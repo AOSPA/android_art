@@ -291,8 +291,8 @@ static jfieldID FindFieldID(const ScopedObjectAccess& soa, jclass jni_class, con
   Class* field_type;
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   if (sig[1] != '\0') {
-    ClassLoader* cl = GetClassLoader(soa);
-    field_type = class_linker->FindClass(sig, cl);
+    SirtRef<mirror::ClassLoader> class_loader(soa.Self(), c->GetClassLoader());
+    field_type = class_linker->FindClass(sig, class_loader.get());
   } else {
     field_type = class_linker->FindPrimitiveClass(*sig);
   }
@@ -831,13 +831,14 @@ class JNI {
   }
 
   static jobject NewGlobalRef(JNIEnv* env, jobject obj) {
-    if (obj == NULL) {
-      return NULL;
-    }
     ScopedObjectAccess soa(env);
+    Object* decoded_obj = soa.Decode<Object*>(obj);
+    // Check for null after decoding the object to handle cleared weak globals.
+    if (decoded_obj == nullptr) {
+      return nullptr;
+    }
     JavaVMExt* vm = soa.Vm();
     IndirectReferenceTable& globals = vm->globals;
-    Object* decoded_obj = soa.Decode<Object*>(obj);
     WriterMutexLock mu(soa.Self(), vm->globals_lock);
     IndirectRef ref = globals.Add(IRT_FIRST_SEGMENT, decoded_obj);
     return reinterpret_cast<jobject>(ref);
@@ -871,11 +872,13 @@ class JNI {
   }
 
   static jobject NewLocalRef(JNIEnv* env, jobject obj) {
-    if (obj == NULL) {
-      return NULL;
-    }
     ScopedObjectAccess soa(env);
-    return soa.AddLocalReference<jobject>(soa.Decode<Object*>(obj));
+    mirror::Object* decoded_obj = soa.Decode<Object*>(obj);
+    // Check for null after decoding the object to handle cleared weak globals.
+    if (decoded_obj == nullptr) {
+      return nullptr;
+    }
+    return soa.AddLocalReference<jobject>(decoded_obj);
   }
 
   static void DeleteLocalRef(JNIEnv* env, jobject obj) {
