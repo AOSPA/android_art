@@ -1154,6 +1154,7 @@ static int patchoat_oat(TimingLogger& timings,
     }
   } else {
     CHECK(!output_oat_filename.empty());
+    unlink(output_oat_filename.c_str());  // IKXLUPGRD-5452
     output_oat.reset(CreateOrOpen(output_oat_filename.c_str(), &new_oat_out));
     if (output_oat == nullptr) {
       int err = errno;
