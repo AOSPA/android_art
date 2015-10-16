@@ -28,6 +28,7 @@
 #include "utils/string_reference.h"
 #include "vixl/a64/disasm-a64.h"
 #include "vixl/a64/macro-assembler-a64.h"
+#include "locations.h"
 
 namespace art {
 namespace arm64 {
@@ -392,6 +393,19 @@ class CodeGeneratorARM64 : public CodeGenerator {
   size_t SaveFloatingPointRegister(size_t stack_index, uint32_t reg_id) OVERRIDE;
   size_t RestoreFloatingPointRegister(size_t stack_index, uint32_t reg_id) OVERRIDE;
 
+  // BEGIN Motorola, a5705c, 10/16/2015, IKSWM-7832
+  size_t SaveBulkLiveCoreRegisters(LocationSummary* locations,
+                                   size_t stack_offset,
+                                   uint32_t* saved_stack_offsets) OVERRIDE;
+  size_t SaveBulkLiveFpuRegisters(LocationSummary* locations,
+                                  size_t stack_offset,
+                                  uint32_t* saved_stack_offsets) OVERRIDE;
+  size_t RestoreBulkLiveCoreRegisters(LocationSummary* locations,
+                                      size_t stack_offset) OVERRIDE;
+  size_t RestoreBulkLiveFpuRegisters(LocationSummary* locations,
+                                     size_t stack_offset) OVERRIDE;
+  // END IKSWM-7832
+
   // The number of registers that can be allocated. The register allocator may
   // decide to reserve and not use a few of them.
   // We do not consider registers sp, xzr, wzr. They are either not allocatable
@@ -632,6 +646,7 @@ class CodeGeneratorARM64 : public CodeGenerator {
   ParallelMoveResolverARM64 move_resolver_;
   Arm64Assembler assembler_;
   const Arm64InstructionSetFeatures& isa_features_;
+  static constexpr size_t kMaximumNumberOfExpectedRegisters = 32;
 
   // Deduplication map for 32-bit literals, used for non-patchable boot image addresses.
   Uint32ToLiteralMap uint32_literals_;

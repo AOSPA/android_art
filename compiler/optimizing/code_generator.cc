@@ -1209,28 +1209,40 @@ void SlowPathCode::SaveLiveRegisters(CodeGenerator* codegen, LocationSummary* lo
   RegisterSet* live_registers = locations->GetLiveRegisters();
   size_t stack_offset = codegen->GetFirstRegisterSlotInSlowPath();
 
-  for (size_t i = 0, e = codegen->GetNumberOfCoreRegisters(); i < e; ++i) {
-    if (!codegen->IsCoreCalleeSaveRegister(i)) {
-      if (live_registers->ContainsCoreRegister(i)) {
-        // If the register holds an object, update the stack mask.
-        if (locations->RegisterContainsObject(i)) {
-          locations->SetStackBit(stack_offset / kVRegSize);
+  // BEGIN Motorola, a5705c, 10/16/2015, IKSWM-7832
+  size_t bulk_offset = codegen->SaveBulkLiveCoreRegisters(locations, stack_offset,
+                                                          &saved_core_stack_offsets_[0]);
+  if (bulk_offset == SIZE_MAX) {
+    for (size_t i = 0, e = codegen->GetNumberOfCoreRegisters(); i < e; ++i) {
+      if (!codegen->IsCoreCalleeSaveRegister(i)) {
+        if (live_registers->ContainsCoreRegister(i)) {
+          // If the register holds an object, update the stack mask.
+          if (locations->RegisterContainsObject(i)) {
+            locations->SetStackBit(stack_offset / kVRegSize);
+          }
+          DCHECK_LT(stack_offset, codegen->GetFrameSize() - codegen->FrameEntrySpillSize());
+          DCHECK_LT(i, kMaximumNumberOfExpectedRegisters);
+          saved_core_stack_offsets_[i] = stack_offset;
+          stack_offset += codegen->SaveCoreRegister(stack_offset, i);
         }
-        DCHECK_LT(stack_offset, codegen->GetFrameSize() - codegen->FrameEntrySpillSize());
-        DCHECK_LT(i, kMaximumNumberOfExpectedRegisters);
-        saved_core_stack_offsets_[i] = stack_offset;
-        stack_offset += codegen->SaveCoreRegister(stack_offset, i);
       }
     }
+  } else {
+    stack_offset = bulk_offset;
   }
 
-  for (size_t i = 0, e = codegen->GetNumberOfFloatingPointRegisters(); i < e; ++i) {
-    if (!codegen->IsFloatingPointCalleeSaveRegister(i)) {
-      if (live_registers->ContainsFloatingPointRegister(i)) {
-        DCHECK_LT(stack_offset, codegen->GetFrameSize() - codegen->FrameEntrySpillSize());
-        DCHECK_LT(i, kMaximumNumberOfExpectedRegisters);
-        saved_fpu_stack_offsets_[i] = stack_offset;
-        stack_offset += codegen->SaveFloatingPointRegister(stack_offset, i);
+  bulk_offset = codegen->SaveBulkLiveFpuRegisters(locations, stack_offset,
+                                                  &saved_fpu_stack_offsets_[0]);
+  if (bulk_offset == SIZE_MAX) {
+    for (size_t i = 0, e = codegen->GetNumberOfFloatingPointRegisters(); i < e; ++i) {
+      if (!codegen->IsFloatingPointCalleeSaveRegister(i)) {
+        if (live_registers->ContainsFloatingPointRegister(i)) {
+          DCHECK_LT(stack_offset, codegen->GetFrameSize() - codegen->FrameEntrySpillSize());
+          DCHECK_LT(i, kMaximumNumberOfExpectedRegisters);
+          saved_fpu_stack_offsets_[i] = stack_offset;
+          stack_offset += codegen->SaveFloatingPointRegister(stack_offset, i);
+        }
+        // END IKSWM-7832
       }
     }
   }
@@ -1240,22 +1252,33 @@ void SlowPathCode::RestoreLiveRegisters(CodeGenerator* codegen, LocationSummary*
   RegisterSet* live_registers = locations->GetLiveRegisters();
   size_t stack_offset = codegen->GetFirstRegisterSlotInSlowPath();
 
-  for (size_t i = 0, e = codegen->GetNumberOfCoreRegisters(); i < e; ++i) {
-    if (!codegen->IsCoreCalleeSaveRegister(i)) {
-      if (live_registers->ContainsCoreRegister(i)) {
-        DCHECK_LT(stack_offset, codegen->GetFrameSize() - codegen->FrameEntrySpillSize());
-        DCHECK_LT(i, kMaximumNumberOfExpectedRegisters);
-        stack_offset += codegen->RestoreCoreRegister(stack_offset, i);
+  // BEGIN Motorola, a5705c, 10/16/2015, IKSWM-7832
+  size_t bulk_offset = codegen->RestoreBulkLiveCoreRegisters(locations, stack_offset);
+
+  if (bulk_offset == SIZE_MAX) {
+    for (size_t i = 0, e = codegen->GetNumberOfCoreRegisters(); i < e; ++i) {
+      if (!codegen->IsCoreCalleeSaveRegister(i)) {
+        if (live_registers->ContainsCoreRegister(i)) {
+          DCHECK_LT(stack_offset, codegen->GetFrameSize() - codegen->FrameEntrySpillSize());
+          DCHECK_LT(i, kMaximumNumberOfExpectedRegisters);
+          stack_offset += codegen->RestoreCoreRegister(stack_offset, i);
+        }
       }
     }
+  } else {
+    stack_offset = bulk_offset;
   }
 
-  for (size_t i = 0, e = codegen->GetNumberOfFloatingPointRegisters(); i < e; ++i) {
-    if (!codegen->IsFloatingPointCalleeSaveRegister(i)) {
-      if (live_registers->ContainsFloatingPointRegister(i)) {
-        DCHECK_LT(stack_offset, codegen->GetFrameSize() - codegen->FrameEntrySpillSize());
-        DCHECK_LT(i, kMaximumNumberOfExpectedRegisters);
-        stack_offset += codegen->RestoreFloatingPointRegister(stack_offset, i);
+  bulk_offset = codegen->RestoreBulkLiveFpuRegisters(locations, stack_offset);
+  if (bulk_offset == SIZE_MAX) {
+    for (size_t i = 0, e = codegen->GetNumberOfFloatingPointRegisters(); i < e; ++i) {
+      if (!codegen->IsFloatingPointCalleeSaveRegister(i)) {
+        if (live_registers->ContainsFloatingPointRegister(i)) {
+          DCHECK_LT(stack_offset, codegen->GetFrameSize() - codegen->FrameEntrySpillSize());
+          DCHECK_LT(i, kMaximumNumberOfExpectedRegisters);
+          stack_offset += codegen->RestoreFloatingPointRegister(stack_offset, i);
+        }
+        // END IKSWM-7832
       }
     }
   }
