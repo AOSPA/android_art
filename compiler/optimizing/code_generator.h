@@ -709,6 +709,44 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
 
   virtual void GenerateNop() = 0;
 
+  // BEGIN Motorola, a5705c, 10/16/2015, IKSWM-7832
+  // Returning SIZE_MAX would mean it does not support bulk savings.
+  virtual size_t SaveBulkLiveCoreRegisters(LocationSummary* locations,
+                                           size_t stack_offset,
+                                           uint32_t* saved_stack_offsets) {
+    UNUSED(locations);
+    UNUSED(stack_offset);
+    UNUSED(saved_stack_offsets);
+    return SIZE_MAX;
+  }
+
+  // Returning SIZE_MAX would mean it does not support bulk savings.
+  virtual size_t SaveBulkLiveFpuRegisters(LocationSummary* locations,
+                                          size_t stack_offset,
+                                          uint32_t* saved_stack_offsets) {
+    UNUSED(locations);
+    UNUSED(stack_offset);
+    UNUSED(saved_stack_offsets);
+    return SIZE_MAX;
+  }
+
+  // Returning SIZE_MAX would mean it does not support bulk restores
+  virtual size_t RestoreBulkLiveCoreRegisters(LocationSummary* locations,
+                                              size_t stack_offset) {
+    UNUSED(locations);
+    UNUSED(stack_offset);
+    return SIZE_MAX;
+  }
+
+  // Returning SIZE_MAX would mean it does not support bulk restores
+  virtual size_t RestoreBulkLiveFpuRegisters(LocationSummary* locations,
+                                             size_t stack_offset) {
+    UNUSED(locations);
+    UNUSED(stack_offset);
+    return SIZE_MAX;
+  }
+  // END IKSWM-7832
+
   static QuickEntrypointEnum GetArrayAllocationEntrypoint(HNewArray* new_array);
   static ScaleFactor ScaleFactorForType(DataType::Type type);
 

@@ -1457,6 +1457,145 @@ size_t CodeGeneratorARM64::RestoreFloatingPointRegister(size_t stack_index ATTRI
   UNREACHABLE();
 }
 
+// BEGIN Motorola, a5705c, 10/16/2015, IKSWM-7832
+size_t CodeGeneratorARM64::SaveBulkLiveCoreRegisters(LocationSummary* locations,
+                                                     size_t stack_offset,
+                                                     uint32_t* saved_stack_offsets) {
+  auto update_location_and_stack_offset = [locations, saved_stack_offsets]
+                                          (size_t x, size_t offset) {
+    if (locations->RegisterContainsObject(x)) {
+      locations->SetStackBit(offset / kVRegSize);
+    }
+    saved_stack_offsets[x] = offset;
+  };
+
+  RegisterSet* register_set = locations->GetLiveRegisters();
+  stack_offset = (stack_offset + (kArm64WordSize - 1)) & ~(kArm64WordSize - 1);
+  size_t last_reg = SIZE_MAX;
+  for (size_t i = 0, e = GetNumberOfCoreRegisters(); i < e; ++i) {
+    if (!IsCoreCalleeSaveRegister(i) && register_set->ContainsCoreRegister(i)) {
+      DCHECK_LT(stack_offset, GetFrameSize() - FrameEntrySpillSize());
+      DCHECK_LT(i, kMaximumNumberOfExpectedRegisters);
+      if (last_reg == SIZE_MAX) {
+        last_reg = i;
+      } else {
+        Register reg1 = Register(VIXLRegCodeFromART(last_reg), kXRegSize);
+        Register reg2 = Register(VIXLRegCodeFromART(i), kXRegSize);
+        update_location_and_stack_offset(last_reg, stack_offset);
+        if (vixl::aarch64::AreSameSizeAndType(reg1, reg2)) {
+          update_location_and_stack_offset(i, (stack_offset + kArm64WordSize));
+          __ Stp(reg1, reg2, MemOperand(sp, stack_offset));
+          stack_offset += kArm64WordSize + kArm64WordSize;
+          last_reg = SIZE_MAX;
+        } else {
+          stack_offset += SaveCoreRegister(stack_offset, last_reg);
+          last_reg = i;
+        }
+      }
+    }
+  }
+  if (last_reg != SIZE_MAX) {
+    update_location_and_stack_offset(last_reg, stack_offset);
+    stack_offset += SaveCoreRegister(stack_offset, last_reg);
+  }
+  return stack_offset;
+}
+
+size_t CodeGeneratorARM64::SaveBulkLiveFpuRegisters(LocationSummary* locations,
+                                                     size_t stack_offset,
+                                                     uint32_t* saved_stack_offsets) {
+  RegisterSet* register_set = locations->GetLiveRegisters();
+  stack_offset = (stack_offset + (kArm64WordSize - 1)) & ~(kArm64WordSize - 1);
+  size_t last_reg = SIZE_MAX;
+  for (size_t i = 0, e = GetNumberOfFloatingPointRegisters(); i < e; ++i) {
+    if (!IsFloatingPointCalleeSaveRegister(i) && register_set->ContainsFloatingPointRegister(i)) {
+      DCHECK_LT(stack_offset, GetFrameSize() - FrameEntrySpillSize());
+      DCHECK_LT(i, kMaximumNumberOfExpectedRegisters);
+      if (last_reg == SIZE_MAX) {
+        last_reg = i;
+      } else {
+        VRegister reg1 = VRegister(last_reg, kDRegSize);
+        VRegister reg2 = VRegister(i, kDRegSize);
+        saved_stack_offsets[last_reg] = stack_offset;
+        if (vixl::aarch64::AreSameSizeAndType(reg1, reg2)) {
+          saved_stack_offsets[i] = stack_offset + kArm64WordSize;
+          __ Stp(reg1, reg2, MemOperand(sp, stack_offset));
+          stack_offset += kArm64WordSize + kArm64WordSize;
+          last_reg = SIZE_MAX;
+        } else {
+          stack_offset += SaveFloatingPointRegister(stack_offset, last_reg);
+          last_reg = i;
+        }
+      }
+    }
+  }
+  if (last_reg != SIZE_MAX) {
+    stack_offset += SaveFloatingPointRegister(stack_offset, last_reg);
+  }
+  return stack_offset;
+}
+
+size_t CodeGeneratorARM64::RestoreBulkLiveCoreRegisters(LocationSummary* locations,
+                                                        size_t stack_offset) {
+  RegisterSet* register_set = locations->GetLiveRegisters();
+  stack_offset = (stack_offset + (kArm64WordSize - 1)) & ~(kArm64WordSize - 1);
+  size_t last_reg = SIZE_MAX;
+  for (size_t i = 0, e = GetNumberOfCoreRegisters(); i < e; ++i) {
+    if (!IsCoreCalleeSaveRegister(i) && register_set->ContainsCoreRegister(i)) {
+      DCHECK_LT(stack_offset, GetFrameSize() - FrameEntrySpillSize());
+      if (last_reg == SIZE_MAX) {
+        last_reg = i;
+      } else {
+        Register reg1 = Register(VIXLRegCodeFromART(last_reg), kXRegSize);
+        Register reg2 = Register(VIXLRegCodeFromART(i), kXRegSize);
+        if (vixl::aarch64::AreSameSizeAndType(reg1, reg2)) {
+          __ Ldp(reg1, reg2, MemOperand(sp, stack_offset));
+          stack_offset += kArm64WordSize + kArm64WordSize;
+          last_reg = SIZE_MAX;
+        } else {
+          stack_offset += RestoreCoreRegister(stack_offset, last_reg);
+          last_reg = i;
+        }
+      }
+    }
+  }
+  if (last_reg != SIZE_MAX) {
+    stack_offset += RestoreCoreRegister(stack_offset, last_reg);
+  }
+  return stack_offset;
+}
+
+size_t CodeGeneratorARM64::RestoreBulkLiveFpuRegisters(LocationSummary* locations,
+                                                        size_t stack_offset) {
+  RegisterSet* register_set = locations->GetLiveRegisters();
+  stack_offset = (stack_offset + (kArm64WordSize - 1)) & ~(kArm64WordSize - 1);
+  size_t last_reg = SIZE_MAX;
+  for (size_t i = 0, e = GetNumberOfFloatingPointRegisters(); i < e; ++i) {
+    if (!IsFloatingPointCalleeSaveRegister(i) && register_set->ContainsFloatingPointRegister(i)) {
+      DCHECK_LT(stack_offset, GetFrameSize() - FrameEntrySpillSize());
+      if (last_reg == SIZE_MAX) {
+        last_reg = i;
+      } else {
+        VRegister reg1 = VRegister(last_reg, kDRegSize);
+        VRegister reg2 = VRegister(i, kDRegSize);
+        if (vixl::aarch64::AreSameSizeAndType(reg1, reg2)) {
+          __ Ldp(reg1, reg2, MemOperand(sp, stack_offset));
+          stack_offset += kArm64WordSize + kArm64WordSize;
+          last_reg = SIZE_MAX;
+        } else {
+          stack_offset += RestoreFloatingPointRegister(stack_offset, last_reg);
+          last_reg = i;
+        }
+      }
+    }
+  }
+  if (last_reg != SIZE_MAX) {
+    stack_offset += RestoreFloatingPointRegister(stack_offset, last_reg);
+  }
+  return stack_offset;
+}
+// END IKSWM-7832
+
 void CodeGeneratorARM64::DumpCoreRegister(std::ostream& stream, int reg) const {
   stream << XRegister(reg);
 }

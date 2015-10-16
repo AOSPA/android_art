@@ -35,6 +35,7 @@
 #include "aarch64/disasm-aarch64.h"
 #include "aarch64/macro-assembler-aarch64.h"
 #pragma GCC diagnostic pop
+#include "locations.h"
 
 namespace art {
 
@@ -629,6 +630,19 @@ class CodeGeneratorARM64 : public CodeGenerator {
   size_t SaveFloatingPointRegister(size_t stack_index, uint32_t reg_id) override;
   size_t RestoreFloatingPointRegister(size_t stack_index, uint32_t reg_id) override;
 
+  // BEGIN Motorola, a5705c, 10/16/2015, IKSWM-7832
+  size_t SaveBulkLiveCoreRegisters(LocationSummary* locations,
+                                   size_t stack_offset,
+                                   uint32_t* saved_stack_offsets) override;
+  size_t SaveBulkLiveFpuRegisters(LocationSummary* locations,
+                                  size_t stack_offset,
+                                  uint32_t* saved_stack_offsets) override;
+  size_t RestoreBulkLiveCoreRegisters(LocationSummary* locations,
+                                      size_t stack_offset) override;
+  size_t RestoreBulkLiveFpuRegisters(LocationSummary* locations,
+                                     size_t stack_offset) override;
+  // END IKSWM-7832
+
   // The number of registers that can be allocated. The register allocator may
   // decide to reserve and not use a few of them.
   // We do not consider registers sp, xzr, wzr. They are either not allocatable
@@ -1094,6 +1108,7 @@ class CodeGeneratorARM64 : public CodeGenerator {
   InstructionCodeGeneratorARM64* instruction_visitor_;
   ParallelMoveResolverARM64 move_resolver_;
   Arm64Assembler assembler_;
+  static constexpr size_t kMaximumNumberOfExpectedRegisters = 32;
 
   // PC-relative method patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<PcRelativePatchInfo> boot_image_method_patches_;
