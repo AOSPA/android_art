@@ -264,7 +264,7 @@ $$(ENUM_OPERATOR_OUT_GEN): $$(GENERATED_SRC_DIR)/%_operator_out.cc : $(LOCAL_PAT
     # For atrace.
     LOCAL_SHARED_LIBRARIES += libcutils
     ifeq ($(BOARD_USES_QCOM_HARDWARE),true)
-      LOCAL_WHOLE_STATIC_LIBRARIES += libqc-art-compiler
+      LOCAL_WHOLE_STATIC_LIBRARIES_arm += libqc-art-compiler
     endif
     include $(BUILD_SHARED_LIBRARY)
   else # host
