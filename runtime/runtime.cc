@@ -23,6 +23,12 @@
 #include <sys/prctl.h>
 #endif
 
+// BEGIN Motorola, ubanerji, 03/16/2016, IKSWM-6668
+// Needed to read system properties.
+#ifdef __ANDROID__
+#include "cutils/properties.h"
+#endif
+// END IKSWM-6668
 #include <signal.h>
 #include <sys/syscall.h>
 #include "base/memory_tool.h"
@@ -1947,10 +1953,21 @@ void Runtime::AddCurrentRuntimeFeaturesAsDex2OatArguments(std::vector<std::strin
   instruction_set += GetInstructionSetString(kRuntimeISA);
   argv->push_back(instruction_set);
 
-  std::unique_ptr<const InstructionSetFeatures> features(InstructionSetFeatures::FromCppDefines());
-  std::string feature_string("--instruction-set-features=");
-  feature_string += features->GetFeatureString();
-  argv->push_back(feature_string);
+  // BEGIN Motorola, ubanerji, 03/16/2016, IKSWM-6668
+#ifdef __ANDROID__
+  std::string dex2oat_isa_features_key;
+  dex2oat_isa_features_key += "dalvik.vm.isa." + instruction_set + ".features";
+  char dex2oat_isa_features[PROPERTY_VALUE_MAX];
+  bool have_dex2oat_isa_features = property_get(dex2oat_isa_features_key.c_str(),
+                                                 dex2oat_isa_features, NULL) > 0;
+
+  if (have_dex2oat_isa_features) {
+    std::string feature_string("--instruction-set-features=");
+    feature_string += std::string(dex2oat_isa_features);
+    argv->push_back(feature_string);
+  }
+#endif
+  // END IKSWM-6668
 }
 
 void Runtime::CreateJit() {
