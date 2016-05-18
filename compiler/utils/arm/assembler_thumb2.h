@@ -245,6 +245,9 @@ class Thumb2Assembler FINAL : public ArmAssembler {
   void vcvtsu(SRegister sd, SRegister sm, Condition cond = AL) OVERRIDE;
   void vcvtdu(DRegister dd, SRegister sm, Condition cond = AL) OVERRIDE;
 
+  void vrints(VRINTRoundingMode rm, SRegister sd, SRegister sm) OVERRIDE;
+  void vrintd(VRINTRoundingMode rm, DRegister dd, DRegister dm) OVERRIDE;
+
   void vcmps(SRegister sd, SRegister sm, Condition cond = AL) OVERRIDE;
   void vcmpd(DRegister dd, DRegister dm, Condition cond = AL) OVERRIDE;
   void vcmpsz(SRegister sd, Condition cond = AL) OVERRIDE;

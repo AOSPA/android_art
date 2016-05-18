@@ -526,6 +526,16 @@ void Arm32Assembler::vcvtdu(DRegister dd, SRegister sm, Condition cond) {
 }
 
 
+void Arm32Assembler::vrints(VRINTRoundingMode rm, SRegister sd, SRegister sm) {
+  Emit(EncodeVRINTr(rm, static_cast<int>(sd), static_cast<int>(sm), /* is_64bit */ false));
+}
+
+
+void Arm32Assembler::vrintd(VRINTRoundingMode rm, DRegister dd, DRegister dm) {
+  Emit(EncodeVRINTr(rm, static_cast<int>(dd), static_cast<int>(dm), /* is_64bit */ true));
+}
+
+
 void Arm32Assembler::vcmps(SRegister sd, SRegister sm, Condition cond) {
   EmitVFPsss(cond, B23 | B21 | B20 | B18 | B6, sd, S0, sm);
 }
