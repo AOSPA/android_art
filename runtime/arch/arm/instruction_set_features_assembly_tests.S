@@ -17,22 +17,39 @@
 #include "asm_support_arm.S"
 
 .section .text
-// This function is used to check for the CPU's support for the sdiv
-// instruction at runtime.  It will either return the value 1 or
-// will cause an invalid instruction trap (SIGILL signal).  The
-// caller must arrange for the signal handler to set the r0
-// register to 0 and move the pc forward by 4 bytes (to skip
-// the invalid instruction).
+// These functions are used to check for the CPU's support for the sdiv and
+// ARMv8-A instructions at runtime. They will either return the value 1 or will
+// cause an invalid instruction trap (SIGILL signal).  The caller must arrange
+// for the signal handler to set the r0 register to 0 and move the pc forward by
+// 4 bytes (to skip the invalid instruction).
+
 ENTRY artCheckForArmSdivInstruction
   mov r1,#1
-  // depending on the architecture, the assembler will not allow an
+  // Depending on the architecture, the assembler will not allow an
   // sdiv instruction, so we will have to output the bytes directly.
 
-  // sdiv r0,r1,r1 is two words: 0xfb91 0xf1f0.  We need little endian.
-  .byte 0x91,0xfb,0xf1,0xf0
+  // The T32 encoding for sdiv r0,r1,r1 is two 16bit words: 0xfb91 0xf0f1, with little endianness.
+  .byte 0x91,0xfb
+  .byte 0xf1,0xf0
 
-  // if the divide worked, r0 will have the value #1 (result of sdiv).
+  // If the divide worked, r0 will have the value #1 (result of sdiv).
   // It will have 0 otherwise (set by the signal handler)
   // the value is just returned from this function.
   bx lr
 END artCheckForArmSdivInstruction
+
+ENTRY artCheckForArmv8AInstructions
+  // Depending on the architecture, the assembler will not allow a
+  // `vrint` instruction, so we will have to output the bytes directly.
+
+  // Move `true` into thre result register. The signal handler will set it to 0
+  // if execution of the instruction below fails
+  mov r0,#1
+
+  // The T32 encoding for vrinta.f32.f32 s0,s0 is two 16bit words: 0xfeb8,0x0a40, with little
+  // endianness.
+  .byte 0xb8,0xfe
+  .byte 0x40,0x0a
+
+  bx lr
+END artCheckForArmv8AInstructions
