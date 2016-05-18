@@ -1481,6 +1481,32 @@ size_t DisassemblerArm::DumpThumb32(std::ostream& os, const uint8_t* instr_ptr) 
           }
           break;
         }
+      case 0x6B:    // 1101011
+      case 0x6F: {  // 1101111
+        constexpr uint32_t fixed_bits_mask   = 0xFFBC0ED0;
+        constexpr uint32_t vrintr_fixed_bits = 0xFEB80A40;
+        if ((instr & fixed_bits_mask) == vrintr_fixed_bits) {
+          opcode << "vrint";
+          int rounding_mode = instr >> 16 & 0x3;
+          switch (rounding_mode) {
+            case 0: opcode << "a"; break;
+            case 1: opcode << "n"; break;
+            case 2: opcode << "p"; break;
+            case 3: opcode << "m"; break;
+            default:
+              LOG(FATAL) << "Unexpected rounding mode " << rounding_mode;
+              UNREACHABLE();
+          }
+          bool double_precision = instr >> 8 & 0x1;
+          if (double_precision) {
+            opcode << ".f64.f64 ";
+          } else {
+            opcode << ".f32.f32 ";
+          }
+          opcode << FpRegister(instr, 12, 22) << ", " << FpRegister(instr, 0, 5);
+        }
+        FALLTHROUGH_INTENDED;
+      }
         case 0x7B: case 0x7F: {
           FpRegister d(instr, 12, 22);
           FpRegister m(instr, 0, 5);

@@ -665,6 +665,29 @@ class ArmAssembler : public Assembler {
   virtual void vcvtsu(SRegister sd, SRegister sm, Condition cond = AL) = 0;
   virtual void vcvtdu(DRegister dd, SRegister sm, Condition cond = AL) = 0;
 
+  enum VRINTRoundingMode {
+    kVRINTA = 0,
+    kVRINTN = 1,
+    kVRINTP = 2,
+    kVRINTM = 3,
+  };
+
+  int32_t EncodeVRINTr(VRINTRoundingMode rm,
+                       int output_register_code,
+                       int input_register_code,
+                       bool is_64bit);
+
+  virtual void vrints(VRINTRoundingMode rm, SRegister sd, SRegister sm) = 0;
+  virtual void vrintd(VRINTRoundingMode rm, DRegister dd, DRegister dm) = 0;
+  void vrintsa(SRegister sd, SRegister sm) { vrints(kVRINTA, sd, sm); }
+  void vrintda(DRegister dd, DRegister dm) { vrintd(kVRINTA, dd, dm); }
+  void vrintsn(SRegister sd, SRegister sm) { vrints(kVRINTN, sd, sm); }
+  void vrintdn(DRegister dd, DRegister dm) { vrintd(kVRINTN, dd, dm); }
+  void vrintsp(SRegister sd, SRegister sm) { vrints(kVRINTP, sd, sm); }
+  void vrintdp(DRegister dd, DRegister dm) { vrintd(kVRINTP, dd, dm); }
+  void vrintsm(SRegister sd, SRegister sm) { vrints(kVRINTM, sd, sm); }
+  void vrintdm(DRegister dd, DRegister dm) { vrintd(kVRINTM, dd, dm); }
+
   virtual void vcmps(SRegister sd, SRegister sm, Condition cond = AL) = 0;
   virtual void vcmpd(DRegister dd, DRegister dm, Condition cond = AL) = 0;
   virtual void vcmpsz(SRegister sd, Condition cond = AL) = 0;
