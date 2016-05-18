@@ -67,6 +67,11 @@ class ArmInstructionSetFeatures FINAL : public InstructionSetFeatures {
     return has_atomic_ldrd_strd_;
   }
 
+  // Are ARMv8-A instructions available?
+  bool HasARMv8AInstructions() const {
+    return has_armv8a_;
+  }
+
   virtual ~ArmInstructionSetFeatures() {}
 
  protected:
@@ -76,20 +81,28 @@ class ArmInstructionSetFeatures FINAL : public InstructionSetFeatures {
                                  std::string* error_msg) const OVERRIDE;
 
  private:
-  ArmInstructionSetFeatures(bool smp, bool has_div, bool has_atomic_ldrd_strd)
+  ArmInstructionSetFeatures(bool smp,
+                            bool has_div,
+                            bool has_atomic_ldrd_strd,
+                            bool has_armv8a)
       : InstructionSetFeatures(smp),
-        has_div_(has_div), has_atomic_ldrd_strd_(has_atomic_ldrd_strd) {
-  }
+        has_div_(has_div),
+        has_atomic_ldrd_strd_(has_atomic_ldrd_strd),
+        has_armv8a_(has_armv8a) {}
 
   // Bitmap positions for encoding features as a bitmap.
   enum {
-    kSmpBitfield = 1,
-    kDivBitfield = 2,
-    kAtomicLdrdStrdBitfield = 4,
+    kSmpBitfield = 1 << 0,
+    kDivBitfield = 1 << 1,
+    kAtomicLdrdStrdBitfield = 1 << 2,
+    kARMv8A = 1 << 3
   };
 
   const bool has_div_;
   const bool has_atomic_ldrd_strd_;
+  // TODO: Eventually we may want a finer grain description, keeping track of the architecture
+  // version and variant. For now this is enough for our purpose.
+  const bool has_armv8a_;
 
   DISALLOW_COPY_AND_ASSIGN(ArmInstructionSetFeatures);
 };
