@@ -1653,6 +1653,9 @@ void CompilerDriver::GetCodeAndMethodForDirectCall(InvokeType* type, InvokeType 
   const bool force_relocations = (compiling_boot ||
                                   GetCompilerOptions().GetIncludePatchInformation());
   if (sharp_type != kStatic && sharp_type != kDirect) {
+    if (runtime->UseJitCompilation()) {
+      *direct_method = reinterpret_cast<uintptr_t>(method);
+    }
     return;
   }
   // TODO: support patching on all architectures.
@@ -1730,6 +1733,10 @@ void CompilerDriver::GetCodeAndMethodForDirectCall(InvokeType* type, InvokeType 
       VLOG(compiler) << "Dex cache devirtualization failed for: " << PrettyMethod(method);
     } else {
       *type = sharp_type;
+      // If we have method resolved in dex cache we can load it directly in JIT mode.
+      if (runtime->UseJitCompilation()) {
+        *direct_method = reinterpret_cast<uintptr_t>(method);
+      }
     }
   } else {
     bool method_in_image = false;
