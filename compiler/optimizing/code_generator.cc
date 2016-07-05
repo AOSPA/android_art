@@ -295,6 +295,15 @@ void CodeGenerator::InitializeCodeGeneration(size_t number_of_spill_slots,
     DCHECK_EQ(maximum_number_of_live_fpu_registers, 0u);
     SetFrameSize(CallPushesPC() ? GetWordSize() : 0);
   } else {
+#ifdef ART_ENABLE_CODEGEN_arm64
+    if (GetInstructionSet() == kArm64) {
+      // Adjust the offset to which we spill and restore registers for slow
+      // paths. We want to use the STP and LDP instructions, which can only
+      // encode offsets that are multiples of the register size accessed.
+      first_register_slot_in_slow_path_ =
+          RoundUp(first_register_slot_in_slow_path_, vixl::kXRegSizeInBytes);
+    }
+#endif
     SetFrameSize(RoundUp(
         first_register_slot_in_slow_path_
         + maximum_number_of_live_core_registers * GetWordSize()
