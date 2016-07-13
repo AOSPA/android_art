@@ -140,6 +140,10 @@ static void MarkZygoteStart(const InstructionSet isa, const uint32_t max_failed_
 
   if (max_failed_boots != 0 && num_failed_boots > max_failed_boots) {
     LOG(WARNING) << "Incomplete boot detected. Pruning dalvik cache";
+    // Motorola, Yin-Jun Chen, 6/13/2016, IKQCOMSD1-3366
+    // Flushing the boot marker if the previous boot was incomplete
+    file->Erase();
+    // END IKQCOMSD1-3366
     impl::DeleteDirectoryContents(isa_subdir, false);
   }
 
