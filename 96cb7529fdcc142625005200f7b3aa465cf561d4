@@ -1,0 +1,27 @@
+{
+  "comments": [
+    {
+      "key": {
+        "uuid": "7afa4931_be75f933",
+        "filename": "compiler/Android.mk",
+        "patchSetId": 2
+      },
+      "lineNbr": 267,
+      "author": {
+        "id": 1000009
+      },
+      "writtenOn": "2016-07-25T14:54:54Z",
+      "side": 0,
+      "message": "This is the main change I need, libqc-art-compiler lib doesn\u0027t build without it.\nSome QCOM targets may not need this lib as Steve has pointed out, changing to TARGET_HAVE_QC_PERF only builds the lib if the device really needs it. Less compilation time for devices that don\u0027t need it.",
+      "range": {
+        "startLine": 267,
+        "startChar": 6,
+        "endLine": 267,
+        "endChar": 38
+      },
+      "revId": "96cb7529fdcc142625005200f7b3aa465cf561d4",
+      "serverId": "3162e3d8-d894-470e-abd9-724f7b0effad",
+      "unresolved": false
+    }
+  ]
+}
