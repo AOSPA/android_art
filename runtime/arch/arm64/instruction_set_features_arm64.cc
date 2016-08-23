@@ -39,7 +39,7 @@ const Arm64InstructionSetFeatures* Arm64InstructionSetFeatures::FromVariant(
   if (!needs_a53_835769_fix) {
     // Check to see if this is an expected variant.
     static const char* arm64_known_variants[] = {
-        "denver64", "kryo", "exynos-m1"
+        "denver64", "kryo", "exynos-m1", "cortex-a53", "cortex-a57", "cortex-a53.a57", "cortex-a72", "cortex-a73"
     };
     if (!FindVariantInArray(arm64_known_variants, arraysize(arm64_known_variants), variant)) {
       std::ostringstream os;
