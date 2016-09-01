@@ -2074,8 +2074,12 @@ void ImageWriter::FixupObject(Object* orig, Object* copy) {
       auto it = native_object_relocations_.find(src_method);
       CHECK(it != native_object_relocations_.end())
           << "Missing relocation for AbstractMethod.artMethod " << PrettyMethod(src_method);
+      // BEGIN Motorola, a5705c, 08/31/2016, IKSWN-2953
+      size_t oat_index = GetOatIndex(src_method->GetDeclaringClass());
+      ImageInfo& image_info = GetImageInfo(oat_index);
       dest->SetArtMethod(
-          reinterpret_cast<ArtMethod*>(global_image_begin_ + it->second.offset));
+          reinterpret_cast<ArtMethod*>(image_info.image_begin_+ it->second.offset));
+      // END IKSWN-2953
     } else if (!klass->IsArrayClass()) {
       ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
       if (klass == class_linker->GetClassRoot(ClassLinker::kJavaLangDexCache)) {
