@@ -29,9 +29,15 @@ include art/build/Android.common.mk
 # Beware that tests may use the non-debug build for performance, notable 055-enum-performance
 #
 ART_BUILD_TARGET_NDEBUG ?= true
-ART_BUILD_TARGET_DEBUG ?= true
 ART_BUILD_HOST_NDEBUG ?= true
+
+ifneq ($(USE_DEX2OAT_DEBUG),false)
+ART_BUILD_TARGET_DEBUG ?= true
 ART_BUILD_HOST_DEBUG ?= true
+else
+ART_BUILD_TARGET_DEBUG ?= false
+ART_BUILD_HOST_DEBUG ?= false
+endif
 
 ifeq ($(ART_BUILD_TARGET_NDEBUG),false)
 $(info Disabling ART_BUILD_TARGET_NDEBUG)
