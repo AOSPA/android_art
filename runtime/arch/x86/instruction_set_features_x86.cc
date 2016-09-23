@@ -50,7 +50,6 @@ static constexpr const char* x86_variants_with_popcnt[] = {
 };
 
 X86FeaturesUniquePtr X86InstructionSetFeatures::Create(bool x86_64,
-                                                       bool smp,
                                                        bool has_SSSE3,
                                                        bool has_SSE4_1,
                                                        bool has_SSE4_2,
@@ -58,16 +57,14 @@ X86FeaturesUniquePtr X86InstructionSetFeatures::Create(bool x86_64,
                                                        bool has_AVX2,
                                                        bool has_POPCNT) {
   if (x86_64) {
-    return X86FeaturesUniquePtr(new X86_64InstructionSetFeatures(smp,
-                                                                 has_SSSE3,
+    return X86FeaturesUniquePtr(new X86_64InstructionSetFeatures(has_SSSE3,
                                                                  has_SSE4_1,
                                                                  has_SSE4_2,
                                                                  has_AVX,
                                                                  has_AVX2,
                                                                  has_POPCNT));
   } else {
-    return X86FeaturesUniquePtr(new X86InstructionSetFeatures(smp,
-                                                              has_SSSE3,
+    return X86FeaturesUniquePtr(new X86InstructionSetFeatures(has_SSSE3,
                                                               has_SSE4_1,
                                                               has_SSE4_2,
                                                               has_AVX,
@@ -79,7 +76,6 @@ X86FeaturesUniquePtr X86InstructionSetFeatures::Create(bool x86_64,
 X86FeaturesUniquePtr X86InstructionSetFeatures::FromVariant(
     const std::string& variant, std::string* error_msg ATTRIBUTE_UNUSED,
     bool x86_64) {
-  bool smp = true;  // Conservative default.
   bool has_SSSE3 = FindVariantInArray(x86_variants_with_ssse3, arraysize(x86_variants_with_ssse3),
                                       variant);
   bool has_SSE4_1 = FindVariantInArray(x86_variants_with_sse4_1,
@@ -102,23 +98,21 @@ X86FeaturesUniquePtr X86InstructionSetFeatures::FromVariant(
     LOG(WARNING) << "Unexpected CPU variant for X86 using defaults: " << variant;
   }
 
-  return Create(x86_64, smp, has_SSSE3, has_SSE4_1, has_SSE4_2, has_AVX, has_AVX2, has_POPCNT);
+  return Create(x86_64, has_SSSE3, has_SSE4_1, has_SSE4_2, has_AVX, has_AVX2, has_POPCNT);
 }
 
-X86FeaturesUniquePtr X86InstructionSetFeatures::FromBitmap(uint32_t bitmap, bool x86_64) {
-  bool smp = (bitmap & kSmpBitfield) != 0;
+X86FeaturesUniquePtr X86InstructionSetFeatures::FromBitmap(uint32_t bitmap,
+                                                           bool x86_64) {
   bool has_SSSE3 = (bitmap & kSsse3Bitfield) != 0;
   bool has_SSE4_1 = (bitmap & kSse4_1Bitfield) != 0;
   bool has_SSE4_2 = (bitmap & kSse4_2Bitfield) != 0;
   bool has_AVX = (bitmap & kAvxBitfield) != 0;
   bool has_AVX2 = (bitmap & kAvxBitfield) != 0;
   bool has_POPCNT = (bitmap & kPopCntBitfield) != 0;
-  return Create(x86_64, smp, has_SSSE3, has_SSE4_1, has_SSE4_2, has_AVX, has_AVX2, has_POPCNT);
+  return Create(x86_64, has_SSSE3, has_SSE4_1, has_SSE4_2, has_AVX, has_AVX2, has_POPCNT);
 }
 
 X86FeaturesUniquePtr X86InstructionSetFeatures::FromCppDefines(bool x86_64) {
-  const bool smp = true;
-
 #ifndef __SSSE3__
   const bool has_SSSE3 = false;
 #else
@@ -155,13 +149,12 @@ X86FeaturesUniquePtr X86InstructionSetFeatures::FromCppDefines(bool x86_64) {
   const bool has_POPCNT = true;
 #endif
 
-  return Create(x86_64, smp, has_SSSE3, has_SSE4_1, has_SSE4_2, has_AVX, has_AVX2, has_POPCNT);
+  return Create(x86_64, has_SSSE3, has_SSE4_1, has_SSE4_2, has_AVX, has_AVX2, has_POPCNT);
 }
 
 X86FeaturesUniquePtr X86InstructionSetFeatures::FromCpuInfo(bool x86_64) {
   // Look in /proc/cpuinfo for features we need.  Only use this when we can guarantee that
   // the kernel puts the appropriate feature flags in here.  Sometimes it doesn't.
-  bool smp = false;
   bool has_SSSE3 = false;
   bool has_SSE4_1 = false;
   bool has_SSE4_2 = false;
@@ -196,9 +189,6 @@ X86FeaturesUniquePtr X86InstructionSetFeatures::FromCpuInfo(bool x86_64) {
           if (line.find("popcnt") != std::string::npos) {
             has_POPCNT = true;
           }
-        } else if (line.find("processor") != std::string::npos &&
-            line.find(": 1") != std::string::npos) {
-          smp = true;
         }
       }
     }
@@ -206,7 +196,7 @@ X86FeaturesUniquePtr X86InstructionSetFeatures::FromCpuInfo(bool x86_64) {
   } else {
     LOG(ERROR) << "Failed to open /proc/cpuinfo";
   }
-  return Create(x86_64, smp, has_SSSE3, has_SSE4_1, has_SSE4_2, has_AVX, has_AVX2, has_POPCNT);
+  return Create(x86_64, has_SSSE3, has_SSE4_1, has_SSE4_2, has_AVX, has_AVX2, has_POPCNT);
 }
 
 X86FeaturesUniquePtr X86InstructionSetFeatures::FromHwcap(bool x86_64) {
@@ -224,8 +214,7 @@ bool X86InstructionSetFeatures::Equals(const InstructionSetFeatures* other) cons
     return false;
   }
   const X86InstructionSetFeatures* other_as_x86 = other->AsX86InstructionSetFeatures();
-  return (IsSmp() == other->IsSmp()) &&
-      (has_SSSE3_ == other_as_x86->has_SSSE3_) &&
+  return (has_SSSE3_ == other_as_x86->has_SSSE3_) &&
       (has_SSE4_1_ == other_as_x86->has_SSE4_1_) &&
       (has_SSE4_2_ == other_as_x86->has_SSE4_2_) &&
       (has_AVX_ == other_as_x86->has_AVX_) &&
@@ -234,8 +223,7 @@ bool X86InstructionSetFeatures::Equals(const InstructionSetFeatures* other) cons
 }
 
 uint32_t X86InstructionSetFeatures::AsBitmap() const {
-  return (IsSmp() ? kSmpBitfield : 0) |
-      (has_SSSE3_ ? kSsse3Bitfield : 0) |
+  return (has_SSSE3_ ? kSsse3Bitfield : 0) |
       (has_SSE4_1_ ? kSse4_1Bitfield : 0) |
       (has_SSE4_2_ ? kSse4_2Bitfield : 0) |
       (has_AVX_ ? kAvxBitfield : 0) |
@@ -245,15 +233,10 @@ uint32_t X86InstructionSetFeatures::AsBitmap() const {
 
 std::string X86InstructionSetFeatures::GetFeatureString() const {
   std::string result;
-  if (IsSmp()) {
-    result += "smp";
-  } else {
-    result += "-smp";
-  }
   if (has_SSSE3_) {
-    result += ",ssse3";
+    result += "ssse3";
   } else {
-    result += ",-ssse3";
+    result += "-ssse3";
   }
   if (has_SSE4_1_) {
     result += ",sse4.1";
@@ -284,7 +267,7 @@ std::string X86InstructionSetFeatures::GetFeatureString() const {
 }
 
 std::unique_ptr<const InstructionSetFeatures> X86InstructionSetFeatures::AddFeaturesFromSplitString(
-    const bool smp, const std::vector<std::string>& features, bool x86_64,
+    const std::vector<std::string>& features, bool x86_64,
     std::string* error_msg) const {
   bool has_SSSE3 = has_SSSE3_;
   bool has_SSE4_1 = has_SSE4_1_;
@@ -323,7 +306,7 @@ std::unique_ptr<const InstructionSetFeatures> X86InstructionSetFeatures::AddFeat
       return nullptr;
     }
   }
-  return Create(x86_64, smp, has_SSSE3, has_SSE4_1, has_SSE4_2, has_AVX, has_AVX2, has_POPCNT);
+  return Create(x86_64, has_SSSE3, has_SSE4_1, has_SSE4_2, has_AVX, has_AVX2, has_POPCNT);
 }
 
 }  // namespace art
