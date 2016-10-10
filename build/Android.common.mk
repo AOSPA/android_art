@@ -29,7 +29,7 @@ else
   ART_MULTILIB_OVERRIDE_host := 32
 endif
 
-ART_COVERAGE := false
+ART_COVERAGE := true
 
 ifeq ($(ART_COVERAGE),true)
 # https://gcc.gnu.org/onlinedocs/gcc/Cross-profiling.html

@@ -41,6 +41,7 @@ endif
 
 # Set this to change what opt level Art is built at.
 ART_DEBUG_OPT_FLAG ?= -O2
+#ART_NDEBUG_OPT_FLAG ?= -Ofast
 ART_NDEBUG_OPT_FLAG ?= -O3
 
 # Enable the static builds only for checkbuilds.
@@ -341,6 +342,7 @@ art_debug_cflags := \
   -DDYNAMIC_ANNOTATIONS_ENABLED=1 \
   -UNDEBUG
 
+#art_host_non_debug_cflags := -O3
 art_host_non_debug_cflags := $(art_non_debug_cflags)
 art_target_non_debug_cflags := $(art_non_debug_cflags)
 
@@ -355,6 +357,9 @@ ifeq ($(HOST_OS),linux)
         art_target_non_debug_cflags += -Wframe-larger-than=1728
       endif
     endif
+  endif
+  ifeq ($(BUILD_FDO_INSTRUMENT), true)
+    art_target_non_debug_cflags += -Wframe-larger-than=2700
   endif
 endif
 
