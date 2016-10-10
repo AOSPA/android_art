@@ -356,6 +356,9 @@ ifeq ($(HOST_OS),linux)
       endif
     endif
   endif
+  ifeq ($(BUILD_FDO_INSTRUMENT), true)
+    art_target_non_debug_cflags += -Wframe-larger-than=2700
+  endif
 endif
 
 ifndef LIBART_IMG_HOST_BASE_ADDRESS

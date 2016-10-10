@@ -235,12 +235,12 @@ LIBART_HOST_LDFLAGS :=
 # we use gold as the linker (arm, x86, x86_64). The symbol is used by the debuggers to detect when
 # new jit code is generated. We don't want it to be called when a different function with the same
 # (empty) body is called.
-JIT_DEBUG_REGISTER_CODE_LDFLAGS := -Wl,--keep-unique,__jit_debug_register_code
-LIBART_TARGET_LDFLAGS_arm    := $(JIT_DEBUG_REGISTER_CODE_LDFLAGS)
-LIBART_TARGET_LDFLAGS_arm64  := $(JIT_DEBUG_REGISTER_CODE_LDFLAGS)
-LIBART_TARGET_LDFLAGS_x86    := $(JIT_DEBUG_REGISTER_CODE_LDFLAGS)
-LIBART_TARGET_LDFLAGS_x86_64 := $(JIT_DEBUG_REGISTER_CODE_LDFLAGS)
-JIT_DEBUG_REGISTER_CODE_LDFLAGS :=
+#JIT_DEBUG_REGISTER_CODE_LDFLAGS := -Wl,--keep-unique,__jit_debug_register_code
+#LIBART_TARGET_LDFLAGS_arm    := $(JIT_DEBUG_REGISTER_CODE_LDFLAGS)
+#LIBART_TARGET_LDFLAGS_arm64  := $(JIT_DEBUG_REGISTER_CODE_LDFLAGS)
+#LIBART_TARGET_LDFLAGS_x86    := $(JIT_DEBUG_REGISTER_CODE_LDFLAGS)
+#LIBART_TARGET_LDFLAGS_x86_64 := $(JIT_DEBUG_REGISTER_CODE_LDFLAGS)
+#JIT_DEBUG_REGISTER_CODE_LDFLAGS :=
 
 LIBART_TARGET_SRC_FILES := \
   $(LIBART_COMMON_SRC_FILES) \
@@ -437,6 +437,8 @@ define build-runtime-library
   ifeq ($$(art_ndebug_or_debug),ndebug)
     LOCAL_MODULE := $(4)
     ifeq ($$(art_target_or_host),target)
+      LOCAL_SDCLANG_LTO := true
+      LOCAL_SDCLANG_LTO_LDFLAGS := $(ART_NDEBUG_OPT_FLAG)
       LOCAL_FDO_SUPPORT := true
     endif
   else # debug

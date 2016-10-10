@@ -210,6 +210,8 @@ define build-libart-compiler
       LOCAL_SHARED_LIBRARIES += libart liblz4 liblzma
     endif
     ifeq ($$(art_target_or_host),target)
+      LOCAL_SDCLANG_LTO := true
+      LOCAL_SDCLANG_LTO_LDFLAGS := $(ART_NDEBUG_OPT_FLAG)
       LOCAL_FDO_SUPPORT := true
     endif
   else # debug
