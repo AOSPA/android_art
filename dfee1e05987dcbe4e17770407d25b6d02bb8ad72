@@ -1,0 +1,38 @@
+{
+  "comments": [
+    {
+      "key": {
+        "uuid": "da7095c5_829bdbc8",
+        "filename": "build/Android.common_build.mk",
+        "patchSetId": 1
+      },
+      "lineNbr": 43,
+      "author": {
+        "id": 1000011
+      },
+      "writtenOn": "2016-10-14T14:05:11Z",
+      "side": 1,
+      "message": "I use this for debugging. I\u0027d like to keep -O2 here",
+      "revId": "dfee1e05987dcbe4e17770407d25b6d02bb8ad72",
+      "serverId": "3162e3d8-d894-470e-abd9-724f7b0effad",
+      "unresolved": false
+    },
+    {
+      "key": {
+        "uuid": "da7095c5_a2a05ff5",
+        "filename": "build/Android.common_build.mk",
+        "patchSetId": 1
+      },
+      "lineNbr": 44,
+      "author": {
+        "id": 1000011
+      },
+      "writtenOn": "2016-10-14T14:05:11Z",
+      "side": 1,
+      "message": "This will never ever compile.\nOfast will be passed to host modules too and they can\u0027t handle it.\nAlso if we do this it would need to be ifdeffed for sdclang, since -Ofast on non-sdclang builds would be overkill.",
+      "revId": "dfee1e05987dcbe4e17770407d25b6d02bb8ad72",
+      "serverId": "3162e3d8-d894-470e-abd9-724f7b0effad",
+      "unresolved": false
+    }
+  ]
+}
