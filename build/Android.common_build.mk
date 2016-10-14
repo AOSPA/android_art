@@ -117,7 +117,7 @@ endif
 ifneq ($(USE_CLANG_PLATFORM_BUILD),)
 ART_TARGET_CLANG := $(USE_CLANG_PLATFORM_BUILD)
 else
-ART_TARGET_CLANG := false
+ART_TARGET_CLANG := true
 endif
 ART_TARGET_CLANG_arm :=
 ART_TARGET_CLANG_arm64 :=
@@ -419,6 +419,7 @@ ART_TARGET_LDFLAGS :=
 
 # $(1): ndebug_or_debug
 define set-target-local-cflags-vars
+  LOCAL_SDCLANG_LTO := true
   LOCAL_CFLAGS += $(ART_TARGET_CFLAGS)
   LOCAL_CFLAGS_x86 += $(ART_TARGET_CFLAGS_x86)
   LOCAL_ASFLAGS += $(ART_TARGET_ASFLAGS)
