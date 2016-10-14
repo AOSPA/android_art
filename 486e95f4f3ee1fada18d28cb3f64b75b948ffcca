@@ -1,0 +1,38 @@
+{
+  "comments": [
+    {
+      "key": {
+        "uuid": "da7095c5_22652fe1",
+        "filename": "build/Android.common_build.mk",
+        "patchSetId": 1
+      },
+      "lineNbr": 120,
+      "author": {
+        "id": 1000011
+      },
+      "writtenOn": "2016-10-14T14:03:12Z",
+      "side": 1,
+      "message": "This is unnecessary, since USE_CLANG_PLATFORM_BUILD is true by default anyways. Devices may set it to false, however as far as I saw it\u0027s not really supported and would break compile anyways.",
+      "revId": "486e95f4f3ee1fada18d28cb3f64b75b948ffcca",
+      "serverId": "3162e3d8-d894-470e-abd9-724f7b0effad",
+      "unresolved": false
+    },
+    {
+      "key": {
+        "uuid": "da7095c5_c261d3d4",
+        "filename": "build/Android.common_build.mk",
+        "patchSetId": 1
+      },
+      "lineNbr": 422,
+      "author": {
+        "id": 1000011
+      },
+      "writtenOn": "2016-10-14T14:03:12Z",
+      "side": 1,
+      "message": "This isn\u0027t really the best place to set this.\nAlso it wouldn\u0027t complete linking since it made my machine (18GB RAM) go out of memory :)  ART is just too huge.\nAlso QCLD will fail since it doesn\u0027t support the JIT debug buffer. We could remove it, but in any case I wasn\u0027t able to make this compile.",
+      "revId": "486e95f4f3ee1fada18d28cb3f64b75b948ffcca",
+      "serverId": "3162e3d8-d894-470e-abd9-724f7b0effad",
+      "unresolved": false
+    }
+  ]
+}
