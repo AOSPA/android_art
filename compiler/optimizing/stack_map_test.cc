@@ -417,7 +417,7 @@ TEST(StackMapTest, TestNonLiveDexRegisters) {
   ArenaBitVector sp_mask(&arena, 0, false);
   uint32_t number_of_dex_registers = 2;
   stream.BeginStackMapEntry(0, 64, 0x3, &sp_mask, number_of_dex_registers, 0);
-  stream.AddDexRegisterEntry(Kind::kNone, 0);            // No location.
+  stream.NextDexRegisterEntry();                         // No location.
   stream.AddDexRegisterEntry(Kind::kConstant, -2);       // Large location.
   stream.EndStackMapEntry();
 
@@ -703,7 +703,7 @@ TEST(StackMapTest, InlineTest) {
 
   // Third stack map.
   stream.BeginStackMapEntry(4, 56, 0x3, &sp_mask1, 2, 0);
-  stream.AddDexRegisterEntry(Kind::kNone, 0);
+  stream.NextDexRegisterEntry();
   stream.AddDexRegisterEntry(Kind::kConstant, 4);
   stream.EndStackMapEntry();
 
@@ -718,7 +718,7 @@ TEST(StackMapTest, InlineTest) {
   stream.AddDexRegisterEntry(Kind::kInRegister, 2);
   stream.EndInlineInfoEntry();
   stream.BeginInlineInfoEntry(52, 10, kStatic, 2);
-  stream.AddDexRegisterEntry(Kind::kNone, 0);
+  stream.NextDexRegisterEntry();
   stream.AddDexRegisterEntry(Kind::kInRegister, 3);
   stream.EndInlineInfoEntry();
 

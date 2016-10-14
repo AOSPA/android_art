@@ -126,6 +126,10 @@ class StackMapStream : public ValueObject {
 
   void AddDexRegisterEntry(DexRegisterLocation::Kind kind, int32_t value);
 
+  ALWAYS_INLINE void NextDexRegisterEntry() {
+    ++current_dex_register_;
+  }
+
   void BeginInlineInfoEntry(uint32_t method_index,
                             uint32_t dex_pc,
                             InvokeType invoke_type,

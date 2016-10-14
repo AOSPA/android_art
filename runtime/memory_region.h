@@ -137,13 +137,7 @@ class MemoryRegion FINAL : public ValueObject {
   // `bit_offset`.  The bit at the smallest offset is the least significant
   // bit of the stored `value`.  `value` must not be larger than `length`
   // bits.
-  void StoreBits(uintptr_t bit_offset, uint32_t value, size_t length) {
-    CHECK_LE(value, MaxInt<uint32_t>(length));
-    for (size_t i = 0; i < length; ++i) {
-      bool ith_bit = value & (1 << i);
-      StoreBit(bit_offset + i, ith_bit);
-    }
-  }
+  void StoreBits(uintptr_t bit_offset, uint32_t value, size_t length);
 
   void CopyFrom(size_t offset, const MemoryRegion& from) const;
 
@@ -163,8 +157,8 @@ class MemoryRegion FINAL : public ValueObject {
  private:
   template<typename T>
   ALWAYS_INLINE T* ComputeInternalPointer(size_t offset) const {
-    CHECK_GE(size(), sizeof(T));
-    CHECK_LE(offset, size() - sizeof(T));
+    DCHECK_GE(size(), sizeof(T));
+    CHECK_LE(offset + sizeof(T), size());
     return reinterpret_cast<T*>(start() + offset);
   }
 

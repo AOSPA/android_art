@@ -61,15 +61,38 @@ void StackMapStream::EndStackMapEntry() {
 }
 
 void StackMapStream::AddDexRegisterEntry(DexRegisterLocation::Kind kind, int32_t value) {
-  if (kind != DexRegisterLocation::Kind::kNone) {
-    // Ensure we only use non-compressed location kind at this stage.
-    DCHECK(DexRegisterLocation::IsShortLocationKind(kind)) << kind;
-    DexRegisterLocation location(kind, value);
+  DCHECK(kind != DexRegisterLocation::Kind::kNone);
+  // Ensure we only use non-compressed location kind at this stage.
+  DCHECK(DexRegisterLocation::IsShortLocationKind(kind)) << kind;
+  DexRegisterLocation location(kind, value);
 
-    // Look for Dex register `location` in the location catalog (using the
-    // companion hash map of locations to indices).  Use its index if it
-    // is already in the location catalog.  If not, insert it (in the
-    // location catalog and the hash map) and use the newly created index.
+  // Look for Dex register `location` in the location catalog (using the
+  // companion hash map of locations to indices).  Use its index if it
+  // is already in the location catalog.  If not, insert it (in the
+  // location catalog and the hash map) and use the newly created index.
+  const size_t count = location_catalog_entries_.size();
+  // Use linear search for less than or equal to the linear limit.
+  static const size_t kLinearLimit = 16;
+  if (count <= kLinearLimit) {
+    for (size_t i = 0; ; ++i) {
+      if (UNLIKELY(i >= count)) {
+        location_catalog_entries_.push_back(location);
+        dex_register_locations_.push_back(i);
+        if (count + 1 > kLinearLimit) {
+          // New count is larger than the limit, add hash entries.
+          for (size_t j = 0; j <= count; ++j) {
+            location_catalog_entries_indices_.Insert(
+                std::make_pair(location_catalog_entries_[j], j));
+          }
+        }
+        break;
+      }
+      if (location_catalog_entries_[i] == location) {
+        dex_register_locations_.push_back(i);
+        break;
+      }
+    }
+  } else {
     auto it = location_catalog_entries_indices_.Find(location);
     if (it != location_catalog_entries_indices_.end()) {
       // Retrieve the index from the hash map.
@@ -81,21 +104,21 @@ void StackMapStream::AddDexRegisterEntry(DexRegisterLocation::Kind kind, int32_t
       dex_register_locations_.push_back(index);
       location_catalog_entries_indices_.Insert(std::make_pair(location, index));
     }
-
-    if (in_inline_frame_) {
-      // TODO: Support sharing DexRegisterMap across InlineInfo.
-      DCHECK_LT(current_dex_register_, current_inline_info_.num_dex_registers);
-      current_inline_info_.live_dex_registers_mask->SetBit(current_dex_register_);
-    } else {
-      DCHECK_LT(current_dex_register_, current_entry_.num_dex_registers);
-      current_entry_.live_dex_registers_mask->SetBit(current_dex_register_);
-      current_entry_.dex_register_map_hash += (1 <<
-          (current_dex_register_ % (sizeof(current_entry_.dex_register_map_hash) * kBitsPerByte)));
-      current_entry_.dex_register_map_hash += static_cast<uint32_t>(value);
-      current_entry_.dex_register_map_hash += static_cast<uint32_t>(kind);
-    }
   }
-  current_dex_register_++;
+
+  if (in_inline_frame_) {
+    // TODO: Support sharing DexRegisterMap across InlineInfo.
+    DCHECK_LT(current_dex_register_, current_inline_info_.num_dex_registers);
+    current_inline_info_.live_dex_registers_mask->SetBit(current_dex_register_);
+  } else {
+    DCHECK_LT(current_dex_register_, current_entry_.num_dex_registers);
+    current_entry_.live_dex_registers_mask->SetBit(current_dex_register_);
+    current_entry_.dex_register_map_hash += (1 <<
+        (current_dex_register_ % (sizeof(current_entry_.dex_register_map_hash) * kBitsPerByte)));
+    current_entry_.dex_register_map_hash += static_cast<uint32_t>(value);
+    current_entry_.dex_register_map_hash += static_cast<uint32_t>(kind);
+  }
+  NextDexRegisterEntry();
 }
 
 void StackMapStream::BeginInlineInfoEntry(uint32_t method_index,
