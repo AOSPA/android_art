@@ -54,6 +54,7 @@ DEX_VERIFY=""
 USE_DEX2OAT_AND_PATCHOAT="y"
 INSTRUCTION_SET_FEATURES=""
 ARGS=""
+APP_IMAGE="y"
 
 while true; do
     if [ "x$1" = "x--quiet" ]; then
@@ -118,6 +119,9 @@ while true; do
         shift
     elif [ "x$1" = "x--prebuild" ]; then
         PREBUILD="y"
+        shift
+    elif [ "x$1" = "x--no-app-image" ]; then
+        APP_IMAGE="n"
         shift
     elif [ "x$1" = "x--strip-dex" ]; then
         STRIP_DEX="y"
@@ -386,11 +390,14 @@ dex2oat_cmdline="true"
 mkdir_cmdline="mkdir -p ${DEX_LOCATION}/dalvik-cache/$ISA"
 strip_cmdline="true"
 
-# Pick a base that will force the app image to get relocated.
-app_image="--base=0x4000 --app-image-file=$DEX_LOCATION/oat/$ISA/$TEST_NAME.art"
 
 if [ "$PREBUILD" = "y" ]; then
   mkdir_cmdline="${mkdir_cmdline} && mkdir -p ${DEX_LOCATION}/oat/$ISA"
+  if [ "$APP_IMAGE" = "y" ]; then
+    # Pick a base that will force the app image to get relocated.
+    app_image="--base=0x4000 --app-image-file=$DEX_LOCATION/oat/$ISA/$TEST_NAME.art"
+  fi
+
   dex2oat_cmdline="$INVOKE_WITH $ANDROID_ROOT/bin/dex2oatd \
                       $COMPILE_FLAGS \
                       --boot-image=${BOOT_IMAGE} \

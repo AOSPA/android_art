@@ -154,4 +154,26 @@ extern "C" JNIEXPORT void JNICALL Java_Main_ensureJitCompiled(JNIEnv* env,
   }
 }
 
+extern "C" JNIEXPORT int JNICALL Java_Main_getHotnessCounter(JNIEnv* env,
+                                                             jclass,
+                                                             jclass cls,
+                                                             jstring method_name) {
+  jit::Jit* jit = Runtime::Current()->GetJit();
+  if (jit == nullptr) {
+    return 0;
+  }
+
+  ArtMethod* method = nullptr;
+  {
+    ScopedObjectAccess soa(Thread::Current());
+
+    ScopedUtfChars chars(env, method_name);
+    CHECK(chars.c_str() != nullptr);
+    method = soa.Decode<mirror::Class>(cls)->FindDeclaredDirectMethodByName(
+        chars.c_str(), kRuntimePointerSize);
+  }
+
+  return method->GetCounter();
+}
+
 }  // namespace art
