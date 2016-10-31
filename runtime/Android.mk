@@ -389,7 +389,7 @@ LIBART_HOST_DEFAULT_INSTRUCTION_SET_FEATURES := default
 LIBART_TARGET_DEFAULT_INSTRUCTION_SET_FEATURES := default
 2ND_LIBART_TARGET_DEFAULT_INSTRUCTION_SET_FEATURES := default
 ifeq ($(DEX2OAT_TARGET_ARCH),arm)
-  ifneq (,$(filter $(DEX2OAT_TARGET_CPU_VARIANT),cortex-a15 krait denver))
+  ifneq (,$(filter $(DEX2OAT_TARGET_CPU_VARIANT),cortex-a15 krait kryo denver))
     LIBART_TARGET_DEFAULT_INSTRUCTION_SET_FEATURES := atomic_ldrd_strd,div
   else
     ifneq (,$(filter $(DEX2OAT_TARGET_CPU_VARIANT),cortex-a7))
@@ -398,7 +398,7 @@ ifeq ($(DEX2OAT_TARGET_ARCH),arm)
   endif
 endif
 ifeq ($(2ND_DEX2OAT_TARGET_ARCH),arm)
-  ifneq (,$(filter $(DEX2OAT_TARGET_CPU_VARIANT),cortex-a15 krait denver))
+  ifneq (,$(filter $(DEX2OAT_TARGET_CPU_VARIANT),cortex-a15 krait kryo denver))
     2ND_LIBART_TARGET_DEFAULT_INSTRUCTION_SET_FEATURES := atomic_ldrd_strd,div
   else
     ifneq (,$(filter $(DEX2OAT_TARGET_CPU_VARIANT),cortex-a7))
