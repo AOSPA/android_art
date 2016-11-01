@@ -804,6 +804,9 @@ class BCEVisitor : public HGraphVisitor {
   }
 
   void VisitBoundsCheck(HBoundsCheck* bounds_check) OVERRIDE {
+    if (!bounds_check->IsInBlock()) {
+      return;  // was forward deleted
+    }
     HBasicBlock* block = bounds_check->GetBlock();
     HInstruction* index = bounds_check->InputAt(0);
     HInstruction* array_length = bounds_check->InputAt(1);
