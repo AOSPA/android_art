@@ -344,6 +344,12 @@ art_debug_cflags := \
 art_host_non_debug_cflags := $(art_non_debug_cflags)
 art_target_non_debug_cflags := $(art_non_debug_cflags)
 
+ifeq ($(SDCLANG),true)
+  ifneq (,$(filter krait kryo,$(TARGET_2ND_CPU_VARIANT)))
+    art_target_non_debug_cflags += -Ofast -fno-fast-math -fno-math-errno
+  endif
+endif
+
 ifeq ($(HOST_OS),linux)
   # Larger frame-size for host clang builds today
   ifneq ($(ART_COVERAGE),true)
