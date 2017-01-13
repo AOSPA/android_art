@@ -37,10 +37,11 @@
 #include <sys/time.h>
 #include <sys/types.h>
 
+#include "android-base/stringprintf.h"
+
 #include "arch/instruction_set.h"
 #include "base/memory_tool.h"
 #include "base/mutex.h"
-#include "base/stringprintf.h"
 #include "base/unix_file/fd_file.h"
 #include "oat_quick_method_header.h"
 #include "os.h"
@@ -52,6 +53,8 @@
 namespace art {
 
 #if defined(__linux__)
+
+using android::base::StringPrintf;
 
 static constexpr bool kUseAddr2line = !kIsTargetBuild;
 
@@ -272,7 +275,7 @@ static bool PcIsWithinQuickCode(ArtMethod* method, uintptr_t pc) NO_THREAD_SAFET
   if (code == 0) {
     return pc == 0;
   }
-  uintptr_t code_size = reinterpret_cast<const OatQuickMethodHeader*>(code)[-1].code_size_;
+  uintptr_t code_size = reinterpret_cast<const OatQuickMethodHeader*>(code)[-1].GetCodeSize();
   return code <= pc && pc <= (code + code_size);
 }
 

@@ -69,19 +69,22 @@ DEFAULT_EXPERIMENT="no-experiment"
 
 # Setup experimental flag mappings in a bash associative array.
 declare -A JACK_EXPERIMENTAL_ARGS
+JACK_EXPERIMENTAL_ARGS["agents"]="-D jack.java.source.version=1.8 -D jack.android.min-api-level=24"
 JACK_EXPERIMENTAL_ARGS["default-methods"]="-D jack.java.source.version=1.8 -D jack.android.min-api-level=24"
 JACK_EXPERIMENTAL_ARGS["lambdas"]="-D jack.java.source.version=1.8 -D jack.android.min-api-level=24"
-JACK_EXPERIMENTAL_ARGS["method-handles"]="-D jack.java.source.version=1.8 -D jack.android.min-api-level=26"
+JACK_EXPERIMENTAL_ARGS["method-handles"]="-D jack.java.source.version=1.7 -D jack.android.min-api-level=o-b1"
 
 declare -A SMALI_EXPERIMENTAL_ARGS
 SMALI_EXPERIMENTAL_ARGS["default-methods"]="--api-level 24"
 SMALI_EXPERIMENTAL_ARGS["method-handles"]="--api-level 26"
+SMALI_EXPERIMENTAL_ARGS["agents"]="--api-level 26"
 
 declare -A JAVAC_EXPERIMENTAL_ARGS
 JAVAC_EXPERIMENTAL_ARGS["default-methods"]="-source 1.8 -target 1.8"
 JAVAC_EXPERIMENTAL_ARGS["lambdas"]="-source 1.8 -target 1.8"
 JAVAC_EXPERIMENTAL_ARGS["method-handles"]="-source 1.8 -target 1.8"
 JAVAC_EXPERIMENTAL_ARGS[${DEFAULT_EXPERIMENT}]="-source 1.7 -target 1.7"
+JAVAC_EXPERIMENTAL_ARGS["agents"]="-source 1.8 -target 1.8"
 
 while true; do
   if [ "x$1" = "x--dx-option" ]; then
@@ -125,6 +128,16 @@ done
 
 # Be sure to get any default arguments if not doing any experiments.
 EXPERIMENTAL="${EXPERIMENTAL} ${DEFAULT_EXPERIMENT}"
+
+if [ "${JACK_SERVER}" = "false" ]; then
+  # Run in single-threaded mode for the continuous buildbot.
+  JACK_ARGS="${JACK_ARGS} -D sched.runner=single-threaded"
+else
+  # Run with 4 threads to reduce memory footprint and thread contention.
+  JACK_ARGS="${JACK_ARGS} -D sched.runner=multi-threaded"
+  JACK_ARGS="${JACK_ARGS} -D sched.runner.thread.kind=fixed"
+  JACK_ARGS="${JACK_ARGS} -D sched.runner.thread.fixed.count=4"
+fi
 
 # Add args from the experimental mappings.
 for experiment in ${EXPERIMENTAL}; do
@@ -273,8 +286,10 @@ if [ ${HAS_SRC_EX} = "true" ]; then
 fi
 
 # Create a single jar with two dex files for multidex.
-if [ ${HAS_SRC_MULTIDEX} = "true" ] || [ ${HAS_SMALI_MULTIDEX} = "true" ]; then
-  zip $TEST_NAME.jar classes.dex classes2.dex
-elif [ ${NEED_DEX} = "true" ]; then
-  zip $TEST_NAME.jar classes.dex
+if [ ${NEED_DEX} = "true" ]; then
+  if [ ${HAS_SRC_MULTIDEX} = "true" ] || [ ${HAS_SMALI_MULTIDEX} = "true" ]; then
+    zip $TEST_NAME.jar classes.dex classes2.dex
+  else
+    zip $TEST_NAME.jar classes.dex
+  fi
 fi

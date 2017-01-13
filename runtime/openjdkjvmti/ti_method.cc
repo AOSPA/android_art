@@ -37,8 +37,67 @@
 #include "jni_internal.h"
 #include "modifiers.h"
 #include "scoped_thread_state_change-inl.h"
+#include "thread-inl.h"
 
 namespace openjdkjvmti {
+
+jvmtiError MethodUtil::GetArgumentsSize(jvmtiEnv* env ATTRIBUTE_UNUSED,
+                                        jmethodID method,
+                                        jint* size_ptr) {
+  if (method == nullptr) {
+    return ERR(INVALID_METHODID);
+  }
+  art::ArtMethod* art_method = art::jni::DecodeArtMethod(method);
+
+  if (art_method->IsNative()) {
+    return ERR(NATIVE_METHOD);
+  }
+
+  if (size_ptr == nullptr) {
+    return ERR(NULL_POINTER);
+  }
+
+  art::ScopedObjectAccess soa(art::Thread::Current());
+  if (art_method->IsProxyMethod() || art_method->IsAbstract()) {
+    // This isn't specified as an error case, so return 0.
+    *size_ptr = 0;
+    return ERR(NONE);
+  }
+
+  DCHECK_NE(art_method->GetCodeItemOffset(), 0u);
+  *size_ptr = art_method->GetCodeItem()->ins_size_;
+
+  return ERR(NONE);
+}
+
+jvmtiError MethodUtil::GetMaxLocals(jvmtiEnv* env ATTRIBUTE_UNUSED,
+                                    jmethodID method,
+                                    jint* max_ptr) {
+  if (method == nullptr) {
+    return ERR(INVALID_METHODID);
+  }
+  art::ArtMethod* art_method = art::jni::DecodeArtMethod(method);
+
+  if (art_method->IsNative()) {
+    return ERR(NATIVE_METHOD);
+  }
+
+  if (max_ptr == nullptr) {
+    return ERR(NULL_POINTER);
+  }
+
+  art::ScopedObjectAccess soa(art::Thread::Current());
+  if (art_method->IsProxyMethod() || art_method->IsAbstract()) {
+    // This isn't specified as an error case, so return 0.
+    *max_ptr = 0;
+    return ERR(NONE);
+  }
+
+  DCHECK_NE(art_method->GetCodeItemOffset(), 0u);
+  *max_ptr = art_method->GetCodeItem()->registers_size_;
+
+  return ERR(NONE);
+}
 
 jvmtiError MethodUtil::GetMethodName(jvmtiEnv* env,
                                      jmethodID method,
@@ -106,6 +165,38 @@ jvmtiError MethodUtil::GetMethodDeclaringClass(jvmtiEnv* env ATTRIBUTE_UNUSED,
   return ERR(NONE);
 }
 
+jvmtiError MethodUtil::GetMethodLocation(jvmtiEnv* env ATTRIBUTE_UNUSED,
+                                         jmethodID method,
+                                         jlocation* start_location_ptr,
+                                         jlocation* end_location_ptr) {
+  if (method == nullptr) {
+    return ERR(INVALID_METHODID);
+  }
+  art::ArtMethod* art_method = art::jni::DecodeArtMethod(method);
+
+  if (art_method->IsNative()) {
+    return ERR(NATIVE_METHOD);
+  }
+
+  if (start_location_ptr == nullptr || end_location_ptr == nullptr) {
+    return ERR(NULL_POINTER);
+  }
+
+  art::ScopedObjectAccess soa(art::Thread::Current());
+  if (art_method->IsProxyMethod() || art_method->IsAbstract()) {
+    // This isn't specified as an error case, so return 0/0.
+    *start_location_ptr = 0;
+    *end_location_ptr = 0;
+    return ERR(NONE);
+  }
+
+  DCHECK_NE(art_method->GetCodeItemOffset(), 0u);
+  *start_location_ptr = 0;
+  *end_location_ptr = art_method->GetCodeItem()->insns_size_in_code_units_ - 1;
+
+  return ERR(NONE);
+}
+
 jvmtiError MethodUtil::GetMethodModifiers(jvmtiEnv* env ATTRIBUTE_UNUSED,
                                           jmethodID method,
                                           jint* modifiers_ptr) {
@@ -128,6 +219,104 @@ jvmtiError MethodUtil::GetMethodModifiers(jvmtiEnv* env ATTRIBUTE_UNUSED,
 
   *modifiers_ptr = modifiers;
   return ERR(NONE);
+}
+
+using LineNumberContext = std::vector<jvmtiLineNumberEntry>;
+
+static bool CollectLineNumbers(void* void_context, const art::DexFile::PositionInfo& entry) {
+  LineNumberContext* context = reinterpret_cast<LineNumberContext*>(void_context);
+  jvmtiLineNumberEntry jvmti_entry = { static_cast<jlocation>(entry.address_),
+                                       static_cast<jint>(entry.line_) };
+  context->push_back(jvmti_entry);
+  return false;  // Collect all, no early exit.
+}
+
+jvmtiError MethodUtil::GetLineNumberTable(jvmtiEnv* env,
+                                          jmethodID method,
+                                          jint* entry_count_ptr,
+                                          jvmtiLineNumberEntry** table_ptr) {
+  if (method == nullptr) {
+    return ERR(NULL_POINTER);
+  }
+  art::ArtMethod* art_method = art::jni::DecodeArtMethod(method);
+  DCHECK(!art_method->IsRuntimeMethod());
+
+  const art::DexFile::CodeItem* code_item;
+  const art::DexFile* dex_file;
+  {
+    art::ScopedObjectAccess soa(art::Thread::Current());
+
+    if (art_method->IsProxyMethod()) {
+      return ERR(ABSENT_INFORMATION);
+    }
+    if (art_method->IsNative()) {
+      return ERR(NATIVE_METHOD);
+    }
+    if (entry_count_ptr == nullptr || table_ptr == nullptr) {
+      return ERR(NULL_POINTER);
+    }
+
+    code_item = art_method->GetCodeItem();
+    dex_file = art_method->GetDexFile();
+    DCHECK(code_item != nullptr) << art_method->PrettyMethod() << " " << dex_file->GetLocation();
+  }
+
+  LineNumberContext context;
+  bool success = dex_file->DecodeDebugPositionInfo(code_item, CollectLineNumbers, &context);
+  if (!success) {
+    return ERR(ABSENT_INFORMATION);
+  }
+
+  unsigned char* data;
+  jlong mem_size = context.size() * sizeof(jvmtiLineNumberEntry);
+  jvmtiError alloc_error = env->Allocate(mem_size, &data);
+  if (alloc_error != ERR(NONE)) {
+    return alloc_error;
+  }
+  *table_ptr = reinterpret_cast<jvmtiLineNumberEntry*>(data);
+  memcpy(*table_ptr, context.data(), mem_size);
+  *entry_count_ptr = static_cast<jint>(context.size());
+
+  return ERR(NONE);
+}
+
+template <typename T>
+static jvmtiError IsMethodT(jvmtiEnv* env ATTRIBUTE_UNUSED,
+                            jmethodID method,
+                            T test,
+                            jboolean* is_t_ptr) {
+  if (method == nullptr) {
+    return ERR(INVALID_METHODID);
+  }
+  if (is_t_ptr == nullptr) {
+    return ERR(NULL_POINTER);
+  }
+
+  art::ArtMethod* art_method = art::jni::DecodeArtMethod(method);
+  *is_t_ptr = test(art_method) ? JNI_TRUE : JNI_FALSE;
+
+  return ERR(NONE);
+}
+
+jvmtiError MethodUtil::IsMethodNative(jvmtiEnv* env, jmethodID m, jboolean* is_native_ptr) {
+  auto test = [](art::ArtMethod* method) {
+    return method->IsNative();
+  };
+  return IsMethodT(env, m, test, is_native_ptr);
+}
+
+jvmtiError MethodUtil::IsMethodObsolete(jvmtiEnv* env, jmethodID m, jboolean* is_obsolete_ptr) {
+  auto test = [](art::ArtMethod* method) {
+    return method->IsObsolete();
+  };
+  return IsMethodT(env, m, test, is_obsolete_ptr);
+}
+
+jvmtiError MethodUtil::IsMethodSynthetic(jvmtiEnv* env, jmethodID m, jboolean* is_synthetic_ptr) {
+  auto test = [](art::ArtMethod* method) {
+    return method->IsSynthetic();
+  };
+  return IsMethodT(env, m, test, is_synthetic_ptr);
 }
 
 }  // namespace openjdkjvmti

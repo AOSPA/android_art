@@ -20,6 +20,8 @@
 
 #include <set>
 
+#include "android-base/stringprintf.h"
+
 #include "arch/context.h"
 #include "art_field-inl.h"
 #include "art_method-inl.h"
@@ -60,6 +62,8 @@
 #include "well_known_classes.h"
 
 namespace art {
+
+using android::base::StringPrintf;
 
 // The key identifying the debugger to update instrumentation.
 static constexpr const char* kDbgInstrumentationKey = "Debugger";
@@ -1565,16 +1569,16 @@ JDWP::JdwpError Dbg::OutputDeclaredMethods(JDWP::RefTypeId class_id, bool with_g
 JDWP::JdwpError Dbg::OutputDeclaredInterfaces(JDWP::RefTypeId class_id, JDWP::ExpandBuf* pReply) {
   JDWP::JdwpError error;
   Thread* self = Thread::Current();
-  StackHandleScope<1> hs(self);
-  Handle<mirror::Class> c(hs.NewHandle(DecodeClass(class_id, &error)));
-  if (c.Get() == nullptr) {
+  ObjPtr<mirror::Class> c = DecodeClass(class_id, &error);
+  if (c == nullptr) {
     return error;
   }
   size_t interface_count = c->NumDirectInterfaces();
   expandBufAdd4BE(pReply, interface_count);
   for (size_t i = 0; i < interface_count; ++i) {
-    expandBufAddRefTypeId(pReply,
-                          gRegistry->AddRefType(mirror::Class::GetDirectInterface(self, c, i)));
+    ObjPtr<mirror::Class> interface = mirror::Class::GetDirectInterface(self, c, i);
+    DCHECK(interface != nullptr);
+    expandBufAddRefTypeId(pReply, gRegistry->AddRefType(interface));
   }
   return JDWP::ERR_NONE;
 }

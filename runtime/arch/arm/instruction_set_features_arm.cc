@@ -24,14 +24,18 @@
 #include "signal.h"
 #include <fstream>
 
-#include "base/stringprintf.h"
-#include "utils.h"  // For Trim.
+#include "android-base/stringprintf.h"
+#include "android-base/strings.h"
+
+#include "base/logging.h"
 
 #if defined(__arm__)
 extern "C" bool artCheckForArmSdivInstruction();
 #endif
 
 namespace art {
+
+using android::base::StringPrintf;
 
 ArmFeaturesUniquePtr ArmInstructionSetFeatures::FromVariant(
     const std::string& variant, std::string* error_msg) {
@@ -271,7 +275,7 @@ ArmInstructionSetFeatures::AddFeaturesFromSplitString(
   bool has_atomic_ldrd_strd = has_atomic_ldrd_strd_;
   bool has_div = has_div_;
   for (auto i = features.begin(); i != features.end(); i++) {
-    std::string feature = Trim(*i);
+    std::string feature = android::base::Trim(*i);
     if (feature == "div") {
       has_div = true;
     } else if (feature == "-div") {

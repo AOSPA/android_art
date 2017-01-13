@@ -16,7 +16,8 @@
 
 #include "register_line.h"
 
-#include "base/stringprintf.h"
+#include "android-base/stringprintf.h"
+
 #include "dex_instruction-inl.h"
 #include "method_verifier-inl.h"
 #include "register_line-inl.h"
@@ -24,6 +25,8 @@
 
 namespace art {
 namespace verifier {
+
+using android::base::StringPrintf;
 
 bool RegisterLine::CheckConstructorReturn(MethodVerifier* verifier) const {
   if (kIsDebugBuild && this_initialized_) {
@@ -44,8 +47,9 @@ bool RegisterLine::CheckConstructorReturn(MethodVerifier* verifier) const {
 }
 
 const RegType& RegisterLine::GetInvocationThis(MethodVerifier* verifier, const Instruction* inst,
-                                               bool is_range, bool allow_failure) {
-  const size_t args_count = is_range ? inst->VRegA_3rc() : inst->VRegA_35c();
+                                               bool allow_failure) {
+  DCHECK(inst->IsInvoke());
+  const size_t args_count = inst->VRegA();
   if (args_count < 1) {
     if (!allow_failure) {
       verifier->Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "invoke lacks 'this'";
@@ -53,7 +57,7 @@ const RegType& RegisterLine::GetInvocationThis(MethodVerifier* verifier, const I
     return verifier->GetRegTypeCache()->Conflict();
   }
   /* Get the element type of the array held in vsrc */
-  const uint32_t this_reg = (is_range) ? inst->VRegC_3rc() : inst->VRegC_35c();
+  const uint32_t this_reg = inst->VRegC();
   const RegType& this_type = GetRegisterType(verifier, this_reg);
   if (!this_type.IsReferenceTypes()) {
     if (!allow_failure) {

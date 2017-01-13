@@ -37,6 +37,8 @@
 #include <vector>
 #include <fcntl.h>
 
+#include "android-base/strings.h"
+
 #include "JniConstants.h"
 #include "ScopedLocalRef.h"
 #include "arch/arm/quick_method_frame_info_arm.h"
@@ -62,6 +64,7 @@
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "base/unix_file/fd_file.h"
+#include "cha.h"
 #include "class_linker-inl.h"
 #include "compiler_callbacks.h"
 #include "debugger.h"
@@ -349,6 +352,7 @@ Runtime::~Runtime() {
   delete monitor_list_;
   delete monitor_pool_;
   delete class_linker_;
+  delete cha_;
   delete heap_;
   delete intern_table_;
   delete oat_file_manager_;
@@ -867,7 +871,7 @@ static bool OpenDexFilesFromImage(const std::string& image_location,
         ImageHeader::GetOatLocationFromImageLocation(image_locations[index].c_str());
     // Note: in the multi-image case, the image location may end in ".jar," and not ".art." Handle
     //       that here.
-    if (EndsWith(oat_location, ".jar")) {
+    if (android::base::EndsWith(oat_location, ".jar")) {
       oat_location.replace(oat_location.length() - 3, 3, "oat");
     }
     std::string error_msg;
@@ -1195,6 +1199,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   CHECK_EQ(self->GetThreadId(), ThreadList::kMainThreadId);
   CHECK(self != nullptr);
 
+  self->SetCanCallIntoJava(!IsAotCompiler());
+
   // Set us to runnable so tools using a runtime can allocate and GC by default
   self->TransitionFromSuspendedToRunnable();
 
@@ -1203,6 +1209,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   CHECK_GE(GetHeap()->GetContinuousSpaces().size(), 1U);
   class_linker_ = new ClassLinker(intern_table_);
+  cha_ = new ClassHierarchyAnalysis;
   if (GetHeap()->HasBootImageSpace()) {
     bool result = class_linker_->InitFromBootImage(&error_msg);
     if (!result) {
@@ -1222,7 +1229,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
       for (const DexFile* dex_file : boot_class_path) {
         dex_locations.push_back(dex_file->GetLocation());
       }
-      boot_class_path_string_ = Join(dex_locations, ':');
+      boot_class_path_string_ = android::base::Join(dex_locations, ':');
     }
     {
       ScopedTrace trace2("AddImageStringsToTable");
@@ -1692,13 +1699,13 @@ void Runtime::VisitNonThreadRoots(RootVisitor* visitor) {
   VisitTransactionRoots(visitor);
 }
 
-void Runtime::VisitNonConcurrentRoots(RootVisitor* visitor) {
-  thread_list_->VisitRoots(visitor);
+void Runtime::VisitNonConcurrentRoots(RootVisitor* visitor, VisitRootFlags flags) {
+  VisitThreadRoots(visitor, flags);
   VisitNonThreadRoots(visitor);
 }
 
-void Runtime::VisitThreadRoots(RootVisitor* visitor) {
-  thread_list_->VisitRoots(visitor);
+void Runtime::VisitThreadRoots(RootVisitor* visitor, VisitRootFlags flags) {
+  thread_list_->VisitRoots(visitor, flags);
 }
 
 size_t Runtime::FlipThreadRoots(Closure* thread_flip_visitor, Closure* flip_callback,
@@ -1707,7 +1714,7 @@ size_t Runtime::FlipThreadRoots(Closure* thread_flip_visitor, Closure* flip_call
 }
 
 void Runtime::VisitRoots(RootVisitor* visitor, VisitRootFlags flags) {
-  VisitNonConcurrentRoots(visitor);
+  VisitNonConcurrentRoots(visitor, flags);
   VisitConcurrentRoots(visitor, flags);
 }
 
@@ -1716,7 +1723,7 @@ void Runtime::VisitImageRoots(RootVisitor* visitor) {
     if (space->IsImageSpace()) {
       auto* image_space = space->AsImageSpace();
       const auto& image_header = image_space->GetImageHeader();
-      for (size_t i = 0; i < ImageHeader::kImageRootsMax; ++i) {
+      for (int32_t i = 0, size = image_header.GetImageRoots()->GetLength(); i != size; ++i) {
         auto* obj = image_header.GetImageRoot(static_cast<ImageHeader::ImageRoot>(i));
         if (obj != nullptr) {
           auto* after_obj = obj;
@@ -1728,9 +1735,24 @@ void Runtime::VisitImageRoots(RootVisitor* visitor) {
   }
 }
 
+static ArtMethod* CreateRuntimeMethod(ClassLinker* class_linker, LinearAlloc* linear_alloc) {
+  const PointerSize image_pointer_size = class_linker->GetImagePointerSize();
+  const size_t method_alignment = ArtMethod::Alignment(image_pointer_size);
+  const size_t method_size = ArtMethod::Size(image_pointer_size);
+  LengthPrefixedArray<ArtMethod>* method_array = class_linker->AllocArtMethodArray(
+      Thread::Current(),
+      linear_alloc,
+      1);
+  ArtMethod* method = &method_array->At(0, method_size, method_alignment);
+  CHECK(method != nullptr);
+  method->SetDexMethodIndex(DexFile::kDexNoIndex);
+  CHECK(method->IsRuntimeMethod());
+  return method;
+}
+
 ArtMethod* Runtime::CreateImtConflictMethod(LinearAlloc* linear_alloc) {
   ClassLinker* const class_linker = GetClassLinker();
-  ArtMethod* method = class_linker->CreateRuntimeMethod(linear_alloc);
+  ArtMethod* method = CreateRuntimeMethod(class_linker, linear_alloc);
   // When compiling, the code pointer will get set later when the image is loaded.
   const PointerSize pointer_size = GetInstructionSetPointerSize(instruction_set_);
   if (IsAotCompiler()) {
@@ -1751,7 +1773,7 @@ void Runtime::SetImtConflictMethod(ArtMethod* method) {
 }
 
 ArtMethod* Runtime::CreateResolutionMethod() {
-  auto* method = GetClassLinker()->CreateRuntimeMethod(GetLinearAlloc());
+  auto* method = CreateRuntimeMethod(GetClassLinker(), GetLinearAlloc());
   // When compiling, the code pointer will get set later when the image is loaded.
   if (IsAotCompiler()) {
     PointerSize pointer_size = GetInstructionSetPointerSize(instruction_set_);
@@ -1763,7 +1785,7 @@ ArtMethod* Runtime::CreateResolutionMethod() {
 }
 
 ArtMethod* Runtime::CreateCalleeSaveMethod() {
-  auto* method = GetClassLinker()->CreateRuntimeMethod(GetLinearAlloc());
+  auto* method = CreateRuntimeMethod(GetClassLinker(), GetLinearAlloc());
   PointerSize pointer_size = GetInstructionSetPointerSize(instruction_set_);
   method->SetEntryPointFromQuickCompiledCodePtrSize(nullptr, pointer_size);
   DCHECK_NE(instruction_set_, kNone);
@@ -1777,6 +1799,9 @@ void Runtime::DisallowNewSystemWeaks() {
   intern_table_->ChangeWeakRootState(gc::kWeakRootStateNoReadsOrWrites);
   java_vm_->DisallowNewWeakGlobals();
   heap_->DisallowNewAllocationRecords();
+  if (GetJit() != nullptr) {
+    GetJit()->GetCodeCache()->DisallowInlineCacheAccess();
+  }
 
   // All other generic system-weak holders.
   for (gc::AbstractSystemWeakHolder* holder : system_weak_holders_) {
@@ -1790,6 +1815,9 @@ void Runtime::AllowNewSystemWeaks() {
   intern_table_->ChangeWeakRootState(gc::kWeakRootStateNormal);  // TODO: Do this in the sweeping.
   java_vm_->AllowNewWeakGlobals();
   heap_->AllowNewAllocationRecords();
+  if (GetJit() != nullptr) {
+    GetJit()->GetCodeCache()->AllowInlineCacheAccess();
+  }
 
   // All other generic system-weak holders.
   for (gc::AbstractSystemWeakHolder* holder : system_weak_holders_) {
@@ -1805,6 +1833,9 @@ void Runtime::BroadcastForNewSystemWeaks(bool broadcast_for_checkpoint) {
   intern_table_->BroadcastForNewInterns();
   java_vm_->BroadcastForNewWeakGlobals();
   heap_->BroadcastForNewAllocationRecords();
+  if (GetJit() != nullptr) {
+    GetJit()->GetCodeCache()->BroadcastForInlineCacheAccess();
+  }
 
   // All other generic system-weak holders.
   for (gc::AbstractSystemWeakHolder* holder : system_weak_holders_) {
@@ -1865,7 +1896,7 @@ void Runtime::RegisterAppInfo(const std::vector<std::string>& code_paths,
   }
 
   VLOG(profiler) << "Register app with " << profile_output_filename
-      << " " << Join(code_paths, ':');
+      << " " << android::base::Join(code_paths, ':');
 
   if (profile_output_filename.empty()) {
     LOG(WARNING) << "JIT profile information will not be recorded: profile filename is empty.";
@@ -2018,7 +2049,8 @@ void Runtime::RecordWeakStringRemoval(ObjPtr<mirror::String> s) const {
   preinitialization_transaction_->RecordWeakStringRemoval(s);
 }
 
-void Runtime::RecordResolveString(ObjPtr<mirror::DexCache> dex_cache, uint32_t string_idx) const {
+void Runtime::RecordResolveString(ObjPtr<mirror::DexCache> dex_cache,
+                                  dex::StringIndex string_idx) const {
   DCHECK(IsAotCompiler());
   DCHECK(IsActiveTransaction());
   preinitialization_transaction_->RecordResolveString(dex_cache, string_idx);
@@ -2178,7 +2210,7 @@ void Runtime::RemoveSystemWeakHolder(gc::AbstractSystemWeakHolder* holder) {
 
 NO_RETURN
 void Runtime::Aborter(const char* abort_message) {
-#ifdef __ANDROID__
+#ifdef ART_TARGET_ANDROID
   android_set_abort_message(abort_message);
 #endif
   Runtime::Abort(abort_message);

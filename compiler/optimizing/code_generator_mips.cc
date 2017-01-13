@@ -99,8 +99,9 @@ Location InvokeDexCallingConventionVisitorMIPS::GetNextLocation(Primitive::Type 
       uint32_t gp_index = gp_index_;
       gp_index_ += 2;
       if (gp_index + 1 < calling_convention.GetNumberOfRegisters()) {
-        if (calling_convention.GetRegisterAt(gp_index) == A1) {
-          gp_index_++;  // Skip A1, and use A2_A3 instead.
+        Register reg = calling_convention.GetRegisterAt(gp_index);
+        if (reg == A1 || reg == A3) {
+          gp_index_++;  // Skip A1(A3), and use A2_A3(T0_T1) instead.
           gp_index++;
         }
         Register low_even = calling_convention.GetRegisterAt(gp_index);
@@ -280,7 +281,7 @@ class LoadStringSlowPathMIPS : public SlowPathCodeMIPS {
 
     InvokeRuntimeCallingConvention calling_convention;
     HLoadString* load = instruction_->AsLoadString();
-    const uint32_t string_index = load->GetStringIndex();
+    const uint32_t string_index = load->GetStringIndex().index_;
     __ LoadConst32(calling_convention.GetRegisterAt(0), string_index);
     mips_codegen->InvokeRuntime(kQuickResolveString, instruction_, instruction_->GetDexPc(), this);
     CheckEntrypointTypes<kQuickResolveString, void*, uint32_t>();
@@ -457,10 +458,6 @@ CodeGeneratorMIPS::CodeGeneratorMIPS(HGraph* graph,
       isa_features_(isa_features),
       uint32_literals_(std::less<uint32_t>(),
                        graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
-      method_patches_(MethodReferenceComparator(),
-                      graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
-      call_patches_(MethodReferenceComparator(),
-                    graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
       pc_relative_dex_cache_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
       boot_image_string_patches_(StringReferenceValueComparator(),
                                  graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
@@ -756,6 +753,11 @@ void CodeGeneratorMIPS::GenerateFrameEntry() {
   if (RequiresCurrentMethod()) {
     __ StoreToOffset(kStoreWord, kMethodRegisterArgument, SP, kCurrentMethodStackOffset);
   }
+
+  if (GetGraph()->HasShouldDeoptimizeFlag()) {
+    // Initialize should deoptimize flag to 0.
+    __ StoreToOffset(kStoreWord, ZERO, SP, GetStackOffsetOfShouldDeoptimizeFlag());
+  }
 }
 
 void CodeGeneratorMIPS::GenerateFrameExit() {
@@ -1002,8 +1004,6 @@ inline void CodeGeneratorMIPS::EmitPcRelativeLinkerPatches(
 void CodeGeneratorMIPS::EmitLinkerPatches(ArenaVector<LinkerPatch>* linker_patches) {
   DCHECK(linker_patches->empty());
   size_t size =
-      method_patches_.size() +
-      call_patches_.size() +
       pc_relative_dex_cache_patches_.size() +
       pc_relative_string_patches_.size() +
       pc_relative_type_patches_.size() +
@@ -1011,24 +1011,6 @@ void CodeGeneratorMIPS::EmitLinkerPatches(ArenaVector<LinkerPatch>* linker_patch
       boot_image_type_patches_.size() +
       boot_image_address_patches_.size();
   linker_patches->reserve(size);
-  for (const auto& entry : method_patches_) {
-    const MethodReference& target_method = entry.first;
-    Literal* literal = entry.second;
-    DCHECK(literal->GetLabel()->IsBound());
-    uint32_t literal_offset = __ GetLabelLocation(literal->GetLabel());
-    linker_patches->push_back(LinkerPatch::MethodPatch(literal_offset,
-                                                       target_method.dex_file,
-                                                       target_method.dex_method_index));
-  }
-  for (const auto& entry : call_patches_) {
-    const MethodReference& target_method = entry.first;
-    Literal* literal = entry.second;
-    DCHECK(literal->GetLabel()->IsBound());
-    uint32_t literal_offset = __ GetLabelLocation(literal->GetLabel());
-    linker_patches->push_back(LinkerPatch::CodePatch(literal_offset,
-                                                     target_method.dex_file,
-                                                     target_method.dex_method_index));
-  }
   EmitPcRelativeLinkerPatches<LinkerPatch::DexCacheArrayPatch>(pc_relative_dex_cache_patches_,
                                                                linker_patches);
   if (!GetCompilerOptions().IsBootImage()) {
@@ -1047,7 +1029,7 @@ void CodeGeneratorMIPS::EmitLinkerPatches(ArenaVector<LinkerPatch>* linker_patch
     uint32_t literal_offset = __ GetLabelLocation(literal->GetLabel());
     linker_patches->push_back(LinkerPatch::StringPatch(literal_offset,
                                                        target_string.dex_file,
-                                                       target_string.string_index));
+                                                       target_string.string_index.index_));
   }
   for (const auto& entry : boot_image_type_patches_) {
     const TypeReference& target_type = entry.first;
@@ -1101,16 +1083,8 @@ Literal* CodeGeneratorMIPS::DeduplicateMethodLiteral(MethodReference target_meth
       [this]() { return __ NewLiteral<uint32_t>(/* placeholder */ 0u); });
 }
 
-Literal* CodeGeneratorMIPS::DeduplicateMethodAddressLiteral(MethodReference target_method) {
-  return DeduplicateMethodLiteral(target_method, &method_patches_);
-}
-
-Literal* CodeGeneratorMIPS::DeduplicateMethodCodeLiteral(MethodReference target_method) {
-  return DeduplicateMethodLiteral(target_method, &call_patches_);
-}
-
 Literal* CodeGeneratorMIPS::DeduplicateBootImageStringLiteral(const DexFile& dex_file,
-                                                              uint32_t string_index) {
+                                                              dex::StringIndex string_index) {
   return boot_image_string_patches_.GetOrCreate(
       StringReference(&dex_file, string_index),
       [this]() { return __ NewLiteral<uint32_t>(/* placeholder */ 0u); });
@@ -1159,11 +1133,15 @@ void CodeGeneratorMIPS::EmitPcRelativeAddressPlaceholder(
   __ SetReorder(reordering);
 }
 
-void CodeGeneratorMIPS::MarkGCCard(Register object, Register value) {
+void CodeGeneratorMIPS::MarkGCCard(Register object,
+                                   Register value,
+                                   bool value_can_be_null) {
   MipsLabel done;
   Register card = AT;
   Register temp = TMP;
-  __ Beqz(value, &done);
+  if (value_can_be_null) {
+    __ Beqz(value, &done);
+  }
   __ LoadFromOffset(kLoadWord,
                     card,
                     TR,
@@ -1171,7 +1149,9 @@ void CodeGeneratorMIPS::MarkGCCard(Register object, Register value) {
   __ Srl(temp, object, gc::accounting::CardTable::kCardShift);
   __ Addu(temp, card, temp);
   __ Sb(card, temp, 0);
-  __ Bind(&done);
+  if (value_can_be_null) {
+    __ Bind(&done);
+  }
 }
 
 void CodeGeneratorMIPS::SetupBlockedRegisters() const {
@@ -2090,7 +2070,7 @@ void InstructionCodeGeneratorMIPS::VisitArraySet(HArraySet* instruction) {
           __ StoreToOffset(kStoreWord, value, base_reg, data_offset, null_checker);
           if (needs_write_barrier) {
             DCHECK_EQ(value_type, Primitive::kPrimNot);
-            codegen_->MarkGCCard(obj, value);
+            codegen_->MarkGCCard(obj, value, instruction->GetValueCanBeNull());
           }
         }
       } else {
@@ -4688,6 +4668,19 @@ void InstructionCodeGeneratorMIPS::GenConditionalMoveR6(HSelect* select) {
   }
 }
 
+void LocationsBuilderMIPS::VisitShouldDeoptimizeFlag(HShouldDeoptimizeFlag* flag) {
+  LocationSummary* locations = new (GetGraph()->GetArena())
+      LocationSummary(flag, LocationSummary::kNoCall);
+  locations->SetOut(Location::RequiresRegister());
+}
+
+void InstructionCodeGeneratorMIPS::VisitShouldDeoptimizeFlag(HShouldDeoptimizeFlag* flag) {
+  __ LoadFromOffset(kLoadWord,
+                    flag->GetLocations()->Out().AsRegister<Register>(),
+                    SP,
+                    codegen_->GetStackOffsetOfShouldDeoptimizeFlag());
+}
+
 void LocationsBuilderMIPS::VisitSelect(HSelect* select) {
   LocationSummary* locations = new (GetGraph()->GetArena()) LocationSummary(select);
   CanMoveConditionally(select, codegen_->GetInstructionSetFeatures().IsR6(), locations);
@@ -4881,7 +4874,8 @@ void LocationsBuilderMIPS::HandleFieldSet(HInstruction* instruction, const Field
 
 void InstructionCodeGeneratorMIPS::HandleFieldSet(HInstruction* instruction,
                                                   const FieldInfo& field_info,
-                                                  uint32_t dex_pc) {
+                                                  uint32_t dex_pc,
+                                                  bool value_can_be_null) {
   Primitive::Type type = field_info.GetFieldType();
   LocationSummary* locations = instruction->GetLocations();
   Register obj = locations->InAt(0).AsRegister<Register>();
@@ -4976,7 +4970,7 @@ void InstructionCodeGeneratorMIPS::HandleFieldSet(HInstruction* instruction,
   // TODO: memory barriers?
   if (CodeGenerator::StoreNeedsWriteBarrier(type, instruction->InputAt(1))) {
     Register src = value_location.AsRegister<Register>();
-    codegen_->MarkGCCard(obj, src);
+    codegen_->MarkGCCard(obj, src, value_can_be_null);
   }
 
   if (is_volatile) {
@@ -4997,7 +4991,10 @@ void LocationsBuilderMIPS::VisitInstanceFieldSet(HInstanceFieldSet* instruction)
 }
 
 void InstructionCodeGeneratorMIPS::VisitInstanceFieldSet(HInstanceFieldSet* instruction) {
-  HandleFieldSet(instruction, instruction->GetFieldInfo(), instruction->GetDexPc());
+  HandleFieldSet(instruction,
+                 instruction->GetFieldInfo(),
+                 instruction->GetDexPc(),
+                 instruction->GetValueCanBeNull());
 }
 
 void InstructionCodeGeneratorMIPS::GenerateGcRootFieldLoad(
@@ -5085,9 +5082,9 @@ void LocationsBuilderMIPS::HandleInvoke(HInvoke* invoke) {
 
 void LocationsBuilderMIPS::VisitInvokeInterface(HInvokeInterface* invoke) {
   HandleInvoke(invoke);
-  // The register T0 is required to be used for the hidden argument in
+  // The register T7 is required to be used for the hidden argument in
   // art_quick_imt_conflict_trampoline, so add the hidden argument.
-  invoke->GetLocations()->AddTemp(Location::RegisterLocation(T0));
+  invoke->GetLocations()->AddTemp(Location::RegisterLocation(T7));
 }
 
 void InstructionCodeGeneratorMIPS::VisitInvokeInterface(HInvokeInterface* invoke) {
@@ -5138,22 +5135,7 @@ void LocationsBuilderMIPS::VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invo
   // art::PrepareForRegisterAllocation.
   DCHECK(!invoke->IsStaticWithExplicitClinitCheck());
 
-  HInvokeStaticOrDirect::MethodLoadKind method_load_kind = invoke->GetMethodLoadKind();
-  HInvokeStaticOrDirect::CodePtrLocation code_ptr_location = invoke->GetCodePtrLocation();
-  bool isR6 = codegen_->GetInstructionSetFeatures().IsR6();
-
-  // kDirectAddressWithFixup and kCallDirectWithFixup need no extra input on R6 because
-  // R6 has PC-relative addressing.
-  bool has_extra_input = !isR6 &&
-      ((method_load_kind == HInvokeStaticOrDirect::MethodLoadKind::kDirectAddressWithFixup) ||
-       (code_ptr_location == HInvokeStaticOrDirect::CodePtrLocation::kCallDirectWithFixup));
-
-  if (invoke->HasPcRelativeDexCache()) {
-    // kDexCachePcRelative is mutually exclusive with
-    // kDirectAddressWithFixup/kCallDirectWithFixup.
-    CHECK(!has_extra_input);
-    has_extra_input = true;
-  }
+  bool has_extra_input = invoke->HasPcRelativeDexCache();
 
   IntrinsicLocationsBuilderMIPS intrinsic(codegen_);
   if (intrinsic.TryDispatch(invoke)) {
@@ -5240,9 +5222,9 @@ HLoadClass::LoadKind CodeGeneratorMIPS::GetSupportedLoadClassKind(
       break;
     case HLoadClass::LoadKind::kBootImageAddress:
       break;
-    case HLoadClass::LoadKind::kDexCacheAddress:
+    case HLoadClass::LoadKind::kJitTableAddress:
       DCHECK(Runtime::Current()->UseJitCompilation());
-      fallback_load = false;
+      fallback_load = true;
       break;
     case HLoadClass::LoadKind::kDexCachePcRelative:
       DCHECK(!Runtime::Current()->UseJitCompilation());
@@ -5293,9 +5275,7 @@ HInvokeStaticOrDirect::DispatchInfo CodeGeneratorMIPS::GetSupportedInvokeStaticO
   // is incompatible with it.
   bool has_irreducible_loops = GetGraph()->HasIrreducibleLoops();
   bool fallback_load = true;
-  bool fallback_call = true;
   switch (dispatch_info.method_load_kind) {
-    case HInvokeStaticOrDirect::MethodLoadKind::kDirectAddressWithFixup:
     case HInvokeStaticOrDirect::MethodLoadKind::kDexCachePcRelative:
       fallback_load = has_irreducible_loops;
       break;
@@ -5303,24 +5283,9 @@ HInvokeStaticOrDirect::DispatchInfo CodeGeneratorMIPS::GetSupportedInvokeStaticO
       fallback_load = false;
       break;
   }
-  switch (dispatch_info.code_ptr_location) {
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallDirectWithFixup:
-      fallback_call = has_irreducible_loops;
-      break;
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallPCRelative:
-      // TODO: Implement this type.
-      break;
-    default:
-      fallback_call = false;
-      break;
-  }
   if (fallback_load) {
     dispatch_info.method_load_kind = HInvokeStaticOrDirect::MethodLoadKind::kDexCacheViaMethod;
     dispatch_info.method_load_data = 0;
-  }
-  if (fallback_call) {
-    dispatch_info.code_ptr_location = HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod;
-    dispatch_info.direct_code_ptr = 0;
   }
   return dispatch_info;
 }
@@ -5330,30 +5295,9 @@ void CodeGeneratorMIPS::GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke
   Location callee_method = temp;  // For all kinds except kRecursive, callee will be in temp.
   HInvokeStaticOrDirect::MethodLoadKind method_load_kind = invoke->GetMethodLoadKind();
   HInvokeStaticOrDirect::CodePtrLocation code_ptr_location = invoke->GetCodePtrLocation();
-  bool isR6 = isa_features_.IsR6();
-  // kDirectAddressWithFixup and kCallDirectWithFixup have no extra input on R6 because
-  // R6 has PC-relative addressing.
-  bool has_extra_input = invoke->HasPcRelativeDexCache() ||
-      (!isR6 &&
-       ((method_load_kind == HInvokeStaticOrDirect::MethodLoadKind::kDirectAddressWithFixup) ||
-        (code_ptr_location == HInvokeStaticOrDirect::CodePtrLocation::kCallDirectWithFixup)));
-  Register base_reg = has_extra_input
+  Register base_reg = invoke->HasPcRelativeDexCache()
       ? GetInvokeStaticOrDirectExtraParameter(invoke, temp.AsRegister<Register>())
       : ZERO;
-
-  // For better instruction scheduling we load the direct code pointer before the method pointer.
-  switch (code_ptr_location) {
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallDirect:
-      // T9 = invoke->GetDirectCodePtr();
-      __ LoadConst32(T9, invoke->GetDirectCodePtr());
-      break;
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallDirectWithFixup:
-      // T9 = code address from literal pool with link-time patch.
-      __ LoadLiteral(T9, base_reg, DeduplicateMethodCodeLiteral(invoke->GetTargetMethod()));
-      break;
-    default:
-      break;
-  }
 
   switch (method_load_kind) {
     case HInvokeStaticOrDirect::MethodLoadKind::kStringInit: {
@@ -5371,11 +5315,6 @@ void CodeGeneratorMIPS::GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke
       break;
     case HInvokeStaticOrDirect::MethodLoadKind::kDirectAddress:
       __ LoadConst32(temp.AsRegister<Register>(), invoke->GetMethodAddress());
-      break;
-    case HInvokeStaticOrDirect::MethodLoadKind::kDirectAddressWithFixup:
-      __ LoadLiteral(temp.AsRegister<Register>(),
-                     base_reg,
-                     DeduplicateMethodAddressLiteral(invoke->GetTargetMethod()));
       break;
     case HInvokeStaticOrDirect::MethodLoadKind::kDexCachePcRelative: {
       HMipsDexCacheArraysBase* base =
@@ -5419,18 +5358,6 @@ void CodeGeneratorMIPS::GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke
     case HInvokeStaticOrDirect::CodePtrLocation::kCallSelf:
       __ Bal(&frame_entry_label_);
       break;
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallDirect:
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallDirectWithFixup:
-      // T9 prepared above for better instruction scheduling.
-      // T9()
-      __ Jalr(T9);
-      __ NopIfNoReordering();
-      break;
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallPCRelative:
-      // TODO: Implement this type.
-      // Currently filtered out by GetSupportedInvokeStaticOrDirectDispatch().
-      LOG(FATAL) << "Unsupported";
-      UNREACHABLE();
     case HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod:
       // T9 = callee_method->entry_point_from_quick_compiled_code_;
       __ LoadFromOffset(kLoadWord,
@@ -5603,17 +5530,8 @@ void InstructionCodeGeneratorMIPS::VisitLoadClass(HLoadClass* cls) {
                      codegen_->DeduplicateBootImageAddressLiteral(address));
       break;
     }
-    case HLoadClass::LoadKind::kDexCacheAddress: {
-      DCHECK_NE(cls->GetAddress(), 0u);
-      uint32_t address = dchecked_integral_cast<uint32_t>(cls->GetAddress());
-      static_assert(sizeof(GcRoot<mirror::Class>) == 4u, "Expected GC root to be 4 bytes.");
-      DCHECK_ALIGNED(cls->GetAddress(), 4u);
-      int16_t offset = Low16Bits(address);
-      uint32_t base_address = address - offset;  // This accounts for offset sign extension.
-      __ Lui(out, High16Bits(base_address));
-      // /* GcRoot<mirror::Class> */ out = *(base_address + offset)
-      GenerateGcRootFieldLoad(cls, out_loc, out, offset);
-      generate_null_check = !cls->IsInDexCache();
+    case HLoadClass::LoadKind::kJitTableAddress: {
+      LOG(FATAL) << "Unimplemented";
       break;
     }
     case HLoadClass::LoadKind::kDexCachePcRelative: {
@@ -5679,11 +5597,7 @@ void InstructionCodeGeneratorMIPS::VisitClearException(HClearException* clear AT
 }
 
 void LocationsBuilderMIPS::VisitLoadString(HLoadString* load) {
-  LocationSummary::CallKind call_kind = (load->NeedsEnvironment() || kEmitCompilerReadBarrier)
-      ? ((load->GetLoadKind() == HLoadString::LoadKind::kDexCacheViaMethod)
-          ? LocationSummary::kCallOnMainOnly
-          : LocationSummary::kCallOnSlowPath)
-      : LocationSummary::kNoCall;
+  LocationSummary::CallKind call_kind = CodeGenerator::GetLoadStringCallKind(load);
   LocationSummary* locations = new (GetGraph()->GetArena()) LocationSummary(load, call_kind);
   HLoadString::LoadKind load_kind = load->GetLoadKind();
   switch (load_kind) {
@@ -5733,22 +5647,19 @@ void InstructionCodeGeneratorMIPS::VisitLoadString(HLoadString* load) {
 
   switch (load_kind) {
     case HLoadString::LoadKind::kBootImageLinkTimeAddress:
-      DCHECK(!kEmitCompilerReadBarrier);
       __ LoadLiteral(out,
                      base_or_current_method_reg,
                      codegen_->DeduplicateBootImageStringLiteral(load->GetDexFile(),
                                                                  load->GetStringIndex()));
       return;  // No dex cache slow path.
     case HLoadString::LoadKind::kBootImageLinkTimePcRelative: {
-      DCHECK(!kEmitCompilerReadBarrier);
       DCHECK(codegen_->GetCompilerOptions().IsBootImage());
       CodeGeneratorMIPS::PcRelativePatchInfo* info =
-          codegen_->NewPcRelativeStringPatch(load->GetDexFile(), load->GetStringIndex());
+          codegen_->NewPcRelativeStringPatch(load->GetDexFile(), load->GetStringIndex().index_);
       codegen_->EmitPcRelativeAddressPlaceholder(info, out, base_or_current_method_reg);
       return;  // No dex cache slow path.
     }
     case HLoadString::LoadKind::kBootImageAddress: {
-      DCHECK(!kEmitCompilerReadBarrier);
       DCHECK_NE(load->GetAddress(), 0u);
       uint32_t address = dchecked_integral_cast<uint32_t>(load->GetAddress());
       __ LoadLiteral(out,
@@ -5759,7 +5670,7 @@ void InstructionCodeGeneratorMIPS::VisitLoadString(HLoadString* load) {
     case HLoadString::LoadKind::kBssEntry: {
       DCHECK(!codegen_->GetCompilerOptions().IsBootImage());
       CodeGeneratorMIPS::PcRelativePatchInfo* info =
-          codegen_->NewPcRelativeStringPatch(load->GetDexFile(), load->GetStringIndex());
+          codegen_->NewPcRelativeStringPatch(load->GetDexFile(), load->GetStringIndex().index_);
       codegen_->EmitPcRelativeAddressPlaceholder(info, out, base_or_current_method_reg);
       __ LoadFromOffset(kLoadWord, out, out, 0);
       SlowPathCodeMIPS* slow_path = new (GetGraph()->GetArena()) LoadStringSlowPathMIPS(load);
@@ -5775,7 +5686,7 @@ void InstructionCodeGeneratorMIPS::VisitLoadString(HLoadString* load) {
   // TODO: Re-add the compiler code to do string dex cache lookup again.
   DCHECK(load_kind == HLoadString::LoadKind::kDexCacheViaMethod);
   InvokeRuntimeCallingConvention calling_convention;
-  __ LoadConst32(calling_convention.GetRegisterAt(0), load->GetStringIndex());
+  __ LoadConst32(calling_convention.GetRegisterAt(0), load->GetStringIndex().index_);
   codegen_->InvokeRuntime(kQuickResolveString, load, load->GetDexPc());
   CheckEntrypointTypes<kQuickResolveString, void*, uint32_t>();
 }
@@ -6274,7 +6185,10 @@ void LocationsBuilderMIPS::VisitStaticFieldSet(HStaticFieldSet* instruction) {
 }
 
 void InstructionCodeGeneratorMIPS::VisitStaticFieldSet(HStaticFieldSet* instruction) {
-  HandleFieldSet(instruction, instruction->GetFieldInfo(), instruction->GetDexPc());
+  HandleFieldSet(instruction,
+                 instruction->GetFieldInfo(),
+                 instruction->GetDexPc(),
+                 instruction->GetValueCanBeNull());
 }
 
 void LocationsBuilderMIPS::VisitUnresolvedInstanceFieldGet(

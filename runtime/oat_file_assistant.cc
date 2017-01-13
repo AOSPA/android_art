@@ -19,8 +19,10 @@
 #include <sstream>
 
 #include <sys/stat.h>
+
+#include "android-base/strings.h"
+
 #include "base/logging.h"
-#include "base/stringprintf.h"
 #include "compiler_filter.h"
 #include "class_linker.h"
 #include "gc/heap.h"
@@ -146,14 +148,13 @@ bool OatFileAssistant::Lock(std::string* error_msg) {
   return true;
 }
 
-OatFileAssistant::DexOptNeeded
-OatFileAssistant::GetDexOptNeeded(CompilerFilter::Filter target, bool profile_changed) {
+int OatFileAssistant::GetDexOptNeeded(CompilerFilter::Filter target, bool profile_changed) {
   OatFileInfo& info = GetBestInfo();
   DexOptNeeded dexopt_needed = info.GetDexOptNeeded(target, profile_changed);
-  if (dexopt_needed == kPatchOatNeeded && info.IsOatLocation()) {
-    dexopt_needed = kSelfPatchOatNeeded;
+  if (info.IsOatLocation() || dexopt_needed == kDex2OatFromScratch) {
+    return dexopt_needed;
   }
-  return dexopt_needed;
+  return -dexopt_needed;
 }
 
 // Figure out the currently specified compile filter option in the runtime.
@@ -191,13 +192,21 @@ OatFileAssistant::MakeUpToDate(bool profile_changed, std::string* error_msg) {
 
   OatFileInfo& info = GetBestInfo();
   switch (info.GetDexOptNeeded(target, profile_changed)) {
-    case kNoDexOptNeeded: return kUpdateSucceeded;
-    case kDex2OatNeeded: return GenerateOatFile(error_msg);
-    case kPatchOatNeeded: return RelocateOatFile(info.Filename(), error_msg);
+    case kNoDexOptNeeded:
+      return kUpdateSucceeded;
 
-    // kSelfPatchOatNeeded will never be returned by GetDexOptNeeded for an
-    // individual OatFileInfo.
-    case kSelfPatchOatNeeded: UNREACHABLE();
+    // TODO: For now, don't bother with all the different ways we can call
+    // dex2oat to generate the oat file. Always generate the oat file as if it
+    // were kDex2OatFromScratch.
+    case kDex2OatFromScratch:
+    case kDex2OatForBootImage:
+    case kDex2OatForRelocation:
+    case kDex2OatForFilter:
+      return GenerateOatFile(error_msg);
+
+    case kPatchoatForRelocation: {
+      return RelocateOatFile(info.Filename(), error_msg);
+    }
   }
   UNREACHABLE();
 }
@@ -307,7 +316,7 @@ OatFileAssistant::OatStatus OatFileAssistant::GivenOatFileStatus(const OatFile& 
   const OatFile::OatDexFile* oat_dex_file = file.GetOatDexFile(
       dex_location_.c_str(), dex_checksum_pointer, &error_msg);
   if (oat_dex_file == nullptr) {
-    VLOG(oat) << error_msg;
+    LOG(ERROR) << error_msg;
     return kOatDexOutOfDate;
   }
 
@@ -449,7 +458,7 @@ OatFileAssistant::RelocateOatFile(const std::string* input_file, std::string* er
   argv.push_back("--output-oat-file=" + oat_file_name);
   argv.push_back("--patched-image-location=" + image_info->location);
 
-  std::string command_line(Join(argv, ' '));
+  std::string command_line(android::base::Join(argv, ' '));
   if (!Exec(argv, error_msg)) {
     // Manually delete the file. This ensures there is no garbage left over if
     // the process unexpectedly died.
@@ -598,7 +607,7 @@ bool OatFileAssistant::Dex2Oat(const std::vector<std::string>& args,
 
   argv.insert(argv.end(), args.begin(), args.end());
 
-  std::string command_line(Join(argv, ' '));
+  std::string command_line(android::base::Join(argv, ' '));
   return Exec(argv, error_msg);
 }
 
@@ -830,29 +839,43 @@ OatFileAssistant::OatStatus OatFileAssistant::OatFileInfo::Status() {
 OatFileAssistant::DexOptNeeded OatFileAssistant::OatFileInfo::GetDexOptNeeded(
     CompilerFilter::Filter target, bool profile_changed) {
   bool compilation_desired = CompilerFilter::IsBytecodeCompilationEnabled(target);
+  bool filter_okay = CompilerFilterIsOkay(target, profile_changed);
 
-  if (CompilerFilterIsOkay(target, profile_changed)) {
-    if (Status() == kOatUpToDate) {
-      // The oat file is in good shape as is.
-      return kNoDexOptNeeded;
-    }
-
-    if (Status() == kOatRelocationOutOfDate) {
-      if (!compilation_desired) {
-        // If no compilation is desired, then it doesn't matter if the oat
-        // file needs relocation. It's in good shape as is.
-        return kNoDexOptNeeded;
-      }
-
-      if (compilation_desired && HasPatchInfo()) {
-        // Relocate if we can.
-        return kPatchOatNeeded;
-      }
-    }
+  if (filter_okay && Status() == kOatUpToDate) {
+    // The oat file is in good shape as is.
+    return kNoDexOptNeeded;
   }
 
-  // We can only run dex2oat if there are original dex files.
-  return oat_file_assistant_->HasOriginalDexFiles() ? kDex2OatNeeded : kNoDexOptNeeded;
+  if (filter_okay && !compilation_desired && Status() == kOatRelocationOutOfDate) {
+    // If no compilation is desired, then it doesn't matter if the oat
+    // file needs relocation. It's in good shape as is.
+    return kNoDexOptNeeded;
+  }
+
+  if (filter_okay && Status() == kOatRelocationOutOfDate && HasPatchInfo()) {
+    return kPatchoatForRelocation;
+  }
+
+  if (oat_file_assistant_->HasOriginalDexFiles()) {
+    // Run dex2oat for relocation if we didn't have the patch info necessary
+    // to use patchoat.
+    if (filter_okay && Status() == kOatRelocationOutOfDate) {
+      return kDex2OatForRelocation;
+    }
+
+    if (IsUseable()) {
+      return kDex2OatForFilter;
+    }
+
+    if (Status() == kOatBootImageOutOfDate) {
+      return kDex2OatForBootImage;
+    }
+
+    return kDex2OatFromScratch;
+  }
+
+  // Otherwise there is nothing we can do, even if we want to.
+  return kNoDexOptNeeded;
 }
 
 const OatFile* OatFileAssistant::OatFileInfo::GetFile() {

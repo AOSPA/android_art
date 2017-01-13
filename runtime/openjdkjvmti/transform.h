@@ -41,6 +41,8 @@
 
 namespace openjdkjvmti {
 
+jvmtiError GetClassLocation(ArtJvmTiEnv* env, jclass klass, /*out*/std::string* location);
+
 // Gets the data surrounding the given class.
 jvmtiError GetTransformationData(ArtJvmTiEnv* env,
                                  jclass klass,
@@ -51,12 +53,6 @@ jvmtiError GetTransformationData(ArtJvmTiEnv* env,
                                  /*out*/jobject* protection_domain,
                                  /*out*/jint* data_len,
                                  /*out*/unsigned char** dex_data);
-
-// Install the new dex file.
-jvmtiError MoveTransformedFileIntoRuntime(jclass jklass,
-                                          const std::string& original_location,
-                                          jint data_len,
-                                          unsigned char* dex_data);
 
 }  // namespace openjdkjvmti
 

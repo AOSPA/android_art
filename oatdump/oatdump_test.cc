@@ -18,9 +18,10 @@
 #include <string>
 #include <vector>
 
+#include "android-base/strings.h"
+
 #include "common_runtime_test.h"
 
-#include "base/stringprintf.h"
 #include "base/unix_file/fd_file.h"
 #include "runtime/arch/instruction_set.h"
 #include "runtime/gc/heap.h"
@@ -143,7 +144,7 @@ class OatDumpTest : public CommonRuntimeTest {
       }
       argv.push_back(nullptr);
       UNUSED(execv(argv[0], &argv[0]));
-      const std::string command_line(Join(exec_argv, ' '));
+      const std::string command_line(android::base::Join(exec_argv, ' '));
       PLOG(ERROR) << "Failed to execv(" << command_line << ")";
       // _exit to avoid atexit handlers in child.
       _exit(1);

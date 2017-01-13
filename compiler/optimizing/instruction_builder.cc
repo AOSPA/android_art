@@ -816,8 +816,7 @@ bool HInstructionBuilder::BuildInvoke(const Instruction& instruction,
     HInvokeStaticOrDirect::DispatchInfo dispatch_info = {
         HInvokeStaticOrDirect::MethodLoadKind::kStringInit,
         HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod,
-        dchecked_integral_cast<uint64_t>(string_init_entry_point),
-        0U
+        dchecked_integral_cast<uint64_t>(string_init_entry_point)
     };
     MethodReference target_method(dex_file_, method_idx);
     HInvoke* invoke = new (arena_) HInvokeStaticOrDirect(
@@ -862,8 +861,7 @@ bool HInstructionBuilder::BuildInvoke(const Instruction& instruction,
     HInvokeStaticOrDirect::DispatchInfo dispatch_info = {
         HInvokeStaticOrDirect::MethodLoadKind::kDexCacheViaMethod,
         HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod,
-        0u,
-        0U
+        0u
     };
     MethodReference target_method(resolved_method->GetDexFile(),
                                   resolved_method->GetDexMethodIndex());
@@ -937,9 +935,7 @@ bool HInstructionBuilder::BuildNewInstance(dex::TypeIndex type_index, uint32_t d
       outer_dex_file,
       IsOutermostCompilingClass(type_index),
       dex_pc,
-      needs_access_check,
-      /* is_in_dex_cache */ false,
-      /* is_in_boot_image */ false);
+      needs_access_check);
 
   AppendInstruction(load_class);
   HInstruction* cls = load_class;
@@ -1029,9 +1025,7 @@ HClinitCheck* HInstructionBuilder::ProcessClinitCheckForInvoke(
         outer_dex_file,
         is_outer_class,
         dex_pc,
-        /*needs_access_check*/ false,
-        /* is_in_dex_cache */ false,
-        /* is_in_boot_image */ false);
+        /*needs_access_check*/ false);
     AppendInstruction(load_class);
     clinit_check = new (arena_) HClinitCheck(load_class, dex_pc);
     AppendInstruction(clinit_check);
@@ -1388,9 +1382,7 @@ bool HInstructionBuilder::BuildStaticFieldAccess(const Instruction& instruction,
                                                  outer_dex_file,
                                                  is_outer_class,
                                                  dex_pc,
-                                                 /*needs_access_check*/ false,
-                                                 /* is_in_dex_cache */ false,
-                                                 /* is_in_boot_image */ false);
+                                                 /*needs_access_check*/ false);
   AppendInstruction(constant);
 
   HInstruction* cls = constant;
@@ -1664,9 +1656,7 @@ void HInstructionBuilder::BuildTypeCheck(const Instruction& instruction,
       dex_file,
       IsOutermostCompilingClass(type_index),
       dex_pc,
-      !can_access,
-      /* is_in_dex_cache */ false,
-      /* is_in_boot_image */ false);
+      !can_access);
   AppendInstruction(cls);
 
   TypeCheckKind check_kind = ComputeTypeCheckKind(resolved_class);
@@ -2625,7 +2615,7 @@ bool HInstructionBuilder::ProcessDexInstruction(const Instruction& instruction, 
     }
 
     case Instruction::CONST_STRING: {
-      uint32_t string_index = instruction.VRegB_21c();
+      dex::StringIndex string_index(instruction.VRegB_21c());
       AppendInstruction(
           new (arena_) HLoadString(graph_->GetCurrentMethod(), string_index, *dex_file_, dex_pc));
       UpdateLocal(instruction.VRegA_21c(), current_block_->GetLastInstruction());
@@ -2633,7 +2623,7 @@ bool HInstructionBuilder::ProcessDexInstruction(const Instruction& instruction, 
     }
 
     case Instruction::CONST_STRING_JUMBO: {
-      uint32_t string_index = instruction.VRegB_31c();
+      dex::StringIndex string_index(instruction.VRegB_31c());
       AppendInstruction(
           new (arena_) HLoadString(graph_->GetCurrentMethod(), string_index, *dex_file_, dex_pc));
       UpdateLocal(instruction.VRegA_31c(), current_block_->GetLastInstruction());
@@ -2656,9 +2646,7 @@ bool HInstructionBuilder::ProcessDexInstruction(const Instruction& instruction, 
           *dex_file_,
           IsOutermostCompilingClass(type_index),
           dex_pc,
-          !can_access,
-          /* is_in_dex_cache */ false,
-          /* is_in_boot_image */ false));
+          !can_access));
       UpdateLocal(instruction.VRegA_21c(), current_block_->GetLastInstruction());
       break;
     }

@@ -485,11 +485,14 @@ class CodeGeneratorARM : public CodeGenerator {
   PcRelativePatchInfo* NewPcRelativeTypePatch(const DexFile& dex_file, dex::TypeIndex type_index);
   PcRelativePatchInfo* NewPcRelativeDexCacheArrayPatch(const DexFile& dex_file,
                                                        uint32_t element_offset);
-  Literal* DeduplicateBootImageStringLiteral(const DexFile& dex_file, uint32_t string_index);
+  Literal* DeduplicateBootImageStringLiteral(const DexFile& dex_file,
+                                             dex::StringIndex string_index);
   Literal* DeduplicateBootImageTypeLiteral(const DexFile& dex_file, dex::TypeIndex type_index);
   Literal* DeduplicateBootImageAddressLiteral(uint32_t address);
-  Literal* DeduplicateDexCacheAddressLiteral(uint32_t address);
-  Literal* DeduplicateJitStringLiteral(const DexFile& dex_file, uint32_t string_index);
+  Literal* DeduplicateJitStringLiteral(const DexFile& dex_file, dex::StringIndex string_index);
+  Literal* DeduplicateJitClassLiteral(const DexFile& dex_file,
+                                      dex::TypeIndex type_index,
+                                      uint64_t address);
 
   void EmitLinkerPatches(ArenaVector<LinkerPatch>* linker_patches) OVERRIDE;
 
@@ -598,14 +601,12 @@ class CodeGeneratorARM : public CodeGenerator {
   using StringToLiteralMap = ArenaSafeMap<StringReference,
                                           Literal*,
                                           StringReferenceValueComparator>;
-  using BootTypeToLiteralMap = ArenaSafeMap<TypeReference,
-                                            Literal*,
-                                            TypeReferenceValueComparator>;
+  using TypeToLiteralMap = ArenaSafeMap<TypeReference,
+                                        Literal*,
+                                        TypeReferenceValueComparator>;
 
   Literal* DeduplicateUint32Literal(uint32_t value, Uint32ToLiteralMap* map);
   Literal* DeduplicateMethodLiteral(MethodReference target_method, MethodToLiteralMap* map);
-  Literal* DeduplicateMethodAddressLiteral(MethodReference target_method);
-  Literal* DeduplicateMethodCodeLiteral(MethodReference target_method);
   PcRelativePatchInfo* NewPcRelativePatch(const DexFile& dex_file,
                                           uint32_t offset_or_index,
                                           ArenaDeque<PcRelativePatchInfo>* patches);
@@ -624,12 +625,6 @@ class CodeGeneratorARM : public CodeGenerator {
 
   // Deduplication map for 32-bit literals, used for non-patchable boot image addresses.
   Uint32ToLiteralMap uint32_literals_;
-  // Method patch info, map MethodReference to a literal for method address and method code.
-  MethodToLiteralMap method_patches_;
-  MethodToLiteralMap call_patches_;
-  // Relative call patch info.
-  // Using ArenaDeque<> which retains element addresses on push/emplace_back().
-  ArenaDeque<PatchInfo<Label>> relative_call_patches_;
   // PC-relative patch info for each HArmDexCacheArraysBase.
   ArenaDeque<PcRelativePatchInfo> pc_relative_dex_cache_patches_;
   // Deduplication map for boot string literals for kBootImageLinkTimeAddress.
@@ -637,7 +632,7 @@ class CodeGeneratorARM : public CodeGenerator {
   // PC-relative String patch info; type depends on configuration (app .bss or boot image PIC).
   ArenaDeque<PcRelativePatchInfo> pc_relative_string_patches_;
   // Deduplication map for boot type literals for kBootImageLinkTimeAddress.
-  BootTypeToLiteralMap boot_image_type_patches_;
+  TypeToLiteralMap boot_image_type_patches_;
   // PC-relative type patch info.
   ArenaDeque<PcRelativePatchInfo> pc_relative_type_patches_;
   // Deduplication map for patchable boot image addresses.
@@ -645,6 +640,8 @@ class CodeGeneratorARM : public CodeGenerator {
 
   // Patches for string literals in JIT compiled code.
   StringToLiteralMap jit_string_patches_;
+  // Patches for class literals in JIT compiled code.
+  TypeToLiteralMap jit_class_patches_;
 
   DISALLOW_COPY_AND_ASSIGN(CodeGeneratorARM);
 };

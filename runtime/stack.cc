@@ -16,6 +16,8 @@
 
 #include "stack.h"
 
+#include "android-base/stringprintf.h"
+
 #include "arch/context.h"
 #include "art_method-inl.h"
 #include "base/enums.h"
@@ -38,6 +40,8 @@
 #include "verify_object-inl.h"
 
 namespace art {
+
+using android::base::StringPrintf;
 
 static constexpr bool kDebugStackWalk = false;
 
@@ -614,10 +618,15 @@ std::string StackVisitor::DescribeLocation() const {
   return result;
 }
 
-static instrumentation::InstrumentationStackFrame& GetInstrumentationStackFrame(Thread* thread,
-                                                                                uint32_t depth) {
-  CHECK_LT(depth, thread->GetInstrumentationStack()->size());
-  return thread->GetInstrumentationStack()->at(depth);
+void StackVisitor::SetMethod(ArtMethod* method) {
+  DCHECK(GetMethod() != nullptr);
+  if (cur_shadow_frame_ != nullptr) {
+    cur_shadow_frame_->SetMethod(method);
+  } else {
+    DCHECK(cur_quick_frame_ != nullptr);
+    CHECK(!IsInInlinedFrame()) << "We do not support setting inlined method's ArtMethod!";
+      *cur_quick_frame_ = method;
+  }
 }
 
 static void AssertPcIsWithinQuickCode(ArtMethod* method, uintptr_t pc)
@@ -648,7 +657,7 @@ static void AssertPcIsWithinQuickCode(ArtMethod* method, uintptr_t pc)
     return;
   }
 
-  uint32_t code_size = OatQuickMethodHeader::FromEntryPoint(code)->code_size_;
+  uint32_t code_size = OatQuickMethodHeader::FromEntryPoint(code)->GetCodeSize();
   uintptr_t code_start = reinterpret_cast<uintptr_t>(code);
   CHECK(code_start <= pc && pc <= (code_start + code_size))
       << method->PrettyMethod()
@@ -777,6 +786,7 @@ QuickMethodFrameInfo StackVisitor::GetCurrentQuickFrameInfo() const {
   return QuickMethodFrameInfo(frame_size, callee_info.CoreSpillMask(), callee_info.FpSpillMask());
 }
 
+template <StackVisitor::CountTransitions kCount>
 void StackVisitor::WalkStack(bool include_transitions) {
   DCHECK(thread_ == Thread::Current() || thread_->IsSuspended());
   CHECK_EQ(cur_depth_, 0U);
@@ -842,8 +852,9 @@ void StackVisitor::WalkStack(bool include_transitions) {
           // While profiling, the return pc is restored from the side stack, except when walking
           // the stack for an exception where the side stack will be unwound in VisitFrame.
           if (reinterpret_cast<uintptr_t>(GetQuickInstrumentationExitPc()) == return_pc) {
+            CHECK_LT(instrumentation_stack_depth, thread_->GetInstrumentationStack()->size());
             const instrumentation::InstrumentationStackFrame& instrumentation_frame =
-                GetInstrumentationStackFrame(thread_, instrumentation_stack_depth);
+                thread_->GetInstrumentationStack()->at(instrumentation_stack_depth);
             instrumentation_stack_depth++;
             if (GetMethod() ==
                 Runtime::Current()->GetCalleeSaveMethod(Runtime::kSaveAllCalleeSaves)) {
@@ -907,12 +918,17 @@ void StackVisitor::WalkStack(bool include_transitions) {
         return;
       }
     }
-    cur_depth_++;
+    if (kCount == CountTransitions::kYes) {
+      cur_depth_++;
+    }
   }
   if (num_frames_ != 0) {
     CHECK_EQ(cur_depth_, num_frames_);
   }
 }
+
+template void StackVisitor::WalkStack<StackVisitor::CountTransitions::kYes>(bool);
+template void StackVisitor::WalkStack<StackVisitor::CountTransitions::kNo>(bool);
 
 void JavaFrameRootInfo::Describe(std::ostream& os) const {
   const StackVisitor* visitor = stack_visitor_;

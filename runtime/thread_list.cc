@@ -25,6 +25,8 @@
 
 #include <sstream>
 
+#include "android-base/stringprintf.h"
+
 #include "base/histogram-inl.h"
 #include "base/mutex-inl.h"
 #include "base/systrace.h"
@@ -51,6 +53,8 @@
 #endif  // ART_USE_FUTEXES
 
 namespace art {
+
+using android::base::StringPrintf;
 
 static constexpr uint64_t kLongThreadSuspendThreshold = MsToNs(5);
 static constexpr uint64_t kThreadSuspendTimeoutMs = 30 * 1000;  // 30s.
@@ -375,7 +379,7 @@ size_t ThreadList::RunCheckpoint(Closure* checkpoint_function, Closure* callback
   return count;
 }
 
-size_t ThreadList::RunEmptyCheckpoint() {
+size_t ThreadList::RunEmptyCheckpoint(std::vector<uint32_t>& runnable_thread_ids) {
   Thread* self = Thread::Current();
   Locks::mutator_lock_->AssertNotExclusiveHeld(self);
   Locks::thread_list_lock_->AssertNotHeld(self);
@@ -392,6 +396,9 @@ size_t ThreadList::RunEmptyCheckpoint() {
             // This thread will run an empty checkpoint (decrement the empty checkpoint barrier)
             // some time in the near future.
             ++count;
+            if (kIsDebugBuild) {
+              runnable_thread_ids.push_back(thread->GetThreadId());
+            }
             break;
           }
           if (thread->GetState() != kRunnable) {
@@ -646,7 +653,7 @@ void ThreadList::SuspendAllInternal(Thread* self,
   // is done with a timeout so that we can detect problems.
 #if ART_USE_FUTEXES
   timespec wait_timeout;
-  InitTimeSpec(true, CLOCK_MONOTONIC, 10000, 0, &wait_timeout);
+  InitTimeSpec(false, CLOCK_MONOTONIC, 10000, 0, &wait_timeout);
 #endif
   while (true) {
     int32_t cur_val = pending_threads.LoadRelaxed();
@@ -1392,10 +1399,10 @@ void ThreadList::VisitRootsForSuspendedThreads(RootVisitor* visitor) {
   }
 }
 
-void ThreadList::VisitRoots(RootVisitor* visitor) const {
+void ThreadList::VisitRoots(RootVisitor* visitor, VisitRootFlags flags) const {
   MutexLock mu(Thread::Current(), *Locks::thread_list_lock_);
   for (const auto& thread : list_) {
-    thread->VisitRoots(visitor);
+    thread->VisitRoots(visitor, flags);
   }
 }
 

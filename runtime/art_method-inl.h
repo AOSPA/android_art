@@ -105,7 +105,7 @@ inline uint32_t ArtMethod::GetAccessFlags() {
       DoGetAccessFlagsHelper<kReadBarrierOption>(this);
     }
   }
-  return access_flags_;
+  return access_flags_.load(std::memory_order_relaxed);
 }
 
 inline uint16_t ArtMethod::GetMethodIndex() {
@@ -134,8 +134,7 @@ inline ArtMethod* ArtMethod::GetDexCacheResolvedMethod(uint16_t method_index,
   // NOTE: Unchecked, i.e. not throwing AIOOB. We don't even know the length here
   // without accessing the DexCache and we don't want to do that in release build.
   DCHECK_LT(method_index,
-            GetInterfaceMethodIfProxy(pointer_size)->GetDeclaringClass()
-                ->GetDexCache()->NumResolvedMethods());
+            GetInterfaceMethodIfProxy(pointer_size)->GetDexCache()->NumResolvedMethods());
   ArtMethod* method = mirror::DexCache::GetElementPtrSize(GetDexCacheResolvedMethods(pointer_size),
                                                           method_index,
                                                           pointer_size);
@@ -154,8 +153,7 @@ inline void ArtMethod::SetDexCacheResolvedMethod(uint16_t method_index,
   // NOTE: Unchecked, i.e. not throwing AIOOB. We don't even know the length here
   // without accessing the DexCache and we don't want to do that in release build.
   DCHECK_LT(method_index,
-            GetInterfaceMethodIfProxy(pointer_size)->GetDeclaringClass()
-                ->GetDexCache()->NumResolvedMethods());
+            GetInterfaceMethodIfProxy(pointer_size)->GetDexCache()->NumResolvedMethods());
   DCHECK(new_method == nullptr || new_method->GetDeclaringClass() != nullptr);
   mirror::DexCache::SetElementPtrSize(GetDexCacheResolvedMethods(pointer_size),
                                       method_index,
@@ -186,8 +184,7 @@ template <bool kWithCheck>
 inline mirror::Class* ArtMethod::GetDexCacheResolvedType(dex::TypeIndex type_index,
                                                          PointerSize pointer_size) {
   if (kWithCheck) {
-    mirror::DexCache* dex_cache =
-        GetInterfaceMethodIfProxy(pointer_size)->GetDeclaringClass()->GetDexCache();
+    mirror::DexCache* dex_cache = GetInterfaceMethodIfProxy(pointer_size)->GetDexCache();
     if (UNLIKELY(type_index.index_ >= dex_cache->NumResolvedTypes())) {
       ThrowArrayIndexOutOfBoundsException(type_index.index_, dex_cache->NumResolvedTypes());
       return nullptr;
@@ -333,7 +330,7 @@ inline const char* ArtMethod::GetName() {
 }
 
 inline const DexFile::CodeItem* ArtMethod::GetCodeItem() {
-  return GetDeclaringClass()->GetDexFile().GetCodeItem(GetCodeItemOffset());
+  return GetDexFile()->GetCodeItem(GetCodeItemOffset());
 }
 
 inline bool ArtMethod::IsResolvedTypeIdx(dex::TypeIndex type_idx, PointerSize pointer_size) {
@@ -398,8 +395,12 @@ inline mirror::ClassLoader* ArtMethod::GetClassLoader() {
 }
 
 inline mirror::DexCache* ArtMethod::GetDexCache() {
-  DCHECK(!IsProxyMethod());
-  return GetDeclaringClass()->GetDexCache();
+  if (LIKELY(!IsObsolete())) {
+    return GetDeclaringClass()->GetDexCache();
+  } else {
+    DCHECK(!IsProxyMethod());
+    return GetObsoleteDexCache();
+  }
 }
 
 template<ReadBarrierOption kReadBarrierOption>
@@ -448,6 +449,53 @@ inline mirror::Class* ArtMethod::GetReturnType(bool resolve, PointerSize pointer
   return type;
 }
 
+inline bool ArtMethod::HasSingleImplementation() {
+  if (IsFinal() || GetDeclaringClass()->IsFinal()) {
+    // We don't set kAccSingleImplementation for these cases since intrinsic
+    // can use the flag also.
+    return true;
+  }
+  return (GetAccessFlags() & kAccSingleImplementation) != 0;
+}
+
+inline void ArtMethod::SetIntrinsic(uint32_t intrinsic) {
+  DCHECK(IsUint<8>(intrinsic));
+  // Currently we only do intrinsics for static/final methods or methods of final
+  // classes. We don't set kHasSingleImplementation for those methods.
+  DCHECK(IsStatic() || IsFinal() || GetDeclaringClass()->IsFinal()) <<
+      "Potential conflict with kAccSingleImplementation";
+  uint32_t new_value = (GetAccessFlags() & kAccFlagsNotUsedByIntrinsic) |
+      kAccIntrinsic |
+      (intrinsic << POPCOUNT(kAccFlagsNotUsedByIntrinsic));
+  if (kIsDebugBuild) {
+    uint32_t java_flags = (GetAccessFlags() & kAccJavaFlagsMask);
+    bool is_constructor = IsConstructor();
+    bool is_synchronized = IsSynchronized();
+    bool skip_access_checks = SkipAccessChecks();
+    bool is_fast_native = IsFastNative();
+    bool is_copied = IsCopied();
+    bool is_miranda = IsMiranda();
+    bool is_default = IsDefault();
+    bool is_default_conflict = IsDefaultConflicting();
+    bool is_compilable = IsCompilable();
+    bool must_count_locks = MustCountLocks();
+    SetAccessFlags(new_value);
+    DCHECK_EQ(java_flags, (GetAccessFlags() & kAccJavaFlagsMask));
+    DCHECK_EQ(is_constructor, IsConstructor());
+    DCHECK_EQ(is_synchronized, IsSynchronized());
+    DCHECK_EQ(skip_access_checks, SkipAccessChecks());
+    DCHECK_EQ(is_fast_native, IsFastNative());
+    DCHECK_EQ(is_copied, IsCopied());
+    DCHECK_EQ(is_miranda, IsMiranda());
+    DCHECK_EQ(is_default, IsDefault());
+    DCHECK_EQ(is_default_conflict, IsDefaultConflicting());
+    DCHECK_EQ(is_compilable, IsCompilable());
+    DCHECK_EQ(must_count_locks, MustCountLocks());
+  } else {
+    SetAccessFlags(new_value);
+  }
+}
+
 template<ReadBarrierOption kReadBarrierOption, typename RootVisitorType>
 void ArtMethod::VisitRoots(RootVisitorType& visitor, PointerSize pointer_size) {
   if (LIKELY(!declaring_class_.IsNull())) {
@@ -465,20 +513,6 @@ void ArtMethod::VisitRoots(RootVisitorType& visitor, PointerSize pointer_size) {
                 Runtime::Current()->GetClassLinker()->FindMethodForProxy<kReadBarrierOption>(
                     klass, this));
       interface_method->VisitRoots(visitor, pointer_size);
-    }
-    // We know we don't have profiling information if the class hasn't been verified. Note
-    // that this check also ensures the IsNative call can be made, as IsNative expects a fully
-    // created class (and not a retired one).
-    if (klass->IsVerified()) {
-      // Runtime methods and native methods use the same field as the profiling info for
-      // storing their own data (jni entrypoint for native methods, and ImtConflictTable for
-      // some runtime methods).
-      if (!IsNative<kReadBarrierOption>() && !IsRuntimeMethod()) {
-        ProfilingInfo* profiling_info = GetProfilingInfo(pointer_size);
-        if (profiling_info != nullptr) {
-          profiling_info->VisitRoots(visitor);
-        }
-      }
     }
   }
 }

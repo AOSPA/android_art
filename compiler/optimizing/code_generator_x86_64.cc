@@ -300,7 +300,7 @@ class LoadStringSlowPathX86_64 : public SlowPathCode {
     __ Bind(GetEntryLabel());
     SaveLiveRegisters(codegen, locations);
 
-    const uint32_t string_index = instruction_->AsLoadString()->GetStringIndex();
+    const uint32_t string_index = instruction_->AsLoadString()->GetStringIndex().index_;
     // Custom calling convention: RAX serves as both input and output.
     __ movl(CpuRegister(RAX), Immediate(string_index));
     x86_64_codegen->InvokeRuntime(kQuickResolveString,
@@ -960,19 +960,7 @@ inline Condition X86_64FPCondition(IfCondition cond) {
 HInvokeStaticOrDirect::DispatchInfo CodeGeneratorX86_64::GetSupportedInvokeStaticOrDirectDispatch(
       const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
       HInvokeStaticOrDirect* invoke ATTRIBUTE_UNUSED) {
-  switch (desired_dispatch_info.code_ptr_location) {
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallDirectWithFixup:
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallDirect:
-      // For direct code, we actually prefer to call via the code pointer from ArtMethod*.
-      return HInvokeStaticOrDirect::DispatchInfo {
-        desired_dispatch_info.method_load_kind,
-        HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod,
-        desired_dispatch_info.method_load_data,
-        0u
-      };
-    default:
-      return desired_dispatch_info;
-  }
+  return desired_dispatch_info;
 }
 
 Location CodeGeneratorX86_64::GenerateCalleeMethodStaticOrDirectCall(HInvokeStaticOrDirect* invoke,
@@ -992,12 +980,6 @@ Location CodeGeneratorX86_64::GenerateCalleeMethodStaticOrDirectCall(HInvokeStat
       break;
     case HInvokeStaticOrDirect::MethodLoadKind::kDirectAddress:
       __ movq(temp.AsRegister<CpuRegister>(), Immediate(invoke->GetMethodAddress()));
-      break;
-    case HInvokeStaticOrDirect::MethodLoadKind::kDirectAddressWithFixup:
-      __ movl(temp.AsRegister<CpuRegister>(), Immediate(0));  // Placeholder.
-      method_patches_.emplace_back(*invoke->GetTargetMethod().dex_file,
-                                   invoke->GetTargetMethod().dex_method_index);
-      __ Bind(&method_patches_.back().label);  // Bind the label at the end of the "movl" insn.
       break;
     case HInvokeStaticOrDirect::MethodLoadKind::kDexCachePcRelative: {
       __ movq(temp.AsRegister<CpuRegister>(),
@@ -1042,19 +1024,6 @@ void CodeGeneratorX86_64::GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invo
     case HInvokeStaticOrDirect::CodePtrLocation::kCallSelf:
       __ call(&frame_entry_label_);
       break;
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallPCRelative: {
-      relative_call_patches_.emplace_back(*invoke->GetTargetMethod().dex_file,
-                                          invoke->GetTargetMethod().dex_method_index);
-      Label* label = &relative_call_patches_.back().label;
-      __ call(label);  // Bind to the patch label, override at link time.
-      __ Bind(label);  // Bind the label at the end of the "call" insn.
-      break;
-    }
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallDirectWithFixup:
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallDirect:
-      // Filtered out by GetSupportedInvokeStaticOrDirectDispatch().
-      LOG(FATAL) << "Unsupported";
-      UNREACHABLE();
     case HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod:
       // (callee_method + offset_of_quick_compiled_code)()
       __ call(Address(callee_method.AsRegister<CpuRegister>(),
@@ -1106,7 +1075,7 @@ void CodeGeneratorX86_64::RecordSimplePatch() {
 
 void CodeGeneratorX86_64::RecordBootStringPatch(HLoadString* load_string) {
   DCHECK(GetCompilerOptions().IsBootImage());
-  string_patches_.emplace_back(load_string->GetDexFile(), load_string->GetStringIndex());
+  string_patches_.emplace_back(load_string->GetDexFile(), load_string->GetStringIndex().index_);
   __ Bind(&string_patches_.back().label);
 }
 
@@ -1117,7 +1086,7 @@ void CodeGeneratorX86_64::RecordTypePatch(HLoadClass* load_class) {
 
 Label* CodeGeneratorX86_64::NewStringBssEntryPatch(HLoadString* load_string) {
   DCHECK(!GetCompilerOptions().IsBootImage());
-  string_patches_.emplace_back(load_string->GetDexFile(), load_string->GetStringIndex());
+  string_patches_.emplace_back(load_string->GetDexFile(), load_string->GetStringIndex().index_);
   return &string_patches_.back().label;
 }
 
@@ -1146,22 +1115,11 @@ inline void CodeGeneratorX86_64::EmitPcRelativeLinkerPatches(
 void CodeGeneratorX86_64::EmitLinkerPatches(ArenaVector<LinkerPatch>* linker_patches) {
   DCHECK(linker_patches->empty());
   size_t size =
-      method_patches_.size() +
-      relative_call_patches_.size() +
       pc_relative_dex_cache_patches_.size() +
       simple_patches_.size() +
       string_patches_.size() +
       type_patches_.size();
   linker_patches->reserve(size);
-  for (const PatchInfo<Label>& info : method_patches_) {
-    uint32_t literal_offset = info.label.Position() - kLabelPositionToLiteralOffsetAdjustment;
-    linker_patches->push_back(LinkerPatch::MethodPatch(literal_offset, &info.dex_file, info.index));
-  }
-  for (const PatchInfo<Label>& info : relative_call_patches_) {
-    uint32_t literal_offset = info.label.Position() - kLabelPositionToLiteralOffsetAdjustment;
-    linker_patches->push_back(
-        LinkerPatch::RelativeCodePatch(literal_offset, &info.dex_file, info.index));
-  }
   EmitPcRelativeLinkerPatches<LinkerPatch::DexCacheArrayPatch>(pc_relative_dex_cache_patches_,
                                                                linker_patches);
   for (const Label& label : simple_patches_) {
@@ -1253,14 +1211,13 @@ CodeGeneratorX86_64::CodeGeneratorX86_64(HGraph* graph,
         assembler_(graph->GetArena()),
         isa_features_(isa_features),
         constant_area_start_(0),
-        method_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
-        relative_call_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
         pc_relative_dex_cache_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
         simple_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
         string_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
         type_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
         fixups_to_jump_tables_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
-        jit_string_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)) {
+        jit_string_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
+        jit_class_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)) {
   AddAllocatedRegister(Location::RegisterLocation(kFakeReturnRegister));
 }
 
@@ -1324,6 +1281,12 @@ void CodeGeneratorX86_64::GenerateFrameEntry() {
       __ movsd(Address(CpuRegister(RSP), offset), XmmRegister(kFpuCalleeSaves[i]));
       __ cfi().RelOffset(DWARFReg(kFpuCalleeSaves[i]), offset);
     }
+  }
+
+  if (GetGraph()->HasShouldDeoptimizeFlag()) {
+    // Initialize should_deoptimize flag to 0.
+    __ movl(Address(CpuRegister(RSP), xmm_spill_location - kShouldDeoptimizeFlagSize),
+            Immediate(0));
   }
 
   // Save the current method if we need it. Note that we do not
@@ -1745,6 +1708,17 @@ void InstructionCodeGeneratorX86_64::VisitDeoptimize(HDeoptimize* deoptimize) {
                                /* condition_input_index */ 0,
                                slow_path->GetEntryLabel(),
                                /* false_target */ nullptr);
+}
+
+void LocationsBuilderX86_64::VisitShouldDeoptimizeFlag(HShouldDeoptimizeFlag* flag) {
+  LocationSummary* locations = new (GetGraph()->GetArena())
+      LocationSummary(flag, LocationSummary::kNoCall);
+  locations->SetOut(Location::RequiresRegister());
+}
+
+void InstructionCodeGeneratorX86_64::VisitShouldDeoptimizeFlag(HShouldDeoptimizeFlag* flag) {
+  __ movl(flag->GetLocations()->Out().AsRegister<CpuRegister>(),
+          Address(CpuRegister(RSP), codegen_->GetStackOffsetOfShouldDeoptimizeFlag()));
 }
 
 static bool SelectCanUseCMOV(HSelect* select) {
@@ -5443,8 +5417,7 @@ HLoadClass::LoadKind CodeGeneratorX86_64::GetSupportedLoadClassKind(
       break;
     case HLoadClass::LoadKind::kBootImageAddress:
       break;
-    case HLoadClass::LoadKind::kDexCacheAddress:
-      DCHECK(Runtime::Current()->UseJitCompilation());
+    case HLoadClass::LoadKind::kJitTableAddress:
       break;
     case HLoadClass::LoadKind::kDexCachePcRelative:
       DCHECK(!Runtime::Current()->UseJitCompilation());
@@ -5481,6 +5454,16 @@ void LocationsBuilderX86_64::VisitLoadClass(HLoadClass* cls) {
     locations->SetInAt(0, Location::RequiresRegister());
   }
   locations->SetOut(Location::RequiresRegister());
+}
+
+Label* CodeGeneratorX86_64::NewJitRootClassPatch(const DexFile& dex_file,
+                                                 dex::TypeIndex dex_index,
+                                                 uint64_t address) {
+  jit_class_roots_.Overwrite(TypeReference(&dex_file, dex_index), address);
+  // Add a patch entry and return the label.
+  jit_class_patches_.emplace_back(dex_file, dex_index.index_);
+  PatchInfo<Label>* info = &jit_class_patches_.back();
+  return &info->label;
 }
 
 void InstructionCodeGeneratorX86_64::VisitLoadClass(HLoadClass* cls) {
@@ -5526,26 +5509,13 @@ void InstructionCodeGeneratorX86_64::VisitLoadClass(HLoadClass* cls) {
       codegen_->RecordSimplePatch();
       break;
     }
-    case HLoadClass::LoadKind::kDexCacheAddress: {
-      DCHECK_NE(cls->GetAddress(), 0u);
+    case HLoadClass::LoadKind::kJitTableAddress: {
+      Address address = Address::Absolute(CodeGeneratorX86_64::kDummy32BitOffset,
+                                          /* no_rip */ true);
+      Label* fixup_label =
+          codegen_->NewJitRootClassPatch(cls->GetDexFile(), cls->GetTypeIndex(), cls->GetAddress());
       // /* GcRoot<mirror::Class> */ out = *address
-      if (IsUint<32>(cls->GetAddress())) {
-        Address address = Address::Absolute(cls->GetAddress(), /* no_rip */ true);
-        GenerateGcRootFieldLoad(cls,
-                                out_loc,
-                                address,
-                                /* fixup_label */ nullptr,
-                                read_barrier_option);
-      } else {
-        // TODO: Consider using opcode A1, i.e. movl eax, moff32 (with 64-bit address).
-        __ movq(out, Immediate(cls->GetAddress()));
-        GenerateGcRootFieldLoad(cls,
-                                out_loc,
-                                Address(out, 0),
-                                /* fixup_label */ nullptr,
-                                read_barrier_option);
-      }
-      generate_null_check = !cls->IsInDexCache();
+      GenerateGcRootFieldLoad(cls, out_loc, address, fixup_label, kCompilerReadBarrierOption);
       break;
     }
     case HLoadClass::LoadKind::kDexCachePcRelative: {
@@ -5660,10 +5630,11 @@ void LocationsBuilderX86_64::VisitLoadString(HLoadString* load) {
   }
 }
 
-Label* CodeGeneratorX86_64::NewJitRootStringPatch(const DexFile& dex_file, uint32_t dex_index) {
+Label* CodeGeneratorX86_64::NewJitRootStringPatch(const DexFile& dex_file,
+                                                  dex::StringIndex dex_index) {
   jit_string_roots_.Overwrite(StringReference(&dex_file, dex_index), /* placeholder */ 0u);
   // Add a patch entry and return the label.
-  jit_string_patches_.emplace_back(dex_file, dex_index);
+  jit_string_patches_.emplace_back(dex_file, dex_index.index_);
   PatchInfo<Label>* info = &jit_string_patches_.back();
   return &info->label;
 }
@@ -5714,7 +5685,7 @@ void InstructionCodeGeneratorX86_64::VisitLoadString(HLoadString* load) {
 
   // TODO: Re-add the compiler code to do string dex cache lookup again.
   // Custom calling convention: RAX serves as both input and output.
-  __ movl(CpuRegister(RAX), Immediate(load->GetStringIndex()));
+  __ movl(CpuRegister(RAX), Immediate(load->GetStringIndex().index_));
   codegen_->InvokeRuntime(kQuickResolveString,
                           load,
                           load->GetDexPc());
@@ -7109,17 +7080,31 @@ void CodeGeneratorX86_64::MoveInt64ToAddress(const Address& addr_low,
   }
 }
 
+void CodeGeneratorX86_64::PatchJitRootUse(uint8_t* code,
+                                          const uint8_t* roots_data,
+                                          const PatchInfo<Label>& info,
+                                          uint64_t index_in_table) const {
+  uint32_t code_offset = info.label.Position() - kLabelPositionToLiteralOffsetAdjustment;
+  uintptr_t address =
+      reinterpret_cast<uintptr_t>(roots_data) + index_in_table * sizeof(GcRoot<mirror::Object>);
+  typedef __attribute__((__aligned__(1))) uint32_t unaligned_uint32_t;
+  reinterpret_cast<unaligned_uint32_t*>(code + code_offset)[0] =
+     dchecked_integral_cast<uint32_t>(address);
+}
+
 void CodeGeneratorX86_64::EmitJitRootPatches(uint8_t* code, const uint8_t* roots_data) {
   for (const PatchInfo<Label>& info : jit_string_patches_) {
-    const auto& it = jit_string_roots_.find(StringReference(&info.dex_file, info.index));
+    const auto& it = jit_string_roots_.find(
+        StringReference(&info.dex_file, dex::StringIndex(info.index)));
     DCHECK(it != jit_string_roots_.end());
-    size_t index_in_table = it->second;
-    uint32_t code_offset = info.label.Position() - kLabelPositionToLiteralOffsetAdjustment;
-    uintptr_t address =
-        reinterpret_cast<uintptr_t>(roots_data) + index_in_table * sizeof(GcRoot<mirror::Object>);
-    typedef __attribute__((__aligned__(1))) uint32_t unaligned_uint32_t;
-    reinterpret_cast<unaligned_uint32_t*>(code + code_offset)[0] =
-       dchecked_integral_cast<uint32_t>(address);
+    PatchJitRootUse(code, roots_data, info, it->second);
+  }
+
+  for (const PatchInfo<Label>& info : jit_class_patches_) {
+    const auto& it = jit_class_roots_.find(
+        TypeReference(&info.dex_file, dex::TypeIndex(info.index)));
+    DCHECK(it != jit_class_roots_.end());
+    PatchJitRootUse(code, roots_data, info, it->second);
   }
 }
 

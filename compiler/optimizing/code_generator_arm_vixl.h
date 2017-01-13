@@ -17,9 +17,15 @@
 #ifndef ART_COMPILER_OPTIMIZING_CODE_GENERATOR_ARM_VIXL_H_
 #define ART_COMPILER_OPTIMIZING_CODE_GENERATOR_ARM_VIXL_H_
 
-#include "code_generator_arm.h"
+#include "base/enums.h"
+#include "code_generator.h"
 #include "common_arm.h"
+#include "driver/compiler_options.h"
+#include "nodes.h"
+#include "string_reference.h"
+#include "parallel_move_resolver.h"
 #include "utils/arm/assembler_arm_vixl.h"
+#include "utils/type_reference.h"
 
 // TODO(VIXL): make vixl clean wrt -Wshadow.
 #pragma GCC diagnostic push
@@ -44,7 +50,7 @@ static const vixl::aarch32::Register kParameterCoreRegistersVIXL[] = {
     vixl::aarch32::r2,
     vixl::aarch32::r3
 };
-static const size_t kParameterCoreRegistersLengthVIXL = arraysize(kParameterCoreRegisters);
+static const size_t kParameterCoreRegistersLengthVIXL = arraysize(kParameterCoreRegistersVIXL);
 static const vixl::aarch32::SRegister kParameterFpuRegistersVIXL[] = {
     vixl::aarch32::s0,
     vixl::aarch32::s1,
@@ -63,7 +69,7 @@ static const vixl::aarch32::SRegister kParameterFpuRegistersVIXL[] = {
     vixl::aarch32::s14,
     vixl::aarch32::s15
 };
-static const size_t kParameterFpuRegistersLengthVIXL = arraysize(kParameterFpuRegisters);
+static const size_t kParameterFpuRegistersLengthVIXL = arraysize(kParameterFpuRegistersVIXL);
 
 static const vixl::aarch32::Register kMethodRegister = vixl::aarch32::r0;
 
@@ -90,7 +96,7 @@ static const vixl::aarch32::Register kRuntimeParameterCoreRegistersVIXL[] = {
     vixl::aarch32::r3
 };
 static const size_t kRuntimeParameterCoreRegistersLengthVIXL =
-    arraysize(kRuntimeParameterCoreRegisters);
+    arraysize(kRuntimeParameterCoreRegistersVIXL);
 static const vixl::aarch32::SRegister kRuntimeParameterFpuRegistersVIXL[] = {
     vixl::aarch32::s0,
     vixl::aarch32::s1,
@@ -98,111 +104,23 @@ static const vixl::aarch32::SRegister kRuntimeParameterFpuRegistersVIXL[] = {
     vixl::aarch32::s3
 };
 static const size_t kRuntimeParameterFpuRegistersLengthVIXL =
-    arraysize(kRuntimeParameterFpuRegisters);
+    arraysize(kRuntimeParameterFpuRegistersVIXL);
 
 class LoadClassSlowPathARMVIXL;
-
-#define FOR_EACH_IMPLEMENTED_INSTRUCTION(M)     \
-  M(Above)                                      \
-  M(AboveOrEqual)                               \
-  M(Add)                                        \
-  M(And)                                        \
-  M(ArrayGet)                                   \
-  M(ArrayLength)                                \
-  M(ArraySet)                                   \
-  M(Below)                                      \
-  M(BelowOrEqual)                               \
-  M(BitwiseNegatedRight)                        \
-  M(BooleanNot)                                 \
-  M(BoundsCheck)                                \
-  M(BoundType)                                  \
-  M(CheckCast)                                  \
-  M(ClassTableGet)                              \
-  M(ClearException)                             \
-  M(ClinitCheck)                                \
-  M(Compare)                                    \
-  M(CurrentMethod)                              \
-  M(Deoptimize)                                 \
-  M(Div)                                        \
-  M(DivZeroCheck)                               \
-  M(DoubleConstant)                             \
-  M(Equal)                                      \
-  M(Exit)                                       \
-  M(FloatConstant)                              \
-  M(Goto)                                       \
-  M(GreaterThan)                                \
-  M(GreaterThanOrEqual)                         \
-  M(If)                                         \
-  M(InstanceFieldGet)                           \
-  M(InstanceFieldSet)                           \
-  M(InstanceOf)                                 \
-  M(IntConstant)                                \
-  M(IntermediateAddress)                        \
-  M(InvokeInterface)                            \
-  M(InvokeStaticOrDirect)                       \
-  M(InvokeUnresolved)                           \
-  M(InvokeVirtual)                              \
-  M(LessThan)                                   \
-  M(LessThanOrEqual)                            \
-  M(LoadClass)                                  \
-  M(LoadException)                              \
-  M(LoadString)                                 \
-  M(LongConstant)                               \
-  M(MemoryBarrier)                              \
-  M(MonitorOperation)                           \
-  M(Mul)                                        \
-  M(MultiplyAccumulate)                         \
-  M(NativeDebugInfo)                            \
-  M(Neg)                                        \
-  M(NewArray)                                   \
-  M(NewInstance)                                \
-  M(Not)                                        \
-  M(NotEqual)                                   \
-  M(NullCheck)                                  \
-  M(NullConstant)                               \
-  M(Or)                                         \
-  M(PackedSwitch)                               \
-  M(ParallelMove)                               \
-  M(ParameterValue)                             \
-  M(Phi)                                        \
-  M(Rem)                                        \
-  M(Return)                                     \
-  M(ReturnVoid)                                 \
-  M(Ror)                                        \
-  M(Select)                                     \
-  M(Shl)                                        \
-  M(Shr)                                        \
-  M(StaticFieldGet)                             \
-  M(StaticFieldSet)                             \
-  M(Sub)                                        \
-  M(SuspendCheck)                               \
-  M(Throw)                                      \
-  M(TryBoundary)                                \
-  M(TypeConversion)                             \
-  M(UnresolvedInstanceFieldGet)                 \
-  M(UnresolvedInstanceFieldSet)                 \
-  M(UnresolvedStaticFieldGet)                   \
-  M(UnresolvedStaticFieldSet)                   \
-  M(UShr)                                       \
-  M(Xor)                                        \
-
-// TODO: Remove once the VIXL32 backend is implemented completely.
-#define FOR_EACH_UNIMPLEMENTED_INSTRUCTION(M)   \
-  M(ArmDexCacheArraysBase)                      \
-
 class CodeGeneratorARMVIXL;
+
+using VIXLInt32Literal = vixl::aarch32::Literal<int32_t>;
+using VIXLUInt32Literal = vixl::aarch32::Literal<uint32_t>;
 
 class JumpTableARMVIXL : public DeletableArenaObject<kArenaAllocSwitchTable> {
  public:
-  typedef vixl::aarch32::Literal<int32_t> IntLiteral;
-
   explicit JumpTableARMVIXL(HPackedSwitch* switch_instr)
       : switch_instr_(switch_instr),
         table_start_(),
         bb_addresses_(switch_instr->GetArena()->Adapter(kArenaAllocCodeGenerator)) {
     uint32_t num_entries = switch_instr_->GetNumEntries();
     for (uint32_t i = 0; i < num_entries; i++) {
-      IntLiteral *lit = new IntLiteral(0);
+      VIXLInt32Literal *lit = new VIXLInt32Literal(0, vixl32::RawLiteral::kManuallyPlaced);
       bb_addresses_.emplace_back(lit);
     }
   }
@@ -215,7 +133,7 @@ class JumpTableARMVIXL : public DeletableArenaObject<kArenaAllocSwitchTable> {
  private:
   HPackedSwitch* const switch_instr_;
   vixl::aarch32::Label table_start_;
-  ArenaVector<std::unique_ptr<IntLiteral>> bb_addresses_;
+  ArenaVector<std::unique_ptr<VIXLInt32Literal>> bb_addresses_;
 
   DISALLOW_COPY_AND_ASSIGN(JumpTableARMVIXL);
 };
@@ -246,6 +164,22 @@ class InvokeDexCallingConventionARMVIXL
 
  private:
   DISALLOW_COPY_AND_ASSIGN(InvokeDexCallingConventionARMVIXL);
+};
+
+class InvokeDexCallingConventionVisitorARMVIXL : public InvokeDexCallingConventionVisitor {
+ public:
+  InvokeDexCallingConventionVisitorARMVIXL() {}
+  virtual ~InvokeDexCallingConventionVisitorARMVIXL() {}
+
+  Location GetNextLocation(Primitive::Type type) OVERRIDE;
+  Location GetReturnLocation(Primitive::Type type) const OVERRIDE;
+  Location GetMethodLocation() const OVERRIDE;
+
+ private:
+  InvokeDexCallingConventionARMVIXL calling_convention;
+  uint32_t double_index_ = 0;
+
+  DISALLOW_COPY_AND_ASSIGN(InvokeDexCallingConventionVisitorARMVIXL);
 };
 
 class FieldAccessCallingConventionARMVIXL : public FieldAccessCallingConvention {
@@ -319,27 +253,26 @@ class ParallelMoveResolverARMVIXL : public ParallelMoveResolverWithSwap {
   DISALLOW_COPY_AND_ASSIGN(ParallelMoveResolverARMVIXL);
 };
 
-#define DEFINE_IMPLEMENTED_INSTRUCTION_VISITOR(Name)            \
-  void Visit##Name(H##Name*) OVERRIDE;
-
-#define DEFINE_UNIMPLEMENTED_INSTRUCTION_VISITOR(Name)          \
-  void Visit##Name(H##Name* instr) OVERRIDE {                   \
-    VisitUnimplemementedInstruction(instr); }
-
 class LocationsBuilderARMVIXL : public HGraphVisitor {
  public:
   LocationsBuilderARMVIXL(HGraph* graph, CodeGeneratorARMVIXL* codegen)
       : HGraphVisitor(graph), codegen_(codegen) {}
 
-  FOR_EACH_IMPLEMENTED_INSTRUCTION(DEFINE_IMPLEMENTED_INSTRUCTION_VISITOR)
+#define DECLARE_VISIT_INSTRUCTION(name, super)     \
+  void Visit##name(H##name* instr) OVERRIDE;
 
-  FOR_EACH_UNIMPLEMENTED_INSTRUCTION(DEFINE_UNIMPLEMENTED_INSTRUCTION_VISITOR)
+  FOR_EACH_CONCRETE_INSTRUCTION_COMMON(DECLARE_VISIT_INSTRUCTION)
+  FOR_EACH_CONCRETE_INSTRUCTION_ARM(DECLARE_VISIT_INSTRUCTION)
+  FOR_EACH_CONCRETE_INSTRUCTION_SHARED(DECLARE_VISIT_INSTRUCTION)
 
- private:
-  void VisitUnimplemementedInstruction(HInstruction* instruction) {
-    LOG(FATAL) << "Unimplemented Instruction: " << instruction->DebugName();
+#undef DECLARE_VISIT_INSTRUCTION
+
+  void VisitInstruction(HInstruction* instruction) OVERRIDE {
+    LOG(FATAL) << "Unreachable instruction " << instruction->DebugName()
+               << " (id " << instruction->GetId() << ")";
   }
 
+ private:
   void HandleInvoke(HInvoke* invoke);
   void HandleBitwiseOperation(HBinaryOperation* operation, Opcode opcode);
   void HandleCondition(HCondition* condition);
@@ -355,7 +288,7 @@ class LocationsBuilderARMVIXL : public HGraphVisitor {
   bool CanEncodeConstantAsImmediate(uint32_t value, Opcode opcode, SetCc set_cc = kCcDontCare);
 
   CodeGeneratorARMVIXL* const codegen_;
-  InvokeDexCallingConventionVisitorARM parameter_visitor_;
+  InvokeDexCallingConventionVisitorARMVIXL parameter_visitor_;
 
   DISALLOW_COPY_AND_ASSIGN(LocationsBuilderARMVIXL);
 };
@@ -364,28 +297,34 @@ class InstructionCodeGeneratorARMVIXL : public InstructionCodeGenerator {
  public:
   InstructionCodeGeneratorARMVIXL(HGraph* graph, CodeGeneratorARMVIXL* codegen);
 
-  FOR_EACH_IMPLEMENTED_INSTRUCTION(DEFINE_IMPLEMENTED_INSTRUCTION_VISITOR)
+#define DECLARE_VISIT_INSTRUCTION(name, super)     \
+  void Visit##name(H##name* instr) OVERRIDE;
 
-  FOR_EACH_UNIMPLEMENTED_INSTRUCTION(DEFINE_UNIMPLEMENTED_INSTRUCTION_VISITOR)
+  FOR_EACH_CONCRETE_INSTRUCTION_COMMON(DECLARE_VISIT_INSTRUCTION)
+  FOR_EACH_CONCRETE_INSTRUCTION_ARM(DECLARE_VISIT_INSTRUCTION)
+  FOR_EACH_CONCRETE_INSTRUCTION_SHARED(DECLARE_VISIT_INSTRUCTION)
+
+#undef DECLARE_VISIT_INSTRUCTION
+
+  void VisitInstruction(HInstruction* instruction) OVERRIDE {
+    LOG(FATAL) << "Unreachable instruction " << instruction->DebugName()
+               << " (id " << instruction->GetId() << ")";
+  }
 
   ArmVIXLAssembler* GetAssembler() const { return assembler_; }
   ArmVIXLMacroAssembler* GetVIXLAssembler() { return GetAssembler()->GetVIXLAssembler(); }
 
  private:
-  void VisitUnimplemementedInstruction(HInstruction* instruction) {
-    LOG(FATAL) << "Unimplemented Instruction: " << instruction->DebugName();
-  }
-
   // Generate code for the given suspend check. If not null, `successor`
   // is the block to branch to if the suspend check is not needed, and after
   // the suspend call.
   void GenerateSuspendCheck(HSuspendCheck* instruction, HBasicBlock* successor);
   void GenerateClassInitializationCheck(LoadClassSlowPathARMVIXL* slow_path,
                                         vixl32::Register class_reg);
-  void HandleGoto(HInstruction* got, HBasicBlock* successor);
   void GenerateAndConst(vixl::aarch32::Register out, vixl::aarch32::Register first, uint32_t value);
   void GenerateOrrConst(vixl::aarch32::Register out, vixl::aarch32::Register first, uint32_t value);
   void GenerateEorConst(vixl::aarch32::Register out, vixl::aarch32::Register first, uint32_t value);
+  void GenerateAddLongConst(Location out, Location first, uint64_t value);
   void HandleBitwiseOperation(HBinaryOperation* operation);
   void HandleCondition(HCondition* condition);
   void HandleIntegerRotate(HRor* ror);
@@ -421,7 +360,8 @@ class InstructionCodeGeneratorARMVIXL : public InstructionCodeGenerator {
   void GenerateReferenceLoadOneRegister(HInstruction* instruction,
                                         Location out,
                                         uint32_t offset,
-                                        Location maybe_temp);
+                                        Location maybe_temp,
+                                        ReadBarrierOption read_barrier_option);
   // Generate a heap reference load using two different registers
   // `out` and `obj`:
   //
@@ -436,18 +376,18 @@ class InstructionCodeGeneratorARMVIXL : public InstructionCodeGenerator {
                                          Location out,
                                          Location obj,
                                          uint32_t offset,
-                                         Location maybe_temp);
-
+                                         Location maybe_temp,
+                                         ReadBarrierOption read_barrier_option);
   // Generate a GC root reference load:
   //
   //   root <- *(obj + offset)
   //
-  // while honoring read barriers if `requires_read_barrier` is true.
+  // while honoring read barriers based on read_barrier_option.
   void GenerateGcRootFieldLoad(HInstruction* instruction,
                                Location root,
                                vixl::aarch32::Register obj,
                                uint32_t offset,
-                               bool requires_read_barrier);
+                               ReadBarrierOption read_barrier_option);
   void GenerateTestAndBranch(HInstruction* instruction,
                              size_t condition_input_index,
                              vixl::aarch32::Label* true_target,
@@ -467,6 +407,7 @@ class InstructionCodeGeneratorARMVIXL : public InstructionCodeGenerator {
   void DivRemByPowerOfTwo(HBinaryOperation* instruction);
   void GenerateDivRemWithAnyConstant(HBinaryOperation* instruction);
   void GenerateDivRemConstantIntegral(HBinaryOperation* instruction);
+  void HandleGoto(HInstruction* got, HBasicBlock* successor);
 
   ArmVIXLAssembler* const assembler_;
   CodeGeneratorARMVIXL* const codegen_;
@@ -480,26 +421,29 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
                        const ArmInstructionSetFeatures& isa_features,
                        const CompilerOptions& compiler_options,
                        OptimizingCompilerStats* stats = nullptr);
-
   virtual ~CodeGeneratorARMVIXL() {}
-
-  void Initialize() OVERRIDE {
-    block_labels_.resize(GetGraph()->GetBlocks().size());
-  }
 
   void GenerateFrameEntry() OVERRIDE;
   void GenerateFrameExit() OVERRIDE;
-
   void Bind(HBasicBlock* block) OVERRIDE;
-
-  vixl::aarch32::Label* GetLabelOf(HBasicBlock* block) {
-    block = FirstNonEmptyBlock(block);
-    return &(block_labels_[block->GetBlockId()]);
-  }
-
   void MoveConstant(Location destination, int32_t value) OVERRIDE;
   void MoveLocation(Location dst, Location src, Primitive::Type dst_type) OVERRIDE;
   void AddLocationAsTemp(Location location, LocationSummary* locations) OVERRIDE;
+
+  size_t SaveCoreRegister(size_t stack_index, uint32_t reg_id) OVERRIDE;
+  size_t RestoreCoreRegister(size_t stack_index, uint32_t reg_id) OVERRIDE;
+  size_t SaveFloatingPointRegister(size_t stack_index, uint32_t reg_id) OVERRIDE;
+  size_t RestoreFloatingPointRegister(size_t stack_index, uint32_t reg_id) OVERRIDE;
+
+  size_t GetWordSize() const OVERRIDE {
+    return static_cast<size_t>(kArmPointerSize);
+  }
+
+  size_t GetFloatingPointSpillSlotSize() const OVERRIDE { return vixl::aarch32::kRegSizeInBytes; }
+
+  HGraphVisitor* GetLocationBuilder() OVERRIDE { return &location_builder_; }
+
+  HGraphVisitor* GetInstructionVisitor() OVERRIDE { return &instruction_visitor_; }
 
   ArmVIXLAssembler* GetAssembler() OVERRIDE { return &assembler_; }
 
@@ -507,35 +451,20 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
 
   ArmVIXLMacroAssembler* GetVIXLAssembler() { return GetAssembler()->GetVIXLAssembler(); }
 
-  size_t GetWordSize() const OVERRIDE { return kArmWordSize; }
-
-  size_t GetFloatingPointSpillSlotSize() const OVERRIDE { return vixl::aarch32::kRegSizeInBytes; }
-
   uintptr_t GetAddressOf(HBasicBlock* block) OVERRIDE {
     vixl::aarch32::Label* block_entry_label = GetLabelOf(block);
     DCHECK(block_entry_label->IsBound());
     return block_entry_label->GetLocation();
   }
 
-  JumpTableARMVIXL* CreateJumpTable(HPackedSwitch* switch_instr) {
-    jump_tables_.emplace_back(new (GetGraph()->GetArena()) JumpTableARMVIXL(switch_instr));
-    return jump_tables_.back().get();
-  }
-
-  HGraphVisitor* GetLocationBuilder() OVERRIDE { return &location_builder_; }
-
-  HGraphVisitor* GetInstructionVisitor() OVERRIDE { return &instruction_visitor_; }
-
   void FixJumpTables();
-  void GenerateMemoryBarrier(MemBarrierKind kind);
-  void Finalize(CodeAllocator* allocator) OVERRIDE;
   void SetupBlockedRegisters() const OVERRIDE;
 
   void DumpCoreRegister(std::ostream& stream, int reg) const OVERRIDE;
   void DumpFloatingPointRegister(std::ostream& stream, int reg) const OVERRIDE;
 
+  ParallelMoveResolver* GetMoveResolver() OVERRIDE { return &move_resolver_; }
   InstructionSet GetInstructionSet() const OVERRIDE { return InstructionSet::kThumb2; }
-
   // Helper method to move a 32-bit value between two locations.
   void Move32(Location destination, Location source);
 
@@ -550,45 +479,6 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
                                vixl::aarch32::Register reg_index,
                                vixl::aarch32::Condition cond = vixl::aarch32::al);
 
-  const ArmInstructionSetFeatures& GetInstructionSetFeatures() const { return isa_features_; }
-
-  vixl::aarch32::Label* GetFrameEntryLabel() { return &frame_entry_label_; }
-
-  // Saves the register in the stack. Returns the size taken on stack.
-  size_t SaveCoreRegister(size_t stack_index ATTRIBUTE_UNUSED,
-                          uint32_t reg_id ATTRIBUTE_UNUSED) OVERRIDE {
-    UNIMPLEMENTED(INFO) << "TODO: SaveCoreRegister";
-    return 0;
-  }
-
-  // Restores the register from the stack. Returns the size taken on stack.
-  size_t RestoreCoreRegister(size_t stack_index ATTRIBUTE_UNUSED,
-                             uint32_t reg_id ATTRIBUTE_UNUSED) OVERRIDE {
-    UNIMPLEMENTED(INFO) << "TODO: RestoreCoreRegister";
-    return 0;
-  }
-
-  size_t SaveFloatingPointRegister(size_t stack_index ATTRIBUTE_UNUSED,
-                                   uint32_t reg_id ATTRIBUTE_UNUSED) OVERRIDE {
-    UNIMPLEMENTED(INFO) << "TODO: SaveFloatingPointRegister";
-    return 0;
-  }
-
-  size_t RestoreFloatingPointRegister(size_t stack_index, uint32_t reg_id) OVERRIDE;
-
-  bool NeedsTwoRegisters(Primitive::Type type) const OVERRIDE {
-    return type == Primitive::kPrimDouble || type == Primitive::kPrimLong;
-  }
-
-  void ComputeSpillMask() OVERRIDE;
-
-  void GenerateImplicitNullCheck(HNullCheck* null_check) OVERRIDE;
-  void GenerateExplicitNullCheck(HNullCheck* null_check) OVERRIDE;
-
-  ParallelMoveResolver* GetMoveResolver() OVERRIDE {
-    return &move_resolver_;
-  }
-
   // Generate code to invoke a runtime entry point.
   void InvokeRuntime(QuickEntrypointEnum entrypoint,
                      HInstruction* instruction,
@@ -601,14 +491,96 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
                                            HInstruction* instruction,
                                            SlowPathCode* slow_path);
 
-  void GenerateInvokeRuntime(int32_t entry_point_offset);
-
   // Emit a write barrier.
   void MarkGCCard(vixl::aarch32::Register temp,
                   vixl::aarch32::Register card,
                   vixl::aarch32::Register object,
                   vixl::aarch32::Register value,
                   bool can_be_null);
+
+  void GenerateMemoryBarrier(MemBarrierKind kind);
+
+  vixl::aarch32::Label* GetLabelOf(HBasicBlock* block) {
+    block = FirstNonEmptyBlock(block);
+    return &(block_labels_[block->GetBlockId()]);
+  }
+
+  void Initialize() OVERRIDE {
+    block_labels_.resize(GetGraph()->GetBlocks().size());
+  }
+
+  void Finalize(CodeAllocator* allocator) OVERRIDE;
+
+  const ArmInstructionSetFeatures& GetInstructionSetFeatures() const { return isa_features_; }
+
+  bool NeedsTwoRegisters(Primitive::Type type) const OVERRIDE {
+    return type == Primitive::kPrimDouble || type == Primitive::kPrimLong;
+  }
+
+  void ComputeSpillMask() OVERRIDE;
+
+  vixl::aarch32::Label* GetFrameEntryLabel() { return &frame_entry_label_; }
+
+  // Check if the desired_string_load_kind is supported. If it is, return it,
+  // otherwise return a fall-back kind that should be used instead.
+  HLoadString::LoadKind GetSupportedLoadStringKind(
+      HLoadString::LoadKind desired_string_load_kind) OVERRIDE;
+
+  // Check if the desired_class_load_kind is supported. If it is, return it,
+  // otherwise return a fall-back kind that should be used instead.
+  HLoadClass::LoadKind GetSupportedLoadClassKind(
+      HLoadClass::LoadKind desired_class_load_kind) OVERRIDE;
+
+  // Check if the desired_dispatch_info is supported. If it is, return it,
+  // otherwise return a fall-back info that should be used instead.
+  HInvokeStaticOrDirect::DispatchInfo GetSupportedInvokeStaticOrDirectDispatch(
+      const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
+      HInvokeStaticOrDirect* invoke) OVERRIDE;
+
+  void GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke, Location temp) OVERRIDE;
+  void GenerateVirtualCall(HInvokeVirtual* invoke, Location temp) OVERRIDE;
+
+  void MoveFromReturnRegister(Location trg, Primitive::Type type) OVERRIDE;
+
+  // The PcRelativePatchInfo is used for PC-relative addressing of dex cache arrays
+  // and boot image strings/types. The only difference is the interpretation of the
+  // offset_or_index. The PC-relative address is loaded with three instructions,
+  // MOVW+MOVT to load the offset to base_reg and then ADD base_reg, PC. The offset
+  // is calculated from the ADD's effective PC, i.e. PC+4 on Thumb2. Though we
+  // currently emit these 3 instructions together, instruction scheduling could
+  // split this sequence apart, so we keep separate labels for each of them.
+  struct PcRelativePatchInfo {
+    PcRelativePatchInfo(const DexFile& dex_file, uint32_t off_or_idx)
+        : target_dex_file(dex_file), offset_or_index(off_or_idx) { }
+    PcRelativePatchInfo(PcRelativePatchInfo&& other) = default;
+
+    const DexFile& target_dex_file;
+    // Either the dex cache array element offset or the string/type index.
+    uint32_t offset_or_index;
+    vixl::aarch32::Label movw_label;
+    vixl::aarch32::Label movt_label;
+    vixl::aarch32::Label add_pc_label;
+  };
+
+  PcRelativePatchInfo* NewPcRelativeStringPatch(const DexFile& dex_file, uint32_t string_index);
+  PcRelativePatchInfo* NewPcRelativeTypePatch(const DexFile& dex_file, dex::TypeIndex type_index);
+  PcRelativePatchInfo* NewPcRelativeDexCacheArrayPatch(const DexFile& dex_file,
+                                                       uint32_t element_offset);
+  VIXLUInt32Literal* DeduplicateBootImageStringLiteral(const DexFile& dex_file,
+                                                       dex::StringIndex string_index);
+  VIXLUInt32Literal* DeduplicateBootImageTypeLiteral(const DexFile& dex_file,
+                                                     dex::TypeIndex type_index);
+  VIXLUInt32Literal* DeduplicateBootImageAddressLiteral(uint32_t address);
+  VIXLUInt32Literal* DeduplicateDexCacheAddressLiteral(uint32_t address);
+  VIXLUInt32Literal* DeduplicateJitStringLiteral(const DexFile& dex_file,
+                                                 dex::StringIndex string_index);
+  VIXLUInt32Literal* DeduplicateJitClassLiteral(const DexFile& dex_file,
+                                                dex::TypeIndex type_index,
+                                                uint64_t address);
+
+  void EmitLinkerPatches(ArenaVector<LinkerPatch>* linker_patches) OVERRIDE;
+
+  void EmitJitRootPatches(uint8_t* code, const uint8_t* roots_data) OVERRIDE;
 
   // Fast path implementation of ReadBarrier::Barrier for a heap
   // reference field load when Baker's read barriers are used.
@@ -618,7 +590,15 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
                                              uint32_t offset,
                                              Location temp,
                                              bool needs_null_check);
-
+  // Fast path implementation of ReadBarrier::Barrier for a heap
+  // reference array load when Baker's read barriers are used.
+  void GenerateArrayLoadWithBakerReadBarrier(HInstruction* instruction,
+                                             Location ref,
+                                             vixl::aarch32::Register obj,
+                                             uint32_t data_offset,
+                                             Location index,
+                                             Location temp,
+                                             bool needs_null_check);
   // Factored implementation, used by GenerateFieldLoadWithBakerReadBarrier,
   // GenerateArrayLoadWithBakerReadBarrier and some intrinsics.
   //
@@ -676,32 +656,56 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
                                     uint32_t offset,
                                     Location index = Location::NoLocation());
 
-  // Check if the desired_string_load_kind is supported. If it is, return it,
-  // otherwise return a fall-back kind that should be used instead.
-  HLoadString::LoadKind GetSupportedLoadStringKind(
-      HLoadString::LoadKind desired_string_load_kind) OVERRIDE;
-
-  // Check if the desired_class_load_kind is supported. If it is, return it,
-  // otherwise return a fall-back kind that should be used instead.
-  HLoadClass::LoadKind GetSupportedLoadClassKind(
-      HLoadClass::LoadKind desired_class_load_kind) OVERRIDE;
-
-  // Check if the desired_dispatch_info is supported. If it is, return it,
-  // otherwise return a fall-back info that should be used instead.
-  HInvokeStaticOrDirect::DispatchInfo GetSupportedInvokeStaticOrDirectDispatch(
-      const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
-      HInvokeStaticOrDirect* invoke) OVERRIDE;
-
-  void GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke, Location temp) OVERRIDE;
-  void GenerateVirtualCall(HInvokeVirtual* invoke, Location temp) OVERRIDE;
-
-  void MoveFromReturnRegister(Location trg, Primitive::Type type) OVERRIDE;
+  // Generate a read barrier for a GC root within `instruction` using
+  // a slow path.
+  //
+  // A read barrier for an object reference GC root is implemented as
+  // a call to the artReadBarrierForRootSlow runtime entry point,
+  // which is passed the value in location `root`:
+  //
+  //   mirror::Object* artReadBarrierForRootSlow(GcRoot<mirror::Object>* root);
+  //
+  // The `out` location contains the value returned by
+  // artReadBarrierForRootSlow.
+  void GenerateReadBarrierForRootSlow(HInstruction* instruction, Location out, Location root);
 
   void GenerateNop() OVERRIDE;
+
+  void GenerateImplicitNullCheck(HNullCheck* instruction) OVERRIDE;
+  void GenerateExplicitNullCheck(HNullCheck* instruction) OVERRIDE;
+
+  JumpTableARMVIXL* CreateJumpTable(HPackedSwitch* switch_instr) {
+    jump_tables_.emplace_back(new (GetGraph()->GetArena()) JumpTableARMVIXL(switch_instr));
+    return jump_tables_.back().get();
+  }
+  void EmitJumpTables();
+
+  void EmitMovwMovtPlaceholder(CodeGeneratorARMVIXL::PcRelativePatchInfo* labels,
+                               vixl::aarch32::Register out);
 
  private:
   vixl::aarch32::Register GetInvokeStaticOrDirectExtraParameter(HInvokeStaticOrDirect* invoke,
                                                                 vixl::aarch32::Register temp);
+
+  using Uint32ToLiteralMap = ArenaSafeMap<uint32_t, VIXLUInt32Literal*>;
+  using MethodToLiteralMap =
+      ArenaSafeMap<MethodReference, VIXLUInt32Literal*, MethodReferenceComparator>;
+  using StringToLiteralMap = ArenaSafeMap<StringReference,
+                                          VIXLUInt32Literal*,
+                                          StringReferenceValueComparator>;
+  using TypeToLiteralMap = ArenaSafeMap<TypeReference,
+                                        VIXLUInt32Literal*,
+                                        TypeReferenceValueComparator>;
+
+  VIXLUInt32Literal* DeduplicateUint32Literal(uint32_t value, Uint32ToLiteralMap* map);
+  VIXLUInt32Literal* DeduplicateMethodLiteral(MethodReference target_method,
+                                              MethodToLiteralMap* map);
+  PcRelativePatchInfo* NewPcRelativePatch(const DexFile& dex_file,
+                                          uint32_t offset_or_index,
+                                          ArenaDeque<PcRelativePatchInfo>* patches);
+  template <LinkerPatch (*Factory)(size_t, const DexFile*, uint32_t, uint32_t)>
+  static void EmitPcRelativeLinkerPatches(const ArenaDeque<PcRelativePatchInfo>& infos,
+                                          ArenaVector<LinkerPatch>* linker_patches);
 
   // Labels for each block that will be compiled.
   // We use a deque so that the `vixl::aarch32::Label` objects do not move in memory.
@@ -716,14 +720,28 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
   ArmVIXLAssembler assembler_;
   const ArmInstructionSetFeatures& isa_features_;
 
+  // Deduplication map for 32-bit literals, used for non-patchable boot image addresses.
+  Uint32ToLiteralMap uint32_literals_;
+  // PC-relative patch info for each HArmDexCacheArraysBase.
+  ArenaDeque<PcRelativePatchInfo> pc_relative_dex_cache_patches_;
+  // Deduplication map for boot string literals for kBootImageLinkTimeAddress.
+  StringToLiteralMap boot_image_string_patches_;
+  // PC-relative String patch info; type depends on configuration (app .bss or boot image PIC).
+  ArenaDeque<PcRelativePatchInfo> pc_relative_string_patches_;
+  // Deduplication map for boot type literals for kBootImageLinkTimeAddress.
+  TypeToLiteralMap boot_image_type_patches_;
+  // PC-relative type patch info.
+  ArenaDeque<PcRelativePatchInfo> pc_relative_type_patches_;
+  // Deduplication map for patchable boot image addresses.
+  Uint32ToLiteralMap boot_image_address_patches_;
+
+  // Patches for string literals in JIT compiled code.
+  StringToLiteralMap jit_string_patches_;
+  // Patches for class literals in JIT compiled code.
+  TypeToLiteralMap jit_class_patches_;
+
   DISALLOW_COPY_AND_ASSIGN(CodeGeneratorARMVIXL);
 };
-
-#undef FOR_EACH_IMPLEMENTED_INSTRUCTION
-#undef FOR_EACH_UNIMPLEMENTED_INSTRUCTION
-#undef DEFINE_IMPLEMENTED_INSTRUCTION_VISITOR
-#undef DEFINE_UNIMPLEMENTED_INSTRUCTION_VISITOR
-
 
 }  // namespace arm
 }  // namespace art

@@ -26,6 +26,9 @@
 #include <unordered_set>
 #include <vector>
 
+#include "android-base/stringprintf.h"
+#include "android-base/strings.h"
+
 #include "arch/instruction_set_features.h"
 #include "art_field-inl.h"
 #include "art_method-inl.h"
@@ -74,6 +77,8 @@
 
 namespace art {
 
+using android::base::StringPrintf;
+
 const char* image_methods_descriptions_[] = {
   "kResolutionMethod",
   "kImtConflictMethod",
@@ -87,6 +92,7 @@ const char* image_methods_descriptions_[] = {
 const char* image_roots_descriptions_[] = {
   "kDexCaches",
   "kClassRoots",
+  "kClassLoader",
 };
 
 // Map is so that we don't allocate multiple dex files for the same OatDexFile.
@@ -668,6 +674,12 @@ class OatDumper {
     }
 
   private:
+    // All of the elements from one container to another.
+    template <typename Dest, typename Src>
+    static void AddAll(Dest& dest, const Src& src) {
+      dest.insert(src.begin(), src.end());
+    }
+
     void WalkClass(const DexFile& dex_file, const DexFile::ClassDef& class_def) {
       const uint8_t* class_data = dex_file.GetClassData(class_def);
       if (class_data == nullptr) {  // empty class such as a marker interface?
@@ -703,13 +715,13 @@ class OatDumper {
         const Instruction* inst = Instruction::At(code_ptr);
         switch (inst->Opcode()) {
           case Instruction::CONST_STRING: {
-            const uint32_t string_index = inst->VRegB_21c();
+            const dex::StringIndex string_index(inst->VRegB_21c());
             unique_string_ids_from_code_.insert(StringReference(&dex_file, string_index));
             ++num_string_ids_from_code_;
             break;
           }
           case Instruction::CONST_STRING_JUMBO: {
-            const uint32_t string_index = inst->VRegB_31c();
+            const dex::StringIndex string_index(inst->VRegB_31c());
             unique_string_ids_from_code_.insert(StringReference(&dex_file, string_index));
             ++num_string_ids_from_code_;
             break;
@@ -1053,7 +1065,8 @@ class OatDumper {
       if (options_.absolute_addresses_) {
         vios->Stream() << StringPrintf("%p ", oat_method.GetVmapTable());
       }
-      uint32_t vmap_table_offset = method_header == nullptr ? 0 : method_header->vmap_table_offset_;
+      uint32_t vmap_table_offset = method_header ==
+          nullptr ? 0 : method_header->GetVmapTableOffset();
       vios->Stream() << StringPrintf("(offset=0x%08x)\n", vmap_table_offset);
 
       size_t vmap_table_offset_limit =
@@ -1497,12 +1510,13 @@ class ImageDumper {
       os << "ROOTS: " << reinterpret_cast<void*>(image_header_.GetImageRoots()) << "\n";
       static_assert(arraysize(image_roots_descriptions_) ==
           static_cast<size_t>(ImageHeader::kImageRootsMax), "sizes must match");
-      for (int i = 0; i < ImageHeader::kImageRootsMax; i++) {
+      DCHECK_LE(image_header_.GetImageRoots()->GetLength(), ImageHeader::kImageRootsMax);
+      for (int32_t i = 0, size = image_header_.GetImageRoots()->GetLength(); i != size; ++i) {
         ImageHeader::ImageRoot image_root = static_cast<ImageHeader::ImageRoot>(i);
         const char* image_root_description = image_roots_descriptions_[i];
         mirror::Object* image_root_object = image_header_.GetImageRoot(image_root);
         indent_os << StringPrintf("%s: %p\n", image_root_description, image_root_object);
-        if (image_root_object->IsObjectArray()) {
+        if (image_root_object != nullptr && image_root_object->IsObjectArray()) {
           mirror::ObjectArray<mirror::Object>* image_root_object_array
               = image_root_object->AsObjectArray<mirror::Object>();
           ScopedIndentation indent2(&vios_);
@@ -1603,7 +1617,7 @@ class ImageDumper {
       // Mark dex caches.
       dex_caches_.clear();
       {
-        ReaderMutexLock mu(self, *class_linker->DexLock());
+        ReaderMutexLock mu(self, *Locks::dex_lock_);
         for (const ClassLinker::DexCacheData& data : class_linker->GetDexCachesData()) {
           ObjPtr<mirror::DexCache> dex_cache =
               ObjPtr<mirror::DexCache>::DownCast(self->DecodeJObject(data.weak_root));
@@ -2951,7 +2965,7 @@ class IMTDumper {
           table_index++;
 
           std::string p_name = ptr2->PrettyMethod(true);
-          if (StartsWith(p_name, method.c_str())) {
+          if (android::base::StartsWith(p_name, method.c_str())) {
             std::cerr << "  Slot "
                       << index
                       << " ("
@@ -2964,7 +2978,7 @@ class IMTDumper {
         }
       } else {
         std::string p_name = ptr->PrettyMethod(true);
-        if (StartsWith(p_name, method.c_str())) {
+        if (android::base::StartsWith(p_name, method.c_str())) {
           std::cerr << "  Slot " << index << " (1)" << std::endl;
           std::cerr << "    " << p_name << std::endl;
         } else {
@@ -2977,7 +2991,7 @@ class IMTDumper {
               for (ArtMethod& iface_method : iface->GetMethods(pointer_size)) {
                 if (ImTable::GetImtIndex(&iface_method) == index) {
                   std::string i_name = iface_method.PrettyMethod(true);
-                  if (StartsWith(i_name, method.c_str())) {
+                  if (android::base::StartsWith(i_name, method.c_str())) {
                     std::cerr << "  Slot " << index << " (1)" << std::endl;
                     std::cerr << "    " << p_name << " (" << i_name << ")" << std::endl;
                   }
@@ -2996,7 +3010,7 @@ class IMTDumper {
     while (in_stream.good()) {
       std::string dot;
       std::getline(in_stream, dot);
-      if (StartsWith(dot, "#") || dot.empty()) {
+      if (android::base::StartsWith(dot, "#") || dot.empty()) {
         continue;
       }
       output.push_back(dot);

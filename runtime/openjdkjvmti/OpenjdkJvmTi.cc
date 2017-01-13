@@ -40,15 +40,18 @@
 #include "base/mutex.h"
 #include "events-inl.h"
 #include "jni_env_ext-inl.h"
-#include "object_tagging.h"
 #include "obj_ptr-inl.h"
+#include "object_tagging.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
-#include "thread_list.h"
 #include "thread-inl.h"
+#include "thread_list.h"
 #include "ti_class.h"
+#include "ti_field.h"
 #include "ti_heap.h"
 #include "ti_method.h"
+#include "ti_object.h"
+#include "ti_redefine.h"
 #include "ti_stack.h"
 #include "transform.h"
 
@@ -536,7 +539,7 @@ class JvmtiFunctions {
   }
 
   static jvmtiError GetClassStatus(jvmtiEnv* env, jclass klass, jint* status_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return ClassUtil::GetClassStatus(env, klass, status_ptr);
   }
 
   static jvmtiError GetSourceFileName(jvmtiEnv* env, jclass klass, char** source_name_ptr) {
@@ -544,28 +547,28 @@ class JvmtiFunctions {
   }
 
   static jvmtiError GetClassModifiers(jvmtiEnv* env, jclass klass, jint* modifiers_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return ClassUtil::GetClassModifiers(env, klass, modifiers_ptr);
   }
 
   static jvmtiError GetClassMethods(jvmtiEnv* env,
                                     jclass klass,
                                     jint* method_count_ptr,
                                     jmethodID** methods_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return ClassUtil::GetClassMethods(env, klass, method_count_ptr, methods_ptr);
   }
 
   static jvmtiError GetClassFields(jvmtiEnv* env,
                                    jclass klass,
                                    jint* field_count_ptr,
                                    jfieldID** fields_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return ClassUtil::GetClassFields(env, klass, field_count_ptr, fields_ptr);
   }
 
   static jvmtiError GetImplementedInterfaces(jvmtiEnv* env,
                                              jclass klass,
                                              jint* interface_count_ptr,
                                              jclass** interfaces_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return ClassUtil::GetImplementedInterfaces(env, klass, interface_count_ptr, interfaces_ptr);
   }
 
   static jvmtiError GetClassVersionNumbers(jvmtiEnv* env,
@@ -584,23 +587,23 @@ class JvmtiFunctions {
   }
 
   static jvmtiError IsInterface(jvmtiEnv* env, jclass klass, jboolean* is_interface_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return ClassUtil::IsInterface(env, klass, is_interface_ptr);
   }
 
   static jvmtiError IsArrayClass(jvmtiEnv* env,
                                  jclass klass,
                                  jboolean* is_array_class_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return ClassUtil::IsArrayClass(env, klass, is_array_class_ptr);
   }
 
   static jvmtiError IsModifiableClass(jvmtiEnv* env,
                                       jclass klass,
                                       jboolean* is_modifiable_class_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return Redefiner::IsModifiableClass(env, klass, is_modifiable_class_ptr);
   }
 
   static jvmtiError GetClassLoader(jvmtiEnv* env, jclass klass, jobject* classloader_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return ClassUtil::GetClassLoader(env, klass, classloader_ptr);
   }
 
   static jvmtiError GetSourceDebugExtension(jvmtiEnv* env,
@@ -620,11 +623,11 @@ class JvmtiFunctions {
   }
 
   static jvmtiError GetObjectSize(jvmtiEnv* env, jobject object, jlong* size_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return ObjectUtil::GetObjectSize(env, object, size_ptr);
   }
 
   static jvmtiError GetObjectHashCode(jvmtiEnv* env, jobject object, jint* hash_code_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return ObjectUtil::GetObjectHashCode(env, object, hash_code_ptr);
   }
 
   static jvmtiError GetObjectMonitorUsage(jvmtiEnv* env,
@@ -639,28 +642,28 @@ class JvmtiFunctions {
                                  char** name_ptr,
                                  char** signature_ptr,
                                  char** generic_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return FieldUtil::GetFieldName(env, klass, field, name_ptr, signature_ptr, generic_ptr);
   }
 
   static jvmtiError GetFieldDeclaringClass(jvmtiEnv* env,
                                            jclass klass,
                                            jfieldID field,
                                            jclass* declaring_class_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return FieldUtil::GetFieldDeclaringClass(env, klass, field, declaring_class_ptr);
   }
 
   static jvmtiError GetFieldModifiers(jvmtiEnv* env,
                                       jclass klass,
                                       jfieldID field,
                                       jint* modifiers_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return FieldUtil::GetFieldModifiers(env, klass, field, modifiers_ptr);
   }
 
   static jvmtiError IsFieldSynthetic(jvmtiEnv* env,
                                      jclass klass,
                                      jfieldID field,
                                      jboolean* is_synthetic_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return FieldUtil::IsFieldSynthetic(env, klass, field, is_synthetic_ptr);
   }
 
   static jvmtiError GetMethodName(jvmtiEnv* env,
@@ -686,27 +689,27 @@ class JvmtiFunctions {
   static jvmtiError GetMaxLocals(jvmtiEnv* env,
                                  jmethodID method,
                                  jint* max_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return MethodUtil::GetMaxLocals(env, method, max_ptr);
   }
 
   static jvmtiError GetArgumentsSize(jvmtiEnv* env,
                                      jmethodID method,
                                      jint* size_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return MethodUtil::GetArgumentsSize(env, method, size_ptr);
   }
 
   static jvmtiError GetLineNumberTable(jvmtiEnv* env,
                                        jmethodID method,
                                        jint* entry_count_ptr,
                                        jvmtiLineNumberEntry** table_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return MethodUtil::GetLineNumberTable(env, method, entry_count_ptr, table_ptr);
   }
 
   static jvmtiError GetMethodLocation(jvmtiEnv* env,
                                       jmethodID method,
                                       jlocation* start_location_ptr,
                                       jlocation* end_location_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return MethodUtil::GetMethodLocation(env, method, start_location_ptr, end_location_ptr);
   }
 
   static jvmtiError GetLocalVariableTable(jvmtiEnv* env,
@@ -724,15 +727,15 @@ class JvmtiFunctions {
   }
 
   static jvmtiError IsMethodNative(jvmtiEnv* env, jmethodID method, jboolean* is_native_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return MethodUtil::IsMethodNative(env, method, is_native_ptr);
   }
 
   static jvmtiError IsMethodSynthetic(jvmtiEnv* env, jmethodID method, jboolean* is_synthetic_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return MethodUtil::IsMethodSynthetic(env, method, is_synthetic_ptr);
   }
 
   static jvmtiError IsMethodObsolete(jvmtiEnv* env, jmethodID method, jboolean* is_obsolete_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return MethodUtil::IsMethodObsolete(env, method, is_obsolete_ptr);
   }
 
   static jvmtiError SetNativeMethodPrefix(jvmtiEnv* env, const char* prefix) {
@@ -837,19 +840,28 @@ class JvmtiFunctions {
   static jvmtiError GetExtensionFunctions(jvmtiEnv* env,
                                           jint* extension_count_ptr,
                                           jvmtiExtensionFunctionInfo** extensions) {
-    return ERR(NOT_IMPLEMENTED);
+    // We do not have any extension functions.
+    *extension_count_ptr = 0;
+    *extensions = nullptr;
+
+    return ERR(NONE);
   }
 
   static jvmtiError GetExtensionEvents(jvmtiEnv* env,
                                        jint* extension_count_ptr,
                                        jvmtiExtensionEventInfo** extensions) {
-    return ERR(NOT_IMPLEMENTED);
+    // We do not have any extension events.
+    *extension_count_ptr = 0;
+    *extensions = nullptr;
+
+    return ERR(NONE);
   }
 
   static jvmtiError SetExtensionEventCallback(jvmtiEnv* env,
                                               jint extension_event_index,
                                               jvmtiExtensionEvent callback) {
-    return ERR(NOT_IMPLEMENTED);
+    // We do not have any extension events, so any call is illegal.
+    return ERR(ILLEGAL_ARGUMENT);
   }
 
   static jvmtiError GetPotentialCapabilities(jvmtiEnv* env, jvmtiCapabilities* capabilities_ptr) {
@@ -1065,8 +1077,15 @@ class JvmtiFunctions {
     ENSURE_NON_NULL(name_ptr);
     switch (error) {
 #define ERROR_CASE(e) case (JVMTI_ERROR_ ## e) : do { \
-          *name_ptr = const_cast<char*>("JVMTI_ERROR_"#e); \
-          return OK; \
+          jvmtiError res = CopyString(env, \
+                                      "JVMTI_ERROR_"#e, \
+                                      reinterpret_cast<unsigned char**>(name_ptr)); \
+          if (res != OK) { \
+            *name_ptr = nullptr; \
+            return res; \
+          } else { \
+            return OK; \
+          } \
         } while (false)
       ERROR_CASE(NONE);
       ERROR_CASE(INVALID_THREAD);
@@ -1118,8 +1137,15 @@ class JvmtiFunctions {
       ERROR_CASE(INVALID_ENVIRONMENT);
 #undef ERROR_CASE
       default: {
-        *name_ptr = const_cast<char*>("JVMTI_ERROR_UNKNOWN");
-        return ERR(ILLEGAL_ARGUMENT);
+        jvmtiError res = CopyString(env,
+                                    "JVMTI_ERROR_UNKNOWN",
+                                    reinterpret_cast<unsigned char**>(name_ptr));
+        if (res != OK) {
+          *name_ptr = nullptr;
+          return res;
+        } else {
+          return ERR(ILLEGAL_ARGUMENT);
+        }
       }
     }
   }
@@ -1141,6 +1167,34 @@ class JvmtiFunctions {
     return RetransformClassesWithHook(reinterpret_cast<ArtJvmTiEnv*>(env), classes, hook);
   }
 
+  static jvmtiError RedefineClassDirect(ArtJvmTiEnv* env,
+                                        jclass klass,
+                                        jint dex_size,
+                                        unsigned char* dex_file) {
+    if (!IsValidEnv(env)) {
+      return ERR(INVALID_ENVIRONMENT);
+    }
+    jvmtiError ret = OK;
+    std::string location;
+    if ((ret = GetClassLocation(env, klass, &location)) != OK) {
+      // TODO Do something more here? Maybe give log statements?
+      return ret;
+    }
+    std::string error;
+    ret = Redefiner::RedefineClass(env,
+                                    art::Runtime::Current(),
+                                    art::Thread::Current(),
+                                    klass,
+                                    location,
+                                    dex_size,
+                                    reinterpret_cast<uint8_t*>(dex_file),
+                                    &error);
+    if (ret != OK) {
+      LOG(WARNING) << "FAILURE TO REDEFINE " << error;
+    }
+    return ret;
+  }
+
   // TODO This will be called by the event handler for the art::ti Event Load Event
   static jvmtiError RetransformClassesWithHook(ArtJvmTiEnv* env,
                                                const std::vector<jclass>& classes,
@@ -1148,6 +1202,8 @@ class JvmtiFunctions {
     if (!IsValidEnv(env)) {
       return ERR(INVALID_ENVIRONMENT);
     }
+    jvmtiError res = OK;
+    std::string error;
     for (jclass klass : classes) {
       JNIEnv* jni_env = nullptr;
       jobject loader = nullptr;
@@ -1183,11 +1239,22 @@ class JvmtiFunctions {
            /*out*/&new_dex_data);
       // Check if anything actually changed.
       if ((new_data_len != 0 || new_dex_data != nullptr) && new_dex_data != dex_data) {
-        MoveTransformedFileIntoRuntime(klass, std::move(location), new_data_len, new_dex_data);
+        res = Redefiner::RedefineClass(env,
+                                       art::Runtime::Current(),
+                                       art::Thread::Current(),
+                                       klass,
+                                       location,
+                                       new_data_len,
+                                       new_dex_data,
+                                       &error);
         env->Deallocate(new_dex_data);
       }
       // Deallocate the old dex data.
       env->Deallocate(dex_data);
+      if (res != OK) {
+        LOG(ERROR) << "FAILURE TO REDEFINE " << error;
+        return res;
+      }
     }
     return OK;
   }
@@ -1238,7 +1305,10 @@ const jvmtiInterface_1 gJvmtiInterface = {
   reinterpret_cast<void*>(JvmtiFunctions::RetransformClassWithHook),
   // nullptr,  // reserved1
   JvmtiFunctions::SetEventNotificationMode,
-  nullptr,  // reserved3
+  // SPECIAL FUNCTION: RedefineClassDirect Is normally reserved3
+  // TODO Remove once we have events working.
+  reinterpret_cast<void*>(JvmtiFunctions::RedefineClassDirect),
+  // nullptr,  // reserved3
   JvmtiFunctions::GetAllThreads,
   JvmtiFunctions::SuspendThread,
   JvmtiFunctions::ResumeThread,

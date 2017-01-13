@@ -19,11 +19,15 @@
 #include <fstream>
 #include <sstream>
 
+#include "android-base/stringprintf.h"
+#include "android-base/strings.h"
+
+#include "base/logging.h"
 #include "base/stl_util.h"
-#include "base/stringprintf.h"
-#include "utils.h"  // For Trim.
 
 namespace art {
+
+using android::base::StringPrintf;
 
 // An enum for the Mips revision.
 enum class MipsLevel {
@@ -210,7 +214,7 @@ MipsInstructionSetFeatures::AddFeaturesFromSplitString(
   bool mips_isa_gte2 = mips_isa_gte2_;
   bool r6 = r6_;
   for (auto i = features.begin(); i != features.end(); i++) {
-    std::string feature = Trim(*i);
+    std::string feature = android::base::Trim(*i);
     if (feature == "fpu32") {
       fpu_32bit = true;
     } else if (feature == "-fpu32") {

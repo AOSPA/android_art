@@ -20,15 +20,21 @@
 #include <string>
 #include <vector>
 
+#include "android-base/stringprintf.h"
+
 #include "base/unix_file/fd_file.h"
 #include "class_linker-inl.h"
+#include "compiler_callbacks.h"
 #include "common_compiler_test.h"
 #include "debug/method_debug_info.h"
+#include "dex/quick_compiler_callbacks.h"
 #include "driver/compiler_options.h"
 #include "elf_writer.h"
 #include "elf_writer_quick.h"
 #include "gc/space/image_space.h"
 #include "image_writer.h"
+#include "linker/buffered_output_stream.h"
+#include "linker/file_output_stream.h"
 #include "linker/multi_oat_relative_patcher.h"
 #include "lock_word.h"
 #include "mirror/object-inl.h"
@@ -71,6 +77,14 @@ class ImageTest : public CommonCompilerTest {
                CompilationHelper& out_helper,
                const std::string& extra_dex = "",
                const std::string& image_class = "");
+
+  void SetUpRuntimeOptions(RuntimeOptions* options) OVERRIDE {
+    CommonCompilerTest::SetUpRuntimeOptions(options);
+    callbacks_.reset(new QuickCompilerCallbacks(
+        verification_results_.get(),
+        CompilerCallbacks::CallbackMode::kCompileBootImage));
+    options->push_back(std::make_pair("compilercallbacks", callbacks_.get()));
+  }
 
   std::unordered_set<std::string>* GetImageClasses() OVERRIDE {
     return new std::unordered_set<std::string>(image_classes_);
@@ -132,7 +146,8 @@ void CompilationHelper::Compile(CompilerDriver* driver,
     // Create a generic tmp file, to be the base of the .art and .oat temporary files.
     ScratchFile location;
     for (int i = 0; i < static_cast<int>(class_path.size()); ++i) {
-      std::string cur_location(StringPrintf("%s-%d.art", location.GetFilename().c_str(), i));
+      std::string cur_location =
+          android::base::StringPrintf("%s-%d.art", location.GetFilename().c_str(), i);
       image_locations.push_back(ScratchFile(cur_location));
     }
   }
@@ -239,6 +254,7 @@ void CompilationHelper::Compile(CompilerDriver* driver,
             driver->GetInstructionSetFeatures(),
             &key_value_store,
             /* verify */ false,           // Dex files may be dex-to-dex-ed, don't verify.
+            /* update_input_vdex */ false,
             &cur_opened_dex_files_map,
             &cur_opened_dex_files);
         ASSERT_TRUE(dex_files_ok);
@@ -255,6 +271,16 @@ void CompilationHelper::Compile(CompilerDriver* driver,
       }
       bool image_space_ok = writer->PrepareImageAddressSpace();
       ASSERT_TRUE(image_space_ok);
+
+      if (kIsVdexEnabled) {
+        for (size_t i = 0, size = vdex_files.size(); i != size; ++i) {
+          std::unique_ptr<BufferedOutputStream> vdex_out(
+              MakeUnique<BufferedOutputStream>(
+                  MakeUnique<FileOutputStream>(vdex_files[i].GetFile())));
+          oat_writers[i]->WriteVerifierDeps(vdex_out.get(), nullptr);
+          oat_writers[i]->WriteChecksumsAndVdexHeader(vdex_out.get());
+        }
+      }
 
       for (size_t i = 0, size = oat_files.size(); i != size; ++i) {
         linker::MultiOatRelativePatcher patcher(driver->GetInstructionSet(),

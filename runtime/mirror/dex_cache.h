@@ -19,7 +19,6 @@
 
 #include "array.h"
 #include "art_field.h"
-#include "art_method.h"
 #include "class.h"
 #include "dex_file_types.h"
 #include "object.h"
@@ -27,10 +26,13 @@
 
 namespace art {
 
+class ArtMethod;
 struct DexCacheOffsets;
 class DexFile;
 class ImageWriter;
 union JValue;
+class LinearAlloc;
+class Thread;
 
 namespace mirror {
 
@@ -137,19 +139,14 @@ class MANAGED DexCache FINAL : public Object {
     return sizeof(DexCache);
   }
 
-  void Init(const DexFile* dex_file,
-            ObjPtr<String> location,
-            StringDexCacheType* strings,
-            uint32_t num_strings,
-            GcRoot<Class>* resolved_types,
-            uint32_t num_resolved_types,
-            ArtMethod** resolved_methods,
-            uint32_t num_resolved_methods,
-            ArtField** resolved_fields,
-            uint32_t num_resolved_fields,
-            MethodTypeDexCacheType* resolved_methodtypes,
-            uint32_t num_resolved_methodtypes,
-            PointerSize pointer_size) REQUIRES_SHARED(Locks::mutator_lock_);
+  static void InitializeDexCache(Thread* self,
+                                 ObjPtr<mirror::DexCache> dex_cache,
+                                 ObjPtr<mirror::String> location,
+                                 const DexFile* dex_file,
+                                 LinearAlloc* linear_alloc,
+                                 PointerSize image_pointer_size)
+      REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(Locks::dex_lock_);
 
   void Fixup(ArtMethod* trampoline, PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -214,15 +211,15 @@ class MANAGED DexCache FINAL : public Object {
     return OFFSET_OF_OBJECT_MEMBER(DexCache, num_resolved_method_types_);
   }
 
-  mirror::String* GetResolvedString(uint32_t string_idx) ALWAYS_INLINE
+  mirror::String* GetResolvedString(dex::StringIndex string_idx) ALWAYS_INLINE
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void SetResolvedString(uint32_t string_idx, ObjPtr<mirror::String> resolved) ALWAYS_INLINE
+  void SetResolvedString(dex::StringIndex string_idx, ObjPtr<mirror::String> resolved) ALWAYS_INLINE
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Clear a string for a string_idx, used to undo string intern transactions to make sure
   // the string isn't kept live.
-  void ClearString(uint32_t string_idx) REQUIRES_SHARED(Locks::mutator_lock_);
+  void ClearString(dex::StringIndex string_idx) REQUIRES_SHARED(Locks::mutator_lock_);
 
   Class* GetResolvedType(dex::TypeIndex type_idx) REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -339,6 +336,21 @@ class MANAGED DexCache FINAL : public Object {
   static void SetElementPtrSize(PtrType* ptr_array, size_t idx, PtrType ptr, PointerSize ptr_size);
 
  private:
+  void Init(const DexFile* dex_file,
+            ObjPtr<String> location,
+            StringDexCacheType* strings,
+            uint32_t num_strings,
+            GcRoot<Class>* resolved_types,
+            uint32_t num_resolved_types,
+            ArtMethod** resolved_methods,
+            uint32_t num_resolved_methods,
+            ArtField** resolved_fields,
+            uint32_t num_resolved_fields,
+            MethodTypeDexCacheType* resolved_methodtypes,
+            uint32_t num_resolved_methodtypes,
+            PointerSize pointer_size)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   // Visit instance fields of the dex cache as well as its associated arrays.
   template <bool kVisitNativeRoots,
             VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,

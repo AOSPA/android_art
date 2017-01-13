@@ -19,11 +19,15 @@
 #include <fstream>
 #include <sstream>
 
+#include "android-base/stringprintf.h"
+#include "android-base/strings.h"
+
+#include "base/logging.h"
 #include "base/stl_util.h"
-#include "base/stringprintf.h"
-#include "utils.h"  // For Trim.
 
 namespace art {
+
+using android::base::StringPrintf;
 
 Arm64FeaturesUniquePtr Arm64InstructionSetFeatures::FromVariant(
     const std::string& variant, std::string* error_msg) {
@@ -137,7 +141,7 @@ Arm64InstructionSetFeatures::AddFeaturesFromSplitString(
     const bool smp, const std::vector<std::string>& features, std::string* error_msg) const {
   bool is_a53 = fix_cortex_a53_835769_;
   for (auto i = features.begin(); i != features.end(); i++) {
-    std::string feature = Trim(*i);
+    std::string feature = android::base::Trim(*i);
     if (feature == "a53") {
       is_a53 = true;
     } else if (feature == "-a53") {

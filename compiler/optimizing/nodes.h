@@ -125,6 +125,11 @@ enum GraphAnalysisResult {
   kAnalysisSuccess,
 };
 
+template <typename T>
+static inline typename std::make_unsigned<T>::type MakeUnsigned(T x) {
+  return static_cast<typename std::make_unsigned<T>::type>(x);
+}
+
 class HInstructionList : public ValueObject {
  public:
   HInstructionList() : first_instruction_(nullptr), last_instruction_(nullptr) {}
@@ -325,6 +330,7 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
         invoke_type_(invoke_type),
         in_ssa_form_(false),
         should_generate_constructor_barrier_(should_generate_constructor_barrier),
+        number_of_cha_guards_(0),
         instruction_set_(instruction_set),
         cached_null_constant_(nullptr),
         cached_int_constants_(std::less<int32_t>(), arena->Adapter(kArenaAllocConstantsMap)),
@@ -333,7 +339,8 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
         cached_double_constants_(std::less<int64_t>(), arena->Adapter(kArenaAllocConstantsMap)),
         cached_current_method_(nullptr),
         inexact_object_rti_(ReferenceTypeInfo::CreateInvalid()),
-        osr_(osr) {
+        osr_(osr),
+        cha_single_implementation_list_(arena->Adapter(kArenaAllocCHA)) {
     blocks_.reserve(kDefaultNumberOfBlocks);
   }
 
@@ -536,6 +543,18 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
 
   bool IsCompilingOsr() const { return osr_; }
 
+  ArenaSet<ArtMethod*>& GetCHASingleImplementationList() {
+    return cha_single_implementation_list_;
+  }
+
+  void AddCHASingleImplementationDependency(ArtMethod* method) {
+    cha_single_implementation_list_.insert(method);
+  }
+
+  bool HasShouldDeoptimizeFlag() const {
+    return number_of_cha_guards_ != 0;
+  }
+
   bool HasTryCatch() const { return has_try_catch_; }
   void SetHasTryCatch(bool value) { has_try_catch_ = value; }
 
@@ -551,6 +570,10 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   HInstruction* InsertOppositeCondition(HInstruction* cond, HInstruction* cursor);
 
   ReferenceTypeInfo GetInexactObjectRti() const { return inexact_object_rti_; }
+
+  uint32_t GetNumberOfCHAGuards() { return number_of_cha_guards_; }
+  void SetNumberOfCHAGuards(uint32_t num) { number_of_cha_guards_ = num; }
+  void IncrementNumberOfCHAGuards() { number_of_cha_guards_++; }
 
  private:
   void RemoveInstructionsAsUsersFromDeadBlocks(const ArenaBitVector& visited) const;
@@ -647,6 +670,10 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
 
   const bool should_generate_constructor_barrier_;
 
+  // Number of CHA guards in the graph. Used to short-circuit the
+  // CHA guard optimization pass when there is no CHA guard left.
+  uint32_t number_of_cha_guards_;
+
   const InstructionSet instruction_set_;
 
   // Cached constants.
@@ -671,6 +698,9 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   // make all loops seen as irreducible and emit special stack maps to mark
   // compiled code entries which the interpreter can directly jump to.
   const bool osr_;
+
+  // List of methods that are assumed to have single implementation.
+  ArenaSet<ArtMethod*> cha_single_implementation_list_;
 
   friend class SsaBuilder;           // For caching constants.
   friend class SsaLivenessAnalysis;  // For the linear order.
@@ -1240,6 +1270,7 @@ class HLoopInformationOutwardIterator : public ValueObject {
   M(ClinitCheck, Instruction)                                           \
   M(Compare, BinaryOperation)                                           \
   M(CurrentMethod, Instruction)                                         \
+  M(ShouldDeoptimizeFlag, Instruction)                                  \
   M(Deoptimize, Instruction)                                            \
   M(Div, BinaryOperation)                                               \
   M(DivZeroCheck, Instruction)                                          \
@@ -2072,6 +2103,8 @@ class HInstruction : public ArenaObject<kArenaAllocInstruction> {
 #undef INSTRUCTION_TYPE_CHECK
 
   // Returns whether the instruction can be moved within the graph.
+  // TODO: this method is used by LICM and GVN with possibly different
+  //       meanings? split and rename?
   virtual bool CanBeMoved() const { return false; }
 
   // Returns whether the two instructions are of the same kind.
@@ -2321,6 +2354,32 @@ class HBackwardInstructionIterator : public ValueObject {
   DISALLOW_COPY_AND_ASSIGN(HBackwardInstructionIterator);
 };
 
+class HVariableInputSizeInstruction : public HInstruction {
+ public:
+  using HInstruction::GetInputRecords;  // Keep the const version visible.
+  ArrayRef<HUserRecord<HInstruction*>> GetInputRecords() OVERRIDE {
+    return ArrayRef<HUserRecord<HInstruction*>>(inputs_);
+  }
+
+  void AddInput(HInstruction* input);
+  void InsertInputAt(size_t index, HInstruction* input);
+  void RemoveInputAt(size_t index);
+
+ protected:
+  HVariableInputSizeInstruction(SideEffects side_effects,
+                                uint32_t dex_pc,
+                                ArenaAllocator* arena,
+                                size_t number_of_inputs,
+                                ArenaAllocKind kind)
+      : HInstruction(side_effects, dex_pc),
+        inputs_(number_of_inputs, arena->Adapter(kind)) {}
+
+  ArenaVector<HUserRecord<HInstruction*>> inputs_;
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(HVariableInputSizeInstruction);
+};
+
 template<size_t N>
 class HTemplateInstruction: public HInstruction {
  public:
@@ -2412,15 +2471,19 @@ class HReturn FINAL : public HTemplateInstruction<1> {
   DISALLOW_COPY_AND_ASSIGN(HReturn);
 };
 
-class HPhi FINAL : public HInstruction {
+class HPhi FINAL : public HVariableInputSizeInstruction {
  public:
   HPhi(ArenaAllocator* arena,
        uint32_t reg_number,
        size_t number_of_inputs,
        Primitive::Type type,
        uint32_t dex_pc = kNoDexPc)
-      : HInstruction(SideEffects::None(), dex_pc),
-        inputs_(number_of_inputs, arena->Adapter(kArenaAllocPhiInputs)),
+      : HVariableInputSizeInstruction(
+            SideEffects::None(),
+            dex_pc,
+            arena,
+            number_of_inputs,
+            kArenaAllocPhiInputs),
         reg_number_(reg_number) {
     SetPackedField<TypeField>(ToPhiType(type));
     DCHECK_NE(GetType(), Primitive::kPrimVoid);
@@ -2437,14 +2500,6 @@ class HPhi FINAL : public HInstruction {
   }
 
   bool IsCatchPhi() const { return GetBlock()->IsCatchBlock(); }
-
-  using HInstruction::GetInputRecords;  // Keep the const version visible.
-  ArrayRef<HUserRecord<HInstruction*>> GetInputRecords() OVERRIDE FINAL {
-    return ArrayRef<HUserRecord<HInstruction*>>(inputs_);
-  }
-
-  void AddInput(HInstruction* input);
-  void RemoveInputAt(size_t index);
 
   Primitive::Type GetType() const OVERRIDE { return GetPackedField<TypeField>(); }
   void SetType(Primitive::Type new_type) {
@@ -2501,7 +2556,6 @@ class HPhi FINAL : public HInstruction {
   static_assert(kNumberOfPhiPackedBits <= kMaxNumberOfPackedBits, "Too many packed fields.");
   using TypeField = BitField<Primitive::Type, kFieldType, kFieldTypeSize>;
 
-  ArenaVector<HUserRecord<HInstruction*>> inputs_;
   const uint32_t reg_number_;
 
   DISALLOW_COPY_AND_ASSIGN(HPhi);
@@ -2871,6 +2925,33 @@ class HDeoptimize FINAL : public HTemplateInstruction<1> {
 
  private:
   DISALLOW_COPY_AND_ASSIGN(HDeoptimize);
+};
+
+// Represents a should_deoptimize flag. Currently used for CHA-based devirtualization.
+// The compiled code checks this flag value in a guard before devirtualized call and
+// if it's true, starts to do deoptimization.
+// It has a 4-byte slot on stack.
+// TODO: allocate a register for this flag.
+class HShouldDeoptimizeFlag FINAL : public HVariableInputSizeInstruction {
+ public:
+  // CHA guards are only optimized in a separate pass and it has no side effects
+  // with regard to other passes.
+  HShouldDeoptimizeFlag(ArenaAllocator* arena, uint32_t dex_pc)
+      : HVariableInputSizeInstruction(SideEffects::None(), dex_pc, arena, 0, kArenaAllocCHA) {
+  }
+
+  Primitive::Type GetType() const OVERRIDE { return Primitive::kPrimInt; }
+
+  // We do all CHA guard elimination/motion in a single pass, after which there is no
+  // further guard elimination/motion since a guard might have been used for justification
+  // of the elimination of another guard. Therefore, we pretend this guard cannot be moved
+  // to avoid other optimizations trying to move it.
+  bool CanBeMoved() const OVERRIDE { return false; }
+
+  DECLARE_INSTRUCTION(ShouldDeoptimizeFlag);
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(HShouldDeoptimizeFlag);
 };
 
 // Represents the ArtMethod that was passed as a first argument to
@@ -3744,14 +3825,9 @@ enum IntrinsicExceptions {
   kCanThrow  // Intrinsic may throw exceptions.
 };
 
-class HInvoke : public HInstruction {
+class HInvoke : public HVariableInputSizeInstruction {
  public:
   bool NeedsEnvironment() const OVERRIDE;
-
-  using HInstruction::GetInputRecords;  // Keep the const version visible.
-  ArrayRef<HUserRecord<HInstruction*>> GetInputRecords() OVERRIDE {
-    return ArrayRef<HUserRecord<HInstruction*>>(inputs_);
-  }
 
   void SetArgumentAt(size_t index, HInstruction* argument) {
     SetRawInputAt(index, argument);
@@ -3789,7 +3865,7 @@ class HInvoke : public HInstruction {
 
   bool CanThrow() const OVERRIDE { return GetPackedFlag<kFlagCanThrow>(); }
 
-  bool CanBeMoved() const OVERRIDE { return IsIntrinsic(); }
+  bool CanBeMoved() const OVERRIDE { return IsIntrinsic() && !DoesAnyWrite(); }
 
   bool InstructionDataEquals(const HInstruction* other) const OVERRIDE {
     return intrinsic_ != Intrinsics::kNone && intrinsic_ == other->AsInvoke()->intrinsic_;
@@ -3831,12 +3907,14 @@ class HInvoke : public HInstruction {
           uint32_t dex_method_index,
           ArtMethod* resolved_method,
           InvokeType invoke_type)
-    : HInstruction(
-          SideEffects::AllExceptGCDependency(), dex_pc),  // Assume write/read on all fields/arrays.
+    : HVariableInputSizeInstruction(
+          SideEffects::AllExceptGCDependency(),  // Assume write/read on all fields/arrays.
+          dex_pc,
+          arena,
+          number_of_arguments + number_of_other_inputs,
+          kArenaAllocInvokeInputs),
       number_of_arguments_(number_of_arguments),
       resolved_method_(resolved_method),
-      inputs_(number_of_arguments + number_of_other_inputs,
-              arena->Adapter(kArenaAllocInvokeInputs)),
       dex_method_index_(dex_method_index),
       intrinsic_(Intrinsics::kNone),
       intrinsic_optimizations_(0) {
@@ -3847,7 +3925,6 @@ class HInvoke : public HInstruction {
 
   uint32_t number_of_arguments_;
   ArtMethod* const resolved_method_;
-  ArenaVector<HUserRecord<HInstruction*>> inputs_;
   const uint32_t dex_method_index_;
   Intrinsics intrinsic_;
 
@@ -3905,12 +3982,6 @@ class HInvokeStaticOrDirect FINAL : public HInvoke {
     // Used for app->boot calls with non-relocatable image and for JIT-compiled calls.
     kDirectAddress,
 
-    // Use ArtMethod* at an address that will be known at link time, embed the direct
-    // address in the code. If the image is relocatable, emit .patch_oat entry.
-    // Used for app->boot calls with relocatable image and boot->boot calls, whether
-    // the image relocatable or not.
-    kDirectAddressWithFixup,
-
     // Load from resolved methods array in the dex cache using a PC-relative load.
     // Used when we need to use the dex cache, for example for invoke-static that
     // may cause class initialization (the entry may point to a resolution method),
@@ -3929,20 +4000,6 @@ class HInvokeStaticOrDirect FINAL : public HInvoke {
     // Recursive call, use local PC-relative call instruction.
     kCallSelf,
 
-    // Use PC-relative call instruction patched at link time.
-    // Used for calls within an oat file, boot->boot or app->app.
-    kCallPCRelative,
-
-    // Call to a known target address, embed the direct address in code.
-    // Used for app->boot call with non-relocatable image and for JIT-compiled calls.
-    kCallDirect,
-
-    // Call to a target address that will be known at link time, embed the direct
-    // address in code. If the image is relocatable, emit .patch_oat entry.
-    // Used for app->boot calls with relocatable image and boot->boot calls, whether
-    // the image relocatable or not.
-    kCallDirectWithFixup,
-
     // Use code pointer from the ArtMethod*.
     // Used when we don't know the target code. This is also the last-resort-kind used when
     // other kinds are unimplemented or impractical (i.e. slow) on a particular architecture.
@@ -3958,7 +4015,6 @@ class HInvokeStaticOrDirect FINAL : public HInvoke {
     //   - the method address for kDirectAddress
     //   - the dex cache arrays offset for kDexCachePcRel.
     uint64_t method_load_data;
-    uint64_t direct_code_ptr;
   };
 
   HInvokeStaticOrDirect(ArenaAllocator* arena,
@@ -4068,7 +4124,6 @@ class HInvokeStaticOrDirect FINAL : public HInvoke {
       return false;
     }
   }
-  bool HasDirectCodePtr() const { return GetCodePtrLocation() == CodePtrLocation::kCallDirect; }
 
   QuickEntrypointEnum GetStringInitEntryPoint() const {
     DCHECK(IsStringInit());
@@ -4083,11 +4138,6 @@ class HInvokeStaticOrDirect FINAL : public HInvoke {
   uint32_t GetDexCacheArrayOffset() const {
     DCHECK(HasPcRelativeDexCache());
     return dispatch_info_.method_load_data;
-  }
-
-  uint64_t GetDirectCodePtr() const {
-    DCHECK(HasDirectCodePtr());
-    return dispatch_info_.direct_code_ptr;
   }
 
   ClinitCheckRequirement GetClinitCheckRequirement() const {
@@ -4137,10 +4187,6 @@ class HInvokeStaticOrDirect FINAL : public HInvoke {
 
   DECLARE_INSTRUCTION(InvokeStaticOrDirect);
 
- protected:
-  void InsertInputAt(size_t index, HInstruction* input);
-  void RemoveInputAt(size_t index);
-
  private:
   static constexpr size_t kFieldClinitCheckRequirement = kNumberOfInvokePackedBits;
   static constexpr size_t kFieldClinitCheckRequirementSize =
@@ -4180,6 +4226,19 @@ class HInvokeVirtual FINAL : public HInvoke {
                 resolved_method,
                 kVirtual),
         vtable_index_(vtable_index) {}
+
+  bool CanBeNull() const OVERRIDE {
+    switch (GetIntrinsic()) {
+      case Intrinsics::kThreadCurrentThread:
+      case Intrinsics::kStringBufferAppend:
+      case Intrinsics::kStringBufferToString:
+      case Intrinsics::kStringBuilderAppend:
+      case Intrinsics::kStringBuilderToString:
+        return false;
+      default:
+        return HInvoke::CanBeNull();
+    }
+  }
 
   bool CanDoImplicitNullCheckOn(HInstruction* obj) const OVERRIDE {
     // TODO: Add implicit null checks in intrinsics.
@@ -5438,9 +5497,8 @@ class HLoadClass FINAL : public HInstruction {
     // GetIncludePatchInformation().
     kBootImageAddress,
 
-    // Load from the resolved types array at an absolute address.
-    // Used for classes outside the boot image referenced by JIT-compiled code.
-    kDexCacheAddress,
+    // Load from the root table associated with the JIT compiled method.
+    kJitTableAddress,
 
     // Load from resolved types array in the dex cache using a PC-relative load.
     // Used for classes outside boot image when we know that we can access
@@ -5460,9 +5518,7 @@ class HLoadClass FINAL : public HInstruction {
              const DexFile& dex_file,
              bool is_referrers_class,
              uint32_t dex_pc,
-             bool needs_access_check,
-             bool is_in_dex_cache,
-             bool is_in_boot_image)
+             bool needs_access_check)
       : HInstruction(SideEffectsForArchRuntimeCalls(), dex_pc),
         special_input_(HUserRecord<HInstruction*>(current_method)),
         type_index_(type_index),
@@ -5475,8 +5531,8 @@ class HLoadClass FINAL : public HInstruction {
     SetPackedField<LoadKindField>(
         is_referrers_class ? LoadKind::kReferrersClass : LoadKind::kDexCacheViaMethod);
     SetPackedFlag<kFlagNeedsAccessCheck>(needs_access_check);
-    SetPackedFlag<kFlagIsInDexCache>(is_in_dex_cache);
-    SetPackedFlag<kFlagIsInBootImage>(is_in_boot_image);
+    SetPackedFlag<kFlagIsInDexCache>(false);
+    SetPackedFlag<kFlagIsInBootImage>(false);
     SetPackedFlag<kFlagGenerateClInitCheck>(false);
   }
 
@@ -5533,7 +5589,6 @@ class HLoadClass FINAL : public HInstruction {
            NeedsAccessCheck();
   }
 
-
   bool CanThrow() const OVERRIDE {
     return CanCallRuntime();
   }
@@ -5558,7 +5613,9 @@ class HLoadClass FINAL : public HInstruction {
     return load_data_.address;
   }
 
-  bool NeedsDexCacheOfDeclaringClass() const OVERRIDE { return !IsReferrersClass(); }
+  bool NeedsDexCacheOfDeclaringClass() const OVERRIDE {
+    return !IsReferrersClass();
+  }
 
   static SideEffects SideEffectsForArchRuntimeCalls() {
     return SideEffects::CanTriggerGC();
@@ -5617,7 +5674,8 @@ class HLoadClass FINAL : public HInstruction {
   }
 
   static bool HasAddress(LoadKind load_kind) {
-    return load_kind == LoadKind::kBootImageAddress || load_kind == LoadKind::kDexCacheAddress;
+    return load_kind == LoadKind::kBootImageAddress ||
+        load_kind == LoadKind::kJitTableAddress;
   }
 
   static bool HasDexCacheReference(LoadKind load_kind) {
@@ -5636,7 +5694,7 @@ class HLoadClass FINAL : public HInstruction {
 
   union {
     uint32_t dex_cache_element_index;   // Only for dex cache reference.
-    uint64_t address;  // Up to 64-bit, needed for kDexCacheAddress on 64-bit targets.
+    uint64_t address;  // Up to 64-bit, needed for kJitTableAddress on 64-bit targets.
   } load_data_;
 
   ReferenceTypeInfo loaded_class_rti_;
@@ -5698,13 +5756,12 @@ class HLoadString FINAL : public HInstruction {
   };
 
   HLoadString(HCurrentMethod* current_method,
-              uint32_t string_index,
+              dex::StringIndex string_index,
               const DexFile& dex_file,
               uint32_t dex_pc)
       : HInstruction(SideEffectsForArchRuntimeCalls(), dex_pc),
         special_input_(HUserRecord<HInstruction*>(current_method)),
         string_index_(string_index) {
-    SetPackedFlag<kFlagIsInDexCache>(false);
     SetPackedField<LoadKindField>(LoadKind::kDexCacheViaMethod);
     load_data_.dex_file_ = &dex_file;
   }
@@ -5717,7 +5774,7 @@ class HLoadString FINAL : public HInstruction {
 
   void SetLoadKindWithStringReference(LoadKind load_kind,
                                       const DexFile& dex_file,
-                                      uint32_t string_index) {
+                                      dex::StringIndex string_index) {
     DCHECK(HasStringReference(load_kind));
     load_data_.dex_file_ = &dex_file;
     string_index_ = string_index;
@@ -5730,8 +5787,7 @@ class HLoadString FINAL : public HInstruction {
 
   const DexFile& GetDexFile() const;
 
-  uint32_t GetStringIndex() const {
-    DCHECK(HasStringReference(GetLoadKind()) || /* For slow paths. */ !IsInDexCache());
+  dex::StringIndex GetStringIndex() const {
     return string_index_;
   }
 
@@ -5744,7 +5800,7 @@ class HLoadString FINAL : public HInstruction {
 
   bool InstructionDataEquals(const HInstruction* other) const OVERRIDE;
 
-  size_t ComputeHashCode() const OVERRIDE { return string_index_; }
+  size_t ComputeHashCode() const OVERRIDE { return string_index_.index_; }
 
   // Will call the runtime if we need to load the string through
   // the dex cache and the string is not guaranteed to be there yet.
@@ -5756,7 +5812,7 @@ class HLoadString FINAL : public HInstruction {
         load_kind == LoadKind::kJitTableAddress) {
       return false;
     }
-    return !IsInDexCache();
+    return true;
   }
 
   bool NeedsDexCacheOfDeclaringClass() const OVERRIDE {
@@ -5768,15 +5824,6 @@ class HLoadString FINAL : public HInstruction {
 
   static SideEffects SideEffectsForArchRuntimeCalls() {
     return SideEffects::CanTriggerGC();
-  }
-
-  bool IsInDexCache() const { return GetPackedFlag<kFlagIsInDexCache>(); }
-
-  void MarkInDexCache() {
-    SetPackedFlag<kFlagIsInDexCache>(true);
-    DCHECK(!NeedsEnvironment());
-    RemoveEnvironment();
-    SetSideEffects(SideEffects::None());
   }
 
   void AddSpecialInput(HInstruction* special_input);
@@ -5794,8 +5841,7 @@ class HLoadString FINAL : public HInstruction {
   DECLARE_INSTRUCTION(LoadString);
 
  private:
-  static constexpr size_t kFlagIsInDexCache = kNumberOfGenericPackedBits;
-  static constexpr size_t kFieldLoadKind = kFlagIsInDexCache + 1;
+  static constexpr size_t kFieldLoadKind = kNumberOfGenericPackedBits;
   static constexpr size_t kFieldLoadKindSize =
       MinimumBitsToStore(static_cast<size_t>(LoadKind::kLast));
   static constexpr size_t kNumberOfLoadStringPackedBits = kFieldLoadKind + kFieldLoadKindSize;
@@ -5823,7 +5869,7 @@ class HLoadString FINAL : public HInstruction {
 
   // String index serves also as the hash code and it's also needed for slow-paths,
   // so it must not be overwritten with other load data.
-  uint32_t string_index_;
+  dex::StringIndex string_index_;
 
   union {
     const DexFile* dex_file_;            // For string reference.

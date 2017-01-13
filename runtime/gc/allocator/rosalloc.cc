@@ -16,6 +16,13 @@
 
 #include "rosalloc.h"
 
+#include <map>
+#include <list>
+#include <sstream>
+#include <vector>
+
+#include "android-base/stringprintf.h"
+
 #include "base/memory_tool.h"
 #include "base/mutex-inl.h"
 #include "gc/space/memory_tool_settings.h"
@@ -26,14 +33,11 @@
 #include "thread-inl.h"
 #include "thread_list.h"
 
-#include <map>
-#include <list>
-#include <sstream>
-#include <vector>
-
 namespace art {
 namespace gc {
 namespace allocator {
+
+using android::base::StringPrintf;
 
 static constexpr bool kUsePrefetchDuringAllocRun = false;
 static constexpr bool kPrefetchNewRunDataByZeroing = false;
@@ -2068,26 +2072,30 @@ void RosAlloc::LogFragmentationAllocFailure(std::ostream& os, size_t failed_allo
   size_t largest_continuous_free_pages = 0;
   WriterMutexLock wmu(self, bulk_free_lock_);
   MutexLock mu(self, lock_);
+  uint64_t total_free = 0;
   for (FreePageRun* fpr : free_page_runs_) {
     largest_continuous_free_pages = std::max(largest_continuous_free_pages,
                                              fpr->ByteSize(this));
+    total_free += fpr->ByteSize(this);
   }
+  size_t required_bytes = 0;
+  const char* new_buffer_msg = "";
   if (failed_alloc_bytes > kLargeSizeThreshold) {
     // Large allocation.
-    size_t required_bytes = RoundUp(failed_alloc_bytes, kPageSize);
-    if (required_bytes > largest_continuous_free_pages) {
-      os << "; failed due to fragmentation (required continguous free "
-         << required_bytes << " bytes where largest contiguous free "
-         <<  largest_continuous_free_pages << " bytes)";
-    }
+    required_bytes = RoundUp(failed_alloc_bytes, kPageSize);
   } else {
     // Non-large allocation.
-    size_t required_bytes = numOfPages[SizeToIndex(failed_alloc_bytes)] * kPageSize;
-    if (required_bytes > largest_continuous_free_pages) {
-      os << "; failed due to fragmentation (required continguous free "
-         << required_bytes << " bytes for a new buffer where largest contiguous free "
-         <<  largest_continuous_free_pages << " bytes)";
-    }
+    required_bytes = numOfPages[SizeToIndex(failed_alloc_bytes)] * kPageSize;
+    new_buffer_msg = " for a new buffer";
+  }
+  if (required_bytes > largest_continuous_free_pages) {
+    os << "; failed due to fragmentation ("
+       << "required contiguous free " << required_bytes << " bytes" << new_buffer_msg
+       << ", largest contiguous free " << largest_continuous_free_pages << " bytes"
+       << ", total free pages " << total_free << " bytes"
+       << ", space footprint " << footprint_ << " bytes"
+       << ", space max capacity " << max_capacity_ << " bytes"
+       << ")" << std::endl;
   }
 }
 

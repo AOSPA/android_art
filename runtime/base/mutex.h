@@ -60,6 +60,7 @@ enum LockLevel {
   kUnexpectedSignalLock,
   kThreadSuspendCountLock,
   kAbortLock,
+  kJdwpAdbStateLock,
   kJdwpSocketLock,
   kRegionSpaceRegionLock,
   kRosAllocGlobalLock,
@@ -97,6 +98,7 @@ enum LockLevel {
   kMonitorPoolLock,
   kClassLinkerClassesLock,  // TODO rename.
   kJitCodeCacheLock,
+  kCHALock,
   kBreakpointLock,
   kMonitorLock,
   kMonitorListLock,
@@ -627,9 +629,12 @@ class Locks {
   // TODO: improve name, perhaps instrumentation_update_lock_.
   static Mutex* deoptimization_lock_ ACQUIRED_AFTER(alloc_tracker_lock_);
 
+  // Guards Class Hierarchy Analysis (CHA).
+  static Mutex* cha_lock_ ACQUIRED_AFTER(deoptimization_lock_);
+
   // The thread_list_lock_ guards ThreadList::list_. It is also commonly held to stop threads
   // attaching and detaching.
-  static Mutex* thread_list_lock_ ACQUIRED_AFTER(deoptimization_lock_);
+  static Mutex* thread_list_lock_ ACQUIRED_AFTER(cha_lock_);
 
   // Signaled when threads terminate. Used to determine when all non-daemons have terminated.
   static ConditionVariable* thread_exit_cond_ GUARDED_BY(Locks::thread_list_lock_);
@@ -655,8 +660,10 @@ class Locks {
   // Guards modification of the LDT on x86.
   static Mutex* modify_ldt_lock_ ACQUIRED_AFTER(allocated_thread_ids_lock_);
 
+  static ReaderWriterMutex* dex_lock_ ACQUIRED_AFTER(modify_ldt_lock_);
+
   // Guards opened oat files in OatFileManager.
-  static ReaderWriterMutex* oat_file_manager_lock_ ACQUIRED_AFTER(modify_ldt_lock_);
+  static ReaderWriterMutex* oat_file_manager_lock_ ACQUIRED_AFTER(dex_lock_);
 
   // Guards extra string entries for VerifierDeps.
   static ReaderWriterMutex* verifier_deps_lock_ ACQUIRED_AFTER(oat_file_manager_lock_);

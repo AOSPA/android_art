@@ -66,6 +66,11 @@ std::ostream& operator<<(std::ostream& os, const VRegKind& rhs);
 struct ShadowFrameDeleter;
 using ShadowFrameAllocaUniquePtr = std::unique_ptr<ShadowFrame, ShadowFrameDeleter>;
 
+// Size in bytes of the should_deoptimize flag on stack.
+// We just need 4 bytes for our purpose regardless of the architecture. Frame size
+// calculation will automatically do alignment for the final frame size.
+static constexpr size_t kShouldDeoptimizeFlagSize = 4;
+
 // Counting locks by storing object pointers into a vector. Duplicate entries mark recursive locks.
 // The vector will be visited with the ShadowFrame during GC (so all the locked-on objects are
 // thread roots).
@@ -320,6 +325,12 @@ class ShadowFrame {
     if (HasReferenceArray()) {
       References()[i].Assign(val);
     }
+  }
+
+  void SetMethod(ArtMethod* method) REQUIRES(Locks::mutator_lock_) {
+    DCHECK(method != nullptr);
+    DCHECK(method_ != nullptr);
+    method_ = method;
   }
 
   ArtMethod* GetMethod() const REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -590,6 +601,12 @@ class StackVisitor {
   // Return 'true' if we should continue to visit more frames, 'false' to stop.
   virtual bool VisitFrame() REQUIRES_SHARED(Locks::mutator_lock_) = 0;
 
+  enum class CountTransitions {
+    kYes,
+    kNo,
+  };
+
+  template <CountTransitions kCount = CountTransitions::kYes>
   void WalkStack(bool include_transitions = false)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -598,6 +615,10 @@ class StackVisitor {
   }
 
   ArtMethod* GetMethod() const REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Sets this stack frame's method pointer. This requires a full lock of the MutatorLock. This
+  // doesn't work with inlined methods.
+  void SetMethod(ArtMethod* method) REQUIRES(Locks::mutator_lock_);
 
   ArtMethod* GetOuterMethod() const {
     return *GetCurrentQuickFrame();
@@ -753,10 +774,6 @@ class StackVisitor {
 
   ShadowFrame* GetCurrentShadowFrame() const {
     return cur_shadow_frame_;
-  }
-
-  bool IsCurrentFrameInInterpreter() const {
-    return cur_shadow_frame_ != nullptr;
   }
 
   HandleScope* GetCurrentHandleScope(size_t pointer_size) const {

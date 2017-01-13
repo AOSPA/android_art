@@ -19,10 +19,14 @@
 #include <fstream>
 #include <sstream>
 
-#include "base/stringprintf.h"
-#include "utils.h"  // For Trim.
+#include "android-base/stringprintf.h"
+#include "android-base/strings.h"
+
+#include "base/logging.h"
 
 namespace art {
+
+using android::base::StringPrintf;
 
 Mips64FeaturesUniquePtr Mips64InstructionSetFeatures::FromVariant(
     const std::string& variant, std::string* error_msg ATTRIBUTE_UNUSED) {
@@ -105,7 +109,7 @@ Mips64InstructionSetFeatures::AddFeaturesFromSplitString(
   auto i = features.begin();
   if (i != features.end()) {
     // We don't have any features.
-    std::string feature = Trim(*i);
+    std::string feature = android::base::Trim(*i);
     *error_msg = StringPrintf("Unknown instruction set feature: '%s'", feature.c_str());
     return nullptr;
   }

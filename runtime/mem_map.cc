@@ -24,7 +24,8 @@
 #include <memory>
 #include <sstream>
 
-#include "base/stringprintf.h"
+#include "android-base/stringprintf.h"
+
 #include "base/unix_file/fd_file.h"
 #include "os.h"
 #include "thread-inl.h"
@@ -41,6 +42,8 @@
 #endif
 
 namespace art {
+
+using android::base::StringPrintf;
 
 static std::ostream& operator<<(
     std::ostream& os,
@@ -282,6 +285,7 @@ MemMap* MemMap::MapAnonymous(const char* name,
 #ifndef __LP64__
   UNUSED(low_4gb);
 #endif
+  use_ashmem = use_ashmem && !kIsTargetLinux;
   if (byte_count == 0) {
     return new MemMap(name, nullptr, 0, nullptr, 0, prot, false);
   }
@@ -522,6 +526,7 @@ MemMap::MemMap(const std::string& name, uint8_t* begin, size_t size, void* base_
 
 MemMap* MemMap::RemapAtEnd(uint8_t* new_end, const char* tail_name, int tail_prot,
                            std::string* error_msg, bool use_ashmem) {
+  use_ashmem = use_ashmem && !kIsTargetLinux;
   DCHECK_GE(new_end, Begin());
   DCHECK_LE(new_end, End());
   DCHECK_LE(begin_ + size_, reinterpret_cast<uint8_t*>(base_begin_) + base_size_);

@@ -23,6 +23,7 @@
 #include "driver/compiler_options.h"
 #include "thread.h"
 #include "thread-inl.h"
+#include "utils/atomic_method_ref_map-inl.h"
 #include "verified_method.h"
 #include "verifier/method_verifier-inl.h"
 
@@ -35,30 +36,32 @@ VerificationResults::VerificationResults(const CompilerOptions* compiler_options
 
 VerificationResults::~VerificationResults() {
   WriterMutexLock mu(Thread::Current(), verified_methods_lock_);
-  DeleteResults(preregistered_dex_files_);
   STLDeleteValues(&verified_methods_);
+  atomic_verified_methods_.Visit([](const MethodReference& ref ATTRIBUTE_UNUSED,
+                                    const VerifiedMethod* method) {
+    delete method;
+  });
 }
 
 void VerificationResults::ProcessVerifiedMethod(verifier::MethodVerifier* method_verifier) {
   DCHECK(method_verifier != nullptr);
   MethodReference ref = method_verifier->GetMethodReference();
-  bool compile = IsCandidateForCompilation(ref, method_verifier->GetAccessFlags());
-  std::unique_ptr<const VerifiedMethod> verified_method(
-      VerifiedMethod::Create(method_verifier, compile));
+  std::unique_ptr<const VerifiedMethod> verified_method(VerifiedMethod::Create(method_verifier));
   if (verified_method == nullptr) {
     // We'll punt this later.
     return;
   }
-  bool inserted;
-  DexFileMethodArray* const array = GetMethodArray(ref.dex_file);
+  AtomicMap::InsertResult result = atomic_verified_methods_.Insert(ref,
+                                                                   /*expected*/ nullptr,
+                                                                   verified_method.get());
   const VerifiedMethod* existing = nullptr;
-  if (array != nullptr) {
-    DCHECK(array != nullptr);
-    Atomic<const VerifiedMethod*>* slot = &(*array)[ref.dex_method_index];
-    inserted = slot->CompareExchangeStrongSequentiallyConsistent(nullptr, verified_method.get());
+  bool inserted;
+  if (result != AtomicMap::kInsertResultInvalidDexFile) {
+    inserted = (result == AtomicMap::kInsertResultSuccess);
     if (!inserted) {
-      existing = slot->LoadSequentiallyConsistent();
-      DCHECK_NE(verified_method.get(), existing);
+      // Rare case.
+      CHECK(atomic_verified_methods_.Get(ref, &existing));
+      CHECK_NE(verified_method.get(), existing);
     }
   } else {
     WriterMutexLock mu(Thread::Current(), verified_methods_lock_);
@@ -79,7 +82,6 @@ void VerificationResults::ProcessVerifiedMethod(verifier::MethodVerifier* method
     // TODO: Investigate why are we doing the work again for this method and try to avoid it.
     LOG(WARNING) << "Method processed more than once: " << ref.PrettyMethod();
     if (!Runtime::Current()->UseJitCompilation()) {
-      DCHECK_EQ(existing->GetDevirtMap().size(), verified_method->GetDevirtMap().size());
       DCHECK_EQ(existing->GetSafeCastSet().size(), verified_method->GetSafeCastSet().size());
     }
     // Let the unique_ptr delete the new verified method since there was already an existing one
@@ -89,13 +91,24 @@ void VerificationResults::ProcessVerifiedMethod(verifier::MethodVerifier* method
 }
 
 const VerifiedMethod* VerificationResults::GetVerifiedMethod(MethodReference ref) {
-  DexFileMethodArray* array = GetMethodArray(ref.dex_file);
-  if (array != nullptr) {
-    return (*array)[ref.dex_method_index].LoadRelaxed();
+  const VerifiedMethod* ret = nullptr;
+  if (atomic_verified_methods_.Get(ref, &ret)) {
+    return ret;
   }
   ReaderMutexLock mu(Thread::Current(), verified_methods_lock_);
   auto it = verified_methods_.find(ref);
   return (it != verified_methods_.end()) ? it->second : nullptr;
+}
+
+void VerificationResults::CreateVerifiedMethodFor(MethodReference ref) {
+  // This method should only be called for classes verified at compile time,
+  // which have no verifier error, nor has methods that we know will throw
+  // at runtime.
+  AtomicMap::InsertResult result = atomic_verified_methods_.Insert(
+      ref,
+      /*expected*/ nullptr,
+      new VerifiedMethod(/* encountered_error_types */ 0, /* has_runtime_throw */ false));
+  DCHECK_EQ(result, AtomicMap::kInsertResultSuccess);
 }
 
 void VerificationResults::AddRejectedClass(ClassReference ref) {
@@ -124,10 +137,8 @@ bool VerificationResults::IsCandidateForCompilation(MethodReference&,
   return true;
 }
 
-void VerificationResults::PreRegisterDexFile(const DexFile* dex_file) {
-  CHECK(preregistered_dex_files_.find(dex_file) == preregistered_dex_files_.end())
-      << dex_file->GetLocation();
-  DexFileMethodArray array(dex_file->NumMethodIds());
+void VerificationResults::AddDexFile(const DexFile* dex_file) {
+  atomic_verified_methods_.AddDexFile(dex_file);
   WriterMutexLock mu(Thread::Current(), verified_methods_lock_);
   // There can be some verified methods that are already registered for the dex_file since we set
   // up well known classes earlier. Remove these and put them in the array so that we don't
@@ -135,31 +146,13 @@ void VerificationResults::PreRegisterDexFile(const DexFile* dex_file) {
   for (auto it = verified_methods_.begin(); it != verified_methods_.end(); ) {
     MethodReference ref = it->first;
     if (ref.dex_file == dex_file) {
-      array[ref.dex_method_index].StoreSequentiallyConsistent(it->second);
+      CHECK(atomic_verified_methods_.Insert(ref, nullptr, it->second) ==
+          AtomicMap::kInsertResultSuccess);
       it = verified_methods_.erase(it);
     } else {
       ++it;
     }
   }
-  preregistered_dex_files_.emplace(dex_file, std::move(array));
-}
-
-void VerificationResults::DeleteResults(DexFileResults& array) {
-  for (auto& pair : array) {
-    for (Atomic<const VerifiedMethod*>& method : pair.second) {
-      delete method.LoadSequentiallyConsistent();
-    }
-  }
-  array.clear();
-}
-
-VerificationResults::DexFileMethodArray* VerificationResults::GetMethodArray(
-    const DexFile* dex_file) {
-  auto it = preregistered_dex_files_.find(dex_file);
-  if (it != preregistered_dex_files_.end()) {
-    return &it->second;
-  }
-  return nullptr;
 }
 
 }  // namespace art

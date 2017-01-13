@@ -28,7 +28,6 @@ class CompilerDriver;
 class DexCompilationUnit;
 class HGraph;
 class HInvoke;
-class InlineCache;
 class OptimizingCompilerStats;
 
 class HInliner : public HOptimization {
@@ -63,17 +62,24 @@ class HInliner : public HOptimization {
 
   // Try to inline `resolved_method` in place of `invoke_instruction`. `do_rtp` is whether
   // reference type propagation can run after the inlining. If the inlining is successful, this
-  // method will replace and remove the `invoke_instruction`.
-  bool TryInlineAndReplace(HInvoke* invoke_instruction, ArtMethod* resolved_method, bool do_rtp)
+  // method will replace and remove the `invoke_instruction`. If `cha_devirtualize` is true,
+  // a CHA guard needs to be added for the inlining.
+  bool TryInlineAndReplace(HInvoke* invoke_instruction,
+                           ArtMethod* resolved_method,
+                           ReferenceTypeInfo receiver_type,
+                           bool do_rtp,
+                           bool cha_devirtualize)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool TryBuildAndInline(HInvoke* invoke_instruction,
                          ArtMethod* resolved_method,
+                         ReferenceTypeInfo receiver_type,
                          HInstruction** return_replacement)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool TryBuildAndInlineHelper(HInvoke* invoke_instruction,
                                ArtMethod* resolved_method,
+                               ReferenceTypeInfo receiver_type,
                                bool same_dex_file,
                                HInstruction** return_replacement);
 
@@ -105,20 +111,32 @@ class HInliner : public HOptimization {
   // ... // inlined code
   bool TryInlineMonomorphicCall(HInvoke* invoke_instruction,
                                 ArtMethod* resolved_method,
-                                const InlineCache& ic)
+                                Handle<mirror::ObjectArray<mirror::Class>> classes)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Try to inline targets of a polymorphic call.
   bool TryInlinePolymorphicCall(HInvoke* invoke_instruction,
                                 ArtMethod* resolved_method,
-                                const InlineCache& ic)
+                                Handle<mirror::ObjectArray<mirror::Class>> classes)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool TryInlinePolymorphicCallToSameTarget(HInvoke* invoke_instruction,
                                             ArtMethod* resolved_method,
-                                            const InlineCache& ic)
+                                            Handle<mirror::ObjectArray<mirror::Class>> classes)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Try CHA-based devirtualization to change virtual method calls into
+  // direct calls.
+  // Returns the actual method that resolved_method can be devirtualized to.
+  ArtMethod* TryCHADevirtualization(ArtMethod* resolved_method)
+    REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Add a CHA guard for a CHA-based devirtualized call. A CHA guard checks a
+  // should_deoptimize flag and if it's true, does deoptimization.
+  void AddCHAGuard(HInstruction* invoke_instruction,
+                   uint32_t dex_pc,
+                   HInstruction* cursor,
+                   HBasicBlock* bb_cursor);
 
   HInstanceFieldGet* BuildGetReceiverClass(ClassLinker* class_linker,
                                            HInstruction* receiver,
@@ -152,7 +170,7 @@ class HInliner : public HOptimization {
                              HInstruction* cursor,
                              HBasicBlock* bb_cursor,
                              dex::TypeIndex class_index,
-                             bool is_referrer,
+                             mirror::Class* klass,
                              HInstruction* invoke_instruction,
                              bool with_deoptimization)
     REQUIRES_SHARED(Locks::mutator_lock_);

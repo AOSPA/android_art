@@ -19,6 +19,8 @@
 #include <errno.h>
 #include <sys/time.h>
 
+#include "android-base/stringprintf.h"
+
 #include "atomic.h"
 #include "base/logging.h"
 #include "base/time_utils.h"
@@ -29,6 +31,8 @@
 #include "thread-inl.h"
 
 namespace art {
+
+using android::base::StringPrintf;
 
 static Atomic<Locks::ClientCallback*> safe_to_call_abort_callback(nullptr);
 
@@ -58,6 +62,7 @@ Mutex* Locks::reference_queue_phantom_references_lock_ = nullptr;
 Mutex* Locks::reference_queue_soft_references_lock_ = nullptr;
 Mutex* Locks::reference_queue_weak_references_lock_ = nullptr;
 Mutex* Locks::runtime_shutdown_lock_ = nullptr;
+Mutex* Locks::cha_lock_ = nullptr;
 Mutex* Locks::thread_list_lock_ = nullptr;
 ConditionVariable* Locks::thread_exit_cond_ = nullptr;
 Mutex* Locks::thread_suspend_count_lock_ = nullptr;
@@ -66,6 +71,7 @@ Mutex* Locks::unexpected_signal_lock_ = nullptr;
 Uninterruptible Roles::uninterruptible_;
 ReaderWriterMutex* Locks::jni_globals_lock_ = nullptr;
 Mutex* Locks::jni_weak_globals_lock_ = nullptr;
+ReaderWriterMutex* Locks::dex_lock_ = nullptr;
 
 struct AllMutexData {
   // A guard for all_mutexes_ that's not a mutex (Mutexes must CAS to acquire and busy wait).
@@ -955,10 +961,12 @@ void Locks::Init() {
     DCHECK(logging_lock_ != nullptr);
     DCHECK(mutator_lock_ != nullptr);
     DCHECK(profiler_lock_ != nullptr);
+    DCHECK(cha_lock_ != nullptr);
     DCHECK(thread_list_lock_ != nullptr);
     DCHECK(thread_suspend_count_lock_ != nullptr);
     DCHECK(trace_lock_ != nullptr);
     DCHECK(unexpected_signal_lock_ != nullptr);
+    DCHECK(dex_lock_ != nullptr);
   } else {
     // Create global locks in level order from highest lock level to lowest.
     LockLevel current_lock_level = kInstrumentEntrypointsLock;
@@ -1014,6 +1022,10 @@ void Locks::Init() {
     DCHECK(breakpoint_lock_ == nullptr);
     breakpoint_lock_ = new ReaderWriterMutex("breakpoint lock", current_lock_level);
 
+    UPDATE_CURRENT_LOCK_LEVEL(kCHALock);
+    DCHECK(cha_lock_ == nullptr);
+    cha_lock_ = new Mutex("CHA lock", current_lock_level);
+
     UPDATE_CURRENT_LOCK_LEVEL(kClassLinkerClassesLock);
     DCHECK(classlinker_classes_lock_ == nullptr);
     classlinker_classes_lock_ = new ReaderWriterMutex("ClassLinker classes lock",
@@ -1032,6 +1044,10 @@ void Locks::Init() {
       DCHECK(modify_ldt_lock_ == nullptr);
       modify_ldt_lock_ = new Mutex("modify_ldt lock", current_lock_level);
     }
+
+    UPDATE_CURRENT_LOCK_LEVEL(kDexLock);
+    DCHECK(dex_lock_ == nullptr);
+    dex_lock_ = new ReaderWriterMutex("ClassLinker dex lock", current_lock_level);
 
     UPDATE_CURRENT_LOCK_LEVEL(kOatFileManagerLock);
     DCHECK(oat_file_manager_lock_ == nullptr);

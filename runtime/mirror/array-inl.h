@@ -19,10 +19,11 @@
 
 #include "array.h"
 
+#include "android-base/stringprintf.h"
+
 #include "base/bit_utils.h"
 #include "base/casts.h"
 #include "base/logging.h"
-#include "base/stringprintf.h"
 #include "class-inl.h"
 #include "gc/heap-inl.h"
 #include "obj_ptr-inl.h"
@@ -167,9 +168,9 @@ inline Array* Array::Alloc(Thread* self,
 #else
   // 32-bit.
   if (UNLIKELY(size == 0)) {
-    self->ThrowOutOfMemoryError(StringPrintf("%s of length %d would overflow",
-                                             array_class->PrettyDescriptor().c_str(),
-                                             component_count).c_str());
+    self->ThrowOutOfMemoryError(android::base::StringPrintf("%s of length %d would overflow",
+                                                            array_class->PrettyDescriptor().c_str(),
+                                                            component_count).c_str());
     return nullptr;
   }
 #endif
@@ -421,6 +422,29 @@ inline void PointerArray::Fixup(mirror::PointerArray* dest,
     if (ptr != new_ptr) {
       dest->SetElementPtrSize<false, true>(i, new_ptr, pointer_size);
     }
+  }
+}
+
+template<bool kUnchecked>
+void PointerArray::Memcpy(int32_t dst_pos,
+                          ObjPtr<PointerArray> src,
+                          int32_t src_pos,
+                          int32_t count,
+                          PointerSize ptr_size) {
+  DCHECK(!Runtime::Current()->IsActiveTransaction());
+  DCHECK(!src.IsNull());
+  if (ptr_size == PointerSize::k64) {
+    LongArray* l_this = (kUnchecked ? down_cast<LongArray*>(static_cast<Object*>(this))
+                                    : AsLongArray());
+    LongArray* l_src = (kUnchecked ? down_cast<LongArray*>(static_cast<Object*>(src.Ptr()))
+                                   : src->AsLongArray());
+    l_this->Memcpy(dst_pos, l_src, src_pos, count);
+  } else {
+    IntArray* i_this = (kUnchecked ? down_cast<IntArray*>(static_cast<Object*>(this))
+                                   : AsIntArray());
+    IntArray* i_src = (kUnchecked ? down_cast<IntArray*>(static_cast<Object*>(src.Ptr()))
+                                  : src->AsIntArray());
+    i_this->Memcpy(dst_pos, i_src, src_pos, count);
   }
 }
 

@@ -17,6 +17,11 @@
 #ifndef ART_COMPILER_OPTIMIZING_COMMON_ARM_H_
 #define ART_COMPILER_OPTIMIZING_COMMON_ARM_H_
 
+#include "debug/dwarf/register.h"
+#include "locations.h"
+#include "nodes.h"
+#include "utils/arm/constants_arm.h"
+
 // TODO(VIXL): Make VIXL compile with -Wshadow.
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wshadow"
@@ -117,8 +122,14 @@ inline vixl::aarch32::VRegister InputVRegisterAt(HInstruction* instr, int input_
   if (type == Primitive::kPrimFloat) {
     return InputSRegisterAt(instr, input_index);
   } else {
+    DCHECK_EQ(type, Primitive::kPrimDouble);
     return InputDRegisterAt(instr, input_index);
   }
+}
+
+inline vixl::aarch32::VRegister InputVRegister(HInstruction* instr) {
+  DCHECK_EQ(instr->InputCount(), 1u);
+  return InputVRegisterAt(instr, 0);
 }
 
 inline vixl::aarch32::Register OutputRegister(HInstruction* instr) {
@@ -135,14 +146,22 @@ inline vixl::aarch32::Register InputRegister(HInstruction* instr) {
   return InputRegisterAt(instr, 0);
 }
 
-inline int32_t Int32ConstantFrom(Location location) {
-  HConstant* instr = location.GetConstant();
+inline int32_t Int32ConstantFrom(HInstruction* instr) {
   if (instr->IsIntConstant()) {
     return instr->AsIntConstant()->GetValue();
-  } else {
-    DCHECK(instr->IsNullConstant()) << instr->DebugName();
+  } else if (instr->IsNullConstant()) {
     return 0;
+  } else {
+    DCHECK(instr->IsLongConstant()) << instr->DebugName();
+    const int64_t ret = instr->AsLongConstant()->GetValue();
+    DCHECK_GE(ret, std::numeric_limits<int32_t>::min());
+    DCHECK_LE(ret, std::numeric_limits<int32_t>::max());
+    return ret;
   }
+}
+
+inline int32_t Int32ConstantFrom(Location location) {
+  return Int32ConstantFrom(location.GetConstant());
 }
 
 inline int64_t Int64ConstantFrom(Location location) {
@@ -157,11 +176,16 @@ inline int64_t Int64ConstantFrom(Location location) {
   }
 }
 
+inline uint64_t Uint64ConstantFrom(HInstruction* instr) {
+  DCHECK(instr->IsConstant()) << instr->DebugName();
+  return instr->AsConstant()->GetValueAsUint64();
+}
+
 inline vixl::aarch32::Operand OperandFrom(Location location, Primitive::Type type) {
   if (location.IsRegister()) {
     return vixl::aarch32::Operand(RegisterFrom(location, type));
   } else {
-    return vixl::aarch32::Operand(Int64ConstantFrom(location));
+    return vixl::aarch32::Operand(Int32ConstantFrom(location));
   }
 }
 

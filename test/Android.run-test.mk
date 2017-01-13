@@ -226,6 +226,12 @@ define name-to-var
 $(shell echo $(1) | tr '[:lower:]' '[:upper:]' | tr '-' '_')
 endef  # name-to-var
 
+# Disable 153-reference-stress temporarily until a fix arrives. b/33389022.
+# Disable 080-oom-fragmentation due to flakes. b/33795328
+ART_TEST_RUN_TEST_SKIP += \
+  153-reference-stress \
+  080-oom-fragmentation
+
 ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),$(PREBUILD_TYPES), \
         $(COMPILER_TYPES),$(RELOCATE_TYPES),$(TRACE_TYPES),$(GC_TYPES),$(JNI_TYPES), \
         $(IMAGE_TYPES), $(PICTEST_TYPES), $(DEBUGGABLE_TYPES), $(ART_TEST_RUN_TEST_SKIP), $(ALL_ADDRESS_SIZES))
@@ -280,6 +286,13 @@ TEST_ART_BROKEN_TARGET_TESTS += \
   911-get-stack-trace \
   912-classes \
   913-heaps \
+  914-hello-obsolescence \
+  915-obsolete-2 \
+  916-obsolete-jit \
+  917-fields-transformation \
+  918-fields \
+  919-obsolete-fields \
+  920-objects \
 
 ifneq (,$(filter target,$(TARGET_TYPES)))
   ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,target,$(RUN_TYPES),$(PREBUILD_TYPES), \
@@ -360,8 +373,10 @@ endif
 TEST_ART_BROKEN_NO_RELOCATE_TESTS :=
 
 # Temporarily disable some broken tests when forcing access checks in interpreter b/22414682
+# 629 requires compilation.
 TEST_ART_BROKEN_INTERPRETER_ACCESS_CHECK_TESTS := \
-  137-cfi
+  137-cfi \
+  629-vdex-speed
 
 ifneq (,$(filter interp-ac,$(COMPILER_TYPES)))
   ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),$(PREBUILD_TYPES), \
@@ -425,6 +440,7 @@ ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),ndebug,$(PREB
 # explicitly test for them. These all also assume we have an image.
 # 147-stripped-dex-fallback is disabled because it requires --prebuild.
 # 554-jit-profile-file is disabled because it needs a primary oat file to know what it should save.
+# 629-vdex-speed requires compiled code.
 TEST_ART_BROKEN_FALLBACK_RUN_TESTS := \
   116-nodex2oat \
   117-nopatchoat \
@@ -433,12 +449,15 @@ TEST_ART_BROKEN_FALLBACK_RUN_TESTS := \
   137-cfi \
   138-duplicate-classes-check2 \
   147-stripped-dex-fallback \
-  554-jit-profile-file
+  554-jit-profile-file \
+  629-vdex-speed
 
 # This test fails without an image.
+# 964 often times out due to the large number of classes it tries to compile.
 TEST_ART_BROKEN_NO_IMAGE_RUN_TESTS := \
   137-cfi \
-  138-duplicate-classes-check
+  138-duplicate-classes-check \
+  964-default-iface-init
 
 ifneq (,$(filter no-dex2oat,$(PREBUILD_TYPES)))
   ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),no-dex2oat, \
@@ -470,12 +489,14 @@ TEST_ART_BROKEN_FALLBACK_RUN_TESTS :=
 # This test dynamically enables tracing to force a deoptimization. This makes the test meaningless
 # when already tracing, and writes an error message that we do not want to check for.
 # 130 occasional timeout b/32383962.
+# 629 requires compilation.
 TEST_ART_BROKEN_TRACING_RUN_TESTS := \
   087-gc-after-link \
   130-hprof \
   137-cfi \
   141-class-unload \
   570-checker-osr \
+  629-vdex-speed \
   802-deoptimization
 
 ifneq (,$(filter trace stream,$(TRACE_TYPES)))
@@ -484,11 +505,31 @@ ifneq (,$(filter trace stream,$(TRACE_TYPES)))
       $(PICTEST_TYPES),$(DEBUGGABLE_TYPES), $(TEST_ART_BROKEN_TRACING_RUN_TESTS),$(ALL_ADDRESS_SIZES))
 endif
 
+TEST_ART_BROKEN_TRACING_RUN_TESTS :=
+
+# These tests expect JIT compilation, which is suppressed when tracing.
+TEST_ART_BROKEN_JIT_TRACING_RUN_TESTS := \
+  604-hot-static-interface \
+  612-jit-dex-cache \
+  613-inlining-dex-cache \
+  616-cha \
+  626-set-resolved-string \
+
+ifneq (,$(filter trace stream,$(TRACE_TYPES)))
+  ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),$(PREBUILD_TYPES), \
+      jit,$(RELOCATE_TYPES),trace stream,$(GC_TYPES),$(JNI_TYPES),$(IMAGE_TYPES), \
+      $(PICTEST_TYPES),$(DEBUGGABLE_TYPES), $(TEST_ART_BROKEN_JIT_TRACING_RUN_TESTS),$(ALL_ADDRESS_SIZES))
+endif
+
+TEST_ART_BROKEN_JIT_TRACING_RUN_TESTS :=
+
 # Known broken tests for the interpreter.
 # CFI unwinding expects managed frames.
+# 629 requires compilation.
 TEST_ART_BROKEN_INTERPRETER_RUN_TESTS := \
   137-cfi \
-  554-jit-profile-file
+  554-jit-profile-file \
+  629-vdex-speed
 
 ifneq (,$(filter interpreter,$(COMPILER_TYPES)))
   ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),$(PREBUILD_TYPES), \
@@ -504,11 +545,22 @@ TEST_ART_BROKEN_INTERPRETER_RUN_TESTS :=
 # Test 906 iterates the heap filtering with different options. No instances should be created
 # between those runs to be able to have precise checks.
 # Test 902 hits races with the JIT compiler. b/32821077
+# Test 629 requires compilation.
+# Test 914, 915, 917, & 919 are very sensitive to the exact state of the stack,
+# including the jit-inserted runtime frames. This causes them to be somewhat
+# flaky as JIT tests. This should be fixed once b/33630159 or b/33616143 are
+# resolved but until then just disable them. Test 916 already checks this
+# feature for JIT use cases in a way that is resilient to the jit frames.
 TEST_ART_BROKEN_JIT_RUN_TESTS := \
   137-cfi \
+  629-vdex-speed \
   902-hello-transformation \
   904-object-allocation \
   906-iterate-heap \
+  914-hello-obsolescence \
+  915-obsolete-2 \
+  917-fields-transformation \
+  919-obsolete-fields \
 
 ifneq (,$(filter jit,$(COMPILER_TYPES)))
   ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),$(PREBUILD_TYPES), \
@@ -531,26 +583,6 @@ ifneq (,$(filter regalloc_gc,$(COMPILER_TYPES)))
       $(IMAGE_TYPES),$(PICTEST_TYPES),$(DEBUGGABLE_TYPES), \
       $(TEST_ART_BROKEN_OPTIMIZING_GRAPH_COLOR),$(ALL_ADDRESS_SIZES))
 endif
-
-# Known broken tests for the ARM VIXL backend.
-# Android.arm_vixl.mk defines TEST_ART_BROKEN_OPTIMIZING_ARM_VIXL_RUN_TESTS.
-include $(LOCAL_PATH)/Android.arm_vixl.mk
-
-ifdef ART_USE_VIXL_ARM_BACKEND
-  ifeq (arm,$(filter arm,$(TARGET_ARCH) $(TARGET_2ND_ARCH)))
-    ifneq (,$(filter $(OPTIMIZING_COMPILER_TYPES),$(COMPILER_TYPES)))
-      ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,target,$(RUN_TYPES),$(PREBUILD_TYPES), \
-          $(OPTIMIZING_COMPILER_TYPES),$(RELOCATE_TYPES),$(TRACE_TYPES),$(GC_TYPES),$(JNI_TYPES), \
-          $(IMAGE_TYPES),$(PICTEST_TYPES),$(DEBUGGABLE_TYPES), \
-          $(TEST_ART_BROKEN_OPTIMIZING_ARM_VIXL_RUN_TESTS),32)
-    endif
-  endif
-  # TODO(VIXL): These two tests currently fail, but adding them to `ART_TEST_KNOWN_BROKEN` breaks
-  # `export ART_USE_VIXL_ARM_BACKEND=true && mma -j6 test-art-target-gtest dist`
-  #ART_TEST_KNOWN_BROKEN += test-art-target-gtest-dex2oat_test32
-  #ART_TEST_KNOWN_BROKEN += test-art-target-gtest-image_test32
-endif
-
 
 # Known broken tests for the mips32 optimizing compiler backend.
 TEST_ART_BROKEN_OPTIMIZING_MIPS_RUN_TESTS := \
@@ -608,10 +640,7 @@ TEST_ART_BROKEN_OPTIMIZING_DEBUGGABLE_RUN_TESTS :=
 TEST_ART_BROKEN_INTERPRETER_READ_BARRIER_RUN_TESTS :=
 
 # Tests that should fail in the read barrier configuration with the Optimizing compiler (AOT).
-# 484: Baker's fast path based read barrier compiler instrumentation generates code containing
-#      more parallel moves on x86, thus some Checker assertions may fail.
-TEST_ART_BROKEN_OPTIMIZING_READ_BARRIER_RUN_TESTS := \
-  484-checker-register-hints
+TEST_ART_BROKEN_OPTIMIZING_READ_BARRIER_RUN_TESTS :=
 
 # Tests that should fail in the read barrier configuration with JIT (Optimizing compiler).
 TEST_ART_BROKEN_JIT_READ_BARRIER_RUN_TESTS :=
@@ -995,10 +1024,11 @@ define define-test-art-run-test
     test_groups += ART_RUN_TEST_$$(uc_host_or_target)_NO_IMAGE_RULES
     run_test_options += --no-image
     # Add the core dependency. This is required for pre-building.
+    # Use the PIC image, as it is the default in run-test, to match dependencies.
     ifeq ($(1),host)
-      prereq_rule += $$(HOST_CORE_IMAGE_$$(image_suffix)_no-pic_$(13))
+      prereq_rule += $$(HOST_CORE_IMAGE_$$(image_suffix)_pic_$(13))
     else
-      prereq_rule += $$(TARGET_CORE_IMAGE_$$(image_suffix)_no-pic_$(13))
+      prereq_rule += $$(TARGET_CORE_IMAGE_$$(image_suffix)_pic_$(13))
     endif
   else
     ifeq ($(9),npicimage)

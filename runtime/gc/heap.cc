@@ -21,6 +21,8 @@
 #include <unwind.h>  // For GC verification.
 #include <vector>
 
+#include "android-base/stringprintf.h"
+
 #include "allocation_listener.h"
 #include "art_field-inl.h"
 #include "base/allocator.h"
@@ -81,6 +83,8 @@
 namespace art {
 
 namespace gc {
+
+using android::base::StringPrintf;
 
 static constexpr size_t kCollectorTransitionStressIterations = 0;
 static constexpr size_t kCollectorTransitionStressWait = 10 * 1000;  // Microseconds
@@ -294,66 +298,15 @@ Heap::Heap(size_t initial_size,
   }
 
   // Load image space(s).
-  if (!image_file_name.empty()) {
-    // For code reuse, handle this like a work queue.
-    std::vector<std::string> image_file_names;
-    image_file_names.push_back(image_file_name);
-    // The loaded spaces. Secondary images may fail to load, in which case we need to remove
-    // already added spaces.
-    std::vector<space::Space*> added_image_spaces;
-    uint8_t* const original_requested_alloc_space_begin = requested_alloc_space_begin;
-    for (size_t index = 0; index < image_file_names.size(); ++index) {
-      std::string& image_name = image_file_names[index];
-      std::string error_msg;
-      std::unique_ptr<space::ImageSpace> boot_image_space_uptr = space::ImageSpace::CreateBootImage(
-          image_name.c_str(),
-          image_instruction_set,
-          index > 0,
-          &error_msg);
-      if (boot_image_space_uptr != nullptr) {
-        space::ImageSpace* boot_image_space = boot_image_space_uptr.release();
-        AddSpace(boot_image_space);
-        added_image_spaces.push_back(boot_image_space);
-        // Oat files referenced by image files immediately follow them in memory, ensure alloc space
-        // isn't going to get in the middle
-        uint8_t* oat_file_end_addr = boot_image_space->GetImageHeader().GetOatFileEnd();
-        CHECK_GT(oat_file_end_addr, boot_image_space->End());
-        requested_alloc_space_begin = AlignUp(oat_file_end_addr, kPageSize);
-        boot_image_spaces_.push_back(boot_image_space);
-
-        if (index == 0) {
-          // If this was the first space, check whether there are more images to load.
-          const OatFile* boot_oat_file = boot_image_space->GetOatFile();
-          if (boot_oat_file == nullptr) {
-            continue;
-          }
-
-          const OatHeader& boot_oat_header = boot_oat_file->GetOatHeader();
-          const char* boot_classpath =
-              boot_oat_header.GetStoreValueByKey(OatHeader::kBootClassPathKey);
-          if (boot_classpath == nullptr) {
-            continue;
-          }
-
-          space::ImageSpace::ExtractMultiImageLocations(image_file_name,
-                                                        boot_classpath,
-                                                        &image_file_names);
-        }
-      } else {
-        LOG(ERROR) << "Could not create image space with image file '" << image_file_name << "'. "
-            << "Attempting to fall back to imageless running. Error was: " << error_msg
-            << "\nAttempted image: " << image_name;
-        // Remove already loaded spaces.
-        for (space::Space* loaded_space : added_image_spaces) {
-          RemoveSpace(loaded_space);
-          delete loaded_space;
-        }
-        boot_image_spaces_.clear();
-        requested_alloc_space_begin = original_requested_alloc_space_begin;
-        break;
-      }
+  if (space::ImageSpace::LoadBootImage(image_file_name,
+                                       image_instruction_set,
+                                       &boot_image_spaces_,
+                                       &requested_alloc_space_begin)) {
+    for (auto space : boot_image_spaces_) {
+      AddSpace(space);
     }
   }
+
   /*
   requested_alloc_space_begin ->     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-
                                      +-  nonmoving space (non_moving_space_capacity)+-
@@ -1326,7 +1279,9 @@ void Heap::ThrowOutOfMemoryError(Thread* self, size_t byte_count, AllocatorType 
   std::ostringstream oss;
   size_t total_bytes_free = GetFreeMemory();
   oss << "Failed to allocate a " << byte_count << " byte allocation with " << total_bytes_free
-      << " free bytes and " << PrettySize(GetFreeMemoryUntilOOME()) << " until OOM";
+      << " free bytes and " << PrettySize(GetFreeMemoryUntilOOME()) << " until OOM,"
+      << " max allowed footprint " << max_allowed_footprint_ << ", growth limit "
+      << growth_limit_;
   // If the allocation failed due to fragmentation, print out the largest continuous allocation.
   if (total_bytes_free >= byte_count) {
     space::AllocSpace* space = nullptr;
@@ -1819,7 +1774,7 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
           break;
         }
         // Try to transition the heap if the allocation failure was due to the space being full.
-        if (!IsOutOfMemoryOnAllocation<false>(allocator, alloc_size)) {
+        if (!IsOutOfMemoryOnAllocation(allocator, alloc_size, /*grow*/ false)) {
           // If we aren't out of memory then the OOM was probably from the non moving space being
           // full. Attempt to disable compaction and turn the main space into a non moving space.
           DisableMovingGc();
@@ -2740,12 +2695,6 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
     // calculated in the same thread so that there aren't any races that can cause it to become
     // permanantly disabled. b/17942071
     concurrent_start_bytes_ = std::numeric_limits<size_t>::max();
-  }
-
-  // It's time to clear all inline caches, in case some classes can be unloaded.
-  if (((gc_type == collector::kGcTypeFull) || (gc_type == collector::kGcTypePartial)) &&
-      (runtime->GetJit() != nullptr)) {
-    runtime->GetJit()->GetCodeCache()->ClearGcRootsInInlineCaches(self);
   }
 
   CHECK(collector != nullptr)
@@ -3974,7 +3923,7 @@ void Heap::RegisterNativeFree(JNIEnv* env, size_t bytes) {
       ScopedObjectAccess soa(env);
       env->ThrowNew(WellKnownClasses::java_lang_RuntimeException,
                     StringPrintf("Attempted to free %zd native bytes with only %zd native bytes "
-                                 "registered as allocated", bytes, expected_size).c_str());
+                    "registered as allocated", bytes, expected_size).c_str());
       break;
     }
   } while (!native_bytes_allocated_.CompareExchangeWeakRelaxed(expected_size,
@@ -4223,6 +4172,73 @@ void Heap::SetGcPauseListener(GcPauseListener* l) {
 
 void Heap::RemoveGcPauseListener() {
   gc_pause_listener_.StoreRelaxed(nullptr);
+}
+
+mirror::Object* Heap::AllocWithNewTLAB(Thread* self,
+                                       size_t alloc_size,
+                                       bool grow,
+                                       size_t* bytes_allocated,
+                                       size_t* usable_size,
+                                       size_t* bytes_tl_bulk_allocated) {
+  const AllocatorType allocator_type = GetCurrentAllocator();
+  if (allocator_type == kAllocatorTypeTLAB) {
+    DCHECK(bump_pointer_space_ != nullptr);
+    const size_t new_tlab_size = alloc_size + kDefaultTLABSize;
+    if (UNLIKELY(IsOutOfMemoryOnAllocation(allocator_type, new_tlab_size, grow))) {
+      return nullptr;
+    }
+    // Try allocating a new thread local buffer, if the allocation fails the space must be
+    // full so return null.
+    if (!bump_pointer_space_->AllocNewTlab(self, new_tlab_size)) {
+      return nullptr;
+    }
+    *bytes_tl_bulk_allocated = new_tlab_size;
+  } else {
+    DCHECK(allocator_type == kAllocatorTypeRegionTLAB);
+    DCHECK(region_space_ != nullptr);
+    if (space::RegionSpace::kRegionSize >= alloc_size) {
+      // Non-large. Check OOME for a tlab.
+      if (LIKELY(!IsOutOfMemoryOnAllocation(allocator_type,
+                                            space::RegionSpace::kRegionSize,
+                                            grow))) {
+        // Try to allocate a tlab.
+        if (!region_space_->AllocNewTlab(self)) {
+          // Failed to allocate a tlab. Try non-tlab.
+          return region_space_->AllocNonvirtual<false>(alloc_size,
+                                                       bytes_allocated,
+                                                       usable_size,
+                                                       bytes_tl_bulk_allocated);
+        }
+        *bytes_tl_bulk_allocated = space::RegionSpace::kRegionSize;
+        // Fall-through to using the TLAB below.
+      } else {
+        // Check OOME for a non-tlab allocation.
+        if (!IsOutOfMemoryOnAllocation(allocator_type, alloc_size, grow)) {
+          return region_space_->AllocNonvirtual<false>(alloc_size,
+                                                       bytes_allocated,
+                                                       usable_size,
+                                                       bytes_tl_bulk_allocated);
+        }
+        // Neither tlab or non-tlab works. Give up.
+        return nullptr;
+      }
+    } else {
+      // Large. Check OOME.
+      if (LIKELY(!IsOutOfMemoryOnAllocation(allocator_type, alloc_size, grow))) {
+        return region_space_->AllocNonvirtual<false>(alloc_size,
+                                                     bytes_allocated,
+                                                     usable_size,
+                                                     bytes_tl_bulk_allocated);
+      }
+      return nullptr;
+    }
+  }
+  // Refilled TLAB, return.
+  mirror::Object* ret = self->AllocTlab(alloc_size);
+  DCHECK(ret != nullptr);
+  *bytes_allocated = alloc_size;
+  *usable_size = alloc_size;
+  return ret;
 }
 
 }  // namespace gc

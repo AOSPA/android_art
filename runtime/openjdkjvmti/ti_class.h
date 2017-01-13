@@ -39,10 +39,34 @@ namespace openjdkjvmti {
 
 class ClassUtil {
  public:
+  static jvmtiError GetClassFields(jvmtiEnv* env,
+                                   jclass klass,
+                                   jint* field_count_ptr,
+                                   jfieldID** fields_ptr);
+
+  static jvmtiError GetClassMethods(jvmtiEnv* env,
+                                    jclass klass,
+                                    jint* method_count_ptr,
+                                    jmethodID** methods_ptr);
+
+  static jvmtiError GetImplementedInterfaces(jvmtiEnv* env,
+                                             jclass klass,
+                                             jint* interface_count_ptr,
+                                             jclass** interfaces_ptr);
+
+  static jvmtiError GetClassModifiers(jvmtiEnv* env, jclass klass, jint* modifiers_ptr);
+
   static jvmtiError GetClassSignature(jvmtiEnv* env,
                                       jclass klass,
                                       char** signature_ptr,
                                       char** generic_ptr);
+
+  static jvmtiError GetClassStatus(jvmtiEnv* env, jclass klass, jint* status_ptr);
+
+  static jvmtiError GetClassLoader(jvmtiEnv* env, jclass klass, jobject* classloader_ptr);
+
+  static jvmtiError IsInterface(jvmtiEnv* env, jclass klass, jboolean* is_interface_ptr);
+  static jvmtiError IsArrayClass(jvmtiEnv* env, jclass klass, jboolean* is_array_class_ptr);
 };
 
 }  // namespace openjdkjvmti

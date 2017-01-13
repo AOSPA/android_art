@@ -18,6 +18,7 @@
 #define ART_COMPILER_OPTIMIZING_CODE_GENERATOR_MIPS_H_
 
 #include "code_generator.h"
+#include "dex_file_types.h"
 #include "driver/compiler_options.h"
 #include "nodes.h"
 #include "parallel_move_resolver.h"
@@ -31,11 +32,11 @@ namespace mips {
 // InvokeDexCallingConvention registers
 
 static constexpr Register kParameterCoreRegisters[] =
-    { A1, A2, A3 };
+    { A1, A2, A3, T0, T1 };
 static constexpr size_t kParameterCoreRegistersLength = arraysize(kParameterCoreRegisters);
 
 static constexpr FRegister kParameterFpuRegisters[] =
-    { F12, F14 };
+    { F8, F10, F12, F14, F16, F18 };
 static constexpr size_t kParameterFpuRegistersLength = arraysize(kParameterFpuRegisters);
 
 
@@ -47,7 +48,7 @@ static constexpr size_t kRuntimeParameterCoreRegistersLength =
     arraysize(kRuntimeParameterCoreRegisters);
 
 static constexpr FRegister kRuntimeParameterFpuRegisters[] =
-    { F12, F14};
+    { F12, F14 };
 static constexpr size_t kRuntimeParameterFpuRegistersLength =
     arraysize(kRuntimeParameterFpuRegisters);
 
@@ -235,7 +236,10 @@ class InstructionCodeGeneratorMIPS : public InstructionCodeGenerator {
   void HandleBinaryOp(HBinaryOperation* operation);
   void HandleCondition(HCondition* instruction);
   void HandleShift(HBinaryOperation* operation);
-  void HandleFieldSet(HInstruction* instruction, const FieldInfo& field_info, uint32_t dex_pc);
+  void HandleFieldSet(HInstruction* instruction,
+                      const FieldInfo& field_info,
+                      uint32_t dex_pc,
+                      bool value_can_be_null);
   void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info, uint32_t dex_pc);
   // Generate a GC root reference load:
   //
@@ -349,7 +353,7 @@ class CodeGeneratorMIPS : public CodeGenerator {
   // Emit linker patches.
   void EmitLinkerPatches(ArenaVector<LinkerPatch>* linker_patches) OVERRIDE;
 
-  void MarkGCCard(Register object, Register value);
+  void MarkGCCard(Register object, Register value, bool value_can_be_null);
 
   // Register allocation.
 
@@ -452,7 +456,8 @@ class CodeGeneratorMIPS : public CodeGenerator {
   PcRelativePatchInfo* NewPcRelativeTypePatch(const DexFile& dex_file, dex::TypeIndex type_index);
   PcRelativePatchInfo* NewPcRelativeDexCacheArrayPatch(const DexFile& dex_file,
                                                        uint32_t element_offset);
-  Literal* DeduplicateBootImageStringLiteral(const DexFile& dex_file, uint32_t string_index);
+  Literal* DeduplicateBootImageStringLiteral(const DexFile& dex_file,
+                                             dex::StringIndex string_index);
   Literal* DeduplicateBootImageTypeLiteral(const DexFile& dex_file, dex::TypeIndex type_index);
   Literal* DeduplicateBootImageAddressLiteral(uint32_t address);
 
@@ -472,8 +477,6 @@ class CodeGeneratorMIPS : public CodeGenerator {
 
   Literal* DeduplicateUint32Literal(uint32_t value, Uint32ToLiteralMap* map);
   Literal* DeduplicateMethodLiteral(MethodReference target_method, MethodToLiteralMap* map);
-  Literal* DeduplicateMethodAddressLiteral(MethodReference target_method);
-  Literal* DeduplicateMethodCodeLiteral(MethodReference target_method);
   PcRelativePatchInfo* NewPcRelativePatch(const DexFile& dex_file,
                                           uint32_t offset_or_index,
                                           ArenaDeque<PcRelativePatchInfo>* patches);
@@ -493,9 +496,6 @@ class CodeGeneratorMIPS : public CodeGenerator {
 
   // Deduplication map for 32-bit literals, used for non-patchable boot image addresses.
   Uint32ToLiteralMap uint32_literals_;
-  // Method patch info, map MethodReference to a literal for method address and method code.
-  MethodToLiteralMap method_patches_;
-  MethodToLiteralMap call_patches_;
   // PC-relative patch info for each HMipsDexCacheArraysBase.
   ArenaDeque<PcRelativePatchInfo> pc_relative_dex_cache_patches_;
   // Deduplication map for boot string literals for kBootImageLinkTimeAddress.

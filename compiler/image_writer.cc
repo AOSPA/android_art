@@ -433,7 +433,7 @@ void ImageWriter::PrepareDexCacheArraySlots() {
 
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   Thread* const self = Thread::Current();
-  ReaderMutexLock mu(self, *class_linker->DexLock());
+  ReaderMutexLock mu(self, *Locks::dex_lock_);
   for (const ClassLinker::DexCacheData& data : class_linker->GetDexCachesData()) {
     ObjPtr<mirror::DexCache> dex_cache =
         ObjPtr<mirror::DexCache>::DownCast(self->DecodeJObject(data.weak_root));
@@ -803,6 +803,13 @@ bool ImageWriter::PruneAppImageClassInternal(
   result = result || PruneAppImageClassInternal(klass->GetSuperClass(),
                                                 &my_early_exit,
                                                 visited);
+  // Remove the class if the dex file is not in the set of dex files. This happens for classes that
+  // are from uses library if there is no profile. b/30688277
+  mirror::DexCache* dex_cache = klass->GetDexCache();
+  if (dex_cache != nullptr) {
+    result = result ||
+        dex_file_oat_index_map_.find(dex_cache->GetDexFile()) == dex_file_oat_index_map_.end();
+  }
   // Erase the element we stored earlier since we are exiting the function.
   auto it = visited->find(klass);
   DCHECK(it != visited->end());
@@ -838,20 +845,72 @@ bool ImageWriter::KeepClass(Class* klass) {
   return true;
 }
 
-class ImageWriter::NonImageClassesVisitor : public ClassVisitor {
+class ImageWriter::PruneClassesVisitor : public ClassVisitor {
  public:
-  explicit NonImageClassesVisitor(ImageWriter* image_writer) : image_writer_(image_writer) {}
+  PruneClassesVisitor(ImageWriter* image_writer, ObjPtr<mirror::ClassLoader> class_loader)
+      : image_writer_(image_writer),
+        class_loader_(class_loader),
+        classes_to_prune_(),
+        defined_class_count_(0u) { }
 
-  bool operator()(ObjPtr<Class> klass) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool operator()(ObjPtr<mirror::Class> klass) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
     if (!image_writer_->KeepClass(klass.Ptr())) {
       classes_to_prune_.insert(klass.Ptr());
+      if (klass->GetClassLoader() == class_loader_) {
+        ++defined_class_count_;
+      }
     }
     return true;
   }
 
-  std::unordered_set<mirror::Class*> classes_to_prune_;
+  size_t Prune() REQUIRES_SHARED(Locks::mutator_lock_) {
+    ClassTable* class_table =
+        Runtime::Current()->GetClassLinker()->ClassTableForClassLoader(class_loader_);
+    for (mirror::Class* klass : classes_to_prune_) {
+      std::string storage;
+      const char* descriptor = klass->GetDescriptor(&storage);
+      bool result = class_table->Remove(descriptor);
+      DCHECK(result);
+      DCHECK(!class_table->Remove(descriptor)) << descriptor;
+    }
+    return defined_class_count_;
+  }
+
+ private:
   ImageWriter* const image_writer_;
+  const ObjPtr<mirror::ClassLoader> class_loader_;
+  std::unordered_set<mirror::Class*> classes_to_prune_;
+  size_t defined_class_count_;
 };
+
+class ImageWriter::PruneClassLoaderClassesVisitor : public ClassLoaderVisitor {
+ public:
+  explicit PruneClassLoaderClassesVisitor(ImageWriter* image_writer)
+      : image_writer_(image_writer), removed_class_count_(0) {}
+
+  virtual void Visit(ObjPtr<mirror::ClassLoader> class_loader) OVERRIDE
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    PruneClassesVisitor classes_visitor(image_writer_, class_loader);
+    ClassTable* class_table =
+        Runtime::Current()->GetClassLinker()->ClassTableForClassLoader(class_loader);
+    class_table->Visit(classes_visitor);
+    removed_class_count_ += classes_visitor.Prune();
+  }
+
+  size_t GetRemovedClassCount() const {
+    return removed_class_count_;
+  }
+
+ private:
+  ImageWriter* const image_writer_;
+  size_t removed_class_count_;
+};
+
+void ImageWriter::VisitClassLoaders(ClassLoaderVisitor* visitor) {
+  WriterMutexLock mu(Thread::Current(), *Locks::classlinker_classes_lock_);
+  visitor->Visit(nullptr);  // Visit boot class loader.
+  Runtime::Current()->GetClassLinker()->VisitClassLoaders(visitor);
+}
 
 void ImageWriter::PruneNonImageClasses() {
   Runtime* runtime = Runtime::Current();
@@ -862,21 +921,11 @@ void ImageWriter::PruneNonImageClasses() {
   // path dex caches.
   class_linker->ClearClassTableStrongRoots();
 
-  // Make a list of classes we would like to prune.
-  NonImageClassesVisitor visitor(this);
-  class_linker->VisitClasses(&visitor);
-
   // Remove the undesired classes from the class roots.
-  VLOG(compiler) << "Pruning " << visitor.classes_to_prune_.size() << " classes";
-  for (mirror::Class* klass : visitor.classes_to_prune_) {
-    std::string temp;
-    const char* name = klass->GetDescriptor(&temp);
-    VLOG(compiler) << "Pruning class " << name;
-    if (!compile_app_image_) {
-      DCHECK(IsBootClassLoaderClass(klass));
-    }
-    bool result = class_linker->RemoveClass(name, klass->GetClassLoader());
-    DCHECK(result);
+  {
+    PruneClassLoaderClassesVisitor class_loader_visitor(this);
+    VisitClassLoaders(&class_loader_visitor);
+    VLOG(compiler) << "Pruned " << class_loader_visitor.GetRemovedClassCount() << " classes";
   }
 
   // Clear references to removed classes from the DexCaches.
@@ -884,7 +933,7 @@ void ImageWriter::PruneNonImageClasses() {
 
   ScopedAssertNoThreadSuspension sa(__FUNCTION__);
   ReaderMutexLock mu(self, *Locks::classlinker_classes_lock_);  // For ClassInClassTable
-  ReaderMutexLock mu2(self, *class_linker->DexLock());
+  ReaderMutexLock mu2(self, *Locks::dex_lock_);
   for (const ClassLinker::DexCacheData& data : class_linker->GetDexCachesData()) {
     if (self->IsJWeakCleared(data.weak_root)) {
       continue;
@@ -1013,7 +1062,7 @@ ObjectArray<Object>* ImageWriter::CreateImageRoots(size_t oat_index) const {
   // caches. We check that the number of dex caches does not change.
   size_t dex_cache_count = 0;
   {
-    ReaderMutexLock mu(self, *class_linker->DexLock());
+    ReaderMutexLock mu(self, *Locks::dex_lock_);
     // Count number of dex caches not in the boot image.
     for (const ClassLinker::DexCacheData& data : class_linker->GetDexCachesData()) {
       ObjPtr<mirror::DexCache> dex_cache =
@@ -1031,7 +1080,7 @@ ObjectArray<Object>* ImageWriter::CreateImageRoots(size_t oat_index) const {
       hs.NewHandle(ObjectArray<Object>::Alloc(self, object_array_class.Get(), dex_cache_count)));
   CHECK(dex_caches.Get() != nullptr) << "Failed to allocate a dex cache array.";
   {
-    ReaderMutexLock mu(self, *class_linker->DexLock());
+    ReaderMutexLock mu(self, *Locks::dex_lock_);
     size_t non_image_dex_caches = 0;
     // Re-count number of non image dex caches.
     for (const ClassLinker::DexCacheData& data : class_linker->GetDexCachesData()) {
@@ -1064,11 +1113,15 @@ ObjectArray<Object>* ImageWriter::CreateImageRoots(size_t oat_index) const {
   }
 
   // build an Object[] of the roots needed to restore the runtime
+  int32_t image_roots_size = ImageHeader::NumberOfImageRoots(compile_app_image_);
   auto image_roots(hs.NewHandle(
-      ObjectArray<Object>::Alloc(self, object_array_class.Get(), ImageHeader::kImageRootsMax)));
+      ObjectArray<Object>::Alloc(self, object_array_class.Get(), image_roots_size)));
   image_roots->Set<false>(ImageHeader::kDexCaches, dex_caches.Get());
   image_roots->Set<false>(ImageHeader::kClassRoots, class_linker->GetClassRoots());
-  for (int i = 0; i < ImageHeader::kImageRootsMax; i++) {
+  // image_roots[ImageHeader::kClassLoader] will be set later for app image.
+  static_assert(ImageHeader::kClassLoader + 1u == ImageHeader::kImageRootsMax,
+                "Class loader should be the last image root.");
+  for (int32_t i = 0; i < ImageHeader::kImageRootsMax - 1; ++i) {
     CHECK(image_roots->Get(i) != nullptr);
   }
   return image_roots.Get();
@@ -1451,7 +1504,8 @@ void ImageWriter::CalculateNewObjectOffsets() {
     InternTable* const intern_table = runtime->GetInternTable();
     for (size_t i = 0, count = dex_file->NumStringIds(); i < count; ++i) {
       uint32_t utf16_length;
-      const char* utf8_data = dex_file->StringDataAndUtf16LengthByIdx(i, &utf16_length);
+      const char* utf8_data = dex_file->StringDataAndUtf16LengthByIdx(dex::StringIndex(i),
+                                                                      &utf16_length);
       mirror::String* string = intern_table->LookupStrong(self, utf16_length, utf8_data).Ptr();
       TryAssignBinSlot(work_stack, string, oat_index);
     }
@@ -1489,6 +1543,12 @@ void ImageWriter::CalculateNewObjectOffsets() {
     }
     // Process the work stack in case anything was added by TryAssignBinSlot.
     ProcessWorkStack(&work_stack);
+
+    // Store the class loader in the class roots.
+    CHECK_EQ(class_loaders_.size(), 1u);
+    CHECK_EQ(image_roots.size(), 1u);
+    CHECK(*class_loaders_.begin() != nullptr);
+    image_roots[0]->Set<false>(ImageHeader::kClassLoader, *class_loaders_.begin());
   }
 
   // Verify that all objects have assigned image bin slots.
@@ -1507,8 +1567,10 @@ void ImageWriter::CalculateNewObjectOffsets() {
     }
     // Calculate the size of the class table.
     ReaderMutexLock mu(self, *Locks::classlinker_classes_lock_);
-    DCHECK_EQ(image_info.class_table_->NumZygoteClasses(), 0u);
-    if (image_info.class_table_->NumNonZygoteClasses() != 0u) {
+    CHECK_EQ(class_loaders_.size(), compile_app_image_ ? 1u : 0u);
+    mirror::ClassLoader* class_loader = compile_app_image_ ? *class_loaders_.begin() : nullptr;
+    DCHECK_EQ(image_info.class_table_->NumZygoteClasses(class_loader), 0u);
+    if (image_info.class_table_->NumNonZygoteClasses(class_loader) != 0u) {
       image_info.class_table_bytes_ += image_info.class_table_->WriteToMemory(nullptr);
     }
   }
@@ -1853,11 +1915,12 @@ void ImageWriter::CopyAndFixupNativeData(size_t oat_index) {
     // above comment for intern tables.
     ClassTable temp_class_table;
     temp_class_table.ReadFromMemory(class_table_memory_ptr);
-    CHECK_EQ(temp_class_table.NumZygoteClasses(), table->NumNonZygoteClasses() +
-             table->NumZygoteClasses());
-    BufferedRootVisitor<kDefaultBufferedRootCount> buffered_visitor(&root_visitor,
-                                                                    RootInfo(kRootUnknown));
-    temp_class_table.VisitRoots(buffered_visitor);
+    CHECK_EQ(class_loaders_.size(), compile_app_image_ ? 1u : 0u);
+    mirror::ClassLoader* class_loader = compile_app_image_ ? *class_loaders_.begin() : nullptr;
+    CHECK_EQ(temp_class_table.NumZygoteClasses(class_loader),
+             table->NumNonZygoteClasses(class_loader) + table->NumZygoteClasses(class_loader));
+    UnbufferedRootVisitor visitor(&root_visitor, RootInfo(kRootUnknown));
+    temp_class_table.VisitRoots(visitor);
   }
 }
 

@@ -75,11 +75,10 @@ ObjPtr<mirror::Object> ReferenceProcessor::GetReferent(Thread* self,
   MutexLock mu(self, *Locks::reference_processor_lock_);
   while ((!kUseReadBarrier && SlowPathEnabled()) ||
          (kUseReadBarrier && !self->GetWeakRefAccessEnabled())) {
-    mirror::HeapReference<mirror::Object>* const referent_addr =
-        reference->GetReferentReferenceAddr();
+    ObjPtr<mirror::Object> referent = reference->GetReferent<kWithoutReadBarrier>();
     // If the referent became cleared, return it. Don't need barrier since thread roots can't get
     // updated until after we leave the function due to holding the mutator lock.
-    if (referent_addr->AsMirrorPtr() == nullptr) {
+    if (referent == nullptr) {
       return nullptr;
     }
     // Try to see if the referent is already marked by using the is_marked_callback. We can return
@@ -91,10 +90,15 @@ ObjPtr<mirror::Object> ReferenceProcessor::GetReferent(Thread* self,
       // case only black nodes can be safely returned. If the GC is preserving references, the
       // mutator could take a white field from a grey or white node and move it somewhere else
       // in the heap causing corruption since this field would get swept.
-      if (collector_->IsMarkedHeapReference(referent_addr)) {
+      // Use the cached referent instead of calling GetReferent since other threads could call
+      // Reference.clear() after we did the null check resulting in a null pointer being
+      // incorrectly passed to IsMarked. b/33569625
+      ObjPtr<mirror::Object> forwarded_ref = collector_->IsMarked(referent.Ptr());
+      if (forwarded_ref != nullptr) {
+        // Non null means that it is marked.
         if (!preserving_references_ ||
            (LIKELY(!reference->IsFinalizerReferenceInstance()) && reference->IsUnprocessed())) {
-          return referent_addr->AsMirrorPtr();
+          return forwarded_ref;
         }
       }
     }
@@ -265,11 +269,23 @@ void ReferenceProcessor::EnqueueClearedReferences(Thread* self) {
   }
 }
 
-bool ReferenceProcessor::MakeCircularListIfUnenqueued(
-    ObjPtr<mirror::FinalizerReference> reference) {
+void ReferenceProcessor::ClearReferent(ObjPtr<mirror::Reference> ref) {
   Thread* self = Thread::Current();
   MutexLock mu(self, *Locks::reference_processor_lock_);
-  // Wait untul we are done processing reference.
+  // Need to wait until reference processing is done since IsMarkedHeapReference does not have a
+  // CAS. If we do not wait, it can result in the GC un-clearing references due to race conditions.
+  // This also handles the race where the referent gets cleared after a null check but before
+  // IsMarkedHeapReference is called.
+  WaitUntilDoneProcessingReferences(self);
+  if (Runtime::Current()->IsActiveTransaction()) {
+    ref->ClearReferent<true>();
+  } else {
+    ref->ClearReferent<false>();
+  }
+}
+
+void ReferenceProcessor::WaitUntilDoneProcessingReferences(Thread* self) {
+  // Wait until we are done processing reference.
   while ((!kUseReadBarrier && SlowPathEnabled()) ||
          (kUseReadBarrier && !self->GetWeakRefAccessEnabled())) {
     // Check and run the empty checkpoint before blocking so the empty checkpoint will work in the
@@ -277,6 +293,13 @@ bool ReferenceProcessor::MakeCircularListIfUnenqueued(
     self->CheckEmptyCheckpoint();
     condition_.WaitHoldingLocks(self);
   }
+}
+
+bool ReferenceProcessor::MakeCircularListIfUnenqueued(
+    ObjPtr<mirror::FinalizerReference> reference) {
+  Thread* self = Thread::Current();
+  MutexLock mu(self, *Locks::reference_processor_lock_);
+  WaitUntilDoneProcessingReferences(self);
   // At this point, since the sentinel of the reference is live, it is guaranteed to not be
   // enqueued if we just finished processing references. Otherwise, we may be doing the main GC
   // phase. Since we are holding the reference processor lock, it guarantees that reference

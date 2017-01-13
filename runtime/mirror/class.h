@@ -674,6 +674,8 @@ class MANAGED Class FINAL : public Object {
     return MemberOffset(OFFSETOF_MEMBER(Class, super_class_));
   }
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
+           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   ClassLoader* GetClassLoader() ALWAYS_INLINE REQUIRES_SHARED(Locks::mutator_lock_);
 
   void SetClassLoader(ObjPtr<ClassLoader> new_cl) REQUIRES_SHARED(Locks::mutator_lock_);
@@ -1085,7 +1087,9 @@ class MANAGED Class FINAL : public Object {
   ArtField* GetStaticField(uint32_t i) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Find a static or instance field using the JLS resolution order
-  static ArtField* FindField(Thread* self, Handle<Class> klass, const StringPiece& name,
+  static ArtField* FindField(Thread* self,
+                             ObjPtr<Class> klass,
+                             const StringPiece& name,
                              const StringPiece& type)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -1106,7 +1110,7 @@ class MANAGED Class FINAL : public Object {
 
   // Finds the given static field in this class or a superclass.
   static ArtField* FindStaticField(Thread* self,
-                                   Handle<Class> klass,
+                                   ObjPtr<Class> klass,
                                    const StringPiece& name,
                                    const StringPiece& type)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -1202,9 +1206,15 @@ class MANAGED Class FINAL : public Object {
 
   dex::TypeIndex GetDirectInterfaceTypeIdx(uint32_t idx) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static ObjPtr<Class> GetDirectInterface(Thread* self,
-                                          Handle<Class> klass,
-                                          uint32_t idx)
+  // Get the direct interface of the `klass` at index `idx` if resolved, otherwise return null.
+  // If the caller expects the interface to be resolved, for example for a resolved `klass`,
+  // that assumption should be checked by `DCHECK(result != nullptr)`.
+  static ObjPtr<Class> GetDirectInterface(Thread* self, ObjPtr<Class> klass, uint32_t idx)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Resolve and get the direct interface of the `klass` at index `idx`.
+  // Returns null with a pending exception if the resolution fails.
+  static ObjPtr<Class> ResolveDirectInterface(Thread* self, Handle<Class> klass, uint32_t idx)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   const char* GetSourceFile() REQUIRES_SHARED(Locks::mutator_lock_);
@@ -1236,13 +1246,6 @@ class MANAGED Class FINAL : public Object {
   MemberOffset GetSlowPathFlagOffset() REQUIRES_SHARED(Locks::mutator_lock_);
   bool GetSlowPathEnabled() REQUIRES_SHARED(Locks::mutator_lock_);
   void SetSlowPath(bool enabled) REQUIRES_SHARED(Locks::mutator_lock_);
-
-  StringDexCacheType* GetDexCacheStrings() REQUIRES_SHARED(Locks::mutator_lock_);
-  void SetDexCacheStrings(StringDexCacheType* new_dex_cache_strings)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  static MemberOffset DexCacheStringsOffset() {
-    return OFFSET_OF_OBJECT_MEMBER(Class, dex_cache_strings_);
-  }
 
   // May cause thread suspension due to EqualParameters.
   ArtMethod* GetDeclaredConstructor(Thread* self,
@@ -1427,9 +1430,6 @@ class MANAGED Class FINAL : public Object {
   // appended. For abstract classes, methods may be created in the vtable that aren't in
   // virtual_ methods_ for miranda methods.
   HeapReference<PointerArray> vtable_;
-
-  // Short cuts to dex_cache_ member for fast compiled code access.
-  uint64_t dex_cache_strings_;
 
   // instance fields
   //

@@ -18,6 +18,8 @@
 
 #include <cstddef>
 
+#include "android-base/stringprintf.h"
+
 #include "arch/context.h"
 #include "art_field-inl.h"
 #include "art_method-inl.h"
@@ -35,6 +37,7 @@
 #include "jit/profiling_info.h"
 #include "jni_internal.h"
 #include "mirror/class-inl.h"
+#include "mirror/class_ext.h"
 #include "mirror/executable.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/object-inl.h"
@@ -45,16 +48,52 @@
 
 namespace art {
 
+using android::base::StringPrintf;
+
 extern "C" void art_quick_invoke_stub(ArtMethod*, uint32_t*, uint32_t, Thread*, JValue*,
                                       const char*);
 extern "C" void art_quick_invoke_static_stub(ArtMethod*, uint32_t*, uint32_t, Thread*, JValue*,
                                              const char*);
+
+ArtMethod* ArtMethod::GetSingleImplementation() {
+  DCHECK(!IsNative());
+  if (!IsAbstract()) {
+    // A non-abstract's single implementation is itself.
+    return this;
+  }
+  // TODO: add single-implementation logic for abstract method by storing it
+  // in ptr_sized_fields_.
+  return nullptr;
+}
 
 ArtMethod* ArtMethod::FromReflectedMethod(const ScopedObjectAccessAlreadyRunnable& soa,
                                           jobject jlr_method) {
   ObjPtr<mirror::Executable> executable = soa.Decode<mirror::Executable>(jlr_method);
   DCHECK(executable != nullptr);
   return executable->GetArtMethod();
+}
+
+mirror::DexCache* ArtMethod::GetObsoleteDexCache() {
+  DCHECK(!Runtime::Current()->IsAotCompiler()) << PrettyMethod();
+  DCHECK(IsObsolete());
+  ObjPtr<mirror::ClassExt> ext(GetDeclaringClass()->GetExtData());
+  CHECK(!ext.IsNull());
+  ObjPtr<mirror::PointerArray> obsolete_methods(ext->GetObsoleteMethods());
+  CHECK(!obsolete_methods.IsNull());
+  DCHECK(ext->GetObsoleteDexCaches() != nullptr);
+  int32_t len = obsolete_methods->GetLength();
+  DCHECK_EQ(len, ext->GetObsoleteDexCaches()->GetLength());
+  // Using kRuntimePointerSize (instead of using the image's pointer size) is fine since images
+  // should never have obsolete methods in them so they should always be the same.
+  PointerSize pointer_size = kRuntimePointerSize;
+  DCHECK_EQ(kRuntimePointerSize, Runtime::Current()->GetClassLinker()->GetImagePointerSize());
+  for (int32_t i = 0; i < len; i++) {
+    if (this == obsolete_methods->GetElementPtrSize<ArtMethod*>(i, pointer_size)) {
+      return ext->GetObsoleteDexCaches()->Get(i);
+    }
+  }
+  LOG(FATAL) << "This method does not appear in the obsolete map of its class!";
+  UNREACHABLE();
 }
 
 mirror::String* ArtMethod::GetNameAsString(Thread* self) {
@@ -322,7 +361,7 @@ void ArtMethod::RegisterNative(const void* native_method, bool is_fast) {
   CHECK(!IsFastNative()) << PrettyMethod();
   CHECK(native_method != nullptr) << PrettyMethod();
   if (is_fast) {
-    SetAccessFlags(GetAccessFlags() | kAccFastNative);
+    AddAccessFlags(kAccFastNative);
   }
   SetEntryPointFromJni(native_method);
 }
@@ -480,7 +519,7 @@ const uint8_t* ArtMethod::GetQuickenedInfo(PointerSize pointer_size) {
     if (oat_file == nullptr) {
       return nullptr;
     }
-    return oat_file->DexBegin() + header->vmap_table_offset_;
+    return oat_file->DexBegin() + header->GetVmapTableOffset();
   } else {
     return oat_method.GetVmapTable();
   }
@@ -578,7 +617,7 @@ const OatQuickMethodHeader* ArtMethod::GetOatQuickMethodHeader(uintptr_t pc) {
   DCHECK(method_header->Contains(pc))
       << PrettyMethod()
       << " " << std::hex << pc << " " << oat_entry_point
-      << " " << (uintptr_t)(method_header->code_ + method_header->code_size_);
+      << " " << (uintptr_t)(method_header->GetCode() + method_header->GetCodeSize());
   return method_header;
 }
 

@@ -28,6 +28,7 @@
 
 #include "arch/instruction_set.h"
 #include "base/macros.h"
+#include "dex_file_types.h"
 #include "experimental_flags.h"
 #include "gc_root.h"
 #include "instrumentation.h"
@@ -75,6 +76,7 @@ namespace verifier {
 }  // namespace verifier
 class ArenaPool;
 class ArtMethod;
+class ClassHierarchyAnalysis;
 class ClassLinker;
 class Closure;
 class CompilerCallbacks;
@@ -97,18 +99,6 @@ struct TraceConfig;
 class Transaction;
 
 typedef std::vector<std::pair<std::string, const void*>> RuntimeOptions;
-
-// Not all combinations of flags are valid. You may not visit all roots as well as the new roots
-// (no logical reason to do this). You also may not start logging new roots and stop logging new
-// roots (also no logical reason to do this).
-enum VisitRootFlags : uint8_t {
-  kVisitRootFlagAllRoots = 0x1,
-  kVisitRootFlagNewRoots = 0x2,
-  kVisitRootFlagStartLoggingNewRoots = 0x4,
-  kVisitRootFlagStopLoggingNewRoots = 0x8,
-  kVisitRootFlagClearRootLog = 0x10,
-  kVisitRootFlagClassLoader = 0x20,
-};
 
 class Runtime {
  public:
@@ -278,7 +268,7 @@ class Runtime {
     return java_vm_.get();
   }
 
-  size_t GetMaxSpinsBeforeThinkLockInflation() const {
+  size_t GetMaxSpinsBeforeThinLockInflation() const {
     return max_spins_before_thin_lock_inflation_;
   }
 
@@ -347,26 +337,14 @@ class Runtime {
   void VisitTransactionRoots(RootVisitor* visitor)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Visit all of the thread roots.
-  void VisitThreadRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
-
   // Flip thread roots from from-space refs to to-space refs.
   size_t FlipThreadRoots(Closure* thread_flip_visitor, Closure* flip_callback,
                          gc::collector::GarbageCollector* collector)
       REQUIRES(!Locks::mutator_lock_);
 
-  // Visit all other roots which must be done with mutators suspended.
-  void VisitNonConcurrentRoots(RootVisitor* visitor)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
   // Sweep system weaks, the system weak is deleted if the visitor return null. Otherwise, the
   // system weak is updated to be the visitor's returned value.
   void SweepSystemWeaks(IsMarkedVisitor* visitor)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Constant roots are the roots which never change after the runtime is initialized, they only
-  // need to be visited once per GC cycle.
-  void VisitConstantRoots(RootVisitor* visitor)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Returns a special method that calls into a trampoline for runtime method resolution
@@ -520,7 +498,7 @@ class Runtime {
       REQUIRES(Locks::intern_table_lock_);
   void RecordWeakStringRemoval(ObjPtr<mirror::String> s) const
       REQUIRES(Locks::intern_table_lock_);
-  void RecordResolveString(ObjPtr<mirror::DexCache> dex_cache, uint32_t string_idx) const
+  void RecordResolveString(ObjPtr<mirror::DexCache> dex_cache, dex::StringIndex string_idx) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void SetFaultMessage(const std::string& message) REQUIRES(!fault_message_lock_);
@@ -673,6 +651,10 @@ class Runtime {
   void AddSystemWeakHolder(gc::AbstractSystemWeakHolder* holder);
   void RemoveSystemWeakHolder(gc::AbstractSystemWeakHolder* holder);
 
+  ClassHierarchyAnalysis* GetClassHierarchyAnalysis() {
+    return cha_;
+  }
+
   NO_RETURN
   static void Aborter(const char* abort_message);
 
@@ -695,6 +677,19 @@ class Runtime {
   void StartSignalCatcher();
 
   void MaybeSaveJitProfilingInfo();
+
+  // Visit all of the thread roots.
+  void VisitThreadRoots(RootVisitor* visitor, VisitRootFlags flags)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Visit all other roots which must be done with mutators suspended.
+  void VisitNonConcurrentRoots(RootVisitor* visitor, VisitRootFlags flags)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Constant roots are the roots which never change after the runtime is initialized, they only
+  // need to be visited once per GC cycle.
+  void VisitConstantRoots(RootVisitor* visitor)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   // A pointer to the active runtime or null.
   static Runtime* instance_;
@@ -919,6 +914,8 @@ class Runtime {
 
   // Generic system-weak holders.
   std::vector<gc::AbstractSystemWeakHolder*> system_weak_holders_;
+
+  ClassHierarchyAnalysis* cha_;
 
   DISALLOW_COPY_AND_ASSIGN(Runtime);
 };

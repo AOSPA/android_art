@@ -24,12 +24,14 @@
 #include <string>
 #include <vector>
 
+#include "android-base/stringprintf.h"
+#include "android-base/strings.h"
+
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "base/dumpable.h"
 #include "base/scoped_flock.h"
 #include "base/stringpiece.h"
-#include "base/stringprintf.h"
 #include "base/unix_file/fd_file.h"
 #include "base/unix_file/random_access_file_utils.h"
 #include "elf_utils.h"
@@ -286,8 +288,8 @@ bool PatchOat::Patch(const std::string& image_location,
       std::string converted_image_filename = space->GetImageLocation();
       std::replace(converted_image_filename.begin() + 1, converted_image_filename.end(), '/', '@');
       std::string output_image_filename = output_directory +
-                                          (StartsWith(converted_image_filename, "/") ? "" : "/") +
-                                          converted_image_filename;
+          (android::base::StartsWith(converted_image_filename, "/") ? "" : "/") +
+          converted_image_filename;
       std::string output_vdex_filename =
           ImageHeader::GetVdexLocationFromImageLocation(output_image_filename);
       std::string output_oat_filename =
@@ -343,8 +345,8 @@ bool PatchOat::Patch(const std::string& image_location,
     std::string converted_image_filename = space->GetImageLocation();
     std::replace(converted_image_filename.begin() + 1, converted_image_filename.end(), '/', '@');
     std::string output_image_filename = output_directory +
-                                        (StartsWith(converted_image_filename, "/") ? "" : "/") +
-                                        converted_image_filename;
+        (android::base::StartsWith(converted_image_filename, "/") ? "" : "/") +
+        converted_image_filename;
     bool new_oat_out;
     std::unique_ptr<File>
         output_image_file(CreateOrOpen(output_image_filename.c_str(), &new_oat_out));
@@ -605,8 +607,7 @@ void PatchOat::PatchClassTable(const ImageHeader* image_header) {
   ClassTable temp_table;
   temp_table.ReadFromMemory(image_->Begin() + section.Offset());
   FixupRootVisitor visitor(this);
-  BufferedRootVisitor<kDefaultBufferedRootCount> buffered_visitor(&visitor, RootInfo(kRootUnknown));
-  temp_table.VisitRoots(buffered_visitor);
+  temp_table.VisitRoots(UnbufferedRootVisitor(&visitor, RootInfo(kRootUnknown)));
 }
 
 
@@ -933,12 +934,12 @@ static std::string CommandLine() {
   for (int i = 0; i < orig_argc; ++i) {
     command.push_back(orig_argv[i]);
   }
-  return Join(command, ' ');
+  return android::base::Join(command, ' ');
 }
 
 static void UsageErrorV(const char* fmt, va_list ap) {
   std::string error;
-  StringAppendV(&error, fmt, ap);
+  android::base::StringAppendV(&error, fmt, ap);
   LOG(ERROR) << error;
 }
 

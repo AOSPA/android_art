@@ -25,12 +25,15 @@
 #include <sstream>
 #include <atomic>
 
+#include "android-base/stringprintf.h"
+
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "base/enums.h"
 #include "base/logging.h"
 #include "base/macros.h"
 #include "class_linker-inl.h"
+#include "common_dex_operations.h"
 #include "common_throws.h"
 #include "dex_file-inl.h"
 #include "dex_instruction-inl.h"
@@ -46,6 +49,7 @@
 #include "obj_ptr.h"
 #include "stack.h"
 #include "thread.h"
+#include "unstarted_runtime.h"
 #include "well_known_classes.h"
 
 namespace art {
@@ -151,8 +155,10 @@ static inline bool DoInvoke(Thread* self,
 
 // Performs a signature polymorphic invoke (invoke-polymorphic/invoke-polymorphic-range).
 template<bool is_range, bool do_access_check>
-bool DoInvokePolymorphic(Thread* self, ShadowFrame& shadow_frame,
-                         const Instruction* inst, uint16_t inst_data,
+bool DoInvokePolymorphic(Thread* self,
+                         ShadowFrame& shadow_frame,
+                         const Instruction* inst,
+                         uint16_t inst_data,
                          JValue* result);
 
 // Handles invoke-virtual-quick and invoke-virtual-quick-range instructions.
@@ -236,7 +242,7 @@ bool DoIPutQuick(const ShadowFrame& shadow_frame, const Instruction* inst, uint1
 // java.lang.String class is initialized.
 static inline ObjPtr<mirror::String> ResolveString(Thread* self,
                                                    ShadowFrame& shadow_frame,
-                                                   uint32_t string_idx)
+                                                   dex::StringIndex string_idx)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   ObjPtr<mirror::Class> java_lang_string_class = mirror::String::GetJavaLangString();
   if (UNLIKELY(!java_lang_string_class->IsInitialized())) {
@@ -249,17 +255,16 @@ static inline ObjPtr<mirror::String> ResolveString(Thread* self,
     }
   }
   ArtMethod* method = shadow_frame.GetMethod();
-  ObjPtr<mirror::Class> declaring_class = method->GetDeclaringClass();
   // MethodVerifier refuses methods with string_idx out of bounds.
-  DCHECK_LT(string_idx % mirror::DexCache::kDexCacheStringCacheSize,
-            declaring_class->GetDexFile().NumStringIds());
+  DCHECK_LT(string_idx.index_ % mirror::DexCache::kDexCacheStringCacheSize,
+            method->GetDexFile()->NumStringIds());
   ObjPtr<mirror::String> string_ptr =
-      mirror::StringDexCachePair::Lookup(declaring_class->GetDexCacheStrings(),
-                                         string_idx,
+      mirror::StringDexCachePair::Lookup(method->GetDexCache()->GetStrings(),
+                                         string_idx.index_,
                                          mirror::DexCache::kDexCacheStringCacheSize).Read();
   if (UNLIKELY(string_ptr == nullptr)) {
     StackHandleScope<1> hs(self);
-    Handle<mirror::DexCache> dex_cache(hs.NewHandle(declaring_class->GetDexCache()));
+    Handle<mirror::DexCache> dex_cache(hs.NewHandle(method->GetDexCache()));
     string_ptr = Runtime::Current()->GetClassLinker()->ResolveString(*method->GetDexFile(),
                                                                      string_idx,
                                                                      dex_cache);
@@ -430,12 +435,12 @@ static inline void TraceExecution(const ShadowFrame& shadow_frame, const Instruc
 #define TRACE_LOG std::cerr
     std::ostringstream oss;
     oss << shadow_frame.GetMethod()->PrettyMethod()
-        << StringPrintf("\n0x%x: ", dex_pc)
+        << android::base::StringPrintf("\n0x%x: ", dex_pc)
         << inst->DumpString(shadow_frame.GetMethod()->GetDexFile()) << "\n";
     for (uint32_t i = 0; i < shadow_frame.NumberOfVRegs(); ++i) {
       uint32_t raw_value = shadow_frame.GetVReg(i);
       ObjPtr<mirror::Object> ref_value = shadow_frame.GetVRegReference(i);
-      oss << StringPrintf(" vreg%u=0x%08X", i, raw_value);
+      oss << android::base::StringPrintf(" vreg%u=0x%08X", i, raw_value);
       if (ref_value != nullptr) {
         if (ref_value->GetClass()->IsStringClass() &&
             !ref_value->AsString()->IsValueNull()) {

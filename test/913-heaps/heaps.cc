@@ -22,9 +22,10 @@
 
 #include <vector>
 
+#include "android-base/stringprintf.h"
+
 #include "base/logging.h"
 #include "base/macros.h"
-#include "base/stringprintf.h"
 #include "jit/jit.h"
 #include "jni.h"
 #include "native_stack_dump.h"
@@ -39,6 +40,8 @@
 namespace art {
 namespace Test913Heaps {
 
+using android::base::StringPrintf;
+
 extern "C" JNIEXPORT void JNICALL Java_Main_forceGarbageCollection(JNIEnv* env ATTRIBUTE_UNUSED,
                                                                    jclass klass ATTRIBUTE_UNUSED) {
   jvmtiError ret = jvmti_env->ForceGarbageCollection();
@@ -46,6 +49,7 @@ extern "C" JNIEXPORT void JNICALL Java_Main_forceGarbageCollection(JNIEnv* env A
     char* err;
     jvmti_env->GetErrorName(ret, &err);
     printf("Error forcing a garbage collection: %s\n", err);
+    jvmti_env->Deallocate(reinterpret_cast<unsigned char*>(err));
   }
 }
 
@@ -103,6 +107,7 @@ static bool Run(jint heap_filter,
     char* err;
     jvmti_env->GetErrorName(ret, &err);
     printf("Failure running FollowReferences: %s\n", err);
+    jvmti_env->Deallocate(reinterpret_cast<unsigned char*>(err));
     return false;
   }
   return true;
@@ -180,7 +185,7 @@ extern "C" JNIEXPORT jobjectArray JNICALL Java_Main_followReferences(JNIEnv* env
       if (*tag_ptr >= 1000) {
         // This is a class or interface, the size of which will be dependent on the architecture.
         // Do not print the size, but detect known values and "normalize" for the golden file.
-        if ((sizeof(void*) == 4 && size == 180) || (sizeof(void*) == 8 && size == 232)) {
+        if ((sizeof(void*) == 4 && size == 172) || (sizeof(void*) == 8 && size == 224)) {
           adapted_size = 123;
         }
       }
@@ -257,6 +262,43 @@ extern "C" JNIEXPORT jobjectArray JNICALL Java_Main_followReferences(JNIEnv* env
                                        info_.jni_local.thread_tag,
                                        info_.jni_local.depth,
                                        name == nullptr ? "<null>" : name);
+        if (name != nullptr) {
+          jvmti_env->Deallocate(reinterpret_cast<unsigned char*>(name));
+        }
+
+        return ret;
+      }
+
+     private:
+      const std::string string_;
+      jvmtiHeapReferenceInfo info_;
+    };
+
+    class StackLocalElement : public Elem {
+     public:
+      StackLocalElement(const std::string& referrer,
+                        const std::string& referree,
+                        jlong size,
+                        jint length,
+                        const jvmtiHeapReferenceInfo* reference_info)
+          : Elem(referrer, referree, size, length) {
+        memcpy(&info_, reference_info, sizeof(jvmtiHeapReferenceInfo));
+      }
+
+     protected:
+      std::string PrintArrowType() const OVERRIDE {
+        char* name = nullptr;
+        if (info_.stack_local.method != nullptr) {
+          jvmti_env->GetMethodName(info_.stack_local.method, &name, nullptr, nullptr);
+        }
+        std::string ret = StringPrintf("stack-local[id=%" PRId64 ",tag=%" PRId64 ",depth=%d,"
+                                       "method=%s,vreg=%d,location=% " PRId64 "]",
+                                       info_.stack_local.thread_id,
+                                       info_.stack_local.thread_tag,
+                                       info_.stack_local.depth,
+                                       name == nullptr ? "<null>" : name,
+                                       info_.stack_local.slot,
+                                       info_.stack_local.location);
         if (name != nullptr) {
           jvmti_env->Deallocate(reinterpret_cast<unsigned char*>(name));
         }
@@ -380,11 +422,11 @@ extern "C" JNIEXPORT jobjectArray JNICALL Java_Main_followReferences(JNIEnv* env
                                                          length,
                                                          "monitor"));
         case JVMTI_HEAP_REFERENCE_STACK_LOCAL:
-          return std::unique_ptr<Elem>(new StringElement(referrer,
-                                                         referree,
-                                                         size,
-                                                         length,
-                                                         "stack-local"));
+          return std::unique_ptr<Elem>(new StackLocalElement(referrer,
+                                                             referree,
+                                                             size,
+                                                             length,
+                                                             reference_info));
         case JVMTI_HEAP_REFERENCE_JNI_LOCAL:
           return std::unique_ptr<Elem>(new JNILocalElement(referrer,
                                                            referree,

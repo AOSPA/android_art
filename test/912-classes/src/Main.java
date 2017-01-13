@@ -34,6 +34,48 @@ public class Main {
 
     testClass(int.class);
     testClass(double[].class);
+
+    testClassType(int.class);
+    testClassType(getProxyClass());
+    testClassType(Runnable.class);
+    testClassType(String.class);
+
+    testClassType(int[].class);
+    testClassType(Runnable[].class);
+    testClassType(String[].class);
+
+    testClassFields(Integer.class);
+    testClassFields(int.class);
+    testClassFields(String[].class);
+
+    testClassMethods(Integer.class);
+    testClassMethods(int.class);
+    testClassMethods(String[].class);
+
+    testClassStatus(int.class);
+    testClassStatus(String[].class);
+    testClassStatus(Object.class);
+    testClassStatus(TestForNonInit.class);
+    try {
+      System.out.println(TestForInitFail.dummy);
+    } catch (ExceptionInInitializerError e) {
+    }
+    testClassStatus(TestForInitFail.class);
+
+    testInterfaces(int.class);
+    testInterfaces(String[].class);
+    testInterfaces(Object.class);
+    testInterfaces(InfA.class);
+    testInterfaces(InfB.class);
+    testInterfaces(InfC.class);
+    testInterfaces(ClassA.class);
+    testInterfaces(ClassB.class);
+    testInterfaces(ClassC.class);
+
+    testClassLoader(String.class);
+    testClassLoader(String[].class);
+    testClassLoader(InfA.class);
+    testClassLoader(getProxyClass());
   }
 
   private static Class<?> proxyClass = null;
@@ -55,7 +97,95 @@ public class Main {
   private static void testClass(Class<?> base) throws Exception {
     String[] result = getClassSignature(base);
     System.out.println(Arrays.toString(result));
+    int mod = getClassModifiers(base);
+    if (mod != base.getModifiers()) {
+      throw new RuntimeException("Unexpected modifiers: " + base.getModifiers() + " vs " + mod);
+    }
+    System.out.println(Integer.toHexString(mod));
   }
 
+  private static void testClassType(Class<?> c) throws Exception {
+    boolean isInterface = isInterface(c);
+    boolean isArray = isArrayClass(c);
+    boolean isModifiable = isModifiableClass(c);
+    System.out.println(c.getName() + " interface=" + isInterface + " array=" + isArray +
+        " modifiable=" + isModifiable);
+  }
+
+  private static void testClassFields(Class<?> c) throws Exception {
+    System.out.println(Arrays.toString(getClassFields(c)));
+  }
+
+  private static void testClassMethods(Class<?> c) throws Exception {
+    System.out.println(Arrays.toString(getClassMethods(c)));
+  }
+
+  private static void testClassStatus(Class<?> c) {
+    System.out.println(c + " " + Integer.toBinaryString(getClassStatus(c)));
+  }
+
+  private static void testInterfaces(Class<?> c) {
+    System.out.println(c + " " + Arrays.toString(getImplementedInterfaces(c)));
+  }
+
+  private static boolean IsBootClassLoader(ClassLoader l) {
+    // Hacky check for Android's fake boot classloader.
+    return l.getClass().getName().equals("java.lang.BootClassLoader");
+  }
+
+  private static void testClassLoader(Class<?> c) {
+    Object cl = getClassLoader(c);
+    System.out.println(c + " " + (cl != null ? cl.getClass().getName() : "null"));
+    if (cl == null) {
+      if (c.getClassLoader() != null && !IsBootClassLoader(c.getClassLoader())) {
+        throw new RuntimeException("Expected " + c.getClassLoader() + ", but got null.");
+      }
+    } else {
+      if (!(cl instanceof ClassLoader)) {
+        throw new RuntimeException("Unexpected \"classloader\": " + cl + " (" + cl.getClass() +
+            ")");
+      }
+      if (cl != c.getClassLoader()) {
+        throw new RuntimeException("Unexpected classloader: " + c.getClassLoader() + " vs " + cl);
+      }
+    }
+  }
+
+  private static native boolean isModifiableClass(Class<?> c);
   private static native String[] getClassSignature(Class<?> c);
+
+  private static native boolean isInterface(Class<?> c);
+  private static native boolean isArrayClass(Class<?> c);
+
+  private static native int getClassModifiers(Class<?> c);
+
+  private static native Object[] getClassFields(Class<?> c);
+  private static native Object[] getClassMethods(Class<?> c);
+  private static native Class[] getImplementedInterfaces(Class<?> c);
+
+  private static native int getClassStatus(Class<?> c);
+
+  private static native Object getClassLoader(Class<?> c);
+
+  private static class TestForNonInit {
+    public static double dummy = Math.random();  // So it can't be compile-time initialized.
+  }
+
+  private static class TestForInitFail {
+    public static int dummy = ((int)Math.random())/0;  // So it throws when initializing.
+  }
+
+  public static interface InfA {
+  }
+  public static interface InfB extends InfA {
+  }
+  public static interface InfC extends InfB {
+  }
+
+  public abstract static class ClassA implements InfA {
+  }
+  public abstract static class ClassB extends ClassA implements InfB {
+  }
+  public abstract static class ClassC implements InfA, InfC {
+  }
 }

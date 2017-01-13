@@ -28,6 +28,8 @@
 #include <list>
 #include <sstream>
 
+#include "android-base/stringprintf.h"
+
 #include "arch/context.h"
 #include "art_field-inl.h"
 #include "art_method-inl.h"
@@ -88,6 +90,9 @@
 
 namespace art {
 
+using android::base::StringAppendV;
+using android::base::StringPrintf;
+
 extern "C" NO_RETURN void artDeoptimize(Thread* self);
 
 bool Thread::is_started_ = false;
@@ -122,21 +127,26 @@ void Thread::SetIsGcMarkingAndUpdateEntrypoints(bool is_marking) {
   CHECK(kUseReadBarrier);
   tls32_.is_gc_marking = is_marking;
   UpdateReadBarrierEntrypoints(&tlsPtr_.quick_entrypoints, is_marking);
+  ResetQuickAllocEntryPointsForThread(is_marking);
 }
 
 void Thread::InitTlsEntryPoints() {
   // Insert a placeholder so we can easily tell if we call an unimplemented entry point.
   uintptr_t* begin = reinterpret_cast<uintptr_t*>(&tlsPtr_.jni_entrypoints);
-  uintptr_t* end = reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(&tlsPtr_.quick_entrypoints) +
-      sizeof(tlsPtr_.quick_entrypoints));
+  uintptr_t* end = reinterpret_cast<uintptr_t*>(
+      reinterpret_cast<uint8_t*>(&tlsPtr_.quick_entrypoints) + sizeof(tlsPtr_.quick_entrypoints));
   for (uintptr_t* it = begin; it != end; ++it) {
     *it = reinterpret_cast<uintptr_t>(UnimplementedEntryPoint);
   }
   InitEntryPoints(&tlsPtr_.jni_entrypoints, &tlsPtr_.quick_entrypoints);
 }
 
-void Thread::ResetQuickAllocEntryPointsForThread() {
-  ResetQuickAllocEntryPoints(&tlsPtr_.quick_entrypoints);
+void Thread::ResetQuickAllocEntryPointsForThread(bool is_marking) {
+  if (kUseReadBarrier && kRuntimeISA != kX86_64) {
+    // Allocation entrypoint switching is currently only implemented for X86_64.
+    is_marking = true;
+  }
+  ResetQuickAllocEntryPoints(&tlsPtr_.quick_entrypoints, is_marking);
 }
 
 class DeoptimizationContextRecord {
@@ -868,6 +878,62 @@ void Thread::SetThreadName(const char* name) {
   Dbg::DdmSendThreadNotification(this, CHUNK_TYPE("THNM"));
 }
 
+static void GetThreadStack(pthread_t thread,
+                           void** stack_base,
+                           size_t* stack_size,
+                           size_t* guard_size) {
+#if defined(__APPLE__)
+  *stack_size = pthread_get_stacksize_np(thread);
+  void* stack_addr = pthread_get_stackaddr_np(thread);
+
+  // Check whether stack_addr is the base or end of the stack.
+  // (On Mac OS 10.7, it's the end.)
+  int stack_variable;
+  if (stack_addr > &stack_variable) {
+    *stack_base = reinterpret_cast<uint8_t*>(stack_addr) - *stack_size;
+  } else {
+    *stack_base = stack_addr;
+  }
+
+  // This is wrong, but there doesn't seem to be a way to get the actual value on the Mac.
+  pthread_attr_t attributes;
+  CHECK_PTHREAD_CALL(pthread_attr_init, (&attributes), __FUNCTION__);
+  CHECK_PTHREAD_CALL(pthread_attr_getguardsize, (&attributes, guard_size), __FUNCTION__);
+  CHECK_PTHREAD_CALL(pthread_attr_destroy, (&attributes), __FUNCTION__);
+#else
+  pthread_attr_t attributes;
+  CHECK_PTHREAD_CALL(pthread_getattr_np, (thread, &attributes), __FUNCTION__);
+  CHECK_PTHREAD_CALL(pthread_attr_getstack, (&attributes, stack_base, stack_size), __FUNCTION__);
+  CHECK_PTHREAD_CALL(pthread_attr_getguardsize, (&attributes, guard_size), __FUNCTION__);
+  CHECK_PTHREAD_CALL(pthread_attr_destroy, (&attributes), __FUNCTION__);
+
+#if defined(__GLIBC__)
+  // If we're the main thread, check whether we were run with an unlimited stack. In that case,
+  // glibc will have reported a 2GB stack for our 32-bit process, and our stack overflow detection
+  // will be broken because we'll die long before we get close to 2GB.
+  bool is_main_thread = (::art::GetTid() == getpid());
+  if (is_main_thread) {
+    rlimit stack_limit;
+    if (getrlimit(RLIMIT_STACK, &stack_limit) == -1) {
+      PLOG(FATAL) << "getrlimit(RLIMIT_STACK) failed";
+    }
+    if (stack_limit.rlim_cur == RLIM_INFINITY) {
+      size_t old_stack_size = *stack_size;
+
+      // Use the kernel default limit as our size, and adjust the base to match.
+      *stack_size = 8 * MB;
+      *stack_base = reinterpret_cast<uint8_t*>(*stack_base) + (old_stack_size - *stack_size);
+
+      VLOG(threads) << "Limiting unlimited stack (reported as " << PrettySize(old_stack_size) << ")"
+                    << " to " << PrettySize(*stack_size)
+                    << " with base " << *stack_base;
+    }
+  }
+#endif
+
+#endif
+}
+
 bool Thread::InitStackHwm() {
   void* read_stack_base;
   size_t read_stack_size;
@@ -1317,6 +1383,32 @@ void Thread::FullSuspendCheck() {
   VLOG(threads) << this << " self-reviving";
 }
 
+static std::string GetSchedulerGroupName(pid_t tid) {
+  // /proc/<pid>/cgroup looks like this:
+  // 2:devices:/
+  // 1:cpuacct,cpu:/
+  // We want the third field from the line whose second field contains the "cpu" token.
+  std::string cgroup_file;
+  if (!ReadFileToString(StringPrintf("/proc/self/task/%d/cgroup", tid), &cgroup_file)) {
+    return "";
+  }
+  std::vector<std::string> cgroup_lines;
+  Split(cgroup_file, '\n', &cgroup_lines);
+  for (size_t i = 0; i < cgroup_lines.size(); ++i) {
+    std::vector<std::string> cgroup_fields;
+    Split(cgroup_lines[i], ':', &cgroup_fields);
+    std::vector<std::string> cgroups;
+    Split(cgroup_fields[1], ',', &cgroups);
+    for (size_t j = 0; j < cgroups.size(); ++j) {
+      if (cgroups[j] == "cpu") {
+        return cgroup_fields[2].substr(1);  // Skip the leading slash.
+      }
+    }
+  }
+  return "";
+}
+
+
 void Thread::DumpState(std::ostream& os, const Thread* thread, pid_t tid) {
   std::string group_name;
   int priority;
@@ -1389,6 +1481,7 @@ void Thread::DumpState(std::ostream& os, const Thread* thread, pid_t tid) {
     os << "  | group=\"" << group_name << "\""
        << " sCount=" << thread->tls32_.suspend_count
        << " dsCount=" << thread->tls32_.debug_suspend_count
+       << " flags=" << thread->tls32_.state_and_flags.as_struct.flags
        << " obj=" << reinterpret_cast<void*>(thread->tlsPtr_.opeer)
        << " self=" << reinterpret_cast<const void*>(thread) << "\n";
   }
@@ -1714,7 +1807,11 @@ void Thread::Shutdown() {
   }
 }
 
-Thread::Thread(bool daemon) : tls32_(daemon), wait_monitor_(nullptr), interrupted_(false) {
+Thread::Thread(bool daemon)
+    : tls32_(daemon),
+      wait_monitor_(nullptr),
+      interrupted_(false),
+      can_call_into_java_(true) {
   wait_mutex_ = new Mutex("a thread wait mutex");
   wait_cond_ = new ConditionVariable("a thread wait condition variable", *wait_mutex_);
   tlsPtr_.instrumentation_stack = new std::deque<instrumentation::InstrumentationStackFrame>;
@@ -2796,7 +2893,7 @@ bool Thread::HoldsLock(mirror::Object* object) const {
 }
 
 // RootVisitor parameters are: (const Object* obj, size_t vreg, const StackVisitor* visitor).
-template <typename RootVisitor>
+template <typename RootVisitor, bool kPrecise = false>
 class ReferenceMapVisitor : public StackVisitor {
  public:
   ReferenceMapVisitor(Thread* thread, Context* context, RootVisitor& visitor)
@@ -2883,7 +2980,9 @@ class ReferenceMapVisitor : public StackVisitor {
     }
   }
 
-  void VisitQuickFrame() REQUIRES_SHARED(Locks::mutator_lock_) {
+  template <typename T>
+  ALWAYS_INLINE
+  inline void VisitQuickFrameWithVregCallback() REQUIRES_SHARED(Locks::mutator_lock_) {
     ArtMethod** cur_quick_frame = GetCurrentQuickFrame();
     DCHECK(cur_quick_frame != nullptr);
     ArtMethod* m = *cur_quick_frame;
@@ -2900,6 +2999,9 @@ class ReferenceMapVisitor : public StackVisitor {
       CodeInfoEncoding encoding = code_info.ExtractEncoding();
       StackMap map = code_info.GetStackMapForNativePcOffset(native_pc_offset, encoding);
       DCHECK(map.IsValid());
+
+      T vreg_info(m, code_info, encoding, map, visitor_);
+
       // Visit stack entries that hold pointers.
       size_t number_of_bits = map.GetNumberOfStackMaskBits(encoding.stack_map_encoding);
       for (size_t i = 0; i < number_of_bits; ++i) {
@@ -2908,7 +3010,7 @@ class ReferenceMapVisitor : public StackVisitor {
           mirror::Object* ref = ref_addr->AsMirrorPtr();
           if (ref != nullptr) {
             mirror::Object* new_ref = ref;
-            visitor_(&new_ref, -1, this);
+            vreg_info.VisitStack(&new_ref, i, this);
             if (ref != new_ref) {
               ref_addr->Assign(new_ref);
             }
@@ -2929,11 +3031,117 @@ class ReferenceMapVisitor : public StackVisitor {
                        << "set in register_mask=" << register_mask << " at " << DescribeLocation();
           }
           if (*ref_addr != nullptr) {
-            visitor_(ref_addr, -1, this);
+            vreg_info.VisitRegister(ref_addr, i, this);
           }
         }
       }
     }
+  }
+
+  void VisitQuickFrame() REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (kPrecise) {
+      VisitQuickFramePrecise();
+    } else {
+      VisitQuickFrameNonPrecise();
+    }
+  }
+
+  void VisitQuickFrameNonPrecise() REQUIRES_SHARED(Locks::mutator_lock_) {
+    struct UndefinedVRegInfo {
+      UndefinedVRegInfo(ArtMethod* method ATTRIBUTE_UNUSED,
+                        const CodeInfo& code_info ATTRIBUTE_UNUSED,
+                        const CodeInfoEncoding& encoding ATTRIBUTE_UNUSED,
+                        const StackMap& map ATTRIBUTE_UNUSED,
+                        RootVisitor& _visitor)
+          : visitor(_visitor) {
+      }
+
+      ALWAYS_INLINE
+      void VisitStack(mirror::Object** ref,
+                      size_t stack_index ATTRIBUTE_UNUSED,
+                      const StackVisitor* stack_visitor)
+          REQUIRES_SHARED(Locks::mutator_lock_) {
+        visitor(ref, -1, stack_visitor);
+      }
+
+      ALWAYS_INLINE
+      void VisitRegister(mirror::Object** ref,
+                         size_t register_index ATTRIBUTE_UNUSED,
+                         const StackVisitor* stack_visitor)
+          REQUIRES_SHARED(Locks::mutator_lock_) {
+        visitor(ref, -1, stack_visitor);
+      }
+
+      RootVisitor& visitor;
+    };
+    VisitQuickFrameWithVregCallback<UndefinedVRegInfo>();
+  }
+
+  void VisitQuickFramePrecise() REQUIRES_SHARED(Locks::mutator_lock_) {
+    struct StackMapVRegInfo {
+      StackMapVRegInfo(ArtMethod* method,
+                       const CodeInfo& _code_info,
+                       const CodeInfoEncoding& _encoding,
+                       const StackMap& map,
+                       RootVisitor& _visitor)
+          : number_of_dex_registers(method->GetCodeItem()->registers_size_),
+            code_info(_code_info),
+            encoding(_encoding),
+            dex_register_map(code_info.GetDexRegisterMapOf(map,
+                                                           encoding,
+                                                           number_of_dex_registers)),
+            visitor(_visitor) {
+      }
+
+      // TODO: If necessary, we should consider caching a reverse map instead of the linear
+      //       lookups for each location.
+      void FindWithType(const size_t index,
+                        const DexRegisterLocation::Kind kind,
+                        mirror::Object** ref,
+                        const StackVisitor* stack_visitor)
+          REQUIRES_SHARED(Locks::mutator_lock_) {
+        bool found = false;
+        for (size_t dex_reg = 0; dex_reg != number_of_dex_registers; ++dex_reg) {
+          DexRegisterLocation location = dex_register_map.GetDexRegisterLocation(
+              dex_reg, number_of_dex_registers, code_info, encoding);
+          if (location.GetKind() == kind && static_cast<size_t>(location.GetValue()) == index) {
+            visitor(ref, dex_reg, stack_visitor);
+            found = true;
+          }
+        }
+
+        if (!found) {
+          // If nothing found, report with -1.
+          visitor(ref, -1, stack_visitor);
+        }
+      }
+
+      void VisitStack(mirror::Object** ref, size_t stack_index, const StackVisitor* stack_visitor)
+          REQUIRES_SHARED(Locks::mutator_lock_) {
+        const size_t stack_offset = stack_index * kFrameSlotSize;
+        FindWithType(stack_offset,
+                     DexRegisterLocation::Kind::kInStack,
+                     ref,
+                     stack_visitor);
+      }
+
+      void VisitRegister(mirror::Object** ref,
+                         size_t register_index,
+                         const StackVisitor* stack_visitor)
+          REQUIRES_SHARED(Locks::mutator_lock_) {
+        FindWithType(register_index,
+                     DexRegisterLocation::Kind::kInRegister,
+                     ref,
+                     stack_visitor);
+      }
+
+      size_t number_of_dex_registers;
+      const CodeInfo& code_info;
+      const CodeInfoEncoding& encoding;
+      DexRegisterMap dex_register_map;
+      RootVisitor& visitor;
+    };
+    VisitQuickFrameWithVregCallback<StackMapVRegInfo>();
   }
 
   // Visitor for when we visit a root.
@@ -2954,6 +3162,7 @@ class RootCallbackVisitor {
   const uint32_t tid_;
 };
 
+template <bool kPrecise>
 void Thread::VisitRoots(RootVisitor* visitor) {
   const uint32_t thread_id = GetThreadId();
   visitor->VisitRootIfNonNull(&tlsPtr_.opeer, RootInfo(kRootThreadObject, thread_id));
@@ -2971,7 +3180,7 @@ void Thread::VisitRoots(RootVisitor* visitor) {
   // Visit roots for deoptimization.
   if (tlsPtr_.stacked_shadow_frame_record != nullptr) {
     RootCallbackVisitor visitor_to_callback(visitor, thread_id);
-    ReferenceMapVisitor<RootCallbackVisitor> mapper(this, nullptr, visitor_to_callback);
+    ReferenceMapVisitor<RootCallbackVisitor, kPrecise> mapper(this, nullptr, visitor_to_callback);
     for (StackedShadowFrameRecord* record = tlsPtr_.stacked_shadow_frame_record;
          record != nullptr;
          record = record->GetLink()) {
@@ -2994,7 +3203,7 @@ void Thread::VisitRoots(RootVisitor* visitor) {
   }
   if (tlsPtr_.frame_id_to_shadow_frame != nullptr) {
     RootCallbackVisitor visitor_to_callback(visitor, thread_id);
-    ReferenceMapVisitor<RootCallbackVisitor> mapper(this, nullptr, visitor_to_callback);
+    ReferenceMapVisitor<RootCallbackVisitor, kPrecise> mapper(this, nullptr, visitor_to_callback);
     for (FrameIdToShadowFrame* record = tlsPtr_.frame_id_to_shadow_frame;
          record != nullptr;
          record = record->GetNext()) {
@@ -3007,11 +3216,19 @@ void Thread::VisitRoots(RootVisitor* visitor) {
   // Visit roots on this thread's stack
   Context* context = GetLongJumpContext();
   RootCallbackVisitor visitor_to_callback(visitor, thread_id);
-  ReferenceMapVisitor<RootCallbackVisitor> mapper(this, context, visitor_to_callback);
-  mapper.WalkStack();
+  ReferenceMapVisitor<RootCallbackVisitor, kPrecise> mapper(this, context, visitor_to_callback);
+  mapper.template WalkStack<StackVisitor::CountTransitions::kNo>(false);
   ReleaseLongJumpContext(context);
   for (instrumentation::InstrumentationStackFrame& frame : *GetInstrumentationStack()) {
     visitor->VisitRootIfNonNull(&frame.this_object_, RootInfo(kRootVMInternal, thread_id));
+  }
+}
+
+void Thread::VisitRoots(RootVisitor* visitor, VisitRootFlags flags) {
+  if ((flags & VisitRootFlags::kVisitRootFlagPrecise) != 0) {
+    VisitRoots<true>(visitor);
+  } else {
+    VisitRoots<false>(visitor);
   }
 }
 
@@ -3168,6 +3385,10 @@ void Thread::SetException(ObjPtr<mirror::Throwable> new_exception) {
   CHECK(new_exception != nullptr);
   // TODO: DCHECK(!IsExceptionPending());
   tlsPtr_.exception = new_exception.Ptr();
+}
+
+bool Thread::IsAotCompiler() {
+  return Runtime::Current()->IsAotCompiler();
 }
 
 }  // namespace art

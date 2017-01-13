@@ -25,6 +25,7 @@
 #include "mirror/class_loader.h"
 #include "mirror/dex_cache-inl.h"
 #include "mirror/iftable.h"
+#include "mirror/throwable.h"
 #include "mirror/object_array.h"
 #include "handle_scope-inl.h"
 #include "scoped_thread_state_change-inl.h"
@@ -65,40 +66,49 @@ inline mirror::Class* ClassLinker::FindArrayClass(Thread* self,
   return array_class.Ptr();
 }
 
-inline mirror::String* ClassLinker::ResolveString(uint32_t string_idx, ArtMethod* referrer) {
+inline mirror::String* ClassLinker::ResolveString(dex::StringIndex string_idx,
+                                                  ArtMethod* referrer) {
   Thread::PoisonObjectPointersIfDebug();
   ObjPtr<mirror::Class> declaring_class = referrer->GetDeclaringClass();
   // MethodVerifier refuses methods with string_idx out of bounds.
-  DCHECK_LT(string_idx, declaring_class->GetDexFile().NumStringIds());
+  DCHECK_LT(string_idx.index_, declaring_class->GetDexFile().NumStringIds());
   ObjPtr<mirror::String> string =
-        mirror::StringDexCachePair::Lookup(declaring_class->GetDexCacheStrings(),
-                                           string_idx,
+        mirror::StringDexCachePair::Lookup(declaring_class->GetDexCache()->GetStrings(),
+                                           string_idx.index_,
                                            mirror::DexCache::kDexCacheStringCacheSize).Read();
   if (UNLIKELY(string == nullptr)) {
     StackHandleScope<1> hs(Thread::Current());
     Handle<mirror::DexCache> dex_cache(hs.NewHandle(declaring_class->GetDexCache()));
     const DexFile& dex_file = *dex_cache->GetDexFile();
     string = ResolveString(dex_file, string_idx, dex_cache);
-    if (string != nullptr) {
-      DCHECK_EQ(dex_cache->GetResolvedString(string_idx), string);
-    }
   }
   return string.Ptr();
 }
 
 inline mirror::Class* ClassLinker::ResolveType(dex::TypeIndex type_idx, ArtMethod* referrer) {
   Thread::PoisonObjectPointersIfDebug();
+  if (kIsDebugBuild) {
+    Thread::Current()->AssertNoPendingException();
+  }
   ObjPtr<mirror::Class> resolved_type =
       referrer->GetDexCacheResolvedType(type_idx, image_pointer_size_);
   if (UNLIKELY(resolved_type == nullptr)) {
-    ObjPtr<mirror::Class> declaring_class = referrer->GetDeclaringClass();
     StackHandleScope<2> hs(Thread::Current());
-    Handle<mirror::DexCache> dex_cache(hs.NewHandle(declaring_class->GetDexCache()));
-    Handle<mirror::ClassLoader> class_loader(hs.NewHandle(declaring_class->GetClassLoader()));
-    const DexFile& dex_file = *dex_cache->GetDexFile();
-    resolved_type = ResolveType(dex_file, type_idx, dex_cache, class_loader);
-    // Note: We cannot check here to see whether we added the type to the cache. The type
-    //       might be an erroneous class, which results in it being hidden from us.
+    // There could be an out of bounds exception from GetDexCacheResolvedType, don't call
+    // ResolveType for this case.
+    if (LIKELY(!hs.Self()->IsExceptionPending())) {
+      ObjPtr<mirror::Class> declaring_class = referrer->GetDeclaringClass();
+      Handle<mirror::DexCache> dex_cache(hs.NewHandle(declaring_class->GetDexCache()));
+      Handle<mirror::ClassLoader> class_loader(hs.NewHandle(declaring_class->GetClassLoader()));
+      const DexFile& dex_file = *dex_cache->GetDexFile();
+      resolved_type = ResolveType(dex_file, type_idx, dex_cache, class_loader);
+      // Note: We cannot check here to see whether we added the type to the cache. The type
+      //       might be an erroneous class, which results in it being hidden from us.
+    } else {
+      // Make sure its an array out of bounds exception.
+      DCHECK(hs.Self()->GetException()->GetClass()->DescriptorEquals(
+          "Ljava/lang/ArrayIndexOutOfBoundsException;"));
+    }
   }
   return resolved_type.Ptr();
 }
@@ -179,20 +189,15 @@ inline ArtField* ClassLinker::GetResolvedField(uint32_t field_idx,
   return dex_cache->GetResolvedField(field_idx, image_pointer_size_);
 }
 
-inline ArtField* ClassLinker::GetResolvedField(uint32_t field_idx,
-                                               ObjPtr<mirror::Class> field_declaring_class) {
-  return GetResolvedField(field_idx, MakeObjPtr(field_declaring_class->GetDexCache()));
-}
-
 inline ArtField* ClassLinker::ResolveField(uint32_t field_idx,
                                            ArtMethod* referrer,
                                            bool is_static) {
   Thread::PoisonObjectPointersIfDebug();
   ObjPtr<mirror::Class> declaring_class = referrer->GetDeclaringClass();
-  ArtField* resolved_field = GetResolvedField(field_idx, declaring_class);
+  ArtField* resolved_field = GetResolvedField(field_idx, referrer->GetDexCache());
   if (UNLIKELY(resolved_field == nullptr)) {
     StackHandleScope<2> hs(Thread::Current());
-    Handle<mirror::DexCache> dex_cache(hs.NewHandle(declaring_class->GetDexCache()));
+    Handle<mirror::DexCache> dex_cache(hs.NewHandle(referrer->GetDexCache()));
     Handle<mirror::ClassLoader> class_loader(hs.NewHandle(declaring_class->GetClassLoader()));
     const DexFile& dex_file = *dex_cache->GetDexFile();
     resolved_field = ResolveField(dex_file, field_idx, dex_cache, class_loader, is_static);
@@ -247,7 +252,7 @@ ArtMethod* ClassLinker::FindMethodForProxy(ObjPtr<mirror::Class> proxy_class,
   DCHECK(proxy_method->IsProxyMethod<kReadBarrierOption>());
   {
     Thread* const self = Thread::Current();
-    ReaderMutexLock mu(self, dex_lock_);
+    ReaderMutexLock mu(self, *Locks::dex_lock_);
     // Locate the dex cache of the original interface/Object
     for (const DexCacheData& data : dex_caches_) {
       if (!self->IsJWeakCleared(data.weak_root) &&

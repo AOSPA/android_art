@@ -174,10 +174,11 @@ jvmtiError HeapUtil::IterateThroughHeap(jvmtiEnv* env ATTRIBUTE_UNUSED,
 class FollowReferencesHelper FINAL {
  public:
   FollowReferencesHelper(HeapUtil* h,
-                         art::ObjPtr<art::mirror::Object> initial_object ATTRIBUTE_UNUSED,
+                         art::ObjPtr<art::mirror::Object> initial_object,
                          const jvmtiHeapCallbacks* callbacks,
                          const void* user_data)
       : tag_table_(h->GetTags()),
+        initial_object_(initial_object),
         callbacks_(callbacks),
         user_data_(user_data),
         start_(0),
@@ -187,13 +188,23 @@ class FollowReferencesHelper FINAL {
   void Init()
       REQUIRES_SHARED(art::Locks::mutator_lock_)
       REQUIRES(!*tag_table_->GetAllowDisallowLock()) {
-    CollectAndReportRootsVisitor carrv(this, tag_table_, &worklist_, &visited_);
-    art::Runtime::Current()->VisitRoots(&carrv);
-    art::Runtime::Current()->VisitImageRoots(&carrv);
-    stop_reports_ = carrv.IsStopReports();
+    if (initial_object_.IsNull()) {
+      CollectAndReportRootsVisitor carrv(this, tag_table_, &worklist_, &visited_);
 
-    if (stop_reports_) {
-      worklist_.clear();
+      // We need precise info (e.g., vregs).
+      constexpr art::VisitRootFlags kRootFlags = static_cast<art::VisitRootFlags>(
+          art::VisitRootFlags::kVisitRootFlagAllRoots | art::VisitRootFlags::kVisitRootFlagPrecise);
+      art::Runtime::Current()->VisitRoots(&carrv, kRootFlags);
+
+      art::Runtime::Current()->VisitImageRoots(&carrv);
+      stop_reports_ = carrv.IsStopReports();
+
+      if (stop_reports_) {
+        worklist_.clear();
+      }
+    } else {
+      visited_.insert(initial_object_.Ptr());
+      worklist_.push_back(initial_object_.Ptr());
     }
   }
 
@@ -316,7 +327,36 @@ class FollowReferencesHelper FINAL {
         }
 
         case art::RootType::kRootJavaFrame:
+        {
+          uint32_t thread_id = info.GetThreadId();
+          ref_info->stack_local.thread_id = thread_id;
+
+          art::Thread* thread = FindThread(info);
+          if (thread != nullptr) {
+            art::mirror::Object* thread_obj = thread->GetPeer();
+            if (thread->IsStillStarting()) {
+              thread_obj = nullptr;
+            } else {
+              thread_obj = thread->GetPeer();
+            }
+            if (thread_obj != nullptr) {
+              ref_info->stack_local.thread_tag = tag_table_->GetTagOrZero(thread_obj);
+            }
+          }
+
+          auto& java_info = static_cast<const art::JavaFrameRootInfo&>(info);
+          ref_info->stack_local.slot = static_cast<jint>(java_info.GetVReg());
+          const art::StackVisitor* visitor = java_info.GetVisitor();
+          ref_info->stack_local.location =
+              static_cast<jlocation>(visitor->GetDexPc(false /* abort_on_failure */));
+          ref_info->stack_local.depth = static_cast<jint>(visitor->GetFrameDepth());
+          art::ArtMethod* method = visitor->GetMethod();
+          if (method != nullptr) {
+            ref_info->stack_local.method = art::jni::EncodeArtMethod(method);
+          }
+
           return JVMTI_HEAP_REFERENCE_STACK_LOCAL;
+        }
 
         case art::RootType::kRootNativeStack:
         case art::RootType::kRootThreadBlock:
@@ -484,7 +524,7 @@ class FollowReferencesHelper FINAL {
     art::Handle<art::mirror::Class> h_klass(hs.NewHandle<art::mirror::Class>(klass));
     for (size_t i = 0; i < h_klass->NumDirectInterfaces(); ++i) {
       art::ObjPtr<art::mirror::Class> inf_klass =
-          art::mirror::Class::GetDirectInterface(self, h_klass, i);
+          art::mirror::Class::ResolveDirectInterface(self, h_klass, i);
       if (inf_klass == nullptr) {
         // TODO: With a resolved class this should not happen...
         self->ClearException();
@@ -616,6 +656,7 @@ class FollowReferencesHelper FINAL {
   }
 
   ObjectTagTable* tag_table_;
+  art::ObjPtr<art::mirror::Object> initial_object_;
   const jvmtiHeapCallbacks* callbacks_;
   const void* user_data_;
 
@@ -646,20 +687,28 @@ jvmtiError HeapUtil::FollowReferences(jvmtiEnv* env ATTRIBUTE_UNUSED,
   }
 
   art::Thread* self = art::Thread::Current();
-  art::ScopedObjectAccess soa(self);      // Now we know we have the shared lock.
 
-  art::Runtime::Current()->GetHeap()->IncrementDisableMovingGC(self);
+  art::gc::Heap* heap = art::Runtime::Current()->GetHeap();
+  if (heap->IsGcConcurrentAndMoving()) {
+    // Need to take a heap dump while GC isn't running. See the
+    // comment in Heap::VisitObjects().
+    heap->IncrementDisableMovingGC(self);
+  }
   {
-    art::ObjPtr<art::mirror::Object> o_initial = soa.Decode<art::mirror::Object>(initial_object);
-
+    art::ScopedObjectAccess soa(self);      // Now we know we have the shared lock.
     art::ScopedThreadSuspension sts(self, art::kWaitingForVisitObjects);
     art::ScopedSuspendAll ssa("FollowReferences");
 
-    FollowReferencesHelper frh(this, o_initial, callbacks, user_data);
+    FollowReferencesHelper frh(this,
+                               self->DecodeJObject(initial_object),
+                               callbacks,
+                               user_data);
     frh.Init();
     frh.Work();
   }
-  art::Runtime::Current()->GetHeap()->DecrementDisableMovingGC(self);
+  if (heap->IsGcConcurrentAndMoving()) {
+    heap->DecrementDisableMovingGC(self);
+  }
 
   return ERR(NONE);
 }

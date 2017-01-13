@@ -49,10 +49,12 @@ art_cc_defaults {
         "optimizing/block_builder.cc",
         "optimizing/bounds_check_elimination.cc",
         "optimizing/builder.cc",
+        "optimizing/cha_guard_optimization.cc",
         "optimizing/code_generator.cc",
         "optimizing/code_generator_utils.cc",
         "optimizing/constant_folding.cc",
         "optimizing/dead_code_elimination.cc",
+        "optimizing/escape.cc",
         "optimizing/graph_checker.cc",
         "optimizing/graph_visualizer.cc",
         "optimizing/gvn.cc",
@@ -144,6 +146,7 @@ art_cc_defaults {
         mips64: {
             srcs: [
                 "jni/quick/mips64/calling_convention_mips64.cc",
+                "linker/mips64/relative_patcher_mips64.cc",
                 "optimizing/code_generator_mips64.cc",
                 "optimizing/intrinsics_mips64.cc",
                 "utils/mips64/assembler_mips64.cc",
@@ -348,6 +351,7 @@ art_cc_test {
         "optimizing/ssa_test.cc",
         "optimizing/stack_map_test.cc",
         "optimizing/suspend_check_test.cc",
+        "utils/atomic_method_ref_map_test.cc",
         "utils/dedupe_set_test.cc",
         "utils/intrusive_forward_list_test.cc",
         "utils/string_reference_test.cc",
@@ -377,6 +381,11 @@ art_cc_test {
             srcs: [
                 "linker/mips/relative_patcher_mips_test.cc",
                 "linker/mips/relative_patcher_mips32r6_test.cc",
+            ],
+        },
+        mips64: {
+            srcs: [
+                "linker/mips64/relative_patcher_mips64_test.cc",
             ],
         },
         x86: {

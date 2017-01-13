@@ -21,6 +21,8 @@
 #include <sys/time.h>
 #include <sys/resource.h>
 
+#include "android-base/stringprintf.h"
+
 #include "base/bit_utils.h"
 #include "base/casts.h"
 #include "base/logging.h"
@@ -30,6 +32,8 @@
 #include "thread-inl.h"
 
 namespace art {
+
+using android::base::StringPrintf;
 
 static constexpr bool kMeasureWaitTime = false;
 
@@ -86,6 +90,8 @@ void* ThreadPoolWorker::Callback(void* arg) {
   Runtime* runtime = Runtime::Current();
   CHECK(runtime->AttachCurrentThread(worker->name_.c_str(), true, nullptr, false));
   worker->thread_ = Thread::Current();
+  // Thread pool workers cannot call into java.
+  worker->thread_->SetCanCallIntoJava(false);
   // Do work until its time to shut down.
   worker->Run();
   runtime->DetachCurrentThread();

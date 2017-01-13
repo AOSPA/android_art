@@ -33,6 +33,9 @@
 #include <sys/utsname.h>
 #endif
 
+#include "android-base/stringprintf.h"
+#include "android-base/strings.h"
+
 #include "arch/instruction_set_features.h"
 #include "arch/mips/instruction_set_features_mips.h"
 #include "art_method-inl.h"
@@ -85,6 +88,9 @@
 
 namespace art {
 
+using android::base::StringAppendV;
+using android::base::StringPrintf;
+
 static constexpr size_t kDefaultMinDexFilesForSwap = 2;
 static constexpr size_t kDefaultMinDexFileCumulativeSizeForSwap = 20 * MB;
 
@@ -96,7 +102,7 @@ static std::string CommandLine() {
   for (int i = 0; i < original_argc; ++i) {
     command.push_back(original_argv[i]);
   }
-  return Join(command, ' ');
+  return android::base::Join(command, ' ');
 }
 
 // A stripped version. Remove some less essential parameters. If we see a "--zip-fd=" parameter, be
@@ -108,7 +114,7 @@ static std::string StrippedCommandLine() {
   // Do a pre-pass to look for zip-fd.
   bool saw_zip_fd = false;
   for (int i = 0; i < original_argc; ++i) {
-    if (StartsWith(original_argv[i], "--zip-fd=")) {
+    if (android::base::StartsWith(original_argv[i], "--zip-fd=")) {
       saw_zip_fd = true;
       break;
     }
@@ -123,17 +129,17 @@ static std::string StrippedCommandLine() {
     }
 
     // Any instruction-setXXX is dropped.
-    if (StartsWith(original_argv[i], "--instruction-set")) {
+    if (android::base::StartsWith(original_argv[i], "--instruction-set")) {
       continue;
     }
 
     // The boot image is dropped.
-    if (StartsWith(original_argv[i], "--boot-image=")) {
+    if (android::base::StartsWith(original_argv[i], "--boot-image=")) {
       continue;
     }
 
     // The image format is dropped.
-    if (StartsWith(original_argv[i], "--image-format=")) {
+    if (android::base::StartsWith(original_argv[i], "--image-format=")) {
       continue;
     }
 
@@ -142,11 +148,11 @@ static std::string StrippedCommandLine() {
     // However, we prefer to drop this when we saw --zip-fd.
     if (saw_zip_fd) {
       // Drop anything --zip-X, --dex-X, --oat-X, --swap-X, or --app-image-X
-      if (StartsWith(original_argv[i], "--zip-") ||
-          StartsWith(original_argv[i], "--dex-") ||
-          StartsWith(original_argv[i], "--oat-") ||
-          StartsWith(original_argv[i], "--swap-") ||
-          StartsWith(original_argv[i], "--app-image-")) {
+      if (android::base::StartsWith(original_argv[i], "--zip-") ||
+          android::base::StartsWith(original_argv[i], "--dex-") ||
+          android::base::StartsWith(original_argv[i], "--oat-") ||
+          android::base::StartsWith(original_argv[i], "--swap-") ||
+          android::base::StartsWith(original_argv[i], "--app-image-")) {
         continue;
       }
     }
@@ -159,7 +165,7 @@ static std::string StrippedCommandLine() {
     // It seems only "/system/bin/dex2oat" is left, or not even that. Use a pretty line.
     return "Starting dex2oat.";
   }
-  return Join(command, ' ');
+  return android::base::Join(command, ' ');
 }
 
 static void UsageErrorV(const char* fmt, va_list ap) {
@@ -518,6 +524,7 @@ class Dex2Oat FINAL {
       runtime_(nullptr),
       thread_count_(sysconf(_SC_NPROCESSORS_CONF)),
       start_ns_(NanoTime()),
+      start_cputime_ns_(ProcessCpuNanoTime()),
       oat_fd_(-1),
       input_vdex_fd_(-1),
       output_vdex_fd_(-1),
@@ -998,7 +1005,7 @@ class Dex2Oat FINAL {
       if (last_dex_dot != std::string::npos) {
         dex_file = dex_file.substr(0, last_dex_dot);
       }
-      if (StartsWith(dex_file, "core-")) {
+      if (android::base::StartsWith(dex_file, "core-")) {
         infix = dex_file.substr(strlen("core"));
       }
     }
@@ -1058,7 +1065,7 @@ class Dex2Oat FINAL {
         in.insert(last_dot, infix);
       }
     }
-    if (EndsWith(in, ".jar")) {
+    if (android::base::EndsWith(in, ".jar")) {
       in = in.substr(0, in.length() - strlen(".jar")) +
           (replace_suffix != nullptr ? replace_suffix : "");
     }
@@ -1288,17 +1295,23 @@ class Dex2Oat FINAL {
 
         DCHECK_EQ(output_vdex_fd_, -1);
         std::string vdex_filename = ReplaceFileExtension(oat_filename, "vdex");
-        std::unique_ptr<File> vdex_file(OS::CreateEmptyFile(vdex_filename.c_str()));
-        if (vdex_file.get() == nullptr) {
-          PLOG(ERROR) << "Failed to open vdex file: " << vdex_filename;
-          return false;
+        if (vdex_filename == input_vdex_) {
+          update_input_vdex_ = true;
+          std::unique_ptr<File> vdex_file(OS::OpenFileReadWrite(vdex_filename.c_str()));
+          vdex_files_.push_back(std::move(vdex_file));
+        } else {
+          std::unique_ptr<File> vdex_file(OS::CreateEmptyFile(vdex_filename.c_str()));
+          if (vdex_file.get() == nullptr) {
+            PLOG(ERROR) << "Failed to open vdex file: " << vdex_filename;
+            return false;
+          }
+          if (fchmod(vdex_file->Fd(), 0644) != 0) {
+            PLOG(ERROR) << "Failed to make vdex file world readable: " << vdex_filename;
+            vdex_file->Erase();
+            return false;
+          }
+          vdex_files_.push_back(std::move(vdex_file));
         }
-        if (fchmod(vdex_file->Fd(), 0644) != 0) {
-          PLOG(ERROR) << "Failed to make vdex file world readable: " << vdex_filename;
-          vdex_file->Erase();
-          return false;
-        }
-        vdex_files_.push_back(std::move(vdex_file));
       }
     } else {
       std::unique_ptr<File> oat_file(new File(oat_fd_, oat_location_, /* check_usage */ true));
@@ -1312,7 +1325,6 @@ class Dex2Oat FINAL {
       }
       oat_files_.push_back(std::move(oat_file));
 
-      DCHECK_NE(input_vdex_fd_, output_vdex_fd_);
       if (input_vdex_fd_ != -1) {
         struct stat s;
         int rc = TEMP_FAILURE_RETRY(fstat(input_vdex_fd_, &s));
@@ -1345,8 +1357,13 @@ class Dex2Oat FINAL {
         return false;
       }
       vdex_file->DisableAutoClose();
-      if (vdex_file->SetLength(0) != 0) {
-        PLOG(WARNING) << "Truncating vdex file " << vdex_location << " failed.";
+      if (input_vdex_file_ != nullptr && output_vdex_fd_ == input_vdex_fd_) {
+        update_input_vdex_ = true;
+      } else {
+        if (vdex_file->SetLength(0) != 0) {
+          PLOG(ERROR) << "Truncating vdex file " << vdex_location << " failed.";
+          return false;
+        }
       }
       vdex_files_.push_back(std::move(vdex_file));
 
@@ -1483,7 +1500,7 @@ class Dex2Oat FINAL {
         for (const gc::space::ImageSpace* image_space : image_spaces) {
           image_filenames.push_back(image_space->GetImageFilename());
         }
-        std::string image_file_location = Join(image_filenames, ':');
+        std::string image_file_location = android::base::Join(image_filenames, ':');
         if (!image_file_location.empty()) {
           key_value_store_->Put(OatHeader::kImageLocationKey, image_file_location);
         }
@@ -1535,6 +1552,7 @@ class Dex2Oat FINAL {
             instruction_set_features_.get(),
             key_value_store_.get(),
             verify,
+            update_input_vdex_,
             &opened_dex_files_map,
             &opened_dex_files)) {
           return false;
@@ -1636,7 +1654,7 @@ class Dex2Oat FINAL {
                                         soa.Decode<mirror::ClassLoader>(class_loader_).Ptr())));
       // Pre-register dex files so that we can access verification results without locks during
       // compilation and verification.
-      verification_results_->PreRegisterDexFile(dex_file);
+      verification_results_->AddDexFile(dex_file);
     }
 
     return true;
@@ -1686,7 +1704,7 @@ class Dex2Oat FINAL {
               }
             }
 
-            if (StartsWith(dex_location, filter.c_str())) {
+            if (android::base::StartsWith(dex_location, filter.c_str())) {
               VLOG(compiler) << "Disabling inlining from " << dex_file->GetLocation();
               no_inline_from_dex_files_.push_back(dex_file);
               break;
@@ -1855,8 +1873,8 @@ class Dex2Oat FINAL {
           return false;
         }
 
-        // VDEX finalized, seek back to the beginning and write the header.
-        if (!oat_writers_[i]->WriteVdexHeader(vdex_out.get())) {
+        // VDEX finalized, seek back to the beginning and write checksums and the header.
+        if (!oat_writers_[i]->WriteChecksumsAndVdexHeader(vdex_out.get())) {
           LOG(ERROR) << "Failed to write vdex header into VDEX " << vdex_file->GetPath();
           return false;
         }
@@ -2361,10 +2379,10 @@ class Dex2Oat FINAL {
     RuntimeOptions raw_options;
     if (boot_image_filename_.empty()) {
       std::string boot_class_path = "-Xbootclasspath:";
-      boot_class_path += Join(dex_filenames_, ':');
+      boot_class_path += android::base::Join(dex_filenames_, ':');
       raw_options.push_back(std::make_pair(boot_class_path, nullptr));
       std::string boot_class_path_locations = "-Xbootclasspath-locations:";
-      boot_class_path_locations += Join(dex_locations_, ':');
+      boot_class_path_locations += android::base::Join(dex_locations_, ':');
       raw_options.push_back(std::make_pair(boot_class_path_locations, nullptr));
     } else {
       std::string boot_image_option = "-Ximage:";
@@ -2578,7 +2596,7 @@ class Dex2Oat FINAL {
     while (in_stream.good()) {
       std::string dot;
       std::getline(in_stream, dot);
-      if (StartsWith(dot, "#") || dot.empty()) {
+      if (android::base::StartsWith(dot, "#") || dot.empty()) {
         continue;
       }
       if (process != nullptr) {
@@ -2595,7 +2613,9 @@ class Dex2Oat FINAL {
     // Note: when creation of a runtime fails, e.g., when trying to compile an app but when there
     //       is no image, there won't be a Runtime::Current().
     // Note: driver creation can fail when loading an invalid dex file.
-    LOG(INFO) << "dex2oat took " << PrettyDuration(NanoTime() - start_ns_)
+    LOG(INFO) << "dex2oat took "
+              << PrettyDuration(NanoTime() - start_ns_)
+              << " (" << PrettyDuration(ProcessCpuNanoTime() - start_cputime_ns_) << " cpu)"
               << " (threads: " << thread_count_ << ") "
               << ((Runtime::Current() != nullptr && driver_ != nullptr) ?
                   driver_->GetMemoryUsageString(kIsDebugBuild || VLOG_IS_ON(compiler)) :
@@ -2643,6 +2663,7 @@ class Dex2Oat FINAL {
 
   size_t thread_count_;
   uint64_t start_ns_;
+  uint64_t start_cputime_ns_;
   std::unique_ptr<WatchDog> watchdog_;
   std::vector<std::unique_ptr<File>> oat_files_;
   std::vector<std::unique_ptr<File>> vdex_files_;
@@ -2721,6 +2742,9 @@ class Dex2Oat FINAL {
 
   // See CompilerOptions.force_determinism_.
   bool force_determinism_;
+
+  // Whether the given input vdex is also the output.
+  bool update_input_vdex_ = false;
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(Dex2Oat);
 };

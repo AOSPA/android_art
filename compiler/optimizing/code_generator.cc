@@ -304,6 +304,7 @@ void CodeGenerator::InitializeCodeGeneration(size_t number_of_spill_slots,
     SetFrameSize(RoundUp(
         first_register_slot_in_slow_path_
         + maximum_safepoint_spill_size
+        + (GetGraph()->HasShouldDeoptimizeFlag() ? kShouldDeoptimizeFlagSize : 0)
         + FrameEntrySpillSize(),
         kStackAlignment));
   }
@@ -1398,6 +1399,14 @@ void CodeGenerator::EmitJitRoots(uint8_t* code,
     // handles strings. b/32995596
     class_linker->GetInternTable()->InternStrong(string);
     roots->Set(index, string);
+    entry.second = index;
+    ++index;
+  }
+  for (auto& entry : jit_class_roots_) {
+    // Update the `roots` with the class, and replace the address temporarily
+    // stored to the index in the table.
+    uint64_t address = entry.second;
+    roots->Set(index, reinterpret_cast<StackReference<mirror::Class>*>(address)->AsMirrorPtr());
     entry.second = index;
     ++index;
   }

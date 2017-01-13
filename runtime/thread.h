@@ -33,13 +33,13 @@
 #include "base/mutex.h"
 #include "entrypoints/jni/jni_entrypoints.h"
 #include "entrypoints/quick/quick_entrypoints.h"
+#include "gc_root.h"
 #include "globals.h"
 #include "handle_scope.h"
 #include "instrumentation.h"
 #include "jvalue.h"
 #include "object_callbacks.h"
 #include "offsets.h"
-#include "runtime.h"
 #include "runtime_stats.h"
 #include "stack.h"
 #include "thread_state.h"
@@ -87,7 +87,6 @@ class FrameIdToShadowFrame;
 class JavaVMExt;
 struct JNIEnvExt;
 class Monitor;
-class Runtime;
 class ScopedObjectAccessAlreadyRunnable;
 class ShadowFrame;
 class SingleStepControl;
@@ -550,7 +549,8 @@ class Thread {
     return tlsPtr_.frame_id_to_shadow_frame != nullptr;
   }
 
-  void VisitRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
+  void VisitRoots(RootVisitor* visitor, VisitRootFlags flags = kVisitRootFlagAllRoots)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   ALWAYS_INLINE void VerifyStack() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -881,6 +881,15 @@ class Thread {
     --tls32_.disable_thread_flip_count;
   }
 
+  // Returns true if the thread is allowed to call into java.
+  bool CanCallIntoJava() const {
+    return can_call_into_java_;
+  }
+
+  void SetCanCallIntoJava(bool can_call_into_java) {
+    can_call_into_java_ = can_call_into_java;
+  }
+
   // Activates single step control for debugging. The thread takes the
   // ownership of the given SingleStepControl*. It is deleted by a call
   // to DeactivateSingleStepControl or upon thread destruction.
@@ -949,17 +958,17 @@ class Thread {
   }
 
   std::vector<ArtMethod*>* GetStackTraceSample() const {
-    DCHECK(!Runtime::Current()->IsAotCompiler());
+    DCHECK(!IsAotCompiler());
     return tlsPtr_.deps_or_stack_trace_sample.stack_trace_sample;
   }
 
   void SetStackTraceSample(std::vector<ArtMethod*>* sample) {
-    DCHECK(!Runtime::Current()->IsAotCompiler());
+    DCHECK(!IsAotCompiler());
     tlsPtr_.deps_or_stack_trace_sample.stack_trace_sample = sample;
   }
 
   verifier::VerifierDeps* GetVerifierDeps() const {
-    DCHECK(Runtime::Current()->IsAotCompiler());
+    DCHECK(IsAotCompiler());
     return tlsPtr_.deps_or_stack_trace_sample.verifier_deps;
   }
 
@@ -967,7 +976,7 @@ class Thread {
   // entry in the thread is cleared before destruction of the actual VerifierDeps
   // object, or the thread.
   void SetVerifierDeps(verifier::VerifierDeps* verifier_deps) {
-    DCHECK(Runtime::Current()->IsAotCompiler());
+    DCHECK(IsAotCompiler());
     DCHECK(verifier_deps == nullptr || tlsPtr_.deps_or_stack_trace_sample.verifier_deps == nullptr);
     tlsPtr_.deps_or_stack_trace_sample.verifier_deps = verifier_deps;
   }
@@ -1007,7 +1016,7 @@ class Thread {
     tls32_.state_and_flags.as_atomic_int.FetchAndAndSequentiallyConsistent(-1 ^ flag);
   }
 
-  void ResetQuickAllocEntryPointsForThread();
+  void ResetQuickAllocEntryPointsForThread(bool is_marking);
 
   // Returns the remaining space in the TLAB.
   size_t TlabSize() const;
@@ -1245,6 +1254,11 @@ class Thread {
 
   // Install the protected region for implicit stack checks.
   void InstallImplicitProtection();
+
+  template <bool kPrecise>
+  void VisitRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
+
+  static bool IsAotCompiler();
 
   // 32 bits of atomically changed state and flags. Keeping as 32 bits allows and atomic CAS to
   // change from being Suspended to Runnable without a suspend request occurring.
@@ -1582,6 +1596,10 @@ class Thread {
 
   // Pending extra checkpoints if checkpoint_function_ is already used.
   std::list<Closure*> checkpoint_overflow_ GUARDED_BY(Locks::thread_suspend_count_lock_);
+
+  // True if the thread is allowed to call back into java (for e.g. during class resolution).
+  // By default this is true.
+  bool can_call_into_java_;
 
   friend class Dbg;  // For SetStateUnsafe.
   friend class gc::collector::SemiSpace;  // For getting stack traces.

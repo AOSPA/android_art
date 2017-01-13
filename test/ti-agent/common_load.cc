@@ -23,9 +23,9 @@
 #include "base/logging.h"
 #include "base/macros.h"
 #include "common_load.h"
+#include "common_helper.h"
 
 #include "901-hello-ti-agent/basics.h"
-#include "902-hello-transformation/transform.h"
 #include "903-hello-tagging/tagging.h"
 #include "904-object-allocation/tracking.h"
 #include "905-object-free/tracking_free.h"
@@ -37,6 +37,8 @@
 #include "911-get-stack-trace/stack_trace.h"
 #include "912-classes/classes.h"
 #include "913-heaps/heaps.h"
+#include "918-fields/fields.h"
+#include "920-objects/objects.h"
 
 namespace art {
 
@@ -54,7 +56,7 @@ struct AgentLib {
 // A list of all the agents we have for testing.
 AgentLib agents[] = {
   { "901-hello-ti-agent", Test901HelloTi::OnLoad, nullptr },
-  { "902-hello-transformation", Test902HelloTransformation::OnLoad, nullptr },
+  { "902-hello-transformation", common_redefine::OnLoad, nullptr },
   { "903-hello-tagging", Test903HelloTagging::OnLoad, nullptr },
   { "904-object-allocation", Test904ObjectAllocation::OnLoad, nullptr },
   { "905-object-free", Test905ObjectFree::OnLoad, nullptr },
@@ -66,6 +68,14 @@ AgentLib agents[] = {
   { "911-get-stack-trace", Test911GetStackTrace::OnLoad, nullptr },
   { "912-classes", Test912Classes::OnLoad, nullptr },
   { "913-heaps", Test913Heaps::OnLoad, nullptr },
+  { "914-hello-obsolescence", common_redefine::OnLoad, nullptr },
+  { "915-obsolete-2", common_redefine::OnLoad, nullptr },
+  { "916-obsolete-jit", common_redefine::OnLoad, nullptr },
+  { "917-fields-transformation", common_redefine::OnLoad, nullptr },
+  { "918-fields", Test918Fields::OnLoad, nullptr },
+  { "919-obsolete-fields", common_redefine::OnLoad, nullptr },
+  { "920-objects", Test920Objects::OnLoad, nullptr },
+  { "921-hello-failure", common_redefine::OnLoad, nullptr },
 };
 
 static AgentLib* FindAgent(char* name) {
@@ -95,6 +105,10 @@ static bool FindAgentNameAndOptions(char* options,
   return true;
 }
 
+static void SetIsJVM(char* options) {
+  RuntimeIsJVM = strncmp(options, "jvm", 3) == 0;
+}
+
 extern "C" JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM* vm, char* options, void* reserved) {
   char* remaining_options = nullptr;
   char* name_option = nullptr;
@@ -112,6 +126,7 @@ extern "C" JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM* vm, char* options, void* 
     printf("agent: %s does not include an OnLoad method.\n", name_option);
     return -3;
   }
+  SetIsJVM(remaining_options);
   return lib->load(vm, remaining_options, reserved);
 }
 
@@ -132,6 +147,7 @@ extern "C" JNIEXPORT jint JNICALL Agent_OnAttach(JavaVM* vm, char* options, void
     printf("agent: %s does not include an OnAttach method.\n", name_option);
     return -3;
   }
+  SetIsJVM(remaining_options);
   return lib->attach(vm, remaining_options, reserved);
 }
 

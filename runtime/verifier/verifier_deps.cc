@@ -80,8 +80,8 @@ uint16_t VerifierDeps::GetAccessFlags(T* element) {
   }
 }
 
-uint32_t VerifierDeps::GetClassDescriptorStringId(const DexFile& dex_file,
-                                                  ObjPtr<mirror::Class> klass) {
+dex::StringIndex VerifierDeps::GetClassDescriptorStringId(const DexFile& dex_file,
+                                                          ObjPtr<mirror::Class> klass) {
   DCHECK(klass != nullptr);
   ObjPtr<mirror::DexCache> dex_cache = klass->GetDexCache();
   // Array and proxy classes do not have a dex cache.
@@ -104,9 +104,9 @@ uint32_t VerifierDeps::GetClassDescriptorStringId(const DexFile& dex_file,
 }
 
 // Try to find the string descriptor of the class. type_idx is a best guess of a matching string id.
-static uint32_t TryGetClassDescriptorStringId(const DexFile& dex_file,
-                                              dex::TypeIndex type_idx,
-                                              ObjPtr<mirror::Class> klass)
+static dex::StringIndex TryGetClassDescriptorStringId(const DexFile& dex_file,
+                                                      dex::TypeIndex type_idx,
+                                                      ObjPtr<mirror::Class> klass)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   if (!klass->IsArrayClass()) {
     const DexFile::TypeId& type_id = dex_file.GetTypeId(type_idx);
@@ -117,21 +117,21 @@ static uint32_t TryGetClassDescriptorStringId(const DexFile& dex_file,
       return type_id.descriptor_idx_;
     }
   }
-  return DexFile::kDexNoIndex;
+  return dex::StringIndex::Invalid();
 }
 
-uint32_t VerifierDeps::GetMethodDeclaringClassStringId(const DexFile& dex_file,
-                                                       uint32_t dex_method_index,
-                                                       ArtMethod* method) {
+dex::StringIndex VerifierDeps::GetMethodDeclaringClassStringId(const DexFile& dex_file,
+                                                               uint32_t dex_method_index,
+                                                               ArtMethod* method) {
   static_assert(kAccJavaFlagsMask == 0xFFFF, "Unexpected value of a constant");
   if (method == nullptr) {
-    return VerifierDeps::kUnresolvedMarker;
+    return dex::StringIndex(VerifierDeps::kUnresolvedMarker);
   }
-  const uint32_t string_id = TryGetClassDescriptorStringId(
+  const dex::StringIndex string_id = TryGetClassDescriptorStringId(
       dex_file,
       dex_file.GetMethodId(dex_method_index).class_idx_,
       method->GetDeclaringClass());
-  if (string_id != DexFile::kDexNoIndex) {
+  if (string_id.IsValid()) {
     // Got lucky using the original dex file, return based on the input dex file.
     DCHECK_EQ(GetClassDescriptorStringId(dex_file, method->GetDeclaringClass()), string_id);
     return string_id;
@@ -139,18 +139,18 @@ uint32_t VerifierDeps::GetMethodDeclaringClassStringId(const DexFile& dex_file,
   return GetClassDescriptorStringId(dex_file, method->GetDeclaringClass());
 }
 
-uint32_t VerifierDeps::GetFieldDeclaringClassStringId(const DexFile& dex_file,
-                                                      uint32_t dex_field_idx,
-                                                      ArtField* field) {
+dex::StringIndex VerifierDeps::GetFieldDeclaringClassStringId(const DexFile& dex_file,
+                                                              uint32_t dex_field_idx,
+                                                              ArtField* field) {
   static_assert(kAccJavaFlagsMask == 0xFFFF, "Unexpected value of a constant");
   if (field == nullptr) {
-    return VerifierDeps::kUnresolvedMarker;
+    return dex::StringIndex(VerifierDeps::kUnresolvedMarker);
   }
-  const uint32_t string_id = TryGetClassDescriptorStringId(
+  const dex::StringIndex string_id = TryGetClassDescriptorStringId(
       dex_file,
       dex_file.GetFieldId(dex_field_idx).class_idx_,
       field->GetDeclaringClass());
-  if (string_id != DexFile::kDexNoIndex) {
+  if (string_id.IsValid()) {
     // Got lucky using the original dex file, return based on the input dex file.
     DCHECK_EQ(GetClassDescriptorStringId(dex_file, field->GetDeclaringClass()), string_id);
     return string_id;
@@ -190,7 +190,7 @@ static bool FindExistingStringId(const std::vector<std::string>& strings,
   return false;
 }
 
-uint32_t VerifierDeps::GetIdFromString(const DexFile& dex_file, const std::string& str) {
+dex::StringIndex VerifierDeps::GetIdFromString(const DexFile& dex_file, const std::string& str) {
   const DexFile::StringId* string_id = dex_file.FindStringId(str.c_str());
   if (string_id != nullptr) {
     // String is in the DEX file. Return its ID.
@@ -212,49 +212,51 @@ uint32_t VerifierDeps::GetIdFromString(const DexFile& dex_file, const std::strin
   {
     ReaderMutexLock mu(Thread::Current(), *Locks::verifier_deps_lock_);
     if (FindExistingStringId(deps->strings_, str, &found_id)) {
-      return num_ids_in_dex + found_id;
+      return dex::StringIndex(num_ids_in_dex + found_id);
     }
   }
   {
     WriterMutexLock mu(Thread::Current(), *Locks::verifier_deps_lock_);
     if (FindExistingStringId(deps->strings_, str, &found_id)) {
-      return num_ids_in_dex + found_id;
+      return dex::StringIndex(num_ids_in_dex + found_id);
     }
     deps->strings_.push_back(str);
-    uint32_t new_id = num_ids_in_dex + deps->strings_.size() - 1;
-    CHECK_GE(new_id, num_ids_in_dex);  // check for overflows
+    dex::StringIndex new_id(num_ids_in_dex + deps->strings_.size() - 1);
+    CHECK_GE(new_id.index_, num_ids_in_dex);  // check for overflows
     DCHECK_EQ(str, singleton->GetStringFromId(dex_file, new_id));
     return new_id;
   }
 }
 
-std::string VerifierDeps::GetStringFromId(const DexFile& dex_file, uint32_t string_id) const {
+std::string VerifierDeps::GetStringFromId(const DexFile& dex_file, dex::StringIndex string_id)
+    const {
   uint32_t num_ids_in_dex = dex_file.NumStringIds();
-  if (string_id < num_ids_in_dex) {
+  if (string_id.index_ < num_ids_in_dex) {
     return std::string(dex_file.StringDataByIdx(string_id));
   } else {
     const DexFileDeps* deps = GetDexFileDeps(dex_file);
     DCHECK(deps != nullptr);
-    string_id -= num_ids_in_dex;
-    CHECK_LT(string_id, deps->strings_.size());
-    return deps->strings_[string_id];
+    string_id.index_ -= num_ids_in_dex;
+    CHECK_LT(string_id.index_, deps->strings_.size());
+    return deps->strings_[string_id.index_];
   }
 }
 
 bool VerifierDeps::IsInClassPath(ObjPtr<mirror::Class> klass) const {
   DCHECK(klass != nullptr);
 
-  ObjPtr<mirror::DexCache> dex_cache = klass->GetDexCache();
-  if (dex_cache == nullptr) {
-    // This is a synthesized class, in this case always an array. They are not
-    // defined in the compiled DEX files and therefore are part of the classpath.
-    // We could avoid recording dependencies on arrays with component types in
-    // the compiled DEX files but we choose to record them anyway so as to
-    // record the access flags VM sets for array classes.
-    DCHECK(klass->IsArrayClass()) << klass->PrettyDescriptor();
+  // For array types, we return whether the non-array component type
+  // is in the classpath.
+  while (klass->IsArrayClass()) {
+    klass = klass->GetComponentType();
+  }
+
+  if (klass->IsPrimitive()) {
     return true;
   }
 
+  ObjPtr<mirror::DexCache> dex_cache = klass->GetDexCache();
+  DCHECK(dex_cache != nullptr);
   const DexFile* dex_file = dex_cache->GetDexFile();
   DCHECK(dex_file != nullptr);
 
@@ -333,6 +335,60 @@ void VerifierDeps::AddMethodResolution(const DexFile& dex_file,
   }
 }
 
+mirror::Class* VerifierDeps::FindOneClassPathBoundaryForInterface(mirror::Class* destination,
+                                                                  mirror::Class* source) const {
+  DCHECK(destination->IsInterface());
+  DCHECK(IsInClassPath(destination));
+  Thread* thread = Thread::Current();
+  mirror::Class* current = source;
+  // Record the classes that are at the boundary between the compiled DEX files and
+  // the classpath. We will check those classes later to find one class that inherits
+  // `destination`.
+  std::vector<ObjPtr<mirror::Class>> boundaries;
+  // If the destination is a direct interface of a class defined in the DEX files being
+  // compiled, no need to record it.
+  while (!IsInClassPath(current)) {
+    for (size_t i = 0; i < current->NumDirectInterfaces(); ++i) {
+      ObjPtr<mirror::Class> direct = mirror::Class::GetDirectInterface(thread, current, i);
+      if (direct == destination) {
+        return nullptr;
+      } else if (IsInClassPath(direct)) {
+        boundaries.push_back(direct);
+      }
+    }
+    current = current->GetSuperClass();
+  }
+  DCHECK(current != nullptr);
+  boundaries.push_back(current);
+
+  // Check if we have an interface defined in the DEX files being compiled, direclty
+  // inheriting `destination`.
+  int32_t iftable_count = source->GetIfTableCount();
+  ObjPtr<mirror::IfTable> iftable = source->GetIfTable();
+  for (int32_t i = 0; i < iftable_count; ++i) {
+    mirror::Class* itf = iftable->GetInterface(i);
+    if (!IsInClassPath(itf)) {
+      for (size_t j = 0; j < itf->NumDirectInterfaces(); ++j) {
+        ObjPtr<mirror::Class> direct = mirror::Class::GetDirectInterface(thread, itf, j);
+        if (direct == destination) {
+          return nullptr;
+        } else if (IsInClassPath(direct)) {
+          boundaries.push_back(direct);
+        }
+      }
+    }
+  }
+
+  // Find a boundary making `source` inherit from `destination`. We must find one.
+  for (const ObjPtr<mirror::Class>& boundary : boundaries) {
+    if (destination->IsAssignableFrom(boundary)) {
+      return boundary.Ptr();
+    }
+  }
+  LOG(FATAL) << "Should have found a classpath boundary";
+  UNREACHABLE();
+}
+
 void VerifierDeps::AddAssignability(const DexFile& dex_file,
                                     mirror::Class* destination,
                                     mirror::Class* source,
@@ -344,8 +400,21 @@ void VerifierDeps::AddAssignability(const DexFile& dex_file,
   // merely on no issues with linking (valid access flags, superclass and
   // implemented interfaces). If the class at any point reached the IsResolved
   // status, the requirement holds. This is guaranteed by RegTypeCache::ResolveClass.
-  DCHECK(destination != nullptr && !destination->IsPrimitive());
-  DCHECK(source != nullptr && !source->IsPrimitive());
+  DCHECK(destination != nullptr);
+  DCHECK(source != nullptr);
+
+  if (destination->IsPrimitive() || source->IsPrimitive()) {
+    // Primitive types are trivially non-assignable to anything else.
+    // We do not need to record trivial assignability, as it will
+    // not change across releases.
+    return;
+  }
+
+  if (source->IsObjectClass() && !is_assignable) {
+    // j.l.Object is trivially non-assignable to other types, don't
+    // record it.
+    return;
+  }
 
   if (destination == source ||
       destination->IsObjectClass() ||
@@ -388,9 +457,33 @@ void VerifierDeps::AddAssignability(const DexFile& dex_file,
     return;
   }
 
+  if (!IsInClassPath(source)) {
+    if (!destination->IsInterface()) {
+      DCHECK(!source->IsInterface());
+      // Find the super class at the classpath boundary. Only that class
+      // can change the assignability.
+      do {
+        source = source->GetSuperClass();
+      } while (!IsInClassPath(source));
+
+      // If that class is the actual destination, no need to record it.
+      if (source == destination) {
+        return;
+      }
+    } else if (is_assignable) {
+      source = FindOneClassPathBoundaryForInterface(destination, source);
+      if (source == nullptr) {
+        // There was no classpath boundary, no need to record.
+        return;
+      }
+      DCHECK(IsInClassPath(source));
+    }
+  }
+
+
   // Get string IDs for both descriptors and store in the appropriate set.
-  uint32_t destination_id = GetClassDescriptorStringId(dex_file, destination);
-  uint32_t source_id = GetClassDescriptorStringId(dex_file, source);
+  dex::StringIndex destination_id = GetClassDescriptorStringId(dex_file, destination);
+  dex::StringIndex source_id = GetClassDescriptorStringId(dex_file, source);
 
   if (is_assignable) {
     dex_deps->assignable_types_.emplace(TypeAssignability(destination_id, source_id));
@@ -471,6 +564,9 @@ template<> inline uint32_t Encode<uint32_t>(uint32_t in) {
 template<> inline uint32_t Encode<dex::TypeIndex>(dex::TypeIndex in) {
   return in.index_;
 }
+template<> inline uint32_t Encode<dex::StringIndex>(dex::StringIndex in) {
+  return in.index_;
+}
 
 template<typename T> inline T Decode(uint32_t in);
 
@@ -482,6 +578,9 @@ template<> inline uint32_t Decode<uint32_t>(uint32_t in) {
 }
 template<> inline dex::TypeIndex Decode<dex::TypeIndex>(uint32_t in) {
   return dex::TypeIndex(in);
+}
+template<> inline dex::StringIndex Decode<dex::StringIndex>(uint32_t in) {
+  return dex::StringIndex(in);
 }
 
 template<typename T1, typename T2>
@@ -508,7 +607,7 @@ template<typename T1, typename T2, typename T3>
 static inline void DecodeTuple(const uint8_t** in, const uint8_t* end, std::tuple<T1, T2, T3>* t) {
   T1 v1 = Decode<T1>(DecodeUint32WithOverflowCheck(in, end));
   T2 v2 = Decode<T2>(DecodeUint32WithOverflowCheck(in, end));
-  T3 v3 = Decode<T2>(DecodeUint32WithOverflowCheck(in, end));
+  T3 v3 = Decode<T3>(DecodeUint32WithOverflowCheck(in, end));
   *t = std::make_tuple(v1, v2, v3);
 }
 

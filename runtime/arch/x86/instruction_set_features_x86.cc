@@ -19,11 +19,15 @@
 #include <fstream>
 #include <sstream>
 
+#include "android-base/stringprintf.h"
+#include "android-base/strings.h"
+
 #include "arch/x86_64/instruction_set_features_x86_64.h"
-#include "base/stringprintf.h"
-#include "utils.h"  // For Trim.
+#include "base/logging.h"
 
 namespace art {
+
+using android::base::StringPrintf;
 
 // Feature-support arrays.
 
@@ -293,7 +297,7 @@ std::unique_ptr<const InstructionSetFeatures> X86InstructionSetFeatures::AddFeat
   bool has_AVX2 = has_AVX2_;
   bool has_POPCNT = has_POPCNT_;
   for (auto i = features.begin(); i != features.end(); i++) {
-    std::string feature = Trim(*i);
+    std::string feature = android::base::Trim(*i);
     if (feature == "ssse3") {
       has_SSSE3 = true;
     } else if (feature == "-ssse3") {

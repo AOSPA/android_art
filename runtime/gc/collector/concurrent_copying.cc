@@ -58,7 +58,7 @@ ConcurrentCopying::ConcurrentCopying(Heap* heap,
                                      bool measure_read_barrier_slow_path)
     : GarbageCollector(heap,
                        name_prefix + (name_prefix.empty() ? "" : " ") +
-                       "concurrent copying + mark sweep"),
+                       "concurrent copying"),
       region_space_(nullptr), gc_barrier_(new Barrier(0)),
       gc_mark_stack_(accounting::ObjectStack::Create("concurrent copying gc mark stack",
                                                      kDefaultGcMarkStackSize,
@@ -812,13 +812,13 @@ void ConcurrentCopying::ProcessFalseGrayStack() {
   false_gray_stack_.clear();
 }
 
-
 void ConcurrentCopying::IssueEmptyCheckpoint() {
   Thread* self = Thread::Current();
   ThreadList* thread_list = Runtime::Current()->GetThreadList();
   Barrier* barrier = thread_list->EmptyCheckpointBarrier();
   barrier->Init(self, 0);
-  size_t barrier_count = thread_list->RunEmptyCheckpoint();
+  std::vector<uint32_t> runnable_thread_ids;  // Used in debug build only
+  size_t barrier_count = thread_list->RunEmptyCheckpoint(runnable_thread_ids);
   // If there are no threads to wait which implys that all the checkpoint functions are finished,
   // then no need to release the mutator lock.
   if (barrier_count == 0) {
@@ -828,7 +828,48 @@ void ConcurrentCopying::IssueEmptyCheckpoint() {
   Locks::mutator_lock_->SharedUnlock(self);
   {
     ScopedThreadStateChange tsc(self, kWaitingForCheckPointsToRun);
-    barrier->Increment(self, barrier_count);
+    if (kIsDebugBuild) {
+      static constexpr uint64_t kEmptyCheckpointTimeoutMs = 600 * 1000;  // 10 minutes.
+      bool timed_out = barrier->Increment(self, barrier_count, kEmptyCheckpointTimeoutMs);
+      if (timed_out) {
+        std::ostringstream ss;
+        ss << "Empty checkpoint timeout\n";
+        ss << "Barrier count " << barrier->GetCount(self) << "\n";
+        ss << "Runnable thread IDs";
+        for (uint32_t tid : runnable_thread_ids) {
+          ss << " " << tid;
+        }
+        ss << "\n";
+        Locks::mutator_lock_->Dump(ss);
+        ss << "\n";
+        LOG(FATAL_WITHOUT_ABORT) << ss.str();
+        // Some threads in 'runnable_thread_ids' are probably stuck. Try to dump their stacks.
+        // Avoid using ThreadList::Dump() initially because it is likely to get stuck as well.
+        {
+          ReaderMutexLock mu0(self, *Locks::mutator_lock_);
+          MutexLock mu1(self, *Locks::thread_list_lock_);
+          for (Thread* thread : thread_list->GetList()) {
+            uint32_t tid = thread->GetThreadId();
+            bool is_in_runnable_thread_ids =
+                std::find(runnable_thread_ids.begin(), runnable_thread_ids.end(), tid) !=
+                runnable_thread_ids.end();
+            if (is_in_runnable_thread_ids &&
+                thread->ReadFlag(kEmptyCheckpointRequest)) {
+              // Found a runnable thread that hasn't responded to the empty checkpoint request.
+              // Assume it's stuck and safe to dump its stack.
+              thread->Dump(LOG_STREAM(FATAL_WITHOUT_ABORT));
+            }
+          }
+        }
+        LOG(FATAL_WITHOUT_ABORT)
+            << "Dumped runnable threads that haven't responded to empty checkpoint.";
+        // Now use ThreadList::Dump() to dump more threads, noting it may get stuck.
+        thread_list->Dump(LOG_STREAM(FATAL_WITHOUT_ABORT));
+        LOG(FATAL) << "Dumped all threads.";
+      }
+    } else {
+      barrier->Increment(self, barrier_count);
+    }
   }
   Locks::mutator_lock_->SharedLock(self);
 }
@@ -1340,9 +1381,10 @@ inline void ConcurrentCopying::ProcessMarkStackRef(mirror::Object* to_ref) {
         << " is_marked=" << IsMarked(to_ref);
   }
 #ifdef USE_BAKER_OR_BROOKS_READ_BARRIER
+  mirror::Object* referent = nullptr;
   if (UNLIKELY((to_ref->GetClass<kVerifyNone, kWithoutReadBarrier>()->IsTypeOfReferenceClass() &&
-                to_ref->AsReference()->GetReferent<kWithoutReadBarrier>() != nullptr &&
-                !IsInToSpace(to_ref->AsReference()->GetReferent<kWithoutReadBarrier>())))) {
+                (referent = to_ref->AsReference()->GetReferent<kWithoutReadBarrier>()) != nullptr &&
+                !IsInToSpace(referent)))) {
     // Leave this reference gray in the queue so that GetReferent() will trigger a read barrier. We
     // will change it to white later in ReferenceQueue::DequeuePendingReference().
     DCHECK(to_ref->AsReference()->GetPendingNext() != nullptr) << "Left unenqueued ref gray " << to_ref;
@@ -2145,14 +2187,18 @@ mirror::Object* ConcurrentCopying::Copy(mirror::Object* from_ref) {
       to_ref->SetReadBarrierState(ReadBarrier::GrayState());
     }
 
+    // Do a fence to prevent the field CAS in ConcurrentCopying::Process from possibly reordering
+    // before the object copy.
+    QuasiAtomic::ThreadFenceRelease();
+
     LockWord new_lock_word = LockWord::FromForwardingAddress(reinterpret_cast<size_t>(to_ref));
 
     // Try to atomically write the fwd ptr.
-    bool success = from_ref->CasLockWordWeakSequentiallyConsistent(old_lock_word, new_lock_word);
+    bool success = from_ref->CasLockWordWeakRelaxed(old_lock_word, new_lock_word);
     if (LIKELY(success)) {
       // The CAS succeeded.
-      objects_moved_.FetchAndAddSequentiallyConsistent(1);
-      bytes_moved_.FetchAndAddSequentiallyConsistent(region_space_alloc_size);
+      objects_moved_.FetchAndAddRelaxed(1);
+      bytes_moved_.FetchAndAddRelaxed(region_space_alloc_size);
       if (LIKELY(!fall_back_to_non_moving)) {
         DCHECK(region_space_->IsInToSpace(to_ref));
       } else {

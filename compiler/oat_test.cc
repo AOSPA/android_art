@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include "android-base/stringprintf.h"
+
 #include "arch/instruction_set_features.h"
 #include "art_method-inl.h"
 #include "base/enums.h"
@@ -30,6 +32,8 @@
 #include "elf_writer.h"
 #include "elf_writer_quick.h"
 #include "entrypoints/quick/quick_entrypoints.h"
+#include "linker/buffered_output_stream.h"
+#include "linker/file_output_stream.h"
 #include "linker/multi_oat_relative_patcher.h"
 #include "linker/vector_output_stream.h"
 #include "mirror/class-inl.h"
@@ -46,7 +50,7 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
   std::string error;
-  StringAppendV(&error, fmt, ap);
+  android::base::StringAppendV(&error, fmt, ap);
   LOG(FATAL) << error;
   va_end(ap);
   UNREACHABLE();
@@ -194,6 +198,7 @@ class OatTest : public CommonCompilerTest {
                                          compiler_driver_->GetInstructionSetFeatures(),
                                          &key_value_store,
                                          verify,
+                                         /* update_input_vdex */ false,
                                          &opened_dex_files_map,
                                          &opened_dex_files)) {
       return false;
@@ -217,6 +222,17 @@ class OatTest : public CommonCompilerTest {
                                       text_size,
                                       oat_writer.GetBssSize(),
                                       oat_writer.GetBssRootsOffset());
+
+    if (kIsVdexEnabled) {
+      std::unique_ptr<BufferedOutputStream> vdex_out(
+            MakeUnique<BufferedOutputStream>(MakeUnique<FileOutputStream>(vdex_file)));
+      if (!oat_writer.WriteVerifierDeps(vdex_out.get(), nullptr)) {
+        return false;
+      }
+      if (!oat_writer.WriteChecksumsAndVdexHeader(vdex_out.get())) {
+        return false;
+      }
+    }
 
     if (!oat_writer.WriteRodata(oat_rodata)) {
       return false;

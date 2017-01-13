@@ -341,56 +341,6 @@ valgrind-test-art-target64: valgrind-test-art-target-gtest64
 
 endif  # art_test_bother
 
-########################################################################
-# oat-target and oat-target-sync rules
-
-OAT_TARGET_RULES :=
-
-# $(1): input jar or apk target location
-define declare-oat-target-target
-OUT_OAT_FILE := $(PRODUCT_OUT)/$(basename $(1)).odex
-
-ifeq ($(ONE_SHOT_MAKEFILE),)
-# ONE_SHOT_MAKEFILE is empty for a top level build and we don't want
-# to define the oat-target-* rules there because they will conflict
-# with the build/core/dex_preopt.mk defined rules.
-.PHONY: oat-target-$(1)
-oat-target-$(1):
-
-else
-.PHONY: oat-target-$(1)
-oat-target-$(1): $$(OUT_OAT_FILE)
-
-$$(OUT_OAT_FILE): $(PRODUCT_OUT)/$(1) $(DEFAULT_DEX_PREOPT_BUILT_IMAGE) $(DEX2OAT_DEPENDENCY)
-	@mkdir -p $$(dir $$@)
-	$(DEX2OAT) --runtime-arg -Xms$(DEX2OAT_XMS) --runtime-arg -Xmx$(DEX2OAT_XMX) \
-		--boot-image=$(DEFAULT_DEX_PREOPT_BUILT_IMAGE) --dex-file=$(PRODUCT_OUT)/$(1) \
-		--dex-location=/$(1) --oat-file=$$@ \
-		--instruction-set=$(DEX2OAT_TARGET_ARCH) \
-		--instruction-set-variant=$(DEX2OAT_TARGET_CPU_VARIANT) \
-		--instruction-set-features=$(DEX2OAT_TARGET_INSTRUCTION_SET_FEATURES) \
-		--android-root=$(PRODUCT_OUT)/system --include-patch-information \
-		--runtime-arg -Xnorelocate
-
-endif
-
-OAT_TARGET_RULES += oat-target-$(1)
-endef
-
-$(foreach file,\
-  $(filter-out\
-    $(addprefix $(TARGET_OUT_JAVA_LIBRARIES)/,$(addsuffix .jar,$(LIBART_TARGET_BOOT_JARS))),\
-    $(wildcard $(TARGET_OUT_APPS)/*.apk) $(wildcard $(TARGET_OUT_JAVA_LIBRARIES)/*.jar)),\
-  $(eval $(call declare-oat-target-target,$(subst $(PRODUCT_OUT)/,,$(file)))))
-
-.PHONY: oat-target
-oat-target: $(ART_TARGET_DEPENDENCIES) $(DEFAULT_DEX_PREOPT_INSTALLED_IMAGE) $(OAT_TARGET_RULES)
-
-.PHONY: oat-target-sync
-oat-target-sync: oat-target
-	$(TEST_ART_ADB_ROOT_AND_REMOUNT)
-	adb sync
-
 ####################################################################################################
 # Fake packages to ensure generation of libopenjdkd when one builds with mm/mmm/mmma.
 #
@@ -435,8 +385,9 @@ build-art-target: $(TARGET_OUT_EXECUTABLES)/art $(ART_TARGET_DEPENDENCIES) $(TAR
 # Phony target for only building what go/lem requires on target.
 .PHONY: build-art-target-golem
 # Also include libartbenchmark, we always include it when running golem.
+# libstdc++ is needed when building for ART_TARGET_LINUX.
 ART_TARGET_SHARED_LIBRARY_BENCHMARK := $(TARGET_OUT_SHARED_LIBRARIES)/libartbenchmark.so
-build-art-target-golem: dex2oat dalvikvm patchoat linker \
+build-art-target-golem: dex2oat dalvikvm patchoat linker libstdc++ \
                         $(TARGET_OUT)/etc/public.libraries.txt \
                         $(ART_TARGET_DEX_DEPENDENCIES) \
                         $(ART_TARGET_SHARED_LIBRARY_DEPENDENCIES) \

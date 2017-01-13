@@ -34,6 +34,7 @@
 #include "stack_map_stream.h"
 #include "string_reference.h"
 #include "utils/label.h"
+#include "utils/type_reference.h"
 
 namespace art {
 
@@ -307,6 +308,12 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
     return POPCOUNT(GetSlowPathSpills(locations, core_registers));
   }
 
+  size_t GetStackOffsetOfShouldDeoptimizeFlag() const {
+    DCHECK(GetGraph()->HasShouldDeoptimizeFlag());
+    DCHECK_GE(GetFrameSize(), FrameEntrySpillSize() + kShouldDeoptimizeFlagSize);
+    return GetFrameSize() - FrameEntrySpillSize() - kShouldDeoptimizeFlagSize;
+  }
+
   // Record native to dex mapping for a suspend point.  Required by runtime.
   void RecordPcInfo(HInstruction* instruction, uint32_t dex_pc, SlowPathCode* slow_path = nullptr);
   // Check whether we have already recorded mapping at this PC.
@@ -337,7 +344,7 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   void BuildStackMaps(MemoryRegion region, const DexFile::CodeItem& code_item);
   size_t ComputeStackMapsSize();
   size_t GetNumberOfJitRoots() const {
-    return jit_string_roots_.size();
+    return jit_string_roots_.size() + jit_class_roots_.size();
   }
 
   // Fills the `literals` array with literals collected during code generation.
@@ -605,6 +612,8 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
         block_order_(nullptr),
         jit_string_roots_(StringReferenceValueComparator(),
                           graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
+        jit_class_roots_(TypeReferenceValueComparator(),
+                         graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
         disasm_info_(nullptr),
         stats_(stats),
         graph_(graph),
@@ -675,6 +684,7 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   virtual void EmitJitRootPatches(uint8_t* code ATTRIBUTE_UNUSED,
                                   const uint8_t* roots_data ATTRIBUTE_UNUSED) {
     DCHECK_EQ(jit_string_roots_.size(), 0u);
+    DCHECK_EQ(jit_class_roots_.size(), 0u);
   }
 
   // Frame size required for this method.
@@ -705,7 +715,12 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   // Maps a StringReference (dex_file, string_index) to the index in the literal table.
   // Entries are intially added with a 0 index, and `EmitJitRoots` will compute all the
   // indices.
-  ArenaSafeMap<StringReference, size_t, StringReferenceValueComparator> jit_string_roots_;
+  ArenaSafeMap<StringReference, uint32_t, StringReferenceValueComparator> jit_string_roots_;
+
+  // Maps a ClassReference (dex_file, type_index) to the index in the literal table.
+  // Entries are intially added with a pointer in the handle zone, and `EmitJitRoots`
+  // will compute all the indices.
+  ArenaSafeMap<TypeReference, uint64_t, TypeReferenceValueComparator> jit_class_roots_;
 
   DisassemblyInformation* disasm_info_;
 

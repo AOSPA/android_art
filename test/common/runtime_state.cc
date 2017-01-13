@@ -19,6 +19,7 @@
 #include "base/enums.h"
 #include "base/logging.h"
 #include "dex_file-inl.h"
+#include "instrumentation.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
 #include "mirror/class-inl.h"
@@ -29,6 +30,16 @@
 #include "thread-inl.h"
 
 namespace art {
+
+// public static native boolean hasJit();
+
+extern "C" JNIEXPORT jboolean JNICALL Java_Main_hasJit(JNIEnv*, jclass) {
+  Runtime* runtime = Runtime::Current();
+  return runtime != nullptr
+      && runtime->GetJit() != nullptr
+      && runtime->GetInstrumentation()->GetCurrentInstrumentationLevel() !=
+            instrumentation::Instrumentation::InstrumentationLevel::kInstrumentWithInterpreter;
+}
 
 // public static native boolean hasOatFile();
 
@@ -119,6 +130,24 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_compiledWithOptimizing(JNIEnv* e
   return JNI_TRUE;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL Java_Main_isAotCompiled(JNIEnv* env,
+                                                              jclass,
+                                                              jclass cls,
+                                                              jstring method_name) {
+  Thread* self = Thread::Current();
+  ScopedObjectAccess soa(self);
+  ScopedUtfChars chars(env, method_name);
+  CHECK(chars.c_str() != nullptr);
+  ArtMethod* method = soa.Decode<mirror::Class>(cls)->FindDeclaredDirectMethodByName(
+        chars.c_str(), kRuntimePointerSize);
+  const void* code = method->GetOatMethodQuickCode(kRuntimePointerSize);
+  jit::Jit* jit = Runtime::Current()->GetJit();
+  if (jit != nullptr && jit->GetCodeCache()->ContainsPc(code)) {
+    return true;
+  }
+  return code != nullptr;
+}
+
 extern "C" JNIEXPORT void JNICALL Java_Main_ensureJitCompiled(JNIEnv* env,
                                                              jclass,
                                                              jclass cls,
@@ -155,6 +184,43 @@ extern "C" JNIEXPORT void JNICALL Java_Main_ensureJitCompiled(JNIEnv* env,
       jit->CompileMethod(method, self, /* osr */ false);
     }
   }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL Java_Main_hasSingleImplementation(JNIEnv* env,
+                                                                        jclass,
+                                                                        jclass cls,
+                                                                        jstring method_name) {
+  ArtMethod* method = nullptr;
+  ScopedObjectAccess soa(Thread::Current());
+  ScopedUtfChars chars(env, method_name);
+  CHECK(chars.c_str() != nullptr);
+  method = soa.Decode<mirror::Class>(cls)->FindDeclaredVirtualMethodByName(
+      chars.c_str(), kRuntimePointerSize);
+  return method->HasSingleImplementation();
+}
+
+extern "C" JNIEXPORT int JNICALL Java_Main_getHotnessCounter(JNIEnv* env,
+                                                             jclass,
+                                                             jclass cls,
+                                                             jstring method_name) {
+  jit::Jit* jit = Runtime::Current()->GetJit();
+  if (jit == nullptr) {
+    // The hotness counter is valid only under JIT.
+    // If we don't JIT return 0 to match test expectations.
+    return 0;
+  }
+
+  ArtMethod* method = nullptr;
+  {
+    ScopedObjectAccess soa(Thread::Current());
+
+    ScopedUtfChars chars(env, method_name);
+    CHECK(chars.c_str() != nullptr);
+    method = soa.Decode<mirror::Class>(cls)->FindDeclaredDirectMethodByName(
+        chars.c_str(), kRuntimePointerSize);
+  }
+
+  return method->GetCounter();
 }
 
 }  // namespace art

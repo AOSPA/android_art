@@ -22,6 +22,7 @@
 #include "nodes.h"
 #include "parallel_move_resolver.h"
 #include "utils/mips64/assembler_mips64.h"
+#include "utils/type_reference.h"
 
 namespace art {
 namespace mips64 {
@@ -216,6 +217,14 @@ class InstructionCodeGeneratorMIPS64 : public InstructionCodeGenerator {
 
   Mips64Assembler* GetAssembler() const { return assembler_; }
 
+  // Compare-and-jump packed switch generates approx. 3 + 2.5 * N 32-bit
+  // instructions for N cases.
+  // Table-based packed switch generates approx. 11 32-bit instructions
+  // and N 32-bit data words for N cases.
+  // At N = 6 they come out as 18 and 17 32-bit words respectively.
+  // We switch to the table-based method starting with 7 cases.
+  static constexpr uint32_t kPackedSwitchJumpTableThreshold = 6;
+
  private:
   void GenerateClassInitializationCheck(SlowPathCodeMIPS64* slow_path, GpuRegister class_reg);
   void GenerateMemoryBarrier(MemBarrierKind kind);
@@ -227,6 +236,15 @@ class InstructionCodeGeneratorMIPS64 : public InstructionCodeGenerator {
                       const FieldInfo& field_info,
                       bool value_can_be_null);
   void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info);
+  // Generate a GC root reference load:
+  //
+  //   root <- *(obj + offset)
+  //
+  // while honoring read barriers (if any).
+  void GenerateGcRootFieldLoad(HInstruction* instruction,
+                               Location root,
+                               GpuRegister obj,
+                               uint32_t offset);
   void GenerateTestAndBranch(HInstruction* instruction,
                              size_t condition_input_index,
                              Mips64Label* true_target,
@@ -240,12 +258,26 @@ class InstructionCodeGeneratorMIPS64 : public InstructionCodeGenerator {
                                        bool is64bit,
                                        LocationSummary* locations,
                                        Mips64Label* label);
+  void GenerateFpCompare(IfCondition cond,
+                         bool gt_bias,
+                         Primitive::Type type,
+                         LocationSummary* locations);
   void GenerateFpCompareAndBranch(IfCondition cond,
                                   bool gt_bias,
                                   Primitive::Type type,
                                   LocationSummary* locations,
                                   Mips64Label* label);
   void HandleGoto(HInstruction* got, HBasicBlock* successor);
+  void GenPackedSwitchWithCompares(GpuRegister value_reg,
+                                   int32_t lower_bound,
+                                   uint32_t num_entries,
+                                   HBasicBlock* switch_block,
+                                   HBasicBlock* default_block);
+  void GenTableBasedPackedSwitch(GpuRegister value_reg,
+                                 int32_t lower_bound,
+                                 uint32_t num_entries,
+                                 HBasicBlock* switch_block,
+                                 HBasicBlock* default_block);
 
   Mips64Assembler* const assembler_;
   CodeGeneratorMIPS64* const codegen_;
@@ -279,6 +311,9 @@ class CodeGeneratorMIPS64 : public CodeGenerator {
   Mips64Assembler* GetAssembler() OVERRIDE { return &assembler_; }
   const Mips64Assembler& GetAssembler() const OVERRIDE { return assembler_; }
 
+  // Emit linker patches.
+  void EmitLinkerPatches(ArenaVector<LinkerPatch>* linker_patches) OVERRIDE;
+
   void MarkGCCard(GpuRegister object, GpuRegister value, bool value_can_be_null);
 
   // Register allocation.
@@ -306,6 +341,10 @@ class CodeGeneratorMIPS64 : public CodeGenerator {
   void Initialize() OVERRIDE {
     block_labels_ = CommonInitializeLabels<Mips64Label>();
   }
+
+  // We prefer aligned loads and stores (less code), so spill and restore registers in slow paths
+  // at aligned locations.
+  uint32_t GetPreferredSlotsAlignment() const OVERRIDE { return kMips64DoublewordSize; }
 
   void Finalize(CodeAllocator* allocator) OVERRIDE;
 
@@ -357,7 +396,57 @@ class CodeGeneratorMIPS64 : public CodeGenerator {
   void GenerateImplicitNullCheck(HNullCheck* instruction) OVERRIDE;
   void GenerateExplicitNullCheck(HNullCheck* instruction) OVERRIDE;
 
+  // The PcRelativePatchInfo is used for PC-relative addressing of dex cache arrays,
+  // boot image strings and method calls. The only difference is the interpretation of
+  // the offset_or_index.
+  struct PcRelativePatchInfo {
+    PcRelativePatchInfo(const DexFile& dex_file, uint32_t off_or_idx)
+        : target_dex_file(dex_file), offset_or_index(off_or_idx) { }
+    PcRelativePatchInfo(PcRelativePatchInfo&& other) = default;
+
+    const DexFile& target_dex_file;
+    // Either the dex cache array element offset or the string/type/method index.
+    uint32_t offset_or_index;
+    // Label for the auipc instruction.
+    Mips64Label pc_rel_label;
+  };
+
+  PcRelativePatchInfo* NewPcRelativeStringPatch(const DexFile& dex_file, uint32_t string_index);
+  PcRelativePatchInfo* NewPcRelativeTypePatch(const DexFile& dex_file, dex::TypeIndex type_index);
+  PcRelativePatchInfo* NewPcRelativeDexCacheArrayPatch(const DexFile& dex_file,
+                                                       uint32_t element_offset);
+  PcRelativePatchInfo* NewPcRelativeCallPatch(const DexFile& dex_file,
+                                              uint32_t method_index);
+  Literal* DeduplicateBootImageStringLiteral(const DexFile& dex_file,
+                                             dex::StringIndex string_index);
+  Literal* DeduplicateBootImageTypeLiteral(const DexFile& dex_file, dex::TypeIndex type_index);
+  Literal* DeduplicateBootImageAddressLiteral(uint64_t address);
+
+  void EmitPcRelativeAddressPlaceholderHigh(PcRelativePatchInfo* info, GpuRegister out);
+
  private:
+  using Uint32ToLiteralMap = ArenaSafeMap<uint32_t, Literal*>;
+  using Uint64ToLiteralMap = ArenaSafeMap<uint64_t, Literal*>;
+  using MethodToLiteralMap = ArenaSafeMap<MethodReference, Literal*, MethodReferenceComparator>;
+  using BootStringToLiteralMap = ArenaSafeMap<StringReference,
+                                              Literal*,
+                                              StringReferenceValueComparator>;
+  using BootTypeToLiteralMap = ArenaSafeMap<TypeReference,
+                                            Literal*,
+                                            TypeReferenceValueComparator>;
+
+  Literal* DeduplicateUint32Literal(uint32_t value, Uint32ToLiteralMap* map);
+  Literal* DeduplicateUint64Literal(uint64_t value);
+  Literal* DeduplicateMethodLiteral(MethodReference target_method, MethodToLiteralMap* map);
+
+  PcRelativePatchInfo* NewPcRelativePatch(const DexFile& dex_file,
+                                          uint32_t offset_or_index,
+                                          ArenaDeque<PcRelativePatchInfo>* patches);
+
+  template <LinkerPatch (*Factory)(size_t, const DexFile*, uint32_t, uint32_t)>
+  void EmitPcRelativeLinkerPatches(const ArenaDeque<PcRelativePatchInfo>& infos,
+                                   ArenaVector<LinkerPatch>* linker_patches);
+
   // Labels for each block that will be compiled.
   Mips64Label* block_labels_;  // Indexed by block id.
   Mips64Label frame_entry_label_;
@@ -366,6 +455,24 @@ class CodeGeneratorMIPS64 : public CodeGenerator {
   ParallelMoveResolverMIPS64 move_resolver_;
   Mips64Assembler assembler_;
   const Mips64InstructionSetFeatures& isa_features_;
+
+  // Deduplication map for 32-bit literals, used for non-patchable boot image addresses.
+  Uint32ToLiteralMap uint32_literals_;
+  // Deduplication map for 64-bit literals, used for non-patchable method address or method code
+  // address.
+  Uint64ToLiteralMap uint64_literals_;
+  // PC-relative patch info.
+  ArenaDeque<PcRelativePatchInfo> pc_relative_dex_cache_patches_;
+  // Deduplication map for boot string literals for kBootImageLinkTimeAddress.
+  BootStringToLiteralMap boot_image_string_patches_;
+  // PC-relative String patch info; type depends on configuration (app .bss or boot image PIC).
+  ArenaDeque<PcRelativePatchInfo> pc_relative_string_patches_;
+  // Deduplication map for boot type literals for kBootImageLinkTimeAddress.
+  BootTypeToLiteralMap boot_image_type_patches_;
+  // PC-relative type patch info.
+  ArenaDeque<PcRelativePatchInfo> pc_relative_type_patches_;
+  // Deduplication map for patchable boot image addresses.
+  Uint32ToLiteralMap boot_image_address_patches_;
 
   DISALLOW_COPY_AND_ASSIGN(CodeGeneratorMIPS64);
 };

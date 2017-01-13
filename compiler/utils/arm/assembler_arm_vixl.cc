@@ -23,6 +23,9 @@
 
 using namespace vixl::aarch32;  // NOLINT(build/namespaces)
 
+using vixl::ExactAssemblyScope;
+using vixl::CodeBufferCheckScope;
+
 namespace art {
 namespace arm {
 
@@ -43,12 +46,12 @@ size_t ArmVIXLAssembler::CodeSize() const {
 }
 
 const uint8_t* ArmVIXLAssembler::CodeBufferBaseAddress() const {
-  return vixl_masm_.GetStartAddress<uint8_t*>();
+  return vixl_masm_.GetBuffer().GetStartAddress<const uint8_t*>();
 }
 
 void ArmVIXLAssembler::FinalizeInstructions(const MemoryRegion& region) {
   // Copy the instructions from the buffer.
-  MemoryRegion from(vixl_masm_.GetStartAddress<void*>(), CodeSize());
+  MemoryRegion from(vixl_masm_.GetBuffer()->GetStartAddress<void*>(), CodeSize());
   region.CopyFrom(0, from);
 }
 
@@ -365,7 +368,7 @@ void ArmVIXLAssembler::StoreRegisterList(RegList regs, size_t stack_offset) {
       if (stack_offset != 0) {
         base = temps.Acquire();
         DCHECK_EQ(regs & (1u << base.GetCode()), 0u);
-        ___ Add(base, sp, stack_offset);
+        ___ Add(base, sp, Operand::From(stack_offset));
       }
       ___ Stm(base, NO_WRITE_BACK, RegisterList(regs));
     } else {
@@ -385,7 +388,7 @@ void ArmVIXLAssembler::LoadRegisterList(RegList regs, size_t stack_offset) {
       vixl32::Register base = sp;
       if (stack_offset != 0) {
         base = temps.Acquire();
-        ___ Add(base, sp, stack_offset);
+        ___ Add(base, sp, Operand::From(stack_offset));
       }
       ___ Ldm(base, NO_WRITE_BACK, RegisterList(regs));
     } else {
@@ -441,7 +444,7 @@ void ArmVIXLMacroAssembler::CompareAndBranchIfZero(vixl32::Register rn,
     return;
   }
   Cmp(rn, 0);
-  B(eq, label);
+  B(eq, label, is_far_target);
 }
 
 void ArmVIXLMacroAssembler::CompareAndBranchIfNonZero(vixl32::Register rn,
@@ -452,7 +455,38 @@ void ArmVIXLMacroAssembler::CompareAndBranchIfNonZero(vixl32::Register rn,
     return;
   }
   Cmp(rn, 0);
-  B(ne, label);
+  B(ne, label, is_far_target);
+}
+
+void ArmVIXLMacroAssembler::B(vixl32::Label* label) {
+  if (!label->IsBound()) {
+    // Try to use 16-bit T2 encoding of B instruction.
+    DCHECK(OutsideITBlock());
+    ExactAssemblyScope guard(this,
+                             k16BitT32InstructionSizeInBytes,
+                             CodeBufferCheckScope::kMaximumSize);
+    b(al, Narrow, label);
+    AddBranchLabel(label);
+    return;
+  }
+  MacroAssembler::B(label);
+}
+
+void ArmVIXLMacroAssembler::B(vixl32::Condition cond, vixl32::Label* label, bool is_far_target) {
+  if (!label->IsBound() && !is_far_target) {
+    // Try to use 16-bit T2 encoding of B instruction.
+    DCHECK(OutsideITBlock());
+    ExactAssemblyScope guard(this,
+                             k16BitT32InstructionSizeInBytes,
+                             CodeBufferCheckScope::kMaximumSize);
+    b(cond, Narrow, label);
+    AddBranchLabel(label);
+    return;
+  }
+  // To further reduce the Bcc encoding size and use 16-bit T1 encoding,
+  // we can provide a hint to this function: i.e. far_target=false.
+  // By default this function uses 'EncodingSizeType::Best' which generates 32-bit T3 encoding.
+  MacroAssembler::B(cond, label);
 }
 
 }  // namespace arm
