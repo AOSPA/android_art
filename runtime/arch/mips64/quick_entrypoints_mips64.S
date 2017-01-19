@@ -1360,29 +1360,6 @@ END art_quick_check_instance_of
 #endif  // USE_READ_BARRIER
 .endm
 
-    /*
-     * Entry from managed code for array put operations of objects where the value being stored
-     * needs to be checked for compatibility.
-     * a0 = array, a1 = index, a2 = value
-     */
-ENTRY art_quick_aput_obj_with_null_and_bound_check
-    bne    $a0, $zero, .Lart_quick_aput_obj_with_bound_check_gp_set
-    nop
-    b art_quick_throw_null_pointer_exception
-    .cpreturn                       # Restore gp from t8 in branch delay slot.
-END art_quick_aput_obj_with_null_and_bound_check
-
-ENTRY art_quick_aput_obj_with_bound_check
-    lwu  $t0, MIRROR_ARRAY_LENGTH_OFFSET($a0)
-    sltu $t1, $a1, $t0
-    bne  $t1, $zero, .Lart_quick_aput_obj_gp_set
-    nop
-    move $a0, $a1
-    move $a1, $t0
-    b art_quick_throw_array_bounds
-    .cpreturn                       # Restore gp from t8 in branch delay slot.
-END art_quick_aput_obj_with_bound_check
-
 ENTRY art_quick_aput_obj
     beq  $a2, $zero, .Ldo_aput_null
     nop
@@ -1775,107 +1752,9 @@ END \name
 // Generate the allocation entrypoints for each allocator.
 GENERATE_ALLOC_ENTRYPOINTS_FOR_EACH_ALLOCATOR
 
-// A hand-written override for GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT(_rosalloc, RosAlloc).
-ENTRY art_quick_alloc_object_rosalloc
-
-    # Fast path rosalloc allocation
-    # a0: type_idx
-    # a1: ArtMethod*
-    # s1: Thread::Current
-    # -----------------------------
-    # t0: class
-    # t1: object size
-    # t2: rosalloc run
-    # t3: thread stack top offset
-    # a4: thread stack bottom offset
-    # v0: free list head
-    #
-    # a5, a6 : temps
-
-    ld     $t0, ART_METHOD_DEX_CACHE_TYPES_OFFSET_64($a1)   # Load dex cache resolved types array.
-
-    dsll   $a5, $a0, COMPRESSED_REFERENCE_SIZE_SHIFT        # Shift the value.
-    daddu  $a5, $t0, $a5                                    # Compute the index.
-    lwu    $t0, 0($a5)                                      # Load class (t0).
-    beqzc  $t0, .Lart_quick_alloc_object_rosalloc_slow_path
-
-    li     $a6, MIRROR_CLASS_STATUS_INITIALIZED
-    lwu    $a5, MIRROR_CLASS_STATUS_OFFSET($t0)             # Check class status.
-    bnec   $a5, $a6, .Lart_quick_alloc_object_rosalloc_slow_path
-
-    # Add a fake dependence from the following access flag and size loads to the status load. This
-    # is to prevent those loads from being reordered above the status load and reading wrong values.
-    xor    $a5, $a5, $a5
-    daddu  $t0, $t0, $a5
-
-    lwu    $a5, MIRROR_CLASS_ACCESS_FLAGS_OFFSET($t0)       # Check if access flags has
-    li     $a6, ACCESS_FLAGS_CLASS_IS_FINALIZABLE           # kAccClassIsFinalizable.
-    and    $a6, $a5, $a6
-    bnezc  $a6, .Lart_quick_alloc_object_rosalloc_slow_path
-
-    ld     $t3, THREAD_LOCAL_ALLOC_STACK_TOP_OFFSET($s1)    # Check if thread local allocation stack
-    ld     $a4, THREAD_LOCAL_ALLOC_STACK_END_OFFSET($s1)    # has any room left.
-    bgeuc  $t3, $a4, .Lart_quick_alloc_object_rosalloc_slow_path
-
-    lwu    $t1, MIRROR_CLASS_OBJECT_SIZE_OFFSET($t0)        # Load object size (t1).
-    li     $a5, ROSALLOC_MAX_THREAD_LOCAL_BRACKET_SIZE      # Check if size is for a thread local
-                                                            # allocation.
-    bltuc  $a5, $t1, .Lart_quick_alloc_object_rosalloc_slow_path
-
-    # Compute the rosalloc bracket index from the size. Allign up the size by the rosalloc bracket
-    # quantum size and divide by the quantum size and subtract by 1.
-    daddiu $t1, $t1, -1                                     # Decrease obj size and shift right by
-    dsrl   $t1, $t1, ROSALLOC_BRACKET_QUANTUM_SIZE_SHIFT    # quantum.
-
-    dsll   $t2, $t1, POINTER_SIZE_SHIFT
-    daddu  $t2, $t2, $s1
-    ld     $t2, THREAD_ROSALLOC_RUNS_OFFSET($t2)            # Load rosalloc run (t2).
-
-    # Load the free list head (v0).
-    # NOTE: this will be the return val.
-    ld     $v0, (ROSALLOC_RUN_FREE_LIST_OFFSET + ROSALLOC_RUN_FREE_LIST_HEAD_OFFSET)($t2)
-    beqzc  $v0, .Lart_quick_alloc_object_rosalloc_slow_path
-
-    # Load the next pointer of the head and update the list head with the next pointer.
-    ld     $a5, ROSALLOC_SLOT_NEXT_OFFSET($v0)
-    sd     $a5, (ROSALLOC_RUN_FREE_LIST_OFFSET + ROSALLOC_RUN_FREE_LIST_HEAD_OFFSET)($t2)
-
-    # Store the class pointer in the header. This also overwrites the first pointer. The offsets are
-    # asserted to match.
-
-#if ROSALLOC_SLOT_NEXT_OFFSET != MIRROR_OBJECT_CLASS_OFFSET
-#error "Class pointer needs to overwrite next pointer."
-#endif
-
-    POISON_HEAP_REF $t0
-    sw     $t0, MIRROR_OBJECT_CLASS_OFFSET($v0)
-
-    # Push the new object onto the thread local allocation stack and increment the thread local
-    # allocation stack top.
-    sd     $v0, 0($t3)
-    daddiu $t3, $t3, COMPRESSED_REFERENCE_SIZE
-    sd     $t3, THREAD_LOCAL_ALLOC_STACK_TOP_OFFSET($s1)
-
-    # Decrement the size of the free list.
-    lw     $a5, (ROSALLOC_RUN_FREE_LIST_OFFSET + ROSALLOC_RUN_FREE_LIST_SIZE_OFFSET)($t2)
-    addiu  $a5, $a5, -1
-    sw     $a5, (ROSALLOC_RUN_FREE_LIST_OFFSET + ROSALLOC_RUN_FREE_LIST_SIZE_OFFSET)($t2)
-
-    sync                                         # Fence.
-
-    jalr   $zero, $ra
-    .cpreturn                                    # Restore gp from t8 in branch delay slot.
-
-.Lart_quick_alloc_object_rosalloc_slow_path:
-    SETUP_SAVE_REFS_ONLY_FRAME
-    jal    artAllocObjectFromCodeRosAlloc
-    move   $a2 ,$s1                              # Pass self as argument.
-    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
-
-END art_quick_alloc_object_rosalloc
-
-GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT(_tlab, TLAB)
-GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT(_region_tlab, RegionTLAB)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_rosalloc, RosAlloc)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_tlab, TLAB)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_region_tlab, RegionTLAB)
 
     /*
      * Entry from managed code to resolve a string, this stub will allocate a String and deliver an
@@ -2203,7 +2082,7 @@ ENTRY_NO_GP art_quick_indexof
   li    $v0,-1          #     return -1;
 
   sll   $v0,$a2,1       # $a0 += $a2 * 2
-  daddu $a0,$a0,$v0     #  "  "   "  " "
+  daddu $a0,$a0,$v0     #  "  ditto  "
   move  $v0,$a2         # Set i to fromIndex.
 
 1:
@@ -2221,5 +2100,62 @@ ENTRY_NO_GP art_quick_indexof
   j     $ra
   nop
 END art_quick_indexof
+
+.extern artInvokePolymorphic
+ENTRY art_quick_invoke_polymorphic
+    SETUP_SAVE_REFS_AND_ARGS_FRAME
+    move   $a2, rSELF                          # Make $a2 an alias for the current Thread.
+    move   $a3, $sp                            # Make $a3 a pointer to the saved frame context.
+    daddiu $sp, $sp, -8                        # Reserve space for JValue result.
+    .cfi_adjust_cfa_offset 8
+    sd     $zero, 0($sp)                       # Initialize JValue result.
+    jal    artInvokePolymorphic                # (result, receiver, Thread*, context)
+    move   $a0, $sp                            # Make $a0 a pointer to the JValue result
+.macro MATCH_RETURN_TYPE c, handler
+    li     $t0, \c
+    beq    $v0, $t0, \handler
+.endm
+    MATCH_RETURN_TYPE 'V', .Lcleanup_and_return
+    MATCH_RETURN_TYPE 'L', .Lstore_ref_result
+    MATCH_RETURN_TYPE 'I', .Lstore_long_result
+    MATCH_RETURN_TYPE 'J', .Lstore_long_result
+    MATCH_RETURN_TYPE 'B', .Lstore_long_result
+    MATCH_RETURN_TYPE 'C', .Lstore_char_result
+    MATCH_RETURN_TYPE 'D', .Lstore_double_result
+    MATCH_RETURN_TYPE 'F', .Lstore_float_result
+    MATCH_RETURN_TYPE 'S', .Lstore_long_result
+    MATCH_RETURN_TYPE 'Z', .Lstore_boolean_result
+.purgem MATCH_RETURN_TYPE
+    nop
+    b .Lcleanup_and_return
+    nop
+.Lstore_boolean_result:
+    b      .Lcleanup_and_return
+    lbu    $v0, 0($sp)                         # Move byte from JValue result to return value register.
+.Lstore_char_result:
+    b      .Lcleanup_and_return
+    lhu    $v0, 0($sp)                         # Move char from JValue result to return value register.
+.Lstore_double_result:
+.Lstore_float_result:
+    b      .Lcleanup_and_return
+    l.d    $f0, 0($sp)                         # Move double/float from JValue result to return value register.
+.Lstore_ref_result:
+    b      .Lcleanup_and_return
+    lwu    $v0, 0($sp)                         # Move zero extended lower 32-bits to return value register.
+.Lstore_long_result:
+    ld     $v0, 0($sp)                         # Move long from JValue result to return value register.
+    // Fall-through to clean up and return.
+.Lcleanup_and_return:
+    daddiu $sp, $sp, 8                         # Remove space for JValue result.
+    .cfi_adjust_cfa_offset -8
+    ld     $t0, THREAD_EXCEPTION_OFFSET(rSELF) # Load Thread::Current()->exception_
+    RESTORE_SAVE_REFS_AND_ARGS_FRAME
+    bnez   $t0, 1f                             # Success if no exception is pending.
+    nop
+    jalr   $zero, $ra
+    nop
+1:
+    DELIVER_PENDING_EXCEPTION
+END art_quick_invoke_polymorphic
 
   .set pop

@@ -46,9 +46,11 @@ class HInstructionBuilder : public ValueObject {
                       CompilerDriver* driver,
                       const uint8_t* interpreter_metadata,
                       OptimizingCompilerStats* compiler_stats,
-                      Handle<mirror::DexCache> dex_cache)
+                      Handle<mirror::DexCache> dex_cache,
+                      VariableSizedHandleScope* handles)
       : arena_(graph->GetArena()),
         graph_(graph),
+        handles_(handles),
         dex_file_(dex_file),
         code_item_(code_item),
         return_type_(return_type),
@@ -175,6 +177,17 @@ class HInstructionBuilder : public ValueObject {
                    uint32_t* args,
                    uint32_t register_index);
 
+  // Builds an invocation node for invoke-polymorphic and returns whether the
+  // instruction is supported.
+  bool BuildInvokePolymorphic(const Instruction& instruction,
+                              uint32_t dex_pc,
+                              uint32_t method_idx,
+                              uint32_t proto_idx,
+                              uint32_t number_of_vreg_arguments,
+                              bool is_range,
+                              uint32_t* args,
+                              uint32_t register_index);
+
   // Builds a new array node and the instructions that fill it.
   void BuildFilledNewArray(uint32_t dex_pc,
                            dex::TypeIndex type_index,
@@ -211,6 +224,14 @@ class HInstructionBuilder : public ValueObject {
 
   // Builds an instruction sequence for a switch statement.
   void BuildSwitch(const Instruction& instruction, uint32_t dex_pc);
+
+  // Builds a `HLoadClass` loading the given `type_index`. If `outer` is true,
+  // this method will use the outer class's dex file to lookup the type at
+  // `type_index`.
+  HLoadClass* BuildLoadClass(dex::TypeIndex type_index,
+                             uint32_t dex_pc,
+                             bool check_access,
+                             bool outer = false);
 
   // Returns the outer-most compiling method's class.
   mirror::Class* GetOutermostCompilingClass() const;
@@ -271,6 +292,7 @@ class HInstructionBuilder : public ValueObject {
 
   ArenaAllocator* const arena_;
   HGraph* const graph_;
+  VariableSizedHandleScope* handles_;
 
   // The dex file where the method being compiled is, and the bytecode data.
   const DexFile* const dex_file_;

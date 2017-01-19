@@ -856,27 +856,6 @@ END art_quick_check_instance_of
 #endif  // USE_READ_BARRIER
 .endm
 
-    /*
-     * Entry from managed code for array put operations of objects where the value being stored
-     * needs to be checked for compatibility.
-     * r0 = array, r1 = index, r2 = value
-     */
-ENTRY art_quick_aput_obj_with_null_and_bound_check
-    tst r0, r0
-    bne art_quick_aput_obj_with_bound_check
-    b art_quick_throw_null_pointer_exception
-END art_quick_aput_obj_with_null_and_bound_check
-
-    .hidden art_quick_aput_obj_with_bound_check
-ENTRY art_quick_aput_obj_with_bound_check
-    ldr r3, [r0, #MIRROR_ARRAY_LENGTH_OFFSET]
-    cmp r3, r1
-    bhi art_quick_aput_obj
-    mov r0, r1
-    mov r1, r3
-    b art_quick_throw_array_bounds
-END art_quick_aput_obj_with_bound_check
-
 #ifdef USE_READ_BARRIER
     .extern artReadBarrierSlow
 #endif
@@ -1124,28 +1103,23 @@ END art_quick_resolve_string
 // Generate the allocation entrypoints for each allocator.
 GENERATE_ALLOC_ENTRYPOINTS_FOR_EACH_ALLOCATOR
 
-// A hand-written override for GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT(_rosalloc, RosAlloc).
-ENTRY art_quick_alloc_object_rosalloc
+// A hand-written override for GENERATE_ALLOC_ENTRYPOINTS_ALLOC_RESOLVED_OBJECT(_rosalloc, RosAlloc).
+ENTRY art_quick_alloc_object_resolved_rosalloc
     // Fast path rosalloc allocation.
-    // r0: type_idx/return value, r1: ArtMethod*, r9: Thread::Current
-    // r2, r3, r12: free.
-    ldr    r2, [r1, #ART_METHOD_DEX_CACHE_TYPES_OFFSET_32]    // Load dex cache resolved types array
-                                                              // Load the class (r2)
-    ldr    r2, [r2, r0, lsl #COMPRESSED_REFERENCE_SIZE_SHIFT]
-    cbz    r2, .Lart_quick_alloc_object_rosalloc_slow_path    // Check null class
-
+    // r0: type/return value, r9: Thread::Current
+    // r1, r2, r3, r12: free.
     ldr    r3, [r9, #THREAD_LOCAL_ALLOC_STACK_TOP_OFFSET]     // Check if the thread local
                                                               // allocation stack has room.
                                                               // TODO: consider using ldrd.
     ldr    r12, [r9, #THREAD_LOCAL_ALLOC_STACK_END_OFFSET]
     cmp    r3, r12
-    bhs    .Lart_quick_alloc_object_rosalloc_slow_path
+    bhs    .Lart_quick_alloc_object_resolved_rosalloc_slow_path
 
-    ldr    r3, [r2, #MIRROR_CLASS_OBJECT_SIZE_ALLOC_FAST_PATH_OFFSET]  // Load the object size (r3)
+    ldr    r3, [r0, #MIRROR_CLASS_OBJECT_SIZE_ALLOC_FAST_PATH_OFFSET]  // Load the object size (r3)
     cmp    r3, #ROSALLOC_MAX_THREAD_LOCAL_BRACKET_SIZE        // Check if the size is for a thread
                                                               // local allocation. Also does the
                                                               // initialized and finalizable checks.
-    bhs    .Lart_quick_alloc_object_rosalloc_slow_path
+    bhs    .Lart_quick_alloc_object_resolved_rosalloc_slow_path
                                                               // Compute the rosalloc bracket index
                                                               // from the size. Since the size is
                                                               // already aligned we can combine the
@@ -1159,7 +1133,7 @@ ENTRY art_quick_alloc_object_rosalloc
                                                               // Load the free list head (r3). This
                                                               // will be the return val.
     ldr    r3, [r12, #(ROSALLOC_RUN_FREE_LIST_OFFSET + ROSALLOC_RUN_FREE_LIST_HEAD_OFFSET)]
-    cbz    r3, .Lart_quick_alloc_object_rosalloc_slow_path
+    cbz    r3, .Lart_quick_alloc_object_resolved_rosalloc_slow_path
     // "Point of no slow path". Won't go to the slow path from here on. OK to clobber r0 and r1.
     ldr    r1, [r3, #ROSALLOC_SLOT_NEXT_OFFSET]               // Load the next pointer of the head
                                                               // and update the list head with the
@@ -1172,8 +1146,8 @@ ENTRY art_quick_alloc_object_rosalloc
 #if ROSALLOC_SLOT_NEXT_OFFSET != MIRROR_OBJECT_CLASS_OFFSET
 #error "Class pointer needs to overwrite next pointer."
 #endif
-    POISON_HEAP_REF r2
-    str    r2, [r3, #MIRROR_OBJECT_CLASS_OFFSET]
+    POISON_HEAP_REF r0
+    str    r0, [r3, #MIRROR_OBJECT_CLASS_OFFSET]
                                                               // Fence. This is "ish" not "ishst" so
                                                               // that it also ensures ordering of
                                                               // the class status load with respect
@@ -1204,20 +1178,20 @@ ENTRY art_quick_alloc_object_rosalloc
     mov    r0, r3                                             // Set the return value and return.
     bx     lr
 
-.Lart_quick_alloc_object_rosalloc_slow_path:
+.Lart_quick_alloc_object_resolved_rosalloc_slow_path:
     SETUP_SAVE_REFS_ONLY_FRAME r2     @ save callee saves in case of GC
-    mov    r2, r9                     @ pass Thread::Current
-    bl     artAllocObjectFromCodeRosAlloc     @ (uint32_t type_idx, Method* method, Thread*)
+    mov    r1, r9                     @ pass Thread::Current
+    bl     artAllocObjectFromCodeResolvedRosAlloc     @ (mirror::Class* cls, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME
     RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
-END art_quick_alloc_object_rosalloc
+END art_quick_alloc_object_resolved_rosalloc
 
-// The common fast path code for art_quick_alloc_object_tlab and art_quick_alloc_object_region_tlab.
+// The common fast path code for art_quick_alloc_object_resolved_tlab
+// and art_quick_alloc_object_resolved_region_tlab.
 //
-// r0: type_idx/return value, r1: ArtMethod*, r2: class, r9: Thread::Current, r3, r12: free.
-// Need to preserve r0 and r1 to the slow path.
-.macro ALLOC_OBJECT_TLAB_FAST_PATH slowPathLabel
-    cbz    r2, \slowPathLabel                                 // Check null class
+// r0: type r9: Thread::Current, r1, r2, r3, r12: free.
+// Need to preserve r0 to the slow path.
+.macro ALLOC_OBJECT_RESOLVED_TLAB_FAST_PATH slowPathLabel
                                                               // Load thread_local_pos (r12) and
                                                               // thread_local_end (r3) with ldrd.
                                                               // Check constraints for ldrd.
@@ -1226,20 +1200,20 @@ END art_quick_alloc_object_rosalloc
 #endif
     ldrd   r12, r3, [r9, #THREAD_LOCAL_POS_OFFSET]
     sub    r12, r3, r12                                       // Compute the remaining buf size.
-    ldr    r3, [r2, #MIRROR_CLASS_OBJECT_SIZE_ALLOC_FAST_PATH_OFFSET]  // Load the object size (r3).
+    ldr    r3, [r0, #MIRROR_CLASS_OBJECT_SIZE_ALLOC_FAST_PATH_OFFSET]  // Load the object size (r3).
     cmp    r3, r12                                            // Check if it fits.
     bhi    \slowPathLabel
     // "Point of no slow path". Won't go to the slow path from here on. OK to clobber r0 and r1.
                                                               // Reload old thread_local_pos (r0)
                                                               // for the return value.
-    ldr    r0, [r9, #THREAD_LOCAL_POS_OFFSET]
-    add    r1, r0, r3
+    ldr    r2, [r9, #THREAD_LOCAL_POS_OFFSET]
+    add    r1, r2, r3
     str    r1, [r9, #THREAD_LOCAL_POS_OFFSET]                 // Store new thread_local_pos.
     ldr    r1, [r9, #THREAD_LOCAL_OBJECTS_OFFSET]             // Increment thread_local_objects.
     add    r1, r1, #1
     str    r1, [r9, #THREAD_LOCAL_OBJECTS_OFFSET]
-    POISON_HEAP_REF r2
-    str    r2, [r0, #MIRROR_OBJECT_CLASS_OFFSET]              // Store the class pointer.
+    POISON_HEAP_REF r0
+    str    r0, [r2, #MIRROR_OBJECT_CLASS_OFFSET]              // Store the class pointer.
                                                               // Fence. This is "ish" not "ishst" so
                                                               // that the code after this allocation
                                                               // site will see the right values in
@@ -1247,71 +1221,46 @@ END art_quick_alloc_object_rosalloc
                                                               // Alternatively we could use "ishst"
                                                               // if we use load-acquire for the
                                                               // object size load.)
+    mov    r0, r2
     dmb    ish
     bx     lr
 .endm
 
-// A hand-written override for GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT(_tlab, TLAB).
-ENTRY art_quick_alloc_object_tlab
+// A hand-written override for GENERATE_ALLOC_ENTRYPOINTS_ALLOC_RESOLVED_OBJECT(_tlab, TLAB).
+ENTRY art_quick_alloc_object_resolved_tlab
     // Fast path tlab allocation.
-    // r0: type_idx/return value, r1: ArtMethod*, r9: Thread::Current
-    // r2, r3, r12: free.
+    // r0: type, r9: Thread::Current
+    // r1, r2, r3, r12: free.
 #if defined(USE_READ_BARRIER)
     mvn    r0, #0                                             // Read barrier not supported here.
     bx     lr                                                 // Return -1.
 #endif
-    ldr    r2, [r1, #ART_METHOD_DEX_CACHE_TYPES_OFFSET_32]    // Load dex cache resolved types array
-                                                              // Load the class (r2)
-    ldr    r2, [r2, r0, lsl #COMPRESSED_REFERENCE_SIZE_SHIFT]
-    ALLOC_OBJECT_TLAB_FAST_PATH .Lart_quick_alloc_object_tlab_slow_path
-.Lart_quick_alloc_object_tlab_slow_path:
+    ALLOC_OBJECT_RESOLVED_TLAB_FAST_PATH .Lart_quick_alloc_object_resolved_tlab_slow_path
+.Lart_quick_alloc_object_resolved_tlab_slow_path:
     SETUP_SAVE_REFS_ONLY_FRAME r2                             // Save callee saves in case of GC.
-    mov    r2, r9                                             // Pass Thread::Current.
-    bl     artAllocObjectFromCodeTLAB    // (uint32_t type_idx, Method* method, Thread*)
+    mov    r1, r9                                             // Pass Thread::Current.
+    bl     artAllocObjectFromCodeResolvedTLAB                 // (mirror::Class* klass, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME
     RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
-END art_quick_alloc_object_tlab
+END art_quick_alloc_object_resolved_tlab
 
-// A hand-written override for GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT(_region_tlab, RegionTLAB)
-ENTRY art_quick_alloc_object_region_tlab
+// A hand-written override for GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_region_tlab, RegionTLAB)
+ENTRY art_quick_alloc_object_resolved_region_tlab
     // Fast path tlab allocation.
-    // r0: type_idx/return value, r1: ArtMethod*, r9: Thread::Current, r2, r3, r12: free.
+    // r0: type, r9: Thread::Current, r1, r2, r3, r12: free.
 #if !defined(USE_READ_BARRIER)
     eor    r0, r0, r0                                         // Read barrier must be enabled here.
     sub    r0, r0, #1                                         // Return -1.
     bx     lr
 #endif
-    ldr    r2, [r1, #ART_METHOD_DEX_CACHE_TYPES_OFFSET_32]    // Load dex cache resolved types array
-                                                              // Load the class (r2)
-    ldr    r2, [r2, r0, lsl #COMPRESSED_REFERENCE_SIZE_SHIFT]
-                                                              // Read barrier for class load.
-    ldr    r3, [r9, #THREAD_IS_GC_MARKING_OFFSET]
-    cbnz   r3, .Lart_quick_alloc_object_region_tlab_class_load_read_barrier_marking
-.Lart_quick_alloc_object_region_tlab_class_load_read_barrier_slow_path_exit:
-    ALLOC_OBJECT_TLAB_FAST_PATH .Lart_quick_alloc_object_region_tlab_slow_path
-.Lart_quick_alloc_object_region_tlab_class_load_read_barrier_marking:
-    cbz    r2, .Lart_quick_alloc_object_region_tlab_slow_path  // Null check for loading lock word.
-    // Check lock word for mark bit, if marked do the allocation.
-    ldr r3, [r2, MIRROR_OBJECT_LOCK_WORD_OFFSET]
-    ands r3, #LOCK_WORD_MARK_BIT_MASK_SHIFTED
-    bne .Lart_quick_alloc_object_region_tlab_class_load_read_barrier_slow_path_exit
-.Lart_quick_alloc_object_region_tlab_class_load_read_barrier_slow_path:
-                                                              // The read barrier slow path. Mark
-                                                              // the class.
-    push   {r0, r1, r3, lr}                                   // Save registers. r3 is pushed only
-                                                              // to align sp by 16 bytes.
-    mov    r0, r2                                             // Pass the class as the first param.
-    bl     artReadBarrierMark
-    mov    r2, r0                                             // Get the (marked) class back.
-    pop    {r0, r1, r3, lr}
-    b      .Lart_quick_alloc_object_region_tlab_class_load_read_barrier_slow_path_exit
-.Lart_quick_alloc_object_region_tlab_slow_path:
+    ALLOC_OBJECT_RESOLVED_TLAB_FAST_PATH .Lart_quick_alloc_object_resolved_region_tlab_slow_path
+.Lart_quick_alloc_object_resolved_region_tlab_slow_path:
     SETUP_SAVE_REFS_ONLY_FRAME r2                             // Save callee saves in case of GC.
-    mov    r2, r9                                             // Pass Thread::Current.
-    bl     artAllocObjectFromCodeRegionTLAB    // (uint32_t type_idx, Method* method, Thread*)
+    mov    r1, r9                                             // Pass Thread::Current.
+    bl     artAllocObjectFromCodeResolvedRegionTLAB           // (mirror::Class* klass, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME
     RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
-END art_quick_alloc_object_region_tlab
+END art_quick_alloc_object_resolved_region_tlab
 
     /*
      * Called by managed code when the value in rSUSPEND has been decremented to 0.
@@ -2040,3 +1989,83 @@ READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg08, r8
 READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg09, r9
 READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg10, r10
 READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg11, r11
+
+.extern artInvokePolymorphic
+ENTRY art_quick_invoke_polymorphic
+    SETUP_SAVE_REFS_AND_ARGS_FRAME r2
+    mov     r2, r9                 @ pass Thread::Current
+    mov     r3, sp                 @ pass SP
+    mov     r0, #0                 @ initialize 64-bit JValue as zero.
+    str     r0, [sp, #-4]!
+    .cfi_adjust_cfa_offset 4
+    str     r0, [sp, #-4]!
+    .cfi_adjust_cfa_offset 4
+    mov     r0, sp                 @ pass JValue for return result as first argument.
+    bl      artInvokePolymorphic   @ artInvokePolymorphic(JValue, receiver, Thread*, SP)
+    sub     r0, 'A'                @ return value is descriptor of handle's return type.
+    cmp     r0, 'Z' - 'A'          @ check if value is in bounds of handler table
+    bgt     .Lcleanup_and_return   @ and clean-up if not.
+    adr     r1, .Lhandler_table
+    tbb     [r0, r1]               @ branch to handler for return value based on return type.
+
+.Lstart_of_handlers:
+.Lstore_boolean_result:
+    ldrb    r0, [sp]               @ Copy boolean value to return value of this function.
+    b       .Lcleanup_and_return
+.Lstore_char_result:
+    ldrh    r0, [sp]               @ Copy char value to return value of this function.
+    b       .Lcleanup_and_return
+.Lstore_float_result:
+    vldr    s0, [sp]               @ Copy float value from JValue result to the context restored by
+    vstr    s0, [sp, #16]          @ RESTORE_SAVE_REFS_AND_ARGS_FRAME.
+    b       .Lcleanup_and_return
+.Lstore_double_result:
+    vldr    d0, [sp]               @ Copy double value from JValue result to the context restored by
+    vstr    d0, [sp, #16]          @ RESTORE_SAVE_REFS_AND_ARGS_FRAME.
+    b       .Lcleanup_and_return
+.Lstore_long_result:
+    ldr     r1, [sp, #4]           @ Copy the upper bits from JValue result to the context restored by
+    str     r1, [sp, #80]          @ RESTORE_SAVE_REFS_AND_ARGS_FRAME.
+    // Fall-through for lower bits.
+.Lstore_int_result:
+    ldr     r0, [sp]               @ Copy int value to return value of this function.
+    // Fall-through to clean up and return.
+.Lcleanup_and_return:
+    add     sp, #8
+    .cfi_adjust_cfa_offset -8
+    RESTORE_SAVE_REFS_AND_ARGS_FRAME
+    RETURN_OR_DELIVER_PENDING_EXCEPTION_REG r2
+
+.macro HANDLER_TABLE_OFFSET handler_label
+    .byte (\handler_label - .Lstart_of_handlers) / 2
+.endm
+
+.Lhandler_table:
+    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // A
+    HANDLER_TABLE_OFFSET(.Lstore_int_result)      // B (byte)
+    HANDLER_TABLE_OFFSET(.Lstore_char_result)     // C (char)
+    HANDLER_TABLE_OFFSET(.Lstore_double_result)   // D (double)
+    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // E
+    HANDLER_TABLE_OFFSET(.Lstore_float_result)    // F (float)
+    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // G
+    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // H
+    HANDLER_TABLE_OFFSET(.Lstore_int_result)      // I (int)
+    HANDLER_TABLE_OFFSET(.Lstore_long_result)     // J (long)
+    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // K
+    HANDLER_TABLE_OFFSET(.Lstore_int_result)      // L (object)
+    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // M
+    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // N
+    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // O
+    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // P
+    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // Q
+    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // R
+    HANDLER_TABLE_OFFSET(.Lstore_int_result)      // S (short)
+    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // T
+    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // U
+    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // V (void)
+    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // W
+    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // X
+    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // Y
+    HANDLER_TABLE_OFFSET(.Lstore_boolean_result)  // Z (boolean)
+.purgem HANDLER_TABLE_OFFSET
+END art_quick_invoke_polymorphic

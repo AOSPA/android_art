@@ -228,9 +228,15 @@ endef  # name-to-var
 
 # Disable 153-reference-stress temporarily until a fix arrives. b/33389022.
 # Disable 080-oom-fragmentation due to flakes. b/33795328
+# Disable 497-inlining-and-class-loader and 542-unresolved-access-check until
+#     they are rewritten. These tests use a broken class loader that tries to
+#     register a dex file that's already registered with a different loader.
+#     b/34193123
 ART_TEST_RUN_TEST_SKIP += \
   153-reference-stress \
-  080-oom-fragmentation
+  080-oom-fragmentation \
+  497-inlining-and-class-loader \
+  542-unresolved-access-check
 
 ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),$(PREBUILD_TYPES), \
         $(COMPILER_TYPES),$(RELOCATE_TYPES),$(TRACE_TYPES),$(GC_TYPES),$(JNI_TYPES), \
@@ -274,6 +280,7 @@ TEST_ART_BROKEN_TARGET_TESTS := \
 # These 9** tests are not supported in current form due to linker
 # restrictions. See b/31681198
 TEST_ART_BROKEN_TARGET_TESTS += \
+  901-hello-ti-agent \
   902-hello-transformation \
   903-hello-tagging \
   904-object-allocation \
@@ -293,6 +300,15 @@ TEST_ART_BROKEN_TARGET_TESTS += \
   918-fields \
   919-obsolete-fields \
   920-objects \
+  921-hello-failure \
+  922-properties \
+  923-monitors \
+  924-threads \
+  925-threadgroups \
+  926-multi-obsolescence \
+  927-timers \
+  928-jni-table \
+  929-search \
 
 ifneq (,$(filter target,$(TARGET_TYPES)))
   ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,target,$(RUN_TYPES),$(PREBUILD_TYPES), \
@@ -453,10 +469,12 @@ TEST_ART_BROKEN_FALLBACK_RUN_TESTS := \
   629-vdex-speed
 
 # This test fails without an image.
-# 964 often times out due to the large number of classes it tries to compile.
+# 018, 961, 964 often time out. b/34369284
 TEST_ART_BROKEN_NO_IMAGE_RUN_TESTS := \
   137-cfi \
   138-duplicate-classes-check \
+  018-stack-overflow \
+  961-default-iface-resolution-gen \
   964-default-iface-init
 
 ifneq (,$(filter no-dex2oat,$(PREBUILD_TYPES)))
@@ -561,6 +579,7 @@ TEST_ART_BROKEN_JIT_RUN_TESTS := \
   915-obsolete-2 \
   917-fields-transformation \
   919-obsolete-fields \
+  926-multi-obsolescence \
 
 ifneq (,$(filter jit,$(COMPILER_TYPES)))
   ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),$(PREBUILD_TYPES), \
@@ -717,6 +736,16 @@ ifeq ($(ART_HEAP_POISONING),true)
 endif
 
 TEST_ART_BROKEN_OPTIMIZING_HEAP_POISONING_RUN_TESTS :=
+
+# Tests that check semantics for a non-debuggable app.
+TEST_ART_BROKEN_DEBUGGABLE_RUN_TESTS := \
+  909-attach-agent \
+
+ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),$(PREBUILD_TYPES), \
+    $(COMPILER_TYPES),$(RELOCATE_TYPES),$(TRACE_TYPES),$(GC_TYPES),$(JNI_TYPES), \
+    $(IMAGE_TYPES),$(PICTEST_TYPES),debuggable,$(TEST_ART_BROKEN_DEBUGGABLE_RUN_TESTS),$(ALL_ADDRESS_SIZES))
+
+TEST_ART_BROKEN_DEBUGGABLE_RUN_TESTS :=
 
 # Tests incompatible with bisection bug search. Sorted by incompatibility reason.
 # 000 through 595 do not compile anything. 089 tests a build failure. 018 through 137

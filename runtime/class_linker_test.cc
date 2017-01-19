@@ -460,7 +460,6 @@ class ClassLinkerMethodHandlesTest : public ClassLinkerTest {
  protected:
   virtual void SetUpRuntimeOptions(RuntimeOptions* options) OVERRIDE {
     CommonRuntimeTest::SetUpRuntimeOptions(options);
-    options->push_back(std::make_pair("-Xexperimental:method-handles", nullptr));
   }
 };
 
@@ -757,6 +756,7 @@ struct MethodHandleImplOffsets : public CheckOffsets<mirror::MethodHandleImpl> {
 struct EmulatedStackFrameOffsets : public CheckOffsets<mirror::EmulatedStackFrame> {
   EmulatedStackFrameOffsets() : CheckOffsets<mirror::EmulatedStackFrame>(
       false, "Ldalvik/system/EmulatedStackFrame;") {
+    addOffset(OFFSETOF_MEMBER(mirror::EmulatedStackFrame, callsite_type_), "callsiteType");
     addOffset(OFFSETOF_MEMBER(mirror::EmulatedStackFrame, references_), "references");
     addOffset(OFFSETOF_MEMBER(mirror::EmulatedStackFrame, stack_frame_), "stackFrame");
     addOffset(OFFSETOF_MEMBER(mirror::EmulatedStackFrame, type_), "type");
@@ -899,7 +899,6 @@ TEST_F(ClassLinkerTest, LookupResolvedType) {
   dex::TypeIndex type_idx = klass->GetClassDef()->class_idx_;
   ObjPtr<mirror::DexCache> dex_cache = klass->GetDexCache();
   const DexFile& dex_file = klass->GetDexFile();
-  EXPECT_OBJ_PTR_EQ(dex_cache->GetResolvedType(type_idx), klass);
   EXPECT_OBJ_PTR_EQ(
       class_linker_->LookupResolvedType(dex_file, type_idx, dex_cache, class_loader.Get()),
       klass);

@@ -323,8 +323,10 @@ bool OatFileBase::Setup(const char* abs_dex_location, std::string* error_msg) {
   }
 
   PointerSize pointer_size = GetInstructionSetPointerSize(GetOatHeader().GetInstructionSet());
-  uint8_t* dex_cache_arrays = bss_begin_;
-  uint8_t* dex_cache_arrays_end = (bss_roots_ != nullptr) ? bss_roots_ : bss_end_;
+  uint8_t* dex_cache_arrays = (bss_begin_ == bss_roots_) ? nullptr : bss_begin_;
+  uint8_t* dex_cache_arrays_end =
+      (bss_begin_ == bss_roots_) ? nullptr : (bss_roots_ != nullptr) ? bss_roots_ : bss_end_;
+  DCHECK_EQ(dex_cache_arrays != nullptr, dex_cache_arrays_end != nullptr);
   uint32_t dex_file_count = GetOatHeader().GetDexFileCount();
   oat_dex_files_storage_.reserve(dex_file_count);
   for (size_t i = 0; i < dex_file_count; i++) {
@@ -710,7 +712,7 @@ bool DlOpenOatFile::Dlopen(const std::string& elf_filename,
       return false;
     }
 #ifdef ART_TARGET_ANDROID
-    android_dlextinfo extinfo;
+    android_dlextinfo extinfo = {};
     extinfo.flags = ANDROID_DLEXT_FORCE_LOAD |                  // Force-load, don't reuse handle
                                                                 //   (open oat files multiple
                                                                 //    times).
@@ -1436,10 +1438,6 @@ const OatFile::OatMethod OatFile::OatClass::GetOatMethod(uint32_t method_index) 
 void OatFile::OatMethod::LinkMethod(ArtMethod* method) const {
   CHECK(method != nullptr);
   method->SetEntryPointFromQuickCompiledCode(GetQuickCode());
-}
-
-bool OatFile::HasPatchInfo() const {
-  return GetOatHeader().HasPatchInfo();
 }
 
 bool OatFile::IsPic() const {

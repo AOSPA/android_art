@@ -30,6 +30,7 @@
  */
 
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include <jni.h>
@@ -37,6 +38,7 @@
 #include "openjdkjvmti/jvmti.h"
 
 #include "art_jvmti.h"
+#include "base/logging.h"
 #include "base/mutex.h"
 #include "events-inl.h"
 #include "jni_env_ext-inl.h"
@@ -49,10 +51,17 @@
 #include "ti_class.h"
 #include "ti_field.h"
 #include "ti_heap.h"
+#include "ti_jni.h"
 #include "ti_method.h"
+#include "ti_monitor.h"
 #include "ti_object.h"
+#include "ti_properties.h"
 #include "ti_redefine.h"
+#include "ti_search.h"
 #include "ti_stack.h"
+#include "ti_thread.h"
+#include "ti_threadgroup.h"
+#include "ti_timers.h"
 #include "transform.h"
 
 // TODO Remove this at some point by annotating all the methods. It was put in to make the skeleton
@@ -115,15 +124,15 @@ class JvmtiFunctions {
   }
 
   static jvmtiError GetThreadState(jvmtiEnv* env, jthread thread, jint* thread_state_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return ThreadUtil::GetThreadState(env, thread, thread_state_ptr);
   }
 
   static jvmtiError GetCurrentThread(jvmtiEnv* env, jthread* thread_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return ThreadUtil::GetCurrentThread(env, thread_ptr);
   }
 
   static jvmtiError GetAllThreads(jvmtiEnv* env, jint* threads_count_ptr, jthread** threads_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return ThreadUtil::GetAllThreads(env, threads_count_ptr, threads_ptr);
   }
 
   static jvmtiError SuspendThread(jvmtiEnv* env, jthread thread) {
@@ -157,7 +166,7 @@ class JvmtiFunctions {
   }
 
   static jvmtiError GetThreadInfo(jvmtiEnv* env, jthread thread, jvmtiThreadInfo* info_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return ThreadUtil::GetThreadInfo(env, thread, info_ptr);
   }
 
   static jvmtiError GetOwnedMonitorInfo(jvmtiEnv* env,
@@ -199,13 +208,13 @@ class JvmtiFunctions {
   static jvmtiError GetTopThreadGroups(jvmtiEnv* env,
                                        jint* group_count_ptr,
                                        jthreadGroup** groups_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return ThreadGroupUtil::GetTopThreadGroups(env, group_count_ptr, groups_ptr);
   }
 
   static jvmtiError GetThreadGroupInfo(jvmtiEnv* env,
                                        jthreadGroup group,
                                        jvmtiThreadGroupInfo* info_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return ThreadGroupUtil::GetThreadGroupInfo(env, group, info_ptr);
   }
 
   static jvmtiError GetThreadGroupChildren(jvmtiEnv* env,
@@ -214,7 +223,12 @@ class JvmtiFunctions {
                                            jthread** threads_ptr,
                                            jint* group_count_ptr,
                                            jthreadGroup** groups_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return ThreadGroupUtil::GetThreadGroupChildren(env,
+                                                   group,
+                                                   thread_count_ptr,
+                                                   threads_ptr,
+                                                   group_count_ptr,
+                                                   groups_ptr);
   }
 
   static jvmtiError GetStackTrace(jvmtiEnv* env,
@@ -235,7 +249,7 @@ class JvmtiFunctions {
                                       jint max_frame_count,
                                       jvmtiStackInfo** stack_info_ptr,
                                       jint* thread_count_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return StackUtil::GetAllStackTraces(env, max_frame_count, stack_info_ptr, thread_count_ptr);
   }
 
   static jvmtiError GetThreadListStackTraces(jvmtiEnv* env,
@@ -243,11 +257,15 @@ class JvmtiFunctions {
                                              const jthread* thread_list,
                                              jint max_frame_count,
                                              jvmtiStackInfo** stack_info_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return StackUtil::GetThreadListStackTraces(env,
+                                               thread_count,
+                                               thread_list,
+                                               max_frame_count,
+                                               stack_info_ptr);
   }
 
   static jvmtiError GetFrameCount(jvmtiEnv* env, jthread thread, jint* count_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return StackUtil::GetFrameCount(env, thread, count_ptr);
   }
 
   static jvmtiError PopFrame(jvmtiEnv* env, jthread thread) {
@@ -259,7 +277,7 @@ class JvmtiFunctions {
                                      jint depth,
                                      jmethodID* method_ptr,
                                      jlocation* location_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return StackUtil::GetFrameLocation(env, thread, depth, method_ptr, location_ptr);
   }
 
   static jvmtiError NotifyFramePop(jvmtiEnv* env, jthread thread, jint depth) {
@@ -528,7 +546,7 @@ class JvmtiFunctions {
                                           jobject initiating_loader,
                                           jint* class_count_ptr,
                                           jclass** classes_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return ClassUtil::GetClassLoaderClasses(env, initiating_loader, class_count_ptr, classes_ptr);
   }
 
   static jvmtiError GetClassSignature(jvmtiEnv* env,
@@ -619,7 +637,17 @@ class JvmtiFunctions {
   static jvmtiError RedefineClasses(jvmtiEnv* env,
                                     jint class_count,
                                     const jvmtiClassDefinition* class_definitions) {
-    return ERR(NOT_IMPLEMENTED);
+    std::string error_msg;
+    jvmtiError res = Redefiner::RedefineClasses(ArtJvmTiEnv::AsArtJvmTiEnv(env),
+                                                art::Runtime::Current(),
+                                                art::Thread::Current(),
+                                                class_count,
+                                                class_definitions,
+                                                &error_msg);
+    if (res != OK) {
+      LOG(WARNING) << "FAILURE TO REDEFINE " << error_msg;
+    }
+    return res;
   }
 
   static jvmtiError GetObjectSize(jvmtiEnv* env, jobject object, jlong* size_ptr) {
@@ -747,39 +775,39 @@ class JvmtiFunctions {
   }
 
   static jvmtiError CreateRawMonitor(jvmtiEnv* env, const char* name, jrawMonitorID* monitor_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return MonitorUtil::CreateRawMonitor(env, name, monitor_ptr);
   }
 
   static jvmtiError DestroyRawMonitor(jvmtiEnv* env, jrawMonitorID monitor) {
-    return ERR(NOT_IMPLEMENTED);
+    return MonitorUtil::DestroyRawMonitor(env, monitor);
   }
 
   static jvmtiError RawMonitorEnter(jvmtiEnv* env, jrawMonitorID monitor) {
-    return ERR(NOT_IMPLEMENTED);
+    return MonitorUtil::RawMonitorEnter(env, monitor);
   }
 
   static jvmtiError RawMonitorExit(jvmtiEnv* env, jrawMonitorID monitor) {
-    return ERR(NOT_IMPLEMENTED);
+    return MonitorUtil::RawMonitorExit(env, monitor);
   }
 
   static jvmtiError RawMonitorWait(jvmtiEnv* env, jrawMonitorID monitor, jlong millis) {
-    return ERR(NOT_IMPLEMENTED);
+    return MonitorUtil::RawMonitorWait(env, monitor, millis);
   }
 
   static jvmtiError RawMonitorNotify(jvmtiEnv* env, jrawMonitorID monitor) {
-    return ERR(NOT_IMPLEMENTED);
+    return MonitorUtil::RawMonitorNotify(env, monitor);
   }
 
   static jvmtiError RawMonitorNotifyAll(jvmtiEnv* env, jrawMonitorID monitor) {
-    return ERR(NOT_IMPLEMENTED);
+    return MonitorUtil::RawMonitorNotifyAll(env, monitor);
   }
 
   static jvmtiError SetJNIFunctionTable(jvmtiEnv* env, const jniNativeInterface* function_table) {
-    return ERR(NOT_IMPLEMENTED);
+    return JNIUtil::SetJNIFunctionTable(env, function_table);
   }
 
   static jvmtiError GetJNIFunctionTable(jvmtiEnv* env, jniNativeInterface** function_table) {
-    return ERR(NOT_IMPLEMENTED);
+    return JNIUtil::GetJNIFunctionTable(env, function_table);
   }
 
   // TODO: This will require locking, so that an agent can't remove callbacks when we're dispatching
@@ -830,7 +858,8 @@ class JvmtiFunctions {
       }
     }
 
-    return gEventHandler.SetEvent(ArtJvmTiEnv::AsArtJvmTiEnv(env), art_thread, event_type, mode);
+    ArtJvmTiEnv* art_env = ArtJvmTiEnv::AsArtJvmTiEnv(env);
+    return gEventHandler.SetEvent(art_env, art_thread, GetArtJvmtiEvent(art_env, event_type), mode);
   }
 
   static jvmtiError GenerateEvents(jvmtiEnv* env, jvmtiEvent event_type) {
@@ -876,11 +905,15 @@ class JvmtiFunctions {
     ENSURE_NON_NULL(capabilities_ptr);
     ArtJvmTiEnv* art_env = static_cast<ArtJvmTiEnv*>(env);
     jvmtiError ret = OK;
+    jvmtiCapabilities changed;
 #define ADD_CAPABILITY(e) \
     do { \
       if (capabilities_ptr->e == 1) { \
         if (kPotentialCapabilities.e == 1) { \
-          art_env->capabilities.e = 1;\
+          if (art_env->capabilities.e != 1) { \
+            art_env->capabilities.e = 1; \
+            changed.e = 1; \
+          }\
         } else { \
           ret = ERR(NOT_AVAILABLE); \
         } \
@@ -929,6 +962,9 @@ class JvmtiFunctions {
     ADD_CAPABILITY(can_generate_resource_exhaustion_heap_events);
     ADD_CAPABILITY(can_generate_resource_exhaustion_threads_events);
 #undef ADD_CAPABILITY
+    gEventHandler.HandleChangedCapabilities(ArtJvmTiEnv::AsArtJvmTiEnv(env),
+                                            changed,
+                                            /*added*/true);
     return ret;
   }
 
@@ -937,10 +973,14 @@ class JvmtiFunctions {
     ENSURE_VALID_ENV(env);
     ENSURE_NON_NULL(capabilities_ptr);
     ArtJvmTiEnv* art_env = reinterpret_cast<ArtJvmTiEnv*>(env);
+    jvmtiCapabilities changed;
 #define DEL_CAPABILITY(e) \
     do { \
       if (capabilities_ptr->e == 1) { \
-        art_env->capabilities.e = 0;\
+        if (art_env->capabilities.e == 1) { \
+          art_env->capabilities.e = 0;\
+          changed.e = 1; \
+        } \
       } \
     } while (false)
 
@@ -986,6 +1026,9 @@ class JvmtiFunctions {
     DEL_CAPABILITY(can_generate_resource_exhaustion_heap_events);
     DEL_CAPABILITY(can_generate_resource_exhaustion_threads_events);
 #undef DEL_CAPABILITY
+    gEventHandler.HandleChangedCapabilities(ArtJvmTiEnv::AsArtJvmTiEnv(env),
+                                            changed,
+                                            /*added*/false);
     return OK;
   }
 
@@ -1014,35 +1057,35 @@ class JvmtiFunctions {
   }
 
   static jvmtiError GetTimerInfo(jvmtiEnv* env, jvmtiTimerInfo* info_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return TimerUtil::GetTimerInfo(env, info_ptr);
   }
 
   static jvmtiError GetTime(jvmtiEnv* env, jlong* nanos_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return TimerUtil::GetTime(env, nanos_ptr);
   }
 
   static jvmtiError GetAvailableProcessors(jvmtiEnv* env, jint* processor_count_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return TimerUtil::GetAvailableProcessors(env, processor_count_ptr);
   }
 
   static jvmtiError AddToBootstrapClassLoaderSearch(jvmtiEnv* env, const char* segment) {
-    return ERR(NOT_IMPLEMENTED);
+    return SearchUtil::AddToBootstrapClassLoaderSearch(env, segment);
   }
 
   static jvmtiError AddToSystemClassLoaderSearch(jvmtiEnv* env, const char* segment) {
-    return ERR(NOT_IMPLEMENTED);
+    return SearchUtil::AddToSystemClassLoaderSearch(env, segment);
   }
 
   static jvmtiError GetSystemProperties(jvmtiEnv* env, jint* count_ptr, char*** property_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return PropertiesUtil::GetSystemProperties(env, count_ptr, property_ptr);
   }
 
   static jvmtiError GetSystemProperty(jvmtiEnv* env, const char* property, char** value_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    return PropertiesUtil::GetSystemProperty(env, property, value_ptr);
   }
 
   static jvmtiError SetSystemProperty(jvmtiEnv* env, const char* property, const char* value) {
-    return ERR(NOT_IMPLEMENTED);
+    return PropertiesUtil::SetSystemProperty(env, property, value);
   }
 
   static jvmtiError GetPhase(jvmtiEnv* env, jvmtiPhase* phase_ptr) {
@@ -1151,11 +1194,66 @@ class JvmtiFunctions {
   }
 
   static jvmtiError SetVerboseFlag(jvmtiEnv* env, jvmtiVerboseFlag flag, jboolean value) {
-    return ERR(NOT_IMPLEMENTED);
+    if (flag == jvmtiVerboseFlag::JVMTI_VERBOSE_OTHER) {
+      // OTHER is special, as it's 0, so can't do a bit check.
+      bool val = (value == JNI_TRUE) ? true : false;
+
+      art::gLogVerbosity.collector = val;
+      art::gLogVerbosity.compiler = val;
+      art::gLogVerbosity.deopt = val;
+      art::gLogVerbosity.heap = val;
+      art::gLogVerbosity.jdwp = val;
+      art::gLogVerbosity.jit = val;
+      art::gLogVerbosity.monitor = val;
+      art::gLogVerbosity.oat = val;
+      art::gLogVerbosity.profiler = val;
+      art::gLogVerbosity.signals = val;
+      art::gLogVerbosity.simulator = val;
+      art::gLogVerbosity.startup = val;
+      art::gLogVerbosity.third_party_jni = val;
+      art::gLogVerbosity.threads = val;
+      art::gLogVerbosity.verifier = val;
+      art::gLogVerbosity.image = val;
+
+      // Note: can't switch systrace_lock_logging. That requires changing entrypoints.
+
+      art::gLogVerbosity.agents = val;
+    } else {
+      // Spec isn't clear whether "flag" is a mask or supposed to be single. We implement the mask
+      // semantics.
+      constexpr std::underlying_type<jvmtiVerboseFlag>::type kMask =
+          jvmtiVerboseFlag::JVMTI_VERBOSE_GC |
+          jvmtiVerboseFlag::JVMTI_VERBOSE_CLASS |
+          jvmtiVerboseFlag::JVMTI_VERBOSE_JNI;
+      if ((flag & ~kMask) != 0) {
+        return ERR(ILLEGAL_ARGUMENT);
+      }
+
+      bool val = (value == JNI_TRUE) ? true : false;
+
+      if ((flag & jvmtiVerboseFlag::JVMTI_VERBOSE_GC) != 0) {
+        art::gLogVerbosity.gc = val;
+      }
+
+      if ((flag & jvmtiVerboseFlag::JVMTI_VERBOSE_CLASS) != 0) {
+        art::gLogVerbosity.class_linker = val;
+      }
+
+      if ((flag & jvmtiVerboseFlag::JVMTI_VERBOSE_JNI) != 0) {
+        art::gLogVerbosity.jni = val;
+      }
+    }
+
+    return ERR(NONE);
   }
 
   static jvmtiError GetJLocationFormat(jvmtiEnv* env, jvmtiJlocationFormat* format_ptr) {
-    return ERR(NOT_IMPLEMENTED);
+    // Report BCI as jlocation format. We report dex bytecode indices.
+    if (format_ptr == nullptr) {
+      return ERR(NULL_POINTER);
+    }
+    *format_ptr = jvmtiJlocationFormat::JVMTI_JLOCATION_JVMBCI;
+    return ERR(NONE);
   }
 
   // TODO Remove this once events are working.
@@ -1165,34 +1263,6 @@ class JvmtiFunctions {
     std::vector<jclass> classes;
     classes.push_back(klass);
     return RetransformClassesWithHook(reinterpret_cast<ArtJvmTiEnv*>(env), classes, hook);
-  }
-
-  static jvmtiError RedefineClassDirect(ArtJvmTiEnv* env,
-                                        jclass klass,
-                                        jint dex_size,
-                                        unsigned char* dex_file) {
-    if (!IsValidEnv(env)) {
-      return ERR(INVALID_ENVIRONMENT);
-    }
-    jvmtiError ret = OK;
-    std::string location;
-    if ((ret = GetClassLocation(env, klass, &location)) != OK) {
-      // TODO Do something more here? Maybe give log statements?
-      return ret;
-    }
-    std::string error;
-    ret = Redefiner::RedefineClass(env,
-                                    art::Runtime::Current(),
-                                    art::Thread::Current(),
-                                    klass,
-                                    location,
-                                    dex_size,
-                                    reinterpret_cast<uint8_t*>(dex_file),
-                                    &error);
-    if (ret != OK) {
-      LOG(WARNING) << "FAILURE TO REDEFINE " << error;
-    }
-    return ret;
   }
 
   // TODO This will be called by the event handler for the art::ti Event Load Event
@@ -1239,14 +1309,13 @@ class JvmtiFunctions {
            /*out*/&new_dex_data);
       // Check if anything actually changed.
       if ((new_data_len != 0 || new_dex_data != nullptr) && new_dex_data != dex_data) {
-        res = Redefiner::RedefineClass(env,
-                                       art::Runtime::Current(),
-                                       art::Thread::Current(),
-                                       klass,
-                                       location,
-                                       new_data_len,
-                                       new_dex_data,
-                                       &error);
+        jvmtiClassDefinition def = { klass, new_data_len, new_dex_data };
+        res = Redefiner::RedefineClasses(env,
+                                         art::Runtime::Current(),
+                                         art::Thread::Current(),
+                                         1,
+                                         &def,
+                                         &error);
         env->Deallocate(new_dex_data);
       }
       // Deallocate the old dex data.
@@ -1305,10 +1374,7 @@ const jvmtiInterface_1 gJvmtiInterface = {
   reinterpret_cast<void*>(JvmtiFunctions::RetransformClassWithHook),
   // nullptr,  // reserved1
   JvmtiFunctions::SetEventNotificationMode,
-  // SPECIAL FUNCTION: RedefineClassDirect Is normally reserved3
-  // TODO Remove once we have events working.
-  reinterpret_cast<void*>(JvmtiFunctions::RedefineClassDirect),
-  // nullptr,  // reserved3
+  nullptr,  // reserved3
   JvmtiFunctions::GetAllThreads,
   JvmtiFunctions::SuspendThread,
   JvmtiFunctions::ResumeThread,

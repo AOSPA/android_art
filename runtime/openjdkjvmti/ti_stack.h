@@ -32,18 +32,41 @@
 #ifndef ART_RUNTIME_OPENJDKJVMTI_TI_STACK_H_
 #define ART_RUNTIME_OPENJDKJVMTI_TI_STACK_H_
 
+#include "jni.h"
 #include "jvmti.h"
+
+#include "base/mutex.h"
 
 namespace openjdkjvmti {
 
 class StackUtil {
  public:
+  static jvmtiError GetAllStackTraces(jvmtiEnv* env,
+                                      jint max_frame_count,
+                                      jvmtiStackInfo** stack_info_ptr,
+                                      jint* thread_count_ptr)
+      REQUIRES(!art::Locks::thread_list_lock_);
+
+  static jvmtiError GetFrameCount(jvmtiEnv* env, jthread thread, jint* count_ptr);
+
+  static jvmtiError GetFrameLocation(jvmtiEnv* env,
+                                     jthread thread,
+                                     jint depth,
+                                     jmethodID* method_ptr,
+                                     jlocation* location_ptr);
+
   static jvmtiError GetStackTrace(jvmtiEnv* env,
                                   jthread thread,
                                   jint start_depth,
                                   jint max_frame_count,
                                   jvmtiFrameInfo* frame_buffer,
                                   jint* count_ptr);
+
+  static jvmtiError GetThreadListStackTraces(jvmtiEnv* env,
+                                             jint thread_count,
+                                             const jthread* thread_list,
+                                             jint max_frame_count,
+                                             jvmtiStackInfo** stack_info_ptr);
 };
 
 }  // namespace openjdkjvmti

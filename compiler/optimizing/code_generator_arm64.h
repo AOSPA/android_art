@@ -540,7 +540,7 @@ class CodeGeneratorARM64 : public CodeGenerator {
   // ADRP (pass `adrp_label = null`) or the ADD (pass `adrp_label` pointing
   // to the associated ADRP patch label).
   vixl::aarch64::Label* NewPcRelativeStringPatch(const DexFile& dex_file,
-                                                 uint32_t string_index,
+                                                 dex::StringIndex string_index,
                                                  vixl::aarch64::Label* adrp_label = nullptr);
 
   // Add a new PC-relative type patch for an instruction and return the label
@@ -550,6 +550,14 @@ class CodeGeneratorARM64 : public CodeGenerator {
   vixl::aarch64::Label* NewPcRelativeTypePatch(const DexFile& dex_file,
                                                dex::TypeIndex type_index,
                                                vixl::aarch64::Label* adrp_label = nullptr);
+
+  // Add a new .bss entry type patch for an instruction and return the label
+  // to be bound before the instruction. The instruction will be either the
+  // ADRP (pass `adrp_label = null`) or the ADD (pass `adrp_label` pointing
+  // to the associated ADRP patch label).
+  vixl::aarch64::Label* NewBssEntryTypePatch(const DexFile& dex_file,
+                                             dex::TypeIndex type_index,
+                                             vixl::aarch64::Label* adrp_label = nullptr);
 
   // Add a new PC-relative dex cache array patch for an instruction and return
   // the label to be bound before the instruction. The instruction will be
@@ -567,10 +575,11 @@ class CodeGeneratorARM64 : public CodeGenerator {
                                                                     dex::TypeIndex type_index);
   vixl::aarch64::Literal<uint32_t>* DeduplicateBootImageAddressLiteral(uint64_t address);
   vixl::aarch64::Literal<uint32_t>* DeduplicateJitStringLiteral(const DexFile& dex_file,
-                                                                dex::StringIndex string_index);
+                                                                dex::StringIndex string_index,
+                                                                Handle<mirror::String> handle);
   vixl::aarch64::Literal<uint32_t>* DeduplicateJitClassLiteral(const DexFile& dex_file,
                                                                dex::TypeIndex string_index,
-                                                               uint64_t address);
+                                                               Handle<mirror::Class> handle);
 
   void EmitAdrpPlaceholder(vixl::aarch64::Label* fixup_label, vixl::aarch64::Register reg);
   void EmitAddPlaceholder(vixl::aarch64::Label* fixup_label,
@@ -743,8 +752,10 @@ class CodeGeneratorARM64 : public CodeGenerator {
   ArenaDeque<PcRelativePatchInfo> pc_relative_string_patches_;
   // Deduplication map for boot type literals for kBootImageLinkTimeAddress.
   TypeToLiteralMap boot_image_type_patches_;
-  // PC-relative type patch info.
+  // PC-relative type patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<PcRelativePatchInfo> pc_relative_type_patches_;
+  // PC-relative type patch info for kBssEntry.
+  ArenaDeque<PcRelativePatchInfo> type_bss_entry_patches_;
   // Deduplication map for patchable boot image addresses.
   Uint32ToLiteralMap boot_image_address_patches_;
 

@@ -46,6 +46,7 @@ Mutex* Locks::deoptimization_lock_ = nullptr;
 ReaderWriterMutex* Locks::heap_bitmap_lock_ = nullptr;
 Mutex* Locks::instrument_entrypoints_lock_ = nullptr;
 Mutex* Locks::intern_table_lock_ = nullptr;
+Mutex* Locks::jni_function_table_lock_ = nullptr;
 Mutex* Locks::jni_libraries_lock_ = nullptr;
 Mutex* Locks::logging_lock_ = nullptr;
 Mutex* Locks::mem_maps_lock_ = nullptr;
@@ -61,6 +62,7 @@ Mutex* Locks::reference_queue_finalizer_references_lock_ = nullptr;
 Mutex* Locks::reference_queue_phantom_references_lock_ = nullptr;
 Mutex* Locks::reference_queue_soft_references_lock_ = nullptr;
 Mutex* Locks::reference_queue_weak_references_lock_ = nullptr;
+ReaderWriterMutex* Locks::runtime_callbacks_lock_ = nullptr;
 Mutex* Locks::runtime_shutdown_lock_ = nullptr;
 Mutex* Locks::cha_lock_ = nullptr;
 Mutex* Locks::thread_list_lock_ = nullptr;
@@ -957,6 +959,7 @@ void Locks::Init() {
     DCHECK(verifier_deps_lock_ != nullptr);
     DCHECK(host_dlopen_handles_lock_ != nullptr);
     DCHECK(intern_table_lock_ != nullptr);
+    DCHECK(jni_function_table_lock_ != nullptr);
     DCHECK(jni_libraries_lock_ != nullptr);
     DCHECK(logging_lock_ != nullptr);
     DCHECK(mutator_lock_ != nullptr);
@@ -967,6 +970,7 @@ void Locks::Init() {
     DCHECK(trace_lock_ != nullptr);
     DCHECK(unexpected_signal_lock_ != nullptr);
     DCHECK(dex_lock_ != nullptr);
+    DCHECK(runtime_callbacks_lock_ != nullptr);
   } else {
     // Create global locks in level order from highest lock level to lowest.
     LockLevel current_lock_level = kInstrumentEntrypointsLock;
@@ -997,6 +1001,10 @@ void Locks::Init() {
     UPDATE_CURRENT_LOCK_LEVEL(kRuntimeShutdownLock);
     DCHECK(runtime_shutdown_lock_ == nullptr);
     runtime_shutdown_lock_ = new Mutex("runtime shutdown lock", current_lock_level);
+
+    UPDATE_CURRENT_LOCK_LEVEL(kRuntimeCallbacksLock);
+    DCHECK(runtime_callbacks_lock_ == nullptr);
+    runtime_callbacks_lock_ = new ReaderWriterMutex("runtime callbacks lock", current_lock_level);
 
     UPDATE_CURRENT_LOCK_LEVEL(kProfilerLock);
     DCHECK(profiler_lock_ == nullptr);
@@ -1097,6 +1105,10 @@ void Locks::Init() {
     UPDATE_CURRENT_LOCK_LEVEL(kJniWeakGlobalsLock);
     DCHECK(jni_weak_globals_lock_ == nullptr);
     jni_weak_globals_lock_ = new Mutex("JNI weak global reference table lock", current_lock_level);
+
+    UPDATE_CURRENT_LOCK_LEVEL(kJniFunctionTableLock);
+    DCHECK(jni_function_table_lock_ == nullptr);
+    jni_function_table_lock_ = new Mutex("JNI function table lock", current_lock_level);
 
     UPDATE_CURRENT_LOCK_LEVEL(kAbortLock);
     DCHECK(abort_lock_ == nullptr);

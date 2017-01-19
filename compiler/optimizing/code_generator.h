@@ -351,8 +351,7 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   // Also emits literal patches.
   void EmitJitRoots(uint8_t* code,
                     Handle<mirror::ObjectArray<mirror::Object>> roots,
-                    const uint8_t* roots_data,
-                    Handle<mirror::DexCache> outer_dex_cache)
+                    const uint8_t* roots_data)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool IsLeafMethod() const {
@@ -427,12 +426,12 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   }
 
 
-  // Perfoms checks pertaining to an InvokeRuntime call.
+  // Performs checks pertaining to an InvokeRuntime call.
   void ValidateInvokeRuntime(QuickEntrypointEnum entrypoint,
                              HInstruction* instruction,
                              SlowPathCode* slow_path);
 
-  // Perfoms checks pertaining to an InvokeRuntimeWithoutRecordingPcInfo call.
+  // Performs checks pertaining to an InvokeRuntimeWithoutRecordingPcInfo call.
   static void ValidateInvokeRuntimeWithoutRecordingPcInfo(HInstruction* instruction,
                                                           SlowPathCode* slow_path);
 
@@ -496,6 +495,8 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
 
   void GenerateInvokeUnresolvedRuntimeCall(HInvokeUnresolved* invoke);
 
+  void GenerateInvokePolymorphicCall(HInvokePolymorphic* invoke);
+
   void CreateUnresolvedFieldLocationSummary(
       HInstruction* field_access,
       Primitive::Type field_type,
@@ -508,11 +509,10 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
       uint32_t dex_pc,
       const FieldAccessCallingConvention& calling_convention);
 
-  // TODO: This overlaps a bit with MoveFromReturnRegister. Refactor for a better design.
-  static void CreateLoadClassLocationSummary(HLoadClass* cls,
-                                             Location runtime_type_index_location,
-                                             Location runtime_return_location,
-                                             bool code_generator_supports_read_barrier = false);
+  static void CreateLoadClassRuntimeCallLocationSummary(HLoadClass* cls,
+                                                        Location runtime_type_index_location,
+                                                        Location runtime_return_location);
+  void GenerateLoadClassRuntimeCall(HLoadClass* cls);
 
   static void CreateSystemArrayCopyLocationSummary(HInvoke* invoke);
 
@@ -522,7 +522,7 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   virtual void InvokeRuntime(QuickEntrypointEnum entrypoint,
                              HInstruction* instruction,
                              uint32_t dex_pc,
-                             SlowPathCode* slow_path) = 0;
+                             SlowPathCode* slow_path = nullptr) = 0;
 
   // Check if the desired_string_load_kind is supported. If it is, return it,
   // otherwise return a fall-back kind that should be used instead.
@@ -713,9 +713,9 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   const ArenaVector<HBasicBlock*>* block_order_;
 
   // Maps a StringReference (dex_file, string_index) to the index in the literal table.
-  // Entries are intially added with a 0 index, and `EmitJitRoots` will compute all the
-  // indices.
-  ArenaSafeMap<StringReference, uint32_t, StringReferenceValueComparator> jit_string_roots_;
+  // Entries are intially added with a pointer in the handle zone, and `EmitJitRoots`
+  // will compute all the indices.
+  ArenaSafeMap<StringReference, uint64_t, StringReferenceValueComparator> jit_string_roots_;
 
   // Maps a ClassReference (dex_file, type_index) to the index in the literal table.
   // Entries are intially added with a pointer in the handle zone, and `EmitJitRoots`

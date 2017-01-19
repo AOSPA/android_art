@@ -66,10 +66,7 @@ void DefaultInitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints) 
   qpoints->pGetObjStatic = art_quick_get_obj_static;
 
   // Array
-  qpoints->pAputObjectWithNullAndBoundCheck = art_quick_aput_obj_with_null_and_bound_check;
-  qpoints->pAputObjectWithBoundCheck = art_quick_aput_obj_with_bound_check;
   qpoints->pAputObject = art_quick_aput_obj;
-  qpoints->pHandleFillArrayData = art_quick_handle_fill_data;
 
   // JNI
   qpoints->pJniMethodStart = JniMethodStart;
@@ -106,6 +103,7 @@ void DefaultInitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints) 
       art_quick_invoke_super_trampoline_with_access_check;
   qpoints->pInvokeVirtualTrampolineWithAccessCheck =
       art_quick_invoke_virtual_trampoline_with_access_check;
+  qpoints->pInvokePolymorphic = art_quick_invoke_polymorphic;
 
   // Thread
   qpoints->pTestSuspend = art_quick_test_suspend;

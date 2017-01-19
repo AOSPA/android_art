@@ -23,12 +23,9 @@
   V(AllocArray, void*, uint32_t, int32_t, ArtMethod*) \
   V(AllocArrayResolved, void*, mirror::Class*, int32_t, ArtMethod*) \
   V(AllocArrayWithAccessCheck, void*, uint32_t, int32_t, ArtMethod*) \
-  V(AllocObject, void*, uint32_t, ArtMethod*) \
-  V(AllocObjectResolved, void*, mirror::Class*, ArtMethod*) \
-  V(AllocObjectInitialized, void*, mirror::Class*, ArtMethod*) \
-  V(AllocObjectWithAccessCheck, void*, uint32_t, ArtMethod*) \
-  V(CheckAndAllocArray, void*, uint32_t, int32_t, ArtMethod*) \
-  V(CheckAndAllocArrayWithAccessCheck, void*, uint32_t, int32_t, ArtMethod*) \
+  V(AllocObjectResolved, void*, mirror::Class*) \
+  V(AllocObjectInitialized, void*, mirror::Class*) \
+  V(AllocObjectWithChecks, void*, mirror::Class*) \
   V(AllocStringFromBytes, void*, void*, int32_t, int32_t, int32_t) \
   V(AllocStringFromChars, void*, int32_t, int32_t, void*) \
   V(AllocStringFromString, void*, void*) \
@@ -66,10 +63,7 @@
   V(GetObjInstance, void*, uint32_t, void*) \
   V(GetObjStatic, void*, uint32_t) \
 \
-  V(AputObjectWithNullAndBoundCheck, void, mirror::Array*, int32_t, mirror::Object*) \
-  V(AputObjectWithBoundCheck, void, mirror::Array*, int32_t, mirror::Object*) \
   V(AputObject, void, mirror::Array*, int32_t, mirror::Object*) \
-  V(HandleFillArrayData, void, void*, void*) \
 \
   V(JniMethodStart, uint32_t, Thread*) \
   V(JniMethodFastStart, uint32_t, Thread*) \
@@ -134,6 +128,7 @@
   V(InvokeStaticTrampolineWithAccessCheck, void, uint32_t, void*) \
   V(InvokeSuperTrampolineWithAccessCheck, void, uint32_t, void*) \
   V(InvokeVirtualTrampolineWithAccessCheck, void, uint32_t, void*) \
+  V(InvokePolymorphic, void, uint32_t, void*) \
 \
   V(TestSuspend, void, void) \
 \

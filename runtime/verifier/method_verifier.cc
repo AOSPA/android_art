@@ -2901,9 +2901,7 @@ bool MethodVerifier::CodeFlowVerifyInstruction(uint32_t* start_guess) {
       ArtMethod* called_method = VerifyInvocationArgs(inst, type, is_range);
       const RegType* return_type = nullptr;
       if (called_method != nullptr) {
-        PointerSize pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
-        mirror::Class* return_type_class = called_method->GetReturnType(can_load_classes_,
-                                                                        pointer_size);
+        mirror::Class* return_type_class = called_method->GetReturnType(can_load_classes_);
         if (return_type_class != nullptr) {
           return_type = &FromClass(called_method->GetReturnTypeDescriptor(),
                                    return_type_class,
@@ -2946,9 +2944,7 @@ bool MethodVerifier::CodeFlowVerifyInstruction(uint32_t* start_guess) {
       } else {
         is_constructor = called_method->IsConstructor();
         return_type_descriptor = called_method->GetReturnTypeDescriptor();
-        PointerSize pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
-        mirror::Class* return_type_class = called_method->GetReturnType(can_load_classes_,
-                                                                        pointer_size);
+        mirror::Class* return_type_class = called_method->GetReturnType(can_load_classes_);
         if (return_type_class != nullptr) {
           return_type = &FromClass(return_type_descriptor,
                                    return_type_class,
@@ -3106,19 +3102,16 @@ bool MethodVerifier::CodeFlowVerifyInstruction(uint32_t* start_guess) {
         break;
       }
       const uint32_t proto_idx = (is_range) ? inst->VRegH_4rcc() : inst->VRegH_45cc();
-      const char* descriptor =
+      const char* return_descriptor =
           dex_file_->GetReturnTypeDescriptor(dex_file_->GetProtoId(proto_idx));
       const RegType& return_type =
-          reg_types_.FromDescriptor(GetClassLoader(), descriptor, false);
+          reg_types_.FromDescriptor(GetClassLoader(), return_descriptor, false);
       if (!return_type.IsLowHalf()) {
         work_line_->SetResultRegisterType(this, return_type);
       } else {
         work_line_->SetResultRegisterTypeWide(return_type, return_type.HighHalf(&reg_types_));
       }
-      // TODO(oth): remove when compiler support is available.
-      Fail(VERIFY_ERROR_FORCE_INTERPRETER)
-          << "invoke-polymorphic is not supported by compiler";
-      have_pending_experimental_failure_ = true;
+      just_set_result = true;
       break;
     }
     case Instruction::NEG_INT:
@@ -5136,9 +5129,7 @@ InstructionFlags* MethodVerifier::CurrentInsnFlags() {
 const RegType& MethodVerifier::GetMethodReturnType() {
   if (return_type_ == nullptr) {
     if (mirror_method_ != nullptr) {
-      PointerSize pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
-      mirror::Class* return_type_class = mirror_method_->GetReturnType(can_load_classes_,
-                                                                       pointer_size);
+      mirror::Class* return_type_class = mirror_method_->GetReturnType(can_load_classes_);
       if (return_type_class != nullptr) {
         return_type_ = &FromClass(mirror_method_->GetReturnTypeDescriptor(),
                                   return_type_class,

@@ -354,6 +354,11 @@ while true; do
     elif [ "x$1" = "x--vdex" ]; then
         run_args="${run_args} --vdex"
         shift
+    elif [ "x$1" = "x--vdex-filter" ]; then
+        shift
+        filter=$1
+        run_args="${run_args} --vdex-filter $filter"
+        shift
     elif expr "x$1" : "x--" >/dev/null 2>&1; then
         echo "unknown $0 option: $1" 1>&2
         usage="yes"
@@ -489,7 +494,7 @@ elif [ "$runtime" = "art" ]; then
     fi
 elif [ "$runtime" = "jvm" ]; then
     # TODO: Detect whether the host is 32-bit or 64-bit.
-    run_args="${run_args} --runtime-option -Djava.library.path=${ANDROID_HOST_OUT}/lib64"
+    run_args="${run_args} --runtime-option -Djava.library.path=${ANDROID_HOST_OUT}/lib64:${ANDROID_HOST_OUT}/nativetest64"
 fi
 
 if [ "$have_image" = "no" ]; then

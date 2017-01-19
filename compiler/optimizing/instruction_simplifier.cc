@@ -1118,7 +1118,66 @@ void InstructionSimplifierVisitor::VisitAboveOrEqual(HAboveOrEqual* condition) {
   VisitCondition(condition);
 }
 
+// Recognize the following pattern:
+// obj.getClass() ==/!= Foo.class
+// And replace it with a constant value if the type of `obj` is statically known.
+static bool RecognizeAndSimplifyClassCheck(HCondition* condition) {
+  HInstruction* input_one = condition->InputAt(0);
+  HInstruction* input_two = condition->InputAt(1);
+  HLoadClass* load_class = input_one->IsLoadClass()
+      ? input_one->AsLoadClass()
+      : input_two->AsLoadClass();
+  if (load_class == nullptr) {
+    return false;
+  }
+
+  ReferenceTypeInfo class_rti = load_class->GetLoadedClassRTI();
+  if (!class_rti.IsValid()) {
+    // Unresolved class.
+    return false;
+  }
+
+  HInstanceFieldGet* field_get = (load_class == input_one)
+      ? input_two->AsInstanceFieldGet()
+      : input_one->AsInstanceFieldGet();
+  if (field_get == nullptr) {
+    return false;
+  }
+
+  HInstruction* receiver = field_get->InputAt(0);
+  ReferenceTypeInfo receiver_type = receiver->GetReferenceTypeInfo();
+  if (!receiver_type.IsExact()) {
+    return false;
+  }
+
+  {
+    ScopedObjectAccess soa(Thread::Current());
+    ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+    ArtField* field = class_linker->GetClassRoot(ClassLinker::kJavaLangObject)->GetInstanceField(0);
+    DCHECK_EQ(std::string(field->GetName()), "shadow$_klass_");
+    if (field_get->GetFieldInfo().GetField() != field) {
+      return false;
+    }
+
+    // We can replace the compare.
+    int value = 0;
+    if (receiver_type.IsEqual(class_rti)) {
+      value = condition->IsEqual() ? 1 : 0;
+    } else {
+      value = condition->IsNotEqual() ? 1 : 0;
+    }
+    condition->ReplaceWith(condition->GetBlock()->GetGraph()->GetIntConstant(value));
+    return true;
+  }
+}
+
 void InstructionSimplifierVisitor::VisitCondition(HCondition* condition) {
+  if (condition->IsEqual() || condition->IsNotEqual()) {
+    if (RecognizeAndSimplifyClassCheck(condition)) {
+      return;
+    }
+  }
+
   // Reverse condition if left is constant. Our code generators prefer constant
   // on the right hand side.
   if (condition->GetLeft()->IsConstant() && !condition->GetRight()->IsConstant()) {
@@ -1843,11 +1902,11 @@ void InstructionSimplifierVisitor::SimplifyStringCharAt(HInvoke* invoke) {
   // so create the HArrayLength, HBoundsCheck and HArrayGet.
   HArrayLength* length = new (arena) HArrayLength(str, dex_pc, /* is_string_length */ true);
   invoke->GetBlock()->InsertInstructionBefore(length, invoke);
-  HBoundsCheck* bounds_check =
-      new (arena) HBoundsCheck(index, length, dex_pc, invoke->GetDexMethodIndex());
+  HBoundsCheck* bounds_check = new (arena) HBoundsCheck(
+      index, length, dex_pc, invoke->GetDexMethodIndex());
   invoke->GetBlock()->InsertInstructionBefore(bounds_check, invoke);
-  HArrayGet* array_get =
-      new (arena) HArrayGet(str, index, Primitive::kPrimChar, dex_pc, /* is_string_char_at */ true);
+  HArrayGet* array_get = new (arena) HArrayGet(
+      str, bounds_check, Primitive::kPrimChar, dex_pc, /* is_string_char_at */ true);
   invoke->GetBlock()->ReplaceAndRemoveInstructionWith(invoke, array_get);
   bounds_check->CopyEnvironmentFrom(invoke->GetEnvironment());
   GetGraph()->SetHasBoundsChecks(true);

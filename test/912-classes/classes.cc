@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-#include "classes.h"
-
 #include <stdio.h>
 
 #include "base/macros.h"
@@ -224,16 +222,23 @@ extern "C" JNIEXPORT jobject JNICALL Java_Main_getClassLoader(
   return classloader;
 }
 
-// Don't do anything
-jint OnLoad(JavaVM* vm,
-            char* options ATTRIBUTE_UNUSED,
-            void* reserved ATTRIBUTE_UNUSED) {
-  if (vm->GetEnv(reinterpret_cast<void**>(&jvmti_env), JVMTI_VERSION_1_0)) {
-    printf("Unable to get jvmti env!\n");
-    return 1;
+extern "C" JNIEXPORT jobjectArray JNICALL Java_Main_getClassLoaderClasses(
+    JNIEnv* env, jclass Main_klass ATTRIBUTE_UNUSED, jobject jclassloader) {
+  jint count = 0;
+  jclass* classes = nullptr;
+  jvmtiError result = jvmti_env->GetClassLoaderClasses(jclassloader, &count, &classes);
+  if (JvmtiErrorToException(env, result)) {
+    return nullptr;
   }
-  SetAllCapabilities(jvmti_env);
-  return 0;
+
+  auto callback = [&](jint i) {
+    return classes[i];
+  };
+  jobjectArray ret = CreateObjectArray(env, count, "java/lang/Class", callback);
+  if (classes != nullptr) {
+    jvmti_env->Deallocate(reinterpret_cast<unsigned char*>(classes));
+  }
+  return ret;
 }
 
 }  // namespace Test912Classes

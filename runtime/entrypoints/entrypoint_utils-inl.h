@@ -52,21 +52,19 @@ inline ArtMethod* GetResolvedMethod(ArtMethod* outer_method,
   // suspended while executing it.
   ScopedAssertNoThreadSuspension sants(__FUNCTION__);
 
+  if (inline_info.EncodesArtMethodAtDepth(encoding, inlining_depth)) {
+    return inline_info.GetArtMethodAtDepth(encoding, inlining_depth);
+  }
+
   uint32_t method_index = inline_info.GetMethodIndexAtDepth(encoding, inlining_depth);
-  InvokeType invoke_type = static_cast<InvokeType>(
-        inline_info.GetInvokeTypeAtDepth(encoding, inlining_depth));
-  ArtMethod* inlined_method = outer_method->GetDexCacheResolvedMethod(method_index,
-                                                                      kRuntimePointerSize);
-  if (!inlined_method->IsRuntimeMethod()) {
+  if (inline_info.GetDexPcAtDepth(encoding, inlining_depth) == static_cast<uint32_t>(-1)) {
+    // "charAt" special case. It is the only non-leaf method we inline across dex files.
+    ArtMethod* inlined_method = jni::DecodeArtMethod(WellKnownClasses::java_lang_String_charAt);
+    DCHECK_EQ(inlined_method->GetDexMethodIndex(), method_index);
     return inlined_method;
   }
 
-  // The method in the dex cache is the runtime method responsible for invoking
-  // the stub that will then update the dex cache. Therefore, we need to do the
-  // resolution ourselves.
-
-  // We first find the dex cache of our caller. If it is the outer method, we can directly
-  // use its dex cache. Otherwise, we also need to resolve our caller.
+  // Find which method did the call in the inlining hierarchy.
   ArtMethod* caller = outer_method;
   if (inlining_depth != 0) {
     caller = GetResolvedMethod(outer_method,
@@ -74,96 +72,56 @@ inline ArtMethod* GetResolvedMethod(ArtMethod* outer_method,
                                encoding,
                                inlining_depth - 1);
   }
-  DCHECK_EQ(caller->GetDexCache(), outer_method->GetDexCache())
-      << "Compiler only supports inlining calls within the same dex cache";
-  const DexFile* dex_file = outer_method->GetDexFile();
-  const DexFile::MethodId& method_id = dex_file->GetMethodId(method_index);
 
-  if (inline_info.GetDexPcAtDepth(encoding, inlining_depth) == static_cast<uint32_t>(-1)) {
-    // "charAt" special case. It is the only non-leaf method we inline across dex files.
-    if (kIsDebugBuild) {
-      const char* name = dex_file->StringDataByIdx(method_id.name_idx_);
-      DCHECK_EQ(std::string(name), "charAt");
-      DCHECK_EQ(std::string(dex_file->GetMethodShorty(method_id)), "CI")
-          << std::string(dex_file->GetMethodShorty(method_id));
-      DCHECK_EQ(std::string(dex_file->StringByTypeIdx(method_id.class_idx_)), "Ljava/lang/String;")
-          << std::string(dex_file->StringByTypeIdx(method_id.class_idx_));
-    }
-    mirror::Class* cls =
-        Runtime::Current()->GetClassLinker()->GetClassRoot(ClassLinker::kJavaLangString);
-    // Update the dex cache for future lookups.
-    caller->GetDexCache()->SetResolvedType(method_id.class_idx_, cls);
-    inlined_method = cls->FindVirtualMethod("charAt", "(I)C", kRuntimePointerSize);
-  } else {
-    mirror::Class* klass = caller->GetDexCache()->GetResolvedType(method_id.class_idx_);
-    DCHECK_EQ(klass->GetDexCache(), caller->GetDexCache())
-        << "Compiler only supports inlining calls within the same dex cache";
-    switch (invoke_type) {
-      case kDirect:
-      case kStatic:
-        inlined_method =
-            klass->FindDirectMethod(klass->GetDexCache(), method_index, kRuntimePointerSize);
-        break;
-      case kSuper:
-      case kVirtual:
-        inlined_method =
-            klass->FindVirtualMethod(klass->GetDexCache(), method_index, kRuntimePointerSize);
-        break;
-      default:
-        LOG(FATAL) << "Unimplemented inlined invocation type: " << invoke_type;
-        UNREACHABLE();
+  // Lookup the declaring class of the inlined method.
+  const DexFile* dex_file = caller->GetDexFile();
+  const DexFile::MethodId& method_id = dex_file->GetMethodId(method_index);
+  const char* descriptor = dex_file->StringByTypeIdx(method_id.class_idx_);
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+  Thread* self = Thread::Current();
+  mirror::ClassLoader* class_loader = caller->GetDeclaringClass()->GetClassLoader();
+  mirror::Class* klass = class_linker->LookupClass(self, descriptor, class_loader);
+  if (klass == nullptr) {
+      LOG(FATAL) << "Could not find an inlined method from an .oat file: "
+                 << "the class " << descriptor << " was not found in the class loader of "
+                 << caller->PrettyMethod() << ". "
+                 << "This must be due to playing wrongly with class loaders";
+  }
+
+  // Lookup the method.
+  const char* method_name = dex_file->GetMethodName(method_id);
+  const Signature signature = dex_file->GetMethodSignature(method_id);
+
+  ArtMethod* inlined_method =
+      klass->FindDeclaredDirectMethod(method_name, signature, kRuntimePointerSize);
+  if (inlined_method == nullptr) {
+    inlined_method = klass->FindDeclaredVirtualMethod(method_name, signature, kRuntimePointerSize);
+    if (inlined_method == nullptr) {
+      LOG(FATAL) << "Could not find an inlined method from an .oat file: "
+                 << "the class " << descriptor << " does not have "
+                 << method_name << signature << " declared. "
+                 << "This must be due to duplicate classes or playing wrongly with class loaders";
     }
   }
 
-  // Update the dex cache for future lookups. Note that for static methods, this is safe
-  // when the class is being initialized, as the entrypoint for the ArtMethod is at
-  // this point still the resolution trampoline.
-  outer_method->SetDexCacheResolvedMethod(method_index, inlined_method, kRuntimePointerSize);
   return inlined_method;
 }
 
-inline ArtMethod* GetCalleeSaveMethodCaller(Thread* self, Runtime::CalleeSaveType type) {
-  return GetCalleeSaveMethodCaller(
-      self->GetManagedStack()->GetTopQuickFrame(), type, true /* do_caller_check */);
-}
-
-template <const bool kAccessCheck>
-ALWAYS_INLINE
-inline mirror::Class* CheckObjectAlloc(dex::TypeIndex type_idx,
-                                       ArtMethod* method,
-                                       Thread* self,
-                                       bool* slow_path) {
-  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  PointerSize pointer_size = class_linker->GetImagePointerSize();
-  mirror::Class* klass = method->GetDexCacheResolvedType<false>(type_idx, pointer_size);
-  if (UNLIKELY(klass == nullptr)) {
-    klass = class_linker->ResolveType(type_idx, method);
+ALWAYS_INLINE inline mirror::Class* CheckObjectAlloc(mirror::Class* klass,
+                                                     Thread* self,
+                                                     bool* slow_path)
+    REQUIRES_SHARED(Locks::mutator_lock_)
+    REQUIRES(!Roles::uninterruptible_) {
+  if (UNLIKELY(!klass->IsInstantiable())) {
+    self->ThrowNewException("Ljava/lang/InstantiationError;", klass->PrettyDescriptor().c_str());
     *slow_path = true;
-    if (klass == nullptr) {
-      DCHECK(self->IsExceptionPending());
-      return nullptr;  // Failure
-    } else {
-      DCHECK(!self->IsExceptionPending());
-    }
+    return nullptr;  // Failure
   }
-  if (kAccessCheck) {
-    if (UNLIKELY(!klass->IsInstantiable())) {
-      self->ThrowNewException("Ljava/lang/InstantiationError;", klass->PrettyDescriptor().c_str());
-      *slow_path = true;
-      return nullptr;  // Failure
-    }
-    if (UNLIKELY(klass->IsClassClass())) {
-      ThrowIllegalAccessError(nullptr, "Class %s is inaccessible",
-                              klass->PrettyDescriptor().c_str());
-      *slow_path = true;
-      return nullptr;  // Failure
-    }
-    mirror::Class* referrer = method->GetDeclaringClass();
-    if (UNLIKELY(!referrer->CanAccess(klass))) {
-      ThrowIllegalAccessErrorClass(referrer, klass);
-      *slow_path = true;
-      return nullptr;  // Failure
-    }
+  if (UNLIKELY(klass->IsClassClass())) {
+    ThrowIllegalAccessError(nullptr, "Class %s is inaccessible",
+                            klass->PrettyDescriptor().c_str());
+    *slow_path = true;
+    return nullptr;  // Failure
   }
   if (UNLIKELY(!klass->IsInitialized())) {
     StackHandleScope<1> hs(self);
@@ -191,7 +149,9 @@ inline mirror::Class* CheckObjectAlloc(dex::TypeIndex type_idx,
 ALWAYS_INLINE
 inline mirror::Class* CheckClassInitializedForObjectAlloc(mirror::Class* klass,
                                                           Thread* self,
-                                                          bool* slow_path) {
+                                                          bool* slow_path)
+    REQUIRES_SHARED(Locks::mutator_lock_)
+    REQUIRES(!Roles::uninterruptible_) {
   if (UNLIKELY(!klass->IsInitialized())) {
     StackHandleScope<1> hs(self);
     Handle<mirror::Class> h_class(hs.NewHandle(klass));
@@ -213,18 +173,15 @@ inline mirror::Class* CheckClassInitializedForObjectAlloc(mirror::Class* klass,
   return klass;
 }
 
-// Given the context of a calling Method, use its DexCache to resolve a type to a Class. If it
-// cannot be resolved, throw an error. If it can, use it to create an instance.
-// When verification/compiler hasn't been able to verify access, optionally perform an access
-// check.
-template <bool kAccessCheck, bool kInstrumented>
+// Allocate an instance of klass. Throws InstantationError if klass is not instantiable,
+// or IllegalAccessError if klass is j.l.Class. Performs a clinit check too.
+template <bool kInstrumented>
 ALWAYS_INLINE
-inline mirror::Object* AllocObjectFromCode(dex::TypeIndex type_idx,
-                                           ArtMethod* method,
+inline mirror::Object* AllocObjectFromCode(mirror::Class* klass,
                                            Thread* self,
                                            gc::AllocatorType allocator_type) {
   bool slow_path = false;
-  mirror::Class* klass = CheckObjectAlloc<kAccessCheck>(type_idx, method, self, &slow_path);
+  klass = CheckObjectAlloc(klass, self, &slow_path);
   if (UNLIKELY(slow_path)) {
     if (klass == nullptr) {
       return nullptr;
@@ -284,10 +241,9 @@ inline mirror::Class* CheckArrayAlloc(dex::TypeIndex type_idx,
     *slow_path = true;
     return nullptr;  // Failure
   }
-  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  PointerSize pointer_size = class_linker->GetImagePointerSize();
-  mirror::Class* klass = method->GetDexCacheResolvedType<false>(type_idx, pointer_size);
+  mirror::Class* klass = method->GetDexCache()->GetResolvedType(type_idx);
   if (UNLIKELY(klass == nullptr)) {  // Not in dex cache so try to resolve
+    ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
     klass = class_linker->ResolveType(type_idx, method);
     *slow_path = true;
     if (klass == nullptr) {  // Error

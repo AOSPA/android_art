@@ -47,6 +47,10 @@
 
 namespace openjdkjvmti {
 
+bool EventMasks::IsEnabledAnywhere(ArtJvmtiEvent event) {
+  return global_event_mask.Test(event) || unioned_thread_event_mask.Test(event);
+}
+
 EventMask& EventMasks::GetEventMask(art::Thread* thread) {
   if (thread == nullptr) {
     return global_event_mask;
@@ -83,7 +87,7 @@ EventMask* EventMasks::GetEventMaskOrNull(art::Thread* thread) {
 }
 
 
-void EventMasks::EnableEvent(art::Thread* thread, jvmtiEvent event) {
+void EventMasks::EnableEvent(art::Thread* thread, ArtJvmtiEvent event) {
   DCHECK(EventMask::EventIsInRange(event));
   GetEventMask(thread).Set(event);
   if (thread != nullptr) {
@@ -91,7 +95,7 @@ void EventMasks::EnableEvent(art::Thread* thread, jvmtiEvent event) {
   }
 }
 
-void EventMasks::DisableEvent(art::Thread* thread, jvmtiEvent event) {
+void EventMasks::DisableEvent(art::Thread* thread, ArtJvmtiEvent event) {
   DCHECK(EventMask::EventIsInRange(event));
   GetEventMask(thread).Set(event, false);
   if (thread != nullptr) {
@@ -107,20 +111,49 @@ void EventMasks::DisableEvent(art::Thread* thread, jvmtiEvent event) {
   }
 }
 
+void EventMasks::HandleChangedCapabilities(const jvmtiCapabilities& caps, bool caps_added) {
+  if (UNLIKELY(caps.can_retransform_classes == 1)) {
+    // If we are giving this env the retransform classes cap we need to switch all events of
+    // NonTransformable to Transformable and vice versa.
+    ArtJvmtiEvent to_remove = caps_added ? ArtJvmtiEvent::kClassFileLoadHookNonRetransformable
+                                         : ArtJvmtiEvent::kClassFileLoadHookRetransformable;
+    ArtJvmtiEvent to_add = caps_added ? ArtJvmtiEvent::kClassFileLoadHookRetransformable
+                                      : ArtJvmtiEvent::kClassFileLoadHookNonRetransformable;
+    if (global_event_mask.Test(to_remove)) {
+      CHECK(!global_event_mask.Test(to_add));
+      global_event_mask.Set(to_remove, false);
+      global_event_mask.Set(to_add, true);
+    }
+
+    if (unioned_thread_event_mask.Test(to_remove)) {
+      CHECK(!unioned_thread_event_mask.Test(to_add));
+      unioned_thread_event_mask.Set(to_remove, false);
+      unioned_thread_event_mask.Set(to_add, true);
+    }
+    for (auto thread_mask : thread_event_masks) {
+      if (thread_mask.second.Test(to_remove)) {
+        CHECK(!thread_mask.second.Test(to_add));
+        thread_mask.second.Set(to_remove, false);
+        thread_mask.second.Set(to_add, true);
+      }
+    }
+  }
+}
+
 void EventHandler::RegisterArtJvmTiEnv(ArtJvmTiEnv* env) {
   envs.push_back(env);
 }
 
-static bool IsThreadControllable(jvmtiEvent event) {
+static bool IsThreadControllable(ArtJvmtiEvent event) {
   switch (event) {
-    case JVMTI_EVENT_VM_INIT:
-    case JVMTI_EVENT_VM_START:
-    case JVMTI_EVENT_VM_DEATH:
-    case JVMTI_EVENT_THREAD_START:
-    case JVMTI_EVENT_COMPILED_METHOD_LOAD:
-    case JVMTI_EVENT_COMPILED_METHOD_UNLOAD:
-    case JVMTI_EVENT_DYNAMIC_CODE_GENERATED:
-    case JVMTI_EVENT_DATA_DUMP_REQUEST:
+    case ArtJvmtiEvent::kVmInit:
+    case ArtJvmtiEvent::kVmStart:
+    case ArtJvmtiEvent::kVmDeath:
+    case ArtJvmtiEvent::kThreadStart:
+    case ArtJvmtiEvent::kCompiledMethodLoad:
+    case ArtJvmtiEvent::kCompiledMethodUnload:
+    case ArtJvmtiEvent::kDynamicCodeGenerated:
+    case ArtJvmtiEvent::kDataDumpRequest:
       return false;
 
     default:
@@ -136,7 +169,7 @@ class JvmtiAllocationListener : public art::gc::AllocationListener {
       OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
     DCHECK_EQ(self, art::Thread::Current());
 
-    if (handler_->IsEventEnabledAnywhere(JVMTI_EVENT_VM_OBJECT_ALLOC)) {
+    if (handler_->IsEventEnabledAnywhere(ArtJvmtiEvent::kVmObjectAlloc)) {
       art::StackHandleScope<1> hs(self);
       auto h = hs.NewHandleWrapper(obj);
       // jvmtiEventVMObjectAlloc parameters:
@@ -162,7 +195,7 @@ class JvmtiAllocationListener : public art::gc::AllocationListener {
           jni_env, jni_env->AddLocalReference<jclass>(obj->Ptr()->GetClass()));
 
       handler_->DispatchEvent(self,
-                              JVMTI_EVENT_VM_OBJECT_ALLOC,
+                              ArtJvmtiEvent::kVmObjectAlloc,
                               jni_env,
                               thread.get(),
                               object.get(),
@@ -196,11 +229,11 @@ class JvmtiGcPauseListener : public art::gc::GcPauseListener {
         finish_enabled_(false) {}
 
   void StartPause() OVERRIDE {
-    handler_->DispatchEvent(nullptr, JVMTI_EVENT_GARBAGE_COLLECTION_START);
+    handler_->DispatchEvent(nullptr, ArtJvmtiEvent::kGarbageCollectionStart);
   }
 
   void EndPause() OVERRIDE {
-    handler_->DispatchEvent(nullptr, JVMTI_EVENT_GARBAGE_COLLECTION_FINISH);
+    handler_->DispatchEvent(nullptr, ArtJvmtiEvent::kGarbageCollectionFinish);
   }
 
   bool IsEnabled() {
@@ -221,10 +254,10 @@ class JvmtiGcPauseListener : public art::gc::GcPauseListener {
   bool finish_enabled_;
 };
 
-static void SetupGcPauseTracking(JvmtiGcPauseListener* listener, jvmtiEvent event, bool enable) {
+static void SetupGcPauseTracking(JvmtiGcPauseListener* listener, ArtJvmtiEvent event, bool enable) {
   bool old_state = listener->IsEnabled();
 
-  if (event == JVMTI_EVENT_GARBAGE_COLLECTION_START) {
+  if (event == ArtJvmtiEvent::kGarbageCollectionStart) {
     listener->SetStartEnabled(enable);
   } else {
     listener->SetFinishEnabled(enable);
@@ -242,14 +275,14 @@ static void SetupGcPauseTracking(JvmtiGcPauseListener* listener, jvmtiEvent even
 }
 
 // Handle special work for the given event type, if necessary.
-void EventHandler::HandleEventType(jvmtiEvent event, bool enable) {
+void EventHandler::HandleEventType(ArtJvmtiEvent event, bool enable) {
   switch (event) {
-    case JVMTI_EVENT_VM_OBJECT_ALLOC:
+    case ArtJvmtiEvent::kVmObjectAlloc:
       SetupObjectAllocationTracking(alloc_listener_.get(), enable);
       return;
 
-    case JVMTI_EVENT_GARBAGE_COLLECTION_START:
-    case JVMTI_EVENT_GARBAGE_COLLECTION_FINISH:
+    case ArtJvmtiEvent::kGarbageCollectionStart:
+    case ArtJvmtiEvent::kGarbageCollectionFinish:
       SetupGcPauseTracking(gc_pause_listener_.get(), event, enable);
       return;
 
@@ -260,7 +293,7 @@ void EventHandler::HandleEventType(jvmtiEvent event, bool enable) {
 
 jvmtiError EventHandler::SetEvent(ArtJvmTiEnv* env,
                                   art::Thread* thread,
-                                  jvmtiEvent event,
+                                  ArtJvmtiEvent event,
                                   jvmtiEventMode mode) {
   if (thread != nullptr) {
     art::ThreadState state = thread->GetState();
@@ -293,17 +326,7 @@ jvmtiError EventHandler::SetEvent(ArtJvmTiEnv* env,
     DCHECK_EQ(mode, JVMTI_DISABLE);
 
     env->event_masks.DisableEvent(thread, event);
-
-    // Gotta recompute the global mask.
-    bool union_value = false;
-    for (const ArtJvmTiEnv* stored_env : envs) {
-      union_value |= stored_env->event_masks.global_event_mask.Test(event);
-      union_value |= stored_env->event_masks.unioned_thread_event_mask.Test(event);
-      if (union_value) {
-        break;
-      }
-    }
-    global_mask.Set(event, union_value);
+    RecalculateGlobalEventMask(event);
   }
 
   bool new_state = global_mask.Test(event);

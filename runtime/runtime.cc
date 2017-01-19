@@ -1100,6 +1100,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   if (runtime_options.Exists(Opt::JdwpOptions)) {
     Dbg::ConfigureJdwp(runtime_options.GetOrDefault(Opt::JdwpOptions));
   }
+  callbacks_.AddThreadLifecycleCallback(Dbg::GetThreadLifecycleCallback());
 
   jit_options_.reset(jit::JitOptions::CreateFromRuntimeArguments(runtime_options));
   if (IsAotCompiler()) {
@@ -1364,6 +1365,34 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   return true;
 }
 
+static bool EnsureJvmtiPlugin(Runtime* runtime,
+                              std::vector<Plugin>* plugins,
+                              std::string* error_msg) {
+  constexpr const char* plugin_name = kIsDebugBuild ? "libopenjdkjvmtid.so" : "libopenjdkjvmti.so";
+
+  // Is the plugin already loaded?
+  for (Plugin p : *plugins) {
+    if (p.GetLibrary() == plugin_name) {
+      return true;
+    }
+  }
+
+  // Is the process debuggable? Otherwise, do not attempt to load the plugin.
+  if (!runtime->IsDebuggable()) {
+    *error_msg = "Process is not debuggable.";
+    return false;
+  }
+
+  Plugin new_plugin = Plugin::Create(plugin_name);
+
+  if (!new_plugin.Load(error_msg)) {
+    return false;
+  }
+
+  plugins->push_back(std::move(new_plugin));
+  return true;
+}
+
 // Attach a new agent and add it to the list of runtime agents
 //
 // TODO: once we decide on the threading model for agents,
@@ -1371,18 +1400,25 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 //   (and we synchronize access to any shared data structures like "agents_")
 //
 void Runtime::AttachAgent(const std::string& agent_arg) {
+  std::string error_msg;
+  if (!EnsureJvmtiPlugin(this, &plugins_, &error_msg)) {
+    LOG(WARNING) << "Could not load plugin: " << error_msg;
+    ScopedObjectAccess soa(Thread::Current());
+    ThrowIOException("%s", error_msg.c_str());
+    return;
+  }
+
   ti::Agent agent(agent_arg);
 
   int res = 0;
-  std::string err;
-  ti::Agent::LoadError result = agent.Attach(&res, &err);
+  ti::Agent::LoadError result = agent.Attach(&res, &error_msg);
 
   if (result == ti::Agent::kNoError) {
     agents_.push_back(std::move(agent));
   } else {
-    LOG(ERROR) << "Agent attach failed (result=" << result << ") : " << err;
+    LOG(WARNING) << "Agent attach failed (result=" << result << ") : " << error_msg;
     ScopedObjectAccess soa(Thread::Current());
-    ThrowWrappedIOException("%s", err.c_str());
+    ThrowIOException("%s", error_msg.c_str());
   }
 }
 
@@ -2195,6 +2231,8 @@ void Runtime::AddSystemWeakHolder(gc::AbstractSystemWeakHolder* holder) {
   gc::ScopedGCCriticalSection gcs(Thread::Current(),
                                   gc::kGcCauseAddRemoveSystemWeakHolder,
                                   gc::kCollectorTypeAddRemoveSystemWeakHolder);
+  // Note: The ScopedGCCriticalSection also ensures that the rest of the function is in
+  //       a critical section.
   system_weak_holders_.push_back(holder);
 }
 

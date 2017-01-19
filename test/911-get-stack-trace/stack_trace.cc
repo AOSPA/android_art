@@ -14,14 +14,13 @@
  * limitations under the License.
  */
 
-#include "stack_trace.h"
-
 #include <inttypes.h>
 #include <memory>
 #include <stdio.h>
 
 #include "android-base/stringprintf.h"
 
+#include "android-base/stringprintf.h"
 #include "base/logging.h"
 #include "base/macros.h"
 #include "jni.h"
@@ -52,33 +51,16 @@ static jint FindLineNumber(jint line_number_count,
   return line_number;
 }
 
-extern "C" JNIEXPORT jobjectArray JNICALL Java_Main_getStackTrace(
-    JNIEnv* env, jclass klass ATTRIBUTE_UNUSED, jthread thread, jint start, jint max) {
-  std::unique_ptr<jvmtiFrameInfo[]> frames(new jvmtiFrameInfo[max]);
-
-  jint count;
-  {
-    jvmtiError result = jvmti_env->GetStackTrace(thread, start, max, frames.get(), &count);
-    if (result != JVMTI_ERROR_NONE) {
-      char* err;
-      jvmti_env->GetErrorName(result, &err);
-      printf("Failure running GetStackTrace: %s\n", err);
-      jvmti_env->Deallocate(reinterpret_cast<unsigned char*>(err));
-      return nullptr;
-    }
-  }
-
+static jobjectArray TranslateJvmtiFrameInfoArray(JNIEnv* env,
+                                                 jvmtiFrameInfo* frames,
+                                                 jint count) {
   auto callback = [&](jint method_index) -> jobjectArray {
     char* name;
     char* sig;
     char* gen;
     {
       jvmtiError result2 = jvmti_env->GetMethodName(frames[method_index].method, &name, &sig, &gen);
-      if (result2 != JVMTI_ERROR_NONE) {
-        char* err;
-        jvmti_env->GetErrorName(result2, &err);
-        printf("Failure running GetMethodName: %s\n", err);
-        jvmti_env->Deallocate(reinterpret_cast<unsigned char*>(err));
+      if (JvmtiErrorToException(env, result2)) {
         return nullptr;
       }
     }
@@ -142,16 +124,133 @@ extern "C" JNIEXPORT jobjectArray JNICALL Java_Main_getStackTrace(
   return CreateObjectArray(env, count, "[Ljava/lang/String;", callback);
 }
 
-// Don't do anything
-jint OnLoad(JavaVM* vm,
-            char* options ATTRIBUTE_UNUSED,
-            void* reserved ATTRIBUTE_UNUSED) {
-  if (vm->GetEnv(reinterpret_cast<void**>(&jvmti_env), JVMTI_VERSION_1_0)) {
-    printf("Unable to get jvmti env!\n");
-    return 1;
+extern "C" JNIEXPORT jobjectArray JNICALL Java_PrintThread_getStackTrace(
+    JNIEnv* env, jclass klass ATTRIBUTE_UNUSED, jthread thread, jint start, jint max) {
+  std::unique_ptr<jvmtiFrameInfo[]> frames(new jvmtiFrameInfo[max]);
+
+  jint count;
+  {
+    jvmtiError result = jvmti_env->GetStackTrace(thread, start, max, frames.get(), &count);
+    if (JvmtiErrorToException(env, result)) {
+      return nullptr;
+    }
   }
-  SetAllCapabilities(jvmti_env);
-  return 0;
+
+  return TranslateJvmtiFrameInfoArray(env, frames.get(), count);
+}
+
+extern "C" JNIEXPORT jobjectArray JNICALL Java_AllTraces_getAllStackTraces(
+    JNIEnv* env, jclass klass ATTRIBUTE_UNUSED, jint max) {
+  jint thread_count;
+  jvmtiStackInfo* stack_infos;
+  {
+    jvmtiError result = jvmti_env->GetAllStackTraces(max, &stack_infos, &thread_count);
+    if (JvmtiErrorToException(env, result)) {
+      return nullptr;
+    }
+  }
+
+  auto callback = [&](jint thread_index) -> jobject {
+    auto inner_callback = [&](jint index) -> jobject {
+      if (index == 0) {
+        return stack_infos[thread_index].thread;
+      } else {
+        return TranslateJvmtiFrameInfoArray(env,
+                                            stack_infos[thread_index].frame_buffer,
+                                            stack_infos[thread_index].frame_count);
+      }
+    };
+    return CreateObjectArray(env, 2, "java/lang/Object", inner_callback);
+  };
+  jobjectArray ret = CreateObjectArray(env, thread_count, "[Ljava/lang/Object;", callback);
+  jvmti_env->Deallocate(reinterpret_cast<unsigned char*>(stack_infos));
+  return ret;
+}
+
+extern "C" JNIEXPORT jobjectArray JNICALL Java_ThreadListTraces_getThreadListStackTraces(
+    JNIEnv* env, jclass klass ATTRIBUTE_UNUSED, jobjectArray jthreads, jint max) {
+  jint thread_count = env->GetArrayLength(jthreads);
+  std::unique_ptr<jthread[]> threads(new jthread[thread_count]);
+  for (jint i = 0; i != thread_count; ++i) {
+    threads[i] = env->GetObjectArrayElement(jthreads, i);
+  }
+
+  jvmtiStackInfo* stack_infos;
+  {
+    jvmtiError result = jvmti_env->GetThreadListStackTraces(thread_count,
+                                                            threads.get(),
+                                                            max,
+                                                            &stack_infos);
+    if (JvmtiErrorToException(env, result)) {
+      return nullptr;
+    }
+  }
+
+  auto callback = [&](jint thread_index) -> jobject {
+    auto inner_callback = [&](jint index) -> jobject {
+      if (index == 0) {
+        return stack_infos[thread_index].thread;
+      } else {
+        return TranslateJvmtiFrameInfoArray(env,
+                                            stack_infos[thread_index].frame_buffer,
+                                            stack_infos[thread_index].frame_count);
+      }
+    };
+    return CreateObjectArray(env, 2, "java/lang/Object", inner_callback);
+  };
+  jobjectArray ret = CreateObjectArray(env, thread_count, "[Ljava/lang/Object;", callback);
+  jvmti_env->Deallocate(reinterpret_cast<unsigned char*>(stack_infos));
+  return ret;
+}
+
+extern "C" JNIEXPORT jint JNICALL Java_Frames_getFrameCount(
+    JNIEnv* env, jclass klass ATTRIBUTE_UNUSED, jthread thread) {
+  jint count;
+  jvmtiError result = jvmti_env->GetFrameCount(thread, &count);
+  if (JvmtiErrorToException(env, result)) {
+    return -1;
+  }
+  return count;
+}
+
+extern "C" JNIEXPORT jobjectArray JNICALL Java_Frames_getFrameLocation(
+    JNIEnv* env, jclass klass ATTRIBUTE_UNUSED, jthread thread, jint depth) {
+  jmethodID method;
+  jlocation location;
+
+  jvmtiError result = jvmti_env->GetFrameLocation(thread, depth, &method, &location);
+  if (JvmtiErrorToException(env, result)) {
+    return nullptr;
+  }
+
+  auto callback = [&](jint index) -> jobject {
+    switch (index) {
+      case 0:
+      {
+        jclass decl_class;
+        jvmtiError class_result = jvmti_env->GetMethodDeclaringClass(method, &decl_class);
+        if (JvmtiErrorToException(env, class_result)) {
+          return nullptr;
+        }
+        jint modifiers;
+        jvmtiError mod_result = jvmti_env->GetMethodModifiers(method, &modifiers);
+        if (JvmtiErrorToException(env, mod_result)) {
+          return nullptr;
+        }
+        constexpr jint kStatic = 0x8;
+        return env->ToReflectedMethod(decl_class,
+                                      method,
+                                      (modifiers & kStatic) != 0 ? JNI_TRUE : JNI_FALSE);
+      }
+      case 1:
+        return env->NewStringUTF(
+            android::base::StringPrintf("%x", static_cast<uint32_t>(location)).c_str());
+    }
+    LOG(FATAL) << "Unreachable";
+    UNREACHABLE();
+  };
+  jobjectArray ret = CreateObjectArray(env, 2, "java/lang/Object", callback);
+  return ret;
 }
 
 }  // namespace Test911GetStackTrace

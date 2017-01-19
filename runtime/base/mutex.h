@@ -68,6 +68,7 @@ enum LockLevel {
   kRosAllocBulkFreeLock,
   kMarkSweepMarkStackLock,
   kTransactionLogLock,
+  kJniFunctionTableLock,
   kJniWeakGlobalsLock,
   kJniGlobalsLock,
   kReferenceQueueSoftReferencesLock,
@@ -111,6 +112,7 @@ enum LockLevel {
   kJdwpEventListLock,
   kJdwpAttachLock,
   kJdwpStartLock,
+  kRuntimeCallbacksLock,
   kRuntimeShutdownLock,
   kTraceLock,
   kHeapBitmapLock,
@@ -615,8 +617,11 @@ class Locks {
   // Guards shutdown of the runtime.
   static Mutex* runtime_shutdown_lock_ ACQUIRED_AFTER(heap_bitmap_lock_);
 
+  // Guards accesses to runtime callback lists.
+  static ReaderWriterMutex* runtime_callbacks_lock_ ACQUIRED_AFTER(runtime_shutdown_lock_);
+
   // Guards background profiler global state.
-  static Mutex* profiler_lock_ ACQUIRED_AFTER(runtime_shutdown_lock_);
+  static Mutex* profiler_lock_ ACQUIRED_AFTER(runtime_callbacks_lock_);
 
   // Guards trace (ie traceview) requests.
   static Mutex* trace_lock_ ACQUIRED_AFTER(profiler_lock_);
@@ -698,8 +703,11 @@ class Locks {
   // Guard accesses to the JNI Weak Global Reference table.
   static Mutex* jni_weak_globals_lock_ ACQUIRED_AFTER(jni_globals_lock_);
 
+  // Guard accesses to the JNI function table override.
+  static Mutex* jni_function_table_lock_ ACQUIRED_AFTER(jni_weak_globals_lock_);
+
   // Have an exclusive aborting thread.
-  static Mutex* abort_lock_ ACQUIRED_AFTER(jni_weak_globals_lock_);
+  static Mutex* abort_lock_ ACQUIRED_AFTER(jni_function_table_lock_);
 
   // Allow mutual exclusion when manipulating Thread::suspend_count_.
   // TODO: Does the trade-off of a per-thread lock make sense?

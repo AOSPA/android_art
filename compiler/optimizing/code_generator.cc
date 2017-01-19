@@ -367,6 +367,12 @@ void CodeGenerator::GenerateInvokeUnresolvedRuntimeCall(HInvokeUnresolved* invok
   InvokeRuntime(entrypoint, invoke, invoke->GetDexPc(), nullptr);
 }
 
+void CodeGenerator::GenerateInvokePolymorphicCall(HInvokePolymorphic* invoke) {
+  MoveConstant(invoke->GetLocations()->GetTemp(0), static_cast<int32_t>(invoke->GetType()));
+  QuickEntrypointEnum entrypoint = kQuickInvokePolymorphic;
+  InvokeRuntime(entrypoint, invoke, invoke->GetDexPc(), nullptr);
+}
+
 void CodeGenerator::CreateUnresolvedFieldLocationSummary(
     HInstruction* field_access,
     Primitive::Type field_type,
@@ -491,30 +497,33 @@ void CodeGenerator::GenerateUnresolvedFieldAccess(
   }
 }
 
-// TODO: Remove argument `code_generator_supports_read_barrier` when
-// all code generators have read barrier support.
-void CodeGenerator::CreateLoadClassLocationSummary(HLoadClass* cls,
-                                                   Location runtime_type_index_location,
-                                                   Location runtime_return_location,
-                                                   bool code_generator_supports_read_barrier) {
-  ArenaAllocator* allocator = cls->GetBlock()->GetGraph()->GetArena();
-  LocationSummary::CallKind call_kind = cls->NeedsAccessCheck()
-      ? LocationSummary::kCallOnMainOnly
-      : (((code_generator_supports_read_barrier && kEmitCompilerReadBarrier) ||
-          cls->CanCallRuntime())
-            ? LocationSummary::kCallOnSlowPath
-            : LocationSummary::kNoCall);
-  LocationSummary* locations = new (allocator) LocationSummary(cls, call_kind);
-  if (cls->NeedsAccessCheck()) {
-    locations->SetInAt(0, Location::NoLocation());
-    locations->AddTemp(runtime_type_index_location);
-    locations->SetOut(runtime_return_location);
-  } else {
-    locations->SetInAt(0, Location::RequiresRegister());
-    locations->SetOut(Location::RequiresRegister());
-  }
+void CodeGenerator::CreateLoadClassRuntimeCallLocationSummary(HLoadClass* cls,
+                                                              Location runtime_type_index_location,
+                                                              Location runtime_return_location) {
+  DCHECK_EQ(cls->GetLoadKind(), HLoadClass::LoadKind::kDexCacheViaMethod);
+  DCHECK_EQ(cls->InputCount(), 1u);
+  LocationSummary* locations = new (cls->GetBlock()->GetGraph()->GetArena()) LocationSummary(
+      cls, LocationSummary::kCallOnMainOnly);
+  locations->SetInAt(0, Location::NoLocation());
+  locations->AddTemp(runtime_type_index_location);
+  locations->SetOut(runtime_return_location);
 }
 
+void CodeGenerator::GenerateLoadClassRuntimeCall(HLoadClass* cls) {
+  DCHECK_EQ(cls->GetLoadKind(), HLoadClass::LoadKind::kDexCacheViaMethod);
+  LocationSummary* locations = cls->GetLocations();
+  MoveConstant(locations->GetTemp(0), cls->GetTypeIndex().index_);
+  if (cls->NeedsAccessCheck()) {
+    CheckEntrypointTypes<kQuickInitializeTypeAndVerifyAccess, void*, uint32_t>();
+    InvokeRuntime(kQuickInitializeTypeAndVerifyAccess, cls, cls->GetDexPc());
+  } else if (cls->MustGenerateClinitCheck()) {
+    CheckEntrypointTypes<kQuickInitializeStaticStorage, void*, uint32_t>();
+    InvokeRuntime(kQuickInitializeStaticStorage, cls, cls->GetDexPc());
+  } else {
+    CheckEntrypointTypes<kQuickInitializeType, void*, uint32_t>();
+    InvokeRuntime(kQuickInitializeType, cls, cls->GetDexPc());
+  }
+}
 
 void CodeGenerator::BlockIfInRegister(Location location, bool is_out) const {
   // The DCHECKS below check that a register is not specified twice in
@@ -927,10 +936,10 @@ void CodeGenerator::EmitEnvironment(HEnvironment* environment, SlowPathCode* slo
   if (environment->GetParent() != nullptr) {
     // We emit the parent environment first.
     EmitEnvironment(environment->GetParent(), slow_path);
-    stack_map_stream_.BeginInlineInfoEntry(environment->GetMethodIdx(),
+    stack_map_stream_.BeginInlineInfoEntry(environment->GetMethod(),
                                            environment->GetDexPc(),
-                                           environment->GetInvokeType(),
-                                           environment->Size());
+                                           environment->Size(),
+                                           &graph_->GetDexFile());
   }
 
   // Walk over the environment, and record the location of dex registers.
@@ -1378,28 +1387,21 @@ uint32_t CodeGenerator::GetReferenceDisableFlagOffset() const {
 
 void CodeGenerator::EmitJitRoots(uint8_t* code,
                                  Handle<mirror::ObjectArray<mirror::Object>> roots,
-                                 const uint8_t* roots_data,
-                                 Handle<mirror::DexCache> outer_dex_cache) {
+                                 const uint8_t* roots_data) {
   DCHECK_EQ(static_cast<size_t>(roots->GetLength()), GetNumberOfJitRoots());
-  StackHandleScope<1> hs(Thread::Current());
-  MutableHandle<mirror::DexCache> h_dex_cache(hs.NewHandle<mirror::DexCache>(nullptr));
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   size_t index = 0;
   for (auto& entry : jit_string_roots_) {
-    const DexFile& entry_dex_file = *entry.first.dex_file;
-    // Avoid the expensive FindDexCache call by checking if the string is
-    // in the compiled method's dex file.
-    h_dex_cache.Assign(IsSameDexFile(*outer_dex_cache->GetDexFile(), entry_dex_file)
-        ? outer_dex_cache.Get()
-        : class_linker->FindDexCache(hs.Self(), entry_dex_file));
-    mirror::String* string = class_linker->LookupString(
-        entry_dex_file, entry.first.string_index, h_dex_cache);
-    DCHECK(string != nullptr) << "JIT roots require strings to have been loaded";
+    // Update the `roots` with the string, and replace the address temporarily
+    // stored to the index in the table.
+    uint64_t address = entry.second;
+    roots->Set(index, reinterpret_cast<StackReference<mirror::String>*>(address)->AsMirrorPtr());
+    DCHECK(roots->Get(index) != nullptr);
+    entry.second = index;
     // Ensure the string is strongly interned. This is a requirement on how the JIT
     // handles strings. b/32995596
-    class_linker->GetInternTable()->InternStrong(string);
-    roots->Set(index, string);
-    entry.second = index;
+    class_linker->GetInternTable()->InternStrong(
+        reinterpret_cast<mirror::String*>(roots->Get(index)));
     ++index;
   }
   for (auto& entry : jit_class_roots_) {
@@ -1407,6 +1409,7 @@ void CodeGenerator::EmitJitRoots(uint8_t* code,
     // stored to the index in the table.
     uint64_t address = entry.second;
     roots->Set(index, reinterpret_cast<StackReference<mirror::Class>*>(address)->AsMirrorPtr());
+    DCHECK(roots->Get(index) != nullptr);
     entry.second = index;
     ++index;
   }

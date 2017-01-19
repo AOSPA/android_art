@@ -846,7 +846,7 @@ void ConcurrentCopying::IssueEmptyCheckpoint() {
         // Some threads in 'runnable_thread_ids' are probably stuck. Try to dump their stacks.
         // Avoid using ThreadList::Dump() initially because it is likely to get stuck as well.
         {
-          ReaderMutexLock mu0(self, *Locks::mutator_lock_);
+          ScopedObjectAccess soa(self);
           MutexLock mu1(self, *Locks::thread_list_lock_);
           for (Thread* thread : thread_list->GetList()) {
             uint32_t tid = thread->GetThreadId();
@@ -2406,16 +2406,29 @@ void ConcurrentCopying::FinishPhase() {
   }
 }
 
-bool ConcurrentCopying::IsMarkedHeapReference(mirror::HeapReference<mirror::Object>* field) {
+bool ConcurrentCopying::IsNullOrMarkedHeapReference(mirror::HeapReference<mirror::Object>* field,
+                                                    bool do_atomic_update) {
   mirror::Object* from_ref = field->AsMirrorPtr();
+  if (from_ref == nullptr) {
+    return true;
+  }
   mirror::Object* to_ref = IsMarked(from_ref);
   if (to_ref == nullptr) {
     return false;
   }
   if (from_ref != to_ref) {
-    QuasiAtomic::ThreadFenceRelease();
-    field->Assign(to_ref);
-    QuasiAtomic::ThreadFenceSequentiallyConsistent();
+    if (do_atomic_update) {
+      do {
+        if (field->AsMirrorPtr() != from_ref) {
+          // Concurrently overwritten by a mutator.
+          break;
+        }
+      } while (!field->CasWeakRelaxed(from_ref, to_ref));
+    } else {
+      QuasiAtomic::ThreadFenceRelease();
+      field->Assign(to_ref);
+      QuasiAtomic::ThreadFenceSequentiallyConsistent();
+    }
   }
   return true;
 }

@@ -308,8 +308,10 @@ ArtMethod* HInliner::TryCHADevirtualization(ArtMethod* resolved_method) {
 }
 
 bool HInliner::TryInline(HInvoke* invoke_instruction) {
-  if (invoke_instruction->IsInvokeUnresolved()) {
-    return false;  // Don't bother to move further if we know the method is unresolved.
+  if (invoke_instruction->IsInvokeUnresolved() ||
+      invoke_instruction->IsInvokePolymorphic()) {
+    return false;  // Don't bother to move further if we know the method is unresolved or an
+                   // invoke-polymorphic.
   }
 
   ScopedObjectAccess soa(Thread::Current());
@@ -429,13 +431,13 @@ HInstanceFieldGet* HInliner::BuildGetReceiverClass(ClassLinker* class_linker,
   DCHECK_EQ(std::string(field->GetName()), "shadow$_klass_");
   HInstanceFieldGet* result = new (graph_->GetArena()) HInstanceFieldGet(
       receiver,
+      field,
       Primitive::kPrimNot,
       field->GetOffset(),
       field->IsVolatile(),
       field->GetDexFieldIndex(),
       field->GetDeclaringClass()->GetDexClassDefIndex(),
       *field->GetDexFile(),
-      handles_->NewHandle(field->GetDexCache()),
       dex_pc);
   // The class of a field is effectively final, and does not have any memory dependencies.
   result->SetSideEffects(SideEffects::None());
@@ -472,10 +474,10 @@ bool HInliner::TryInlineMonomorphicCall(HInvoke* invoke_instruction,
   HInstruction* receiver = invoke_instruction->InputAt(0);
   HInstruction* cursor = invoke_instruction->GetPrevious();
   HBasicBlock* bb_cursor = invoke_instruction->GetBlock();
-  Handle<mirror::Class> handle = handles_->NewHandle(GetMonomorphicType(classes));
+  Handle<mirror::Class> monomorphic_type = handles_->NewHandle(GetMonomorphicType(classes));
   if (!TryInlineAndReplace(invoke_instruction,
                            resolved_method,
-                           ReferenceTypeInfo::Create(handle, /* is_exact */ true),
+                           ReferenceTypeInfo::Create(monomorphic_type, /* is_exact */ true),
                            /* do_rtp */ false,
                            /* cha_devirtualize */ false)) {
     return false;
@@ -486,7 +488,7 @@ bool HInliner::TryInlineMonomorphicCall(HInvoke* invoke_instruction,
                cursor,
                bb_cursor,
                class_index,
-               GetMonomorphicType(classes),
+               monomorphic_type,
                invoke_instruction,
                /* with_deoptimization */ true);
 
@@ -531,11 +533,9 @@ HInstruction* HInliner::AddTypeGuard(HInstruction* receiver,
                                      HInstruction* cursor,
                                      HBasicBlock* bb_cursor,
                                      dex::TypeIndex class_index,
-                                     mirror::Class* klass,
+                                     Handle<mirror::Class> klass,
                                      HInstruction* invoke_instruction,
                                      bool with_deoptimization) {
-  ScopedAssertNoThreadSuspension sants("Adding compiler type guard");
-
   ClassLinker* class_linker = caller_compilation_unit_.GetClassLinker();
   HInstanceFieldGet* receiver_class = BuildGetReceiverClass(
       class_linker, receiver, invoke_instruction->GetDexPc());
@@ -546,19 +546,20 @@ HInstruction* HInliner::AddTypeGuard(HInstruction* receiver,
   }
 
   const DexFile& caller_dex_file = *caller_compilation_unit_.GetDexFile();
-  bool is_referrer = (klass == outermost_graph_->GetArtMethod()->GetDeclaringClass());
+  bool is_referrer = (klass.Get() == outermost_graph_->GetArtMethod()->GetDeclaringClass());
   // Note that we will just compare the classes, so we don't need Java semantics access checks.
   // Note that the type index and the dex file are relative to the method this type guard is
   // inlined into.
   HLoadClass* load_class = new (graph_->GetArena()) HLoadClass(graph_->GetCurrentMethod(),
                                                                class_index,
                                                                caller_dex_file,
+                                                               klass,
                                                                is_referrer,
                                                                invoke_instruction->GetDexPc(),
                                                                /* needs_access_check */ false);
   bb_cursor->InsertInstructionAfter(load_class, receiver_class);
   // Sharpen after adding the instruction, as the sharpening may remove inputs.
-  HSharpening::SharpenClass(load_class, klass, handles_, codegen_, compiler_driver_);
+  HSharpening::SharpenClass(load_class, codegen_, compiler_driver_);
 
   // TODO: Extend reference type propagation to understand the guard.
   HNotEqual* compare = new (graph_->GetArena()) HNotEqual(load_class, receiver_class);
@@ -618,6 +619,9 @@ bool HInliner::TryInlinePolymorphicCall(HInvoke* invoke_instruction,
     } else {
       one_target_inlined = true;
 
+      VLOG(compiler) << "Polymorphic call to " << ArtMethod::PrettyMethod(resolved_method)
+                     << " has inlined " << ArtMethod::PrettyMethod(method);
+
       // If we have inlined all targets before, and this receiver is the last seen,
       // we deoptimize instead of keeping the original invoke instruction.
       bool deoptimize = all_targets_inlined &&
@@ -632,7 +636,7 @@ bool HInliner::TryInlinePolymorphicCall(HInvoke* invoke_instruction,
                                            cursor,
                                            bb_cursor,
                                            class_index,
-                                           handle.Get(),
+                                           handle,
                                            invoke_instruction,
                                            deoptimize);
       if (deoptimize) {
@@ -655,6 +659,7 @@ bool HInliner::TryInlinePolymorphicCall(HInvoke* invoke_instruction,
                    << " of its targets could be inlined";
     return false;
   }
+
   MaybeRecordStat(kInlinedPolymorphicCall);
 
   // Run type propagation to get the guards typed.
@@ -1161,13 +1166,13 @@ HInstanceFieldGet* HInliner::CreateInstanceFieldGet(Handle<mirror::DexCache> dex
   DCHECK(resolved_field != nullptr);
   HInstanceFieldGet* iget = new (graph_->GetArena()) HInstanceFieldGet(
       obj,
+      resolved_field,
       resolved_field->GetTypeAsPrimitiveType(),
       resolved_field->GetOffset(),
       resolved_field->IsVolatile(),
       field_index,
       resolved_field->GetDeclaringClass()->GetDexClassDefIndex(),
       *dex_cache->GetDexFile(),
-      dex_cache,
       // Read barrier generates a runtime call in slow path and we need a valid
       // dex pc for the associated stack map. 0 is bogus but valid. Bug: 26854537.
       /* dex_pc */ 0);
@@ -1190,13 +1195,13 @@ HInstanceFieldSet* HInliner::CreateInstanceFieldSet(Handle<mirror::DexCache> dex
   HInstanceFieldSet* iput = new (graph_->GetArena()) HInstanceFieldSet(
       obj,
       value,
+      resolved_field,
       resolved_field->GetTypeAsPrimitiveType(),
       resolved_field->GetOffset(),
       resolved_field->IsVolatile(),
       field_index,
       resolved_field->GetDeclaringClass()->GetDexClassDefIndex(),
       *dex_cache->GetDexFile(),
-      dex_cache,
       // Read barrier generates a runtime call in slow path and we need a valid
       // dex pc for the associated stack map. 0 is bogus but valid. Bug: 26854537.
       /* dex_pc */ 0);
@@ -1424,15 +1429,6 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
         return false;
       }
 
-      if (current->IsNewInstance() &&
-          (current->AsNewInstance()->GetEntrypoint() == kQuickAllocObjectWithAccessCheck)) {
-        VLOG(compiler) << "Method " << callee_dex_file.PrettyMethod(method_index)
-                       << " could not be inlined because it is using an entrypoint"
-                       << " with access checks";
-        // Allocation entrypoint does not handle inlined frames.
-        return false;
-      }
-
       if (current->IsNewArray() &&
           (current->AsNewArray()->GetEntrypoint() == kQuickAllocArrayWithAccessCheck)) {
         VLOG(compiler) << "Method " << callee_dex_file.PrettyMethod(method_index)
@@ -1542,8 +1538,6 @@ bool HInliner::ArgumentTypesMoreSpecific(HInvoke* invoke_instruction, ArtMethod*
     }
   }
 
-  PointerSize pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
-
   // Iterate over the list of parameter types and test whether any of the
   // actual inputs has a more specific reference type than the type declared in
   // the signature.
@@ -1555,9 +1549,9 @@ bool HInliner::ArgumentTypesMoreSpecific(HInvoke* invoke_instruction, ArtMethod*
        ++param_idx, ++input_idx) {
     HInstruction* input = invoke_instruction->InputAt(input_idx);
     if (input->GetType() == Primitive::kPrimNot) {
-      mirror::Class* param_cls = resolved_method->GetDexCacheResolvedType(
+      mirror::Class* param_cls = resolved_method->GetClassFromTypeIndex(
           param_list->GetTypeItem(param_idx).type_idx_,
-          pointer_size);
+          /* resolve */ false);
       if (IsReferenceTypeRefinement(GetClassRTI(param_cls),
                                     /* declared_can_be_null */ true,
                                     input)) {
@@ -1579,6 +1573,13 @@ bool HInliner::ReturnTypeMoreSpecific(HInvoke* invoke_instruction,
                                     /* declared_can_be_null */ true,
                                     return_replacement)) {
         return true;
+      } else if (return_replacement->IsInstanceFieldGet()) {
+        HInstanceFieldGet* field_get = return_replacement->AsInstanceFieldGet();
+        ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+        if (field_get->GetFieldInfo().GetField() ==
+              class_linker->GetClassRoot(ClassLinker::kJavaLangObject)->GetInstanceField(0)) {
+          return true;
+        }
       }
     } else if (return_replacement->IsInstanceOf()) {
       // Inlining InstanceOf into an If may put a tighter bound on reference types.
@@ -1599,8 +1600,7 @@ void HInliner::FixUpReturnReferenceType(ArtMethod* resolved_method,
         // TODO: we could be more precise by merging the phi inputs but that requires
         // some functionality from the reference type propagation.
         DCHECK(return_replacement->IsPhi());
-        PointerSize pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
-        mirror::Class* cls = resolved_method->GetReturnType(false /* resolve */, pointer_size);
+        mirror::Class* cls = resolved_method->GetReturnType(false /* resolve */);
         return_replacement->SetReferenceTypeInfo(GetClassRTI(cls));
       }
     }

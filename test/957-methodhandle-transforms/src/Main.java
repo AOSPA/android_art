@@ -33,6 +33,7 @@ public class Main {
     testBindTo();
     testFilterReturnValue();
     testPermuteArguments();
+    testInvokers();
   }
 
   public static void testThrowException() throws Throwable {
@@ -40,17 +41,17 @@ public class Main {
         IllegalArgumentException.class);
 
     if (handle.type().returnType() != String.class) {
-      System.out.println("Unexpected return type for handle: " + handle +
+      fail("Unexpected return type for handle: " + handle +
           " [ " + handle.type() + "]");
     }
 
     final IllegalArgumentException iae = new IllegalArgumentException("boo!");
     try {
       handle.invoke(iae);
-      System.out.println("Expected an exception of type: java.lang.IllegalArgumentException");
+      fail("Expected an exception of type: java.lang.IllegalArgumentException");
     } catch (IllegalArgumentException expected) {
       if (expected != iae) {
-        System.out.println("Wrong exception: expected " + iae + " but was " + expected);
+        fail("Wrong exception: expected " + iae + " but was " + expected);
       }
     }
   }
@@ -262,7 +263,7 @@ public class Main {
       array[0] = 42;
       int value = (int) getter.invoke(array, 0);
       if (value != 42) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
 
       try {
@@ -284,7 +285,7 @@ public class Main {
       array[0] = 42;
       long value = (long) getter.invoke(array, 0);
       if (value != 42l) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -294,7 +295,7 @@ public class Main {
       array[0] = 42;
       short value = (short) getter.invoke(array, 0);
       if (value != 42l) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -304,7 +305,7 @@ public class Main {
       array[0] = 42;
       char value = (char) getter.invoke(array, 0);
       if (value != 42l) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -314,7 +315,7 @@ public class Main {
       array[0] = (byte) 0x8;
       byte value = (byte) getter.invoke(array, 0);
       if (value != (byte) 0x8) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -324,7 +325,7 @@ public class Main {
       array[0] = true;
       boolean value = (boolean) getter.invoke(array, 0);
       if (!value) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -334,7 +335,7 @@ public class Main {
       array[0] = 42.0f;
       float value = (float) getter.invoke(array, 0);
       if (value != 42.0f) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -344,7 +345,7 @@ public class Main {
       array[0] = 42.0;
       double value = (double) getter.invoke(array, 0);
       if (value != 42.0) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -372,10 +373,10 @@ public class Main {
       setter.invoke(array, 1, 43);
 
       if (array[0] != 42) {
-        System.out.println("Unexpected value: " + array[0]);
+        fail("Unexpected value: " + array[0]);
       }
       if (array[1] != 43) {
-        System.out.println("Unexpected value: " + array[1]);
+        fail("Unexpected value: " + array[1]);
       }
 
       try {
@@ -396,7 +397,7 @@ public class Main {
       long[] array = new long[1];
       setter.invoke(array, 0, 42l);
       if (array[0] != 42l) {
-        System.out.println("Unexpected value: " + array[0]);
+        fail("Unexpected value: " + array[0]);
       }
     }
 
@@ -405,7 +406,7 @@ public class Main {
       short[] array = new short[1];
       setter.invoke(array, 0, (short) 42);
       if (array[0] != 42l) {
-        System.out.println("Unexpected value: " + array[0]);
+        fail("Unexpected value: " + array[0]);
       }
     }
 
@@ -414,7 +415,7 @@ public class Main {
       char[] array = new char[1];
       setter.invoke(array, 0, (char) 42);
       if (array[0] != 42) {
-        System.out.println("Unexpected value: " + array[0]);
+        fail("Unexpected value: " + array[0]);
       }
     }
 
@@ -423,7 +424,7 @@ public class Main {
       byte[] array = new byte[1];
       setter.invoke(array, 0, (byte) 0x8);
       if (array[0] != (byte) 0x8) {
-        System.out.println("Unexpected value: " + array[0]);
+        fail("Unexpected value: " + array[0]);
       }
     }
 
@@ -432,7 +433,7 @@ public class Main {
       boolean[] array = new boolean[1];
       setter.invoke(array, 0, true);
       if (!array[0]) {
-        System.out.println("Unexpected value: " + array[0]);
+        fail("Unexpected value: " + array[0]);
       }
     }
 
@@ -441,7 +442,7 @@ public class Main {
       float[] array = new float[1];
       setter.invoke(array, 0, 42.0f);
       if (array[0] != 42.0f) {
-        System.out.println("Unexpected value: " + array[0]);
+        fail("Unexpected value: " + array[0]);
       }
     }
 
@@ -450,7 +451,7 @@ public class Main {
       double[] array = new double[1];
       setter.invoke(array, 0, 42.0);
       if (array[0] != 42.0) {
-        System.out.println("Unexpected value: " + array[0]);
+        fail("Unexpected value: " + array[0]);
       }
     }
 
@@ -471,7 +472,7 @@ public class Main {
       MethodHandle identity = MethodHandles.identity(boolean.class);
       boolean value = (boolean) identity.invoke(false);
       if (value) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -479,7 +480,7 @@ public class Main {
       MethodHandle identity = MethodHandles.identity(byte.class);
       byte value = (byte) identity.invoke((byte) 0x8);
       if (value != (byte) 0x8) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -487,7 +488,7 @@ public class Main {
       MethodHandle identity = MethodHandles.identity(char.class);
       char value = (char) identity.invoke((char) -56);
       if (value != (char) -56) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -495,7 +496,7 @@ public class Main {
       MethodHandle identity = MethodHandles.identity(short.class);
       short value = (short) identity.invoke((short) -59);
       if (value != (short) -59) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + Short.toString(value));
       }
     }
 
@@ -503,7 +504,7 @@ public class Main {
       MethodHandle identity = MethodHandles.identity(int.class);
       int value = (int) identity.invoke(52);
       if (value != 52) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -511,7 +512,7 @@ public class Main {
       MethodHandle identity = MethodHandles.identity(long.class);
       long value = (long) identity.invoke(-76l);
       if (value != (long) -76) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -519,7 +520,7 @@ public class Main {
       MethodHandle identity = MethodHandles.identity(float.class);
       float value = (float) identity.invoke(56.0f);
       if (value != (float) 56.0f) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -527,7 +528,7 @@ public class Main {
       MethodHandle identity = MethodHandles.identity(double.class);
       double value = (double) identity.invoke((double) 72.0);
       if (value != (double) 72.0) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -544,28 +545,28 @@ public class Main {
       MethodHandle constant = MethodHandles.constant(int.class, 56);
       int value = (int) constant.invoke();
       if (value != 56) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
 
       // short constant values are converted to int.
       constant = MethodHandles.constant(int.class, (short) 52);
       value = (int) constant.invoke();
       if (value != 52) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
 
       // char constant values are converted to int.
       constant = MethodHandles.constant(int.class, (char) 'b');
       value = (int) constant.invoke();
       if (value != (int) 'b') {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
 
       // int constant values are converted to int.
       constant = MethodHandles.constant(int.class, (byte) 0x1);
       value = (int) constant.invoke();
       if (value != 1) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
 
       // boolean, float, double and long primitive constants are not convertible
@@ -600,13 +601,13 @@ public class Main {
       MethodHandle constant = MethodHandles.constant(long.class, 56l);
       long value = (long) constant.invoke();
       if (value != 56l) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
 
       constant = MethodHandles.constant(long.class, (int) 56);
       value = (long) constant.invoke();
       if (value != 56l) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -615,7 +616,7 @@ public class Main {
       MethodHandle constant = MethodHandles.constant(byte.class, (byte) 0x12);
       byte value = (byte) constant.invoke();
       if (value != (byte) 0x12) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -624,7 +625,7 @@ public class Main {
       MethodHandle constant = MethodHandles.constant(boolean.class, true);
       boolean value = (boolean) constant.invoke();
       if (!value) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -633,7 +634,7 @@ public class Main {
       MethodHandle constant = MethodHandles.constant(char.class, 'f');
       char value = (char) constant.invoke();
       if (value != 'f') {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -642,7 +643,7 @@ public class Main {
       MethodHandle constant = MethodHandles.constant(short.class, (short) 123);
       short value = (short) constant.invoke();
       if (value != (short) 123) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -651,7 +652,7 @@ public class Main {
       MethodHandle constant = MethodHandles.constant(float.class, 56.0f);
       float value = (float) constant.invoke();
       if (value != 56.0f) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -660,7 +661,7 @@ public class Main {
       MethodHandle constant = MethodHandles.constant(double.class, 256.0);
       double value = (double) constant.invoke();
       if (value != 256.0) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -678,13 +679,13 @@ public class Main {
 
     char value = (char) stringCharAt.invoke("foo", 0);
     if (value != 'f') {
-      System.out.println("Unexpected value: " + value);
+      fail("Unexpected value: " + value);
     }
 
     MethodHandle bound = stringCharAt.bindTo("foo");
     value = (char) bound.invoke(0);
     if (value != 'f') {
-      System.out.println("Unexpected value: " + value);
+      fail("Unexpected value: " + value);
     }
 
     try {
@@ -706,7 +707,7 @@ public class Main {
     bound = integerParseInt.bindTo("78452");
     int intValue = (int) bound.invoke();
     if (intValue != 78452) {
-      System.out.println("Unexpected value: " + intValue);
+      fail("Unexpected value: " + intValue);
     }
   }
 
@@ -745,11 +746,11 @@ public class Main {
 
       boolean value = (boolean) adapter.invoke((int) 42);
       if (!value) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
       value = (boolean) adapter.invoke((int) 43);
       if (value) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -764,7 +765,7 @@ public class Main {
 
       int value = (int) adapter.invoke("56");
       if (value != 57) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
 
@@ -779,7 +780,7 @@ public class Main {
 
       int value = (int) adapter.invoke();
       if (value != 42) {
-        System.out.println("Unexpected value: " + value);
+        fail("Unexpected value: " + value);
       }
     }
   }
@@ -791,7 +792,7 @@ public class Main {
       return;
     }
 
-    System.out.println("Unexpected arguments: " + a + ", " + b + ", " + c
+    fail("Unexpected arguments: " + a + ", " + b + ", " + c
         + ", " + d + ", " + e + ", " + f + ", " + g + ", " + h);
   }
 
@@ -800,7 +801,7 @@ public class Main {
       return;
     }
 
-    System.out.println("Unexpected arguments: " + a + ", " + b);
+    fail("Unexpected arguments: " + a + ", " + b);
   }
 
   public static void testPermuteArguments() throws Throwable {
@@ -888,8 +889,45 @@ public class Main {
     }
   }
 
+  private static Object returnBar() {
+    return "bar";
+  }
+
+  public static void testInvokers() throws Throwable {
+    final MethodType targetType = MethodType.methodType(String.class, String.class);
+    final MethodHandle target = MethodHandles.lookup().findVirtual(
+        String.class, "concat", targetType);
+
+    MethodHandle invoker = MethodHandles.invoker(target.type());
+    assertEquals("barbar", (String) invoker.invoke(target, "bar", "bar"));
+    assertEquals("barbar", (String) invoker.invoke(target, (Object) returnBar(), "bar"));
+    try {
+      String foo = (String) invoker.invoke(target, "bar", "bar", 24);
+      fail();
+    } catch (WrongMethodTypeException expected) {
+    }
+
+    MethodHandle exactInvoker = MethodHandles.exactInvoker(target.type());
+    assertEquals("barbar", (String) exactInvoker.invoke(target, "bar", "bar"));
+    try {
+      String foo = (String) exactInvoker.invoke(target, (Object) returnBar(), "bar");
+      fail();
+    } catch (WrongMethodTypeException expected) {
+    }
+    try {
+      String foo = (String) exactInvoker.invoke(target, "bar", "bar", 24);
+      fail();
+    } catch (WrongMethodTypeException expected) {
+    }
+  }
+
   public static void fail() {
     System.out.println("FAIL");
+    Thread.dumpStack();
+  }
+
+  public static void fail(String message) {
+    System.out.println("fail: " + message);
     Thread.dumpStack();
   }
 

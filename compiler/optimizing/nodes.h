@@ -171,6 +171,7 @@ class HInstructionList : public ValueObject {
   friend class HGraph;
   friend class HInstruction;
   friend class HInstructionIterator;
+  friend class HInstructionIteratorHandleChanges;
   friend class HBackwardInstructionIterator;
 
   DISALLOW_COPY_AND_ASSIGN(HInstructionList);
@@ -1096,6 +1097,9 @@ class HBasicBlock : public ArenaObject<kArenaAllocBasicBlock> {
   // with a control flow instruction).
   void ReplaceWith(HBasicBlock* other);
 
+  // Merges the instructions of `other` at the end of `this`.
+  void MergeInstructionsWith(HBasicBlock* other);
+
   // Merge `other` at the end of `this`. This method updates loops, reverse post
   // order, links to predecessors, successors, dominators and deletes the block
   // from the graph. The two blocks must be successive, i.e. `this` the only
@@ -1290,6 +1294,7 @@ class HLoopInformationOutwardIterator : public ValueObject {
   M(InvokeInterface, Invoke)                                            \
   M(InvokeStaticOrDirect, Invoke)                                       \
   M(InvokeVirtual, Invoke)                                              \
+  M(InvokePolymorphic, Invoke)                                          \
   M(LessThan, Condition)                                                \
   M(LessThanOrEqual, Condition)                                         \
   M(LoadClass, Instruction)                                             \
@@ -1719,28 +1724,22 @@ class HEnvironment : public ArenaObject<kArenaAllocEnvironment> {
  public:
   HEnvironment(ArenaAllocator* arena,
                size_t number_of_vregs,
-               const DexFile& dex_file,
-               uint32_t method_idx,
+               ArtMethod* method,
                uint32_t dex_pc,
-               InvokeType invoke_type,
                HInstruction* holder)
      : vregs_(number_of_vregs, arena->Adapter(kArenaAllocEnvironmentVRegs)),
        locations_(number_of_vregs, arena->Adapter(kArenaAllocEnvironmentLocations)),
        parent_(nullptr),
-       dex_file_(dex_file),
-       method_idx_(method_idx),
+       method_(method),
        dex_pc_(dex_pc),
-       invoke_type_(invoke_type),
        holder_(holder) {
   }
 
   HEnvironment(ArenaAllocator* arena, const HEnvironment& to_copy, HInstruction* holder)
       : HEnvironment(arena,
                      to_copy.Size(),
-                     to_copy.GetDexFile(),
-                     to_copy.GetMethodIdx(),
+                     to_copy.GetMethod(),
                      to_copy.GetDexPc(),
-                     to_copy.GetInvokeType(),
                      holder) {}
 
   void SetAndCopyParentChain(ArenaAllocator* allocator, HEnvironment* parent) {
@@ -1789,16 +1788,8 @@ class HEnvironment : public ArenaObject<kArenaAllocEnvironment> {
     return dex_pc_;
   }
 
-  uint32_t GetMethodIdx() const {
-    return method_idx_;
-  }
-
-  InvokeType GetInvokeType() const {
-    return invoke_type_;
-  }
-
-  const DexFile& GetDexFile() const {
-    return dex_file_;
+  ArtMethod* GetMethod() const {
+    return method_;
   }
 
   HInstruction* GetHolder() const {
@@ -1814,10 +1805,8 @@ class HEnvironment : public ArenaObject<kArenaAllocEnvironment> {
   ArenaVector<HUserRecord<HEnvironment*>> vregs_;
   ArenaVector<Location> locations_;
   HEnvironment* parent_;
-  const DexFile& dex_file_;
-  const uint32_t method_idx_;
+  ArtMethod* method_;
   const uint32_t dex_pc_;
-  const InvokeType invoke_type_;
 
   // The instruction that holds this environment.
   HInstruction* const holder_;
@@ -2312,6 +2301,9 @@ class HInstruction : public ArenaObject<kArenaAllocInstruction> {
 };
 std::ostream& operator<<(std::ostream& os, const HInstruction::InstructionKind& rhs);
 
+// Iterates over the instructions, while preserving the next instruction
+// in case the current instruction gets removed from the list by the user
+// of this iterator.
 class HInstructionIterator : public ValueObject {
  public:
   explicit HInstructionIterator(const HInstructionList& instructions)
@@ -2332,6 +2324,28 @@ class HInstructionIterator : public ValueObject {
 
   DISALLOW_COPY_AND_ASSIGN(HInstructionIterator);
 };
+
+// Iterates over the instructions without saving the next instruction,
+// therefore handling changes in the graph potentially made by the user
+// of this iterator.
+class HInstructionIteratorHandleChanges : public ValueObject {
+ public:
+  explicit HInstructionIteratorHandleChanges(const HInstructionList& instructions)
+      : instruction_(instructions.first_instruction_) {
+  }
+
+  bool Done() const { return instruction_ == nullptr; }
+  HInstruction* Current() const { return instruction_; }
+  void Advance() {
+    instruction_ = instruction_->GetNext();
+  }
+
+ private:
+  HInstruction* instruction_;
+
+  DISALLOW_COPY_AND_ASSIGN(HInstructionIteratorHandleChanges);
+};
+
 
 class HBackwardInstructionIterator : public ValueObject {
  public:
@@ -3748,24 +3762,20 @@ class HCompare FINAL : public HBinaryOperation {
   DISALLOW_COPY_AND_ASSIGN(HCompare);
 };
 
-class HNewInstance FINAL : public HExpression<2> {
+class HNewInstance FINAL : public HExpression<1> {
  public:
   HNewInstance(HInstruction* cls,
-               HCurrentMethod* current_method,
                uint32_t dex_pc,
                dex::TypeIndex type_index,
                const DexFile& dex_file,
-               bool needs_access_check,
                bool finalizable,
                QuickEntrypointEnum entrypoint)
       : HExpression(Primitive::kPrimNot, SideEffects::CanTriggerGC(), dex_pc),
         type_index_(type_index),
         dex_file_(dex_file),
         entrypoint_(entrypoint) {
-    SetPackedFlag<kFlagNeedsAccessCheck>(needs_access_check);
     SetPackedFlag<kFlagFinalizable>(finalizable);
     SetRawInputAt(0, cls);
-    SetRawInputAt(1, current_method);
   }
 
   dex::TypeIndex GetTypeIndex() const { return type_index_; }
@@ -3777,8 +3787,9 @@ class HNewInstance FINAL : public HExpression<2> {
   // Can throw errors when out-of-memory or if it's not instantiable/accessible.
   bool CanThrow() const OVERRIDE { return true; }
 
-  // Needs to call into runtime to make sure it's instantiable/accessible.
-  bool NeedsAccessCheck() const { return GetPackedFlag<kFlagNeedsAccessCheck>(); }
+  bool NeedsChecks() const {
+    return entrypoint_ == kQuickAllocObjectWithChecks;
+  }
 
   bool IsFinalizable() const { return GetPackedFlag<kFlagFinalizable>(); }
 
@@ -3795,8 +3806,7 @@ class HNewInstance FINAL : public HExpression<2> {
   DECLARE_INSTRUCTION(NewInstance);
 
  private:
-  static constexpr size_t kFlagNeedsAccessCheck = kNumberOfExpressionPackedBits;
-  static constexpr size_t kFlagFinalizable = kFlagNeedsAccessCheck + 1;
+  static constexpr size_t kFlagFinalizable = kNumberOfExpressionPackedBits;
   static constexpr size_t kNumberOfNewInstancePackedBits = kFlagFinalizable + 1;
   static_assert(kNumberOfNewInstancePackedBits <= kMaxNumberOfPackedBits,
                 "Too many packed fields.");
@@ -3842,7 +3852,6 @@ class HInvoke : public HVariableInputSizeInstruction {
   Primitive::Type GetType() const OVERRIDE { return GetPackedField<ReturnTypeField>(); }
 
   uint32_t GetDexMethodIndex() const { return dex_method_index_; }
-  const DexFile& GetDexFile() const { return GetEnvironment()->GetDexFile(); }
 
   InvokeType GetInvokeType() const {
     return GetPackedField<InvokeTypeField>();
@@ -3957,6 +3966,28 @@ class HInvokeUnresolved FINAL : public HInvoke {
 
  private:
   DISALLOW_COPY_AND_ASSIGN(HInvokeUnresolved);
+};
+
+class HInvokePolymorphic FINAL : public HInvoke {
+ public:
+  HInvokePolymorphic(ArenaAllocator* arena,
+                     uint32_t number_of_arguments,
+                     Primitive::Type return_type,
+                     uint32_t dex_pc,
+                     uint32_t dex_method_index)
+      : HInvoke(arena,
+                number_of_arguments,
+                0u /* number_of_other_inputs */,
+                return_type,
+                dex_pc,
+                dex_method_index,
+                nullptr,
+                kVirtual) {}
+
+  DECLARE_INSTRUCTION(InvokePolymorphic);
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(HInvokePolymorphic);
 };
 
 class HInvokeStaticOrDirect FINAL : public HInvoke {
@@ -4139,6 +4170,8 @@ class HInvokeStaticOrDirect FINAL : public HInvoke {
     DCHECK(HasPcRelativeDexCache());
     return dispatch_info_.method_load_data;
   }
+
+  const DexFile& GetDexFileForPcRelativeDexCache() const;
 
   ClinitCheckRequirement GetClinitCheckRequirement() const {
     return GetPackedField<ClinitCheckRequirementField>();
@@ -5056,60 +5089,62 @@ class HNullCheck FINAL : public HExpression<1> {
   DISALLOW_COPY_AND_ASSIGN(HNullCheck);
 };
 
+// Embeds an ArtField and all the information required by the compiler. We cache
+// that information to avoid requiring the mutator lock every time we need it.
 class FieldInfo : public ValueObject {
  public:
-  FieldInfo(MemberOffset field_offset,
+  FieldInfo(ArtField* field,
+            MemberOffset field_offset,
             Primitive::Type field_type,
             bool is_volatile,
             uint32_t index,
             uint16_t declaring_class_def_index,
-            const DexFile& dex_file,
-            Handle<mirror::DexCache> dex_cache)
-      : field_offset_(field_offset),
+            const DexFile& dex_file)
+      : field_(field),
+        field_offset_(field_offset),
         field_type_(field_type),
         is_volatile_(is_volatile),
         index_(index),
         declaring_class_def_index_(declaring_class_def_index),
-        dex_file_(dex_file),
-        dex_cache_(dex_cache) {}
+        dex_file_(dex_file) {}
 
+  ArtField* GetField() const { return field_; }
   MemberOffset GetFieldOffset() const { return field_offset_; }
   Primitive::Type GetFieldType() const { return field_type_; }
   uint32_t GetFieldIndex() const { return index_; }
   uint16_t GetDeclaringClassDefIndex() const { return declaring_class_def_index_;}
   const DexFile& GetDexFile() const { return dex_file_; }
   bool IsVolatile() const { return is_volatile_; }
-  Handle<mirror::DexCache> GetDexCache() const { return dex_cache_; }
 
  private:
+  ArtField* const field_;
   const MemberOffset field_offset_;
   const Primitive::Type field_type_;
   const bool is_volatile_;
   const uint32_t index_;
   const uint16_t declaring_class_def_index_;
   const DexFile& dex_file_;
-  const Handle<mirror::DexCache> dex_cache_;
 };
 
 class HInstanceFieldGet FINAL : public HExpression<1> {
  public:
   HInstanceFieldGet(HInstruction* value,
+                    ArtField* field,
                     Primitive::Type field_type,
                     MemberOffset field_offset,
                     bool is_volatile,
                     uint32_t field_idx,
                     uint16_t declaring_class_def_index,
                     const DexFile& dex_file,
-                    Handle<mirror::DexCache> dex_cache,
                     uint32_t dex_pc)
       : HExpression(field_type, SideEffects::FieldReadOfType(field_type, is_volatile), dex_pc),
-        field_info_(field_offset,
+        field_info_(field,
+                    field_offset,
                     field_type,
                     is_volatile,
                     field_idx,
                     declaring_class_def_index,
-                    dex_file,
-                    dex_cache) {
+                    dex_file) {
     SetRawInputAt(0, value);
   }
 
@@ -5145,22 +5180,22 @@ class HInstanceFieldSet FINAL : public HTemplateInstruction<2> {
  public:
   HInstanceFieldSet(HInstruction* object,
                     HInstruction* value,
+                    ArtField* field,
                     Primitive::Type field_type,
                     MemberOffset field_offset,
                     bool is_volatile,
                     uint32_t field_idx,
                     uint16_t declaring_class_def_index,
                     const DexFile& dex_file,
-                    Handle<mirror::DexCache> dex_cache,
                     uint32_t dex_pc)
       : HTemplateInstruction(SideEffects::FieldWriteOfType(field_type, is_volatile), dex_pc),
-        field_info_(field_offset,
+        field_info_(field,
+                    field_offset,
                     field_type,
                     is_volatile,
                     field_idx,
                     declaring_class_def_index,
-                    dex_file,
-                    dex_cache) {
+                    dex_file) {
     SetPackedFlag<kFlagValueCanBeNull>(true);
     SetRawInputAt(0, object);
     SetRawInputAt(1, value);
@@ -5397,10 +5432,10 @@ class HBoundsCheck FINAL : public HExpression<2> {
   HBoundsCheck(HInstruction* index,
                HInstruction* length,
                uint32_t dex_pc,
-               uint32_t string_char_at_method_index = DexFile::kDexNoIndex)
-      : HExpression(index->GetType(), SideEffects::CanTriggerGC(), dex_pc),
-        string_char_at_method_index_(string_char_at_method_index) {
+               bool string_char_at = false)
+      : HExpression(index->GetType(), SideEffects::CanTriggerGC(), dex_pc) {
     DCHECK_EQ(Primitive::kPrimInt, Primitive::PrimitiveKind(index->GetType()));
+    SetPackedFlag<kFlagIsStringCharAt>(string_char_at);
     SetRawInputAt(0, index);
     SetRawInputAt(1, length);
   }
@@ -5414,22 +5449,14 @@ class HBoundsCheck FINAL : public HExpression<2> {
 
   bool CanThrow() const OVERRIDE { return true; }
 
-  bool IsStringCharAt() const { return GetStringCharAtMethodIndex() != DexFile::kDexNoIndex; }
-  uint32_t GetStringCharAtMethodIndex() const { return string_char_at_method_index_; }
+  bool IsStringCharAt() const { return GetPackedFlag<kFlagIsStringCharAt>(); }
 
   HInstruction* GetIndex() const { return InputAt(0); }
 
   DECLARE_INSTRUCTION(BoundsCheck);
 
  private:
-  // We treat a String as an array, creating the HBoundsCheck from String.charAt()
-  // intrinsic in the instruction simplifier. We want to include the String.charAt()
-  // in the stack trace if we actually throw the StringIndexOutOfBoundsException,
-  // so we need to create an HEnvironment which will be translated to an InlineInfo
-  // indicating the extra stack frame. Since we add this HEnvironment quite late,
-  // in the PrepareForRegisterAllocation pass, we need to remember the method index
-  // from the invoke as we don't want to look again at the dex bytecode.
-  uint32_t string_char_at_method_index_;  // DexFile::kDexNoIndex if regular array.
+  static constexpr size_t kFlagIsStringCharAt = kNumberOfExpressionPackedBits;
 
   DISALLOW_COPY_AND_ASSIGN(HBoundsCheck);
 };
@@ -5497,13 +5524,12 @@ class HLoadClass FINAL : public HInstruction {
     // GetIncludePatchInformation().
     kBootImageAddress,
 
+    // Load from an entry in the .bss section using a PC-relative load.
+    // Used for classes outside boot image when .bss is accessible with a PC-relative load.
+    kBssEntry,
+
     // Load from the root table associated with the JIT compiled method.
     kJitTableAddress,
-
-    // Load from resolved types array in the dex cache using a PC-relative load.
-    // Used for classes outside boot image when we know that we can access
-    // the dex cache arrays using a PC-relative load.
-    kDexCachePcRelative,
 
     // Load from resolved types array accessed through the class loaded from
     // the compiled method's own ArtMethod*. This is the default access type when
@@ -5516,6 +5542,7 @@ class HLoadClass FINAL : public HInstruction {
   HLoadClass(HCurrentMethod* current_method,
              dex::TypeIndex type_index,
              const DexFile& dex_file,
+             Handle<mirror::Class> klass,
              bool is_referrers_class,
              uint32_t dex_pc,
              bool needs_access_check)
@@ -5523,6 +5550,7 @@ class HLoadClass FINAL : public HInstruction {
         special_input_(HUserRecord<HInstruction*>(current_method)),
         type_index_(type_index),
         dex_file_(dex_file),
+        klass_(klass),
         loaded_class_rti_(ReferenceTypeInfo::CreateInvalid()) {
     // Referrers class should not need access check. We never inline unverified
     // methods so we can't possibly end up in this situation.
@@ -5531,14 +5559,11 @@ class HLoadClass FINAL : public HInstruction {
     SetPackedField<LoadKindField>(
         is_referrers_class ? LoadKind::kReferrersClass : LoadKind::kDexCacheViaMethod);
     SetPackedFlag<kFlagNeedsAccessCheck>(needs_access_check);
-    SetPackedFlag<kFlagIsInDexCache>(false);
     SetPackedFlag<kFlagIsInBootImage>(false);
     SetPackedFlag<kFlagGenerateClInitCheck>(false);
   }
 
-  void SetLoadKindWithAddress(LoadKind load_kind, uint64_t address) {
-    DCHECK(HasAddress(load_kind));
-    load_data_.address = address;
+  void SetLoadKind(LoadKind load_kind) {
     SetLoadKindInternal(load_kind);
   }
 
@@ -5548,15 +5573,6 @@ class HLoadClass FINAL : public HInstruction {
     DCHECK(HasTypeReference(load_kind));
     DCHECK(IsSameDexFile(dex_file_, dex_file));
     DCHECK_EQ(type_index_, type_index);
-    SetLoadKindInternal(load_kind);
-  }
-
-  void SetLoadKindWithDexCacheReference(LoadKind load_kind,
-                                        const DexFile& dex_file,
-                                        uint32_t element_index) {
-    DCHECK(HasDexCacheReference(load_kind));
-    DCHECK(IsSameDexFile(dex_file_, dex_file));
-    load_data_.dex_cache_element_index = element_index;
     SetLoadKindInternal(load_kind);
   }
 
@@ -5584,13 +5600,21 @@ class HLoadClass FINAL : public HInstruction {
   }
 
   bool CanCallRuntime() const {
-    return MustGenerateClinitCheck() ||
-           (!IsReferrersClass() && !IsInDexCache()) ||
-           NeedsAccessCheck();
+    return NeedsAccessCheck() ||
+           MustGenerateClinitCheck() ||
+           GetLoadKind() == LoadKind::kDexCacheViaMethod ||
+           GetLoadKind() == LoadKind::kBssEntry;
   }
 
   bool CanThrow() const OVERRIDE {
-    return CanCallRuntime();
+    return NeedsAccessCheck() ||
+           MustGenerateClinitCheck() ||
+           // If the class is in the boot image, the lookup in the runtime call cannot throw.
+           // This keeps CanThrow() consistent between non-PIC (using kBootImageAddress) and
+           // PIC and subsequently avoids a DCE behavior dependency on the PIC option.
+           ((GetLoadKind() == LoadKind::kDexCacheViaMethod ||
+             GetLoadKind() == LoadKind::kBssEntry) &&
+            !IsInBootImage());
   }
 
   ReferenceTypeInfo GetLoadedClassRTI() {
@@ -5606,15 +5630,8 @@ class HLoadClass FINAL : public HInstruction {
   dex::TypeIndex GetTypeIndex() const { return type_index_; }
   const DexFile& GetDexFile() const { return dex_file_; }
 
-  uint32_t GetDexCacheElementOffset() const;
-
-  uint64_t GetAddress() const {
-    DCHECK(HasAddress(GetLoadKind()));
-    return load_data_.address;
-  }
-
   bool NeedsDexCacheOfDeclaringClass() const OVERRIDE {
-    return !IsReferrersClass();
+    return GetLoadKind() == LoadKind::kDexCacheViaMethod;
   }
 
   static SideEffects SideEffectsForArchRuntimeCalls() {
@@ -5623,16 +5640,8 @@ class HLoadClass FINAL : public HInstruction {
 
   bool IsReferrersClass() const { return GetLoadKind() == LoadKind::kReferrersClass; }
   bool NeedsAccessCheck() const { return GetPackedFlag<kFlagNeedsAccessCheck>(); }
-  bool IsInDexCache() const { return GetPackedFlag<kFlagIsInDexCache>(); }
   bool IsInBootImage() const { return GetPackedFlag<kFlagIsInBootImage>(); }
   bool MustGenerateClinitCheck() const { return GetPackedFlag<kFlagGenerateClInitCheck>(); }
-
-  void MarkInDexCache() {
-    SetPackedFlag<kFlagIsInDexCache>(true);
-    DCHECK(!NeedsEnvironment());
-    RemoveEnvironment();
-    SetSideEffects(SideEffects::None());
-  }
 
   void MarkInBootImage() {
     SetPackedFlag<kFlagIsInBootImage>(true);
@@ -5650,12 +5659,15 @@ class HLoadClass FINAL : public HInstruction {
     return Primitive::kPrimNot;
   }
 
+  Handle<mirror::Class> GetClass() const {
+    return klass_;
+  }
+
   DECLARE_INSTRUCTION(LoadClass);
 
  private:
   static constexpr size_t kFlagNeedsAccessCheck    = kNumberOfGenericPackedBits;
-  static constexpr size_t kFlagIsInDexCache        = kFlagNeedsAccessCheck + 1;
-  static constexpr size_t kFlagIsInBootImage       = kFlagIsInDexCache + 1;
+  static constexpr size_t kFlagIsInBootImage       = kFlagNeedsAccessCheck + 1;
   // Whether this instruction must generate the initialization check.
   // Used for code generation.
   static constexpr size_t kFlagGenerateClInitCheck = kFlagIsInBootImage + 1;
@@ -5667,35 +5679,24 @@ class HLoadClass FINAL : public HInstruction {
   using LoadKindField = BitField<LoadKind, kFieldLoadKind, kFieldLoadKindSize>;
 
   static bool HasTypeReference(LoadKind load_kind) {
-    return load_kind == LoadKind::kBootImageLinkTimeAddress ||
+    return load_kind == LoadKind::kReferrersClass ||
+        load_kind == LoadKind::kBootImageLinkTimeAddress ||
         load_kind == LoadKind::kBootImageLinkTimePcRelative ||
-        load_kind == LoadKind::kDexCacheViaMethod ||
-        load_kind == LoadKind::kReferrersClass;
-  }
-
-  static bool HasAddress(LoadKind load_kind) {
-    return load_kind == LoadKind::kBootImageAddress ||
-        load_kind == LoadKind::kJitTableAddress;
-  }
-
-  static bool HasDexCacheReference(LoadKind load_kind) {
-    return load_kind == LoadKind::kDexCachePcRelative;
+        load_kind == LoadKind::kBssEntry ||
+        load_kind == LoadKind::kDexCacheViaMethod;
   }
 
   void SetLoadKindInternal(LoadKind load_kind);
 
   // The special input is the HCurrentMethod for kDexCacheViaMethod or kReferrersClass.
   // For other load kinds it's empty or possibly some architecture-specific instruction
-  // for PC-relative loads, i.e. kDexCachePcRelative or kBootImageLinkTimePcRelative.
+  // for PC-relative loads, i.e. kBssEntry or kBootImageLinkTimePcRelative.
   HUserRecord<HInstruction*> special_input_;
 
   const dex::TypeIndex type_index_;
   const DexFile& dex_file_;
 
-  union {
-    uint32_t dex_cache_element_index;   // Only for dex cache reference.
-    uint64_t address;  // Up to 64-bit, needed for kJitTableAddress on 64-bit targets.
-  } load_data_;
+  Handle<mirror::Class> klass_;
 
   ReferenceTypeInfo loaded_class_rti_;
 
@@ -5704,19 +5705,13 @@ class HLoadClass FINAL : public HInstruction {
 std::ostream& operator<<(std::ostream& os, HLoadClass::LoadKind rhs);
 
 // Note: defined outside class to see operator<<(., HLoadClass::LoadKind).
-inline uint32_t HLoadClass::GetDexCacheElementOffset() const {
-  DCHECK(HasDexCacheReference(GetLoadKind())) << GetLoadKind();
-  return load_data_.dex_cache_element_index;
-}
-
-// Note: defined outside class to see operator<<(., HLoadClass::LoadKind).
 inline void HLoadClass::AddSpecialInput(HInstruction* special_input) {
   // The special input is used for PC-relative loads on some architectures,
   // including literal pool loads, which are PC-relative too.
   DCHECK(GetLoadKind() == LoadKind::kBootImageLinkTimePcRelative ||
-         GetLoadKind() == LoadKind::kDexCachePcRelative ||
          GetLoadKind() == LoadKind::kBootImageLinkTimeAddress ||
-         GetLoadKind() == LoadKind::kBootImageAddress) << GetLoadKind();
+         GetLoadKind() == LoadKind::kBootImageAddress ||
+         GetLoadKind() == LoadKind::kBssEntry) << GetLoadKind();
   DCHECK(special_input_.GetInstruction() == nullptr);
   special_input_ = HUserRecord<HInstruction*>(special_input);
   special_input->AddUseAt(this, 0);
@@ -5744,15 +5739,15 @@ class HLoadString FINAL : public HInstruction {
     // Used for strings outside boot image when .bss is accessible with a PC-relative load.
     kBssEntry,
 
+    // Load from the root table associated with the JIT compiled method.
+    kJitTableAddress,
+
     // Load from resolved strings array accessed through the class loaded from
     // the compiled method's own ArtMethod*. This is the default access type when
     // all other types are unavailable.
     kDexCacheViaMethod,
 
-    // Load from the root table associated with the JIT compiled method.
-    kJitTableAddress,
-
-    kLast = kJitTableAddress,
+    kLast = kDexCacheViaMethod,
   };
 
   HLoadString(HCurrentMethod* current_method,
@@ -5761,39 +5756,31 @@ class HLoadString FINAL : public HInstruction {
               uint32_t dex_pc)
       : HInstruction(SideEffectsForArchRuntimeCalls(), dex_pc),
         special_input_(HUserRecord<HInstruction*>(current_method)),
-        string_index_(string_index) {
+        string_index_(string_index),
+        dex_file_(dex_file) {
     SetPackedField<LoadKindField>(LoadKind::kDexCacheViaMethod);
-    load_data_.dex_file_ = &dex_file;
   }
 
-  void SetLoadKindWithAddress(LoadKind load_kind, uint64_t address) {
-    DCHECK(HasAddress(load_kind));
-    load_data_.address = address;
-    SetLoadKindInternal(load_kind);
-  }
-
-  void SetLoadKindWithStringReference(LoadKind load_kind,
-                                      const DexFile& dex_file,
-                                      dex::StringIndex string_index) {
-    DCHECK(HasStringReference(load_kind));
-    load_data_.dex_file_ = &dex_file;
-    string_index_ = string_index;
-    SetLoadKindInternal(load_kind);
-  }
+  void SetLoadKind(LoadKind load_kind);
 
   LoadKind GetLoadKind() const {
     return GetPackedField<LoadKindField>();
   }
 
-  const DexFile& GetDexFile() const;
+  const DexFile& GetDexFile() const {
+    return dex_file_;
+  }
 
   dex::StringIndex GetStringIndex() const {
     return string_index_;
   }
 
-  uint64_t GetAddress() const {
-    DCHECK(HasAddress(GetLoadKind()));
-    return load_data_.address;
+  Handle<mirror::String> GetString() const {
+    return string_;
+  }
+
+  void SetString(Handle<mirror::String> str) {
+    string_ = str;
   }
 
   bool CanBeMoved() const OVERRIDE { return true; }
@@ -5848,43 +5835,21 @@ class HLoadString FINAL : public HInstruction {
   static_assert(kNumberOfLoadStringPackedBits <= kMaxNumberOfPackedBits, "Too many packed fields.");
   using LoadKindField = BitField<LoadKind, kFieldLoadKind, kFieldLoadKindSize>;
 
-  static bool HasStringReference(LoadKind load_kind) {
-    return load_kind == LoadKind::kBootImageLinkTimeAddress ||
-        load_kind == LoadKind::kBootImageLinkTimePcRelative ||
-        load_kind == LoadKind::kBssEntry ||
-        load_kind == LoadKind::kDexCacheViaMethod ||
-        load_kind == LoadKind::kJitTableAddress;
-  }
-
-  static bool HasAddress(LoadKind load_kind) {
-    return load_kind == LoadKind::kBootImageAddress;
-  }
-
   void SetLoadKindInternal(LoadKind load_kind);
 
   // The special input is the HCurrentMethod for kDexCacheViaMethod.
   // For other load kinds it's empty or possibly some architecture-specific instruction
-  // for PC-relative loads, i.e. kDexCachePcRelative or kBootImageLinkTimePcRelative.
+  // for PC-relative loads, i.e. kBssEntry or kBootImageLinkTimePcRelative.
   HUserRecord<HInstruction*> special_input_;
 
-  // String index serves also as the hash code and it's also needed for slow-paths,
-  // so it must not be overwritten with other load data.
   dex::StringIndex string_index_;
+  const DexFile& dex_file_;
 
-  union {
-    const DexFile* dex_file_;            // For string reference.
-    uint64_t address;  // Up to 64-bit, needed for kDexCacheAddress on 64-bit targets.
-  } load_data_;
+  Handle<mirror::String> string_;
 
   DISALLOW_COPY_AND_ASSIGN(HLoadString);
 };
 std::ostream& operator<<(std::ostream& os, HLoadString::LoadKind rhs);
-
-// Note: defined outside class to see operator<<(., HLoadString::LoadKind).
-inline const DexFile& HLoadString::GetDexFile() const {
-  DCHECK(HasStringReference(GetLoadKind())) << GetLoadKind();
-  return *load_data_.dex_file_;
-}
 
 // Note: defined outside class to see operator<<(., HLoadString::LoadKind).
 inline void HLoadString::AddSpecialInput(HInstruction* special_input) {
@@ -5937,22 +5902,22 @@ class HClinitCheck FINAL : public HExpression<1> {
 class HStaticFieldGet FINAL : public HExpression<1> {
  public:
   HStaticFieldGet(HInstruction* cls,
+                  ArtField* field,
                   Primitive::Type field_type,
                   MemberOffset field_offset,
                   bool is_volatile,
                   uint32_t field_idx,
                   uint16_t declaring_class_def_index,
                   const DexFile& dex_file,
-                  Handle<mirror::DexCache> dex_cache,
                   uint32_t dex_pc)
       : HExpression(field_type, SideEffects::FieldReadOfType(field_type, is_volatile), dex_pc),
-        field_info_(field_offset,
+        field_info_(field,
+                    field_offset,
                     field_type,
                     is_volatile,
                     field_idx,
                     declaring_class_def_index,
-                    dex_file,
-                    dex_cache) {
+                    dex_file) {
     SetRawInputAt(0, cls);
   }
 
@@ -5985,22 +5950,22 @@ class HStaticFieldSet FINAL : public HTemplateInstruction<2> {
  public:
   HStaticFieldSet(HInstruction* cls,
                   HInstruction* value,
+                  ArtField* field,
                   Primitive::Type field_type,
                   MemberOffset field_offset,
                   bool is_volatile,
                   uint32_t field_idx,
                   uint16_t declaring_class_def_index,
                   const DexFile& dex_file,
-                  Handle<mirror::DexCache> dex_cache,
                   uint32_t dex_pc)
       : HTemplateInstruction(SideEffects::FieldWriteOfType(field_type, is_volatile), dex_pc),
-        field_info_(field_offset,
+        field_info_(field,
+                    field_offset,
                     field_type,
                     is_volatile,
                     field_idx,
                     declaring_class_def_index,
-                    dex_file,
-                    dex_cache) {
+                    dex_file) {
     SetPackedFlag<kFlagValueCanBeNull>(true);
     SetRawInputAt(0, cls);
     SetRawInputAt(1, value);

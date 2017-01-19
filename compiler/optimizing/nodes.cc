@@ -1853,6 +1853,14 @@ void HBasicBlock::DisconnectAndDelete() {
   SetGraph(nullptr);
 }
 
+void HBasicBlock::MergeInstructionsWith(HBasicBlock* other) {
+  DCHECK(EndsWithControlFlowInstruction());
+  RemoveInstruction(GetLastInstruction());
+  instructions_.Add(other->GetInstructions());
+  other->instructions_.SetBlockOfInstructions(this);
+  other->instructions_.Clear();
+}
+
 void HBasicBlock::MergeWith(HBasicBlock* other) {
   DCHECK_EQ(GetGraph(), other->GetGraph());
   DCHECK(ContainsElement(dominated_blocks_, other));
@@ -1861,11 +1869,7 @@ void HBasicBlock::MergeWith(HBasicBlock* other) {
   DCHECK(other->GetPhis().IsEmpty());
 
   // Move instructions from `other` to `this`.
-  DCHECK(EndsWithControlFlowInstruction());
-  RemoveInstruction(GetLastInstruction());
-  instructions_.Add(other->GetInstructions());
-  other->instructions_.SetBlockOfInstructions(this);
-  other->instructions_.Clear();
+  MergeInstructionsWith(other);
 
   // Remove `other` from the loops it is included in.
   for (HLoopInformationOutwardIterator it(*other); !it.Done(); it.Advance()) {
@@ -2387,6 +2391,14 @@ bool HInvoke::NeedsEnvironment() const {
   return !opt.GetDoesNotNeedEnvironment();
 }
 
+const DexFile& HInvokeStaticOrDirect::GetDexFileForPcRelativeDexCache() const {
+  ArtMethod* caller = GetEnvironment()->GetMethod();
+  ScopedObjectAccess soa(Thread::Current());
+  // `caller` is null for a top-level graph representing a method whose declaring
+  // class was not resolved.
+  return caller == nullptr ? GetBlock()->GetGraph()->GetDexFile() : *caller->GetDexFile();
+}
+
 bool HInvokeStaticOrDirect::NeedsDexCacheOfDeclaringClass() const {
   if (GetMethodLoadKind() != MethodLoadKind::kDexCacheViaMethod) {
     return false;
@@ -2430,17 +2442,6 @@ std::ostream& operator<<(std::ostream& os, HInvokeStaticOrDirect::ClinitCheckReq
   }
 }
 
-// Helper for InstructionDataEquals to fetch the mirror Class out
-// from a kJitTableAddress LoadClass kind.
-// NO_THREAD_SAFETY_ANALYSIS because even though we're accessing
-// mirrors, they are stored in a variable size handle scope which is always
-// visited during a pause. Also, the only caller of this helper
-// only uses the mirror for pointer comparison.
-static inline mirror::Class* AsMirrorInternal(uint64_t address)
-    NO_THREAD_SAFETY_ANALYSIS {
-  return reinterpret_cast<StackReference<mirror::Class>*>(address)->AsMirrorPtr();
-}
-
 bool HLoadClass::InstructionDataEquals(const HInstruction* other) const {
   const HLoadClass* other_load_class = other->AsLoadClass();
   // TODO: To allow GVN for HLoadClass from different dex files, we should compare the type
@@ -2451,11 +2452,12 @@ bool HLoadClass::InstructionDataEquals(const HInstruction* other) const {
   }
   switch (GetLoadKind()) {
     case LoadKind::kBootImageAddress:
-      return GetAddress() == other_load_class->GetAddress();
-    case LoadKind::kJitTableAddress:
-      return AsMirrorInternal(GetAddress()) == AsMirrorInternal(other_load_class->GetAddress());
+    case LoadKind::kJitTableAddress: {
+      ScopedObjectAccess soa(Thread::Current());
+      return GetClass().Get() == other_load_class->GetClass().Get();
+    }
     default:
-      DCHECK(HasTypeReference(GetLoadKind()) || HasDexCacheReference(GetLoadKind()));
+      DCHECK(HasTypeReference(GetLoadKind()));
       return IsSameDexFile(GetDexFile(), other_load_class->GetDexFile());
   }
 }
@@ -2486,10 +2488,10 @@ std::ostream& operator<<(std::ostream& os, HLoadClass::LoadKind rhs) {
       return os << "BootImageLinkTimePcRelative";
     case HLoadClass::LoadKind::kBootImageAddress:
       return os << "BootImageAddress";
+    case HLoadClass::LoadKind::kBssEntry:
+      return os << "BssEntry";
     case HLoadClass::LoadKind::kJitTableAddress:
       return os << "JitTableAddress";
-    case HLoadClass::LoadKind::kDexCachePcRelative:
-      return os << "DexCachePcRelative";
     case HLoadClass::LoadKind::kDexCacheViaMethod:
       return os << "DexCacheViaMethod";
     default:
@@ -2506,16 +2508,18 @@ bool HLoadString::InstructionDataEquals(const HInstruction* other) const {
       GetPackedFields() != other_load_string->GetPackedFields()) {
     return false;
   }
-  LoadKind load_kind = GetLoadKind();
-  if (HasAddress(load_kind)) {
-    return GetAddress() == other_load_string->GetAddress();
-  } else {
-    DCHECK(HasStringReference(load_kind)) << load_kind;
-    return IsSameDexFile(GetDexFile(), other_load_string->GetDexFile());
+  switch (GetLoadKind()) {
+    case LoadKind::kBootImageAddress:
+    case LoadKind::kJitTableAddress: {
+      ScopedObjectAccess soa(Thread::Current());
+      return GetString().Get() == other_load_string->GetString().Get();
+    }
+    default:
+      return IsSameDexFile(GetDexFile(), other_load_string->GetDexFile());
   }
 }
 
-void HLoadString::SetLoadKindInternal(LoadKind load_kind) {
+void HLoadString::SetLoadKind(LoadKind load_kind) {
   // Once sharpened, the load kind should not be changed again.
   DCHECK_EQ(GetLoadKind(), LoadKind::kDexCacheViaMethod);
   SetPackedField<LoadKindField>(load_kind);
@@ -2540,10 +2544,10 @@ std::ostream& operator<<(std::ostream& os, HLoadString::LoadKind rhs) {
       return os << "BootImageAddress";
     case HLoadString::LoadKind::kBssEntry:
       return os << "BssEntry";
-    case HLoadString::LoadKind::kDexCacheViaMethod:
-      return os << "DexCacheViaMethod";
     case HLoadString::LoadKind::kJitTableAddress:
       return os << "JitTableAddress";
+    case HLoadString::LoadKind::kDexCacheViaMethod:
+      return os << "DexCacheViaMethod";
     default:
       LOG(FATAL) << "Unknown HLoadString::LoadKind: " << static_cast<int>(rhs);
       UNREACHABLE();

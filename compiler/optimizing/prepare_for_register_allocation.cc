@@ -16,6 +16,9 @@
 
 #include "prepare_for_register_allocation.h"
 
+#include "jni_internal.h"
+#include "well_known_classes.h"
+
 namespace art {
 
 void PrepareForRegisterAllocation::Run() {
@@ -42,16 +45,12 @@ void PrepareForRegisterAllocation::VisitBoundsCheck(HBoundsCheck* check) {
   if (check->IsStringCharAt()) {
     // Add a fake environment for String.charAt() inline info as we want
     // the exception to appear as being thrown from there.
-    const DexFile& dex_file = check->GetEnvironment()->GetDexFile();
-    DCHECK_STREQ(dex_file.PrettyMethod(check->GetStringCharAtMethodIndex()).c_str(),
-                 "char java.lang.String.charAt(int)");
+    ArtMethod* char_at_method = jni::DecodeArtMethod(WellKnownClasses::java_lang_String_charAt);
     ArenaAllocator* arena = GetGraph()->GetArena();
     HEnvironment* environment = new (arena) HEnvironment(arena,
                                                          /* number_of_vregs */ 0u,
-                                                         dex_file,
-                                                         check->GetStringCharAtMethodIndex(),
+                                                         char_at_method,
                                                          /* dex_pc */ DexFile::kDexNoIndex,
-                                                         kVirtual,
                                                          check);
     check->InsertRawEnvironment(environment);
   }
@@ -134,39 +133,6 @@ void PrepareForRegisterAllocation::VisitClinitCheck(HClinitCheck* check) {
   }
 }
 
-void PrepareForRegisterAllocation::VisitNewInstance(HNewInstance* instruction) {
-  HLoadClass* load_class = instruction->InputAt(0)->AsLoadClass();
-  const bool has_only_one_use = load_class->HasOnlyOneNonEnvironmentUse();
-  // Change the entrypoint to kQuickAllocObject if either:
-  // - the class is finalizable (only kQuickAllocObject handles finalizable classes),
-  // - the class needs access checks (we do not know if it's finalizable),
-  // - or the load class has only one use.
-  if (instruction->IsFinalizable() || has_only_one_use || load_class->NeedsAccessCheck()) {
-    instruction->SetEntrypoint(kQuickAllocObject);
-    instruction->ReplaceInput(GetGraph()->GetIntConstant(load_class->GetTypeIndex().index_), 0);
-    if (has_only_one_use) {
-      // We've just removed the only use of the HLoadClass. Since we don't run DCE after this pass,
-      // do it manually if possible.
-      if (!load_class->CanThrow()) {
-        // If the load class can not throw, it has no side effects and can be removed if there is
-        // only one use.
-        load_class->GetBlock()->RemoveInstruction(load_class);
-      } else if (!instruction->GetEnvironment()->IsFromInlinedInvoke() &&
-          CanMoveClinitCheck(load_class, instruction)) {
-        // The allocation entry point that deals with access checks does not work with inlined
-        // methods, so we need to check whether this allocation comes from an inlined method.
-        // We also need to make the same check as for moving clinit check, whether the HLoadClass
-        // has the clinit check responsibility or not (HLoadClass can throw anyway).
-        // If it needed access checks, we delegate the access check to the allocation.
-        if (load_class->NeedsAccessCheck()) {
-          instruction->SetEntrypoint(kQuickAllocObjectWithAccessCheck);
-        }
-        load_class->GetBlock()->RemoveInstruction(load_class);
-      }
-    }
-  }
-}
-
 bool PrepareForRegisterAllocation::CanEmitConditionAt(HCondition* condition,
                                                       HInstruction* user) const {
   if (condition->GetNext() != user) {
@@ -232,8 +198,7 @@ bool PrepareForRegisterAllocation::CanMoveClinitCheck(HInstruction* input,
       return false;
     }
     if (user_environment->GetDexPc() != input_environment->GetDexPc() ||
-        user_environment->GetMethodIdx() != input_environment->GetMethodIdx() ||
-        !IsSameDexFile(user_environment->GetDexFile(), input_environment->GetDexFile())) {
+        user_environment->GetMethod() != input_environment->GetMethod()) {
       return false;
     }
     user_environment = user_environment->GetParent();

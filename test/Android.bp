@@ -262,6 +262,13 @@ art_cc_defaults {
         "913-heaps/heaps.cc",
         "918-fields/fields.cc",
         "920-objects/objects.cc",
+        "922-properties/properties.cc",
+        "923-monitors/monitors.cc",
+        "924-threads/threads.cc",
+        "925-threadgroups/threadgroups.cc",
+        "927-timers/timers.cc",
+        "928-jni-table/jni_table.cc",
+        "929-search/search.cc",
     ],
     shared_libs: [
         "libbase",

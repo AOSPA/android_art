@@ -64,6 +64,7 @@ class ImtConflictTable;
 template<typename T> class LengthPrefixedArray;
 template<class T> class MutableHandle;
 class InternTable;
+class OatFile;
 template<class T> class ObjectLock;
 class Runtime;
 class ScopedObjectAccessAlreadyRunnable;
@@ -535,6 +536,12 @@ class ClassLinker {
       REQUIRES(!Locks::classlinker_classes_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Add an oat file with .bss GC roots to be visited again at the end of GC
+  // for collector types that need it.
+  void WriteBarrierForBootOatFileBssRoots(const OatFile* oat_file)
+      REQUIRES(!Locks::classlinker_classes_lock_)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   mirror::ObjectArray<mirror::Class>* GetClassRoots() REQUIRES_SHARED(Locks::mutator_lock_) {
     mirror::ObjectArray<mirror::Class>* class_roots = class_roots_.Read();
     DCHECK(class_roots != nullptr);
@@ -638,6 +645,14 @@ class ClassLinker {
   mirror::Class* GetHoldingClassOfCopiedMethod(ArtMethod* method)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Returns null if not found.
+  ClassTable* ClassTableForClassLoader(ObjPtr<mirror::ClassLoader> class_loader)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void AppendToBootClassPath(Thread* self, const DexFile& dex_file)
+      REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(!Locks::dex_lock_);
+
   struct DexCacheData {
     // Weak root to the DexCache. Note: Do not decode this unnecessarily or else class unloading may
     // not work properly.
@@ -646,10 +661,12 @@ class ClassLinker {
     // jweak decode that triggers read barriers (and mark them alive unnecessarily and mess with
     // class unloading.)
     const DexFile* dex_file;
-    GcRoot<mirror::Class>* resolved_types;
+    ArtMethod** resolved_methods;
   };
 
  private:
+  class LinkInterfaceMethodsHelper;
+
   struct ClassLoaderData {
     jweak weak_root;  // Weak root to enable class unloading.
     ClassTable* class_table;
@@ -731,9 +748,6 @@ class ClassLinker {
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_, !Roles::uninterruptible_);
 
-  void AppendToBootClassPath(Thread* self, const DexFile& dex_file)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!Locks::dex_lock_);
   void AppendToBootClassPath(const DexFile& dex_file, Handle<mirror::DexCache> dex_cache)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_);
@@ -1030,10 +1044,6 @@ class ClassLinker {
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(Locks::classlinker_classes_lock_);
 
-  // Returns null if not found.
-  ClassTable* ClassTableForClassLoader(ObjPtr<mirror::ClassLoader> class_loader)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
   // Insert a new class table if not found.
   ClassTable* InsertClassTableForClassLoader(ObjPtr<mirror::ClassLoader> class_loader)
       REQUIRES_SHARED(Locks::mutator_lock_)
@@ -1087,6 +1097,12 @@ class ClassLinker {
       REQUIRES(!Locks::dex_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Allocate method arrays for interfaces.
+  bool AllocateIfTableMethodArrays(Thread* self,
+                                   Handle<mirror::Class> klass,
+                                   Handle<mirror::IfTable> iftable)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   // Sets imt_ref appropriately for LinkInterfaceMethods.
   // If there is no method in the imt location of imt_ref it will store the given method there.
   // Otherwise it will set the conflict method which will figure out which method to use during
@@ -1130,6 +1146,10 @@ class ClassLinker {
   // New class roots, only used by CMS since the GC needs to mark these in the pause.
   std::vector<GcRoot<mirror::Class>> new_class_roots_ GUARDED_BY(Locks::classlinker_classes_lock_);
 
+  // Boot image oat files with new .bss GC roots to be visited in the pause by CMS.
+  std::vector<const OatFile*> new_bss_roots_boot_oat_files_
+      GUARDED_BY(Locks::classlinker_classes_lock_);
+
   // Number of times we've searched dex caches for a class. After a certain number of misses we move
   // the classes into the class_table_ to avoid dex cache based searches.
   Atomic<uint32_t> failed_dex_cache_class_lookups_;
@@ -1147,7 +1167,7 @@ class ClassLinker {
   size_t find_array_class_cache_next_victim_;
 
   bool init_done_;
-  bool log_new_class_table_roots_ GUARDED_BY(Locks::classlinker_classes_lock_);
+  bool log_new_roots_ GUARDED_BY(Locks::classlinker_classes_lock_);
 
   InternTable* intern_table_;
 

@@ -177,7 +177,7 @@ class Thread {
   void CheckEmptyCheckpoint() REQUIRES_SHARED(Locks::mutator_lock_);
 
   static Thread* FromManagedThread(const ScopedObjectAccessAlreadyRunnable& ts,
-                                   mirror::Object* thread_peer)
+                                   ObjPtr<mirror::Object> thread_peer)
       REQUIRES(Locks::thread_list_lock_, !Locks::thread_suspend_count_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
   static Thread* FromManagedThread(const ScopedObjectAccessAlreadyRunnable& ts, jobject thread)
@@ -312,7 +312,7 @@ class Thread {
 
   size_t NumberOfHeldMutexes() const;
 
-  bool HoldsLock(mirror::Object*) const REQUIRES_SHARED(Locks::mutator_lock_);
+  bool HoldsLock(ObjPtr<mirror::Object> object) const REQUIRES_SHARED(Locks::mutator_lock_);
 
   /*
    * Changes the priority of this thread to match that of the java.lang.Thread object.
@@ -413,7 +413,7 @@ class Thread {
 
   // Returns whether the given exception was thrown by the current Java method being executed
   // (Note that this includes native Java methods).
-  bool IsExceptionThrownByCurrentMethod(mirror::Throwable* exception) const
+  bool IsExceptionThrownByCurrentMethod(ObjPtr<mirror::Throwable> exception) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void SetTopOfStack(ArtMethod** top_method) {
@@ -925,9 +925,11 @@ class Thread {
   void PushDeoptimizationContext(const JValue& return_value,
                                  bool is_reference,
                                  bool from_code,
-                                 mirror::Throwable* exception)
+                                 ObjPtr<mirror::Throwable> exception)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void PopDeoptimizationContext(JValue* result, mirror::Throwable** exception, bool* from_code)
+  void PopDeoptimizationContext(JValue* result,
+                                ObjPtr<mirror::Throwable>* exception,
+                                bool* from_code)
       REQUIRES_SHARED(Locks::mutator_lock_);
   void AssertHasDeoptimizationContext()
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -1136,6 +1138,14 @@ class Thread {
 
   uint8_t GetDebugDisallowReadBarrierCount() const {
     return debug_disallow_read_barrier_;
+  }
+
+  const void* GetCustomTLS() const {
+    return custom_tls_;
+  }
+
+  void SetCustomTLS(const void* data) {
+    custom_tls_ = data;
   }
 
   // Returns true if the current thread is the jit sensitive thread.
@@ -1416,7 +1426,7 @@ class Thread {
       stacked_shadow_frame_record(nullptr), deoptimization_context_stack(nullptr),
       frame_id_to_shadow_frame(nullptr), name(nullptr), pthread_self(0),
       last_no_thread_suspension_cause(nullptr), checkpoint_function(nullptr),
-      thread_local_pos(nullptr), thread_local_end(nullptr), thread_local_start(nullptr),
+      thread_local_start(nullptr), thread_local_pos(nullptr), thread_local_end(nullptr),
       thread_local_objects(0), mterp_current_ibase(nullptr), mterp_default_ibase(nullptr),
       mterp_alt_ibase(nullptr), thread_local_alloc_stack_top(nullptr),
       thread_local_alloc_stack_end(nullptr), nested_signal_state(nullptr),
@@ -1535,19 +1545,20 @@ class Thread {
     // to avoid additional cost of a mutex and a condition variable, as used in art::Barrier.
     AtomicInteger* active_suspend_barriers[kMaxSuspendBarriers];
 
-    // Entrypoint function pointers.
-    // TODO: move this to more of a global offset table model to avoid per-thread duplication.
-    JniEntryPoints jni_entrypoints;
-    QuickEntryPoints quick_entrypoints;
+    // Thread-local allocation pointer. Moved here to force alignment for thread_local_pos on ARM.
+    uint8_t* thread_local_start;
 
     // thread_local_pos and thread_local_end must be consecutive for ldrd and are 8 byte aligned for
     // potentially better performance.
     uint8_t* thread_local_pos;
     uint8_t* thread_local_end;
-    // Thread-local allocation pointer.
-    uint8_t* thread_local_start;
 
     size_t thread_local_objects;
+
+    // Entrypoint function pointers.
+    // TODO: move this to more of a global offset table model to avoid per-thread duplication.
+    JniEntryPoints jni_entrypoints;
+    QuickEntryPoints quick_entrypoints;
 
     // Mterp jump table bases.
     void* mterp_current_ibase;
@@ -1596,6 +1607,10 @@ class Thread {
 
   // Pending extra checkpoints if checkpoint_function_ is already used.
   std::list<Closure*> checkpoint_overflow_ GUARDED_BY(Locks::thread_suspend_count_lock_);
+
+  // Custom TLS field that can be used by plugins.
+  // TODO: Generalize once we have more plugins.
+  const void* custom_tls_;
 
   // True if the thread is allowed to call back into java (for e.g. during class resolution).
   // By default this is true.
@@ -1687,6 +1702,14 @@ class ScopedTransitioningToRunnable : public ValueObject {
 
  private:
   Thread* const self_;
+};
+
+class ThreadLifecycleCallback {
+ public:
+  virtual ~ThreadLifecycleCallback() {}
+
+  virtual void ThreadStart(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_) = 0;
+  virtual void ThreadDeath(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_) = 0;
 };
 
 std::ostream& operator<<(std::ostream& os, const Thread& thread);

@@ -320,6 +320,8 @@ size_t Dbg::field_write_event_ref_count_ = 0;
 size_t Dbg::exception_catch_event_ref_count_ = 0;
 uint32_t Dbg::instrumentation_events_ = 0;
 
+Dbg::DbgThreadLifecycleCallback Dbg::thread_lifecycle_callback_;
+
 // Breakpoints.
 static std::vector<Breakpoint> gBreakpoints GUARDED_BY(Locks::breakpoint_lock_);
 
@@ -3985,9 +3987,7 @@ JDWP::JdwpError Dbg::PrepareInvokeMethod(uint32_t request_id, JDWP::ObjectId thr
         if (shorty[i + 1] == 'L') {
           // Did we really get an argument of an appropriate reference type?
           mirror::Class* parameter_type =
-              m->GetClassFromTypeIndex(types->GetTypeItem(i).type_idx_,
-                                       true /* resolve */,
-                                       kRuntimePointerSize);
+              m->GetClassFromTypeIndex(types->GetTypeItem(i).type_idx_, true /* resolve */);
           mirror::Object* argument = gRegistry->Get<mirror::Object*>(arg_values[i], &error);
           if (error != JDWP::ERR_NONE) {
             return JDWP::ERR_INVALID_OBJECT;
@@ -5135,6 +5135,14 @@ void Dbg::VisitRoots(RootVisitor* visitor) {
   for (Breakpoint& breakpoint : gBreakpoints) {
     breakpoint.Method()->VisitRoots(root_visitor, kRuntimePointerSize);
   }
+}
+
+void Dbg::DbgThreadLifecycleCallback::ThreadStart(Thread* self) {
+  Dbg::PostThreadStart(self);
+}
+
+void Dbg::DbgThreadLifecycleCallback::ThreadDeath(Thread* self) {
+  Dbg::PostThreadDeath(self);
 }
 
 }  // namespace art
