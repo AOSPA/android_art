@@ -573,6 +573,8 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   uint32_t GetReferenceSlowFlagOffset() const;
   uint32_t GetReferenceDisableFlagOffset() const;
 
+  static QuickEntrypointEnum GetArrayAllocationEntrypoint(Handle<mirror::Class> array_klass);
+
  protected:
   // Patch info used for recording locations of required linker patches and their targets,
   // i.e. target method, string, type or code identified by their dex file and index.
@@ -608,7 +610,7 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
         number_of_register_pairs_(number_of_register_pairs),
         core_callee_save_mask_(core_callee_save_mask),
         fpu_callee_save_mask_(fpu_callee_save_mask),
-        stack_map_stream_(graph->GetArena()),
+        stack_map_stream_(graph->GetArena(), graph->GetInstructionSet()),
         block_order_(nullptr),
         jit_string_roots_(StringReferenceValueComparator(),
                           graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),

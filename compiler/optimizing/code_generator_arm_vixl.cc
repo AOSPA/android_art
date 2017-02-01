@@ -3336,7 +3336,7 @@ void LocationsBuilderARMVIXL::VisitDiv(HDiv* div) {
         InvokeRuntimeCallingConventionARMVIXL calling_convention;
         locations->SetInAt(0, LocationFrom(calling_convention.GetRegisterAt(0)));
         locations->SetInAt(1, LocationFrom(calling_convention.GetRegisterAt(1)));
-        // Note: divrem will compute both the quotient and the remainder as the pair R0 and R1, but
+        // Note: divmod will compute both the quotient and the remainder as the pair R0 and R1, but
         //       we only need the former.
         locations->SetOut(LocationFrom(r0));
       }
@@ -3450,7 +3450,7 @@ void LocationsBuilderARMVIXL::VisitRem(HRem* rem) {
         InvokeRuntimeCallingConventionARMVIXL calling_convention;
         locations->SetInAt(0, LocationFrom(calling_convention.GetRegisterAt(0)));
         locations->SetInAt(1, LocationFrom(calling_convention.GetRegisterAt(1)));
-        // Note: divrem will compute both the quotient and the remainder as the pair R0 and R1, but
+        // Note: divmod will compute both the quotient and the remainder as the pair R0 and R1, but
         //       we only need the latter.
         locations->SetOut(LocationFrom(r1));
       }
@@ -3997,19 +3997,16 @@ void LocationsBuilderARMVIXL::VisitNewArray(HNewArray* instruction) {
   LocationSummary* locations =
       new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kCallOnMainOnly);
   InvokeRuntimeCallingConventionARMVIXL calling_convention;
-  locations->AddTemp(LocationFrom(calling_convention.GetRegisterAt(0)));
   locations->SetOut(LocationFrom(r0));
-  locations->SetInAt(0, LocationFrom(calling_convention.GetRegisterAt(1)));
-  locations->SetInAt(1, LocationFrom(calling_convention.GetRegisterAt(2)));
+  locations->SetInAt(0, LocationFrom(calling_convention.GetRegisterAt(0)));
+  locations->SetInAt(1, LocationFrom(calling_convention.GetRegisterAt(1)));
 }
 
 void InstructionCodeGeneratorARMVIXL::VisitNewArray(HNewArray* instruction) {
-  InvokeRuntimeCallingConventionARMVIXL calling_convention;
-  __ Mov(calling_convention.GetRegisterAt(0), instruction->GetTypeIndex().index_);
   // Note: if heap poisoning is enabled, the entry point takes cares
   // of poisoning the reference.
-  codegen_->InvokeRuntime(instruction->GetEntrypoint(), instruction, instruction->GetDexPc());
-  CheckEntrypointTypes<kQuickAllocArrayWithAccessCheck, void*, uint32_t, int32_t, ArtMethod*>();
+  codegen_->InvokeRuntime(kQuickAllocArrayResolved, instruction, instruction->GetDexPc());
+  CheckEntrypointTypes<kQuickAllocArrayResolved, void*, mirror::Class*, int32_t>();
 }
 
 void LocationsBuilderARMVIXL::VisitParameterValue(HParameterValue* instruction) {
@@ -7236,18 +7233,7 @@ void CodeGeneratorARMVIXL::GenerateReadBarrierForRootSlow(HInstruction* instruct
 HInvokeStaticOrDirect::DispatchInfo CodeGeneratorARMVIXL::GetSupportedInvokeStaticOrDirectDispatch(
     const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
     HInvokeStaticOrDirect* invoke ATTRIBUTE_UNUSED) {
-  HInvokeStaticOrDirect::DispatchInfo dispatch_info = desired_dispatch_info;
-  // We disable pc-relative load when there is an irreducible loop, as the optimization
-  // is incompatible with it.
-  // TODO: Create as many ArmDexCacheArraysBase instructions as needed for methods
-  // with irreducible loops.
-  if (GetGraph()->HasIrreducibleLoops() &&
-      (dispatch_info.method_load_kind ==
-          HInvokeStaticOrDirect::MethodLoadKind::kDexCachePcRelative)) {
-    dispatch_info.method_load_kind = HInvokeStaticOrDirect::MethodLoadKind::kDexCacheViaMethod;
-  }
-
-  return dispatch_info;
+  return desired_dispatch_info;
 }
 
 vixl32::Register CodeGeneratorARMVIXL::GetInvokeStaticOrDirectExtraParameter(
@@ -7276,7 +7262,7 @@ vixl32::Register CodeGeneratorARMVIXL::GetInvokeStaticOrDirectExtraParameter(
   return RegisterFrom(location);
 }
 
-void CodeGeneratorARMVIXL::GenerateStaticOrDirectCall(
+Location CodeGeneratorARMVIXL::GenerateCalleeMethodStaticOrDirectCall(
     HInvokeStaticOrDirect* invoke, Location temp) {
   Location callee_method = temp;  // For all kinds except kRecursive, callee will be in temp.
   switch (invoke->GetMethodLoadKind()) {
@@ -7327,6 +7313,12 @@ void CodeGeneratorARMVIXL::GenerateStaticOrDirectCall(
       break;
     }
   }
+  return callee_method;
+}
+
+void CodeGeneratorARMVIXL::GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke,
+                                                      Location temp) {
+  Location callee_method = GenerateCalleeMethodStaticOrDirectCall(invoke, temp);
 
   switch (invoke->GetCodePtrLocation()) {
     case HInvokeStaticOrDirect::CodePtrLocation::kCallSelf:
@@ -7687,15 +7679,21 @@ void InstructionCodeGeneratorARMVIXL::VisitPackedSwitch(HPackedSwitch* switch_in
     vixl32::Register jump_offset = temps.Acquire();
 
     // Load jump offset from the table.
-    __ Adr(table_base, jump_table->GetTableStartLabel());
-    __ Ldr(jump_offset, MemOperand(table_base, key_reg, vixl32::LSL, 2));
+    {
+      const size_t jump_size = switch_instr->GetNumEntries() * sizeof(int32_t);
+      ExactAssemblyScope aas(GetVIXLAssembler(),
+                             (vixl32::kMaxInstructionSizeInBytes * 4) + jump_size,
+                             CodeBufferCheckScope::kMaximumSize);
+      __ adr(table_base, jump_table->GetTableStartLabel());
+      __ ldr(jump_offset, MemOperand(table_base, key_reg, vixl32::LSL, 2));
 
-    // Jump to target block by branching to table_base(pc related) + offset.
-    vixl32::Register target_address = table_base;
-    __ Add(target_address, table_base, jump_offset);
-    __ Bx(target_address);
+      // Jump to target block by branching to table_base(pc related) + offset.
+      vixl32::Register target_address = table_base;
+      __ add(target_address, table_base, jump_offset);
+      __ bx(target_address);
 
-    jump_table->EmitTable(codegen_);
+      jump_table->EmitTable(codegen_);
+    }
   }
 }
 void LocationsBuilderARMVIXL::VisitArmDexCacheArraysBase(HArmDexCacheArraysBase* base) {

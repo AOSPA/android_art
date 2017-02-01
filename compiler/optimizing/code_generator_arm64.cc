@@ -1533,7 +1533,9 @@ void CodeGeneratorARM64::MoveLocation(Location destination,
       HConstant* src_cst = source.GetConstant();
       CPURegister temp;
       if (src_cst->IsZeroBitPattern()) {
-        temp = (src_cst->IsLongConstant() || src_cst->IsDoubleConstant()) ? xzr : wzr;
+        temp = (src_cst->IsLongConstant() || src_cst->IsDoubleConstant())
+            ? Register(xzr)
+            : Register(wzr);
       } else {
         if (src_cst->IsIntConstant()) {
           temp = temps.AcquireW();
@@ -1903,6 +1905,9 @@ void LocationsBuilderARM64::HandleFieldGet(HInstruction* instruction) {
                                                        LocationSummary::kNoCall);
   if (object_field_get_with_read_barrier && kUseBakerReadBarrier) {
     locations->SetCustomSlowPathCallerSaves(RegisterSet::Empty());  // No caller-save registers.
+    // We need a temporary register for the read barrier marking slow
+    // path in CodeGeneratorARM64::GenerateFieldLoadWithBakerReadBarrier.
+    locations->AddTemp(Location::RequiresRegister());
   }
   locations->SetInAt(0, Location::RequiresRegister());
   if (Primitive::IsFloatingPointType(instruction->GetType())) {
@@ -1930,11 +1935,9 @@ void InstructionCodeGeneratorARM64::HandleFieldGet(HInstruction* instruction,
 
   if (field_type == Primitive::kPrimNot && kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
     // Object FieldGet with Baker's read barrier case.
-    MacroAssembler* masm = GetVIXLAssembler();
-    UseScratchRegisterScope temps(masm);
     // /* HeapReference<Object> */ out = *(base + offset)
     Register base = RegisterFrom(base_loc, Primitive::kPrimNot);
-    Register temp = temps.AcquireW();
+    Register temp = WRegisterFrom(locations->GetTemp(0));
     // Note that potential implicit null checks are handled in this
     // CodeGeneratorARM64::GenerateFieldLoadWithBakerReadBarrier call.
     codegen_->GenerateFieldLoadWithBakerReadBarrier(
@@ -3993,7 +3996,8 @@ HInvokeStaticOrDirect::DispatchInfo CodeGeneratorARM64::GetSupportedInvokeStatic
   return desired_dispatch_info;
 }
 
-void CodeGeneratorARM64::GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke, Location temp) {
+Location CodeGeneratorARM64::GenerateCalleeMethodStaticOrDirectCall(HInvokeStaticOrDirect* invoke,
+                                                                    Location temp) {
   // Make sure that ArtMethod* is passed in kArtMethodRegister as per the calling convention.
   Location callee_method = temp;  // For all kinds except kRecursive, callee will be in temp.
   switch (invoke->GetMethodLoadKind()) {
@@ -4047,6 +4051,12 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invok
       break;
     }
   }
+  return callee_method;
+}
+
+void CodeGeneratorARM64::GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke, Location temp) {
+  // All registers are assumed to be correctly set up.
+  Location callee_method = GenerateCalleeMethodStaticOrDirectCall(invoke, temp);
 
   switch (invoke->GetCodePtrLocation()) {
     case HInvokeStaticOrDirect::CodePtrLocation::kCallSelf:
@@ -4655,7 +4665,7 @@ void LocationsBuilderARM64::VisitMonitorOperation(HMonitorOperation* instruction
 }
 
 void InstructionCodeGeneratorARM64::VisitMonitorOperation(HMonitorOperation* instruction) {
-  codegen_->InvokeRuntime(instruction->IsEnter() ? kQuickLockObject: kQuickUnlockObject,
+  codegen_->InvokeRuntime(instruction->IsEnter() ? kQuickLockObject : kQuickUnlockObject,
                           instruction,
                           instruction->GetDexPc());
   if (instruction->IsEnter()) {
@@ -4747,22 +4757,18 @@ void LocationsBuilderARM64::VisitNewArray(HNewArray* instruction) {
   LocationSummary* locations =
       new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kCallOnMainOnly);
   InvokeRuntimeCallingConvention calling_convention;
-  locations->AddTemp(LocationFrom(calling_convention.GetRegisterAt(0)));
   locations->SetOut(LocationFrom(x0));
-  locations->SetInAt(0, LocationFrom(calling_convention.GetRegisterAt(1)));
-  locations->SetInAt(1, LocationFrom(calling_convention.GetRegisterAt(2)));
+  locations->SetInAt(0, LocationFrom(calling_convention.GetRegisterAt(0)));
+  locations->SetInAt(1, LocationFrom(calling_convention.GetRegisterAt(1)));
 }
 
 void InstructionCodeGeneratorARM64::VisitNewArray(HNewArray* instruction) {
-  LocationSummary* locations = instruction->GetLocations();
-  InvokeRuntimeCallingConvention calling_convention;
-  Register type_index = RegisterFrom(locations->GetTemp(0), Primitive::kPrimInt);
-  DCHECK(type_index.Is(w0));
-  __ Mov(type_index, instruction->GetTypeIndex().index_);
   // Note: if heap poisoning is enabled, the entry point takes cares
   // of poisoning the reference.
-  codegen_->InvokeRuntime(instruction->GetEntrypoint(), instruction, instruction->GetDexPc());
-  CheckEntrypointTypes<kQuickAllocArrayWithAccessCheck, void*, uint32_t, int32_t, ArtMethod*>();
+  QuickEntrypointEnum entrypoint =
+      CodeGenerator::GetArrayAllocationEntrypoint(instruction->GetLoadClass()->GetClass());
+  codegen_->InvokeRuntime(entrypoint, instruction, instruction->GetDexPc());
+  CheckEntrypointTypes<kQuickAllocArrayResolved, void*, mirror::Class*, int32_t>();
 }
 
 void LocationsBuilderARM64::VisitNewInstance(HNewInstance* instruction) {

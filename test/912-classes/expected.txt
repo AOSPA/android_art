@@ -29,7 +29,7 @@ int 100000
 class [Ljava.lang.String; 10000
 class java.lang.Object 111
 class Main$TestForNonInit 11
-class Main$TestForInitFail 1001
+class Main$TestForInitFail 1011
 int []
 class [Ljava.lang.String; []
 class java.lang.Object []
@@ -59,3 +59,35 @@ boot <- src (B) <- src-ex (A, List)
 boot <- src+src-ex (A,B)
 912-classes.jar+ -> 
 [class A, class B, class java.lang.Object]
+
+[37, 0]
+
+B, false
+Load: LB; on main
+Prepare: LB; on main (cur=main)
+B, true
+Load: LB; on main
+Prepare: LB; on main (cur=main)
+C, false
+Load: LA; on main
+Prepare: LA; on main (cur=main)
+Load: LC; on main
+Prepare: LC; on main (cur=main)
+A, false
+C, true
+Load: LA; on main
+Prepare: LA; on main (cur=main)
+Load: LC; on main
+Prepare: LC; on main (cur=main)
+A, true
+A, true
+Load: LA; on main
+Prepare: LA; on main (cur=main)
+C, true
+Load: LC; on main
+Prepare: LC; on main (cur=main)
+C, true
+Load: LA; on TestRunner
+Prepare: LA; on TestRunner (cur=TestRunner)
+Load: LC; on TestRunner
+Prepare: LC; on TestRunner (cur=TestRunner)

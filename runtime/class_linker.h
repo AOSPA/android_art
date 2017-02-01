@@ -34,6 +34,7 @@
 #include "dex_file.h"
 #include "dex_file_types.h"
 #include "gc_root.h"
+#include "handle.h"
 #include "jni.h"
 #include "mirror/class.h"
 #include "object_callbacks.h"
@@ -261,16 +262,16 @@ class ClassLinker {
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_, !Roles::uninterruptible_);
 
-  mirror::Class* ResolveType(dex::TypeIndex type_idx, ArtField* referrer)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!Locks::dex_lock_, !Roles::uninterruptible_);
-
   // Look up a resolved type with the given ID from the DexFile. The ClassLoader is used to search
   // for the type, since it may be referenced from but not contained within the given DexFile.
   ObjPtr<mirror::Class> LookupResolvedType(const DexFile& dex_file,
                                            dex::TypeIndex type_idx,
                                            ObjPtr<mirror::DexCache> dex_cache,
                                            ObjPtr<mirror::ClassLoader> class_loader)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  static ObjPtr<mirror::Class> LookupResolvedType(dex::TypeIndex type_idx,
+                                                  ObjPtr<mirror::DexCache> dex_cache,
+                                                  ObjPtr<mirror::ClassLoader> class_loader)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Resolve a type with the given ID from the DexFile, storing the
@@ -1192,6 +1193,38 @@ class ClassLinker {
   ART_FRIEND_TEST(mirror::DexCacheMethodHandlesTest, Open);  // for AllocDexCache
   ART_FRIEND_TEST(mirror::DexCacheTest, Open);  // for AllocDexCache
   DISALLOW_COPY_AND_ASSIGN(ClassLinker);
+};
+
+class ClassLoadCallback {
+ public:
+  virtual ~ClassLoadCallback() {}
+
+  // If set we will replace initial_class_def & initial_dex_file with the final versions. The
+  // callback author is responsible for ensuring these are allocated in such a way they can be
+  // cleaned up if another transformation occurs. Note that both must be set or null/unchanged on
+  // return.
+  // Note: the class may be temporary, in which case a following ClassPrepare event will be a
+  //       different object. It is the listener's responsibility to handle this.
+  // Note: This callback is rarely useful so a default implementation has been given that does
+  //       nothing.
+  virtual void ClassPreDefine(const char* descriptor ATTRIBUTE_UNUSED,
+                              Handle<mirror::Class> klass ATTRIBUTE_UNUSED,
+                              Handle<mirror::ClassLoader> class_loader ATTRIBUTE_UNUSED,
+                              const DexFile& initial_dex_file ATTRIBUTE_UNUSED,
+                              const DexFile::ClassDef& initial_class_def ATTRIBUTE_UNUSED,
+                              /*out*/DexFile const** final_dex_file ATTRIBUTE_UNUSED,
+                              /*out*/DexFile::ClassDef const** final_class_def ATTRIBUTE_UNUSED)
+      REQUIRES_SHARED(Locks::mutator_lock_) {}
+
+  // A class has been loaded.
+  // Note: the class may be temporary, in which case a following ClassPrepare event will be a
+  //       different object. It is the listener's responsibility to handle this.
+  virtual void ClassLoad(Handle<mirror::Class> klass) REQUIRES_SHARED(Locks::mutator_lock_) = 0;
+
+  // A class has been prepared, i.e., resolved. As the ClassLoad event might have been for a
+  // temporary class, provide both the former and the current class.
+  virtual void ClassPrepare(Handle<mirror::Class> temp_klass,
+                            Handle<mirror::Class> klass) REQUIRES_SHARED(Locks::mutator_lock_) = 0;
 };
 
 }  // namespace art

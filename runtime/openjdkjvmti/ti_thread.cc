@@ -31,10 +31,12 @@
 
 #include "ti_thread.h"
 
+#include "android-base/strings.h"
 #include "art_field.h"
 #include "art_jvmti.h"
 #include "base/logging.h"
 #include "base/mutex.h"
+#include "events-inl.h"
 #include "gc/system_weak.h"
 #include "gc_root-inl.h"
 #include "jni_internal.h"
@@ -43,12 +45,88 @@
 #include "mirror/string.h"
 #include "obj_ptr.h"
 #include "runtime.h"
+#include "runtime_callbacks.h"
+#include "ScopedLocalRef.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread-inl.h"
 #include "thread_list.h"
 #include "well_known_classes.h"
 
 namespace openjdkjvmti {
+
+struct ThreadCallback : public art::ThreadLifecycleCallback, public art::RuntimePhaseCallback {
+  jthread GetThreadObject(art::Thread* self) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    if (self->GetPeer() == nullptr) {
+      return nullptr;
+    }
+    return self->GetJniEnv()->AddLocalReference<jthread>(self->GetPeer());
+  }
+  template <ArtJvmtiEvent kEvent>
+  void Post(art::Thread* self) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    DCHECK_EQ(self, art::Thread::Current());
+    ScopedLocalRef<jthread> thread(self->GetJniEnv(), GetThreadObject(self));
+    art::ScopedThreadSuspension sts(self, art::ThreadState::kNative);
+    event_handler->DispatchEvent<kEvent>(self,
+                                         reinterpret_cast<JNIEnv*>(self->GetJniEnv()),
+                                         thread.get());
+  }
+
+  void ThreadStart(art::Thread* self) OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    if (!started) {
+      // Runtime isn't started. We only expect at most the signal handler or JIT threads to be
+      // started here.
+      if (art::kIsDebugBuild) {
+        std::string name;
+        self->GetThreadName(name);
+        if (name != "Signal Catcher" && !android::base::StartsWith(name, "Jit thread pool")) {
+          LOG(FATAL) << "Unexpected thread before start: " << name;
+        }
+      }
+      return;
+    }
+    Post<ArtJvmtiEvent::kThreadStart>(self);
+  }
+
+  void ThreadDeath(art::Thread* self) OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    Post<ArtJvmtiEvent::kThreadEnd>(self);
+  }
+
+  void NextRuntimePhase(RuntimePhase phase) OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    if (phase == RuntimePhase::kInit) {
+      // We moved to VMInit. Report the main thread as started (it was attached early, and must
+      // not be reported until Init.
+      started = true;
+      Post<ArtJvmtiEvent::kThreadStart>(art::Thread::Current());
+    }
+  }
+
+  EventHandler* event_handler = nullptr;
+  bool started = false;
+};
+
+ThreadCallback gThreadCallback;
+
+void ThreadUtil::Register(EventHandler* handler) {
+  art::Runtime* runtime = art::Runtime::Current();
+
+  gThreadCallback.started = runtime->IsStarted();
+  gThreadCallback.event_handler = handler;
+
+  art::ScopedThreadStateChange stsc(art::Thread::Current(),
+                                    art::ThreadState::kWaitingForDebuggerToAttach);
+  art::ScopedSuspendAll ssa("Add thread callback");
+  runtime->GetRuntimeCallbacks()->AddThreadLifecycleCallback(&gThreadCallback);
+  runtime->GetRuntimeCallbacks()->AddRuntimePhaseCallback(&gThreadCallback);
+}
+
+void ThreadUtil::Unregister() {
+  art::ScopedThreadStateChange stsc(art::Thread::Current(),
+                                    art::ThreadState::kWaitingForDebuggerToAttach);
+  art::ScopedSuspendAll ssa("Remove thread callback");
+  art::Runtime* runtime = art::Runtime::Current();
+  runtime->GetRuntimeCallbacks()->RemoveThreadLifecycleCallback(&gThreadCallback);
+  runtime->GetRuntimeCallbacks()->RemoveRuntimePhaseCallback(&gThreadCallback);
+}
 
 jvmtiError ThreadUtil::GetCurrentThread(jvmtiEnv* env ATTRIBUTE_UNUSED, jthread* thread_ptr) {
   art::Thread* self = art::Thread::Current();
@@ -440,6 +518,82 @@ jvmtiError ThreadUtil::GetThreadLocalStorage(jvmtiEnv* env ATTRIBUTE_UNUSED,
   }
 
   *data_ptr = const_cast<void*>(self->GetCustomTLS());
+  return ERR(NONE);
+}
+
+struct AgentData {
+  const void* arg;
+  jvmtiStartFunction proc;
+  jthread thread;
+  JavaVM* java_vm;
+  jvmtiEnv* jvmti_env;
+  jint priority;
+};
+
+static void* AgentCallback(void* arg) {
+  std::unique_ptr<AgentData> data(reinterpret_cast<AgentData*>(arg));
+  CHECK(data->thread != nullptr);
+
+  // We already have a peer. So call our special Attach function.
+  art::Thread* self = art::Thread::Attach("JVMTI Agent thread", true, data->thread);
+  CHECK(self != nullptr);
+  // The name in Attach() is only for logging. Set the thread name. This is important so
+  // that the thread is no longer seen as starting up.
+  {
+    art::ScopedObjectAccess soa(self);
+    self->SetThreadName("JVMTI Agent thread");
+  }
+
+  // Release the peer.
+  JNIEnv* env = self->GetJniEnv();
+  env->DeleteGlobalRef(data->thread);
+  data->thread = nullptr;
+
+  // Run the agent code.
+  data->proc(data->jvmti_env, env, const_cast<void*>(data->arg));
+
+  // Detach the thread.
+  int detach_result = data->java_vm->DetachCurrentThread();
+  CHECK_EQ(detach_result, 0);
+
+  return nullptr;
+}
+
+jvmtiError ThreadUtil::RunAgentThread(jvmtiEnv* jvmti_env,
+                                      jthread thread,
+                                      jvmtiStartFunction proc,
+                                      const void* arg,
+                                      jint priority) {
+  if (priority < JVMTI_THREAD_MIN_PRIORITY || priority > JVMTI_THREAD_MAX_PRIORITY) {
+    return ERR(INVALID_PRIORITY);
+  }
+  JNIEnv* env = art::Thread::Current()->GetJniEnv();
+  if (thread == nullptr || !env->IsInstanceOf(thread, art::WellKnownClasses::java_lang_Thread)) {
+    return ERR(INVALID_THREAD);
+  }
+  if (proc == nullptr) {
+    return ERR(NULL_POINTER);
+  }
+
+  std::unique_ptr<AgentData> data(new AgentData);
+  data->arg = arg;
+  data->proc = proc;
+  // We need a global ref for Java objects, as local refs will be invalid.
+  data->thread = env->NewGlobalRef(thread);
+  data->java_vm = art::Runtime::Current()->GetJavaVM();
+  data->jvmti_env = jvmti_env;
+  data->priority = priority;
+
+  pthread_t pthread;
+  int pthread_create_result = pthread_create(&pthread,
+                                             nullptr,
+                                             &AgentCallback,
+                                             reinterpret_cast<void*>(data.get()));
+  if (pthread_create_result != 0) {
+    return ERR(INTERNAL);
+  }
+  data.release();
+
   return ERR(NONE);
 }
 

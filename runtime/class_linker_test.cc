@@ -87,6 +87,7 @@ class ClassLinkerTest : public CommonRuntimeTest {
     EXPECT_FALSE(primitive->IsErroneous());
     EXPECT_TRUE(primitive->IsLoaded());
     EXPECT_TRUE(primitive->IsResolved());
+    EXPECT_FALSE(primitive->IsErroneousResolved());
     EXPECT_TRUE(primitive->IsVerified());
     EXPECT_TRUE(primitive->IsInitialized());
     EXPECT_FALSE(primitive->IsArrayInstance());
@@ -125,6 +126,7 @@ class ClassLinkerTest : public CommonRuntimeTest {
     EXPECT_FALSE(JavaLangObject->IsErroneous());
     EXPECT_TRUE(JavaLangObject->IsLoaded());
     EXPECT_TRUE(JavaLangObject->IsResolved());
+    EXPECT_FALSE(JavaLangObject->IsErroneousResolved());
     EXPECT_TRUE(JavaLangObject->IsVerified());
     EXPECT_TRUE(JavaLangObject->IsInitialized());
     EXPECT_FALSE(JavaLangObject->IsArrayInstance());
@@ -199,6 +201,7 @@ class ClassLinkerTest : public CommonRuntimeTest {
     EXPECT_FALSE(array->IsErroneous());
     EXPECT_TRUE(array->IsLoaded());
     EXPECT_TRUE(array->IsResolved());
+    EXPECT_FALSE(array->IsErroneousResolved());
     EXPECT_TRUE(array->IsVerified());
     EXPECT_TRUE(array->IsInitialized());
     EXPECT_FALSE(array->IsArrayInstance());
@@ -242,12 +245,8 @@ class ClassLinkerTest : public CommonRuntimeTest {
     EXPECT_TRUE(method->GetSignature() != Signature::NoSignature());
 
     EXPECT_TRUE(method->HasDexCacheResolvedMethods(kRuntimePointerSize));
-    EXPECT_TRUE(method->HasDexCacheResolvedTypes(kRuntimePointerSize));
     EXPECT_TRUE(method->HasSameDexCacheResolvedMethods(
         method->GetDeclaringClass()->GetDexCache()->GetResolvedMethods(),
-        kRuntimePointerSize));
-    EXPECT_TRUE(method->HasSameDexCacheResolvedTypes(
-        method->GetDeclaringClass()->GetDexCache()->GetResolvedTypes(),
         kRuntimePointerSize));
   }
 
@@ -274,6 +273,7 @@ class ClassLinkerTest : public CommonRuntimeTest {
     EXPECT_TRUE(klass->GetDexCache() != nullptr);
     EXPECT_TRUE(klass->IsLoaded());
     EXPECT_TRUE(klass->IsResolved());
+    EXPECT_FALSE(klass->IsErroneousResolved());
     EXPECT_FALSE(klass->IsErroneous());
     EXPECT_FALSE(klass->IsArrayClass());
     EXPECT_TRUE(klass->GetComponentType() == nullptr);
@@ -491,7 +491,7 @@ struct CheckOffsets {
       // says AccessibleObject is 9 bytes but sizeof(AccessibleObject) is 12 bytes due to padding.
       // The RoundUp is to get around this case.
       static constexpr size_t kPackAlignment = 4;
-      size_t expected_size = RoundUp(is_static ? klass->GetClassSize(): klass->GetObjectSize(),
+      size_t expected_size = RoundUp(is_static ? klass->GetClassSize() : klass->GetObjectSize(),
           kPackAlignment);
       if (sizeof(T) != expected_size) {
         LOG(ERROR) << "Class size mismatch:"
@@ -616,7 +616,7 @@ struct ClassExtOffsets : public CheckOffsets<mirror::ClassExt> {
   ClassExtOffsets() : CheckOffsets<mirror::ClassExt>(false, "Ldalvik/system/ClassExt;") {
     addOffset(OFFSETOF_MEMBER(mirror::ClassExt, obsolete_dex_caches_), "obsoleteDexCaches");
     addOffset(OFFSETOF_MEMBER(mirror::ClassExt, obsolete_methods_), "obsoleteMethods");
-    addOffset(OFFSETOF_MEMBER(mirror::ClassExt, original_dex_cache_), "originalDexCache");
+    addOffset(OFFSETOF_MEMBER(mirror::ClassExt, original_dex_file_bytes_), "originalDexFile");
     addOffset(OFFSETOF_MEMBER(mirror::ClassExt, verify_error_), "verifyError");
   }
 };
@@ -743,13 +743,22 @@ struct MethodTypeOffsets : public CheckOffsets<mirror::MethodType> {
   }
 };
 
+struct MethodHandleOffsets : public CheckOffsets<mirror::MethodHandle> {
+  MethodHandleOffsets() : CheckOffsets<mirror::MethodHandle>(
+      false, "Ljava/lang/invoke/MethodHandle;") {
+    addOffset(OFFSETOF_MEMBER(mirror::MethodHandle, art_field_or_method_), "artFieldOrMethod");
+    addOffset(OFFSETOF_MEMBER(mirror::MethodHandle, cached_spread_invoker_),
+              "cachedSpreadInvoker");
+    addOffset(OFFSETOF_MEMBER(mirror::MethodHandle, handle_kind_), "handleKind");
+    addOffset(OFFSETOF_MEMBER(mirror::MethodHandle, nominal_type_), "nominalType");
+    addOffset(OFFSETOF_MEMBER(mirror::MethodHandle, method_type_), "type");
+  }
+};
+
 struct MethodHandleImplOffsets : public CheckOffsets<mirror::MethodHandleImpl> {
   MethodHandleImplOffsets() : CheckOffsets<mirror::MethodHandleImpl>(
-      false, "Ljava/lang/invoke/MethodHandle;") {
-    addOffset(OFFSETOF_MEMBER(mirror::MethodHandleImpl, art_field_or_method_), "artFieldOrMethod");
-    addOffset(OFFSETOF_MEMBER(mirror::MethodHandleImpl, handle_kind_), "handleKind");
-    addOffset(OFFSETOF_MEMBER(mirror::MethodHandleImpl, nominal_type_), "nominalType");
-    addOffset(OFFSETOF_MEMBER(mirror::MethodHandleImpl, method_type_), "type");
+      false, "Ljava/lang/invoke/MethodHandleImpl;") {
+    addOffset(OFFSETOF_MEMBER(mirror::MethodHandleImpl, info_), "info");
   }
 };
 
@@ -783,6 +792,7 @@ TEST_F(ClassLinkerTest, ValidateFieldOrderOfJavaCppUnionClasses) {
   EXPECT_TRUE(FieldOffsets().Check());
   EXPECT_TRUE(ExecutableOffsets().Check());
   EXPECT_TRUE(MethodTypeOffsets().Check());
+  EXPECT_TRUE(MethodHandleOffsets().Check());
   EXPECT_TRUE(MethodHandleImplOffsets().Check());
   EXPECT_TRUE(EmulatedStackFrameOffsets().Check());
 }
@@ -861,6 +871,7 @@ TEST_F(ClassLinkerTest, FindClass) {
   EXPECT_FALSE(MyClass->IsErroneous());
   EXPECT_TRUE(MyClass->IsLoaded());
   EXPECT_TRUE(MyClass->IsResolved());
+  EXPECT_FALSE(MyClass->IsErroneousResolved());
   EXPECT_FALSE(MyClass->IsVerified());
   EXPECT_FALSE(MyClass->IsInitialized());
   EXPECT_FALSE(MyClass->IsArrayInstance());
@@ -903,11 +914,87 @@ TEST_F(ClassLinkerTest, LookupResolvedType) {
       class_linker_->LookupResolvedType(dex_file, type_idx, dex_cache, class_loader.Get()),
       klass);
   // Zero out the resolved type and make sure LookupResolvedType still finds it.
-  dex_cache->SetResolvedType(type_idx, nullptr);
+  dex_cache->ClearResolvedType(type_idx);
   EXPECT_TRUE(dex_cache->GetResolvedType(type_idx) == nullptr);
   EXPECT_OBJ_PTR_EQ(
       class_linker_->LookupResolvedType(dex_file, type_idx, dex_cache, class_loader.Get()),
       klass);
+}
+
+TEST_F(ClassLinkerTest, LookupResolvedTypeArray) {
+  ScopedObjectAccess soa(Thread::Current());
+  StackHandleScope<2> hs(soa.Self());
+  Handle<mirror::ClassLoader> class_loader(
+      hs.NewHandle(soa.Decode<mirror::ClassLoader>(LoadDex("AllFields"))));
+  // Get the AllFields class for the dex cache and dex file.
+  ObjPtr<mirror::Class> all_fields_klass
+      = class_linker_->FindClass(soa.Self(), "LAllFields;", class_loader);
+  ASSERT_OBJ_PTR_NE(all_fields_klass, ObjPtr<mirror::Class>(nullptr));
+  Handle<mirror::DexCache> dex_cache = hs.NewHandle(all_fields_klass->GetDexCache());
+  const DexFile& dex_file = *dex_cache->GetDexFile();
+  // Get the index of the array class we want to test.
+  const DexFile::TypeId* array_id = dex_file.FindTypeId("[Ljava/lang/Object;");
+  ASSERT_TRUE(array_id != nullptr);
+  dex::TypeIndex array_idx = dex_file.GetIndexForTypeId(*array_id);
+  // Check that the array class wasn't resolved yet.
+  EXPECT_OBJ_PTR_EQ(
+      class_linker_->LookupResolvedType(dex_file, array_idx, dex_cache.Get(), class_loader.Get()),
+      ObjPtr<mirror::Class>(nullptr));
+  // Resolve the array class we want to test.
+  ObjPtr<mirror::Class> array_klass
+      = class_linker_->FindClass(soa.Self(), "[Ljava/lang/Object;", class_loader);
+  ASSERT_OBJ_PTR_NE(array_klass, ObjPtr<mirror::Class>(nullptr));
+  // Test that LookupResolvedType() finds the array class.
+  EXPECT_OBJ_PTR_EQ(
+      class_linker_->LookupResolvedType(dex_file, array_idx, dex_cache.Get(), class_loader.Get()),
+      array_klass);
+  // Zero out the resolved type and make sure LookupResolvedType() still finds it.
+  dex_cache->ClearResolvedType(array_idx);
+  EXPECT_TRUE(dex_cache->GetResolvedType(array_idx) == nullptr);
+  EXPECT_OBJ_PTR_EQ(
+      class_linker_->LookupResolvedType(dex_file, array_idx, dex_cache.Get(), class_loader.Get()),
+      array_klass);
+}
+
+TEST_F(ClassLinkerTest, LookupResolvedTypeErroneousInit) {
+  ScopedObjectAccess soa(Thread::Current());
+  StackHandleScope<3> hs(soa.Self());
+  Handle<mirror::ClassLoader> class_loader(
+      hs.NewHandle(soa.Decode<mirror::ClassLoader>(LoadDex("ErroneousInit"))));
+  AssertNonExistentClass("LErroneousInit;");
+  Handle<mirror::Class> klass =
+      hs.NewHandle(class_linker_->FindClass(soa.Self(), "LErroneousInit;", class_loader));
+  ASSERT_OBJ_PTR_NE(klass.Get(), ObjPtr<mirror::Class>(nullptr));
+  dex::TypeIndex type_idx = klass->GetClassDef()->class_idx_;
+  Handle<mirror::DexCache> dex_cache = hs.NewHandle(klass->GetDexCache());
+  const DexFile& dex_file = klass->GetDexFile();
+  EXPECT_OBJ_PTR_EQ(
+      class_linker_->LookupResolvedType(dex_file, type_idx, dex_cache.Get(), class_loader.Get()),
+      klass.Get());
+  // Zero out the resolved type and make sure LookupResolvedType still finds it.
+  dex_cache->ClearResolvedType(type_idx);
+  EXPECT_TRUE(dex_cache->GetResolvedType(type_idx) == nullptr);
+  EXPECT_OBJ_PTR_EQ(
+      class_linker_->LookupResolvedType(dex_file, type_idx, dex_cache.Get(), class_loader.Get()),
+      klass.Get());
+  // Force initialization to turn the class erroneous.
+  bool initialized = class_linker_->EnsureInitialized(soa.Self(),
+                                                      klass,
+                                                      /* can_init_fields */ true,
+                                                      /* can_init_parents */ true);
+  EXPECT_FALSE(initialized);
+  EXPECT_TRUE(soa.Self()->IsExceptionPending());
+  soa.Self()->ClearException();
+  // Check that the LookupResolvedType() can still find the resolved type.
+  EXPECT_OBJ_PTR_EQ(
+      class_linker_->LookupResolvedType(dex_file, type_idx, dex_cache.Get(), class_loader.Get()),
+      klass.Get());
+  // Zero out the resolved type and make sure LookupResolvedType() still finds it.
+  dex_cache->ClearResolvedType(type_idx);
+  EXPECT_TRUE(dex_cache->GetResolvedType(type_idx) == nullptr);
+  EXPECT_OBJ_PTR_EQ(
+      class_linker_->LookupResolvedType(dex_file, type_idx, dex_cache.Get(), class_loader.Get()),
+      klass.Get());
 }
 
 TEST_F(ClassLinkerTest, LibCore) {

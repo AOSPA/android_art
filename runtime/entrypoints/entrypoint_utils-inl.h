@@ -293,24 +293,16 @@ inline mirror::Array* AllocArrayFromCode(dex::TypeIndex type_idx,
                                              klass->GetComponentSizeShift(), allocator_type);
 }
 
-template <bool kAccessCheck, bool kInstrumented>
+template <bool kInstrumented>
 ALWAYS_INLINE
 inline mirror::Array* AllocArrayFromCodeResolved(mirror::Class* klass,
                                                  int32_t component_count,
-                                                 ArtMethod* method,
                                                  Thread* self,
                                                  gc::AllocatorType allocator_type) {
   DCHECK(klass != nullptr);
   if (UNLIKELY(component_count < 0)) {
     ThrowNegativeArraySizeException(component_count);
     return nullptr;  // Failure
-  }
-  if (kAccessCheck) {
-    mirror::Class* referrer = method->GetDeclaringClass();
-    if (UNLIKELY(!referrer->CanAccess(klass))) {
-      ThrowIllegalAccessErrorClass(referrer, klass);
-      return nullptr;  // Failure
-    }
   }
   // No need to retry a slow-path allocation as the above code won't cause a GC or thread
   // suspension.
@@ -713,10 +705,10 @@ inline ArtMethod* FindMethodFast(uint32_t method_idx,
     return resolved_method;
   } else if (type == kSuper) {
     // TODO This lookup is rather slow.
-    dex::TypeIndex method_type_idx =
-        referrer->GetDexFile()->GetMethodId(method_idx).class_idx_;
-    mirror::Class* method_reference_class =
-        referrer->GetDexCache()->GetResolvedType(method_type_idx);
+    ObjPtr<mirror::DexCache> dex_cache = referrer->GetDexCache();
+    dex::TypeIndex method_type_idx = dex_cache->GetDexFile()->GetMethodId(method_idx).class_idx_;
+    ObjPtr<mirror::Class> method_reference_class = ClassLinker::LookupResolvedType(
+        method_type_idx, dex_cache, referrer->GetClassLoader());
     if (method_reference_class == nullptr) {
       // Need to do full type resolution...
       return nullptr;

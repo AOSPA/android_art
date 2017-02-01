@@ -64,7 +64,7 @@
 #include "gc/space/space-inl.h"
 #include "image_writer.h"
 #include "interpreter/unstarted_runtime.h"
-#include "jit/offline_profiling_info.h"
+#include "jit/profile_compilation_info.h"
 #include "leb128.h"
 #include "linker/buffered_output_stream.h"
 #include "linker/file_output_stream.h"
@@ -277,7 +277,6 @@ NO_RETURN static void Usage(const char* fmt, ...) {
                 "|balanced"
                 "|speed-profile"
                 "|speed"
-                "|layout-profile"
                 "|everything-profile"
                 "|everything):");
   UsageError("      select compiler filter.");
@@ -1540,9 +1539,9 @@ class Dex2Oat FINAL {
         std::unique_ptr<MemMap> opened_dex_files_map;
         std::vector<std::unique_ptr<const DexFile>> opened_dex_files;
         // No need to verify the dex file for:
-        // 1) dexlayout, which already verified it
+        // 1) kSpeedProfile, since it includes dexlayout, which does the verification.
         // 2) when we have a vdex file, which means it was already verified.
-        bool verify = compiler_options_->GetCompilerFilter() != CompilerFilter::kLayoutProfile &&
+        bool verify = compiler_options_->GetCompilerFilter() != CompilerFilter::kSpeedProfile &&
             (input_vdex_file_ == nullptr);
         if (!oat_writers_[i]->WriteAndOpenDexFiles(
             kIsVdexEnabled ? vdex_files_[i].get() : oat_files_[i].get(),
@@ -2349,7 +2348,7 @@ class Dex2Oat FINAL {
                                                      compiler_options_.get(),
                                                      oat_file.get()));
       elf_writers_.back()->Start();
-      bool do_dexlayout = compiler_options_->GetCompilerFilter() == CompilerFilter::kLayoutProfile;
+      bool do_dexlayout = compiler_options_->GetCompilerFilter() == CompilerFilter::kSpeedProfile;
       oat_writers_.emplace_back(new OatWriter(
           IsBootImage(), timings_, do_dexlayout ? profile_compilation_info_.get() : nullptr));
     }

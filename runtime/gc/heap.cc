@@ -360,7 +360,7 @@ Heap::Heap(size_t initial_size,
     // If we are the zygote, the non moving space becomes the zygote space when we run
     // PreZygoteFork the first time. In this case, call the map "zygote space" since we can't
     // rename the mem map later.
-    const char* space_name = is_zygote ? kZygoteSpaceName: kNonMovingSpaceName;
+    const char* space_name = is_zygote ? kZygoteSpaceName : kNonMovingSpaceName;
     // Reserve the non moving mem map before the other two since it needs to be at a specific
     // address.
     non_moving_space_mem_map.reset(
@@ -3543,8 +3543,11 @@ void Heap::GrowForUtilization(collector::GarbageCollector* collector_ran,
   collector::GcType gc_type = collector_ran->GetGcType();
   const double multiplier = HeapGrowthMultiplier();  // Use the multiplier to grow more for
   // foreground.
-  const uint64_t adjusted_min_free = static_cast<uint64_t>(min_free_ * multiplier);
-  const uint64_t adjusted_max_free = static_cast<uint64_t>(max_free_ * multiplier);
+  // Ensure at least 2.5 MB to temporarily fix excessive GC caused by TLAB ergonomics.
+  const uint64_t adjusted_min_free = std::max(static_cast<uint64_t>(min_free_ * multiplier),
+                                              static_cast<uint64_t>(5 * MB / 2));
+  const uint64_t adjusted_max_free = std::max(static_cast<uint64_t>(max_free_ * multiplier),
+                                              static_cast<uint64_t>(5 * MB / 2));
   if (gc_type != collector::kGcTypeSticky) {
     // Grow the heap for non sticky GC.
     ssize_t delta = bytes_allocated / GetTargetHeapUtilization() - bytes_allocated;

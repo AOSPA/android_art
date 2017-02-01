@@ -38,6 +38,7 @@
 
 #include "art_jvmti.h"
 #include "art_method.h"
+#include "base/array_slice.h"
 #include "class_linker.h"
 #include "dex_file.h"
 #include "gc_root-inl.h"
@@ -56,6 +57,7 @@
 #include "obj_ptr.h"
 #include "scoped_thread_state_change-inl.h"
 #include "stack.h"
+#include "ti_class_definition.h"
 #include "thread_list.h"
 #include "transform.h"
 #include "utf.h"
@@ -72,15 +74,32 @@ class Redefiner {
  public:
   // Redefine the given classes with the given dex data. Note this function does not take ownership
   // of the dex_data pointers. It is not used after this call however and may be freed if desired.
+  // The caller is responsible for freeing it. The runtime makes its own copy of the data. This
+  // function does not call the transformation events.
+  // TODO Check modified flag of the definitions.
+  static jvmtiError RedefineClassesDirect(ArtJvmTiEnv* env,
+                                          art::Runtime* runtime,
+                                          art::Thread* self,
+                                          const std::vector<ArtClassDefinition>& definitions,
+                                          /*out*/std::string* error_msg);
+
+  // Redefine the given classes with the given dex data. Note this function does not take ownership
+  // of the dex_data pointers. It is not used after this call however and may be freed if desired.
   // The caller is responsible for freeing it. The runtime makes its own copy of the data.
+  // TODO This function should call the transformation events.
   static jvmtiError RedefineClasses(ArtJvmTiEnv* env,
                                     art::Runtime* runtime,
                                     art::Thread* self,
                                     jint class_count,
                                     const jvmtiClassDefinition* definitions,
-                                    std::string* error_msg);
+                                    /*out*/std::string* error_msg);
 
   static jvmtiError IsModifiableClass(jvmtiEnv* env, jclass klass, jboolean* is_redefinable);
+
+  static std::unique_ptr<art::MemMap> MoveDataToMemMap(const std::string& original_location,
+                                                       jint data_len,
+                                                       const unsigned char* dex_data,
+                                                       std::string* error_msg);
 
  private:
   class ClassRedefinition {
@@ -88,7 +107,8 @@ class Redefiner {
     ClassRedefinition(Redefiner* driver,
                       jclass klass,
                       const art::DexFile* redefined_dex_file,
-                      const char* class_sig)
+                      const char* class_sig,
+                      art::ArraySlice<const unsigned char> orig_dex_file)
       REQUIRES_SHARED(art::Locks::mutator_lock_);
 
     // NO_THREAD_SAFETY_ANALYSIS so we can unlock the class in the destructor.
@@ -99,34 +119,26 @@ class Redefiner {
         : driver_(other.driver_),
           klass_(other.klass_),
           dex_file_(std::move(other.dex_file_)),
-          class_sig_(std::move(other.class_sig_)) {
+          class_sig_(std::move(other.class_sig_)),
+          original_dex_file_(other.original_dex_file_) {
       other.driver_ = nullptr;
     }
 
     art::mirror::Class* GetMirrorClass() REQUIRES_SHARED(art::Locks::mutator_lock_);
     art::mirror::ClassLoader* GetClassLoader() REQUIRES_SHARED(art::Locks::mutator_lock_);
 
-    // This finds the java.lang.DexFile we will add the native DexFile to as part of the classpath.
-    // TODO Make sure the DexFile object returned is the one that the klass_ actually comes from.
-    art::mirror::Object* FindSourceDexFileObject(art::Handle<art::mirror::ClassLoader> loader)
-        REQUIRES_SHARED(art::Locks::mutator_lock_);
-
     art::mirror::DexCache* CreateNewDexCache(art::Handle<art::mirror::ClassLoader> loader)
         REQUIRES_SHARED(art::Locks::mutator_lock_);
 
-    // Allocates and fills the new DexFileCookie
-    art::mirror::LongArray* AllocateDexFileCookie(art::Handle<art::mirror::Object> j_dex_file_obj)
+    // This may return nullptr with a OOME pending if allocation fails.
+    art::mirror::ByteArray* AllocateOrGetOriginalDexFileBytes()
         REQUIRES_SHARED(art::Locks::mutator_lock_);
 
     void RecordFailure(jvmtiError e, const std::string& err) {
       driver_->RecordFailure(e, class_sig_, err);
     }
 
-    bool FinishRemainingAllocations(
-          /*out*/art::MutableHandle<art::mirror::ClassLoader>* source_class_loader,
-          /*out*/art::MutableHandle<art::mirror::Object>* source_dex_file_obj,
-          /*out*/art::MutableHandle<art::mirror::LongArray>* new_dex_file_cookie,
-          /*out*/art::MutableHandle<art::mirror::DexCache>* new_dex_cache)
+    bool FinishRemainingAllocations(int32_t klass_index, /*out*/RedefinitionDataHolder* holder)
         REQUIRES_SHARED(art::Locks::mutator_lock_);
 
     void FindAndAllocateObsoleteMethods(art::mirror::Class* art_klass)
@@ -179,7 +191,8 @@ class Redefiner {
         REQUIRES(art::Locks::mutator_lock_);
 
     void UpdateClass(art::ObjPtr<art::mirror::Class> mclass,
-                     art::ObjPtr<art::mirror::DexCache> new_dex_cache)
+                     art::ObjPtr<art::mirror::DexCache> new_dex_cache,
+                     art::ObjPtr<art::mirror::ByteArray> original_dex_file)
         REQUIRES(art::Locks::mutator_lock_);
 
     void ReleaseDexFile() REQUIRES_SHARED(art::Locks::mutator_lock_);
@@ -189,6 +202,7 @@ class Redefiner {
     jclass klass_;
     std::unique_ptr<const art::DexFile> dex_file_;
     std::string class_sig_;
+    art::ArraySlice<const unsigned char> original_dex_file_;
   };
 
   jvmtiError result_;
@@ -209,17 +223,12 @@ class Redefiner {
         redefinitions_(),
         error_msg_(error_msg) { }
 
-  jvmtiError AddRedefinition(ArtJvmTiEnv* env, const jvmtiClassDefinition& def)
+  jvmtiError AddRedefinition(ArtJvmTiEnv* env, const ArtClassDefinition& def)
       REQUIRES_SHARED(art::Locks::mutator_lock_);
 
   static jvmtiError GetClassRedefinitionError(art::Handle<art::mirror::Class> klass,
                                               /*out*/std::string* error_msg)
       REQUIRES_SHARED(art::Locks::mutator_lock_);
-
-  static std::unique_ptr<art::MemMap> MoveDataToMemMap(const std::string& original_location,
-                                                       jint data_len,
-                                                       const unsigned char* dex_data,
-                                                       std::string* error_msg);
 
   // TODO Put on all the lock qualifiers.
   jvmtiError Run() REQUIRES_SHARED(art::Locks::mutator_lock_);
@@ -229,14 +238,6 @@ class Redefiner {
   bool FinishAllRemainingAllocations(RedefinitionDataHolder& holder)
       REQUIRES_SHARED(art::Locks::mutator_lock_);
   void ReleaseAllDexFiles() REQUIRES_SHARED(art::Locks::mutator_lock_);
-
-  // Ensure that obsolete methods are deoptimized. This is needed since optimized methods may have
-  // pointers to their ArtMethods stashed in registers that they then use to attempt to hit the
-  // DexCache.
-  void EnsureObsoleteMethodsAreDeoptimized()
-      REQUIRES(art::Locks::mutator_lock_)
-      REQUIRES(!art::Locks::thread_list_lock_,
-               !art::Locks::classlinker_classes_lock_);
 
   void RecordFailure(jvmtiError result, const std::string& class_sig, const std::string& error_msg);
   void RecordFailure(jvmtiError result, const std::string& error_msg) {

@@ -116,16 +116,8 @@ public class Main {
   }
 
   public static void main(String[] args) {
-    System.loadLibrary(args[1]);
     TestWatcher w = new TestWatcher();
     doTest(new Transform(w), w);
-  }
-
-  // TODO Workaround to (1) inability to ensure that current_method is not put into a register by
-  // the JIT and/or (2) inability to deoptimize frames near runtime functions.
-  // TODO Fix one/both of these issues.
-  public static void doCall(Runnable r) {
-      r.run();
   }
 
   private static boolean interpreting = true;

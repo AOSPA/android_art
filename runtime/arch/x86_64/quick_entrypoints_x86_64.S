@@ -919,11 +919,10 @@ END_MACRO
 
 MACRO3(ONE_ARG_REF_DOWNCALL, c_name, cxx_name, return_macro)
     DEFINE_FUNCTION VAR(c_name)
-    movq 8(%rsp), %rsi                  // pass referrer
     SETUP_SAVE_REFS_ONLY_FRAME
                                         // arg0 is in rdi
-    movq %gs:THREAD_SELF_OFFSET, %rdx   // pass Thread::Current()
-    call CALLVAR(cxx_name)              // cxx_name(arg0, referrer, Thread*)
+    movq %gs:THREAD_SELF_OFFSET, %rsi   // pass Thread::Current()
+    call CALLVAR(cxx_name)              // cxx_name(arg0, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME        // restore frame up to return address
     CALL_MACRO(return_macro)
     END_FUNCTION VAR(c_name)
@@ -931,11 +930,10 @@ END_MACRO
 
 MACRO3(TWO_ARG_REF_DOWNCALL, c_name, cxx_name, return_macro)
     DEFINE_FUNCTION VAR(c_name)
-    movq 8(%rsp), %rdx                  // pass referrer
     SETUP_SAVE_REFS_ONLY_FRAME
                                         // arg0 and arg1 are in rdi/rsi
-    movq %gs:THREAD_SELF_OFFSET, %rcx   // pass Thread::Current()
-    call CALLVAR(cxx_name)              // (arg0, arg1, referrer, Thread*)
+    movq %gs:THREAD_SELF_OFFSET, %rdx   // pass Thread::Current()
+    call CALLVAR(cxx_name)              // (arg0, arg1, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME        // restore frame up to return address
     CALL_MACRO(return_macro)
     END_FUNCTION VAR(c_name)
@@ -943,11 +941,10 @@ END_MACRO
 
 MACRO3(THREE_ARG_REF_DOWNCALL, c_name, cxx_name, return_macro)
     DEFINE_FUNCTION VAR(c_name)
-    movq 8(%rsp), %rcx                  // pass referrer
     SETUP_SAVE_REFS_ONLY_FRAME
                                         // arg0, arg1, and arg2 are in rdi/rsi/rdx
-    movq %gs:THREAD_SELF_OFFSET, %r8    // pass Thread::Current()
-    call CALLVAR(cxx_name)              // cxx_name(arg0, arg1, arg2, referrer, Thread*)
+    movq %gs:THREAD_SELF_OFFSET, %rcx   // pass Thread::Current()
+    call CALLVAR(cxx_name)              // cxx_name(arg0, arg1, arg2, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME        // restore frame up to return address
     CALL_MACRO(return_macro)            // return or deliver exception
     END_FUNCTION VAR(c_name)
@@ -986,9 +983,11 @@ GENERATE_ALLOC_ENTRYPOINTS_FOR_NON_TLAB_ALLOCATORS
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_region_tlab, RegionTLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_INITIALIZED(_region_tlab, RegionTLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_WITH_ACCESS_CHECK(_region_tlab, RegionTLAB)
-// GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY(_region_tlab, RegionTLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_region_tlab, RegionTLAB)
-GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_WITH_ACCESS_CHECK(_region_tlab, RegionTLAB)
+// GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED8(_region_tlab, RegionTLAB)
+// GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED16(_region_tlab, RegionTLAB)
+// GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED32(_region_tlab, RegionTLAB)
+// GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED64(_region_tlab, RegionTLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_BYTES(_region_tlab, RegionTLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_CHARS(_region_tlab, RegionTLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(_region_tlab, RegionTLAB)
@@ -997,7 +996,10 @@ GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(_region_tlab, RegionTLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_INITIALIZED(_tlab, TLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_WITH_ACCESS_CHECK(_tlab, TLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_tlab, TLAB)
-GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_WITH_ACCESS_CHECK(_tlab, TLAB)
+// GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED8(_tlab, TLAB)
+// GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED16(_tlab, TLAB)
+// GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED32(_tlab, TLAB)
+// GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED64(_tlab, TLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_BYTES(_tlab, TLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_CHARS(_tlab, TLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(_tlab, TLAB)
@@ -1115,27 +1117,11 @@ MACRO1(ALLOC_OBJECT_INITIALIZED_TLAB_FAST_PATH, slowPathLabel)
 END_MACRO
 
 // The fast path code for art_quick_alloc_array_region_tlab.
-// Inputs: RDI: uint32_t type_idx, RSI: int32_t component_count, RDX: ArtMethod* method
-// Temps: RCX: the class, r8, r9
+// Inputs: RDI: the class, RSI: int32_t component_count, R9: total_size
+// Free temps: RCX, RDX, R8
 // Output: RAX: return value.
-MACRO1(ALLOC_ARRAY_TLAB_FAST_PATH_RESOLVED, slowPathLabel)
-    movq %rcx, %r8                                             // Save class for later
-    movl MIRROR_CLASS_COMPONENT_TYPE_OFFSET(%rcx), %ecx        // Load component type.
-    UNPOISON_HEAP_REF ecx
-    movl MIRROR_CLASS_OBJECT_PRIMITIVE_TYPE_OFFSET(%rcx), %ecx // Load primitive type.
-    shrq LITERAL(PRIMITIVE_TYPE_SIZE_SHIFT_SHIFT), %rcx        // Get component size shift.
-    movq %rsi, %r9
-    salq %cl, %r9                                              // Calculate array count shifted.
-    // Add array header + alignment rounding.
-    addq LITERAL(MIRROR_INT_ARRAY_DATA_OFFSET + OBJECT_ALIGNMENT_MASK), %r9
-    // Add 4 extra bytes if we are doing a long array.
-    addq LITERAL(1), %rcx
-    andq LITERAL(4), %rcx
-    addq %rcx, %r9
+MACRO1(ALLOC_ARRAY_TLAB_FAST_PATH_RESOLVED_WITH_SIZE, slowPathLabel)
     movq %gs:THREAD_SELF_OFFSET, %rcx                          // rcx = thread
-#if MIRROR_LONG_ARRAY_DATA_OFFSET != MIRROR_INT_ARRAY_DATA_OFFSET + 4
-#error Long array data offset must be 4 greater than int array data offset.
-#endif
     // Mask out the unaligned part to make sure we are 8 byte aligned.
     andq LITERAL(OBJECT_ALIGNMENT_MASK_TOGGLED64), %r9
     movq THREAD_LOCAL_POS_OFFSET(%rcx), %rax
@@ -1147,12 +1133,11 @@ MACRO1(ALLOC_ARRAY_TLAB_FAST_PATH_RESOLVED, slowPathLabel)
                                                                // Store the class pointer in the
                                                                // header.
                                                                // No fence needed for x86.
-    POISON_HEAP_REF r8d
-    movl %r8d, MIRROR_OBJECT_CLASS_OFFSET(%rax)
+    POISON_HEAP_REF edi
+    movl %edi, MIRROR_OBJECT_CLASS_OFFSET(%rax)
     movl %esi, MIRROR_ARRAY_LENGTH_OFFSET(%rax)
     ret                                                        // Fast path succeeded.
 END_MACRO
-
 
 // The common slow path code for art_quick_alloc_object_{resolved, initialized}_tlab
 // and art_quick_alloc_object_{resolved, initialized}_region_tlab.
@@ -1163,16 +1148,6 @@ MACRO1(ALLOC_OBJECT_TLAB_SLOW_PATH, cxx_name)
     call CALLVAR(cxx_name)                                 // cxx_name(arg0, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME                           // restore frame up to return address
     RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER                // return or deliver exception
-END_MACRO
-
-// The slow path code for art_quick_alloc_array_region_tlab.
-MACRO1(ALLOC_ARRAY_TLAB_SLOW_PATH, cxx_name)
-    SETUP_SAVE_REFS_ONLY_FRAME                                 // save ref containing registers for GC
-    // Outgoing argument set up
-    movq %gs:THREAD_SELF_OFFSET, %rcx                          // pass Thread::Current()
-    call CALLVAR(cxx_name)                                     // cxx_name(arg0, arg1, arg2, Thread*)
-    RESTORE_SAVE_REFS_ONLY_FRAME                               // restore frame up to return address
-    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER                    // return or deliver exception
 END_MACRO
 
 // A hand-written override for GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_tlab, TLAB). May be
@@ -1195,77 +1170,92 @@ DEFINE_FUNCTION art_quick_alloc_object_initialized_tlab
     ALLOC_OBJECT_TLAB_SLOW_PATH artAllocObjectFromCodeInitializedTLAB
 END_FUNCTION art_quick_alloc_object_initialized_tlab
 
-// A hand-written override for GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY(_tlab, TLAB).
-DEFINE_FUNCTION art_quick_alloc_array_tlab
-    // RDI: uint32_t type_idx, RSI: int32_t component_count, RDX: ArtMethod*
-    // RCX: klass, R8, R9: free. RAX: return val.
-    movq ART_METHOD_DEX_CACHE_TYPES_OFFSET_64(%rdx), %rcx      // Load dex cache resolved types array
-    movl 0(%rcx, %rdi, COMPRESSED_REFERENCE_SIZE), %ecx        // Load the class
-    testl %ecx, %ecx
-    jz .Lart_quick_alloc_array_tlab_slow_path
-    ALLOC_ARRAY_TLAB_FAST_PATH_RESOLVED .Lart_quick_alloc_array_tlab_slow_path
-.Lart_quick_alloc_array_tlab_slow_path:
-    ALLOC_ARRAY_TLAB_SLOW_PATH artAllocArrayFromCodeTLAB
-END_FUNCTION art_quick_alloc_array_tlab
+MACRO0(COMPUTE_ARRAY_SIZE_UNKNOWN)
+    movl MIRROR_CLASS_COMPONENT_TYPE_OFFSET(%rdi), %ecx        // Load component type.
+    UNPOISON_HEAP_REF ecx
+    movl MIRROR_CLASS_OBJECT_PRIMITIVE_TYPE_OFFSET(%rcx), %ecx // Load primitive type.
+    shrq MACRO_LITERAL(PRIMITIVE_TYPE_SIZE_SHIFT_SHIFT), %rcx        // Get component size shift.
+    movq %rsi, %r9
+    salq %cl, %r9                                              // Calculate array count shifted.
+    // Add array header + alignment rounding.
+    addq MACRO_LITERAL(MIRROR_INT_ARRAY_DATA_OFFSET + OBJECT_ALIGNMENT_MASK), %r9
+    // Add 4 extra bytes if we are doing a long array.
+    addq MACRO_LITERAL(1), %rcx
+    andq MACRO_LITERAL(4), %rcx
+#if MIRROR_LONG_ARRAY_DATA_OFFSET != MIRROR_INT_ARRAY_DATA_OFFSET + 4
+#error Long array data offset must be 4 greater than int array data offset.
+#endif
+    addq %rcx, %r9
+END_MACRO
 
-// A hand-written override for GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_tlab, TLAB).
-DEFINE_FUNCTION art_quick_alloc_array_resolved_tlab
-    // RDI: mirror::Class* klass, RSI: int32_t component_count, RDX: ArtMethod*
-    // RCX: mirror::Class* klass, R8, R9: free. RAX: return val.
-    movq %rdi, %rcx
-    // Already resolved, no null check.
-    ALLOC_ARRAY_TLAB_FAST_PATH_RESOLVED .Lart_quick_alloc_array_resolved_tlab_slow_path
-.Lart_quick_alloc_array_resolved_tlab_slow_path:
-    ALLOC_ARRAY_TLAB_SLOW_PATH artAllocArrayFromCodeResolvedTLAB
-END_FUNCTION art_quick_alloc_array_resolved_tlab
+MACRO0(COMPUTE_ARRAY_SIZE_8)
+    // RDI: mirror::Class* klass, RSI: int32_t component_count
+    // RDX, RCX, R8, R9: free. RAX: return val.
+    movq %rsi, %r9
+    // Add array header + alignment rounding.
+    addq MACRO_LITERAL(MIRROR_INT_ARRAY_DATA_OFFSET + OBJECT_ALIGNMENT_MASK), %r9
+END_MACRO
 
-// A hand-written override for GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY(_region_tlab, RegionTLAB).
-DEFINE_FUNCTION art_quick_alloc_array_region_tlab
-    // Fast path region tlab allocation.
-    // RDI: uint32_t type_idx, RSI: int32_t component_count, RDX: ArtMethod*
-    // RCX: klass, R8, R9: free. RAX: return val.
-    ASSERT_USE_READ_BARRIER
-    movq ART_METHOD_DEX_CACHE_TYPES_OFFSET_64(%rdx), %rcx      // Load dex cache resolved types array
-    movl 0(%rcx, %rdi, COMPRESSED_REFERENCE_SIZE), %ecx        // Load the class
-    // Null check so that we can load the lock word.
-    testl %ecx, %ecx
-    jz .Lart_quick_alloc_array_region_tlab_slow_path
-    // Since we have allocation entrypoint switching, we know the GC is marking.
-    // Check the mark bit, if it is 0, do the read barrier mark.
-    testl LITERAL(LOCK_WORD_MARK_BIT_MASK_SHIFTED), MIRROR_OBJECT_LOCK_WORD_OFFSET(%ecx)
-    jz .Lart_quick_alloc_array_region_tlab_class_load_read_barrier_slow_path
-.Lart_quick_alloc_array_region_tlab_class_load_read_barrier_slow_path_exit:
-    ALLOC_ARRAY_TLAB_FAST_PATH_RESOLVED .Lart_quick_alloc_array_region_tlab_slow_path
-.Lart_quick_alloc_array_region_tlab_class_load_read_barrier_slow_path:
-    // The read barrier slow path. Mark the class.
-    PUSH rdi
-    PUSH rsi
-    PUSH rdx
+MACRO0(COMPUTE_ARRAY_SIZE_16)
+    // RDI: mirror::Class* klass, RSI: int32_t component_count
+    // RDX, RCX, R8, R9: free. RAX: return val.
+    movq %rsi, %r9
+    salq MACRO_LITERAL(1), %r9
+    // Add array header + alignment rounding.
+    addq MACRO_LITERAL(MIRROR_INT_ARRAY_DATA_OFFSET + OBJECT_ALIGNMENT_MASK), %r9
+END_MACRO
+
+MACRO0(COMPUTE_ARRAY_SIZE_32)
+    // RDI: mirror::Class* klass, RSI: int32_t component_count
+    // RDX, RCX, R8, R9: free. RAX: return val.
+    movq %rsi, %r9
+    salq MACRO_LITERAL(2), %r9
+    // Add array header + alignment rounding.
+    addq MACRO_LITERAL(MIRROR_INT_ARRAY_DATA_OFFSET + OBJECT_ALIGNMENT_MASK), %r9
+END_MACRO
+
+MACRO0(COMPUTE_ARRAY_SIZE_64)
+    // RDI: mirror::Class* klass, RSI: int32_t component_count
+    // RDX, RCX, R8, R9: free. RAX: return val.
+    movq %rsi, %r9
+    salq MACRO_LITERAL(3), %r9
+    // Add array header + alignment rounding.
+    // Add 4 extra bytes for array data alignment
+    addq MACRO_LITERAL(MIRROR_INT_ARRAY_DATA_OFFSET + OBJECT_ALIGNMENT_MASK + 4), %r9
+END_MACRO
+
+// The slow path code for art_quick_alloc_array_*tlab.
+MACRO1(ALLOC_ARRAY_TLAB_SLOW_PATH, cxx_name)
+END_MACRO
+
+MACRO3(GENERATE_ALLOC_ARRAY_TLAB, c_entrypoint, cxx_name, size_setup)
+    DEFINE_FUNCTION VAR(c_entrypoint)
+    // RDI: mirror::Class* klass, RSI: int32_t component_count
+    // RDX, RCX, R8, R9: free. RAX: return val.
+    CALL_MACRO(size_setup)
+    ALLOC_ARRAY_TLAB_FAST_PATH_RESOLVED_WITH_SIZE .Lslow_path\c_entrypoint
+.Lslow_path\c_entrypoint:
+    SETUP_SAVE_REFS_ONLY_FRAME                                 // save ref containing registers for GC
     // Outgoing argument set up
-    movq %rcx, %rdi                                            // Pass the class as the first param.
-    call SYMBOL(artReadBarrierMark)                            // cxx_name(mirror::Object* obj)
-    movq %rax, %rcx
-    POP rdx
-    POP rsi
-    POP rdi
-    jmp .Lart_quick_alloc_array_region_tlab_class_load_read_barrier_slow_path_exit
-.Lart_quick_alloc_array_region_tlab_slow_path:
-    ALLOC_ARRAY_TLAB_SLOW_PATH artAllocArrayFromCodeRegionTLAB
-END_FUNCTION art_quick_alloc_array_region_tlab
+    movq %gs:THREAD_SELF_OFFSET, %rdx                          // pass Thread::Current()
+    call CALLVAR(cxx_name)                                     // cxx_name(arg0, arg1, Thread*)
+    RESTORE_SAVE_REFS_ONLY_FRAME                               // restore frame up to return address
+    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER                    // return or deliver exception
+    END_FUNCTION VAR(c_entrypoint)
+END_MACRO
 
-// A hand-written override for GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_region_tlab, RegionTLAB).
-DEFINE_FUNCTION art_quick_alloc_array_resolved_region_tlab
-    // Fast path region tlab allocation.
-    // RDI: mirror::Class* klass, RSI: int32_t component_count, RDX: ArtMethod*
-    // RCX: mirror::Class* klass, R8, R9: free. RAX: return val.
-    ASSERT_USE_READ_BARRIER
-    movq %rdi, %rcx
-    // Caller is responsible for read barrier.
-    // Already resolved, no null check.
-    ALLOC_ARRAY_TLAB_FAST_PATH_RESOLVED .Lart_quick_alloc_array_resolved_region_tlab_slow_path
-.Lart_quick_alloc_array_resolved_region_tlab_slow_path:
-    ALLOC_ARRAY_TLAB_SLOW_PATH artAllocArrayFromCodeResolvedRegionTLAB
-END_FUNCTION art_quick_alloc_array_resolved_region_tlab
+
+GENERATE_ALLOC_ARRAY_TLAB art_quick_alloc_array_resolved_region_tlab, artAllocArrayFromCodeResolvedRegionTLAB, COMPUTE_ARRAY_SIZE_UNKNOWN
+GENERATE_ALLOC_ARRAY_TLAB art_quick_alloc_array_resolved8_region_tlab, artAllocArrayFromCodeResolvedRegionTLAB, COMPUTE_ARRAY_SIZE_8
+GENERATE_ALLOC_ARRAY_TLAB art_quick_alloc_array_resolved16_region_tlab, artAllocArrayFromCodeResolvedRegionTLAB, COMPUTE_ARRAY_SIZE_16
+GENERATE_ALLOC_ARRAY_TLAB art_quick_alloc_array_resolved32_region_tlab, artAllocArrayFromCodeResolvedRegionTLAB, COMPUTE_ARRAY_SIZE_32
+GENERATE_ALLOC_ARRAY_TLAB art_quick_alloc_array_resolved64_region_tlab, artAllocArrayFromCodeResolvedRegionTLAB, COMPUTE_ARRAY_SIZE_64
+
+GENERATE_ALLOC_ARRAY_TLAB art_quick_alloc_array_resolved_tlab, artAllocArrayFromCodeResolvedTLAB, COMPUTE_ARRAY_SIZE_UNKNOWN
+GENERATE_ALLOC_ARRAY_TLAB art_quick_alloc_array_resolved8_tlab, artAllocArrayFromCodeResolvedTLAB, COMPUTE_ARRAY_SIZE_8
+GENERATE_ALLOC_ARRAY_TLAB art_quick_alloc_array_resolved16_tlab, artAllocArrayFromCodeResolvedTLAB, COMPUTE_ARRAY_SIZE_16
+GENERATE_ALLOC_ARRAY_TLAB art_quick_alloc_array_resolved32_tlab, artAllocArrayFromCodeResolvedTLAB, COMPUTE_ARRAY_SIZE_32
+GENERATE_ALLOC_ARRAY_TLAB art_quick_alloc_array_resolved64_tlab, artAllocArrayFromCodeResolvedTLAB, COMPUTE_ARRAY_SIZE_64
 
 // A hand-written override for GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_region_tlab, RegionTLAB).
 DEFINE_FUNCTION art_quick_alloc_object_resolved_region_tlab
@@ -1295,7 +1285,7 @@ DEFINE_FUNCTION art_quick_resolve_string
     // Outgoing argument set up
     movl %eax, %edi                             // pass string index
     movq %gs:THREAD_SELF_OFFSET, %rsi           // pass Thread::Current()
-    call SYMBOL(artResolveStringFromCode)       // artResolveStringFromCode(arg0, referrer, Thread*)
+    call SYMBOL(artResolveStringFromCode)       // artResolveStringFromCode(arg0, Thread*)
 
     testl %eax, %eax                            // If result is null, deliver the OOME.
     jz 1f
@@ -1607,45 +1597,33 @@ UNIMPLEMENTED art_quick_lshl
 UNIMPLEMENTED art_quick_lshr
 UNIMPLEMENTED art_quick_lushr
 
-THREE_ARG_REF_DOWNCALL art_quick_set8_instance, artSet8InstanceFromCode, RETURN_IF_EAX_ZERO
-THREE_ARG_REF_DOWNCALL art_quick_set16_instance, artSet16InstanceFromCode, RETURN_IF_EAX_ZERO
-THREE_ARG_REF_DOWNCALL art_quick_set32_instance, artSet32InstanceFromCode, RETURN_IF_EAX_ZERO
-THREE_ARG_REF_DOWNCALL art_quick_set64_instance, artSet64InstanceFromCode, RETURN_IF_EAX_ZERO
-THREE_ARG_REF_DOWNCALL art_quick_set_obj_instance, artSetObjInstanceFromCode, RETURN_IF_EAX_ZERO
+THREE_ARG_REF_DOWNCALL art_quick_set8_instance, artSet8InstanceFromCompiledCode, RETURN_IF_EAX_ZERO
+THREE_ARG_REF_DOWNCALL art_quick_set16_instance, artSet16InstanceFromCompiledCode, RETURN_IF_EAX_ZERO
+THREE_ARG_REF_DOWNCALL art_quick_set32_instance, artSet32InstanceFromCompiledCode, RETURN_IF_EAX_ZERO
+THREE_ARG_REF_DOWNCALL art_quick_set64_instance, artSet64InstanceFromCompiledCode, RETURN_IF_EAX_ZERO
+THREE_ARG_REF_DOWNCALL art_quick_set_obj_instance, artSetObjInstanceFromCompiledCode, RETURN_IF_EAX_ZERO
 
-TWO_ARG_REF_DOWNCALL art_quick_get_byte_instance, artGetByteInstanceFromCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-TWO_ARG_REF_DOWNCALL art_quick_get_boolean_instance, artGetBooleanInstanceFromCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-TWO_ARG_REF_DOWNCALL art_quick_get_short_instance, artGetShortInstanceFromCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-TWO_ARG_REF_DOWNCALL art_quick_get_char_instance, artGetCharInstanceFromCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-TWO_ARG_REF_DOWNCALL art_quick_get32_instance, artGet32InstanceFromCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-TWO_ARG_REF_DOWNCALL art_quick_get64_instance, artGet64InstanceFromCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-TWO_ARG_REF_DOWNCALL art_quick_get_obj_instance, artGetObjInstanceFromCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get_byte_instance, artGetByteInstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get_boolean_instance, artGetBooleanInstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get_short_instance, artGetShortInstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get_char_instance, artGetCharInstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get32_instance, artGet32InstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get64_instance, artGet64InstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get_obj_instance, artGetObjInstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
 
-TWO_ARG_REF_DOWNCALL art_quick_set8_static, artSet8StaticFromCode, RETURN_IF_EAX_ZERO
-TWO_ARG_REF_DOWNCALL art_quick_set16_static, artSet16StaticFromCode, RETURN_IF_EAX_ZERO
-TWO_ARG_REF_DOWNCALL art_quick_set32_static, artSet32StaticFromCode, RETURN_IF_EAX_ZERO
-TWO_ARG_REF_DOWNCALL art_quick_set_obj_static, artSetObjStaticFromCode, RETURN_IF_EAX_ZERO
+TWO_ARG_REF_DOWNCALL art_quick_set8_static, artSet8StaticFromCompiledCode, RETURN_IF_EAX_ZERO
+TWO_ARG_REF_DOWNCALL art_quick_set16_static, artSet16StaticFromCompiledCode, RETURN_IF_EAX_ZERO
+TWO_ARG_REF_DOWNCALL art_quick_set32_static, artSet32StaticFromCompiledCode, RETURN_IF_EAX_ZERO
+TWO_ARG_REF_DOWNCALL art_quick_set64_static, artSet64StaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_set_obj_static, artSetObjStaticFromCompiledCode, RETURN_IF_EAX_ZERO
 
-ONE_ARG_REF_DOWNCALL art_quick_get_byte_static, artGetByteStaticFromCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-ONE_ARG_REF_DOWNCALL art_quick_get_boolean_static, artGetBooleanStaticFromCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-ONE_ARG_REF_DOWNCALL art_quick_get_short_static, artGetShortStaticFromCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-ONE_ARG_REF_DOWNCALL art_quick_get_char_static, artGetCharStaticFromCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-ONE_ARG_REF_DOWNCALL art_quick_get32_static, artGet32StaticFromCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-ONE_ARG_REF_DOWNCALL art_quick_get64_static, artGet64StaticFromCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-ONE_ARG_REF_DOWNCALL art_quick_get_obj_static, artGetObjStaticFromCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-
-// This is singled out as the argument order is different.
-DEFINE_FUNCTION art_quick_set64_static
-                                         // new_val is already in %rdx
-    movq 8(%rsp), %rsi                   // pass referrer
-    SETUP_SAVE_REFS_ONLY_FRAME
-                                         // field_idx is in rdi
-    movq %gs:THREAD_SELF_OFFSET, %rcx    // pass Thread::Current()
-    call SYMBOL(artSet64StaticFromCode)  // (field_idx, referrer, new_val, Thread*)
-    RESTORE_SAVE_REFS_ONLY_FRAME         // restore frame up to return address
-    RETURN_IF_EAX_ZERO                   // return or deliver exception
-END_FUNCTION art_quick_set64_static
-
+ONE_ARG_REF_DOWNCALL art_quick_get_byte_static, artGetByteStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
+ONE_ARG_REF_DOWNCALL art_quick_get_boolean_static, artGetBooleanStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
+ONE_ARG_REF_DOWNCALL art_quick_get_short_static, artGetShortStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
+ONE_ARG_REF_DOWNCALL art_quick_get_char_static, artGetCharStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
+ONE_ARG_REF_DOWNCALL art_quick_get32_static, artGet32StaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
+ONE_ARG_REF_DOWNCALL art_quick_get64_static, artGet64StaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
+ONE_ARG_REF_DOWNCALL art_quick_get_obj_static, artGetObjStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
 
 DEFINE_FUNCTION art_quick_proxy_invoke_handler
     SETUP_SAVE_REFS_AND_ARGS_FRAME_WITH_METHOD_IN_RDI

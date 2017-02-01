@@ -25,6 +25,7 @@
 
 namespace art {
 
+struct MethodHandleOffsets;
 struct MethodHandleImplOffsets;
 
 namespace mirror {
@@ -84,10 +85,12 @@ class MANAGED MethodHandle : public Object {
   static mirror::Class* StaticClass() REQUIRES_SHARED(Locks::mutator_lock_);
 
  private:
+  // NOTE: cached_spread_invoker_ isn't used by the runtime.
+  HeapReference<mirror::MethodHandle> cached_spread_invoker_;
   HeapReference<mirror::MethodType> nominal_type_;
   HeapReference<mirror::MethodType> method_type_;
-  uint64_t art_field_or_method_;
   uint32_t handle_kind_;
+  uint64_t art_field_or_method_;
 
  private:
   static MemberOffset NominalTypeOffset() {
@@ -103,7 +106,7 @@ class MANAGED MethodHandle : public Object {
     return MemberOffset(OFFSETOF_MEMBER(MethodHandle, handle_kind_));
   }
 
-  friend struct art::MethodHandleImplOffsets;  // for verifying offset information
+  friend struct art::MethodHandleOffsets;  // for verifying offset information
   DISALLOW_IMPLICIT_CONSTRUCTORS(MethodHandle);
 };
 
@@ -119,6 +122,11 @@ class MANAGED MethodHandleImpl : public MethodHandle {
   static void VisitRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
 
  private:
+  static MemberOffset InfoOffset() {
+    return MemberOffset(OFFSETOF_MEMBER(MethodHandleImpl, info_));
+  }
+
+  HeapReference<mirror::Object> info_;  // Unused by the runtime.
   static GcRoot<mirror::Class> static_class_;  // java.lang.invoke.MethodHandleImpl.class
 
   friend struct art::MethodHandleImplOffsets;  // for verifying offset information

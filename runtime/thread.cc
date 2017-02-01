@@ -67,6 +67,7 @@
 #include "quick/quick_method_frame_info.h"
 #include "reflection.h"
 #include "runtime.h"
+#include "runtime_callbacks.h"
 #include "scoped_thread_state_change-inl.h"
 #include "ScopedLocalRef.h"
 #include "ScopedUtfChars.h"
@@ -431,10 +432,8 @@ void* Thread::CreateCallback(void* arg) {
 
     ArtField* priorityField = jni::DecodeArtField(WellKnownClasses::java_lang_Thread_priority);
     self->SetNativePriority(priorityField->GetInt(self->tlsPtr_.opeer));
-    {
-      ReaderMutexLock mu(self, *Locks::runtime_callbacks_lock_);
-      runtime->GetRuntimeCallbacks().ThreadStart(self);
-    }
+
+    runtime->GetRuntimeCallbacks()->ThreadStart(self);
 
     // Invoke the 'run' method of our java.lang.Thread.
     ObjPtr<mirror::Object> receiver = self->tlsPtr_.opeer;
@@ -726,8 +725,8 @@ bool Thread::Init(ThreadList* thread_list, JavaVMExt* java_vm, JNIEnvExt* jni_en
   return true;
 }
 
-Thread* Thread::Attach(const char* thread_name, bool as_daemon, jobject thread_group,
-                       bool create_peer) {
+template <typename PeerAction>
+Thread* Thread::Attach(const char* thread_name, bool as_daemon, PeerAction peer_action) {
   Runtime* runtime = Runtime::Current();
   if (runtime == nullptr) {
     LOG(ERROR) << "Thread attaching to non-existent runtime: " << thread_name;
@@ -756,32 +755,11 @@ Thread* Thread::Attach(const char* thread_name, bool as_daemon, jobject thread_g
   CHECK_NE(self->GetState(), kRunnable);
   self->SetState(kNative);
 
-  // If we're the main thread, ClassLinker won't be created until after we're attached,
-  // so that thread needs a two-stage attach. Regular threads don't need this hack.
-  // In the compiler, all threads need this hack, because no-one's going to be getting
-  // a native peer!
-  if (create_peer) {
-    self->CreatePeer(thread_name, as_daemon, thread_group);
-    if (self->IsExceptionPending()) {
-      // We cannot keep the exception around, as we're deleting self. Try to be helpful and log it.
-      {
-        ScopedObjectAccess soa(self);
-        LOG(ERROR) << "Exception creating thread peer:";
-        LOG(ERROR) << self->GetException()->Dump();
-        self->ClearException();
-      }
-      runtime->GetThreadList()->Unregister(self);
-      // Unregister deletes self, no need to do this here.
-      return nullptr;
-    }
-  } else {
-    // These aren't necessary, but they improve diagnostics for unit tests & command-line tools.
-    if (thread_name != nullptr) {
-      self->tlsPtr_.name->assign(thread_name);
-      ::art::SetThreadName(thread_name);
-    } else if (self->GetJniEnv()->check_jni) {
-      LOG(WARNING) << *Thread::Current() << " attached without supplying a name";
-    }
+  // Run the action that is acting on the peer.
+  if (!peer_action(self)) {
+    runtime->GetThreadList()->Unregister(self);
+    // Unregister deletes self, no need to do this here.
+    return nullptr;
   }
 
   if (VLOG_IS_ON(threads)) {
@@ -796,11 +774,61 @@ Thread* Thread::Attach(const char* thread_name, bool as_daemon, jobject thread_g
 
   {
     ScopedObjectAccess soa(self);
-    ReaderMutexLock mu(self, *Locks::runtime_callbacks_lock_);
-    runtime->GetRuntimeCallbacks().ThreadStart(self);
+    runtime->GetRuntimeCallbacks()->ThreadStart(self);
   }
 
   return self;
+}
+
+Thread* Thread::Attach(const char* thread_name,
+                       bool as_daemon,
+                       jobject thread_group,
+                       bool create_peer) {
+  auto create_peer_action = [&](Thread* self) {
+    // If we're the main thread, ClassLinker won't be created until after we're attached,
+    // so that thread needs a two-stage attach. Regular threads don't need this hack.
+    // In the compiler, all threads need this hack, because no-one's going to be getting
+    // a native peer!
+    if (create_peer) {
+      self->CreatePeer(thread_name, as_daemon, thread_group);
+      if (self->IsExceptionPending()) {
+        // We cannot keep the exception around, as we're deleting self. Try to be helpful and log it.
+        {
+          ScopedObjectAccess soa(self);
+          LOG(ERROR) << "Exception creating thread peer:";
+          LOG(ERROR) << self->GetException()->Dump();
+          self->ClearException();
+        }
+        return false;
+      }
+    } else {
+      // These aren't necessary, but they improve diagnostics for unit tests & command-line tools.
+      if (thread_name != nullptr) {
+        self->tlsPtr_.name->assign(thread_name);
+        ::art::SetThreadName(thread_name);
+      } else if (self->GetJniEnv()->check_jni) {
+        LOG(WARNING) << *Thread::Current() << " attached without supplying a name";
+      }
+    }
+    return true;
+  };
+  return Attach(thread_name, as_daemon, create_peer_action);
+}
+
+Thread* Thread::Attach(const char* thread_name, bool as_daemon, jobject thread_peer) {
+  auto set_peer_action = [&](Thread* self) {
+    // Install the given peer.
+    {
+      DCHECK(self == Thread::Current());
+      ScopedObjectAccess soa(self);
+      self->tlsPtr_.opeer = soa.Decode<mirror::Object>(thread_peer).Ptr();
+    }
+    self->GetJniEnv()->SetLongField(thread_peer,
+                                    WellKnownClasses::java_lang_Thread_nativePeer,
+                                    reinterpret_cast<jlong>(self));
+    return true;
+  };
+  return Attach(thread_name, as_daemon, set_peer_action);
 }
 
 void Thread::CreatePeer(const char* name, bool as_daemon, jobject thread_group) {
@@ -1935,8 +1963,7 @@ void Thread::Destroy() {
     }
     Runtime* runtime = Runtime::Current();
     if (runtime != nullptr) {
-      ReaderMutexLock mu(self, *Locks::runtime_callbacks_lock_);
-      runtime->GetRuntimeCallbacks().ThreadDeath(self);
+      runtime->GetRuntimeCallbacks()->ThreadDeath(self);
     }
 
 
@@ -2635,9 +2662,11 @@ void Thread::DumpThreadOffset(std::ostream& os, uint32_t offset) {
       os << #x; \
       return; \
     }
-  QUICK_ENTRY_POINT_INFO(pAllocArray)
   QUICK_ENTRY_POINT_INFO(pAllocArrayResolved)
-  QUICK_ENTRY_POINT_INFO(pAllocArrayWithAccessCheck)
+  QUICK_ENTRY_POINT_INFO(pAllocArrayResolved8)
+  QUICK_ENTRY_POINT_INFO(pAllocArrayResolved16)
+  QUICK_ENTRY_POINT_INFO(pAllocArrayResolved32)
+  QUICK_ENTRY_POINT_INFO(pAllocArrayResolved64)
   QUICK_ENTRY_POINT_INFO(pAllocObjectResolved)
   QUICK_ENTRY_POINT_INFO(pAllocObjectInitialized)
   QUICK_ENTRY_POINT_INFO(pAllocObjectWithChecks)
@@ -2823,13 +2852,16 @@ void Thread::QuickDeliverException() {
   if (Dbg::IsForcedInterpreterNeededForException(this)) {
     NthCallerVisitor visitor(this, 0, false);
     visitor.WalkStack();
-    if (Runtime::Current()->IsDeoptimizeable(visitor.caller_pc)) {
+    if (Runtime::Current()->IsAsyncDeoptimizeable(visitor.caller_pc)) {
       // Save the exception into the deoptimization context so it can be restored
       // before entering the interpreter.
       PushDeoptimizationContext(
           JValue(), /*is_reference */ false, /* from_code */ false, exception);
       artDeoptimize(this);
       UNREACHABLE();
+    } else {
+      LOG(WARNING) << "Got a deoptimization request on un-deoptimizable method "
+                   << visitor.caller->PrettyMethod();
     }
   }
 
@@ -3006,7 +3038,7 @@ class ReferenceMapVisitor : public StackVisitor {
       T vreg_info(m, code_info, encoding, map, visitor_);
 
       // Visit stack entries that hold pointers.
-      size_t number_of_bits = map.GetNumberOfStackMaskBits(encoding.stack_map_encoding);
+      size_t number_of_bits = code_info.GetNumberOfStackMaskBits(encoding);
       for (size_t i = 0; i < number_of_bits; ++i) {
         if (map.GetStackMaskBit(encoding.stack_map_encoding, i)) {
           auto* ref_addr = vreg_base + i;

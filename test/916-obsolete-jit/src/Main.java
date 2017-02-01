@@ -113,15 +113,7 @@ public class Main {
   }
 
   public static void main(String[] args) {
-    System.loadLibrary(args[1]);
     doTest(new Transform(), new TestWatcher());
-  }
-
-  // TODO Workaround to (1) inability to ensure that current_method is not put into a register by
-  // the JIT and/or (2) inability to deoptimize frames near runtime functions.
-  // TODO Fix one/both of these issues.
-  public static void doCall(Runnable r) {
-      r.run();
   }
 
   private static boolean interpreting = true;
@@ -130,24 +122,21 @@ public class Main {
   public static void doTest(Transform t, TestWatcher w) {
     // Get the methods that need to be optimized.
     Method say_hi_method;
-    Method do_call_method;
     // Figure out if we can even JIT at all.
     final boolean has_jit = hasJit();
     try {
       say_hi_method = Transform.class.getDeclaredMethod(
           "sayHi", Runnable.class, Consumer.class);
-      do_call_method = Main.class.getDeclaredMethod("doCall", Runnable.class);
     } catch (Exception e) {
       System.out.println("Unable to find methods!");
       e.printStackTrace();
       return;
     }
     // Makes sure the stack is the way we want it for the test and does the redefinition. It will
-    // set the retry boolean to true if we need to go around again due to a bad stack.
+    // set the retry boolean to true if the stack does not have a JIT-compiled sayHi entry. This can
+    // only happen if the method gets GC'd.
     Runnable do_redefinition = () -> {
-      if (has_jit &&
-          (Main.isInterpretedFunction(say_hi_method, true) ||
-           Main.isInterpretedFunction(do_call_method, false))) {
+      if (has_jit && Main.isInterpretedFunction(say_hi_method, true)) {
         // Try again. We are not running the right jitted methods/cannot redefine them now.
         retry = true;
       } else {
@@ -162,7 +151,6 @@ public class Main {
     do {
       // Run ensureJitCompiled here since it might get GCd
       ensureJitCompiled(Transform.class, "sayHi");
-      ensureJitCompiled(Main.class, "doCall");
       // Clear output.
       w.clear();
       // Try and redefine.

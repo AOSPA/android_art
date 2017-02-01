@@ -111,7 +111,7 @@ target_mode="yes"
 dev_mode="no"
 update_mode="no"
 debug_mode="no"
-relocate="yes"
+relocate="no"
 runtime="art"
 usage="no"
 build_only="no"
@@ -131,6 +131,7 @@ pic_image_suffix=""
 multi_image_suffix=""
 android_root="/system"
 bisection_search="no"
+suspend_timeout="500000"
 # By default we will use optimizing.
 image_args=""
 image_suffix=""
@@ -155,6 +156,7 @@ while true; do
         shift
     elif [ "x$1" = "x--jvm" ]; then
         target_mode="no"
+        DEX_LOCATION="$tmp_dir"
         runtime="jvm"
         image_args=""
         prebuild_mode="no"
@@ -218,6 +220,10 @@ while true; do
     elif [ "x$1" = "x--gcstress" ]; then
         basic_verify="true"
         gc_stress="true"
+        shift
+    elif [ "x$1" = "x--suspend-timeout" ]; then
+        shift
+        suspend_timeout="$1"
         shift
     elif [ "x$1" = "x--image" ]; then
         shift
@@ -401,6 +407,11 @@ function err_echo() {
 noncanonical_tmp_dir=$tmp_dir
 tmp_dir="`cd $oldwd ; python -c "import os; print os.path.realpath('$tmp_dir')"`"
 mkdir -p $tmp_dir
+
+# Add thread suspend timeout flag
+if [ ! "$runtime" = "jvm" ]; then
+  run_args="${run_args} --runtime-option -XX:ThreadSuspendTimeout=$suspend_timeout"
+fi
 
 if [ "$basic_verify" = "true" ]; then
   # Set HspaceCompactForOOMMinIntervalMs to zero to run hspace compaction for OOM more frequently in tests.
@@ -616,8 +627,8 @@ if [ "$usage" = "yes" ]; then
         echo "    --strip-dex           Strip the dex files before starting test."
         echo "    --relocate            Force the use of relocating in the test, making"
         echo "                          the image and oat files be relocated to a random"
-        echo "                          address before running. (default)"
-        echo "    --no-relocate         Force the use of no relocating in the test"
+        echo "                          address before running."
+        echo "    --no-relocate         Force the use of no relocating in the test. (default)"
         echo "    --image               Run the test using a precompiled boot image. (default)"
         echo "    --no-image            Run the test without a precompiled boot image."
         echo "    --host                Use the host-mode virtual machine."
@@ -649,6 +660,7 @@ if [ "$usage" = "yes" ]; then
         echo "    --quiet               Don't print anything except failure messages"
         echo "    --bisection-search    Perform bisection bug search."
         echo "    --vdex                Test using vdex as in input to dex2oat. Only works with --prebuild."
+        echo "    --suspend-timeout     Change thread suspend timeout ms (default 500000)."
     ) 1>&2  # Direct to stderr so usage is not printed if --quiet is set.
     exit 1
 fi
@@ -722,7 +734,7 @@ if [[ "$TEST_NAME" =~ ^[0-9]+-checker- ]]; then
     #
     # TODO: Enable Checker when read barrier support is added to more
     # architectures (b/12687968).
-    if [ "x$ART_USE_READ_BARRIER" = xtrue ]                    \
+    if [ "x$ART_USE_READ_BARRIER" != xfalse ]                  \
        && (([ "x$host_mode" = "xyes" ]                         \
             && ! arch_supports_read_barrier "$host_arch_name") \
            || ([ "x$target_mode" = "xyes" ]                    \

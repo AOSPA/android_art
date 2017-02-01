@@ -37,8 +37,13 @@
 
 namespace openjdkjvmti {
 
+class EventHandler;
+
 class ThreadUtil {
  public:
+  static void Register(EventHandler* event_handler);
+  static void Unregister();
+
   static jvmtiError GetAllThreads(jvmtiEnv* env, jint* threads_count_ptr, jthread** threads_ptr);
 
   static jvmtiError GetCurrentThread(jvmtiEnv* env, jthread* thread_ptr);
@@ -49,6 +54,12 @@ class ThreadUtil {
 
   static jvmtiError SetThreadLocalStorage(jvmtiEnv* env, jthread thread, const void* data);
   static jvmtiError GetThreadLocalStorage(jvmtiEnv* env, jthread thread, void** data_ptr);
+
+  static jvmtiError RunAgentThread(jvmtiEnv* env,
+                                   jthread thread,
+                                   jvmtiStartFunction proc,
+                                   const void* arg,
+                                   jint priority);
 };
 
 }  // namespace openjdkjvmti

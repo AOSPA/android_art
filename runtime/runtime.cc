@@ -114,6 +114,7 @@
 #include "native/java_lang_Thread.h"
 #include "native/java_lang_Throwable.h"
 #include "native/java_lang_VMClassLoader.h"
+#include "native/java_lang_invoke_MethodHandleImpl.h"
 #include "native/java_lang_ref_FinalizerReference.h"
 #include "native/java_lang_ref_Reference.h"
 #include "native/java_lang_reflect_Array.h"
@@ -137,6 +138,7 @@
 #include "jit/profile_saver.h"
 #include "quick/quick_method_frame_info.h"
 #include "reflection.h"
+#include "runtime_callbacks.h"
 #include "runtime_options.h"
 #include "ScopedLocalRef.h"
 #include "scoped_thread_state_change-inl.h"
@@ -243,7 +245,7 @@ Runtime::Runtime()
       force_native_bridge_(false),
       is_native_bridge_loaded_(false),
       is_native_debuggable_(false),
-      is_fully_deoptable_(false),
+      is_java_debuggable_(false),
       zygote_max_failed_boots_(0),
       experimental_flags_(ExperimentalFlags::kNone),
       oat_file_manager_(nullptr),
@@ -253,10 +255,12 @@ Runtime::Runtime()
       pruned_dalvik_cache_(false),
       // Initially assume we perceive jank in case the process state is never updated.
       process_state_(kProcessStateJankPerceptible),
-      zygote_no_threads_(false) {
+      zygote_no_threads_(false),
+      cha_(nullptr) {
   CheckAsmSupportOffsetsAndSizes();
   std::fill(callee_save_methods_, callee_save_methods_ + arraysize(callee_save_methods_), 0u);
   interpreter::CheckInterpreterAsmConstants();
+  callbacks_.reset(new RuntimeCallbacks());
 }
 
 Runtime::~Runtime() {
@@ -300,6 +304,13 @@ Runtime::~Runtime() {
   }
 
   Trace::Shutdown();
+
+  // Report death. Clients me require a working thread, still, so do it before GC completes and
+  // all non-daemon threads are done.
+  {
+    ScopedObjectAccess soa(self);
+    callbacks_->NextRuntimePhase(RuntimePhaseCallback::RuntimePhase::kDeath);
+  }
 
   if (attach_shutdown_thread) {
     DetachCurrentThread();
@@ -703,6 +714,13 @@ bool Runtime::Start() {
 
   Thread::FinishStartup();
 
+  // Send the start phase event. We have to wait till here as this is when the main thread peer
+  // has just been generated, important root clinits have been run and JNI is completely functional.
+  {
+    ScopedObjectAccess soa(self);
+    callbacks_->NextRuntimePhase(RuntimePhaseCallback::RuntimePhase::kStart);
+  }
+
   system_class_loader_ = CreateSystemClassLoader(this);
 
   if (!is_zygote_) {
@@ -716,6 +734,13 @@ bool Runtime::Start() {
                             /* is_system_server */ false,
                             action,
                             GetInstructionSetString(kRuntimeISA));
+  }
+
+  // Send the initialized phase event. Send it before starting daemons, as otherwise
+  // sending thread events becomes complicated.
+  {
+    ScopedObjectAccess soa(self);
+    callbacks_->NextRuntimePhase(RuntimePhaseCallback::RuntimePhase::kInit);
   }
 
   StartDaemonThreads();
@@ -799,14 +824,6 @@ void Runtime::StartSignalCatcher() {
 bool Runtime::IsShuttingDown(Thread* self) {
   MutexLock mu(self, *Locks::runtime_shutdown_lock_);
   return IsShuttingDownLocked();
-}
-
-bool Runtime::IsDebuggable() const {
-  if (IsFullyDeoptable()) {
-    return true;
-  }
-  const OatFile* oat_file = GetOatFileManager().GetPrimaryOatFile();
-  return oat_file != nullptr && oat_file->IsDebuggable();
 }
 
 void Runtime::StartDaemonThreads() {
@@ -1014,6 +1031,12 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   compiler_executable_ = runtime_options.ReleaseOrDefault(Opt::Compiler);
   compiler_options_ = runtime_options.ReleaseOrDefault(Opt::CompilerOptions);
+  for (StringPiece option : Runtime::Current()->GetCompilerOptions()) {
+    if (option.starts_with("--debuggable")) {
+      SetJavaDebuggable(true);
+      break;
+    }
+  }
   image_compiler_options_ = runtime_options.ReleaseOrDefault(Opt::ImageCompilerOptions);
   image_location_ = runtime_options.GetOrDefault(Opt::Image);
 
@@ -1022,13 +1045,11 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   monitor_list_ = new MonitorList;
   monitor_pool_ = MonitorPool::Create();
-  thread_list_ = new ThreadList;
+  thread_list_ = new ThreadList(runtime_options.GetOrDefault(Opt::ThreadSuspendTimeout));
   intern_table_ = new InternTable;
 
   verify_ = runtime_options.GetOrDefault(Opt::Verify);
   allow_dex_file_fallback_ = !runtime_options.Exists(Opt::NoDexFileFallback);
-
-  is_fully_deoptable_ = runtime_options.Exists(Opt::FullyDeoptable);
 
   no_sig_chain_ = runtime_options.Exists(Opt::NoSigChain);
   force_native_bridge_ = runtime_options.Exists(Opt::ForceNativeBridge);
@@ -1045,16 +1066,13 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   experimental_flags_ = runtime_options.GetOrDefault(Opt::Experimental);
   is_low_memory_mode_ = runtime_options.Exists(Opt::LowMemoryMode);
 
-  if (experimental_flags_ & ExperimentalFlags::kRuntimePlugins) {
-    plugins_ = runtime_options.ReleaseOrDefault(Opt::Plugins);
-  }
-  if (experimental_flags_ & ExperimentalFlags::kAgents) {
-    agents_ = runtime_options.ReleaseOrDefault(Opt::AgentPath);
-    // TODO Add back in -agentlib
-    // for (auto lib : runtime_options.ReleaseOrDefault(Opt::AgentLib)) {
-    //   agents_.push_back(lib);
-    // }
-  }
+  plugins_ = runtime_options.ReleaseOrDefault(Opt::Plugins);
+  agents_ = runtime_options.ReleaseOrDefault(Opt::AgentPath);
+  // TODO Add back in -agentlib
+  // for (auto lib : runtime_options.ReleaseOrDefault(Opt::AgentLib)) {
+  //   agents_.push_back(lib);
+  // }
+
   XGcOption xgc_option = runtime_options.GetOrDefault(Opt::GcOption);
   heap_ = new gc::Heap(runtime_options.GetOrDefault(Opt::MemoryInitialSize),
                        runtime_options.GetOrDefault(Opt::HeapGrowthLimit),
@@ -1100,7 +1118,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   if (runtime_options.Exists(Opt::JdwpOptions)) {
     Dbg::ConfigureJdwp(runtime_options.GetOrDefault(Opt::JdwpOptions));
   }
-  callbacks_.AddThreadLifecycleCallback(Dbg::GetThreadLifecycleCallback());
+  callbacks_->AddThreadLifecycleCallback(Dbg::GetThreadLifecycleCallback());
+  callbacks_->AddClassLoadCallback(Dbg::GetClassLoadCallback());
 
   jit_options_.reset(jit::JitOptions::CreateFromRuntimeArguments(runtime_options));
   if (IsAotCompiler()) {
@@ -1236,6 +1255,11 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
       ScopedTrace trace2("AddImageStringsToTable");
       GetInternTable()->AddImagesStringsToTable(heap_->GetBootImageSpaces());
     }
+    if (IsJavaDebuggable()) {
+      // Now that we have loaded the boot image, deoptimize its methods if we are running
+      // debuggable, as the code may have been compiled non-debuggable.
+      DeoptimizeBootImage();
+    }
   } else {
     std::vector<std::string> dex_filenames;
     Split(boot_class_path_string_, ':', &dex_filenames);
@@ -1359,6 +1383,10 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
       LOG(ERROR) << "Unable to load an agent: " << err;
     }
   }
+  {
+    ScopedObjectAccess soa(self);
+    callbacks_->NextRuntimePhase(RuntimePhaseCallback::RuntimePhase::kInitialAgents);
+  }
 
   VLOG(startup) << "Runtime::Init exiting";
 
@@ -1371,14 +1399,14 @@ static bool EnsureJvmtiPlugin(Runtime* runtime,
   constexpr const char* plugin_name = kIsDebugBuild ? "libopenjdkjvmtid.so" : "libopenjdkjvmti.so";
 
   // Is the plugin already loaded?
-  for (Plugin p : *plugins) {
+  for (const Plugin& p : *plugins) {
     if (p.GetLibrary() == plugin_name) {
       return true;
     }
   }
 
   // Is the process debuggable? Otherwise, do not attempt to load the plugin.
-  if (!runtime->IsDebuggable()) {
+  if (!runtime->IsJavaDebuggable()) {
     *error_msg = "Process is not debuggable.";
     return false;
   }
@@ -1510,6 +1538,7 @@ void Runtime::RegisterRuntimeNativeMethods(JNIEnv* env) {
   register_java_lang_Class(env);
   register_java_lang_DexCache(env);
   register_java_lang_Object(env);
+  register_java_lang_invoke_MethodHandleImpl(env);
   register_java_lang_ref_FinalizerReference(env);
   register_java_lang_reflect_Array(env);
   register_java_lang_reflect_Constructor(env);
@@ -1548,6 +1577,12 @@ void Runtime::DumpForSigQuit(std::ostream& os) {
 
   thread_list_->DumpForSigQuit(os);
   BaseMutex::DumpAll(os);
+
+  // Inform anyone else who is interested in SigQuit.
+  {
+    ScopedObjectAccess soa(Thread::Current());
+    callbacks_->SigQuit();
+  }
 }
 
 void Runtime::DumpLockHolders(std::ostream& os) {
@@ -2172,9 +2207,15 @@ bool Runtime::IsVerificationSoftFail() const {
   return verify_ == verifier::VerifyMode::kSoftFail;
 }
 
-bool Runtime::IsDeoptimizeable(uintptr_t code) const
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  return !heap_->IsInBootImageOatFile(reinterpret_cast<void *>(code));
+bool Runtime::IsAsyncDeoptimizeable(uintptr_t code) const {
+  // We only support async deopt (ie the compiled code is not explicitly asking for
+  // deopt, but something else like the debugger) in debuggable JIT code.
+  // We could look at the oat file where `code` is being defined,
+  // and check whether it's been compiled debuggable, but we decided to
+  // only rely on the JIT for debuggable apps.
+  return IsJavaDebuggable() &&
+      GetJit() != nullptr &&
+      GetJit()->GetCodeCache()->ContainsPc(reinterpret_cast<const void*>(code));
 }
 
 LinearAlloc* Runtime::CreateLinearAlloc() {
@@ -2252,6 +2293,49 @@ void Runtime::Aborter(const char* abort_message) {
   android_set_abort_message(abort_message);
 #endif
   Runtime::Abort(abort_message);
+}
+
+RuntimeCallbacks* Runtime::GetRuntimeCallbacks() {
+  return callbacks_.get();
+}
+
+// Used to patch boot image method entry point to interpreter bridge.
+class UpdateEntryPointsClassVisitor : public ClassVisitor {
+ public:
+  explicit UpdateEntryPointsClassVisitor(instrumentation::Instrumentation* instrumentation)
+      : instrumentation_(instrumentation) {}
+
+  bool operator()(ObjPtr<mirror::Class> klass) OVERRIDE REQUIRES(Locks::mutator_lock_) {
+    auto pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
+    for (auto& m : klass->GetMethods(pointer_size)) {
+      const void* code = m.GetEntryPointFromQuickCompiledCode();
+      if (Runtime::Current()->GetHeap()->IsInBootImageOatFile(code) &&
+          !m.IsNative() &&
+          !m.IsProxyMethod()) {
+        instrumentation_->UpdateMethodsCodeForJavaDebuggable(&m, GetQuickToInterpreterBridge());
+      }
+    }
+    return true;
+  }
+
+ private:
+  instrumentation::Instrumentation* const instrumentation_;
+};
+
+void Runtime::SetJavaDebuggable(bool value) {
+  is_java_debuggable_ = value;
+  // Do not call DeoptimizeBootImage just yet, the runtime may still be starting up.
+}
+
+void Runtime::DeoptimizeBootImage() {
+  // If we've already started and we are setting this runtime to debuggable,
+  // we patch entry points of methods in boot image to interpreter bridge, as
+  // boot image code may be AOT compiled as not debuggable.
+  if (!GetInstrumentation()->IsForcedInterpretOnly()) {
+    ScopedObjectAccess soa(Thread::Current());
+    UpdateEntryPointsClassVisitor visitor(GetInstrumentation());
+    GetClassLinker()->VisitClasses(&visitor);
+  }
 }
 
 }  // namespace art

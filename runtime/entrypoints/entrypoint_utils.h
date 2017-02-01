@@ -93,10 +93,9 @@ ALWAYS_INLINE inline mirror::Array* AllocArrayFromCode(dex::TypeIndex type_idx,
     REQUIRES_SHARED(Locks::mutator_lock_)
     REQUIRES(!Roles::uninterruptible_);
 
-template <bool kAccessCheck, bool kInstrumented>
+template <bool kInstrumented>
 ALWAYS_INLINE inline mirror::Array* AllocArrayFromCodeResolved(mirror::Class* klass,
                                                                int32_t component_count,
-                                                               ArtMethod* method,
                                                                Thread* self,
                                                                gc::AllocatorType allocator_type)
     REQUIRES_SHARED(Locks::mutator_lock_)
@@ -190,6 +189,9 @@ struct CallerAndOuterMethod {
 
 CallerAndOuterMethod GetCalleeSaveMethodCallerAndOuterMethod(Thread* self,
                                                              Runtime::CalleeSaveType type)
+    REQUIRES_SHARED(Locks::mutator_lock_);
+
+ArtMethod* GetCalleeSaveOuterMethod(Thread* self, Runtime::CalleeSaveType type)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
 }  // namespace art

@@ -450,7 +450,8 @@ void CodeGeneratorMIPS64::Finalize(CodeAllocator* allocator) {
 
   // Adjust native pc offsets in stack maps.
   for (size_t i = 0, num = stack_map_stream_.GetNumberOfStackMaps(); i != num; ++i) {
-    uint32_t old_position = stack_map_stream_.GetStackMap(i).native_pc_offset;
+    uint32_t old_position =
+        stack_map_stream_.GetStackMap(i).native_pc_code_offset.Uint32Value(kMips64);
     uint32_t new_position = __ GetAdjustedPosition(old_position);
     DCHECK_GE(new_position, old_position);
     stack_map_stream_.SetStackMapNativePcOffset(i, new_position);
@@ -3116,14 +3117,6 @@ void InstructionCodeGeneratorMIPS64::GenerateGcRootFieldLoad(
     Location root,
     GpuRegister obj,
     uint32_t offset) {
-  // When handling PC-relative loads, the caller calls
-  // EmitPcRelativeAddressPlaceholderHigh() and then GenerateGcRootFieldLoad().
-  // The relative patcher expects the two methods to emit the following patchable
-  // sequence of instructions in this case:
-  //   auipc reg1, 0x1234  // 0x1234 is a placeholder for offset_high.
-  //   lwu   reg2, 0x5678(reg1)  // 0x5678 is a placeholder for offset_low.
-  // TODO: Adjust GenerateGcRootFieldLoad() and its caller when this method is
-  // extended (e.g. for read barriers) so as not to break the relative patcher.
   GpuRegister root_reg = root.AsRegister<GpuRegister>();
   if (kEmitCompilerReadBarrier) {
     UNIMPLEMENTED(FATAL) << "for read barrier";
@@ -3841,19 +3834,14 @@ void LocationsBuilderMIPS64::VisitNewArray(HNewArray* instruction) {
   LocationSummary* locations =
       new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kCallOnMainOnly);
   InvokeRuntimeCallingConvention calling_convention;
-  locations->AddTemp(Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
   locations->SetOut(calling_convention.GetReturnLocation(Primitive::kPrimNot));
-  locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(1)));
-  locations->SetInAt(1, Location::RegisterLocation(calling_convention.GetRegisterAt(2)));
+  locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
+  locations->SetInAt(1, Location::RegisterLocation(calling_convention.GetRegisterAt(1)));
 }
 
 void InstructionCodeGeneratorMIPS64::VisitNewArray(HNewArray* instruction) {
-  LocationSummary* locations = instruction->GetLocations();
-  // Move an uint16_t value to a register.
-  __ LoadConst32(locations->GetTemp(0).AsRegister<GpuRegister>(),
-                 instruction->GetTypeIndex().index_);
-  codegen_->InvokeRuntime(instruction->GetEntrypoint(), instruction, instruction->GetDexPc());
-  CheckEntrypointTypes<kQuickAllocArrayWithAccessCheck, void*, uint32_t, int32_t, ArtMethod*>();
+  codegen_->InvokeRuntime(kQuickAllocArrayResolved, instruction, instruction->GetDexPc());
+  CheckEntrypointTypes<kQuickAllocArrayResolved, void*, mirror::Class*, int32_t>();
 }
 
 void LocationsBuilderMIPS64::VisitNewInstance(HNewInstance* instruction) {

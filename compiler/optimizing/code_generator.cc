@@ -839,8 +839,8 @@ void CodeGenerator::RecordPcInfo(HInstruction* instruction,
     // last emitted is different than the native pc of the stack map just emitted.
     size_t number_of_stack_maps = stack_map_stream_.GetNumberOfStackMaps();
     if (number_of_stack_maps > 1) {
-      DCHECK_NE(stack_map_stream_.GetStackMap(number_of_stack_maps - 1).native_pc_offset,
-                stack_map_stream_.GetStackMap(number_of_stack_maps - 2).native_pc_offset);
+      DCHECK_NE(stack_map_stream_.GetStackMap(number_of_stack_maps - 1).native_pc_code_offset,
+                stack_map_stream_.GetStackMap(number_of_stack_maps - 2).native_pc_code_offset);
     }
   }
 }
@@ -848,7 +848,8 @@ void CodeGenerator::RecordPcInfo(HInstruction* instruction,
 bool CodeGenerator::HasStackMapAtCurrentPc() {
   uint32_t pc = GetAssembler()->CodeSize();
   size_t count = stack_map_stream_.GetNumberOfStackMaps();
-  return count > 0 && stack_map_stream_.GetStackMap(count - 1).native_pc_offset == pc;
+  CodeOffset native_pc_offset = stack_map_stream_.GetStackMap(count - 1).native_pc_code_offset;
+  return (count > 0) && (native_pc_offset.Uint32Value(GetInstructionSet()) == pc);
 }
 
 void CodeGenerator::MaybeRecordNativeDebugInfo(HInstruction* instruction,
@@ -1414,6 +1415,24 @@ void CodeGenerator::EmitJitRoots(uint8_t* code,
     ++index;
   }
   EmitJitRootPatches(code, roots_data);
+}
+
+QuickEntrypointEnum CodeGenerator::GetArrayAllocationEntrypoint(Handle<mirror::Class> array_klass) {
+  ScopedObjectAccess soa(Thread::Current());
+  if (array_klass.Get() == nullptr) {
+    // This can only happen for non-primitive arrays, as primitive arrays can always
+    // be resolved.
+    return kQuickAllocArrayResolved32;
+  }
+
+  switch (array_klass->GetComponentSize()) {
+    case 1: return kQuickAllocArrayResolved8;
+    case 2: return kQuickAllocArrayResolved16;
+    case 4: return kQuickAllocArrayResolved32;
+    case 8: return kQuickAllocArrayResolved64;
+  }
+  LOG(FATAL) << "Unreachable";
+  return kQuickAllocArrayResolved;
 }
 
 }  // namespace art

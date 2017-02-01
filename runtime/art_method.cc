@@ -55,15 +55,24 @@ extern "C" void art_quick_invoke_stub(ArtMethod*, uint32_t*, uint32_t, Thread*, 
 extern "C" void art_quick_invoke_static_stub(ArtMethod*, uint32_t*, uint32_t, Thread*, JValue*,
                                              const char*);
 
-ArtMethod* ArtMethod::GetSingleImplementation() {
+ArtMethod* ArtMethod::GetNonObsoleteMethod() {
+  DCHECK_EQ(kRuntimePointerSize, Runtime::Current()->GetClassLinker()->GetImagePointerSize());
+  if (LIKELY(!IsObsolete())) {
+    return this;
+  } else if (IsDirect()) {
+    return &GetDeclaringClass()->GetDirectMethodsSlice(kRuntimePointerSize)[GetMethodIndex()];
+  } else {
+    return GetDeclaringClass()->GetVTableEntry(GetMethodIndex(), kRuntimePointerSize);
+  }
+}
+
+ArtMethod* ArtMethod::GetSingleImplementation(PointerSize pointer_size) {
   DCHECK(!IsNative());
   if (!IsAbstract()) {
     // A non-abstract's single implementation is itself.
     return this;
   }
-  // TODO: add single-implementation logic for abstract method by storing it
-  // in ptr_sized_fields_.
-  return nullptr;
+  return reinterpret_cast<ArtMethod*>(GetDataPtrSize(pointer_size));
 }
 
 ArtMethod* ArtMethod::FromReflectedMethod(const ScopedObjectAccessAlreadyRunnable& soa,
@@ -719,21 +728,7 @@ std::string ArtMethod::PrettyMethod(bool with_signature) {
 }
 
 std::string ArtMethod::JniShortName() {
-  std::string class_name(GetDeclaringClassDescriptor());
-  // Remove the leading 'L' and trailing ';'...
-  CHECK_EQ(class_name[0], 'L') << class_name;
-  CHECK_EQ(class_name[class_name.size() - 1], ';') << class_name;
-  class_name.erase(0, 1);
-  class_name.erase(class_name.size() - 1, 1);
-
-  std::string method_name(GetName());
-
-  std::string short_name;
-  short_name += "Java_";
-  short_name += MangleForJni(class_name);
-  short_name += "_";
-  short_name += MangleForJni(method_name);
-  return short_name;
+  return GetJniShortName(GetDeclaringClassDescriptor(), GetName());
 }
 
 std::string ArtMethod::JniLongName() {

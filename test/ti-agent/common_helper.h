@@ -28,6 +28,15 @@ jint OnLoad(JavaVM* vm, char* options, void* reserved);
 
 }  // namespace common_redefine
 
+namespace common_retransform {
+jint OnLoad(JavaVM* vm, char* options, void* reserved);
+}  // namespace common_retransform
+
+namespace common_transform {
+jint OnLoad(JavaVM* vm, char* options, void* reserved);
+}  // namespace common_transform
+
+
 extern bool RuntimeIsJVM;
 
 bool IsJVM();
@@ -66,6 +75,12 @@ static jobjectArray CreateObjectArray(JNIEnv* env,
 void SetAllCapabilities(jvmtiEnv* env);
 
 bool JvmtiErrorToException(JNIEnv* env, jvmtiError error);
+
+// Load the class through JNI. Inspect it, find all native methods. Construct the corresponding
+// mangled name, run dlsym and bind the method.
+//
+// This will abort on failure.
+void BindFunctions(jvmtiEnv* jvmti_env, JNIEnv* env, const char* class_name);
 
 }  // namespace art
 

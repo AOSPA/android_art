@@ -109,8 +109,7 @@ inline uint32_t ArtMethod::GetAccessFlags() {
 }
 
 inline uint16_t ArtMethod::GetMethodIndex() {
-  DCHECK(IsRuntimeMethod() || GetDeclaringClass()->IsResolved() ||
-         GetDeclaringClass()->IsErroneous());
+  DCHECK(IsRuntimeMethod() || GetDeclaringClass()->IsResolved());
   return method_index_;
 }
 
@@ -175,31 +174,20 @@ inline bool ArtMethod::HasSameDexCacheResolvedMethods(ArtMethod* other, PointerS
       other->GetDexCacheResolvedMethods(pointer_size);
 }
 
-inline GcRoot<mirror::Class>* ArtMethod::GetDexCacheResolvedTypes(PointerSize pointer_size) {
-  return GetNativePointer<GcRoot<mirror::Class>*>(DexCacheResolvedTypesOffset(pointer_size),
-                                                  pointer_size);
-}
-
-inline bool ArtMethod::HasDexCacheResolvedTypes(PointerSize pointer_size) {
-  return GetDexCacheResolvedTypes(pointer_size) != nullptr;
-}
-
-inline bool ArtMethod::HasSameDexCacheResolvedTypes(GcRoot<mirror::Class>* other_cache,
-                                                    PointerSize pointer_size) {
-  return GetDexCacheResolvedTypes(pointer_size) == other_cache;
-}
-
-inline bool ArtMethod::HasSameDexCacheResolvedTypes(ArtMethod* other, PointerSize pointer_size) {
-  return GetDexCacheResolvedTypes(pointer_size) == other->GetDexCacheResolvedTypes(pointer_size);
-}
-
 inline mirror::Class* ArtMethod::GetClassFromTypeIndex(dex::TypeIndex type_idx, bool resolve) {
+  // TODO: Refactor this function into two functions, Resolve...() and Lookup...()
+  // so that we can properly annotate it with no-suspension possible / suspension possible.
   ObjPtr<mirror::DexCache> dex_cache = GetDexCache();
   ObjPtr<mirror::Class> type = dex_cache->GetResolvedType(type_idx);
-  if (UNLIKELY(type == nullptr) && resolve) {
+  if (UNLIKELY(type == nullptr)) {
     ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-    type = class_linker->ResolveType(type_idx, this);
-    CHECK(type != nullptr || Thread::Current()->IsExceptionPending());
+    if (resolve) {
+      type = class_linker->ResolveType(type_idx, this);
+      CHECK(type != nullptr || Thread::Current()->IsExceptionPending());
+    } else {
+      type = class_linker->LookupResolvedType(
+          *dex_cache->GetDexFile(), type_idx, dex_cache, GetClassLoader());
+    }
   }
   return type.Ptr();
 }
@@ -263,7 +251,9 @@ inline bool ArtMethod::IsImtUnimplementedMethod() {
 }
 
 inline const DexFile* ArtMethod::GetDexFile() {
-  return GetDexCache()->GetDexFile();
+  // It is safe to avoid the read barrier here since the dex file is constant, so if we read the
+  // from-space dex file pointer it will be equal to the to-space copy.
+  return GetDexCache<kWithoutReadBarrier>()->GetDexFile();
 }
 
 inline const char* ArtMethod::GetDeclaringClassDescriptor() {
@@ -380,9 +370,11 @@ inline mirror::ClassLoader* ArtMethod::GetClassLoader() {
   return GetDeclaringClass()->GetClassLoader();
 }
 
+template <ReadBarrierOption kReadBarrierOption>
 inline mirror::DexCache* ArtMethod::GetDexCache() {
   if (LIKELY(!IsObsolete())) {
-    return GetDeclaringClass()->GetDexCache();
+    mirror::Class* klass = GetDeclaringClass<kReadBarrierOption>();
+    return klass->GetDexCache<kDefaultVerifyFlags, kReadBarrierOption>();
   } else {
     DCHECK(!IsProxyMethod());
     return GetObsoleteDexCache();
@@ -398,14 +390,13 @@ inline ArtMethod* ArtMethod::GetInterfaceMethodIfProxy(PointerSize pointer_size)
   if (LIKELY(!IsProxyMethod())) {
     return this;
   }
-  mirror::Class* klass = GetDeclaringClass();
   ArtMethod* interface_method = mirror::DexCache::GetElementPtrSize(
       GetDexCacheResolvedMethods(pointer_size),
       GetDexMethodIndex(),
       pointer_size);
   DCHECK(interface_method != nullptr);
   DCHECK_EQ(interface_method,
-            Runtime::Current()->GetClassLinker()->FindMethodForProxy(klass, this));
+            Runtime::Current()->GetClassLinker()->FindMethodForProxy(GetDeclaringClass(), this));
   return interface_method;
 }
 
@@ -414,11 +405,6 @@ inline void ArtMethod::SetDexCacheResolvedMethods(ArtMethod** new_dex_cache_meth
   SetNativePointer(DexCacheResolvedMethodsOffset(pointer_size),
                    new_dex_cache_methods,
                    pointer_size);
-}
-
-inline void ArtMethod::SetDexCacheResolvedTypes(GcRoot<mirror::Class>* new_dex_cache_types,
-                                                PointerSize pointer_size) {
-  SetNativePointer(DexCacheResolvedTypesOffset(pointer_size), new_dex_cache_types, pointer_size);
 }
 
 inline mirror::Class* ArtMethod::GetReturnType(bool resolve) {
@@ -510,11 +496,6 @@ inline void ArtMethod::UpdateObjectsForImageRelocation(const Visitor& visitor,
   ArtMethod** new_methods = visitor(old_methods);
   if (old_methods != new_methods) {
     SetDexCacheResolvedMethods(new_methods, pointer_size);
-  }
-  GcRoot<mirror::Class>* old_types = GetDexCacheResolvedTypes(pointer_size);
-  GcRoot<mirror::Class>* new_types = visitor(old_types);
-  if (old_types != new_types) {
-    SetDexCacheResolvedTypes(new_types, pointer_size);
   }
 }
 

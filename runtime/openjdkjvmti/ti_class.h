@@ -37,8 +37,13 @@
 
 namespace openjdkjvmti {
 
+class EventHandler;
+
 class ClassUtil {
  public:
+  static void Register(EventHandler* event_handler);
+  static void Unregister();
+
   static jvmtiError GetClassFields(jvmtiEnv* env,
                                    jclass klass,
                                    jint* field_count_ptr,
@@ -72,6 +77,11 @@ class ClassUtil {
 
   static jvmtiError IsInterface(jvmtiEnv* env, jclass klass, jboolean* is_interface_ptr);
   static jvmtiError IsArrayClass(jvmtiEnv* env, jclass klass, jboolean* is_array_class_ptr);
+
+  static jvmtiError GetClassVersionNumbers(jvmtiEnv* env,
+                                           jclass klass,
+                                           jint* minor_version_ptr,
+                                           jint* major_version_ptr);
 };
 
 }  // namespace openjdkjvmti

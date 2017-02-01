@@ -16,9 +16,11 @@
 
 public class Main {
   public static void main(String[] args) {
-    System.loadLibrary(args[1]);
-
     System.out.println("Hello, world!");
+
+    if (checkLivePhase()) {
+      System.out.println("Agent in live phase.");
+    }
 
     set(0);  // OTHER
     set(1);  // GC
@@ -37,5 +39,6 @@ public class Main {
     }
   }
 
+  private static native boolean checkLivePhase();
   private static native void setVerboseFlag(int flag, boolean value);
 }

@@ -438,14 +438,22 @@ void AbortTransactionV(Thread* self, const char* fmt, va_list args) {
 // about ALWAYS_INLINE (-Werror, -Wgcc-compat) in definitions.
 //
 
+// b/30419309
+#if defined(__i386__)
+#define IF_X86_OPTNONE_ELSE_ALWAYS_INLINE __attribute__((optnone))
+#else
+#define IF_X86_OPTNONE_ELSE_ALWAYS_INLINE ALWAYS_INLINE
+#endif
+
 template <bool is_range, bool do_assignability_check>
-static ALWAYS_INLINE bool DoCallCommon(ArtMethod* called_method,
-                                       Thread* self,
-                                       ShadowFrame& shadow_frame,
-                                       JValue* result,
-                                       uint16_t number_of_inputs,
-                                       uint32_t (&arg)[Instruction::kMaxVarArgRegs],
-                                       uint32_t vregC) REQUIRES_SHARED(Locks::mutator_lock_);
+IF_X86_OPTNONE_ELSE_ALWAYS_INLINE
+static bool DoCallCommon(ArtMethod* called_method,
+                         Thread* self,
+                         ShadowFrame& shadow_frame,
+                         JValue* result,
+                         uint16_t number_of_inputs,
+                         uint32_t (&arg)[Instruction::kMaxVarArgRegs],
+                         uint32_t vregC) REQUIRES_SHARED(Locks::mutator_lock_);
 
 template <bool is_range>
 ALWAYS_INLINE void CopyRegisters(ShadowFrame& caller_frame,
@@ -596,7 +604,7 @@ bool DoInvokePolymorphic(Thread* self,
     // Get the register arguments for the invoke.
     inst->GetVarArgs(args, inst_data);
     // Drop the first register which is the method handle performing the invoke.
-    memcpy(args, args + 1, sizeof(args[0]) * (Instruction::kMaxVarArgRegs - 1));
+    memmove(args, args + 1, sizeof(args[0]) * (Instruction::kMaxVarArgRegs - 1));
     args[Instruction::kMaxVarArgRegs - 1] = 0;
     return DoInvokePolymorphic<is_range, do_access_check>(self,
                                                           invoke_method,

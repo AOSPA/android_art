@@ -57,7 +57,6 @@ namespace art {
 using android::base::StringPrintf;
 
 static constexpr uint64_t kLongThreadSuspendThreshold = MsToNs(5);
-static constexpr uint64_t kThreadSuspendTimeoutMs = 30 * 1000;  // 30s.
 // Use 0 since we want to yield to prevent blocking for an unpredictable amount of time.
 static constexpr useconds_t kThreadSuspendInitialSleepUs = 0;
 static constexpr useconds_t kThreadSuspendMaxYieldUs = 3000;
@@ -68,12 +67,13 @@ static constexpr useconds_t kThreadSuspendMaxSleepUs = 5000;
 // Turned off again. b/29248079
 static constexpr bool kDumpUnattachedThreadNativeStackForSigQuit = false;
 
-ThreadList::ThreadList()
+ThreadList::ThreadList(uint64_t thread_suspend_timeout_ns)
     : suspend_all_count_(0),
       debug_suspend_all_count_(0),
       unregistering_count_(0),
       suspend_all_historam_("suspend all histogram", 16, 64),
       long_suspend_(false),
+      thread_suspend_timeout_ns_(thread_suspend_timeout_ns),
       empty_checkpoint_barrier_(new Barrier(0)) {
   CHECK(Monitor::IsValidLockWord(LockWord::FromThinLockId(kMaxThreadId, 1, 0U)));
 }
@@ -455,7 +455,6 @@ size_t ThreadList::FlipThreadRoots(Closure* thread_flip_visitor,
                                    Closure* flip_callback,
                                    gc::collector::GarbageCollector* collector) {
   TimingLogger::ScopedTiming split("ThreadListFlip", collector->GetTimings());
-  const uint64_t start_time = NanoTime();
   Thread* self = Thread::Current();
   Locks::mutator_lock_->AssertNotHeld(self);
   Locks::thread_list_lock_->AssertNotHeld(self);
@@ -464,13 +463,17 @@ size_t ThreadList::FlipThreadRoots(Closure* thread_flip_visitor,
 
   collector->GetHeap()->ThreadFlipBegin(self);  // Sync with JNI critical calls.
 
+  // ThreadFlipBegin happens before we suspend all the threads, so it does not count towards the
+  // pause.
+  const uint64_t suspend_start_time = NanoTime();
   SuspendAllInternal(self, self, nullptr);
 
   // Run the flip callback for the collector.
   Locks::mutator_lock_->ExclusiveLock(self);
+  suspend_all_historam_.AdjustAndAddValue(NanoTime() - suspend_start_time);
   flip_callback->Run(self);
   Locks::mutator_lock_->ExclusiveUnlock(self);
-  collector->RegisterPause(NanoTime() - start_time);
+  collector->RegisterPause(NanoTime() - suspend_start_time);
 
   // Resume runnable threads.
   size_t runnable_thread_count = 0;
@@ -554,12 +557,14 @@ void ThreadList::SuspendAll(const char* cause, bool long_suspend) {
     // Make sure this thread grabs exclusive access to the mutator lock and its protected data.
 #if HAVE_TIMED_RWLOCK
     while (true) {
-      if (Locks::mutator_lock_->ExclusiveLockWithTimeout(self, kThreadSuspendTimeoutMs, 0)) {
+      if (Locks::mutator_lock_->ExclusiveLockWithTimeout(self,
+                                                         NsToMs(thread_suspend_timeout_ns_),
+                                                         0)) {
         break;
       } else if (!long_suspend_) {
         // Reading long_suspend without the mutator lock is slightly racy, in some rare cases, this
         // could result in a thread suspend timeout.
-        // Timeout if we wait more than kThreadSuspendTimeoutMs seconds.
+        // Timeout if we wait more than thread_suspend_timeout_ns_ nanoseconds.
         UnsafeLogFatalForThreadSuspendAllTimeout();
       }
     }
@@ -627,8 +632,9 @@ void ThreadList::SuspendAllInternal(Thread* self,
     MutexLock mu2(self, *Locks::thread_suspend_count_lock_);
     // Update global suspend all state for attaching threads.
     ++suspend_all_count_;
-    if (debug_suspend)
+    if (debug_suspend) {
       ++debug_suspend_all_count_;
+    }
     pending_threads.StoreRelaxed(list_.size() - num_ignored);
     // Increment everybody's suspend count (except those that should be ignored).
     for (const auto& thread : list_) {
@@ -653,7 +659,7 @@ void ThreadList::SuspendAllInternal(Thread* self,
   // is done with a timeout so that we can detect problems.
 #if ART_USE_FUTEXES
   timespec wait_timeout;
-  InitTimeSpec(false, CLOCK_MONOTONIC, kIsDebugBuild ? 50000 : 10000, 0, &wait_timeout);
+  InitTimeSpec(false, CLOCK_MONOTONIC, NsToMs(thread_suspend_timeout_ns_), 0, &wait_timeout);
 #endif
   const uint64_t start_time = NanoTime();
   while (true) {
@@ -863,7 +869,7 @@ Thread* ThreadList::SuspendThreadByPeer(jobject peer,
           return thread;
         }
         const uint64_t total_delay = NanoTime() - start_time;
-        if (total_delay >= MsToNs(kThreadSuspendTimeoutMs)) {
+        if (total_delay >= thread_suspend_timeout_ns_) {
           ThreadSuspendByPeerWarning(self,
                                      ::android::base::FATAL,
                                      "Thread suspension timed out",
@@ -969,7 +975,7 @@ Thread* ThreadList::SuspendThreadByThreadId(uint32_t thread_id,
           return thread;
         }
         const uint64_t total_delay = NanoTime() - start_time;
-        if (total_delay >= MsToNs(kThreadSuspendTimeoutMs)) {
+        if (total_delay >= thread_suspend_timeout_ns_) {
           ThreadSuspendByThreadIdWarning(::android::base::WARNING,
                                          "Thread suspension timed out",
                                          thread_id);

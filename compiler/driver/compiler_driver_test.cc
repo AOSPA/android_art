@@ -32,7 +32,7 @@
 #include "mirror/object_array-inl.h"
 #include "mirror/object-inl.h"
 #include "handle_scope-inl.h"
-#include "jit/offline_profiling_info.h"
+#include "jit/profile_compilation_info.h"
 #include "scoped_thread_state_change-inl.h"
 
 namespace art {
@@ -101,6 +101,7 @@ class CompilerDriverTest : public CommonCompilerTest {
 };
 
 // Disabled due to 10 second runtime on host
+// TODO: Update the test for hash-based dex cache arrays. Bug: 30627598
 TEST_F(CompilerDriverTest, DISABLED_LARGE_CompileDexLibCore) {
   CompileAll(nullptr);
 

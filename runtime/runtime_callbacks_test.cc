@@ -17,18 +17,29 @@
 #include "runtime_callbacks.h"
 
 #include "jni.h"
+#include <signal.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#include <initializer_list>
 #include <memory>
 #include <string>
 
 #include "art_method-inl.h"
 #include "base/mutex.h"
-#include "mirror/class-inl.h"
+#include "class_linker.h"
 #include "common_runtime_test.h"
+#include "handle.h"
+#include "handle_scope-inl.h"
 #include "mem_map.h"
+#include "mirror/class-inl.h"
+#include "mirror/class_loader.h"
 #include "obj_ptr.h"
 #include "runtime.h"
+#include "scoped_thread_state_change-inl.h"
 #include "ScopedLocalRef.h"
 #include "thread-inl.h"
+#include "thread_list.h"
 #include "well_known_classes.h"
 
 namespace art {
@@ -38,21 +49,27 @@ class RuntimeCallbacksTest : public CommonRuntimeTest {
   void SetUp() OVERRIDE {
     CommonRuntimeTest::SetUp();
 
-    WriterMutexLock mu(Thread::Current(), *Locks::runtime_callbacks_lock_);
+    Thread* self = Thread::Current();
+    ScopedObjectAccess soa(self);
+    ScopedThreadSuspension sts(self, kWaitingForDebuggerToAttach);
+    ScopedSuspendAll ssa("RuntimeCallbacksTest SetUp");
     AddListener();
   }
 
   void TearDown() OVERRIDE {
     {
-      WriterMutexLock mu(Thread::Current(), *Locks::runtime_callbacks_lock_);
+      Thread* self = Thread::Current();
+      ScopedObjectAccess soa(self);
+      ScopedThreadSuspension sts(self, kWaitingForDebuggerToAttach);
+      ScopedSuspendAll ssa("RuntimeCallbacksTest TearDown");
       RemoveListener();
     }
 
     CommonRuntimeTest::TearDown();
   }
 
-  virtual void AddListener() REQUIRES(Locks::runtime_callbacks_lock_) = 0;
-  virtual void RemoveListener() REQUIRES(Locks::runtime_callbacks_lock_) = 0;
+  virtual void AddListener() REQUIRES(Locks::mutator_lock_) = 0;
+  virtual void RemoveListener() REQUIRES(Locks::mutator_lock_) = 0;
 
   void MakeExecutable(ObjPtr<mirror::Class> klass) REQUIRES_SHARED(Locks::mutator_lock_) {
     CHECK(klass != nullptr);
@@ -80,11 +97,11 @@ class ThreadLifecycleCallbackRuntimeCallbacksTest : public RuntimeCallbacksTest 
   }
 
  protected:
-  void AddListener() OVERRIDE REQUIRES(Locks::runtime_callbacks_lock_) {
-    Runtime::Current()->GetRuntimeCallbacks().AddThreadLifecycleCallback(&cb_);
+  void AddListener() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+    Runtime::Current()->GetRuntimeCallbacks()->AddThreadLifecycleCallback(&cb_);
   }
-  void RemoveListener() OVERRIDE REQUIRES(Locks::runtime_callbacks_lock_) {
-    Runtime::Current()->GetRuntimeCallbacks().RemoveThreadLifecycleCallback(&cb_);
+  void RemoveListener() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+    Runtime::Current()->GetRuntimeCallbacks()->RemoveThreadLifecycleCallback(&cb_);
   }
 
   enum CallbackState {
@@ -119,7 +136,6 @@ class ThreadLifecycleCallbackRuntimeCallbacksTest : public RuntimeCallbacksTest 
 
   Callback cb_;
 };
-
 
 TEST_F(ThreadLifecycleCallbackRuntimeCallbacksTest, ThreadLifecycleCallbackJava) {
   Thread* self = Thread::Current();
@@ -196,6 +212,221 @@ TEST_F(ThreadLifecycleCallbackRuntimeCallbacksTest, ThreadLifecycleCallbackAttac
 
   // Detach is not a ThreadDeath event, so we expect to be in state Started.
   EXPECT_TRUE(cb_.state == CallbackState::kStarted) << static_cast<int>(cb_.state);
+}
+
+class ClassLoadCallbackRuntimeCallbacksTest : public RuntimeCallbacksTest {
+ protected:
+  void AddListener() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+    Runtime::Current()->GetRuntimeCallbacks()->AddClassLoadCallback(&cb_);
+  }
+  void RemoveListener() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+    Runtime::Current()->GetRuntimeCallbacks()->RemoveClassLoadCallback(&cb_);
+  }
+
+  bool Expect(std::initializer_list<const char*> list) {
+    if (cb_.data.size() != list.size()) {
+      PrintError(list);
+      return false;
+    }
+
+    if (!std::equal(cb_.data.begin(), cb_.data.end(), list.begin())) {
+      PrintError(list);
+      return false;
+    }
+
+    return true;
+  }
+
+  void PrintError(std::initializer_list<const char*> list) {
+    LOG(ERROR) << "Expected:";
+    for (const char* expected : list) {
+      LOG(ERROR) << "  " << expected;
+    }
+    LOG(ERROR) << "Found:";
+    for (const auto& s : cb_.data) {
+      LOG(ERROR) << "  " << s;
+    }
+  }
+
+  struct Callback : public ClassLoadCallback {
+    virtual void ClassPreDefine(const char* descriptor,
+                                Handle<mirror::Class> klass ATTRIBUTE_UNUSED,
+                                Handle<mirror::ClassLoader> class_loader ATTRIBUTE_UNUSED,
+                                const DexFile& initial_dex_file,
+                                const DexFile::ClassDef& initial_class_def ATTRIBUTE_UNUSED,
+                                /*out*/DexFile const** final_dex_file ATTRIBUTE_UNUSED,
+                                /*out*/DexFile::ClassDef const** final_class_def ATTRIBUTE_UNUSED)
+        OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+      std::string location(initial_dex_file.GetLocation());
+      std::string event =
+          std::string("PreDefine:") + descriptor + " <" +
+          location.substr(location.rfind("/") + 1, location.size()) + ">";
+      data.push_back(event);
+    }
+
+    void ClassLoad(Handle<mirror::Class> klass) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+      std::string tmp;
+      std::string event = std::string("Load:") + klass->GetDescriptor(&tmp);
+      data.push_back(event);
+    }
+
+    void ClassPrepare(Handle<mirror::Class> temp_klass,
+                      Handle<mirror::Class> klass) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+      std::string tmp, tmp2;
+      std::string event = std::string("Prepare:") + klass->GetDescriptor(&tmp)
+          + "[" + temp_klass->GetDescriptor(&tmp2) + "]";
+      data.push_back(event);
+    }
+
+    std::vector<std::string> data;
+  };
+
+  Callback cb_;
+};
+
+TEST_F(ClassLoadCallbackRuntimeCallbacksTest, ClassLoadCallback) {
+  ScopedObjectAccess soa(Thread::Current());
+  jobject jclass_loader = LoadDex("XandY");
+  VariableSizedHandleScope hs(soa.Self());
+  Handle<mirror::ClassLoader> class_loader(hs.NewHandle(
+      soa.Decode<mirror::ClassLoader>(jclass_loader)));
+
+  const char* descriptor_y = "LY;";
+  Handle<mirror::Class> h_Y(
+      hs.NewHandle(class_linker_->FindClass(soa.Self(), descriptor_y, class_loader)));
+  ASSERT_TRUE(h_Y.Get() != nullptr);
+
+  bool expect1 = Expect({ "PreDefine:LY; <art-gtest-XandY.jar>",
+                          "PreDefine:LX; <art-gtest-XandY.jar>",
+                          "Load:LX;",
+                          "Prepare:LX;[LX;]",
+                          "Load:LY;",
+                          "Prepare:LY;[LY;]" });
+  EXPECT_TRUE(expect1);
+
+  cb_.data.clear();
+
+  ASSERT_TRUE(class_linker_->EnsureInitialized(Thread::Current(), h_Y, true, true));
+
+  bool expect2 = Expect({ "PreDefine:LY$Z; <art-gtest-XandY.jar>",
+                          "Load:LY$Z;",
+                          "Prepare:LY$Z;[LY$Z;]" });
+  EXPECT_TRUE(expect2);
+}
+
+class RuntimeSigQuitCallbackRuntimeCallbacksTest : public RuntimeCallbacksTest {
+ protected:
+  void AddListener() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+    Runtime::Current()->GetRuntimeCallbacks()->AddRuntimeSigQuitCallback(&cb_);
+  }
+  void RemoveListener() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+    Runtime::Current()->GetRuntimeCallbacks()->RemoveRuntimeSigQuitCallback(&cb_);
+  }
+
+  struct Callback : public RuntimeSigQuitCallback {
+    void SigQuit() OVERRIDE {
+      ++sigquit_count;
+    }
+
+    size_t sigquit_count = 0;
+  };
+
+  Callback cb_;
+};
+
+TEST_F(RuntimeSigQuitCallbackRuntimeCallbacksTest, SigQuit) {
+  // The runtime needs to be started for the signal handler.
+  Thread* self = Thread::Current();
+
+  self->TransitionFromSuspendedToRunnable();
+  bool started = runtime_->Start();
+  ASSERT_TRUE(started);
+
+  EXPECT_EQ(0u, cb_.sigquit_count);
+
+  kill(getpid(), SIGQUIT);
+
+  // Try a few times.
+  for (size_t i = 0; i != 30; ++i) {
+    if (cb_.sigquit_count == 0) {
+      sleep(1);
+    } else {
+      break;
+    }
+  }
+  EXPECT_EQ(1u, cb_.sigquit_count);
+}
+
+class RuntimePhaseCallbackRuntimeCallbacksTest : public RuntimeCallbacksTest {
+ protected:
+  void AddListener() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+    Runtime::Current()->GetRuntimeCallbacks()->AddRuntimePhaseCallback(&cb_);
+  }
+  void RemoveListener() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+    Runtime::Current()->GetRuntimeCallbacks()->RemoveRuntimePhaseCallback(&cb_);
+  }
+
+  void TearDown() OVERRIDE {
+    // Bypass RuntimeCallbacksTest::TearDown, as the runtime is already gone.
+    CommonRuntimeTest::TearDown();
+  }
+
+  struct Callback : public RuntimePhaseCallback {
+    void NextRuntimePhase(RuntimePhaseCallback::RuntimePhase p) OVERRIDE {
+      if (p == RuntimePhaseCallback::RuntimePhase::kInitialAgents) {
+        if (start_seen > 0 || init_seen > 0 || death_seen > 0) {
+          LOG(FATAL) << "Unexpected order";
+        }
+        ++initial_agents_seen;
+      } else if (p == RuntimePhaseCallback::RuntimePhase::kStart) {
+        if (init_seen > 0 || death_seen > 0) {
+          LOG(FATAL) << "Init seen before start.";
+        }
+        ++start_seen;
+      } else if (p == RuntimePhaseCallback::RuntimePhase::kInit) {
+        ++init_seen;
+      } else if (p == RuntimePhaseCallback::RuntimePhase::kDeath) {
+        ++death_seen;
+      } else {
+        LOG(FATAL) << "Unknown phase " << static_cast<uint32_t>(p);
+      }
+    }
+
+    size_t initial_agents_seen = 0;
+    size_t start_seen = 0;
+    size_t init_seen = 0;
+    size_t death_seen = 0;
+  };
+
+  Callback cb_;
+};
+
+TEST_F(RuntimePhaseCallbackRuntimeCallbacksTest, Phases) {
+  ASSERT_EQ(0u, cb_.initial_agents_seen);
+  ASSERT_EQ(0u, cb_.start_seen);
+  ASSERT_EQ(0u, cb_.init_seen);
+  ASSERT_EQ(0u, cb_.death_seen);
+
+  // Start the runtime.
+  {
+    Thread* self = Thread::Current();
+    self->TransitionFromSuspendedToRunnable();
+    bool started = runtime_->Start();
+    ASSERT_TRUE(started);
+  }
+
+  ASSERT_EQ(0u, cb_.initial_agents_seen);
+  ASSERT_EQ(1u, cb_.start_seen);
+  ASSERT_EQ(1u, cb_.init_seen);
+  ASSERT_EQ(0u, cb_.death_seen);
+
+  // Delete the runtime.
+  runtime_.reset();
+
+  ASSERT_EQ(0u, cb_.initial_agents_seen);
+  ASSERT_EQ(1u, cb_.start_seen);
+  ASSERT_EQ(1u, cb_.init_seen);
+  ASSERT_EQ(1u, cb_.death_seen);
 }
 
 }  // namespace art
