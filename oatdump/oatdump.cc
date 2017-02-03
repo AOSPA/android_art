@@ -589,16 +589,16 @@ class OatDumper {
       kByteKindCodeInfoInlineInfo,
       kByteKindCodeInfoEncoding,
       kByteKindCodeInfoOther,
+      kByteKindCodeInfoStackMasks,
       kByteKindStackMapNativePc,
       kByteKindStackMapDexPc,
       kByteKindStackMapDexRegisterMap,
       kByteKindStackMapInlineInfo,
       kByteKindStackMapRegisterMask,
-      kByteKindStackMapMask,
-      kByteKindStackMapOther,
+      kByteKindStackMapStackMaskIndex,
       kByteKindCount,
       kByteKindStackMapFirst = kByteKindCodeInfoOther,
-      kByteKindStackMapLast = kByteKindStackMapOther,
+      kByteKindStackMapLast = kByteKindStackMapStackMaskIndex,
     };
     int64_t bits[kByteKindCount] = {};
     // Since code has deduplication, seen tracks already seen pointers to avoid double counting
@@ -632,6 +632,7 @@ class OatDumper {
         Dump(os, "CodeInfoLocationCatalog        ", bits[kByteKindCodeInfoLocationCatalog], sum);
         Dump(os, "CodeInfoDexRegisterMap         ", bits[kByteKindCodeInfoDexRegisterMap], sum);
         Dump(os, "CodeInfoInlineInfo             ", bits[kByteKindCodeInfoInlineInfo], sum);
+        Dump(os, "CodeInfoStackMasks             ", bits[kByteKindCodeInfoStackMasks], sum);
         Dump(os, "CodeInfoStackMap               ", stack_map_bits, sum);
         {
           ScopedIndentation indent1(&os);
@@ -661,13 +662,8 @@ class OatDumper {
                stack_map_bits,
                "stack map");
           Dump(os,
-               "StackMapMask                 ",
-               bits[kByteKindStackMapMask],
-               stack_map_bits,
-               "stack map");
-          Dump(os,
-               "StackMapOther                ",
-               bits[kByteKindStackMapOther],
+               "StackMapStackMaskIndex       ",
+               bits[kByteKindStackMapStackMaskIndex],
                stack_map_bits,
                "stack map");
         }
@@ -1575,16 +1571,13 @@ class OatDumper {
           stats_.AddBits(
               Stats::kByteKindStackMapRegisterMask,
               stack_map_encoding.GetRegisterMaskEncoding().BitSize() * num_stack_maps);
-          const size_t stack_mask_bits = encoding.stack_map_size_in_bits -
-              stack_map_encoding.GetStackMaskBitOffset();
           stats_.AddBits(
-              Stats::kByteKindStackMapMask,
-              stack_mask_bits * num_stack_maps);
-          const size_t stack_map_bits =
-              stack_map_encoding.GetStackMaskBitOffset() + stack_mask_bits;
+              Stats::kByteKindStackMapStackMaskIndex,
+              stack_map_encoding.GetStackMaskIndexEncoding().BitSize() * num_stack_maps);
           stats_.AddBits(
-              Stats::kByteKindStackMapOther,
-              (encoding.stack_map_size_in_bits - stack_map_bits) * num_stack_maps);
+              Stats::kByteKindCodeInfoStackMasks,
+              helper.GetCodeInfo().GetNumberOfStackMaskBits(encoding) *
+                  encoding.number_of_stack_masks);
           const size_t stack_map_bytes = helper.GetCodeInfo().GetStackMapsSize(encoding);
           const size_t location_catalog_bytes =
               helper.GetCodeInfo().GetDexRegisterLocationCatalogSize(encoding);
@@ -2180,14 +2173,9 @@ class ImageDumper {
           ScopedIndentation indent2(&state->vios_);
           auto* resolved_types = dex_cache->GetResolvedTypes();
           for (size_t i = 0; i < num_types; ++i) {
-            auto pair = resolved_types[i].load(std::memory_order_relaxed);
+            auto* elem = resolved_types[i].Read();
             size_t run = 0;
-            for (size_t j = i + 1; j != num_types; ++j) {
-              auto other_pair = resolved_types[j].load(std::memory_order_relaxed);
-              if (pair.index != other_pair.index ||
-                  pair.object.Read() != other_pair.object.Read()) {
-                break;
-              }
+            for (size_t j = i + 1; j != num_types && elem == resolved_types[j].Read(); ++j) {
               ++run;
             }
             if (run == 0) {
@@ -2197,13 +2185,12 @@ class ImageDumper {
               i = i + run;
             }
             std::string msg;
-            auto* elem = pair.object.Read();
             if (elem == nullptr) {
               msg = "null";
             } else {
               msg = elem->PrettyClass();
             }
-            os << StringPrintf("%p   %u %s\n", elem, pair.index, msg.c_str());
+            os << StringPrintf("%p   %s\n", elem, msg.c_str());
           }
         }
       }

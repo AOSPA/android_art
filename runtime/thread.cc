@@ -1047,9 +1047,10 @@ void Thread::ShortDump(std::ostream& os) const {
      << "]";
 }
 
-void Thread::Dump(std::ostream& os, bool dump_native_stack, BacktraceMap* backtrace_map) const {
+void Thread::Dump(std::ostream& os, bool dump_native_stack, BacktraceMap* backtrace_map,
+                  bool force_dump_stack) const {
   DumpState(os);
-  DumpStack(os, dump_native_stack, backtrace_map);
+  DumpStack(os, dump_native_stack, backtrace_map, force_dump_stack);
 }
 
 mirror::String* Thread::GetThreadName() const {
@@ -1750,7 +1751,8 @@ void Thread::DumpJavaStack(std::ostream& os) const {
 
 void Thread::DumpStack(std::ostream& os,
                        bool dump_native_stack,
-                       BacktraceMap* backtrace_map) const {
+                       BacktraceMap* backtrace_map,
+                       bool force_dump_stack) const {
   // TODO: we call this code when dying but may not have suspended the thread ourself. The
   //       IsSuspended check is therefore racy with the use for dumping (normally we inhibit
   //       the race with the thread_suspend_count_lock_).
@@ -1761,11 +1763,11 @@ void Thread::DumpStack(std::ostream& os,
     // thread's stack in debug builds where we'll hit the not suspended check in the stack walk.
     safe_to_dump = (safe_to_dump || dump_for_abort);
   }
-  if (safe_to_dump) {
+  if (safe_to_dump || force_dump_stack) {
     // If we're currently in native code, dump that stack before dumping the managed stack.
-    if (dump_native_stack && (dump_for_abort || ShouldShowNativeStack(this))) {
+    if (dump_native_stack && (dump_for_abort || force_dump_stack || ShouldShowNativeStack(this))) {
       DumpKernelStack(os, GetTid(), "  kernel: ", false);
-      ArtMethod* method = GetCurrentMethod(nullptr, !dump_for_abort);
+      ArtMethod* method = GetCurrentMethod(nullptr, !(dump_for_abort || force_dump_stack));
       DumpNativeStack(os, GetTid(), backtrace_map, "  native: ", method);
     }
     DumpJavaStack(os);
@@ -3038,9 +3040,10 @@ class ReferenceMapVisitor : public StackVisitor {
       T vreg_info(m, code_info, encoding, map, visitor_);
 
       // Visit stack entries that hold pointers.
-      size_t number_of_bits = code_info.GetNumberOfStackMaskBits(encoding);
+      const size_t number_of_bits = code_info.GetNumberOfStackMaskBits(encoding);
+      BitMemoryRegion stack_mask = code_info.GetStackMaskOf(encoding, map);
       for (size_t i = 0; i < number_of_bits; ++i) {
-        if (map.GetStackMaskBit(encoding.stack_map_encoding, i)) {
+        if (stack_mask.LoadBit(i)) {
           auto* ref_addr = vreg_base + i;
           mirror::Object* ref = ref_addr->AsMirrorPtr();
           if (ref != nullptr) {
@@ -3048,7 +3051,7 @@ class ReferenceMapVisitor : public StackVisitor {
             vreg_info.VisitStack(&new_ref, i, this);
             if (ref != new_ref) {
               ref_addr->Assign(new_ref);
-            }
+           }
           }
         }
       }
