@@ -2216,14 +2216,36 @@ void IntrinsicCodeGeneratorARM::VisitDoubleIsInfinite(HInvoke* invoke) {
   __ Lsr(out, out, 5);
 }
 
+void IntrinsicLocationsBuilderARM::VisitMathCeil(HInvoke* invoke) {
+  if (features_.HasARMv8AInstructions()) {
+    CreateFPToFPLocations(arena_, invoke);
+ }
+}
+
+void IntrinsicCodeGeneratorARM::VisitMathCeil(HInvoke* invoke) {
+  ArmAssembler* assembler = GetAssembler();
+  DCHECK(codegen_->GetInstructionSetFeatures().HasARMv8AInstructions());
+  __ Vrintp(F64, F64, OutputDRegister(invoke), InputDRegisterAt(invoke, 0));
+}
+
+void IntrinsicLocationsBuilderARM::VisitMathFloor(HInvoke* invoke) {
+  if (features_.HasARMv8AInstructions()) {
+   CreateFPToFPLocations(arena_, invoke);
+  }
+}
+
+void IntrinsicCodeGeneratorARM::VisitMathFloor(HInvoke* invoke) {
+  ArmAssembler* assembler = GetAssembler();
+  DCHECK(codegen_->GetInstructionSetFeatures().HasARMv8AInstructions());
+  __ Vrintm(F64, F64, OutputDRegister(invoke), InputDRegisterAt(invoke, 0));
+}
+
 UNIMPLEMENTED_INTRINSIC(ARM, MathMinDoubleDouble)
 UNIMPLEMENTED_INTRINSIC(ARM, MathMinFloatFloat)
 UNIMPLEMENTED_INTRINSIC(ARM, MathMaxDoubleDouble)
 UNIMPLEMENTED_INTRINSIC(ARM, MathMaxFloatFloat)
 UNIMPLEMENTED_INTRINSIC(ARM, MathMinLongLong)
 UNIMPLEMENTED_INTRINSIC(ARM, MathMaxLongLong)
-UNIMPLEMENTED_INTRINSIC(ARM, MathCeil)          // Could be done by changing rounding mode, maybe?
-UNIMPLEMENTED_INTRINSIC(ARM, MathFloor)         // Could be done by changing rounding mode, maybe?
 UNIMPLEMENTED_INTRINSIC(ARM, MathRint)
 UNIMPLEMENTED_INTRINSIC(ARM, MathRoundDouble)   // Could be done by changing rounding mode, maybe?
 UNIMPLEMENTED_INTRINSIC(ARM, MathRoundFloat)    // Could be done by changing rounding mode, maybe?
