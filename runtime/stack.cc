@@ -37,7 +37,7 @@
 #include "runtime.h"
 #include "thread.h"
 #include "thread_list.h"
-#include "verify_object-inl.h"
+#include "verify_object.h"
 
 namespace art {
 
@@ -96,13 +96,17 @@ bool ManagedStack::ShadowFramesContain(StackReference<mirror::Object>* shadow_fr
   return false;
 }
 
-StackVisitor::StackVisitor(Thread* thread, Context* context, StackWalkKind walk_kind)
-    : StackVisitor(thread, context, walk_kind, 0) {}
+StackVisitor::StackVisitor(Thread* thread,
+                           Context* context,
+                           StackWalkKind walk_kind,
+                           bool check_suspended)
+    : StackVisitor(thread, context, walk_kind, 0, check_suspended) {}
 
 StackVisitor::StackVisitor(Thread* thread,
                            Context* context,
                            StackWalkKind walk_kind,
-                           size_t num_frames)
+                           size_t num_frames,
+                           bool check_suspended)
     : thread_(thread),
       walk_kind_(walk_kind),
       cur_shadow_frame_(nullptr),
@@ -112,8 +116,11 @@ StackVisitor::StackVisitor(Thread* thread,
       num_frames_(num_frames),
       cur_depth_(0),
       current_inlining_depth_(0),
-      context_(context) {
-  DCHECK(thread == Thread::Current() || thread->IsSuspended()) << *thread;
+      context_(context),
+      check_suspended_(check_suspended) {
+  if (check_suspended_) {
+    DCHECK(thread == Thread::Current() || thread->IsSuspended()) << *thread;
+  }
 }
 
 InlineInfo StackVisitor::GetCurrentInlineInfo() const {
@@ -625,7 +632,7 @@ void StackVisitor::SetMethod(ArtMethod* method) {
   } else {
     DCHECK(cur_quick_frame_ != nullptr);
     CHECK(!IsInInlinedFrame()) << "We do not support setting inlined method's ArtMethod!";
-      *cur_quick_frame_ = method;
+    *cur_quick_frame_ = method;
   }
 }
 
@@ -788,7 +795,9 @@ QuickMethodFrameInfo StackVisitor::GetCurrentQuickFrameInfo() const {
 
 template <StackVisitor::CountTransitions kCount>
 void StackVisitor::WalkStack(bool include_transitions) {
-  DCHECK(thread_ == Thread::Current() || thread_->IsSuspended());
+  if (check_suspended_) {
+    DCHECK(thread_ == Thread::Current() || thread_->IsSuspended());
+  }
   CHECK_EQ(cur_depth_, 0U);
   bool exit_stubs_installed = Runtime::Current()->GetInstrumentation()->AreExitStubsInstalled();
   uint32_t instrumentation_stack_depth = 0;

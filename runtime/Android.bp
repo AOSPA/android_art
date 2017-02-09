@@ -57,6 +57,7 @@ cc_defaults {
         "dex_file_verifier.cc",
         "dex_instruction.cc",
         "elf_file.cc",
+        "exec_utils.cc",
         "fault_handler.cc",
         "gc/allocation_record.cc",
         "gc/allocator/dlmalloc.cc",
@@ -207,6 +208,7 @@ cc_defaults {
         "verifier/reg_type_cache.cc",
         "verifier/register_line.cc",
         "verifier/verifier_deps.cc",
+        "verify_object.cc",
         "well_known_classes.cc",
         "zip_archive.cc",
 
@@ -378,6 +380,10 @@ cc_defaults {
     },
     cflags: ["-DBUILDING_LIBART=1"],
     generated_sources: ["art_operator_srcs"],
+    // asm_support_gen.h (used by asm_support.h) is generated with cpp-define-generator
+    generated_headers: ["cpp-define-generator-asm-support"],
+    // export our headers so the libart-gtest targets can use it as well.
+    export_generated_headers: ["cpp-define-generator-asm-support"],
     clang: true,
     include_dirs: [
         "art/cmdline",
@@ -576,6 +582,7 @@ art_cc_test {
         "type_lookup_table_test.cc",
         "utf_test.cc",
         "utils_test.cc",
+        "vdex_file_test.cc",
         "verifier/method_verifier_test.cc",
         "verifier/reg_type_test.cc",
         "zip_archive_test.cc",

@@ -90,6 +90,7 @@
 #include "reference_type_propagation.h"
 #include "register_allocator_linear_scan.h"
 #include "select_generator.h"
+#include "scheduler.h"
 #include "sharpening.h"
 #include "side_effects_analysis.h"
 #include "ssa_builder.h"
@@ -658,10 +659,13 @@ void OptimizingCompiler::RunArchOptimizations(InstructionSet instruction_set,
           new (arena) arm64::InstructionSimplifierArm64(graph, stats);
       SideEffectsAnalysis* side_effects = new (arena) SideEffectsAnalysis(graph);
       GVNOptimization* gvn = new (arena) GVNOptimization(graph, *side_effects, "GVN$after_arch");
+      HInstructionScheduling* scheduling =
+          new (arena) HInstructionScheduling(graph, instruction_set);
       HOptimization* arm64_optimizations[] = {
         simplifier,
         side_effects,
-        gvn
+        gvn,
+        scheduling,
       };
       RunOptimizations(arm64_optimizations, arraysize(arm64_optimizations), pass_observer);
       break;
@@ -995,6 +999,7 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* arena,
                           &dex_file,
                           *code_item,
                           compiler_driver,
+                          codegen.get(),
                           compilation_stats_.get(),
                           interpreter_metadata,
                           dex_cache,
@@ -1126,6 +1131,25 @@ bool IsCompilingWithCoreImage() {
       android::base::EndsWith(image, "core-optimizing.art")) {
     return true;
   }
+  return false;
+}
+
+bool EncodeArtMethodInInlineInfo(ArtMethod* method ATTRIBUTE_UNUSED) {
+  // Note: the runtime is null only for unit testing.
+  return Runtime::Current() == nullptr || !Runtime::Current()->IsAotCompiler();
+}
+
+bool CanEncodeInlinedMethodInStackMap(const DexFile& caller_dex_file, ArtMethod* callee) {
+  if (!Runtime::Current()->IsAotCompiler()) {
+    // JIT can always encode methods in stack maps.
+    return true;
+  }
+  if (IsSameDexFile(caller_dex_file, *callee->GetDexFile())) {
+    return true;
+  }
+  // TODO(ngeoffray): Support more AOT cases for inlining:
+  // - methods in multidex
+  // - methods in boot image for on-device non-PIC compilation.
   return false;
 }
 

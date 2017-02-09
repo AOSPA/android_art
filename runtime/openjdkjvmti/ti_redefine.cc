@@ -48,7 +48,7 @@
 #include "jit/jit_code_cache.h"
 #include "jni_env_ext-inl.h"
 #include "jvmti_allocator.h"
-#include "mirror/class.h"
+#include "mirror/class-inl.h"
 #include "mirror/class_ext.h"
 #include "mirror/object.h"
 #include "object_lock.h"
@@ -56,6 +56,8 @@
 #include "ScopedLocalRef.h"
 #include "ti_class_loader.h"
 #include "transform.h"
+#include "verifier/method_verifier.h"
+#include "verifier/verifier_log_mode.h"
 
 namespace openjdkjvmti {
 
@@ -121,6 +123,7 @@ class ObsoleteMethodStackVisitor : public art::StackVisitor {
         new_obsolete_method->CopyFrom(old_method, ptr_size);
         DCHECK_EQ(new_obsolete_method->GetDeclaringClass(), old_method->GetDeclaringClass());
         new_obsolete_method->SetIsObsolete();
+        new_obsolete_method->SetDontCompile();
         obsolete_maps_->insert({old_method, new_obsolete_method});
         // Update JIT Data structures to point to the new method.
         art::jit::Jit* jit = art::Runtime::Current()->GetJit();
@@ -490,6 +493,143 @@ void Redefiner::ClassRedefinition::FillObsoleteMethodMap(
   }
 }
 
+// Try and get the declared method. First try to get a virtual method then a direct method if that's
+// not found.
+static art::ArtMethod* FindMethod(art::Handle<art::mirror::Class> klass,
+                                  const char* name,
+                                  art::Signature sig) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  art::ArtMethod* m = klass->FindDeclaredVirtualMethod(name, sig, art::kRuntimePointerSize);
+  if (m == nullptr) {
+    m = klass->FindDeclaredDirectMethod(name, sig, art::kRuntimePointerSize);
+  }
+  return m;
+}
+
+bool Redefiner::ClassRedefinition::CheckSameMethods() {
+  art::StackHandleScope<1> hs(driver_->self_);
+  art::Handle<art::mirror::Class> h_klass(hs.NewHandle(GetMirrorClass()));
+  DCHECK_EQ(dex_file_->NumClassDefs(), 1u);
+
+  art::ClassDataItemIterator new_iter(*dex_file_,
+                                      dex_file_->GetClassData(dex_file_->GetClassDef(0)));
+
+  // Make sure we have the same number of methods.
+  uint32_t num_new_method = new_iter.NumVirtualMethods() + new_iter.NumDirectMethods();
+  uint32_t num_old_method = h_klass->GetDeclaredMethodsSlice(art::kRuntimePointerSize).size();
+  if (num_new_method != num_old_method) {
+    bool bigger = num_new_method > num_old_method;
+    RecordFailure(bigger ? ERR(UNSUPPORTED_REDEFINITION_METHOD_ADDED)
+                         : ERR(UNSUPPORTED_REDEFINITION_METHOD_DELETED),
+                  StringPrintf("Total number of declared methods changed from %d to %d",
+                               num_old_method, num_new_method));
+    return false;
+  }
+
+  // Skip all of the fields. We should have already checked this.
+  while (new_iter.HasNextStaticField() || new_iter.HasNextInstanceField()) {
+    new_iter.Next();
+  }
+  // Check each of the methods. NB we don't need to specifically check for removals since the 2 dex
+  // files have the same number of methods, which means there must be an equal amount of additions
+  // and removals.
+  for (; new_iter.HasNextVirtualMethod() || new_iter.HasNextDirectMethod(); new_iter.Next()) {
+    // Get the data on the method we are searching for
+    const art::DexFile::MethodId& new_method_id = dex_file_->GetMethodId(new_iter.GetMemberIndex());
+    const char* new_method_name = dex_file_->GetMethodName(new_method_id);
+    art::Signature new_method_signature = dex_file_->GetMethodSignature(new_method_id);
+    art::ArtMethod* old_method = FindMethod(h_klass, new_method_name, new_method_signature);
+    // If we got past the check for the same number of methods above that means there must be at
+    // least one added and one removed method. We will return the ADDED failure message since it is
+    // easier to get a useful error report for it.
+    if (old_method == nullptr) {
+      RecordFailure(ERR(UNSUPPORTED_REDEFINITION_METHOD_ADDED),
+                    StringPrintf("Unknown method '%s' (sig: %s) was added!",
+                                  new_method_name,
+                                  new_method_signature.ToString().c_str()));
+      return false;
+    }
+    // Since direct methods have different flags than virtual ones (specifically direct methods must
+    // have kAccPrivate or kAccStatic or kAccConstructor flags) we can tell if a method changes from
+    // virtual to direct.
+    uint32_t new_flags = new_iter.GetMethodAccessFlags();
+    if (new_flags != (old_method->GetAccessFlags() & art::kAccValidMethodFlags)) {
+      RecordFailure(ERR(UNSUPPORTED_REDEFINITION_METHOD_MODIFIERS_CHANGED),
+                    StringPrintf("method '%s' (sig: %s) had different access flags",
+                                 new_method_name,
+                                 new_method_signature.ToString().c_str()));
+      return false;
+    }
+  }
+  return true;
+}
+
+bool Redefiner::ClassRedefinition::CheckSameFields() {
+  art::StackHandleScope<1> hs(driver_->self_);
+  art::Handle<art::mirror::Class> h_klass(hs.NewHandle(GetMirrorClass()));
+  DCHECK_EQ(dex_file_->NumClassDefs(), 1u);
+  art::ClassDataItemIterator new_iter(*dex_file_,
+                                      dex_file_->GetClassData(dex_file_->GetClassDef(0)));
+  const art::DexFile& old_dex_file = h_klass->GetDexFile();
+  art::ClassDataItemIterator old_iter(old_dex_file,
+                                      old_dex_file.GetClassData(*h_klass->GetClassDef()));
+  // Instance and static fields can be differentiated by their flags so no need to check them
+  // separately.
+  while (new_iter.HasNextInstanceField() || new_iter.HasNextStaticField()) {
+    // Get the data on the method we are searching for
+    const art::DexFile::FieldId& new_field_id = dex_file_->GetFieldId(new_iter.GetMemberIndex());
+    const char* new_field_name = dex_file_->GetFieldName(new_field_id);
+    const char* new_field_type = dex_file_->GetFieldTypeDescriptor(new_field_id);
+
+    if (!(old_iter.HasNextInstanceField() || old_iter.HasNextStaticField())) {
+      // We are missing the old version of this method!
+      RecordFailure(ERR(UNSUPPORTED_REDEFINITION_SCHEMA_CHANGED),
+                    StringPrintf("Unknown field '%s' (type: %s) added!",
+                                  new_field_name,
+                                  new_field_type));
+      return false;
+    }
+
+    const art::DexFile::FieldId& old_field_id = old_dex_file.GetFieldId(old_iter.GetMemberIndex());
+    const char* old_field_name = old_dex_file.GetFieldName(old_field_id);
+    const char* old_field_type = old_dex_file.GetFieldTypeDescriptor(old_field_id);
+
+    // Check name and type.
+    if (strcmp(old_field_name, new_field_name) != 0 ||
+        strcmp(old_field_type, new_field_type) != 0) {
+      RecordFailure(ERR(UNSUPPORTED_REDEFINITION_SCHEMA_CHANGED),
+                    StringPrintf("Field changed from '%s' (sig: %s) to '%s' (sig: %s)!",
+                                  old_field_name,
+                                  old_field_type,
+                                  new_field_name,
+                                  new_field_type));
+      return false;
+    }
+
+    // Since static fields have different flags than instance ones (specifically static fields must
+    // have the kAccStatic flag) we can tell if a field changes from static to instance.
+    if (new_iter.GetFieldAccessFlags() != old_iter.GetFieldAccessFlags()) {
+      RecordFailure(ERR(UNSUPPORTED_REDEFINITION_SCHEMA_CHANGED),
+                    StringPrintf("Field '%s' (sig: %s) had different access flags",
+                                  new_field_name,
+                                  new_field_type));
+      return false;
+    }
+
+    new_iter.Next();
+    old_iter.Next();
+  }
+  if (old_iter.HasNextInstanceField() || old_iter.HasNextStaticField()) {
+    RecordFailure(ERR(UNSUPPORTED_REDEFINITION_SCHEMA_CHANGED),
+                  StringPrintf("field '%s' (sig: %s) is missing!",
+                                old_dex_file.GetFieldName(old_dex_file.GetFieldId(
+                                    old_iter.GetMemberIndex())),
+                                old_dex_file.GetFieldTypeDescriptor(old_dex_file.GetFieldId(
+                                    old_iter.GetMemberIndex()))));
+    return false;
+  }
+  return true;
+}
+
 bool Redefiner::ClassRedefinition::CheckClass() {
   // TODO Might just want to put it in a ObjPtr and NoSuspend assert.
   art::StackHandleScope<1> hs(driver_->self_);
@@ -565,7 +705,6 @@ bool Redefiner::ClassRedefinition::CheckClass() {
     }
   }
   LOG(WARNING) << "No verification is done on annotations of redefined classes.";
-  LOG(WARNING) << "Bytecodes of redefinitions are not verified.";
 
   return true;
 }
@@ -628,26 +767,28 @@ class RedefinitionDataHolder {
   }
 
   // TODO Maybe make an iterable view type to simplify using this.
-  art::mirror::ClassLoader* GetSourceClassLoader(jint klass_index)
+  art::mirror::ClassLoader* GetSourceClassLoader(jint klass_index) const
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     return art::down_cast<art::mirror::ClassLoader*>(GetSlot(klass_index, kSlotSourceClassLoader));
   }
-  art::mirror::Object* GetJavaDexFile(jint klass_index) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  art::mirror::Object* GetJavaDexFile(jint klass_index) const
+      REQUIRES_SHARED(art::Locks::mutator_lock_) {
     return GetSlot(klass_index, kSlotJavaDexFile);
   }
-  art::mirror::LongArray* GetNewDexFileCookie(jint klass_index)
+  art::mirror::LongArray* GetNewDexFileCookie(jint klass_index) const
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     return art::down_cast<art::mirror::LongArray*>(GetSlot(klass_index, kSlotNewDexFileCookie));
   }
-  art::mirror::DexCache* GetNewDexCache(jint klass_index)
+  art::mirror::DexCache* GetNewDexCache(jint klass_index) const
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     return art::down_cast<art::mirror::DexCache*>(GetSlot(klass_index, kSlotNewDexCache));
   }
-  art::mirror::Class* GetMirrorClass(jint klass_index) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  art::mirror::Class* GetMirrorClass(jint klass_index) const
+      REQUIRES_SHARED(art::Locks::mutator_lock_) {
     return art::down_cast<art::mirror::Class*>(GetSlot(klass_index, kSlotMirrorClass));
   }
 
-  art::mirror::ByteArray* GetOriginalDexFileBytes(jint klass_index)
+  art::mirror::ByteArray* GetOriginalDexFileBytes(jint klass_index) const
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     return art::down_cast<art::mirror::ByteArray*>(GetSlot(klass_index, kSlotOrigDexFile));
   }
@@ -677,15 +818,15 @@ class RedefinitionDataHolder {
     SetSlot(klass_index, kSlotOrigDexFile, bytes);
   }
 
-  int32_t Length() REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  int32_t Length() const REQUIRES_SHARED(art::Locks::mutator_lock_) {
     return arr_->GetLength() / kNumSlots;
   }
 
  private:
-  art::Handle<art::mirror::ObjectArray<art::mirror::Object>> arr_;
+  mutable art::Handle<art::mirror::ObjectArray<art::mirror::Object>> arr_;
 
   art::mirror::Object* GetSlot(jint klass_index,
-                               DataSlot slot) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+                               DataSlot slot) const REQUIRES_SHARED(art::Locks::mutator_lock_) {
     DCHECK_LT(klass_index, Length());
     return arr_->Get((kNumSlots * klass_index) + slot);
   }
@@ -700,6 +841,85 @@ class RedefinitionDataHolder {
 
   DISALLOW_COPY_AND_ASSIGN(RedefinitionDataHolder);
 };
+
+// TODO Stash and update soft failure state
+bool Redefiner::ClassRedefinition::CheckVerification(int32_t klass_index,
+                                                     const RedefinitionDataHolder& holder) {
+  DCHECK_EQ(dex_file_->NumClassDefs(), 1u);
+  art::StackHandleScope<2> hs(driver_->self_);
+  std::string error;
+  // TODO Make verification log level lower
+  art::verifier::MethodVerifier::FailureKind failure =
+      art::verifier::MethodVerifier::VerifyClass(driver_->self_,
+                                                 dex_file_.get(),
+                                                 hs.NewHandle(holder.GetNewDexCache(klass_index)),
+                                                 hs.NewHandle(GetClassLoader()),
+                                                 dex_file_->GetClassDef(0), /*class_def*/
+                                                 nullptr, /*compiler_callbacks*/
+                                                 false, /*allow_soft_failures*/
+                                                 /*log_level*/
+                                                 art::verifier::HardFailLogMode::kLogWarning,
+                                                 &error);
+  bool passes = failure == art::verifier::MethodVerifier::kNoFailure;
+  if (!passes) {
+    RecordFailure(ERR(FAILS_VERIFICATION), "Failed to verify class. Error was: " + error);
+  }
+  return passes;
+}
+
+// Looks through the previously allocated cookies to see if we need to update them with another new
+// dexfile. This is so that even if multiple classes with the same classloader are redefined at
+// once they are all added to the classloader.
+bool Redefiner::ClassRedefinition::AllocateAndRememberNewDexFileCookie(
+    int32_t klass_index,
+    art::Handle<art::mirror::ClassLoader> source_class_loader,
+    art::Handle<art::mirror::Object> dex_file_obj,
+    /*out*/RedefinitionDataHolder* holder) {
+  art::StackHandleScope<2> hs(driver_->self_);
+  art::MutableHandle<art::mirror::LongArray> old_cookie(
+      hs.NewHandle<art::mirror::LongArray>(nullptr));
+  bool has_older_cookie = false;
+  // See if we already have a cookie that a previous redefinition got from the same classloader.
+  for (int32_t i = 0; i < klass_index; i++) {
+    if (holder->GetSourceClassLoader(i) == source_class_loader.Get()) {
+      // Since every instance of this classloader should have the same cookie associated with it we
+      // can stop looking here.
+      has_older_cookie = true;
+      old_cookie.Assign(holder->GetNewDexFileCookie(i));
+      break;
+    }
+  }
+  if (old_cookie.IsNull()) {
+    // No older cookie. Get it directly from the dex_file_obj
+    // We should not have seen this classloader elsewhere.
+    CHECK(!has_older_cookie);
+    old_cookie.Assign(ClassLoaderHelper::GetDexFileCookie(dex_file_obj));
+  }
+  // Use the old cookie to generate the new one with the new DexFile* added in.
+  art::Handle<art::mirror::LongArray>
+      new_cookie(hs.NewHandle(ClassLoaderHelper::AllocateNewDexFileCookie(driver_->self_,
+                                                                          old_cookie,
+                                                                          dex_file_.get())));
+  // Make sure the allocation worked.
+  if (new_cookie.IsNull()) {
+    return false;
+  }
+
+  // Save the cookie.
+  holder->SetNewDexFileCookie(klass_index, new_cookie.Get());
+  // If there are other copies of this same classloader we need to make sure that we all have the
+  // same cookie.
+  if (has_older_cookie) {
+    for (int32_t i = 0; i < klass_index; i++) {
+      // We will let the GC take care of the cookie we allocated for this one.
+      if (holder->GetSourceClassLoader(i) == source_class_loader.Get()) {
+        holder->SetNewDexFileCookie(i, new_cookie.Get());
+      }
+    }
+  }
+
+  return true;
+}
 
 bool Redefiner::ClassRedefinition::FinishRemainingAllocations(
     int32_t klass_index, /*out*/RedefinitionDataHolder* holder) {
@@ -719,11 +939,8 @@ bool Redefiner::ClassRedefinition::FinishRemainingAllocations(
       RecordFailure(ERR(INTERNAL), "Unable to find dex file!");
       return false;
     }
-    holder->SetNewDexFileCookie(klass_index,
-                                ClassLoaderHelper::AllocateNewDexFileCookie(driver_->self_,
-                                                                            dex_file_obj,
-                                                                            dex_file_.get()).Ptr());
-    if (holder->GetNewDexFileCookie(klass_index) == nullptr) {
+    // Allocate the new dex file cookie.
+    if (!AllocateAndRememberNewDexFileCookie(klass_index, loader, dex_file_obj, holder)) {
       driver_->self_->AssertPendingOOMException();
       driver_->self_->ClearException();
       RecordFailure(ERR(OUT_OF_MEMORY), "Unable to allocate dex file array for class loader");
@@ -789,6 +1006,17 @@ void Redefiner::ReleaseAllDexFiles() {
   }
 }
 
+bool Redefiner::CheckAllClassesAreVerified(const RedefinitionDataHolder& holder) {
+  int32_t cnt = 0;
+  for (Redefiner::ClassRedefinition& redef : redefinitions_) {
+    if (!redef.CheckVerification(cnt, holder)) {
+      return false;
+    }
+    cnt++;
+  }
+  return true;
+}
+
 jvmtiError Redefiner::Run() {
   art::StackHandleScope<1> hs(self_);
   // Allocate an array to hold onto all java temporary objects associated with this redefinition.
@@ -808,7 +1036,8 @@ jvmtiError Redefiner::Run() {
   // try loop.
   if (!CheckAllRedefinitionAreValid() ||
       !EnsureAllClassAllocationsFinished() ||
-      !FinishAllRemainingAllocations(holder)) {
+      !FinishAllRemainingAllocations(holder) ||
+      !CheckAllClassesAreVerified(holder)) {
     // TODO Null out the ClassExt fields we allocated (if possible, might be racing with another
     // redefineclass call which made it even bigger. Leak shouldn't be huge (2x array of size
     // declared_methods_.length) but would be good to get rid of. All other allocations should be

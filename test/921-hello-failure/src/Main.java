@@ -18,6 +18,7 @@ import java.util.ArrayList;
 public class Main {
 
   public static void main(String[] args) {
+    Verification.doTest(new Transform());
     NewName.doTest(new Transform());
     DifferentAccess.doTest(new Transform());
     NewInterface.doTest(new Transform2());
@@ -25,6 +26,12 @@ public class Main {
     ReorderInterface.doTest(new Transform2());
     MultiRedef.doTest(new Transform(), new Transform2());
     MultiRetrans.doTest(new Transform(), new Transform2());
+    NewMethod.doTest(new Transform());
+    MissingMethod.doTest(new Transform3());
+    MethodChange.doTest(new Transform());
+    NewField.doTest(new Transform());
+    MissingField.doTest(new Transform4("there"));
+    FieldChange.doTest(new Transform4("there again"));
   }
 
   // Transforms the class. This throws an exception if something goes wrong.

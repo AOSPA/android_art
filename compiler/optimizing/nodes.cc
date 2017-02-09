@@ -1354,13 +1354,15 @@ std::ostream& operator<<(std::ostream& os, const HInstruction::InstructionKind& 
   return os;
 }
 
-void HInstruction::MoveBefore(HInstruction* cursor) {
-  DCHECK(!IsPhi());
-  DCHECK(!IsControlFlow());
-  DCHECK(CanBeMoved() ||
-         // HShouldDeoptimizeFlag can only be moved by CHAGuardOptimization.
-         IsShouldDeoptimizeFlag());
-  DCHECK(!cursor->IsPhi());
+void HInstruction::MoveBefore(HInstruction* cursor, bool do_checks) {
+  if (do_checks) {
+    DCHECK(!IsPhi());
+    DCHECK(!IsControlFlow());
+    DCHECK(CanBeMoved() ||
+           // HShouldDeoptimizeFlag can only be moved by CHAGuardOptimization.
+           IsShouldDeoptimizeFlag());
+    DCHECK(!cursor->IsPhi());
+  }
 
   next_->previous_ = previous_;
   if (previous_ != nullptr) {
@@ -2462,16 +2464,15 @@ bool HLoadClass::InstructionDataEquals(const HInstruction* other) const {
   }
 }
 
-void HLoadClass::SetLoadKindInternal(LoadKind load_kind) {
-  // Once sharpened, the load kind should not be changed again.
-  // Also, kReferrersClass should never be overwritten.
-  DCHECK_EQ(GetLoadKind(), LoadKind::kDexCacheViaMethod);
+void HLoadClass::SetLoadKind(LoadKind load_kind) {
   SetPackedField<LoadKindField>(load_kind);
 
-  if (load_kind != LoadKind::kDexCacheViaMethod) {
+  if (load_kind != LoadKind::kDexCacheViaMethod &&
+      load_kind != LoadKind::kReferrersClass) {
     RemoveAsUserOfInput(0u);
     SetRawInputAt(0u, nullptr);
   }
+
   if (!NeedsEnvironment()) {
     RemoveEnvironment();
     SetSideEffects(SideEffects::None());

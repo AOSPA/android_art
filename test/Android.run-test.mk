@@ -439,13 +439,14 @@ TEST_ART_BROKEN_FALLBACK_RUN_TESTS := \
   629-vdex-speed
 
 # This test fails without an image.
-# 018, 961, 964 often time out. b/34369284
+# 018, 961, 964, 968 often time out. b/34369284
 TEST_ART_BROKEN_NO_IMAGE_RUN_TESTS := \
   137-cfi \
   138-duplicate-classes-check \
   018-stack-overflow \
   961-default-iface-resolution-gen \
-  964-default-iface-init
+  964-default-iface-init \
+  968-default-partial-compile-gen \
 
 ifneq (,$(filter no-dex2oat,$(PREBUILD_TYPES)))
   ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),no-dex2oat, \
@@ -546,7 +547,6 @@ TEST_ART_BROKEN_JIT_RUN_TESTS := \
   902-hello-transformation \
   904-object-allocation \
   906-iterate-heap \
-  912-classes \
   914-hello-obsolescence \
   915-obsolete-2 \
   917-fields-transformation \

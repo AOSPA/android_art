@@ -65,6 +65,17 @@ inline Class* Class::GetSuperClass() {
       OFFSET_OF_OBJECT_MEMBER(Class, super_class_));
 }
 
+inline void Class::SetSuperClass(ObjPtr<Class> new_super_class) {
+  // Super class is assigned once, except during class linker initialization.
+  if (kIsDebugBuild) {
+    ObjPtr<Class> old_super_class =
+        GetFieldObject<Class>(OFFSET_OF_OBJECT_MEMBER(Class, super_class_));
+    DCHECK(old_super_class == nullptr || old_super_class == new_super_class);
+  }
+  DCHECK(new_super_class != nullptr);
+  SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(Class, super_class_), new_super_class);
+}
+
 template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
 inline ClassLoader* Class::GetClassLoader() {
   return GetFieldObject<ClassLoader, kVerifyFlags, kReadBarrierOption>(
@@ -633,23 +644,6 @@ inline void Class::SetClinitThreadId(pid_t new_clinit_thread_id) {
   } else {
     SetField32<false>(OFFSET_OF_OBJECT_MEMBER(Class, clinit_thread_id_), new_clinit_thread_id);
   }
-}
-
-template<VerifyObjectFlags kVerifyFlags>
-inline uint32_t Class::GetAccessFlags() {
-  // Check class is loaded/retired or this is java.lang.String that has a
-  // circularity issue during loading the names of its members
-  DCHECK(IsIdxLoaded<kVerifyFlags>() || IsRetired<kVerifyFlags>() ||
-         IsErroneous<static_cast<VerifyObjectFlags>(kVerifyFlags & ~kVerifyThis)>() ||
-         this == String::GetJavaLangString())
-      << "IsIdxLoaded=" << IsIdxLoaded<kVerifyFlags>()
-      << " IsRetired=" << IsRetired<kVerifyFlags>()
-      << " IsErroneous=" <<
-          IsErroneous<static_cast<VerifyObjectFlags>(kVerifyFlags & ~kVerifyThis)>()
-      << " IsString=" << (this == String::GetJavaLangString())
-      << " status= " << GetStatus<kVerifyFlags>()
-      << " descriptor=" << PrettyDescriptor();
-  return GetField32<kVerifyFlags>(AccessFlagsOffset());
 }
 
 inline String* Class::GetName() {

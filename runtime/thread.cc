@@ -65,6 +65,7 @@
 #include "object_lock.h"
 #include "quick_exception_handler.h"
 #include "quick/quick_method_frame_info.h"
+#include "read_barrier-inl.h"
 #include "reflection.h"
 #include "runtime.h"
 #include "runtime_callbacks.h"
@@ -77,7 +78,7 @@
 #include "thread-inl.h"
 #include "utils.h"
 #include "verifier/method_verifier.h"
-#include "verify_object-inl.h"
+#include "verify_object.h"
 #include "well_known_classes.h"
 #include "interpreter/interpreter.h"
 
@@ -1583,15 +1584,24 @@ void Thread::DumpState(std::ostream& os) const {
 }
 
 struct StackDumpVisitor : public StackVisitor {
-  StackDumpVisitor(std::ostream& os_in, Thread* thread_in, Context* context, bool can_allocate_in)
+  StackDumpVisitor(std::ostream& os_in,
+                   Thread* thread_in,
+                   Context* context,
+                   bool can_allocate_in,
+                   bool check_suspended = true,
+                   bool dump_locks_in = true)
       REQUIRES_SHARED(Locks::mutator_lock_)
-      : StackVisitor(thread_in, context, StackVisitor::StackWalkKind::kIncludeInlinedFrames),
+      : StackVisitor(thread_in,
+                     context,
+                     StackVisitor::StackWalkKind::kIncludeInlinedFrames,
+                     check_suspended),
         os(os_in),
         can_allocate(can_allocate_in),
         last_method(nullptr),
         last_line_number(0),
         repetition_count(0),
-        frame_count(0) {}
+        frame_count(0),
+        dump_locks(dump_locks_in) {}
 
   virtual ~StackDumpVisitor() {
     if (frame_count == 0) {
@@ -1636,8 +1646,10 @@ struct StackDumpVisitor : public StackVisitor {
       if (frame_count == 0) {
         Monitor::DescribeWait(os, GetThread());
       }
-      if (can_allocate) {
+      if (can_allocate && dump_locks) {
         // Visit locks, but do not abort on errors. This would trigger a nested abort.
+        // Skip visiting locks if dump_locks is false as it would cause a bad_mutexes_held in
+        // RegTypeCache::RegTypeCache due to thread_list_lock.
         Monitor::VisitLocks(this, DumpLockedObject, &os, false);
       }
     }
@@ -1681,6 +1693,7 @@ struct StackDumpVisitor : public StackVisitor {
   int last_line_number;
   int repetition_count;
   int frame_count;
+  const bool dump_locks;
 };
 
 static bool ShouldShowNativeStack(const Thread* thread)
@@ -1712,7 +1725,7 @@ static bool ShouldShowNativeStack(const Thread* thread)
   return current_method != nullptr && current_method->IsNative();
 }
 
-void Thread::DumpJavaStack(std::ostream& os) const {
+void Thread::DumpJavaStack(std::ostream& os, bool check_suspended, bool dump_locks) const {
   // If flip_function is not null, it means we have run a checkpoint
   // before the thread wakes up to execute the flip function and the
   // thread roots haven't been forwarded.  So the following access to
@@ -1741,7 +1754,7 @@ void Thread::DumpJavaStack(std::ostream& os) const {
 
   std::unique_ptr<Context> context(Context::Create());
   StackDumpVisitor dumper(os, const_cast<Thread*>(this), context.get(),
-                          !tls32_.throwing_OutOfMemoryError);
+                          !tls32_.throwing_OutOfMemoryError, check_suspended, dump_locks);
   dumper.WalkStack();
 
   if (have_exception) {
@@ -1767,10 +1780,15 @@ void Thread::DumpStack(std::ostream& os,
     // If we're currently in native code, dump that stack before dumping the managed stack.
     if (dump_native_stack && (dump_for_abort || force_dump_stack || ShouldShowNativeStack(this))) {
       DumpKernelStack(os, GetTid(), "  kernel: ", false);
-      ArtMethod* method = GetCurrentMethod(nullptr, !(dump_for_abort || force_dump_stack));
+      ArtMethod* method =
+          GetCurrentMethod(nullptr,
+                           /*check_suspended*/ !force_dump_stack,
+                           /*abort_on_error*/ !(dump_for_abort || force_dump_stack));
       DumpNativeStack(os, GetTid(), backtrace_map, "  native: ", method);
     }
-    DumpJavaStack(os);
+    DumpJavaStack(os,
+                  /*check_suspended*/ !force_dump_stack,
+                  /*dump_locks*/ !force_dump_stack);
   } else {
     os << "Not able to dump stack of thread that isn't suspended";
   }
@@ -1845,6 +1863,7 @@ Thread::Thread(bool daemon)
     : tls32_(daemon),
       wait_monitor_(nullptr),
       interrupted_(false),
+      custom_tls_(nullptr),
       can_call_into_java_(true) {
   wait_mutex_ = new Mutex("a thread wait mutex");
   wait_cond_ = new ConditionVariable("a thread wait condition variable", *wait_mutex_);
@@ -2190,12 +2209,18 @@ void Thread::SetClassLoaderOverride(jobject class_loader_override) {
   tlsPtr_.class_loader_override = GetJniEnv()->NewGlobalRef(class_loader_override);
 }
 
-class CountStackDepthVisitor : public StackVisitor {
+using ArtMethodDexPcPair = std::pair<ArtMethod*, uint32_t>;
+
+// Counts the stack trace depth and also fetches the first max_saved_frames frames.
+class FetchStackTraceVisitor : public StackVisitor {
  public:
-  explicit CountStackDepthVisitor(Thread* thread)
+  explicit FetchStackTraceVisitor(Thread* thread,
+                                  ArtMethodDexPcPair* saved_frames = nullptr,
+                                  size_t max_saved_frames = 0)
       REQUIRES_SHARED(Locks::mutator_lock_)
       : StackVisitor(thread, nullptr, StackVisitor::StackWalkKind::kIncludeInlinedFrames),
-        depth_(0), skip_depth_(0), skipping_(true) {}
+        saved_frames_(saved_frames),
+        max_saved_frames_(max_saved_frames) {}
 
   bool VisitFrame() REQUIRES_SHARED(Locks::mutator_lock_) {
     // We want to skip frames up to and including the exception's constructor.
@@ -2208,6 +2233,10 @@ class CountStackDepthVisitor : public StackVisitor {
     }
     if (!skipping_) {
       if (!m->IsRuntimeMethod()) {  // Ignore runtime frames (in particular callee save).
+        if (depth_ < max_saved_frames_) {
+          saved_frames_[depth_].first = m;
+          saved_frames_[depth_].second = m->IsProxyMethod() ? DexFile::kDexNoIndex : GetDexPc();
+        }
         ++depth_;
       }
     } else {
@@ -2216,20 +2245,22 @@ class CountStackDepthVisitor : public StackVisitor {
     return true;
   }
 
-  int GetDepth() const {
+  uint32_t GetDepth() const {
     return depth_;
   }
 
-  int GetSkipDepth() const {
+  uint32_t GetSkipDepth() const {
     return skip_depth_;
   }
 
  private:
-  uint32_t depth_;
-  uint32_t skip_depth_;
-  bool skipping_;
+  uint32_t depth_ = 0;
+  uint32_t skip_depth_ = 0;
+  bool skipping_ = true;
+  ArtMethodDexPcPair* saved_frames_;
+  const size_t max_saved_frames_;
 
-  DISALLOW_COPY_AND_ASSIGN(CountStackDepthVisitor);
+  DISALLOW_COPY_AND_ASSIGN(FetchStackTraceVisitor);
 };
 
 template<bool kTransactionActive>
@@ -2239,8 +2270,6 @@ class BuildInternalStackTraceVisitor : public StackVisitor {
       : StackVisitor(thread, nullptr, StackVisitor::StackWalkKind::kIncludeInlinedFrames),
         self_(self),
         skip_depth_(skip_depth),
-        count_(0),
-        trace_(nullptr),
         pointer_size_(Runtime::Current()->GetClassLinker()->GetImagePointerSize()) {}
 
   bool Init(int depth) REQUIRES_SHARED(Locks::mutator_lock_) ACQUIRE(Roles::uninterruptible_) {
@@ -2292,17 +2321,21 @@ class BuildInternalStackTraceVisitor : public StackVisitor {
     if (m->IsRuntimeMethod()) {
       return true;  // Ignore runtime frames (in particular callee save).
     }
+    AddFrame(m, m->IsProxyMethod() ? DexFile::kDexNoIndex : GetDexPc());
+    return true;
+  }
+
+  void AddFrame(ArtMethod* method, uint32_t dex_pc) REQUIRES_SHARED(Locks::mutator_lock_) {
     ObjPtr<mirror::PointerArray> trace_methods_and_pcs = GetTraceMethodsAndPCs();
-    trace_methods_and_pcs->SetElementPtrSize<kTransactionActive>(count_, m, pointer_size_);
+    trace_methods_and_pcs->SetElementPtrSize<kTransactionActive>(count_, method, pointer_size_);
     trace_methods_and_pcs->SetElementPtrSize<kTransactionActive>(
         trace_methods_and_pcs->GetLength() / 2 + count_,
-        m->IsProxyMethod() ? DexFile::kDexNoIndex : GetDexPc(),
+        dex_pc,
         pointer_size_);
     // Save the declaring class of the method to ensure that the declaring classes of the methods
     // do not get unloaded while the stack trace is live.
-    trace_->Set(count_ + 1, m->GetDeclaringClass());
+    trace_->Set(count_ + 1, method->GetDeclaringClass());
     ++count_;
-    return true;
   }
 
   ObjPtr<mirror::PointerArray> GetTraceMethodsAndPCs() const REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -2318,12 +2351,12 @@ class BuildInternalStackTraceVisitor : public StackVisitor {
   // How many more frames to skip.
   int32_t skip_depth_;
   // Current position down stack trace.
-  uint32_t count_;
+  uint32_t count_ = 0;
   // An object array where the first element is a pointer array that contains the ArtMethod
   // pointers on the stack and dex PCs. The rest of the elements are the declaring
   // class of the ArtMethod pointers. trace_[i+1] contains the declaring class of the ArtMethod of
   // the i'th frame.
-  mirror::ObjectArray<mirror::Object>* trace_;
+  mirror::ObjectArray<mirror::Object>* trace_ = nullptr;
   // For cross compilation.
   const PointerSize pointer_size_;
 
@@ -2332,11 +2365,15 @@ class BuildInternalStackTraceVisitor : public StackVisitor {
 
 template<bool kTransactionActive>
 jobject Thread::CreateInternalStackTrace(const ScopedObjectAccessAlreadyRunnable& soa) const {
-  // Compute depth of stack
-  CountStackDepthVisitor count_visitor(const_cast<Thread*>(this));
+  // Compute depth of stack, save frames if possible to avoid needing to recompute many.
+  constexpr size_t kMaxSavedFrames = 256;
+  std::unique_ptr<ArtMethodDexPcPair[]> saved_frames(new ArtMethodDexPcPair[kMaxSavedFrames]);
+  FetchStackTraceVisitor count_visitor(const_cast<Thread*>(this),
+                                       &saved_frames[0],
+                                       kMaxSavedFrames);
   count_visitor.WalkStack();
-  int32_t depth = count_visitor.GetDepth();
-  int32_t skip_depth = count_visitor.GetSkipDepth();
+  const uint32_t depth = count_visitor.GetDepth();
+  const uint32_t skip_depth = count_visitor.GetSkipDepth();
 
   // Build internal stack trace.
   BuildInternalStackTraceVisitor<kTransactionActive> build_trace_visitor(soa.Self(),
@@ -2345,7 +2382,16 @@ jobject Thread::CreateInternalStackTrace(const ScopedObjectAccessAlreadyRunnable
   if (!build_trace_visitor.Init(depth)) {
     return nullptr;  // Allocation failed.
   }
-  build_trace_visitor.WalkStack();
+  // If we saved all of the frames we don't even need to do the actual stack walk. This is faster
+  // than doing the stack walk twice.
+  if (depth < kMaxSavedFrames) {
+    for (size_t i = 0; i < depth; ++i) {
+      build_trace_visitor.AddFrame(saved_frames[i].first, saved_frames[i].second);
+    }
+  } else {
+    build_trace_visitor.WalkStack();
+  }
+
   mirror::ObjectArray<mirror::Object>* trace = build_trace_visitor.GetInternalStackTrace();
   if (kIsDebugBuild) {
     ObjPtr<mirror::PointerArray> trace_methods = build_trace_visitor.GetTraceMethodsAndPCs();
@@ -2364,9 +2410,10 @@ template jobject Thread::CreateInternalStackTrace<true>(
     const ScopedObjectAccessAlreadyRunnable& soa) const;
 
 bool Thread::IsExceptionThrownByCurrentMethod(ObjPtr<mirror::Throwable> exception) const {
-  CountStackDepthVisitor count_visitor(const_cast<Thread*>(this));
+  // Only count the depth since we do not pass a stack frame array as an argument.
+  FetchStackTraceVisitor count_visitor(const_cast<Thread*>(this));
   count_visitor.WalkStack();
-  return count_visitor.GetDepth() == exception->GetStackDepth();
+  return count_visitor.GetDepth() == static_cast<uint32_t>(exception->GetStackDepth());
 }
 
 jobjectArray Thread::InternalStackTraceToStackTraceElementArray(
@@ -2890,9 +2937,12 @@ Context* Thread::GetLongJumpContext() {
 // Note: this visitor may return with a method set, but dex_pc_ being DexFile:kDexNoIndex. This is
 //       so we don't abort in a special situation (thinlocked monitor) when dumping the Java stack.
 struct CurrentMethodVisitor FINAL : public StackVisitor {
-  CurrentMethodVisitor(Thread* thread, Context* context, bool abort_on_error)
+  CurrentMethodVisitor(Thread* thread, Context* context, bool check_suspended, bool abort_on_error)
       REQUIRES_SHARED(Locks::mutator_lock_)
-      : StackVisitor(thread, context, StackVisitor::StackWalkKind::kIncludeInlinedFrames),
+      : StackVisitor(thread,
+                     context,
+                     StackVisitor::StackWalkKind::kIncludeInlinedFrames,
+                     check_suspended),
         this_object_(nullptr),
         method_(nullptr),
         dex_pc_(0),
@@ -2916,8 +2966,13 @@ struct CurrentMethodVisitor FINAL : public StackVisitor {
   const bool abort_on_error_;
 };
 
-ArtMethod* Thread::GetCurrentMethod(uint32_t* dex_pc, bool abort_on_error) const {
-  CurrentMethodVisitor visitor(const_cast<Thread*>(this), nullptr, abort_on_error);
+ArtMethod* Thread::GetCurrentMethod(uint32_t* dex_pc,
+                                    bool check_suspended,
+                                    bool abort_on_error) const {
+  CurrentMethodVisitor visitor(const_cast<Thread*>(this),
+                               nullptr,
+                               check_suspended,
+                               abort_on_error);
   visitor.WalkStack(false);
   if (dex_pc != nullptr) {
     *dex_pc = visitor.dex_pc_;
@@ -3056,7 +3111,7 @@ class ReferenceMapVisitor : public StackVisitor {
         }
       }
       // Visit callee-save registers that hold pointers.
-      uint32_t register_mask = map.GetRegisterMask(encoding.stack_map_encoding);
+      uint32_t register_mask = code_info.GetRegisterMaskOf(encoding, map);
       for (size_t i = 0; i < BitSizeOf<uint32_t>(); ++i) {
         if (register_mask & (1 << i)) {
           mirror::Object** ref_addr = reinterpret_cast<mirror::Object**>(GetGPRAddress(i));
@@ -3427,6 +3482,17 @@ void Thread::SetException(ObjPtr<mirror::Throwable> new_exception) {
 
 bool Thread::IsAotCompiler() {
   return Runtime::Current()->IsAotCompiler();
+}
+
+mirror::Object* Thread::GetPeerFromOtherThread() const {
+  mirror::Object* peer = GetPeer();
+  if (kUseReadBarrier && Current()->GetIsGcMarking()) {
+    // We may call Thread::Dump() in the middle of the CC thread flip and this thread's stack
+    // may have not been flipped yet and peer may be a from-space (stale) ref. So explicitly
+    // mark/forward it here.
+    peer = art::ReadBarrier::Mark(peer);
+  }
+  return peer;
 }
 
 }  // namespace art

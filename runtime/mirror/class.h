@@ -231,7 +231,13 @@ class MANAGED Class FINAL : public Object {
   }
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
-  ALWAYS_INLINE uint32_t GetAccessFlags() REQUIRES_SHARED(Locks::mutator_lock_);
+  ALWAYS_INLINE uint32_t GetAccessFlags() REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (kIsDebugBuild) {
+      GetAccessFlagsDCheck<kVerifyFlags>();
+    }
+    return GetField32<kVerifyFlags>(AccessFlagsOffset());
+  }
+
   static MemberOffset AccessFlagsOffset() {
     return OFFSET_OF_OBJECT_MEMBER(Class, access_flags_);
   }
@@ -683,14 +689,7 @@ class MANAGED Class FINAL : public Object {
   // `This` and `klass` must be classes.
   ObjPtr<Class> GetCommonSuperClass(Handle<Class> klass) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void SetSuperClass(ObjPtr<Class> new_super_class) REQUIRES_SHARED(Locks::mutator_lock_) {
-    // Super class is assigned once, except during class linker initialization.
-    ObjPtr<Class> old_super_class =
-        GetFieldObject<Class>(OFFSET_OF_OBJECT_MEMBER(Class, super_class_));
-    DCHECK(old_super_class == nullptr || old_super_class == new_super_class);
-    DCHECK(new_super_class != nullptr);
-    SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(Class, super_class_), new_super_class);
-  }
+  void SetSuperClass(ObjPtr<Class> new_super_class) REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool HasSuperClass() REQUIRES_SHARED(Locks::mutator_lock_) {
     return GetSuperClass() != nullptr;
@@ -1396,6 +1395,9 @@ class MANAGED Class FINAL : public Object {
   ALWAYS_INLINE uint32_t GetCopiedMethodsStartOffset() REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool ProxyDescriptorEquals(const char* match) REQUIRES_SHARED(Locks::mutator_lock_);
+
+  template<VerifyObjectFlags kVerifyFlags>
+  void GetAccessFlagsDCheck() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Check that the pointer size matches the one in the class linker.
   ALWAYS_INLINE static void CheckPointerSize(PointerSize pointer_size);

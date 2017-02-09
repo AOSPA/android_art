@@ -145,6 +145,13 @@ class Redefiner {
     bool FinishRemainingAllocations(int32_t klass_index, /*out*/RedefinitionDataHolder* holder)
         REQUIRES_SHARED(art::Locks::mutator_lock_);
 
+    bool AllocateAndRememberNewDexFileCookie(
+        int32_t klass_index,
+        art::Handle<art::mirror::ClassLoader> source_class_loader,
+        art::Handle<art::mirror::Object> dex_file_obj,
+        /*out*/RedefinitionDataHolder* holder)
+          REQUIRES_SHARED(art::Locks::mutator_lock_);
+
     void FindAndAllocateObsoleteMethods(art::mirror::Class* art_klass)
         REQUIRES(art::Locks::mutator_lock_);
 
@@ -158,6 +165,11 @@ class Redefiner {
     // data has not been modified in an incompatible manner.
     bool CheckClass() REQUIRES_SHARED(art::Locks::mutator_lock_);
 
+    // Checks that the contained class can be successfully verified.
+    bool CheckVerification(int32_t klass_index,
+                           const RedefinitionDataHolder& holder)
+        REQUIRES_SHARED(art::Locks::mutator_lock_);
+
     // Preallocates all needed allocations in klass so that we can pause execution safely.
     // TODO We should be able to free the arrays if they end up not being used. Investigate doing
     // this in the future. For now we will just take the memory hit.
@@ -170,17 +182,11 @@ class Redefiner {
     // Checks that the class can even be redefined.
     bool CheckRedefinable() REQUIRES_SHARED(art::Locks::mutator_lock_);
 
-    // Checks that the dex file does not add/remove methods.
-    bool CheckSameMethods() REQUIRES_SHARED(art::Locks::mutator_lock_) {
-      LOG(WARNING) << "methods are not checked for modification currently";
-      return true;
-    }
+    // Checks that the dex file does not add/remove methods, or change their modifiers or types.
+    bool CheckSameMethods() REQUIRES_SHARED(art::Locks::mutator_lock_);
 
-    // Checks that the dex file does not modify fields
-    bool CheckSameFields() REQUIRES_SHARED(art::Locks::mutator_lock_) {
-      LOG(WARNING) << "Fields are not checked for modification currently";
-      return true;
-    }
+    // Checks that the dex file does not modify fields types or modifiers.
+    bool CheckSameFields() REQUIRES_SHARED(art::Locks::mutator_lock_);
 
     void UpdateJavaDexFile(art::ObjPtr<art::mirror::Object> java_dex_file,
                            art::ObjPtr<art::mirror::LongArray> new_cookie)
@@ -238,6 +244,8 @@ class Redefiner {
   jvmtiError Run() REQUIRES_SHARED(art::Locks::mutator_lock_);
 
   bool CheckAllRedefinitionAreValid() REQUIRES_SHARED(art::Locks::mutator_lock_);
+  bool CheckAllClassesAreVerified(const RedefinitionDataHolder& holder)
+      REQUIRES_SHARED(art::Locks::mutator_lock_);
   bool EnsureAllClassAllocationsFinished() REQUIRES_SHARED(art::Locks::mutator_lock_);
   bool FinishAllRemainingAllocations(RedefinitionDataHolder& holder)
       REQUIRES_SHARED(art::Locks::mutator_lock_);

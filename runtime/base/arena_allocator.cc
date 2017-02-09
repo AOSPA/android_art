@@ -84,6 +84,7 @@ const char* const ArenaAllocatorStatsImpl<kCount>::kAllocNames[] = {
   "Verifier     ",
   "CallingConv  ",
   "CHA          ",
+  "Scheduler    ",
 };
 
 template <bool kCount>
@@ -144,8 +145,13 @@ void ArenaAllocatorStatsImpl<kCount>::Dump(std::ostream& os, const Arena* first,
   }
 }
 
+#pragma GCC diagnostic push
+#if __clang_major__ >= 4
+#pragma GCC diagnostic ignored "-Winstantiation-after-specialization"
+#endif
 // Explicitly instantiate the used implementation.
 template class ArenaAllocatorStatsImpl<kArenaAllocatorCountAllocations>;
+#pragma GCC diagnostic pop
 
 void ArenaAllocatorMemoryTool::DoMakeDefined(void* ptr, size_t size) {
   MEMORY_TOOL_MAKE_DEFINED(ptr, size);
