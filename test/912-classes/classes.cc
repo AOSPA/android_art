@@ -430,5 +430,145 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_isLoadedClass(
   return found ? JNI_TRUE : JNI_FALSE;
 }
 
+class ClassLoadPrepareEquality {
+ public:
+  static constexpr const char* kClassName = "LMain$ClassE;";
+  static constexpr const char* kStorageFieldName = "STATIC";
+  static constexpr const char* kStorageFieldSig = "Ljava/lang/Object;";
+  static constexpr const char* kStorageWeakFieldName = "WEAK";
+  static constexpr const char* kStorageWeakFieldSig = "Ljava/lang/ref/Reference;";
+  static constexpr const char* kWeakClassName = "java/lang/ref/WeakReference";
+  static constexpr const char* kWeakInitSig = "(Ljava/lang/Object;)V";
+  static constexpr const char* kWeakGetSig = "()Ljava/lang/Object;";
+
+  static void JNICALL ClassLoadCallback(jvmtiEnv* jenv,
+                                        JNIEnv* jni_env,
+                                        jthread thread ATTRIBUTE_UNUSED,
+                                        jclass klass) {
+    std::string name = GetClassName(jenv, jni_env, klass);
+    if (name == kClassName) {
+      found_ = true;
+      stored_class_ = jni_env->NewGlobalRef(klass);
+      weakly_stored_class_ = jni_env->NewWeakGlobalRef(klass);
+      // The following is bad and relies on implementation details. But otherwise a test would be
+      // a lot more complicated.
+      local_stored_class_ = jni_env->NewLocalRef(klass);
+      // Store the value into a field in the heap.
+      SetOrCompare(jni_env, klass, true);
+    }
+  }
+
+  static void JNICALL ClassPrepareCallback(jvmtiEnv* jenv,
+                                           JNIEnv* jni_env,
+                                           jthread thread ATTRIBUTE_UNUSED,
+                                           jclass klass) {
+    std::string name = GetClassName(jenv, jni_env, klass);
+    if (name == kClassName) {
+      CHECK(stored_class_ != nullptr);
+      CHECK(jni_env->IsSameObject(stored_class_, klass));
+      CHECK(jni_env->IsSameObject(weakly_stored_class_, klass));
+      CHECK(jni_env->IsSameObject(local_stored_class_, klass));
+      // Look up the value in a field in the heap.
+      SetOrCompare(jni_env, klass, false);
+      compared_ = true;
+    }
+  }
+
+  static void SetOrCompare(JNIEnv* jni_env, jobject value, bool set) {
+    CHECK(storage_class_ != nullptr);
+
+    // Simple direct storage.
+    jfieldID field = jni_env->GetStaticFieldID(storage_class_, kStorageFieldName, kStorageFieldSig);
+    CHECK(field != nullptr);
+
+    if (set) {
+      jni_env->SetStaticObjectField(storage_class_, field, value);
+      CHECK(!jni_env->ExceptionCheck());
+    } else {
+      ScopedLocalRef<jobject> stored(jni_env, jni_env->GetStaticObjectField(storage_class_, field));
+      CHECK(jni_env->IsSameObject(value, stored.get()));
+    }
+
+    // Storage as a reference.
+    ScopedLocalRef<jclass> weak_ref_class(jni_env, jni_env->FindClass(kWeakClassName));
+    CHECK(weak_ref_class.get() != nullptr);
+    jfieldID weak_field = jni_env->GetStaticFieldID(storage_class_,
+                                                    kStorageWeakFieldName,
+                                                    kStorageWeakFieldSig);
+    CHECK(weak_field != nullptr);
+    if (set) {
+      // Create a WeakReference.
+      jmethodID weak_init = jni_env->GetMethodID(weak_ref_class.get(), "<init>", kWeakInitSig);
+      CHECK(weak_init != nullptr);
+      ScopedLocalRef<jobject> weak_obj(jni_env, jni_env->NewObject(weak_ref_class.get(),
+                                                                   weak_init,
+                                                                   value));
+      CHECK(weak_obj.get() != nullptr);
+      jni_env->SetStaticObjectField(storage_class_, weak_field, weak_obj.get());
+      CHECK(!jni_env->ExceptionCheck());
+    } else {
+      // Check the reference value.
+      jmethodID get_referent = jni_env->GetMethodID(weak_ref_class.get(), "get", kWeakGetSig);
+      CHECK(get_referent != nullptr);
+      ScopedLocalRef<jobject> weak_obj(jni_env, jni_env->GetStaticObjectField(storage_class_,
+                                                                              weak_field));
+      CHECK(weak_obj.get() != nullptr);
+      ScopedLocalRef<jobject> weak_referent(jni_env, jni_env->CallObjectMethod(weak_obj.get(),
+                                                                               get_referent));
+      CHECK(weak_referent.get() != nullptr);
+      CHECK(jni_env->IsSameObject(value, weak_referent.get()));
+    }
+  }
+
+  static void CheckFound() {
+    CHECK(found_);
+    CHECK(compared_);
+  }
+
+  static void Free(JNIEnv* env) {
+    if (stored_class_ != nullptr) {
+      env->DeleteGlobalRef(stored_class_);
+      DCHECK(weakly_stored_class_ != nullptr);
+      env->DeleteWeakGlobalRef(weakly_stored_class_);
+      // Do not attempt to delete the local ref. It will be out of date by now.
+    }
+  }
+
+  static jclass storage_class_;
+
+ private:
+  static jobject stored_class_;
+  static jweak weakly_stored_class_;
+  static jobject local_stored_class_;
+  static bool found_;
+  static bool compared_;
+};
+jclass ClassLoadPrepareEquality::storage_class_ = nullptr;
+jobject ClassLoadPrepareEquality::stored_class_ = nullptr;
+jweak ClassLoadPrepareEquality::weakly_stored_class_ = nullptr;
+jobject ClassLoadPrepareEquality::local_stored_class_ = nullptr;
+bool ClassLoadPrepareEquality::found_ = false;
+bool ClassLoadPrepareEquality::compared_ = false;
+
+extern "C" JNIEXPORT void JNICALL Java_Main_setEqualityEventStorageClass(
+    JNIEnv* env, jclass Main_klass ATTRIBUTE_UNUSED, jclass klass) {
+  ClassLoadPrepareEquality::storage_class_ =
+      reinterpret_cast<jclass>(env->NewGlobalRef(klass));
+}
+
+extern "C" JNIEXPORT void JNICALL Java_Main_enableClassLoadPrepareEqualityEvents(
+    JNIEnv* env, jclass Main_klass ATTRIBUTE_UNUSED, jboolean b) {
+  EnableEvents(env,
+               b,
+               ClassLoadPrepareEquality::ClassLoadCallback,
+               ClassLoadPrepareEquality::ClassPrepareCallback);
+  if (b == JNI_FALSE) {
+    ClassLoadPrepareEquality::Free(env);
+    ClassLoadPrepareEquality::CheckFound();
+    env->DeleteGlobalRef(ClassLoadPrepareEquality::storage_class_);
+    ClassLoadPrepareEquality::storage_class_ = nullptr;
+  }
+}
+
 }  // namespace Test912Classes
 }  // namespace art

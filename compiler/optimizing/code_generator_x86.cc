@@ -6057,6 +6057,7 @@ void LocationsBuilderX86::VisitLoadClass(HLoadClass* cls) {
         cls,
         Location::RegisterLocation(calling_convention.GetRegisterAt(0)),
         Location::RegisterLocation(EAX));
+    DCHECK_EQ(calling_convention.GetRegisterAt(0), EAX);
     return;
   }
   DCHECK(!cls->NeedsAccessCheck());
@@ -6076,6 +6077,17 @@ void LocationsBuilderX86::VisitLoadClass(HLoadClass* cls) {
     locations->SetInAt(0, Location::RequiresRegister());
   }
   locations->SetOut(Location::RequiresRegister());
+  if (load_kind == HLoadClass::LoadKind::kBssEntry) {
+    if (!kUseReadBarrier || kUseBakerReadBarrier) {
+      // Rely on the type resolution and/or initialization to save everything.
+      RegisterSet caller_saves = RegisterSet::Empty();
+      InvokeRuntimeCallingConvention calling_convention;
+      caller_saves.Add(Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
+      locations->SetCustomSlowPathCallerSaves(caller_saves);
+    } else {
+      // For non-Baker read barrier we have a temp-clobbering call.
+    }
+  }
 }
 
 Label* CodeGeneratorX86::NewJitRootClassPatch(const DexFile& dex_file,
@@ -6158,7 +6170,7 @@ void InstructionCodeGeneratorX86::VisitLoadClass(HLoadClass* cls) NO_THREAD_SAFE
       Label* fixup_label = codegen_->NewJitRootClassPatch(
           cls->GetDexFile(), cls->GetTypeIndex(), cls->GetClass());
       // /* GcRoot<mirror::Class> */ out = *address
-      GenerateGcRootFieldLoad(cls, out_loc, address, fixup_label, kCompilerReadBarrierOption);
+      GenerateGcRootFieldLoad(cls, out_loc, address, fixup_label, read_barrier_option);
       break;
     }
     case HLoadClass::LoadKind::kDexCacheViaMethod:
@@ -6250,7 +6262,7 @@ void LocationsBuilderX86::VisitLoadString(HLoadString* load) {
     locations->SetOut(Location::RequiresRegister());
     if (load_kind == HLoadString::LoadKind::kBssEntry) {
       if (!kUseReadBarrier || kUseBakerReadBarrier) {
-        // Rely on the pResolveString and/or marking to save everything.
+        // Rely on the pResolveString to save everything.
         RegisterSet caller_saves = RegisterSet::Empty();
         InvokeRuntimeCallingConvention calling_convention;
         caller_saves.Add(Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
@@ -7136,9 +7148,10 @@ void InstructionCodeGeneratorX86::GenerateGcRootFieldLoad(
       // Fast path implementation of art::ReadBarrier::BarrierForRoot when
       // Baker's read barrier are used:
       //
-      //   root = *address;
-      //   if (Thread::Current()->GetIsGcMarking()) {
-      //     root = ReadBarrier::Mark(root)
+      //   root = obj.field;
+      //   temp = Thread::Current()->pReadBarrierMarkReg ## root.reg()
+      //   if (temp != null) {
+      //     root = temp(root)
       //   }
 
       // /* GcRoot<mirror::Object> */ root = *address
@@ -7159,8 +7172,11 @@ void InstructionCodeGeneratorX86::GenerateGcRootFieldLoad(
           instruction, root, /* unpoison_ref_before_marking */ false);
       codegen_->AddSlowPath(slow_path);
 
-      __ fs()->cmpl(Address::Absolute(Thread::IsGcMarkingOffset<kX86PointerSize>().Int32Value()),
-                    Immediate(0));
+      // Test the entrypoint (`Thread::Current()->pReadBarrierMarkReg ## root.reg()`).
+      const int32_t entry_point_offset =
+          CodeGenerator::GetReadBarrierMarkEntryPointsOffset<kX86PointerSize>(root.reg());
+      __ fs()->cmpl(Address::Absolute(entry_point_offset), Immediate(0));
+      // The entrypoint is null when the GC is not marking.
       __ j(kNotEqual, slow_path->GetEntryLabel());
       __ Bind(slow_path->GetExitLabel());
     } else {

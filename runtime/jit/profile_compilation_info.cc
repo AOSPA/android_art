@@ -597,6 +597,24 @@ uint32_t ProfileCompilationInfo::GetNumberOfResolvedClasses() const {
   return total;
 }
 
+// Produce a non-owning vector from a vector.
+template<typename T>
+const std::vector<T*>* MakeNonOwningVector(const std::vector<std::unique_ptr<T>>* owning_vector) {
+  auto non_owning_vector = new std::vector<T*>();
+  for (auto& element : *owning_vector) {
+    non_owning_vector->push_back(element.get());
+  }
+  return non_owning_vector;
+}
+
+std::string ProfileCompilationInfo::DumpInfo(
+    const std::vector<std::unique_ptr<const DexFile>>* dex_files,
+    bool print_full_dex_location) const {
+  std::unique_ptr<const std::vector<const DexFile*>> non_owning_dex_files(
+      MakeNonOwningVector(dex_files));
+  return DumpInfo(non_owning_dex_files.get(), print_full_dex_location);
+}
+
 std::string ProfileCompilationInfo::DumpInfo(const std::vector<const DexFile*>* dex_files,
                                              bool print_full_dex_location) const {
   std::ostringstream os;
@@ -644,6 +662,38 @@ std::string ProfileCompilationInfo::DumpInfo(const std::vector<const DexFile*>* 
     }
   }
   return os.str();
+}
+
+void ProfileCompilationInfo::GetClassNames(
+    const std::vector<std::unique_ptr<const DexFile>>* dex_files,
+    std::set<std::string>* class_names) const {
+  std::unique_ptr<const std::vector<const DexFile*>> non_owning_dex_files(
+      MakeNonOwningVector(dex_files));
+  GetClassNames(non_owning_dex_files.get(), class_names);
+}
+
+void ProfileCompilationInfo::GetClassNames(const std::vector<const DexFile*>* dex_files,
+                                           std::set<std::string>* class_names) const {
+  if (info_.empty()) {
+    return;
+  }
+  for (const auto& it : info_) {
+    const std::string& location = it.first;
+    const DexFileData& dex_data = it.second;
+    const DexFile* dex_file = nullptr;
+    if (dex_files != nullptr) {
+      for (size_t i = 0; i < dex_files->size(); i++) {
+        if (location == (*dex_files)[i]->GetLocation()) {
+          dex_file = (*dex_files)[i];
+        }
+      }
+    }
+    for (const auto class_it : dex_data.class_set) {
+      if (dex_file != nullptr) {
+        class_names->insert(std::string(dex_file->PrettyType(class_it)));
+      }
+    }
+  }
 }
 
 bool ProfileCompilationInfo::Equals(const ProfileCompilationInfo& other) {

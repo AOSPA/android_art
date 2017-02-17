@@ -155,12 +155,6 @@ class Redefiner {
     void FindAndAllocateObsoleteMethods(art::mirror::Class* art_klass)
         REQUIRES(art::Locks::mutator_lock_);
 
-    void FillObsoleteMethodMap(
-        art::mirror::Class* art_klass,
-        const std::unordered_map<art::ArtMethod*, art::ArtMethod*>& obsoletes)
-          REQUIRES(art::Locks::mutator_lock_);
-
-
     // Checks that the dex file contains only the single expected class and that the top-level class
     // data has not been modified in an incompatible manner.
     bool CheckClass() REQUIRES_SHARED(art::Locks::mutator_lock_);
@@ -207,6 +201,8 @@ class Redefiner {
 
     void ReleaseDexFile() REQUIRES_SHARED(art::Locks::mutator_lock_);
 
+    void UnregisterBreakpoints() REQUIRES_SHARED(art::Locks::mutator_lock_);
+
    private:
     Redefiner* driver_;
     jclass klass_;
@@ -250,6 +246,7 @@ class Redefiner {
   bool FinishAllRemainingAllocations(RedefinitionDataHolder& holder)
       REQUIRES_SHARED(art::Locks::mutator_lock_);
   void ReleaseAllDexFiles() REQUIRES_SHARED(art::Locks::mutator_lock_);
+  void UnregisterAllBreakpoints() REQUIRES_SHARED(art::Locks::mutator_lock_);
 
   void RecordFailure(jvmtiError result, const std::string& class_sig, const std::string& error_msg);
   void RecordFailure(jvmtiError result, const std::string& error_msg) {

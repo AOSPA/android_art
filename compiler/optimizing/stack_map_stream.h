@@ -70,6 +70,7 @@ class StackMapStream : public ValueObject {
         inline_infos_(allocator->Adapter(kArenaAllocStackMapStream)),
         stack_masks_(allocator->Adapter(kArenaAllocStackMapStream)),
         register_masks_(allocator->Adapter(kArenaAllocStackMapStream)),
+        dex_register_entries_(allocator->Adapter(kArenaAllocStackMapStream)),
         stack_mask_max_(-1),
         dex_pc_max_(0),
         register_mask_max_(0),
@@ -79,13 +80,6 @@ class StackMapStream : public ValueObject {
         current_entry_(),
         current_inline_info_(),
         code_info_encoding_(allocator->Adapter(kArenaAllocStackMapStream)),
-        inline_info_size_(0),
-        dex_register_maps_size_(0),
-        stack_maps_size_(0),
-        dex_register_location_catalog_size_(0),
-        dex_register_location_catalog_start_(0),
-        dex_register_maps_start_(0),
-        inline_infos_start_(0),
         needed_size_(0),
         current_dex_register_(0),
         in_inline_frame_(false) {
@@ -96,30 +90,42 @@ class StackMapStream : public ValueObject {
     code_info_encoding_.reserve(16);
   }
 
+  // A dex register map entry for a single stack map entry, contains what registers are live as
+  // well as indices into the location catalog.
+  class DexRegisterMapEntry {
+   public:
+    static const size_t kOffsetUnassigned = -1;
+
+    BitVector* live_dex_registers_mask;
+    uint32_t num_dex_registers;
+    size_t locations_start_index;
+    // Computed fields
+    size_t hash = 0;
+    size_t offset = kOffsetUnassigned;
+
+    size_t ComputeSize(size_t catalog_size) const;
+  };
+
   // See runtime/stack_map.h to know what these fields contain.
   struct StackMapEntry {
     uint32_t dex_pc;
     CodeOffset native_pc_code_offset;
     uint32_t register_mask;
     BitVector* sp_mask;
-    uint32_t num_dex_registers;
     uint8_t inlining_depth;
-    size_t dex_register_locations_start_index;
     size_t inline_infos_start_index;
-    BitVector* live_dex_registers_mask;
-    uint32_t dex_register_map_hash;
-    size_t same_dex_register_map_as_;
     uint32_t stack_mask_index;
     uint32_t register_mask_index;
+    DexRegisterMapEntry dex_register_entry;
+    size_t dex_register_map_index;
   };
 
   struct InlineInfoEntry {
     uint32_t dex_pc;  // DexFile::kDexNoIndex for intrinsified native methods.
     ArtMethod* method;
     uint32_t method_index;
-    uint32_t num_dex_registers;
-    BitVector* live_dex_registers_mask;
-    size_t dex_register_locations_start_index;
+    DexRegisterMapEntry dex_register_entry;
+    size_t dex_register_map_index;
   };
 
   void BeginStackMapEntry(uint32_t dex_pc,
@@ -147,7 +153,8 @@ class StackMapStream : public ValueObject {
   }
 
   void SetStackMapNativePcOffset(size_t i, uint32_t native_pc_offset) {
-    stack_maps_[i].native_pc_code_offset = CodeOffset::FromOffset(native_pc_offset, instruction_set_);
+    stack_maps_[i].native_pc_code_offset =
+        CodeOffset::FromOffset(native_pc_offset, instruction_set_);
   }
 
   // Prepares the stream to fill in a memory region. Must be called before FillIn.
@@ -157,10 +164,9 @@ class StackMapStream : public ValueObject {
 
  private:
   size_t ComputeDexRegisterLocationCatalogSize() const;
-  size_t ComputeDexRegisterMapSize(uint32_t num_dex_registers,
-                                   const BitVector* live_dex_registers_mask) const;
   size_t ComputeDexRegisterMapsSize() const;
-  void ComputeInlineInfoEncoding();
+  void ComputeInlineInfoEncoding(InlineInfoEncoding* encoding,
+                                 size_t dex_register_maps_bytes);
 
   CodeOffset ComputeMaxNativePcCodeOffset() const;
 
@@ -170,15 +176,24 @@ class StackMapStream : public ValueObject {
   // Returns the number of unique register masks.
   size_t PrepareRegisterMasks();
 
-  // Returns the index of an entry with the same dex register map as the current_entry,
-  // or kNoSameDexMapFound if no such entry exists.
-  size_t FindEntryWithTheSameDexMap();
-  bool HaveTheSameDexMaps(const StackMapEntry& a, const StackMapEntry& b) const;
+  // Deduplicate entry if possible and return the corresponding index into dex_register_entries_
+  // array. If entry is not a duplicate, a new entry is added to dex_register_entries_.
+  size_t AddDexRegisterMapEntry(const DexRegisterMapEntry& entry);
+
+  // Return true if the two dex register map entries are equal.
+  bool DexRegisterMapEntryEquals(const DexRegisterMapEntry& a, const DexRegisterMapEntry& b) const;
+
+  // Fill in the corresponding entries of a register map.
   void FillInDexRegisterMap(DexRegisterMap dex_register_map,
                             uint32_t num_dex_registers,
                             const BitVector& live_dex_registers_mask,
                             uint32_t start_index_in_dex_register_locations) const;
 
+  // Returns the offset for the dex register inside of the dex register location region. See FillIn.
+  // Only copies the dex register map if the offset for the entry is not already assigned.
+  size_t MaybeCopyDexRegisterMap(DexRegisterMapEntry& entry,
+                                 size_t* current_offset,
+                                 MemoryRegion dex_register_locations_region);
   void CheckDexRegisterMap(const CodeInfo& code_info,
                            const DexRegisterMap& dex_register_map,
                            size_t num_dex_registers,
@@ -205,6 +220,7 @@ class StackMapStream : public ValueObject {
   ArenaVector<InlineInfoEntry> inline_infos_;
   ArenaVector<uint8_t> stack_masks_;
   ArenaVector<uint32_t> register_masks_;
+  ArenaVector<DexRegisterMapEntry> dex_register_entries_;
   int stack_mask_max_;
   uint32_t dex_pc_max_;
   uint32_t register_mask_max_;
@@ -214,16 +230,7 @@ class StackMapStream : public ValueObject {
 
   StackMapEntry current_entry_;
   InlineInfoEntry current_inline_info_;
-  StackMapEncoding stack_map_encoding_;
-  InlineInfoEncoding inline_info_encoding_;
   ArenaVector<uint8_t> code_info_encoding_;
-  size_t inline_info_size_;
-  size_t dex_register_maps_size_;
-  size_t stack_maps_size_;
-  size_t dex_register_location_catalog_size_;
-  size_t dex_register_location_catalog_start_;
-  size_t dex_register_maps_start_;
-  size_t inline_infos_start_;
   size_t needed_size_;
   uint32_t current_dex_register_;
   bool in_inline_frame_;

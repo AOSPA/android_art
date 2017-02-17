@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import java.lang.ref.Reference;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Proxy;
 import java.util.Arrays;
@@ -221,7 +222,8 @@ public class Main {
 
     // The JIT may deeply inline and load some classes. Preload these for test determinism.
     final String PRELOAD_FOR_JIT[] = {
-        "java.nio.charset.CoderMalfunctionError"
+        "java.nio.charset.CoderMalfunctionError",
+        "java.util.NoSuchElementException"
     };
     for (String s : PRELOAD_FOR_JIT) {
       Class.forName(s);
@@ -289,6 +291,8 @@ public class Main {
     if (hasJit() && !isLoadedClass("Main$ClassD")) {
       testClassEventsJit();
     }
+
+    testClassLoadPrepareEquality();
   }
 
   private static void testClassEventsJit() throws Exception {
@@ -309,6 +313,16 @@ public class Main {
     if (ClassD.x != 1) {
       throw new RuntimeException("Unexpected value");
     }
+  }
+
+  private static void testClassLoadPrepareEquality() throws Exception {
+    setEqualityEventStorageClass(ClassF.class);
+
+    enableClassLoadPrepareEqualityEvents(true);
+
+    Class.forName("Main$ClassE");
+
+    enableClassLoadPrepareEqualityEvents(false);
   }
 
   private static void printClassLoaderClasses(ClassLoader cl) {
@@ -382,6 +396,9 @@ public class Main {
   private static native void enableClassLoadSeenEvents(boolean b);
   private static native boolean hadLoadEvent();
 
+  private static native void setEqualityEventStorageClass(Class<?> c);
+  private static native void enableClassLoadPrepareEqualityEvents(boolean b);
+
   private static class TestForNonInit {
     public static double dummy = Math.random();  // So it can't be compile-time initialized.
   }
@@ -406,6 +423,18 @@ public class Main {
 
   public static class ClassD {
     static int x = 1;
+  }
+
+  public static class ClassE {
+    public void foo() {
+    }
+    public void bar() {
+    }
+  }
+
+  public static class ClassF {
+    public static Object STATIC = null;
+    public static Reference<Object> WEAK = null;
   }
 
   private static final String DEX1 = System.getenv("DEX_LOCATION") + "/912-classes.jar";

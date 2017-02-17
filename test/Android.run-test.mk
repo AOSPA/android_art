@@ -533,25 +533,13 @@ TEST_ART_BROKEN_INTERPRETER_RUN_TESTS :=
 # also uses Generic JNI instead of the JNI compiler.
 # Test 906 iterates the heap filtering with different options. No instances should be created
 # between those runs to be able to have precise checks.
-# Test 902 hits races with the JIT compiler. b/32821077
 # Test 629 requires compilation.
-# Test 914, 915, 917, & 919 are very sensitive to the exact state of the stack,
-# including the jit-inserted runtime frames. This causes them to be somewhat
-# flaky as JIT tests. This should be fixed once b/33630159 or b/33616143 are
-# resolved but until then just disable them. Test 916 already checks this
-# feature for JIT use cases in a way that is resilient to the jit frames.
 # 912: b/34655682
 TEST_ART_BROKEN_JIT_RUN_TESTS := \
   137-cfi \
   629-vdex-speed \
-  902-hello-transformation \
   904-object-allocation \
   906-iterate-heap \
-  914-hello-obsolescence \
-  915-obsolete-2 \
-  917-fields-transformation \
-  919-obsolete-fields \
-  926-multi-obsolescence \
 
 ifneq (,$(filter jit,$(COMPILER_TYPES)))
   ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),$(PREBUILD_TYPES), \
@@ -861,6 +849,69 @@ ART_TEST_HOST_RUN_TEST_DEPENDENCIES += \
   $(2ND_ART_HOST_OUT_SHARED_LIBRARIES)/libopenjdkjvmtid$(ART_HOST_SHLIB_EXTENSION) \
 
 endif
+
+# Host executables.
+host_prereq_rules := $(ART_TEST_HOST_RUN_TEST_DEPENDENCIES)
+
+# Classpath for Jack compilation for host.
+host_prereq_rules += $(HOST_JACK_CLASSPATH_DEPENDENCIES)
+
+# Required for dx, jasmin, smali, dexmerger, jack.
+host_prereq_rules += $(TEST_ART_RUN_TEST_DEPENDENCIES)
+
+host_prereq_rules += $(HOST_OUT_EXECUTABLES)/hprof-conv
+
+# Classpath for Jack compilation for target.
+target_prereq_rules := $(TARGET_JACK_CLASSPATH_DEPENDENCIES)
+
+# Sync test files to the target, depends upon all things that must be pushed
+#to the target.
+target_prereq_rules += test-art-target-sync
+
+define core-image-dependencies
+  image_suffix := $(3)
+  ifeq ($(3),regalloc_gc)
+    image_suffix:=optimizing
+  else
+    ifeq ($(3),jit)
+      image_suffix:=interpreter
+    endif
+  endif
+  ifeq ($(2),no-image)
+    $(1)_prereq_rules += $$($(call name-to-var,$(1))_CORE_IMAGE_$$(image_suffix)_pic_$(4))
+  else
+    ifeq ($(2),npicimage)
+      $(1)_prereq_rules += $$($(call name-to-var,$(1))_CORE_IMAGE_$$(image_suffix)_no-pic_$(4))
+    else
+      ifeq ($(2),picimage)
+        $(1)_prereq_rules += $$($(call name-to-var,$(1))_CORE_IMAGE_$$(image_suffix)_pic_$(4))
+      else
+        ifeq ($(2),multinpicimage)
+          $(1)_prereq_rules += $$($(call name-to-var,$(1))_CORE_IMAGE_$$(image_suffix)_no-pic_multi_$(4))
+        else
+          ifeq ($(2),multipicimage)
+             $(1)_prereq_rules += $$($(call name-to-var,$(1))_CORE_IMAGE_$$(image_suffix)_pic_multi_$(4))
+          endif
+        endif
+      endif
+    endif
+  endif
+endef
+
+# Add core image dependencies required for given target - HOST or TARGET,
+# IMAGE_TYPE, COMPILER_TYPE and ADDRESS_SIZE to the prereq_rules.
+$(foreach target, $(TARGET_TYPES), \
+  $(foreach image, $(IMAGE_TYPES), \
+    $(foreach compiler, $(COMPILER_TYPES), \
+      $(foreach address_size, $(ALL_ADDRESS_SIZES), $(eval \
+        $(call core-image-dependencies,$(target),$(image),$(compiler),$(address_size)))))))
+
+test-art-host-run-test-dependencies : $(host_prereq_rules)
+test-art-target-run-test-dependencies : $(target_prereq_rules)
+test-art-run-test-dependencies : test-art-host-run-test-dependencies test-art-target-run-test-dependencies
+
+host_prereq_rules :=
+target_prereq_rules :=
 
 # Create a rule to build and run a tests following the form:
 # test-art-{1: host or target}-run-test-{2: debug ndebug}-{3: prebuild no-prebuild no-dex2oat}-

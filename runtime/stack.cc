@@ -145,7 +145,7 @@ ArtMethod* StackVisitor::GetMethod() const {
       DCHECK(walk_kind_ != StackWalkKind::kSkipInlinedFrames);
       return GetResolvedMethod(*GetCurrentQuickFrame(),
                                inline_info,
-                               encoding.inline_info_encoding,
+                               encoding.inline_info.encoding,
                                depth_in_stack_map);
     } else {
       return *cur_quick_frame_;
@@ -162,7 +162,7 @@ uint32_t StackVisitor::GetDexPc(bool abort_on_failure) const {
       size_t depth_in_stack_map = current_inlining_depth_ - 1;
       const OatQuickMethodHeader* method_header = GetCurrentOatQuickMethodHeader();
       CodeInfoEncoding encoding = method_header->GetOptimizedCodeInfo().ExtractEncoding();
-      return GetCurrentInlineInfo().GetDexPcAtDepth(encoding.inline_info_encoding,
+      return GetCurrentInlineInfo().GetDexPcAtDepth(encoding.inline_info.encoding,
                                                     depth_in_stack_map);
     } else if (cur_oat_quick_method_header_ == nullptr) {
       return DexFile::kDexNoIndex;
@@ -826,10 +826,10 @@ void StackVisitor::WalkStack(bool include_transitions) {
           uint32_t native_pc_offset =
               cur_oat_quick_method_header_->NativeQuickPcOffset(cur_quick_frame_pc_);
           StackMap stack_map = code_info.GetStackMapForNativePcOffset(native_pc_offset, encoding);
-          if (stack_map.IsValid() && stack_map.HasInlineInfo(encoding.stack_map_encoding)) {
+          if (stack_map.IsValid() && stack_map.HasInlineInfo(encoding.stack_map.encoding)) {
             InlineInfo inline_info = code_info.GetInlineInfoOf(stack_map, encoding);
             DCHECK_EQ(current_inlining_depth_, 0u);
-            for (current_inlining_depth_ = inline_info.GetDepth(encoding.inline_info_encoding);
+            for (current_inlining_depth_ = inline_info.GetDepth(encoding.inline_info.encoding);
                  current_inlining_depth_ != 0;
                  --current_inlining_depth_) {
               bool should_continue = VisitFrame();
@@ -874,9 +874,13 @@ void StackVisitor::WalkStack(bool include_transitions) {
               CHECK_EQ(GetMethod(), callee) << "Expected: " << ArtMethod::PrettyMethod(callee)
                                             << " Found: " << ArtMethod::PrettyMethod(GetMethod());
             } else {
-              CHECK_EQ(instrumentation_frame.method_, GetMethod())
-                  << "Expected: " << ArtMethod::PrettyMethod(instrumentation_frame.method_)
-                  << " Found: " << ArtMethod::PrettyMethod(GetMethod());
+              // Instrumentation generally doesn't distinguish between a method's obsolete and
+              // non-obsolete version.
+              CHECK_EQ(instrumentation_frame.method_->GetNonObsoleteMethod(),
+                       GetMethod()->GetNonObsoleteMethod())
+                  << "Expected: "
+                  << ArtMethod::PrettyMethod(instrumentation_frame.method_->GetNonObsoleteMethod())
+                  << " Found: " << ArtMethod::PrettyMethod(GetMethod()->GetNonObsoleteMethod());
             }
             if (num_frames_ != 0) {
               // Check agreement of frame Ids only if num_frames_ is computed to avoid infinite
@@ -903,7 +907,7 @@ void StackVisitor::WalkStack(bool include_transitions) {
               << " native=" << method->IsNative()
               << std::noboolalpha
               << " entrypoints=" << method->GetEntryPointFromQuickCompiledCode()
-              << "," << method->GetEntryPointFromJni()
+              << "," << (method->IsNative() ? method->GetEntryPointFromJni() : nullptr)
               << " next=" << *cur_quick_frame_;
         }
 

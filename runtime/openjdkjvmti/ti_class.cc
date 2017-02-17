@@ -42,12 +42,17 @@
 #include "class_linker.h"
 #include "common_throws.h"
 #include "events-inl.h"
+#include "gc/heap.h"
+#include "gc_root.h"
 #include "handle.h"
 #include "jni_env_ext-inl.h"
 #include "jni_internal.h"
 #include "mirror/array-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_ext.h"
+#include "mirror/object_reference.h"
+#include "mirror/object-inl.h"
+#include "mirror/reference.h"
 #include "runtime.h"
 #include "runtime_callbacks.h"
 #include "ScopedLocalRef.h"
@@ -261,15 +266,22 @@ struct ClassCallback : public art::ClassLoadCallback {
             thread_jni.get(),
             jklass.get());
       }
-      AddTempClass(thread, jklass.get());
+      if (klass->IsTemp()) {
+        AddTempClass(thread, jklass.get());
+      }
     }
   }
 
-  void ClassPrepare(art::Handle<art::mirror::Class> temp_klass ATTRIBUTE_UNUSED,
+  void ClassPrepare(art::Handle<art::mirror::Class> temp_klass,
                     art::Handle<art::mirror::Class> klass)
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     if (event_handler->IsEventEnabledAnywhere(ArtJvmtiEvent::kClassPrepare)) {
       art::Thread* thread = art::Thread::Current();
+      if (temp_klass.Get() != klass.Get()) {
+        DCHECK(temp_klass->IsTemp());
+        DCHECK(temp_klass->IsRetired());
+        HandleTempClass(thread, temp_klass, klass);
+      }
       ScopedLocalRef<jclass> jklass(thread->GetJniEnv(),
                                     thread->GetJniEnv()->AddLocalReference<jclass>(klass.Get()));
       ScopedLocalRef<jthread> thread_jni(
@@ -283,32 +295,209 @@ struct ClassCallback : public art::ClassLoadCallback {
     }
   }
 
+  // To support parallel class-loading, we need to perform some locking dances here. Namely,
+  // the fixup stage must not be holding the temp_classes lock when it fixes up the system
+  // (as that requires suspending all mutators).
+
   void AddTempClass(art::Thread* self, jclass klass) {
     std::unique_lock<std::mutex> mu(temp_classes_lock);
-    temp_classes.push_back(reinterpret_cast<jclass>(self->GetJniEnv()->NewGlobalRef(klass)));
+    jclass global_klass = reinterpret_cast<jclass>(self->GetJniEnv()->NewGlobalRef(klass));
+    temp_classes.push_back(global_klass);
   }
 
-  void HandleTempClass(art::Handle<art::mirror::Class> temp_klass,
+  void HandleTempClass(art::Thread* self,
+                       art::Handle<art::mirror::Class> temp_klass,
                        art::Handle<art::mirror::Class> klass)
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
-    std::unique_lock<std::mutex> mu(temp_classes_lock);
-    if (temp_classes.empty()) {
-      return;
-    }
-
-    art::Thread* self = art::Thread::Current();
-    for (auto it = temp_classes.begin(); it != temp_classes.end(); ++it) {
-      if (temp_klass.Get() == art::ObjPtr<art::mirror::Class>::DownCast(self->DecodeJObject(*it))) {
-        temp_classes.erase(it);
-        FixupTempClass(temp_klass, klass);
+    bool requires_fixup = false;
+    {
+      std::unique_lock<std::mutex> mu(temp_classes_lock);
+      if (temp_classes.empty()) {
+        return;
       }
+
+      for (auto it = temp_classes.begin(); it != temp_classes.end(); ++it) {
+        if (temp_klass.Get() == art::ObjPtr<art::mirror::Class>::DownCast(self->DecodeJObject(*it))) {
+          self->GetJniEnv()->DeleteGlobalRef(*it);
+          temp_classes.erase(it);
+          requires_fixup = true;
+          break;
+        }
+      }
+    }
+    if (requires_fixup) {
+      FixupTempClass(self, temp_klass, klass);
     }
   }
 
-  void FixupTempClass(art::Handle<art::mirror::Class> temp_klass ATTRIBUTE_UNUSED,
-                      art::Handle<art::mirror::Class> klass ATTRIBUTE_UNUSED)
+  void FixupTempClass(art::Thread* self,
+                      art::Handle<art::mirror::Class> temp_klass,
+                      art::Handle<art::mirror::Class> klass)
      REQUIRES_SHARED(art::Locks::mutator_lock_) {
-    // TODO: Implement.
+    // Suspend everything.
+    art::gc::Heap* heap = art::Runtime::Current()->GetHeap();
+    if (heap->IsGcConcurrentAndMoving()) {
+      // Need to take a heap dump while GC isn't running. See the
+      // comment in Heap::VisitObjects().
+      heap->IncrementDisableMovingGC(self);
+    }
+    {
+      art::ScopedThreadSuspension sts(self, art::kWaitingForVisitObjects);
+      art::ScopedSuspendAll ssa("FixupTempClass");
+
+      art::mirror::Class* input = temp_klass.Get();
+      art::mirror::Class* output = klass.Get();
+
+      FixupGlobalReferenceTables(input, output);
+      FixupLocalReferenceTables(self, input, output);
+      FixupHeap(input, output);
+    }
+    if (heap->IsGcConcurrentAndMoving()) {
+      heap->DecrementDisableMovingGC(self);
+    }
+  }
+
+  class RootUpdater : public art::RootVisitor {
+   public:
+    RootUpdater(const art::mirror::Class* input, art::mirror::Class* output)
+        : input_(input), output_(output) {}
+
+    void VisitRoots(art::mirror::Object*** roots,
+                    size_t count,
+                    const art::RootInfo& info ATTRIBUTE_UNUSED)
+        OVERRIDE {
+      for (size_t i = 0; i != count; ++i) {
+        if (*roots[i] == input_) {
+          *roots[i] = output_;
+        }
+      }
+    }
+
+    void VisitRoots(art::mirror::CompressedReference<art::mirror::Object>** roots,
+                    size_t count,
+                    const art::RootInfo& info ATTRIBUTE_UNUSED)
+        OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
+      for (size_t i = 0; i != count; ++i) {
+        if (roots[i]->AsMirrorPtr() == input_) {
+          roots[i]->Assign(output_);
+        }
+      }
+    }
+
+   private:
+    const art::mirror::Class* input_;
+    art::mirror::Class* output_;
+  };
+
+  void FixupGlobalReferenceTables(art::mirror::Class* input, art::mirror::Class* output)
+      REQUIRES(art::Locks::mutator_lock_) {
+    art::JavaVMExt* java_vm = art::Runtime::Current()->GetJavaVM();
+
+    // Fix up the global table with a root visitor.
+    RootUpdater global_update(input, output);
+    java_vm->VisitRoots(&global_update);
+
+    class WeakGlobalUpdate : public art::IsMarkedVisitor {
+     public:
+      WeakGlobalUpdate(art::mirror::Class* root_input, art::mirror::Class* root_output)
+          : input_(root_input), output_(root_output) {}
+
+      art::mirror::Object* IsMarked(art::mirror::Object* obj) OVERRIDE {
+        if (obj == input_) {
+          return output_;
+        }
+        return obj;
+      }
+
+     private:
+      const art::mirror::Class* input_;
+      art::mirror::Class* output_;
+    };
+    WeakGlobalUpdate weak_global_update(input, output);
+    java_vm->SweepJniWeakGlobals(&weak_global_update);
+  }
+
+  void FixupLocalReferenceTables(art::Thread* self,
+                                 art::mirror::Class* input,
+                                 art::mirror::Class* output)
+      REQUIRES(art::Locks::mutator_lock_) {
+    class LocalUpdate {
+     public:
+      LocalUpdate(const art::mirror::Class* root_input, art::mirror::Class* root_output)
+          : input_(root_input), output_(root_output) {}
+
+      static void Callback(art::Thread* t, void* arg) REQUIRES(art::Locks::mutator_lock_) {
+        LocalUpdate* local = reinterpret_cast<LocalUpdate*>(arg);
+
+        // Fix up the local table with a root visitor.
+        RootUpdater local_update(local->input_, local->output_);
+        t->GetJniEnv()->locals.VisitRoots(
+            &local_update, art::RootInfo(art::kRootJNILocal, t->GetThreadId()));
+      }
+
+     private:
+      const art::mirror::Class* input_;
+      art::mirror::Class* output_;
+    };
+    LocalUpdate local_upd(input, output);
+    art::MutexLock mu(self, *art::Locks::thread_list_lock_);
+    art::Runtime::Current()->GetThreadList()->ForEach(LocalUpdate::Callback, &local_upd);
+  }
+
+  void FixupHeap(art::mirror::Class* input, art::mirror::Class* output)
+        REQUIRES(art::Locks::mutator_lock_) {
+    class HeapFixupVisitor {
+     public:
+      HeapFixupVisitor(const art::mirror::Class* root_input, art::mirror::Class* root_output)
+                : input_(root_input), output_(root_output) {}
+
+      void operator()(art::mirror::Object* src,
+                      art::MemberOffset field_offset,
+                      bool is_static ATTRIBUTE_UNUSED) const
+          REQUIRES_SHARED(art::Locks::mutator_lock_) {
+        art::mirror::HeapReference<art::mirror::Object>* trg =
+          src->GetFieldObjectReferenceAddr(field_offset);
+        if (trg->AsMirrorPtr() == input_) {
+          DCHECK_NE(field_offset.Uint32Value(), 0u);  // This shouldn't be the class field of
+                                                      // an object.
+          trg->Assign(output_);
+        }
+      }
+
+      void operator()(art::ObjPtr<art::mirror::Class> klass ATTRIBUTE_UNUSED,
+                      art::ObjPtr<art::mirror::Reference> reference) const
+          REQUIRES_SHARED(art::Locks::mutator_lock_) {
+        art::mirror::Object* val = reference->GetReferent();
+        if (val == input_) {
+          reference->SetReferent<false>(output_);
+        }
+      }
+
+      void VisitRoot(art::mirror::CompressedReference<art::mirror::Object>* root ATTRIBUTE_UNUSED)
+          const {
+        LOG(FATAL) << "Unreachable";
+      }
+
+      void VisitRootIfNonNull(
+          art::mirror::CompressedReference<art::mirror::Object>* root ATTRIBUTE_UNUSED) const {
+        LOG(FATAL) << "Unreachable";
+      }
+
+      static void AllObjectsCallback(art::mirror::Object* obj, void* arg)
+          REQUIRES_SHARED(art::Locks::mutator_lock_) {
+        HeapFixupVisitor* hfv = reinterpret_cast<HeapFixupVisitor*>(arg);
+
+        // Visit references, not native roots.
+        obj->VisitReferences<false>(*hfv, *hfv);
+      }
+
+     private:
+      const art::mirror::Class* input_;
+      art::mirror::Class* output_;
+    };
+    HeapFixupVisitor hfv(input, output);
+    art::Runtime::Current()->GetHeap()->VisitObjectsPaused(HeapFixupVisitor::AllObjectsCallback,
+                                                           &hfv);
   }
 
   // A set of all the temp classes we have handed out. We have to fix up references to these.

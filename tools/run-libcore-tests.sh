@@ -14,6 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Exit as a stop-gap measure for b/35308152.
+exit 0
+
 if [ ! -d libcore ]; then
   echo "Script needs to be run at the root of the android tree"
   exit 1
@@ -123,7 +126,7 @@ done
 vogar_args="$vogar_args --timeout 480"
 
 # Use Jack with "1.8" configuration.
-vogar_args="$vogar_args --toolchain jack --language JN"
+vogar_args="$vogar_args --toolchain jack --language JO"
 
 # JIT settings.
 if $use_jit; then

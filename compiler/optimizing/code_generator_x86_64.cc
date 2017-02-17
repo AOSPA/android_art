@@ -245,9 +245,8 @@ class LoadClassSlowPathX86_64 : public SlowPathCode {
 
     SaveLiveRegisters(codegen, locations);
 
-    InvokeRuntimeCallingConvention calling_convention;
-    __ movl(CpuRegister(calling_convention.GetRegisterAt(0)),
-            Immediate(cls_->GetTypeIndex().index_));
+    // Custom calling convention: RAX serves as both input and output.
+    __ movl(CpuRegister(RAX), Immediate(cls_->GetTypeIndex().index_));
     x86_64_codegen->InvokeRuntime(do_clinit_ ? kQuickInitializeStaticStorage : kQuickInitializeType,
                                   instruction_,
                                   dex_pc_,
@@ -5456,10 +5455,10 @@ HLoadClass::LoadKind CodeGeneratorX86_64::GetSupportedLoadClassKind(
 void LocationsBuilderX86_64::VisitLoadClass(HLoadClass* cls) {
   HLoadClass::LoadKind load_kind = cls->GetLoadKind();
   if (load_kind == HLoadClass::LoadKind::kDexCacheViaMethod) {
-    InvokeRuntimeCallingConvention calling_convention;
+    // Custom calling convention: RAX serves as both input and output.
     CodeGenerator::CreateLoadClassRuntimeCallLocationSummary(
         cls,
-        Location::RegisterLocation(calling_convention.GetRegisterAt(0)),
+        Location::RegisterLocation(RAX),
         Location::RegisterLocation(RAX));
     return;
   }
@@ -5478,6 +5477,17 @@ void LocationsBuilderX86_64::VisitLoadClass(HLoadClass* cls) {
     locations->SetInAt(0, Location::RequiresRegister());
   }
   locations->SetOut(Location::RequiresRegister());
+  if (load_kind == HLoadClass::LoadKind::kBssEntry) {
+    if (!kUseReadBarrier || kUseBakerReadBarrier) {
+      // Rely on the type resolution and/or initialization to save everything.
+      // Custom calling convention: RAX serves as both input and output.
+      RegisterSet caller_saves = RegisterSet::Empty();
+      caller_saves.Add(Location::RegisterLocation(RAX));
+      locations->SetCustomSlowPathCallerSaves(caller_saves);
+    } else {
+      // For non-Baker read barrier we have a temp-clobbering call.
+    }
+  }
 }
 
 Label* CodeGeneratorX86_64::NewJitRootClassPatch(const DexFile& dex_file,
@@ -5553,7 +5563,7 @@ void InstructionCodeGeneratorX86_64::VisitLoadClass(HLoadClass* cls) NO_THREAD_S
       Label* fixup_label =
           codegen_->NewJitRootClassPatch(cls->GetDexFile(), cls->GetTypeIndex(), cls->GetClass());
       // /* GcRoot<mirror::Class> */ out = *address
-      GenerateGcRootFieldLoad(cls, out_loc, address, fixup_label, kCompilerReadBarrierOption);
+      GenerateGcRootFieldLoad(cls, out_loc, address, fixup_label, read_barrier_option);
       break;
     }
     default:
@@ -5629,7 +5639,7 @@ void LocationsBuilderX86_64::VisitLoadString(HLoadString* load) {
     locations->SetOut(Location::RequiresRegister());
     if (load->GetLoadKind() == HLoadString::LoadKind::kBssEntry) {
       if (!kUseReadBarrier || kUseBakerReadBarrier) {
-        // Rely on the pResolveString and/or marking to save everything.
+        // Rely on the pResolveString to save everything.
         // Custom calling convention: RAX serves as both input and output.
         RegisterSet caller_saves = RegisterSet::Empty();
         caller_saves.Add(Location::RegisterLocation(RAX));
@@ -6501,9 +6511,10 @@ void InstructionCodeGeneratorX86_64::GenerateGcRootFieldLoad(
       // Fast path implementation of art::ReadBarrier::BarrierForRoot when
       // Baker's read barrier are used:
       //
-      //   root = *address;
-      //   if (Thread::Current()->GetIsGcMarking()) {
-      //     root = ReadBarrier::Mark(root)
+      //   root = obj.field;
+      //   temp = Thread::Current()->pReadBarrierMarkReg ## root.reg()
+      //   if (temp != null) {
+      //     root = temp(root)
       //   }
 
       // /* GcRoot<mirror::Object> */ root = *address
@@ -6524,9 +6535,11 @@ void InstructionCodeGeneratorX86_64::GenerateGcRootFieldLoad(
           instruction, root, /* unpoison_ref_before_marking */ false);
       codegen_->AddSlowPath(slow_path);
 
-      __ gs()->cmpl(Address::Absolute(Thread::IsGcMarkingOffset<kX86_64PointerSize>().Int32Value(),
-                                      /* no_rip */ true),
-                    Immediate(0));
+      // Test the `Thread::Current()->pReadBarrierMarkReg ## root.reg()` entrypoint.
+      const int32_t entry_point_offset =
+          CodeGenerator::GetReadBarrierMarkEntryPointsOffset<kX86_64PointerSize>(root.reg());
+      __ gs()->cmpl(Address::Absolute(entry_point_offset, /* no_rip */ true), Immediate(0));
+      // The entrypoint is null when the GC is not marking.
       __ j(kNotEqual, slow_path->GetEntryLabel());
       __ Bind(slow_path->GetExitLabel());
     } else {
