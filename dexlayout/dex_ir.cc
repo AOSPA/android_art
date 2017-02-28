@@ -466,8 +466,8 @@ AnnotationItem* Collections::CreateAnnotationItem(const DexFile::AnnotationItem*
 
 
 AnnotationSetItem* Collections::CreateAnnotationSetItem(const DexFile& dex_file,
-    const DexFile::AnnotationSetItem& disk_annotations_item, uint32_t offset) {
-  if (disk_annotations_item.size_ == 0 && offset == 0) {
+    const DexFile::AnnotationSetItem* disk_annotations_item, uint32_t offset) {
+  if (disk_annotations_item == nullptr || (disk_annotations_item->size_ == 0 && offset == 0)) {
     return nullptr;
   }
   auto found_anno_set_item = AnnotationSetItems().find(offset);
@@ -475,14 +475,14 @@ AnnotationSetItem* Collections::CreateAnnotationSetItem(const DexFile& dex_file,
     return found_anno_set_item->second.get();
   }
   std::vector<AnnotationItem*>* items = new std::vector<AnnotationItem*>();
-  for (uint32_t i = 0; i < disk_annotations_item.size_; ++i) {
+  for (uint32_t i = 0; i < disk_annotations_item->size_; ++i) {
     const DexFile::AnnotationItem* annotation =
-        dex_file.GetAnnotationItem(&disk_annotations_item, i);
+        dex_file.GetAnnotationItem(disk_annotations_item, i);
     if (annotation == nullptr) {
       continue;
     }
     AnnotationItem* annotation_item =
-        CreateAnnotationItem(annotation, disk_annotations_item.entries_[i]);
+        CreateAnnotationItem(annotation, disk_annotations_item->entries_[i]);
     items->push_back(annotation_item);
   }
   AnnotationSetItem* annotation_set_item = new AnnotationSetItem(items);
@@ -501,7 +501,7 @@ AnnotationsDirectoryItem* Collections::CreateAnnotationsDirectoryItem(const DexF
   AnnotationSetItem* class_annotation = nullptr;
   if (class_set_item != nullptr) {
     uint32_t offset = disk_annotations_item->class_annotations_off_;
-    class_annotation = CreateAnnotationSetItem(dex_file, *class_set_item, offset);
+    class_annotation = CreateAnnotationSetItem(dex_file, class_set_item, offset);
   }
   const DexFile::FieldAnnotationsItem* fields =
       dex_file.GetFieldAnnotations(disk_annotations_item);
@@ -514,7 +514,7 @@ AnnotationsDirectoryItem* Collections::CreateAnnotationsDirectoryItem(const DexF
           dex_file.GetFieldAnnotationSetItem(fields[i]);
       uint32_t annotation_set_offset = fields[i].annotations_off_;
       AnnotationSetItem* annotation_set_item =
-          CreateAnnotationSetItem(dex_file, *field_set_item, annotation_set_offset);
+          CreateAnnotationSetItem(dex_file, field_set_item, annotation_set_offset);
       field_annotations->push_back(std::unique_ptr<FieldAnnotation>(
           new FieldAnnotation(field_id, annotation_set_item)));
     }
@@ -530,7 +530,7 @@ AnnotationsDirectoryItem* Collections::CreateAnnotationsDirectoryItem(const DexF
           dex_file.GetMethodAnnotationSetItem(methods[i]);
       uint32_t annotation_set_offset = methods[i].annotations_off_;
       AnnotationSetItem* annotation_set_item =
-          CreateAnnotationSetItem(dex_file, *method_set_item, annotation_set_offset);
+          CreateAnnotationSetItem(dex_file, method_set_item, annotation_set_offset);
       method_annotations->push_back(std::unique_ptr<MethodAnnotation>(
           new MethodAnnotation(method_id, annotation_set_item)));
     }
@@ -569,7 +569,7 @@ ParameterAnnotation* Collections::GenerateParameterAnnotation(
       const DexFile::AnnotationSetItem* annotation_set_item =
           dex_file.GetSetRefItemItem(&annotation_set_ref_list->list_[i]);
       uint32_t set_offset = annotation_set_ref_list->list_[i].annotations_off_;
-      annotations->push_back(CreateAnnotationSetItem(dex_file, *annotation_set_item, set_offset));
+      annotations->push_back(CreateAnnotationSetItem(dex_file, annotation_set_item, set_offset));
     }
     set_ref_list = new AnnotationSetRefList(annotations);
     annotation_set_ref_lists_.AddItem(set_ref_list, offset);
@@ -588,11 +588,14 @@ CodeItem* Collections::CreateCodeItem(const DexFile& dex_file,
   const uint8_t* debug_info_stream = dex_file.GetDebugInfoStream(&disk_code_item);
   DebugInfoItem* debug_info = nullptr;
   if (debug_info_stream != nullptr) {
-    uint32_t debug_info_size = GetDebugInfoStreamSize(debug_info_stream);
-    uint8_t* debug_info_buffer = new uint8_t[debug_info_size];
-    memcpy(debug_info_buffer, debug_info_stream, debug_info_size);
-    debug_info = new DebugInfoItem(debug_info_size, debug_info_buffer);
-    debug_info_items_.AddItem(debug_info, disk_code_item.debug_info_off_);
+    debug_info = debug_info_items_.GetExistingObject(disk_code_item.debug_info_off_);
+    if (debug_info == nullptr) {
+      uint32_t debug_info_size = GetDebugInfoStreamSize(debug_info_stream);
+      uint8_t* debug_info_buffer = new uint8_t[debug_info_size];
+      memcpy(debug_info_buffer, debug_info_stream, debug_info_size);
+      debug_info = new DebugInfoItem(debug_info_size, debug_info_buffer);
+      debug_info_items_.AddItem(debug_info, disk_code_item.debug_info_off_);
+    }
   }
 
   uint32_t insns_size = disk_code_item.insns_size_in_code_units_;
@@ -613,6 +616,7 @@ CodeItem* Collections::CreateCodeItem(const DexFile& dex_file,
       for (std::unique_ptr<const CatchHandler>& existing_handlers : *handler_list) {
         if (handler_off == existing_handlers->GetListOffset()) {
           handlers = existing_handlers.get();
+          break;
         }
       }
       if (handlers == nullptr) {
@@ -631,7 +635,51 @@ CodeItem* Collections::CreateCodeItem(const DexFile& dex_file,
       TryItem* try_item = new TryItem(start_addr, insn_count, handlers);
       tries->push_back(std::unique_ptr<const TryItem>(try_item));
     }
+    // Manually walk catch handlers list and add any missing handlers unreferenced by try items.
+    const uint8_t* handlers_base = DexFile::GetCatchHandlerData(disk_code_item, 0);
+    const uint8_t* handlers_data = handlers_base;
+    uint32_t handlers_size = DecodeUnsignedLeb128(&handlers_data);
+    while (handlers_size > handler_list->size()) {
+      bool already_added = false;
+      uint16_t handler_off = handlers_data - handlers_base;
+      for (std::unique_ptr<const CatchHandler>& existing_handlers : *handler_list) {
+        if (handler_off == existing_handlers->GetListOffset()) {
+          already_added = true;
+          break;
+        }
+      }
+      int32_t size = DecodeSignedLeb128(&handlers_data);
+      bool has_catch_all = size < 0;
+      if (has_catch_all) {
+        size = -size;
+      }
+      if (already_added == true)  {
+        for (int32_t i = 0; i < size; i++) {
+          DecodeUnsignedLeb128(&handlers_data);
+          DecodeUnsignedLeb128(&handlers_data);
+        }
+        if (has_catch_all) {
+          DecodeUnsignedLeb128(&handlers_data);
+        }
+        continue;
+      }
+      TypeAddrPairVector* addr_pairs = new TypeAddrPairVector();
+      for (int32_t i = 0; i < size; i++) {
+        const TypeId* type_id = GetTypeIdOrNullPtr(DecodeUnsignedLeb128(&handlers_data));
+        uint32_t addr = DecodeUnsignedLeb128(&handlers_data);
+        addr_pairs->push_back(
+            std::unique_ptr<const TypeAddrPair>(new TypeAddrPair(type_id, addr)));
+      }
+      if (has_catch_all) {
+        uint32_t addr = DecodeUnsignedLeb128(&handlers_data);
+        addr_pairs->push_back(
+            std::unique_ptr<const TypeAddrPair>(new TypeAddrPair(nullptr, addr)));
+      }
+      const CatchHandler* handler = new CatchHandler(has_catch_all, handler_off, addr_pairs);
+      handler_list->push_back(std::unique_ptr<const CatchHandler>(handler));
+    }
   }
+
   uint32_t size = GetCodeItemSize(dex_file, disk_code_item);
   CodeItem* code_item = new CodeItem(
       registers_size, ins_size, outs_size, debug_info, insns_size, insns, tries, handler_list);
@@ -683,8 +731,8 @@ ClassData* Collections::CreateClassData(
     const DexFile& dex_file, const uint8_t* encoded_data, uint32_t offset) {
   // Read the fields and methods defined by the class, resolving the circular reference from those
   // to classes by setting class at the same time.
-  ClassData* class_data = nullptr;
-  if (encoded_data != nullptr) {
+  ClassData* class_data = class_datas_.GetExistingObject(offset);
+  if (class_data == nullptr && encoded_data != nullptr) {
     ClassDataItemIterator cdii(dex_file, encoded_data);
     // Static fields.
     FieldItemVector* static_fields = new FieldItemVector();

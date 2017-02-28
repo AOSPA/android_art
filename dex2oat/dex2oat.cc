@@ -419,23 +419,23 @@ class WatchDog {
   } while (false)
 
  public:
-  explicit WatchDog(bool is_watch_dog_enabled) {
-    is_watch_dog_enabled_ = is_watch_dog_enabled;
-    if (!is_watch_dog_enabled_) {
-      return;
-    }
-    shutting_down_ = false;
+  explicit WatchDog(int64_t timeout_in_milliseconds)
+      : timeout_in_milliseconds_(timeout_in_milliseconds),
+        shutting_down_(false) {
     const char* reason = "dex2oat watch dog thread startup";
     CHECK_WATCH_DOG_PTHREAD_CALL(pthread_mutex_init, (&mutex_, nullptr), reason);
-    CHECK_WATCH_DOG_PTHREAD_CALL(pthread_cond_init, (&cond_, nullptr), reason);
+#ifndef __APPLE__
+    pthread_condattr_t condattr;
+    CHECK_WATCH_DOG_PTHREAD_CALL(pthread_condattr_init, (&condattr), reason);
+    CHECK_WATCH_DOG_PTHREAD_CALL(pthread_condattr_setclock, (&condattr, CLOCK_MONOTONIC), reason);
+    CHECK_WATCH_DOG_PTHREAD_CALL(pthread_cond_init, (&cond_, &condattr), reason);
+    CHECK_WATCH_DOG_PTHREAD_CALL(pthread_condattr_destroy, (&condattr), reason);
+#endif
     CHECK_WATCH_DOG_PTHREAD_CALL(pthread_attr_init, (&attr_), reason);
     CHECK_WATCH_DOG_PTHREAD_CALL(pthread_create, (&pthread_, &attr_, &CallBack, this), reason);
     CHECK_WATCH_DOG_PTHREAD_CALL(pthread_attr_destroy, (&attr_), reason);
   }
   ~WatchDog() {
-    if (!is_watch_dog_enabled_) {
-      return;
-    }
     const char* reason = "dex2oat watch dog thread shutdown";
     CHECK_WATCH_DOG_PTHREAD_CALL(pthread_mutex_lock, (&mutex_), reason);
     shutting_down_ = true;
@@ -447,6 +447,23 @@ class WatchDog {
     CHECK_WATCH_DOG_PTHREAD_CALL(pthread_cond_destroy, (&cond_), reason);
     CHECK_WATCH_DOG_PTHREAD_CALL(pthread_mutex_destroy, (&mutex_), reason);
   }
+
+  // TODO: tune the multiplier for GC verification, the following is just to make the timeout
+  //       large.
+  static constexpr int64_t kWatchdogVerifyMultiplier =
+      kVerifyObjectSupport > kVerifyObjectModeFast ? 100 : 1;
+
+  // When setting timeouts, keep in mind that the build server may not be as fast as your
+  // desktop. Debug builds are slower so they have larger timeouts.
+  static constexpr int64_t kWatchdogSlowdownFactor = kIsDebugBuild ? 5U : 1U;
+
+  // 9.5 minutes scaled by kSlowdownFactor. This is slightly smaller than the Package Manager
+  // watchdog (PackageManagerService.WATCHDOG_TIMEOUT, 10 minutes), so that dex2oat will abort
+  // itself before that watchdog would take down the system server.
+  static constexpr int64_t kWatchDogTimeoutSeconds = kWatchdogSlowdownFactor * (9 * 60 + 30);
+
+  static constexpr int64_t kDefaultWatchdogTimeoutInMS =
+      kWatchdogVerifyMultiplier * kWatchDogTimeoutSeconds * 1000;
 
  private:
   static void* CallBack(void* arg) {
@@ -470,18 +487,19 @@ class WatchDog {
   }
 
   void Wait() {
-    // TODO: tune the multiplier for GC verification, the following is just to make the timeout
-    //       large.
-    constexpr int64_t multiplier = kVerifyObjectSupport > kVerifyObjectModeFast ? 100 : 1;
     timespec timeout_ts;
-    InitTimeSpec(true, CLOCK_REALTIME, multiplier * kWatchDogTimeoutSeconds * 1000, 0, &timeout_ts);
+#if defined(__APPLE__)
+    InitTimeSpec(true, CLOCK_REALTIME, timeout_in_milliseconds_, 0, &timeout_ts);
+#else
+    InitTimeSpec(true, CLOCK_MONOTONIC, timeout_in_milliseconds_, 0, &timeout_ts);
+#endif
     const char* reason = "dex2oat watch dog thread waiting";
     CHECK_WATCH_DOG_PTHREAD_CALL(pthread_mutex_lock, (&mutex_), reason);
     while (!shutting_down_) {
       int rc = TEMP_FAILURE_RETRY(pthread_cond_timedwait(&cond_, &mutex_, &timeout_ts));
       if (rc == ETIMEDOUT) {
         Fatal(StringPrintf("dex2oat did not finish after %" PRId64 " seconds",
-                           kWatchDogTimeoutSeconds));
+                           timeout_in_milliseconds_/1000));
       } else if (rc != 0) {
         std::string message(StringPrintf("pthread_cond_timedwait failed: %s",
                                          strerror(errno)));
@@ -491,16 +509,7 @@ class WatchDog {
     CHECK_WATCH_DOG_PTHREAD_CALL(pthread_mutex_unlock, (&mutex_), reason);
   }
 
-  // When setting timeouts, keep in mind that the build server may not be as fast as your desktop.
-  // Debug builds are slower so they have larger timeouts.
-  static constexpr int64_t kSlowdownFactor = kIsDebugBuild ? 5U : 1U;
-
-  // 9.5 minutes scaled by kSlowdownFactor. This is slightly smaller than the Package Manager
-  // watchdog (PackageManagerService.WATCHDOG_TIMEOUT, 10 minutes), so that dex2oat will abort
-  // itself before that watchdog would take down the system server.
-  static constexpr int64_t kWatchDogTimeoutSeconds = kSlowdownFactor * (9 * 60 + 30);
-
-  bool is_watch_dog_enabled_;
+  const int64_t timeout_in_milliseconds_;
   bool shutting_down_;
   // TODO: Switch to Mutex when we can guarantee it won't prevent shutdown in error cases.
   pthread_mutex_t mutex_;
@@ -591,6 +600,7 @@ class Dex2Oat FINAL {
   struct ParserOptions {
     std::vector<const char*> oat_symbols;
     std::string boot_image_filename;
+    int64_t watch_dog_timeout_in_ms = -1;
     bool watch_dog_enabled = true;
     bool requested_specific_compiler = false;
     std::string error_msg;
@@ -919,7 +929,10 @@ class Dex2Oat FINAL {
 
     // Done with usage checks, enable watchdog if requested
     if (parser_options->watch_dog_enabled) {
-      watchdog_.reset(new WatchDog(true));
+      int64_t timeout = parser_options->watch_dog_timeout_in_ms > 0
+                            ? parser_options->watch_dog_timeout_in_ms
+                            : WatchDog::kDefaultWatchdogTimeoutInMS;
+      watchdog_.reset(new WatchDog(timeout));
     }
 
     // Fill some values into the key-value store for the oat header.
@@ -1150,6 +1163,11 @@ class Dex2Oat FINAL {
         parser_options->watch_dog_enabled = true;
       } else if (option == "--no-watch-dog") {
         parser_options->watch_dog_enabled = false;
+      } else if (option.starts_with("--watchdog-timeout=")) {
+        ParseIntOption(option,
+                       "--watchdog-timeout",
+                       &parser_options->watch_dog_timeout_in_ms,
+                       Usage);
       } else if (option.starts_with("-j")) {
         ParseJ(option);
       } else if (option.starts_with("--image=")) {
@@ -1533,10 +1551,10 @@ class Dex2Oat FINAL {
         std::unique_ptr<MemMap> opened_dex_files_map;
         std::vector<std::unique_ptr<const DexFile>> opened_dex_files;
         // No need to verify the dex file for:
-        // 1) kSpeedProfile, since it includes dexlayout, which does the verification.
+        // 1) Dexlayout since it does the verification. It also may not pass the verification since
+        // we don't update the dex checksum.
         // 2) when we have a vdex file, which means it was already verified.
-        bool verify = compiler_options_->GetCompilerFilter() != CompilerFilter::kSpeedProfile &&
-            (input_vdex_file_ == nullptr);
+        const bool verify = !DoDexLayoutOptimizations() && (input_vdex_file_ == nullptr);
         if (!oat_writers_[i]->WriteAndOpenDexFiles(
             kIsVdexEnabled ? vdex_files_[i].get() : oat_files_[i].get(),
             rodata_.back(),
@@ -2086,12 +2104,20 @@ class Dex2Oat FINAL {
     return is_host_;
   }
 
-  bool UseProfileGuidedCompilation() const {
-    return CompilerFilter::DependsOnProfile(compiler_options_->GetCompilerFilter());
+  bool UseProfile() const {
+    return profile_file_fd_ != -1 || !profile_file_.empty();
+  }
+
+  bool DoProfileGuidedOptimizations() const {
+    return UseProfile() && compiler_options_->GetCompilerFilter() != CompilerFilter::kVerifyProfile;
+  }
+
+  bool DoDexLayoutOptimizations() const {
+    return DoProfileGuidedOptimizations();
   }
 
   bool LoadProfile() {
-    DCHECK(UseProfileGuidedCompilation());
+    DCHECK(UseProfile());
 
     profile_compilation_info_.reset(new ProfileCompilationInfo());
     ScopedFlock flock;
@@ -2348,7 +2374,7 @@ class Dex2Oat FINAL {
                                                      compiler_options_.get(),
                                                      oat_file.get()));
       elf_writers_.back()->Start();
-      bool do_dexlayout = compiler_options_->GetCompilerFilter() == CompilerFilter::kSpeedProfile;
+      const bool do_dexlayout = DoDexLayoutOptimizations();
       oat_writers_.emplace_back(new OatWriter(
           IsBootImage(), timings_, do_dexlayout ? profile_compilation_info_.get() : nullptr));
     }
@@ -2865,7 +2891,7 @@ static int dex2oat(int argc, char** argv) {
 
   // If needed, process profile information for profile guided compilation.
   // This operation involves I/O.
-  if (dex2oat->UseProfileGuidedCompilation()) {
+  if (dex2oat->UseProfile()) {
     if (!dex2oat->LoadProfile()) {
       LOG(ERROR) << "Failed to process profile file";
       return EXIT_FAILURE;

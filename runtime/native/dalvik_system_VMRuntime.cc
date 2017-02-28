@@ -350,7 +350,7 @@ static void PreloadDexCachesResolveField(Handle<mirror::DexCache> dex_cache, uin
   Thread* const self = Thread::Current();
   StackHandleScope<1> hs(self);
   Handle<mirror::Class> klass(hs.NewHandle(dex_cache->GetResolvedType(field_id.class_idx_)));
-  if (klass.Get() == nullptr) {
+  if (klass == nullptr) {
     return;
   }
   if (is_static) {
@@ -512,7 +512,7 @@ static void VMRuntime_preloadDexCaches(JNIEnv* env, jobject) {
     CHECK(dex_file != nullptr);
     StackHandleScope<1> hs(soa.Self());
     Handle<mirror::DexCache> dex_cache(hs.NewHandle(linker->RegisterDexFile(*dex_file, nullptr)));
-    CHECK(dex_cache.Get() != nullptr);  // Boot class path dex caches are never unloaded.
+    CHECK(dex_cache != nullptr);  // Boot class path dex caches are never unloaded.
     if (kPreloadDexCachesStrings) {
       for (size_t j = 0; j < dex_cache->NumStrings(); j++) {
         PreloadDexCachesResolveString(dex_cache, dex::StringIndex(j), strings);
@@ -642,7 +642,7 @@ static jboolean VMRuntime_didPruneDalvikCache(JNIEnv* env ATTRIBUTE_UNUSED,
 }
 
 static JNINativeMethod gMethods[] = {
-  NATIVE_METHOD(VMRuntime, addressOf, "!(Ljava/lang/Object;)J"),
+  FAST_NATIVE_METHOD(VMRuntime, addressOf, "(Ljava/lang/Object;)J"),
   NATIVE_METHOD(VMRuntime, bootClassPath, "()Ljava/lang/String;"),
   NATIVE_METHOD(VMRuntime, clampGrowthLimit, "()V"),
   NATIVE_METHOD(VMRuntime, classPath, "()Ljava/lang/String;"),
@@ -650,11 +650,11 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(VMRuntime, concurrentGC, "()V"),
   NATIVE_METHOD(VMRuntime, disableJitCompilation, "()V"),
   NATIVE_METHOD(VMRuntime, getTargetHeapUtilization, "()F"),
-  NATIVE_METHOD(VMRuntime, isDebuggerActive, "!()Z"),
-  NATIVE_METHOD(VMRuntime, isNativeDebuggable, "!()Z"),
+  FAST_NATIVE_METHOD(VMRuntime, isDebuggerActive, "()Z"),
+  FAST_NATIVE_METHOD(VMRuntime, isNativeDebuggable, "()Z"),
   NATIVE_METHOD(VMRuntime, nativeSetTargetHeapUtilization, "(F)V"),
-  NATIVE_METHOD(VMRuntime, newNonMovableArray, "!(Ljava/lang/Class;I)Ljava/lang/Object;"),
-  NATIVE_METHOD(VMRuntime, newUnpaddedArray, "!(Ljava/lang/Class;I)Ljava/lang/Object;"),
+  FAST_NATIVE_METHOD(VMRuntime, newNonMovableArray, "(Ljava/lang/Class;I)Ljava/lang/Object;"),
+  FAST_NATIVE_METHOD(VMRuntime, newUnpaddedArray, "(Ljava/lang/Class;I)Ljava/lang/Object;"),
   NATIVE_METHOD(VMRuntime, properties, "()[Ljava/lang/String;"),
   NATIVE_METHOD(VMRuntime, setTargetSdkVersionNative, "(I)V"),
   NATIVE_METHOD(VMRuntime, registerNativeAllocation, "(I)V"),
@@ -671,8 +671,8 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(VMRuntime, vmVersion, "()Ljava/lang/String;"),
   NATIVE_METHOD(VMRuntime, vmLibrary, "()Ljava/lang/String;"),
   NATIVE_METHOD(VMRuntime, vmInstructionSet, "()Ljava/lang/String;"),
-  NATIVE_METHOD(VMRuntime, is64Bit, "!()Z"),
-  NATIVE_METHOD(VMRuntime, isCheckJniEnabled, "!()Z"),
+  FAST_NATIVE_METHOD(VMRuntime, is64Bit, "()Z"),
+  FAST_NATIVE_METHOD(VMRuntime, isCheckJniEnabled, "()Z"),
   NATIVE_METHOD(VMRuntime, preloadDexCaches, "()V"),
   NATIVE_METHOD(VMRuntime, registerAppInfo,
                 "(Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)V"),

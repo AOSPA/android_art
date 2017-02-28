@@ -29,7 +29,8 @@
 namespace art {
 
 inline DexCacheArraysLayout::DexCacheArraysLayout(PointerSize pointer_size,
-                                                  const DexFile::Header& header)
+                                                  const DexFile::Header& header,
+                                                  uint32_t num_call_sites)
     : pointer_size_(pointer_size),
       /* types_offset_ is always 0u, so it's constexpr */
       methods_offset_(
@@ -40,17 +41,21 @@ inline DexCacheArraysLayout::DexCacheArraysLayout(PointerSize pointer_size,
           RoundUp(strings_offset_ + StringsSize(header.string_ids_size_), FieldsAlignment())),
       method_types_offset_(
           RoundUp(fields_offset_ + FieldsSize(header.field_ids_size_), MethodTypesAlignment())),
-      size_(
-          RoundUp(method_types_offset_ + MethodTypesSize(header.proto_ids_size_), Alignment())) {
+    call_sites_offset_(
+        RoundUp(method_types_offset_ + MethodTypesSize(header.proto_ids_size_),
+                MethodTypesAlignment())),
+      size_(RoundUp(call_sites_offset_ + CallSitesSize(num_call_sites), Alignment())) {
 }
 
 inline DexCacheArraysLayout::DexCacheArraysLayout(PointerSize pointer_size, const DexFile* dex_file)
-    : DexCacheArraysLayout(pointer_size, dex_file->GetHeader()) {
+    : DexCacheArraysLayout(pointer_size, dex_file->GetHeader(), dex_file->NumCallSiteIds()) {
 }
 
-inline constexpr size_t DexCacheArraysLayout::Alignment() {
-  // GcRoot<> alignment is 4, i.e. lower than or equal to the pointer alignment.
-  static_assert(alignof(GcRoot<mirror::Class>) == 4, "Expecting alignof(GcRoot<>) == 4");
+constexpr size_t DexCacheArraysLayout::Alignment() {
+  // mirror::Type/String/MethodTypeDexCacheType alignment is 8,
+  // i.e. higher than or equal to the pointer alignment.
+  static_assert(alignof(mirror::TypeDexCacheType) == 8,
+                "Expecting alignof(ClassDexCacheType) == 8");
   static_assert(alignof(mirror::StringDexCacheType) == 8,
                 "Expecting alignof(StringDexCacheType) == 8");
   static_assert(alignof(mirror::MethodTypeDexCacheType) == 8,
@@ -60,17 +65,22 @@ inline constexpr size_t DexCacheArraysLayout::Alignment() {
 }
 
 template <typename T>
-static constexpr PointerSize GcRootAsPointerSize() {
+constexpr PointerSize GcRootAsPointerSize() {
   static_assert(sizeof(GcRoot<T>) == 4U, "Unexpected GcRoot size");
   return PointerSize::k32;
 }
 
 inline size_t DexCacheArraysLayout::TypeOffset(dex::TypeIndex type_idx) const {
-  return types_offset_ + ElementOffset(GcRootAsPointerSize<mirror::Class>(), type_idx.index_);
+  return types_offset_ + ElementOffset(PointerSize::k64,
+                                       type_idx.index_ % mirror::DexCache::kDexCacheTypeCacheSize);
 }
 
 inline size_t DexCacheArraysLayout::TypesSize(size_t num_elements) const {
-  return ArraySize(GcRootAsPointerSize<mirror::Class>(), num_elements);
+  size_t cache_size = mirror::DexCache::kDexCacheTypeCacheSize;
+  if (num_elements < cache_size) {
+    cache_size = num_elements;
+  }
+  return ArraySize(PointerSize::k64, cache_size);
 }
 
 inline size_t DexCacheArraysLayout::TypesAlignment() const {
@@ -131,8 +141,16 @@ inline size_t DexCacheArraysLayout::MethodTypesSize(size_t num_elements) const {
 
 inline size_t DexCacheArraysLayout::MethodTypesAlignment() const {
   static_assert(alignof(mirror::MethodTypeDexCacheType) == 8,
-                "alignof(MethodTypeDexCacheType) != 8");
+                "Expecting alignof(MethodTypeDexCacheType) == 8");
   return alignof(mirror::MethodTypeDexCacheType);
+}
+
+inline size_t DexCacheArraysLayout::CallSitesSize(size_t num_elements) const {
+  return ArraySize(GcRootAsPointerSize<mirror::CallSite>(), num_elements);
+}
+
+inline size_t DexCacheArraysLayout::CallSitesAlignment() const {
+  return alignof(GcRoot<mirror::CallSite>);
 }
 
 inline size_t DexCacheArraysLayout::ElementOffset(PointerSize element_size, uint32_t idx) {

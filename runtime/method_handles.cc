@@ -220,7 +220,7 @@ bool ConvertJValueCommon(
     StackHandleScope<2> hs(Thread::Current());
     Handle<mirror::Class> h_to(hs.NewHandle(to));
     Handle<mirror::Object> h_obj(hs.NewHandle(src_value.GetL()));
-    if (h_obj.Get() != nullptr && !to->IsAssignableFrom(h_obj->GetClass())) {
+    if (h_obj != nullptr && !to->IsAssignableFrom(h_obj->GetClass())) {
       ThrowClassCastException(h_to.Get(), h_obj->GetClass());
       return false;
     }
@@ -419,6 +419,32 @@ static inline bool DoCallPolymorphic(ArtMethod* called_method,
                                      JValue* result,
                                      const mirror::MethodHandle::Kind handle_kind)
     REQUIRES_SHARED(Locks::mutator_lock_) {
+  // For virtual and interface methods ensure called_method points to
+  // the actual method to invoke.
+  if (handle_kind == mirror::MethodHandle::Kind::kInvokeVirtual ||
+      handle_kind == mirror::MethodHandle::Kind::kInvokeInterface) {
+    uint32_t receiver_reg = is_range ? first_arg : args[0];
+    ObjPtr<mirror::Object> receiver(shadow_frame.GetVRegReference(receiver_reg));
+    if (IsCallerTransformer(callsite_type)) {
+      // The current receiver is an emulated stack frame, the method's
+      // receiver needs to be fetched from there as the emulated frame
+      // will be unpacked into a new frame.
+      receiver = ObjPtr<mirror::EmulatedStackFrame>::DownCast(receiver)->GetReceiver();
+    }
+
+    ObjPtr<mirror::Class> declaring_class(called_method->GetDeclaringClass());
+    if (receiver == nullptr || receiver->GetClass() != declaring_class) {
+      // Verify that _vRegC is an object reference and of the type expected by
+      // the receiver.
+      if (!VerifyObjectIsClass(receiver, declaring_class)) {
+        DCHECK(self->IsExceptionPending());
+        return false;
+      }
+      called_method = receiver->GetClass()->FindVirtualMethodForVirtualOrInterface(
+          called_method, kRuntimePointerSize);
+    }
+  }
+
   // Compute method information.
   const DexFile::CodeItem* code_item = called_method->GetCodeItem();
 
@@ -502,24 +528,6 @@ static inline bool DoCallPolymorphic(ArtMethod* called_method,
     }
   }
 
-  // See TODO in DoInvokePolymorphic : We need to perform this dynamic, receiver
-  // based dispatch right before we perform the actual call, because the
-  // receiver isn't known very early.
-  if (handle_kind == mirror::MethodHandle::Kind::kInvokeVirtual ||
-      handle_kind == mirror::MethodHandle::Kind::kInvokeInterface) {
-    ObjPtr<mirror::Object> receiver(new_shadow_frame->GetVRegReference(first_dest_reg));
-    ObjPtr<mirror::Class> declaring_class(called_method->GetDeclaringClass());
-    // Verify that _vRegC is an object reference and of the type expected by
-    // the receiver.
-    if (!VerifyObjectIsClass(receiver, declaring_class)) {
-      DCHECK(self->IsExceptionPending());
-      return false;
-    }
-
-    called_method = receiver->GetClass()->FindVirtualMethodForVirtualOrInterface(
-        called_method, kRuntimePointerSize);
-  }
-
   PerformCall(self, code_item, shadow_frame.GetMethod(), first_dest_reg, new_shadow_frame, result);
   if (self->IsExceptionPending()) {
     return false;
@@ -555,7 +563,7 @@ static inline bool DoCallTransform(ArtMethod* called_method,
                                    Handle<mirror::MethodType> callee_type,
                                    Thread* self,
                                    ShadowFrame& shadow_frame,
-                                   Handle<mirror::MethodHandleImpl> receiver,
+                                   Handle<mirror::MethodHandle> receiver,
                                    const uint32_t (&args)[Instruction::kMaxVarArgRegs],
                                    uint32_t first_arg,
                                    JValue* result)
@@ -599,7 +607,7 @@ static inline bool DoCallTransform(ArtMethod* called_method,
 
     // Something went wrong while creating the emulated stack frame, we should
     // throw the pending exception.
-    if (sf.Get() == nullptr) {
+    if (sf == nullptr) {
       DCHECK(self->IsExceptionPending());
       return false;
     }
@@ -645,7 +653,7 @@ inline static ObjPtr<mirror::Class> GetAndInitializeDeclaringClass(Thread* self,
 template <bool is_range>
 bool DoInvokePolymorphicUnchecked(Thread* self,
                                   ShadowFrame& shadow_frame,
-                                  Handle<mirror::MethodHandleImpl> method_handle,
+                                  Handle<mirror::MethodHandle> method_handle,
                                   Handle<mirror::MethodType> callsite_type,
                                   const uint32_t (&args)[Instruction::kMaxVarArgRegs],
                                   uint32_t first_arg,
@@ -780,7 +788,6 @@ inline static void DoFieldGetForInvokePolymorphic(Thread* self,
 }
 
 // Helper for setters in invoke-polymorphic.
-template <bool do_assignability_check>
 inline bool DoFieldPutForInvokePolymorphic(Thread* self,
                                            ShadowFrame& shadow_frame,
                                            ObjPtr<mirror::Object>& obj,
@@ -788,30 +795,33 @@ inline bool DoFieldPutForInvokePolymorphic(Thread* self,
                                            Primitive::Type field_type,
                                            const JValue& value)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  static const bool kTransaction = false;
+  DCHECK(!Runtime::Current()->IsActiveTransaction());
+  static const bool kTransaction = false;         // Not in a transaction.
+  static const bool kAssignabilityCheck = false;  // No access check.
   switch (field_type) {
     case Primitive::kPrimBoolean:
-      return DoFieldPutCommon<Primitive::kPrimBoolean, do_assignability_check, kTransaction>(
-          self, shadow_frame, obj, field, value);
+      return
+          DoFieldPutCommon<Primitive::kPrimBoolean, kAssignabilityCheck, kTransaction>(
+              self, shadow_frame, obj, field, value);
     case Primitive::kPrimByte:
-      return DoFieldPutCommon<Primitive::kPrimByte, do_assignability_check, kTransaction>(
+      return DoFieldPutCommon<Primitive::kPrimByte, kAssignabilityCheck, kTransaction>(
           self, shadow_frame, obj, field, value);
     case Primitive::kPrimChar:
-      return DoFieldPutCommon<Primitive::kPrimChar, do_assignability_check, kTransaction>(
+      return DoFieldPutCommon<Primitive::kPrimChar, kAssignabilityCheck, kTransaction>(
           self, shadow_frame, obj, field, value);
     case Primitive::kPrimShort:
-      return DoFieldPutCommon<Primitive::kPrimShort, do_assignability_check, kTransaction>(
+      return DoFieldPutCommon<Primitive::kPrimShort, kAssignabilityCheck, kTransaction>(
           self, shadow_frame, obj, field, value);
     case Primitive::kPrimInt:
     case Primitive::kPrimFloat:
-      return DoFieldPutCommon<Primitive::kPrimInt, do_assignability_check, kTransaction>(
+      return DoFieldPutCommon<Primitive::kPrimInt, kAssignabilityCheck, kTransaction>(
           self, shadow_frame, obj, field, value);
     case Primitive::kPrimLong:
     case Primitive::kPrimDouble:
-      return DoFieldPutCommon<Primitive::kPrimLong, do_assignability_check, kTransaction>(
+      return DoFieldPutCommon<Primitive::kPrimLong, kAssignabilityCheck, kTransaction>(
           self, shadow_frame, obj, field, value);
     case Primitive::kPrimNot:
-      return DoFieldPutCommon<Primitive::kPrimNot, do_assignability_check, kTransaction>(
+      return DoFieldPutCommon<Primitive::kPrimNot, kAssignabilityCheck, kTransaction>(
           self, shadow_frame, obj, field, value);
     case Primitive::kPrimVoid:
       LOG(FATAL) << "Unreachable: " << field_type;
@@ -855,10 +865,10 @@ static JValue GetValueFromShadowFrame(const ShadowFrame& shadow_frame,
   return field_value;
 }
 
-template <bool is_range, bool do_conversions, bool do_assignability_check>
+template <bool is_range, bool do_conversions>
 bool DoInvokePolymorphicFieldAccess(Thread* self,
                                     ShadowFrame& shadow_frame,
-                                    Handle<mirror::MethodHandleImpl> method_handle,
+                                    Handle<mirror::MethodHandle> method_handle,
                                     Handle<mirror::MethodType> callsite_type,
                                     const uint32_t (&args)[Instruction::kMaxVarArgRegs],
                                     uint32_t first_arg,
@@ -903,12 +913,7 @@ bool DoInvokePolymorphicFieldAccess(Thread* self,
         return false;
       }
       ObjPtr<mirror::Object> obj = shadow_frame.GetVRegReference(obj_reg);
-      return DoFieldPutForInvokePolymorphic<do_assignability_check>(self,
-                                                                    shadow_frame,
-                                                                    obj,
-                                                                    field,
-                                                                    field_type,
-                                                                    value);
+      return DoFieldPutForInvokePolymorphic(self, shadow_frame, obj, field, field_type, value);
     }
     case mirror::MethodHandle::kStaticPut: {
       ObjPtr<mirror::Object> obj = GetAndInitializeDeclaringClass(self, field);
@@ -922,12 +927,7 @@ bool DoInvokePolymorphicFieldAccess(Thread* self,
         DCHECK(self->IsExceptionPending());
         return false;
       }
-      return DoFieldPutForInvokePolymorphic<do_assignability_check>(self,
-                                                                    shadow_frame,
-                                                                    obj,
-                                                                    field,
-                                                                    field_type,
-                                                                    value);
+      return DoFieldPutForInvokePolymorphic(self, shadow_frame, obj, field, field_type, value);
     }
     default:
       LOG(FATAL) << "Unreachable: " << handle_kind;
@@ -935,10 +935,10 @@ bool DoInvokePolymorphicFieldAccess(Thread* self,
   }
 }
 
-template <bool is_range, bool do_assignability_check>
+template <bool is_range>
 static inline bool DoInvokePolymorphicNonExact(Thread* self,
                                                ShadowFrame& shadow_frame,
-                                               Handle<mirror::MethodHandleImpl> method_handle,
+                                               Handle<mirror::MethodHandle> method_handle,
                                                Handle<mirror::MethodType> callsite_type,
                                                const uint32_t (&args)[Instruction::kMaxVarArgRegs],
                                                uint32_t first_arg,
@@ -959,7 +959,7 @@ static inline bool DoInvokePolymorphicNonExact(Thread* self,
   if (IsFieldAccess(handle_kind)) {
     if (UNLIKELY(callsite_type->IsExactMatch(handle_type.Ptr()))) {
       const bool do_convert = false;
-      return DoInvokePolymorphicFieldAccess<is_range, do_convert, do_assignability_check>(
+      return DoInvokePolymorphicFieldAccess<is_range, do_convert>(
           self,
           shadow_frame,
           method_handle,
@@ -969,7 +969,7 @@ static inline bool DoInvokePolymorphicNonExact(Thread* self,
           result);
     } else {
       const bool do_convert = true;
-      return DoInvokePolymorphicFieldAccess<is_range, do_convert, do_assignability_check>(
+      return DoInvokePolymorphicFieldAccess<is_range, do_convert>(
           self,
           shadow_frame,
           method_handle,
@@ -999,10 +999,10 @@ static inline bool DoInvokePolymorphicNonExact(Thread* self,
   }
 }
 
-template <bool is_range, bool do_assignability_check>
+template <bool is_range>
 bool DoInvokePolymorphicExact(Thread* self,
                               ShadowFrame& shadow_frame,
-                              Handle<mirror::MethodHandleImpl> method_handle,
+                              Handle<mirror::MethodHandle> method_handle,
                               Handle<mirror::MethodType> callsite_type,
                               const uint32_t (&args)[Instruction::kMaxVarArgRegs],
                               uint32_t first_arg,
@@ -1018,13 +1018,13 @@ bool DoInvokePolymorphicExact(Thread* self,
       ThrowWrongMethodTypeException(nominal_type.Ptr(), callsite_type.Get());
       return false;
     }
-    return DoInvokePolymorphicNonExact<is_range, do_assignability_check>(self,
-                                                                         shadow_frame,
-                                                                         method_handle,
-                                                                         callsite_type,
-                                                                         args,
-                                                                         first_arg,
-                                                                         result);
+    return DoInvokePolymorphicNonExact<is_range>(self,
+                                                 shadow_frame,
+                                                 method_handle,
+                                                 callsite_type,
+                                                 args,
+                                                 first_arg,
+                                                 result);
   }
 
   ObjPtr<mirror::MethodType> handle_type(method_handle->GetMethodType());
@@ -1036,7 +1036,7 @@ bool DoInvokePolymorphicExact(Thread* self,
   const mirror::MethodHandle::Kind handle_kind = method_handle->GetHandleKind();
   if (IsFieldAccess(handle_kind)) {
     const bool do_convert = false;
-    return DoInvokePolymorphicFieldAccess<is_range, do_convert, do_assignability_check>(
+    return DoInvokePolymorphicFieldAccess<is_range, do_convert>(
         self,
         shadow_frame,
         method_handle,
@@ -1057,51 +1057,49 @@ bool DoInvokePolymorphicExact(Thread* self,
 
 }  // namespace
 
-template <bool is_range, bool do_assignability_check>
+template <bool is_range>
 bool DoInvokePolymorphic(Thread* self,
                          ArtMethod* invoke_method,
                          ShadowFrame& shadow_frame,
-                         Handle<mirror::MethodHandleImpl> method_handle,
+                         Handle<mirror::MethodHandle> method_handle,
                          Handle<mirror::MethodType> callsite_type,
                          const uint32_t (&args)[Instruction::kMaxVarArgRegs],
                          uint32_t first_arg,
                          JValue* result)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   if (IsMethodHandleInvokeExact(invoke_method)) {
-    return DoInvokePolymorphicExact<is_range, do_assignability_check>(self,
-                                                                      shadow_frame,
-                                                                      method_handle,
-                                                                      callsite_type,
-                                                                      args,
-                                                                      first_arg,
-                                                                      result);
+    return DoInvokePolymorphicExact<is_range>(self,
+                                              shadow_frame,
+                                              method_handle,
+                                              callsite_type,
+                                              args,
+                                              first_arg,
+                                              result);
   } else {
-    return DoInvokePolymorphicNonExact<is_range, do_assignability_check>(self,
-                                                                         shadow_frame,
-                                                                         method_handle,
-                                                                         callsite_type,
-                                                                         args,
-                                                                         first_arg,
-                                                                         result);
+    return DoInvokePolymorphicNonExact<is_range>(self,
+                                                 shadow_frame,
+                                                 method_handle,
+                                                 callsite_type,
+                                                 args,
+                                                 first_arg,
+                                                 result);
   }
 }
 
-#define EXPLICIT_DO_INVOKE_POLYMORPHIC_TEMPLATE_DECL(_is_range, _do_assignability_check) \
-template REQUIRES_SHARED(Locks::mutator_lock_)                                           \
-bool DoInvokePolymorphic<_is_range, _do_assignability_check>(                            \
-    Thread* self,                                                                        \
-    ArtMethod* invoke_method,                                                            \
-    ShadowFrame& shadow_frame,                                                           \
-    Handle<mirror::MethodHandleImpl> method_handle,                                      \
-    Handle<mirror::MethodType> callsite_type,                                            \
-    const uint32_t (&args)[Instruction::kMaxVarArgRegs],                                 \
-    uint32_t first_arg,                                                                  \
-    JValue* result)
+#define EXPLICIT_DO_INVOKE_POLYMORPHIC_TEMPLATE_DECL(_is_range)  \
+  template REQUIRES_SHARED(Locks::mutator_lock_)                 \
+  bool DoInvokePolymorphic<_is_range>(                           \
+      Thread* self,                                              \
+      ArtMethod* invoke_method,                                  \
+      ShadowFrame& shadow_frame,                                 \
+      Handle<mirror::MethodHandle> method_handle,                \
+      Handle<mirror::MethodType> callsite_type,                  \
+      const uint32_t (&args)[Instruction::kMaxVarArgRegs],       \
+      uint32_t first_arg,                                        \
+      JValue* result)
 
-EXPLICIT_DO_INVOKE_POLYMORPHIC_TEMPLATE_DECL(true, true);
-EXPLICIT_DO_INVOKE_POLYMORPHIC_TEMPLATE_DECL(true, false);
-EXPLICIT_DO_INVOKE_POLYMORPHIC_TEMPLATE_DECL(false, true);
-EXPLICIT_DO_INVOKE_POLYMORPHIC_TEMPLATE_DECL(false, false);
+EXPLICIT_DO_INVOKE_POLYMORPHIC_TEMPLATE_DECL(true);
+EXPLICIT_DO_INVOKE_POLYMORPHIC_TEMPLATE_DECL(false);
 #undef EXPLICIT_DO_INVOKE_POLYMORPHIC_TEMPLATE_DECL
 
 }  // namespace art

@@ -30,7 +30,7 @@
 namespace art {
 
 class HandleScope;
-template<class MirrorType, bool kPoison> class ObjPtr;
+template<class MirrorType> class ObjPtr;
 class Thread;
 class VariableSizedHandleScope;
 
@@ -224,8 +224,8 @@ class PACKED(4) FixedSizeHandleScope : public HandleScope {
   ALWAYS_INLINE HandleWrapperObjPtr<T> NewHandleWrapper(ObjPtr<T>* object)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template<class MirrorType, bool kPoison>
-  ALWAYS_INLINE MutableHandle<MirrorType> NewHandle(ObjPtr<MirrorType, kPoison> object)
+  template<class MirrorType>
+  ALWAYS_INLINE MutableHandle<MirrorType> NewHandle(ObjPtr<MirrorType> object)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
   ALWAYS_INLINE void SetReference(size_t i, mirror::Object* object)
@@ -250,7 +250,7 @@ class PACKED(4) FixedSizeHandleScope : public HandleScope {
   StackReference<mirror::Object> storage_[kNumReferences];
 
   // Position new handles will be created.
-  size_t pos_ = 0;
+  uint32_t pos_ = 0;
 
   template<size_t kNumRefs> friend class StackHandleScope;
   friend class VariableSizedHandleScope;
@@ -286,8 +286,8 @@ class VariableSizedHandleScope : public BaseHandleScope {
   template<class T>
   MutableHandle<T> NewHandle(T* object) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template<class MirrorType, bool kPoison>
-  MutableHandle<MirrorType> NewHandle(ObjPtr<MirrorType, kPoison> ptr)
+  template<class MirrorType>
+  MutableHandle<MirrorType> NewHandle(ObjPtr<MirrorType> ptr)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Number of references contained within this handle scope.
@@ -299,12 +299,20 @@ class VariableSizedHandleScope : public BaseHandleScope {
   void VisitRoots(Visitor& visitor) REQUIRES_SHARED(Locks::mutator_lock_);
 
  private:
-  static constexpr size_t kNumReferencesPerScope = 4;
+  static constexpr size_t kLocalScopeSize = 64u;
+  static constexpr size_t kSizeOfReferencesPerScope =
+      kLocalScopeSize
+          - /* BaseHandleScope::link_ */ sizeof(BaseHandleScope*)
+          - /* BaseHandleScope::number_of_references_ */ sizeof(int32_t)
+          - /* FixedSizeHandleScope<>::pos_ */ sizeof(uint32_t);
+  static constexpr size_t kNumReferencesPerScope =
+      kSizeOfReferencesPerScope / sizeof(StackReference<mirror::Object>);
 
   Thread* const self_;
 
   // Linked list of fixed size handle scopes.
   using LocalScopeType = FixedSizeHandleScope<kNumReferencesPerScope>;
+  static_assert(sizeof(LocalScopeType) == kLocalScopeSize, "Unexpected size of LocalScopeType");
   LocalScopeType* current_scope_;
 
   DISALLOW_COPY_AND_ASSIGN(VariableSizedHandleScope);

@@ -252,7 +252,7 @@ mirror::Object* ProcessEncodedAnnotation(Handle<mirror::Class> klass, const uint
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   Handle<mirror::Class> annotation_class(hs.NewHandle(
       class_linker->ResolveType(klass->GetDexFile(), dex::TypeIndex(type_index), klass.Get())));
-  if (annotation_class.Get() == nullptr) {
+  if (annotation_class == nullptr) {
     LOG(INFO) << "Unable to resolve " << klass->PrettyClass() << " annotation class " << type_index;
     DCHECK(Thread::Current()->IsExceptionPending());
     Thread::Current()->ClearException();
@@ -299,6 +299,7 @@ mirror::Object* ProcessEncodedAnnotation(Handle<mirror::Class> klass, const uint
   return result.GetL();
 }
 
+template <bool kTransactionActive>
 bool ProcessAnnotationValue(Handle<mirror::Class> klass,
                             const uint8_t** annotation_ptr,
                             DexFile::AnnotationValue* annotation_value,
@@ -409,22 +410,21 @@ bool ProcessAnnotationValue(Handle<mirror::Class> klass,
         }
         PointerSize pointer_size = class_linker->GetImagePointerSize();
         set_object = true;
-        DCHECK(!Runtime::Current()->IsActiveTransaction());
         if (method->IsConstructor()) {
           if (pointer_size == PointerSize::k64) {
             element_object = mirror::Constructor::CreateFromArtMethod<PointerSize::k64,
-                                                                      false>(self, method);
+                kTransactionActive>(self, method);
           } else {
             element_object = mirror::Constructor::CreateFromArtMethod<PointerSize::k32,
-                                                                      false>(self, method);
+                kTransactionActive>(self, method);
           }
         } else {
           if (pointer_size == PointerSize::k64) {
             element_object = mirror::Method::CreateFromArtMethod<PointerSize::k64,
-                                                                 false>(self, method);
+                kTransactionActive>(self, method);
           } else {
             element_object = mirror::Method::CreateFromArtMethod<PointerSize::k32,
-                                                                 false>(self, method);
+                kTransactionActive>(self, method);
           }
         }
         if (element_object == nullptr) {
@@ -449,9 +449,11 @@ bool ProcessAnnotationValue(Handle<mirror::Class> klass,
         set_object = true;
         PointerSize pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
         if (pointer_size == PointerSize::k64) {
-          element_object = mirror::Field::CreateFromArtField<PointerSize::k64>(self, field, true);
+          element_object = mirror::Field::CreateFromArtField<PointerSize::k64,
+              kTransactionActive>(self, field, true);
         } else {
-          element_object = mirror::Field::CreateFromArtField<PointerSize::k32>(self, field, true);
+          element_object = mirror::Field::CreateFromArtField<PointerSize::k32,
+              kTransactionActive>(self, field, true);
         }
         if (element_object == nullptr) {
           return false;
@@ -481,7 +483,7 @@ bool ProcessAnnotationValue(Handle<mirror::Class> klass,
       break;
     }
     case DexFile::kDexAnnotationArray:
-      if (result_style == DexFile::kAllRaw || array_class.Get() == nullptr) {
+      if (result_style == DexFile::kAllRaw || array_class == nullptr) {
         return false;
       } else {
         ScopedObjectAccessUnchecked soa(self);
@@ -491,51 +493,55 @@ bool ProcessAnnotationValue(Handle<mirror::Class> klass,
         Handle<mirror::Array> new_array(hs.NewHandle(mirror::Array::Alloc<true>(
             self, array_class.Get(), size, array_class->GetComponentSizeShift(),
             Runtime::Current()->GetHeap()->GetCurrentAllocator())));
-        if (new_array.Get() == nullptr) {
+        if (new_array == nullptr) {
           LOG(ERROR) << "Annotation element array allocation failed with size " << size;
           return false;
         }
         DexFile::AnnotationValue new_annotation_value;
         for (uint32_t i = 0; i < size; ++i) {
-          if (!ProcessAnnotationValue(klass, &annotation, &new_annotation_value,
-                                      component_type, DexFile::kPrimitivesOrObjects)) {
+          if (!ProcessAnnotationValue<kTransactionActive>(klass,
+                                                          &annotation,
+                                                          &new_annotation_value,
+                                                          component_type,
+                                                          DexFile::kPrimitivesOrObjects)) {
             return false;
           }
           if (!component_type->IsPrimitive()) {
             mirror::Object* obj = new_annotation_value.value_.GetL();
-            new_array->AsObjectArray<mirror::Object>()->SetWithoutChecks<false>(i, obj);
+            new_array->AsObjectArray<mirror::Object>()->
+                SetWithoutChecks<kTransactionActive>(i, obj);
           } else {
             switch (new_annotation_value.type_) {
               case DexFile::kDexAnnotationByte:
-                new_array->AsByteArray()->SetWithoutChecks<false>(
+                new_array->AsByteArray()->SetWithoutChecks<kTransactionActive>(
                     i, new_annotation_value.value_.GetB());
                 break;
               case DexFile::kDexAnnotationShort:
-                new_array->AsShortArray()->SetWithoutChecks<false>(
+                new_array->AsShortArray()->SetWithoutChecks<kTransactionActive>(
                     i, new_annotation_value.value_.GetS());
                 break;
               case DexFile::kDexAnnotationChar:
-                new_array->AsCharArray()->SetWithoutChecks<false>(
+                new_array->AsCharArray()->SetWithoutChecks<kTransactionActive>(
                     i, new_annotation_value.value_.GetC());
                 break;
               case DexFile::kDexAnnotationInt:
-                new_array->AsIntArray()->SetWithoutChecks<false>(
+                new_array->AsIntArray()->SetWithoutChecks<kTransactionActive>(
                     i, new_annotation_value.value_.GetI());
                 break;
               case DexFile::kDexAnnotationLong:
-                new_array->AsLongArray()->SetWithoutChecks<false>(
+                new_array->AsLongArray()->SetWithoutChecks<kTransactionActive>(
                     i, new_annotation_value.value_.GetJ());
                 break;
               case DexFile::kDexAnnotationFloat:
-                new_array->AsFloatArray()->SetWithoutChecks<false>(
+                new_array->AsFloatArray()->SetWithoutChecks<kTransactionActive>(
                     i, new_annotation_value.value_.GetF());
                 break;
               case DexFile::kDexAnnotationDouble:
-                new_array->AsDoubleArray()->SetWithoutChecks<false>(
+                new_array->AsDoubleArray()->SetWithoutChecks<kTransactionActive>(
                     i, new_annotation_value.value_.GetD());
                 break;
               case DexFile::kDexAnnotationBoolean:
-                new_array->AsBooleanArray()->SetWithoutChecks<false>(
+                new_array->AsBooleanArray()->SetWithoutChecks<kTransactionActive>(
                     i, new_annotation_value.value_.GetZ());
                 break;
               default:
@@ -611,8 +617,11 @@ mirror::Object* CreateAnnotationMember(Handle<mirror::Class> klass,
       annotation_method->GetReturnType(true /* resolve */)));
 
   DexFile::AnnotationValue annotation_value;
-  if (!ProcessAnnotationValue(klass, annotation, &annotation_value, method_return,
-                              DexFile::kAllObjects)) {
+  if (!ProcessAnnotationValue<false>(klass,
+                                     annotation,
+                                     &annotation_value,
+                                     method_return,
+                                     DexFile::kAllObjects)) {
     return nullptr;
   }
   Handle<mirror::Object> value_object(hs.NewHandle(annotation_value.value_.GetL()));
@@ -631,8 +640,8 @@ mirror::Object* CreateAnnotationMember(Handle<mirror::Class> klass,
   }
   Handle<mirror::Method> method_object(hs.NewHandle(method_obj_ptr));
 
-  if (new_member.Get() == nullptr || string_name.Get() == nullptr ||
-      method_object.Get() == nullptr || method_return.Get() == nullptr) {
+  if (new_member == nullptr || string_name == nullptr ||
+      method_object == nullptr || method_return == nullptr) {
     LOG(ERROR) << StringPrintf("Failed creating annotation element (m=%p n=%p a=%p r=%p",
         new_member.Get(), string_name.Get(), method_object.Get(), method_return.Get());
     return nullptr;
@@ -716,8 +725,18 @@ mirror::Object* GetAnnotationValue(Handle<mirror::Class> klass,
     return nullptr;
   }
   DexFile::AnnotationValue annotation_value;
-  if (!ProcessAnnotationValue(klass, &annotation, &annotation_value, array_class,
-                              DexFile::kAllObjects)) {
+  bool result = Runtime::Current()->IsActiveTransaction()
+      ? ProcessAnnotationValue<true>(klass,
+                                     &annotation,
+                                     &annotation_value,
+                                     array_class,
+                                     DexFile::kAllObjects)
+      : ProcessAnnotationValue<false>(klass,
+                                      &annotation,
+                                      &annotation_value,
+                                      array_class,
+                                      DexFile::kAllObjects);
+  if (!result) {
     return nullptr;
   }
   if (annotation_value.type_ != expected_type) {
@@ -740,7 +759,7 @@ mirror::ObjectArray<mirror::String>* GetSignatureValue(Handle<mirror::Class> kla
   ObjPtr<mirror::Class> string_class = mirror::String::GetJavaLangString();
   Handle<mirror::Class> string_array_class(hs.NewHandle(
       Runtime::Current()->GetClassLinker()->FindArrayClass(Thread::Current(), &string_class)));
-  if (string_array_class.Get() == nullptr) {
+  if (string_array_class == nullptr) {
     return nullptr;
   }
   mirror::Object* obj =
@@ -766,7 +785,7 @@ mirror::ObjectArray<mirror::Class>* GetThrowsValue(Handle<mirror::Class> klass,
   ObjPtr<mirror::Class> class_class = mirror::Class::GetJavaLangClass();
   Handle<mirror::Class> class_array_class(hs.NewHandle(
       Runtime::Current()->GetClassLinker()->FindArrayClass(Thread::Current(), &class_class)));
-  if (class_array_class.Get() == nullptr) {
+  if (class_array_class == nullptr) {
     return nullptr;
   }
   mirror::Object* obj =
@@ -796,7 +815,7 @@ mirror::ObjectArray<mirror::Object>* ProcessAnnotationSet(
   uint32_t size = annotation_set->size_;
   Handle<mirror::ObjectArray<mirror::Object>> result(hs.NewHandle(
       mirror::ObjectArray<mirror::Object>::Alloc(self, annotation_array_class.Get(), size)));
-  if (result.Get() == nullptr) {
+  if (result == nullptr) {
     return nullptr;
   }
 
@@ -854,7 +873,7 @@ mirror::ObjectArray<mirror::Object>* ProcessAnnotationSetRefList(
   }
   Handle<mirror::ObjectArray<mirror::Object>> annotation_array_array(hs.NewHandle(
       mirror::ObjectArray<mirror::Object>::Alloc(self, annotation_array_array_class, size)));
-  if (annotation_array_array.Get() == nullptr) {
+  if (annotation_array_array == nullptr) {
     LOG(ERROR) << "Annotation set ref array allocation failed";
     return nullptr;
   }
@@ -949,8 +968,11 @@ mirror::Object* GetAnnotationDefaultValue(ArtMethod* method) {
   StackHandleScope<2> hs(Thread::Current());
   Handle<mirror::Class> h_klass(hs.NewHandle(klass));
   Handle<mirror::Class> return_type(hs.NewHandle(method->GetReturnType(true /* resolve */)));
-  if (!ProcessAnnotationValue(h_klass, &annotation, &annotation_value, return_type,
-                              DexFile::kAllObjects)) {
+  if (!ProcessAnnotationValue<false>(h_klass,
+                                     &annotation,
+                                     &annotation_value,
+                                     return_type,
+                                     DexFile::kAllObjects)) {
     return nullptr;
   }
   return annotation_value.value_.GetL();
@@ -1056,7 +1078,7 @@ bool GetParametersMetadataForMethod(ArtMethod* method,
   ObjPtr<mirror::Class> string_class = mirror::String::GetJavaLangString();
   Handle<mirror::Class> string_array_class(hs.NewHandle(
       Runtime::Current()->GetClassLinker()->FindArrayClass(Thread::Current(), &string_class)));
-  if (UNLIKELY(string_array_class.Get() == nullptr)) {
+  if (UNLIKELY(string_array_class == nullptr)) {
     return false;
   }
 
@@ -1067,13 +1089,13 @@ bool GetParametersMetadataForMethod(ArtMethod* method,
                                       "names",
                                       string_array_class,
                                       DexFile::kDexAnnotationArray));
-  if (names_obj.Get() == nullptr) {
+  if (names_obj == nullptr) {
     return false;
   }
 
   // Extract the parameters' access flags int[].
   Handle<mirror::Class> int_array_class(hs.NewHandle(mirror::IntArray::GetArrayClass()));
-  if (UNLIKELY(int_array_class.Get() == nullptr)) {
+  if (UNLIKELY(int_array_class == nullptr)) {
     return false;
   }
   Handle<mirror::Object> access_flags_obj =
@@ -1082,7 +1104,7 @@ bool GetParametersMetadataForMethod(ArtMethod* method,
                                       "accessFlags",
                                       int_array_class,
                                       DexFile::kDexAnnotationArray));
-  if (access_flags_obj.Get() == nullptr) {
+  if (access_flags_obj == nullptr) {
     return false;
   }
 
@@ -1146,7 +1168,7 @@ mirror::ObjectArray<mirror::Class>* GetDeclaredClasses(Handle<mirror::Class> kla
   ObjPtr<mirror::Class> class_class = mirror::Class::GetJavaLangClass();
   Handle<mirror::Class> class_array_class(hs.NewHandle(
       Runtime::Current()->GetClassLinker()->FindArrayClass(hs.Self(), &class_class)));
-  if (class_array_class.Get() == nullptr) {
+  if (class_array_class == nullptr) {
     return nullptr;
   }
   mirror::Object* obj =
@@ -1201,8 +1223,11 @@ mirror::Class* GetEnclosingClass(Handle<mirror::Class> klass) {
     return nullptr;
   }
   DexFile::AnnotationValue annotation_value;
-  if (!ProcessAnnotationValue(klass, &annotation, &annotation_value,
-                              ScopedNullHandle<mirror::Class>(), DexFile::kAllRaw)) {
+  if (!ProcessAnnotationValue<false>(klass,
+                                     &annotation,
+                                     &annotation_value,
+                                     ScopedNullHandle<mirror::Class>(),
+                                     DexFile::kAllRaw)) {
     return nullptr;
   }
   if (annotation_value.type_ != DexFile::kDexAnnotationMethod) {
@@ -1252,9 +1277,11 @@ bool GetInnerClass(Handle<mirror::Class> klass, mirror::String** name) {
     return false;
   }
   DexFile::AnnotationValue annotation_value;
-  if (!ProcessAnnotationValue(klass, &annotation, &annotation_value,
-                              ScopedNullHandle<mirror::Class>(),
-                                           DexFile::kAllObjects)) {
+  if (!ProcessAnnotationValue<false>(klass,
+                                     &annotation,
+                                     &annotation_value,
+                                     ScopedNullHandle<mirror::Class>(),
+                                     DexFile::kAllObjects)) {
     return false;
   }
   if (annotation_value.type_ != DexFile::kDexAnnotationNull &&
@@ -1283,8 +1310,11 @@ bool GetInnerClassFlags(Handle<mirror::Class> klass, uint32_t* flags) {
     return false;
   }
   DexFile::AnnotationValue annotation_value;
-  if (!ProcessAnnotationValue(klass, &annotation, &annotation_value,
-                              ScopedNullHandle<mirror::Class>(), DexFile::kAllRaw)) {
+  if (!ProcessAnnotationValue<false>(klass,
+                                     &annotation,
+                                     &annotation_value,
+                                     ScopedNullHandle<mirror::Class>(),
+                                     DexFile::kAllRaw)) {
     return false;
   }
   if (annotation_value.type_ != DexFile::kDexAnnotationInt) {

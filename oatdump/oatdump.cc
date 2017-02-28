@@ -587,6 +587,7 @@ class OatDumper {
       kByteKindCodeInfoLocationCatalog,
       kByteKindCodeInfoDexRegisterMap,
       kByteKindCodeInfoEncoding,
+      kByteKindCodeInfoInvokeInfo,
       kByteKindCodeInfoStackMasks,
       kByteKindCodeInfoRegisterMasks,
       kByteKindStackMapNativePc,
@@ -637,6 +638,7 @@ class OatDumper {
         Dump(os, "CodeInfoDexRegisterMap          ", bits[kByteKindCodeInfoDexRegisterMap], sum);
         Dump(os, "CodeInfoStackMasks              ", bits[kByteKindCodeInfoStackMasks], sum);
         Dump(os, "CodeInfoRegisterMasks           ", bits[kByteKindCodeInfoRegisterMasks], sum);
+        Dump(os, "CodeInfoInvokeInfo              ", bits[kByteKindCodeInfoInvokeInfo], sum);
         // Stack map section.
         const int64_t stack_map_bits = std::accumulate(bits + kByteKindStackMapFirst,
                                                        bits + kByteKindStackMapLast + 1,
@@ -1016,7 +1018,9 @@ class OatDumper {
       dex_orig_name = dex_file_location.substr(dex_orig_pos + 1);
 
     // A more elegant approach to efficiently name user installed apps is welcome
-    if (dex_orig_name.size() == 8 && !dex_orig_name.compare("base.apk")) {
+    if (dex_orig_name.size() == 8 &&
+        dex_orig_name.compare("base.apk") == 0 &&
+        dex_orig_pos != std::string::npos) {
       dex_file_location.erase(dex_orig_pos, strlen("base.apk") + 1);
       size_t apk_orig_pos = dex_file_location.rfind('/');
       if (apk_orig_pos != std::string::npos) {
@@ -1473,7 +1477,7 @@ class OatDumper {
       Runtime* const runtime = Runtime::Current();
       Handle<mirror::DexCache> dex_cache(
           hs->NewHandle(runtime->GetClassLinker()->RegisterDexFile(*dex_file, nullptr)));
-      CHECK(dex_cache.Get() != nullptr);
+      CHECK(dex_cache != nullptr);
       DCHECK(options_.class_loader_ != nullptr);
       return verifier::MethodVerifier::VerifyMethodAndDump(
           soa.Self(), vios, dex_method_idx, dex_file, dex_cache, *options_.class_loader_,
@@ -1592,10 +1596,8 @@ class OatDumper {
         CodeInfoEncoding encoding(helper.GetEncoding());
         StackMapEncoding stack_map_encoding(encoding.stack_map.encoding);
         const size_t num_stack_maps = encoding.stack_map.num_entries;
-        std::vector<uint8_t> size_vector;
-        encoding.Compress(&size_vector);
         if (stats_.AddBitsIfUnique(Stats::kByteKindCodeInfoEncoding,
-                                   size_vector.size() * kBitsPerByte,
+                                   encoding.HeaderSize() * kBitsPerByte,
                                    oat_method.GetVmapTable())) {
           // Stack maps
           stats_.AddBits(
@@ -1626,6 +1628,13 @@ class OatDumper {
           stats_.AddBits(
               Stats::kByteKindCodeInfoRegisterMasks,
               encoding.register_mask.encoding.BitSize() * encoding.register_mask.num_entries);
+
+          // Invoke infos
+          if (encoding.invoke_info.num_entries > 0u) {
+            stats_.AddBits(
+                Stats::kByteKindCodeInfoInvokeInfo,
+                encoding.invoke_info.encoding.BitSize() * encoding.invoke_info.num_entries);
+          }
 
           // Location catalog
           const size_t location_catalog_bytes =
@@ -2235,9 +2244,14 @@ class ImageDumper {
           ScopedIndentation indent2(&state->vios_);
           auto* resolved_types = dex_cache->GetResolvedTypes();
           for (size_t i = 0; i < num_types; ++i) {
-            auto* elem = resolved_types[i].Read();
+            auto pair = resolved_types[i].load(std::memory_order_relaxed);
             size_t run = 0;
-            for (size_t j = i + 1; j != num_types && elem == resolved_types[j].Read(); ++j) {
+            for (size_t j = i + 1; j != num_types; ++j) {
+              auto other_pair = resolved_types[j].load(std::memory_order_relaxed);
+              if (pair.index != other_pair.index ||
+                  pair.object.Read() != other_pair.object.Read()) {
+                break;
+              }
               ++run;
             }
             if (run == 0) {
@@ -2247,12 +2261,13 @@ class ImageDumper {
               i = i + run;
             }
             std::string msg;
+            auto* elem = pair.object.Read();
             if (elem == nullptr) {
               msg = "null";
             } else {
               msg = elem->PrettyClass();
             }
-            os << StringPrintf("%p   %s\n", elem, msg.c_str());
+            os << StringPrintf("%p   %u %s\n", elem, pair.index, msg.c_str());
           }
         }
       }
@@ -2950,7 +2965,7 @@ class IMTDumper {
         const DexFile::ClassDef& class_def = dex_file->GetClassDef(class_def_index);
         const char* descriptor = dex_file->GetClassDescriptor(class_def);
         h_klass.Assign(class_linker->FindClass(self, descriptor, h_class_loader));
-        if (h_klass.Get() == nullptr) {
+        if (h_klass == nullptr) {
           std::cerr << "Warning: could not load " << descriptor << std::endl;
           continue;
         }

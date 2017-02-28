@@ -874,35 +874,100 @@ void Thread::CreatePeer(const char* name, bool as_daemon, jobject thread_group) 
   ScopedObjectAccess soa(self);
   StackHandleScope<1> hs(self);
   MutableHandle<mirror::String> peer_thread_name(hs.NewHandle(GetThreadName()));
-  if (peer_thread_name.Get() == nullptr) {
+  if (peer_thread_name == nullptr) {
     // The Thread constructor should have set the Thread.name to a
     // non-null value. However, because we can run without code
     // available (in the compiler, in tests), we manually assign the
     // fields the constructor should have set.
     if (runtime->IsActiveTransaction()) {
-      InitPeer<true>(soa, thread_is_daemon, thread_group, thread_name.get(), thread_priority);
+      InitPeer<true>(soa,
+                     tlsPtr_.opeer,
+                     thread_is_daemon,
+                     thread_group,
+                     thread_name.get(),
+                     thread_priority);
     } else {
-      InitPeer<false>(soa, thread_is_daemon, thread_group, thread_name.get(), thread_priority);
+      InitPeer<false>(soa,
+                      tlsPtr_.opeer,
+                      thread_is_daemon,
+                      thread_group,
+                      thread_name.get(),
+                      thread_priority);
     }
     peer_thread_name.Assign(GetThreadName());
   }
   // 'thread_name' may have been null, so don't trust 'peer_thread_name' to be non-null.
-  if (peer_thread_name.Get() != nullptr) {
+  if (peer_thread_name != nullptr) {
     SetThreadName(peer_thread_name->ToModifiedUtf8().c_str());
   }
 }
 
+jobject Thread::CreateCompileTimePeer(JNIEnv* env,
+                                      const char* name,
+                                      bool as_daemon,
+                                      jobject thread_group) {
+  Runtime* runtime = Runtime::Current();
+  CHECK(!runtime->IsStarted());
+
+  if (thread_group == nullptr) {
+    thread_group = runtime->GetMainThreadGroup();
+  }
+  ScopedLocalRef<jobject> thread_name(env, env->NewStringUTF(name));
+  // Add missing null check in case of OOM b/18297817
+  if (name != nullptr && thread_name.get() == nullptr) {
+    CHECK(Thread::Current()->IsExceptionPending());
+    return nullptr;
+  }
+  jint thread_priority = GetNativePriority();
+  jboolean thread_is_daemon = as_daemon;
+
+  ScopedLocalRef<jobject> peer(env, env->AllocObject(WellKnownClasses::java_lang_Thread));
+  if (peer.get() == nullptr) {
+    CHECK(Thread::Current()->IsExceptionPending());
+    return nullptr;
+  }
+
+  // We cannot call Thread.init, as it will recursively ask for currentThread.
+
+  // The Thread constructor should have set the Thread.name to a
+  // non-null value. However, because we can run without code
+  // available (in the compiler, in tests), we manually assign the
+  // fields the constructor should have set.
+  ScopedObjectAccessUnchecked soa(Thread::Current());
+  if (runtime->IsActiveTransaction()) {
+    InitPeer<true>(soa,
+                   soa.Decode<mirror::Object>(peer.get()),
+                   thread_is_daemon,
+                   thread_group,
+                   thread_name.get(),
+                   thread_priority);
+  } else {
+    InitPeer<false>(soa,
+                    soa.Decode<mirror::Object>(peer.get()),
+                    thread_is_daemon,
+                    thread_group,
+                    thread_name.get(),
+                    thread_priority);
+  }
+
+  return peer.release();
+}
+
 template<bool kTransactionActive>
-void Thread::InitPeer(ScopedObjectAccess& soa, jboolean thread_is_daemon, jobject thread_group,
-                      jobject thread_name, jint thread_priority) {
+void Thread::InitPeer(ScopedObjectAccessAlreadyRunnable& soa,
+                      ObjPtr<mirror::Object> peer,
+                      jboolean thread_is_daemon,
+                      jobject thread_group,
+                      jobject thread_name,
+                      jint thread_priority) {
   jni::DecodeArtField(WellKnownClasses::java_lang_Thread_daemon)->
-      SetBoolean<kTransactionActive>(tlsPtr_.opeer, thread_is_daemon);
+      SetBoolean<kTransactionActive>(peer, thread_is_daemon);
   jni::DecodeArtField(WellKnownClasses::java_lang_Thread_group)->
-      SetObject<kTransactionActive>(tlsPtr_.opeer, soa.Decode<mirror::Object>(thread_group));
+      SetObject<kTransactionActive>(peer, soa.Decode<mirror::Object>(thread_group));
   jni::DecodeArtField(WellKnownClasses::java_lang_Thread_name)->
-      SetObject<kTransactionActive>(tlsPtr_.opeer, soa.Decode<mirror::Object>(thread_name));
+      SetObject<kTransactionActive>(peer, soa.Decode<mirror::Object>(thread_name));
   jni::DecodeArtField(WellKnownClasses::java_lang_Thread_priority)->
-      SetInt<kTransactionActive>(tlsPtr_.opeer, thread_priority);
+      SetInt<kTransactionActive>(peer, thread_priority);
 }
 
 void Thread::SetThreadName(const char* name) {
@@ -2284,7 +2349,7 @@ class BuildInternalStackTraceVisitor : public StackVisitor {
     Handle<mirror::ObjectArray<mirror::Object>> trace(
         hs.NewHandle(
             mirror::ObjectArray<mirror::Object>::Alloc(hs.Self(), array_class, depth + 1)));
-    if (trace.Get() == nullptr) {
+    if (trace == nullptr) {
       // Acquire uninterruptible_ in all paths.
       self_->StartAssertNoThreadSuspension("Building internal stack trace");
       self_->AssertPendingOOMException();
@@ -2479,16 +2544,23 @@ jobjectArray Thread::InternalStackTraceToStackTraceElementArray(
       std::string class_name(PrettyDescriptor(descriptor));
       class_name_object.Assign(
           mirror::String::AllocFromModifiedUtf8(soa.Self(), class_name.c_str()));
-      if (class_name_object.Get() == nullptr) {
+      if (class_name_object == nullptr) {
         soa.Self()->AssertPendingOOMException();
         return nullptr;
       }
       const char* source_file = method->GetDeclaringClassSourceFile();
-      if (source_file != nullptr) {
-        source_name_object.Assign(mirror::String::AllocFromModifiedUtf8(soa.Self(), source_file));
-        if (source_name_object.Get() == nullptr) {
-          soa.Self()->AssertPendingOOMException();
-          return nullptr;
+      if (line_number == -1) {
+        // Make the line_number field of StackTraceElement hold the dex pc.
+        // source_name_object is intentionally left null if we failed to map the dex pc to
+        // a line number (most probably because there is no debug info). See b/30183883.
+        line_number = dex_pc;
+      } else {
+        if (source_file != nullptr) {
+          source_name_object.Assign(mirror::String::AllocFromModifiedUtf8(soa.Self(), source_file));
+          if (source_name_object == nullptr) {
+            soa.Self()->AssertPendingOOMException();
+            return nullptr;
+          }
         }
       }
     }
@@ -2496,14 +2568,14 @@ jobjectArray Thread::InternalStackTraceToStackTraceElementArray(
     CHECK(method_name != nullptr);
     Handle<mirror::String> method_name_object(
         hs.NewHandle(mirror::String::AllocFromModifiedUtf8(soa.Self(), method_name)));
-    if (method_name_object.Get() == nullptr) {
+    if (method_name_object == nullptr) {
       return nullptr;
     }
-    ObjPtr<mirror::StackTraceElement> obj =mirror::StackTraceElement::Alloc(soa.Self(),
-                                                                            class_name_object,
-                                                                            method_name_object,
-                                                                            source_name_object,
-                                                                            line_number);
+    ObjPtr<mirror::StackTraceElement> obj = mirror::StackTraceElement::Alloc(soa.Self(),
+                                                                             class_name_object,
+                                                                             method_name_object,
+                                                                             source_name_object,
+                                                                             line_number);
     if (obj == nullptr) {
       return nullptr;
     }
@@ -2554,7 +2626,7 @@ void Thread::ThrowNewWrappedException(const char* exception_class_descriptor,
   auto* cl = runtime->GetClassLinker();
   Handle<mirror::Class> exception_class(
       hs.NewHandle(cl->FindClass(this, exception_class_descriptor, class_loader)));
-  if (UNLIKELY(exception_class.Get() == nullptr)) {
+  if (UNLIKELY(exception_class == nullptr)) {
     CHECK(IsExceptionPending());
     LOG(ERROR) << "No exception class " << PrettyDescriptor(exception_class_descriptor);
     return;
@@ -2570,7 +2642,7 @@ void Thread::ThrowNewWrappedException(const char* exception_class_descriptor,
       hs.NewHandle(ObjPtr<mirror::Throwable>::DownCast(exception_class->AllocObject(this))));
 
   // If we couldn't allocate the exception, throw the pre-allocated out of memory exception.
-  if (exception.Get() == nullptr) {
+  if (exception == nullptr) {
     SetException(Runtime::Current()->GetPreAllocatedOutOfMemoryError());
     return;
   }
@@ -3485,7 +3557,8 @@ bool Thread::IsAotCompiler() {
 }
 
 mirror::Object* Thread::GetPeerFromOtherThread() const {
-  mirror::Object* peer = GetPeer();
+  DCHECK(tlsPtr_.jpeer == nullptr);
+  mirror::Object* peer = tlsPtr_.opeer;
   if (kUseReadBarrier && Current()->GetIsGcMarking()) {
     // We may call Thread::Dump() in the middle of the CC thread flip and this thread's stack
     // may have not been flipped yet and peer may be a from-space (stale) ref. So explicitly

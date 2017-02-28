@@ -72,23 +72,13 @@ struct DexFile::AnnotationValue {
   uint8_t type_;
 };
 
-bool DexFile::GetChecksum(const char* filename, uint32_t* checksum, std::string* error_msg) {
-  CHECK(checksum != nullptr);
+bool DexFile::GetMultiDexChecksums(const char* filename,
+                                   std::vector<uint32_t>* checksums,
+                                   std::string* error_msg) {
+  CHECK(checksums != nullptr);
   uint32_t magic;
 
-  // Strip ":...", which is the location
-  const char* zip_entry_name = kClassesDex;
-  const char* file_part = filename;
-  std::string file_part_storage;
-
-  if (DexFile::IsMultiDexLocation(filename)) {
-    file_part_storage = GetBaseLocation(filename);
-    file_part = file_part_storage.c_str();
-    zip_entry_name = filename + file_part_storage.size() + 1;
-    DCHECK_EQ(zip_entry_name[-1], kMultiDexSeparator);
-  }
-
-  File fd = OpenAndReadMagic(file_part, &magic, error_msg);
+  File fd = OpenAndReadMagic(filename, &magic, error_msg);
   if (fd.Fd() == -1) {
     DCHECK(!error_msg->empty());
     return false;
@@ -97,17 +87,25 @@ bool DexFile::GetChecksum(const char* filename, uint32_t* checksum, std::string*
     std::unique_ptr<ZipArchive> zip_archive(
         ZipArchive::OpenFromFd(fd.Release(), filename, error_msg));
     if (zip_archive.get() == nullptr) {
-      *error_msg = StringPrintf("Failed to open zip archive '%s' (error msg: %s)", file_part,
+      *error_msg = StringPrintf("Failed to open zip archive '%s' (error msg: %s)", filename,
                                 error_msg->c_str());
       return false;
     }
-    std::unique_ptr<ZipEntry> zip_entry(zip_archive->Find(zip_entry_name, error_msg));
+
+    uint32_t i = 0;
+    std::string zip_entry_name = GetMultiDexClassesDexName(i++);
+    std::unique_ptr<ZipEntry> zip_entry(zip_archive->Find(zip_entry_name.c_str(), error_msg));
     if (zip_entry.get() == nullptr) {
-      *error_msg = StringPrintf("Zip archive '%s' doesn't contain %s (error msg: %s)", file_part,
-                                zip_entry_name, error_msg->c_str());
+      *error_msg = StringPrintf("Zip archive '%s' doesn't contain %s (error msg: %s)", filename,
+          zip_entry_name.c_str(), error_msg->c_str());
       return false;
     }
-    *checksum = zip_entry->GetCrc32();
+
+    do {
+      checksums->push_back(zip_entry->GetCrc32());
+      zip_entry_name = DexFile::GetMultiDexClassesDexName(i++);
+      zip_entry.reset(zip_archive->Find(zip_entry_name.c_str(), error_msg));
+    } while (zip_entry.get() != nullptr);
     return true;
   }
   if (IsDexMagic(magic)) {
@@ -116,7 +114,7 @@ bool DexFile::GetChecksum(const char* filename, uint32_t* checksum, std::string*
     if (dex_file.get() == nullptr) {
       return false;
     }
-    *checksum = dex_file->GetHeader().checksum_;
+    checksums->push_back(dex_file->GetHeader().checksum_);
     return true;
   }
   *error_msg = StringPrintf("Expected valid zip or dex file: '%s'", filename);
@@ -333,7 +331,32 @@ std::unique_ptr<const DexFile> DexFile::OpenOneDexFileFromZip(const ZipArchive& 
     *error_code = ZipOpenErrorCode::kDexFileError;
     return nullptr;
   }
-  std::unique_ptr<MemMap> map(zip_entry->ExtractToMemMap(location.c_str(), entry_name, error_msg));
+
+  std::unique_ptr<MemMap> map;
+  if (zip_entry->IsUncompressed()) {
+    if (!zip_entry->IsAlignedTo(alignof(Header))) {
+      // Do not mmap unaligned ZIP entries because
+      // doing so would fail dex verification which requires 4 byte alignment.
+      LOG(WARNING) << "Can't mmap dex file " << location << "!" << entry_name << " directly; "
+                   << "please zipalign to " << alignof(Header) << " bytes. "
+                   << "Falling back to extracting file.";
+    } else {
+      // Map uncompressed files within zip as file-backed to avoid a dirty copy.
+      map.reset(zip_entry->MapDirectlyFromFile(location.c_str(), /*out*/error_msg));
+      if (map == nullptr) {
+        LOG(WARNING) << "Can't mmap dex file " << location << "!" << entry_name << " directly; "
+                     << "is your ZIP file corrupted? Falling back to extraction.";
+        // Try again with Extraction which still has a chance of recovery.
+      }
+    }
+  }
+
+  if (map == nullptr) {
+    // Default path for compressed ZIP entries,
+    // and fallback for stored ZIP entries.
+    map.reset(zip_entry->ExtractToMemMap(location.c_str(), entry_name, error_msg));
+  }
+
   if (map == nullptr) {
     *error_msg = StringPrintf("Failed to extract '%s' from '%s': %s", entry_name, location.c_str(),
                               error_msg->c_str());
@@ -415,7 +438,7 @@ bool DexFile::OpenAllDexFilesFromZip(const ZipArchive& zip_archive,
                                                                          &error_code));
       if (next_dex_file.get() == nullptr) {
         if (error_code != ZipOpenErrorCode::kEntryNotFound) {
-          LOG(WARNING) << error_msg;
+          LOG(WARNING) << "Zip open failed: " << *error_msg;
         }
         break;
       } else {
@@ -497,9 +520,19 @@ DexFile::DexFile(const uint8_t* base,
       method_ids_(reinterpret_cast<const MethodId*>(base + header_->method_ids_off_)),
       proto_ids_(reinterpret_cast<const ProtoId*>(base + header_->proto_ids_off_)),
       class_defs_(reinterpret_cast<const ClassDef*>(base + header_->class_defs_off_)),
+      method_handles_(nullptr),
+      num_method_handles_(0),
+      call_site_ids_(nullptr),
+      num_call_site_ids_(0),
       oat_dex_file_(oat_dex_file) {
   CHECK(begin_ != nullptr) << GetLocation();
   CHECK_GT(size_, 0U) << GetLocation();
+  // Check base (=header) alignment.
+  // Must be 4-byte aligned to avoid undefined behavior when accessing
+  // any of the sections via a pointer.
+  CHECK_ALIGNED(begin_, alignof(Header));
+
+  InitializeSectionsFromMapList();
 }
 
 DexFile::~DexFile() {
@@ -538,6 +571,29 @@ bool DexFile::CheckMagicAndVersion(std::string* error_msg) const {
     return false;
   }
   return true;
+}
+
+void DexFile::InitializeSectionsFromMapList() {
+  const MapList* map_list = reinterpret_cast<const MapList*>(begin_ + header_->map_off_);
+  const size_t count = map_list->size_;
+
+  size_t map_limit = header_->map_off_ + count * sizeof(MapItem);
+  if (header_->map_off_ >= map_limit || map_limit > size_) {
+    // Overflow or out out of bounds. The dex file verifier runs after
+    // this method and will reject the file as it is malformed.
+    return;
+  }
+
+  for (size_t i = 0; i < count; ++i) {
+    const MapItem& map_item = map_list->list_[i];
+    if (map_item.type_ == kDexTypeMethodHandleItem) {
+      method_handles_ = reinterpret_cast<const MethodHandleItem*>(begin_ + map_item.offset_);
+      num_method_handles_ = map_item.size_;
+    } else if (map_item.type_ == kDexTypeCallSiteIdItem) {
+      call_site_ids_ = reinterpret_cast<const CallSiteIdItem*>(begin_ + map_item.offset_);
+      num_call_site_ids_ = map_item.size_;
+    }
+  }
 }
 
 bool DexFile::IsMagicValid(const uint8_t* magic) {
@@ -1339,24 +1395,20 @@ void ClassDataItemIterator::ReadClassDataMethod() {
   }
 }
 
-EncodedStaticFieldValueIterator::EncodedStaticFieldValueIterator(const DexFile& dex_file,
-                                                                 const DexFile::ClassDef& class_def)
+EncodedArrayValueIterator::EncodedArrayValueIterator(const DexFile& dex_file,
+                                                     const uint8_t* array_data)
     : dex_file_(dex_file),
       array_size_(),
       pos_(-1),
+      ptr_(array_data),
       type_(kByte) {
-  ptr_ = dex_file_.GetEncodedStaticFieldValuesArray(class_def);
-  if (ptr_ == nullptr) {
-    array_size_ = 0;
-  } else {
-    array_size_ = DecodeUnsignedLeb128(&ptr_);
-  }
+  array_size_ = (ptr_ != nullptr) ? DecodeUnsignedLeb128(&ptr_) : 0;
   if (array_size_ > 0) {
     Next();
   }
 }
 
-void EncodedStaticFieldValueIterator::Next() {
+void EncodedArrayValueIterator::Next() {
   pos_++;
   if (pos_ >= array_size_) {
     return;
@@ -1396,6 +1448,8 @@ void EncodedStaticFieldValueIterator::Next() {
     break;
   case kString:
   case kType:
+  case kMethodType:
+  case kMethodHandle:
     jval_.i = DexFile::ReadUnsignedInt(ptr_, value_arg, false);
     break;
   case kField:

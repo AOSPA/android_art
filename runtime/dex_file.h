@@ -103,7 +103,7 @@ class DexFile {
   };
 
   // Map item type codes.
-  enum {
+  enum MapItemType : uint16_t {  // private
     kDexTypeHeaderItem               = 0x0000,
     kDexTypeStringIdItem             = 0x0001,
     kDexTypeTypeIdItem               = 0x0002,
@@ -111,6 +111,8 @@ class DexFile {
     kDexTypeFieldIdItem              = 0x0004,
     kDexTypeMethodIdItem             = 0x0005,
     kDexTypeClassDefItem             = 0x0006,
+    kDexTypeCallSiteIdItem           = 0x0007,
+    kDexTypeMethodHandleItem         = 0x0008,
     kDexTypeMapList                  = 0x1000,
     kDexTypeTypeList                 = 0x1001,
     kDexTypeAnnotationSetRefList     = 0x1002,
@@ -260,6 +262,37 @@ class DexFile {
     DISALLOW_COPY_AND_ASSIGN(TypeList);
   };
 
+  // MethodHandle Types
+  enum class MethodHandleType : uint16_t {  // private
+    kStaticPut         = 0x0000,  // a setter for a given static field.
+    kStaticGet         = 0x0001,  // a getter for a given static field.
+    kInstancePut       = 0x0002,  // a setter for a given instance field.
+    kInstanceGet       = 0x0003,  // a getter for a given instance field.
+    kInvokeStatic      = 0x0004,  // an invoker for a given static method.
+    kInvokeInstance    = 0x0005,  // invoke_instance : an invoker for a given instance method. This
+                                  // can be any non-static method on any class (or interface) except
+                                  // for “<init>”.
+    kInvokeConstructor = 0x0006,  // an invoker for a given constructor.
+    kLast = kInvokeConstructor
+  };
+
+  // raw method_handle_item
+  struct MethodHandleItem {
+    uint16_t method_handle_type_;
+    uint16_t reserved1_;            // Reserved for future use.
+    uint16_t field_or_method_idx_;  // Field index for accessors, method index otherwise.
+    uint16_t reserved2_;            // Reserved for future use.
+   private:
+    DISALLOW_COPY_AND_ASSIGN(MethodHandleItem);
+  };
+
+  // raw call_site_id_item
+  struct CallSiteIdItem {
+    uint32_t data_off_;  // Offset into data section pointing to encoded array items.
+   private:
+    DISALLOW_COPY_AND_ASSIGN(CallSiteIdItem);
+  };
+
   // Raw code_item.
   struct CodeItem {
     uint16_t registers_size_;            // the number of registers used by this code
@@ -302,6 +335,8 @@ class DexFile {
     kDexAnnotationLong          = 0x06,
     kDexAnnotationFloat         = 0x10,
     kDexAnnotationDouble        = 0x11,
+    kDexAnnotationMethodType    = 0x15,
+    kDexAnnotationMethodHandle  = 0x16,
     kDexAnnotationString        = 0x17,
     kDexAnnotationType          = 0x18,
     kDexAnnotationField         = 0x19,
@@ -389,11 +424,18 @@ class DexFile {
 
   struct AnnotationValue;
 
-  // Returns the checksum of a file for comparison with GetLocationChecksum().
-  // For .dex files, this is the header checksum.
-  // For zip files, this is the classes.dex zip entry CRC32 checksum.
-  // Return true if the checksum could be found, false otherwise.
-  static bool GetChecksum(const char* filename, uint32_t* checksum, std::string* error_msg);
+  // Returns the checksums of a file for comparison with GetLocationChecksum().
+  // For .dex files, this is the single header checksum.
+  // For zip files, this is the zip entry CRC32 checksum for classes.dex and
+  // each additional multidex entry classes2.dex, classes3.dex, etc.
+  // Return true if the checksums could be found, false otherwise.
+  static bool GetMultiDexChecksums(const char* filename,
+                                   std::vector<uint32_t>* checksums,
+                                   std::string* error_msg);
+
+  // Check whether a location denotes a multidex dex file. This is a very simple check: returns
+  // whether the string contains the separator character.
+  static bool IsMultiDexLocation(const char* location);
 
   // Opens .dex file, backed by existing memory
   static std::unique_ptr<const DexFile> Open(const uint8_t* base,
@@ -683,6 +725,24 @@ class DexFile {
     }
   }
 
+  uint32_t NumMethodHandles() const {
+    return num_method_handles_;
+  }
+
+  const MethodHandleItem& GetMethodHandle(uint32_t idx) const {
+    CHECK_LT(idx, NumMethodHandles());
+    return method_handles_[idx];
+  }
+
+  uint32_t NumCallSiteIds() const {
+    return num_call_site_ids_;
+  }
+
+  const CallSiteIdItem& GetCallSiteId(uint32_t idx) const {
+    CHECK_LT(idx, NumCallSiteIds());
+    return call_site_ids_[idx];
+  }
+
   // Returns a pointer to the raw memory mapped class_data_item
   const uint8_t* GetClassData(const ClassDef& class_def) const {
     if (class_def.class_data_off_ == 0) {
@@ -759,6 +819,10 @@ class DexFile {
     } else {
       return begin_ + class_def.static_values_off_;
     }
+  }
+
+  const uint8_t* GetCallSiteEncodedValuesArray(const CallSiteIdItem& call_site_id) const {
+    return begin_ + call_site_id.data_off_;
   }
 
   static const TryItem* GetTryItems(const CodeItem& code_item, uint32_t offset);
@@ -1101,9 +1165,8 @@ class DexFile {
   // Returns true if the header magic and version numbers are of the expected values.
   bool CheckMagicAndVersion(std::string* error_msg) const;
 
-  // Check whether a location denotes a multidex dex file. This is a very simple check: returns
-  // whether the string contains the separator character.
-  static bool IsMultiDexLocation(const char* location);
+  // Initialize section info for sections only found in map. Returns true on success.
+  void InitializeSectionsFromMapList();
 
   // The base address of the memory mapping.
   const uint8_t* const begin_;
@@ -1142,6 +1205,18 @@ class DexFile {
 
   // Points to the base of the class definition list.
   const ClassDef* const class_defs_;
+
+  // Points to the base of the method handles list.
+  const MethodHandleItem* method_handles_;
+
+  // Number of elements in the method handles list.
+  size_t num_method_handles_;
+
+  // Points to the base of the call sites id list.
+  const CallSiteIdItem* call_site_ids_;
+
+  // Number of elements in the call sites list.
+  size_t num_call_site_ids_;
 
   // If this dex file was loaded from an oat file, oat_dex_file_ contains a
   // pointer to the OatDexFile it was loaded from. Otherwise oat_dex_file_ is
@@ -1409,32 +1484,33 @@ class ClassDataItemIterator {
   DISALLOW_IMPLICIT_CONSTRUCTORS(ClassDataItemIterator);
 };
 
-class EncodedStaticFieldValueIterator {
+class EncodedArrayValueIterator {
  public:
-  EncodedStaticFieldValueIterator(const DexFile& dex_file,
-                                  const DexFile::ClassDef& class_def);
+  EncodedArrayValueIterator(const DexFile& dex_file, const uint8_t* array_data);
 
   bool HasNext() const { return pos_ < array_size_; }
 
   void Next();
 
   enum ValueType {
-    kByte = 0x00,
-    kShort = 0x02,
-    kChar = 0x03,
-    kInt = 0x04,
-    kLong = 0x06,
-    kFloat = 0x10,
-    kDouble = 0x11,
-    kString = 0x17,
-    kType = 0x18,
-    kField = 0x19,
-    kMethod = 0x1a,
-    kEnum = 0x1b,
-    kArray = 0x1c,
-    kAnnotation = 0x1d,
-    kNull = 0x1e,
-    kBoolean = 0x1f
+    kByte         = 0x00,
+    kShort        = 0x02,
+    kChar         = 0x03,
+    kInt          = 0x04,
+    kLong         = 0x06,
+    kFloat        = 0x10,
+    kDouble       = 0x11,
+    kMethodType   = 0x15,
+    kMethodHandle = 0x16,
+    kString       = 0x17,
+    kType         = 0x18,
+    kField        = 0x19,
+    kMethod       = 0x1a,
+    kEnum         = 0x1b,
+    kArray        = 0x1c,
+    kAnnotation   = 0x1d,
+    kNull         = 0x1e,
+    kBoolean      = 0x1f,
   };
 
   ValueType GetValueType() const { return type_; }
@@ -1452,9 +1528,37 @@ class EncodedStaticFieldValueIterator {
   jvalue jval_;  // Value of current encoded value.
 
  private:
+  DISALLOW_IMPLICIT_CONSTRUCTORS(EncodedArrayValueIterator);
+};
+std::ostream& operator<<(std::ostream& os, const EncodedArrayValueIterator::ValueType& code);
+
+class EncodedStaticFieldValueIterator : public EncodedArrayValueIterator {
+ public:
+  EncodedStaticFieldValueIterator(const DexFile& dex_file,
+                                  const DexFile::ClassDef& class_def)
+      : EncodedArrayValueIterator(dex_file,
+                                  dex_file.GetEncodedStaticFieldValuesArray(class_def))
+  {}
+
+ private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(EncodedStaticFieldValueIterator);
 };
 std::ostream& operator<<(std::ostream& os, const EncodedStaticFieldValueIterator::ValueType& code);
+
+class CallSiteArrayValueIterator : public EncodedArrayValueIterator {
+ public:
+  CallSiteArrayValueIterator(const DexFile& dex_file,
+                             const DexFile::CallSiteIdItem& call_site_id)
+      : EncodedArrayValueIterator(dex_file,
+                                  dex_file.GetCallSiteEncodedValuesArray(call_site_id))
+  {}
+
+  uint32_t Size() const { return array_size_; }
+
+ private:
+  DISALLOW_IMPLICIT_CONSTRUCTORS(CallSiteArrayValueIterator);
+};
+std::ostream& operator<<(std::ostream& os, const CallSiteArrayValueIterator::ValueType& code);
 
 class CatchHandlerIterator {
   public:

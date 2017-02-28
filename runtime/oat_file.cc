@@ -273,6 +273,36 @@ inline static bool ReadOatDexFileData(const OatFile& oat_file,
   return true;
 }
 
+static bool FindDexFileMapItem(const uint8_t* dex_begin,
+                               const uint8_t* dex_end,
+                               DexFile::MapItemType map_item_type,
+                               const DexFile::MapItem** result_item) {
+  *result_item = nullptr;
+
+  const DexFile::Header* header =
+      BoundsCheckedCast<const DexFile::Header*>(dex_begin, dex_begin, dex_end);
+  if (nullptr == header) return false;
+
+  if (!DexFile::IsMagicValid(header->magic_)) return true;  // Not a dex file, not an error.
+
+  const DexFile::MapList* map_list =
+      BoundsCheckedCast<const DexFile::MapList*>(dex_begin + header->map_off_, dex_begin, dex_end);
+  if (nullptr == map_list) return false;
+
+  const DexFile::MapItem* map_item = map_list->list_;
+  size_t count = map_list->size_;
+  while (count--) {
+    if (map_item->type_ == static_cast<uint16_t>(map_item_type)) {
+      *result_item = map_item;
+      break;
+    }
+    map_item = BoundsCheckedCast<const DexFile::MapItem*>(map_item + 1, dex_begin, dex_end);
+    if (nullptr == map_item) return false;
+  }
+
+  return true;
+}
+
 bool OatFileBase::Setup(const char* abs_dex_location, std::string* error_msg) {
   if (!GetOatHeader().IsValid()) {
     std::string cause = GetOatHeader().GetValidationErrorMessage();
@@ -501,7 +531,19 @@ bool OatFileBase::Setup(const char* abs_dex_location, std::string* error_msg) {
 
     uint8_t* current_dex_cache_arrays = nullptr;
     if (dex_cache_arrays != nullptr) {
-      DexCacheArraysLayout layout(pointer_size, *header);
+      // All DexCache types except for CallSite have their instance counts in the
+      // DexFile header. For CallSites, we need to read the info from the MapList.
+      const DexFile::MapItem* call_sites_item = nullptr;
+      if (!FindDexFileMapItem(DexBegin(),
+                              DexEnd(),
+                              DexFile::MapItemType::kDexTypeCallSiteIdItem,
+                              &call_sites_item)) {
+        *error_msg = StringPrintf("In oat file '%s' could not read data from truncated DexFile map",
+                                  GetLocation().c_str());
+        return false;
+      }
+      size_t num_call_sites = call_sites_item == nullptr ? 0 : call_sites_item->size_;
+      DexCacheArraysLayout layout(pointer_size, *header, num_call_sites);
       if (layout.Size() != 0u) {
         if (static_cast<size_t>(dex_cache_arrays_end - dex_cache_arrays) < layout.Size()) {
           *error_msg = StringPrintf("In oat file '%s' found OatDexFile #%zu for '%s' with "
@@ -1466,77 +1508,6 @@ std::string OatFile::EncodeDexFileDependencies(const std::vector<const DexFile*>
   }
 
   return out.str();
-}
-
-bool OatFile::CheckStaticDexFileDependencies(const char* dex_dependencies, std::string* msg) {
-  if (dex_dependencies == nullptr || dex_dependencies[0] == 0) {
-    // No dependencies.
-    return true;
-  }
-
-  // Assumption: this is not performance-critical. So it's OK to do this with a std::string and
-  //             Split() instead of manual parsing of the combined char*.
-  std::vector<std::string> split;
-  Split(dex_dependencies, kDexClassPathEncodingSeparator, &split);
-  if (split.size() % 2 != 0) {
-    // Expected pairs of location and checksum.
-    *msg = StringPrintf("Odd number of elements in dependency list %s", dex_dependencies);
-    return false;
-  }
-
-  for (auto it = split.begin(), end = split.end(); it != end; it += 2) {
-    std::string& location = *it;
-    std::string& checksum = *(it + 1);
-    int64_t converted = strtoll(checksum.c_str(), nullptr, 10);
-    if (converted == 0) {
-      // Conversion error.
-      *msg = StringPrintf("Conversion error for %s", checksum.c_str());
-      return false;
-    }
-
-    uint32_t dex_checksum;
-    std::string error_msg;
-    if (DexFile::GetChecksum(DexFile::GetDexCanonicalLocation(location.c_str()).c_str(),
-                             &dex_checksum,
-                             &error_msg)) {
-      if (converted != dex_checksum) {
-        *msg = StringPrintf("Checksums don't match for %s: %" PRId64 " vs %u",
-                            location.c_str(), converted, dex_checksum);
-        return false;
-      }
-    } else {
-      // Problem retrieving checksum.
-      // TODO: odex files?
-      *msg = StringPrintf("Could not retrieve checksum for %s: %s", location.c_str(),
-                          error_msg.c_str());
-      return false;
-    }
-  }
-
-  return true;
-}
-
-bool OatFile::GetDexLocationsFromDependencies(const char* dex_dependencies,
-                                              std::vector<std::string>* locations) {
-  DCHECK(locations != nullptr);
-  if (dex_dependencies == nullptr || dex_dependencies[0] == 0) {
-    return true;
-  }
-
-  // Assumption: this is not performance-critical. So it's OK to do this with a std::string and
-  //             Split() instead of manual parsing of the combined char*.
-  std::vector<std::string> split;
-  Split(dex_dependencies, kDexClassPathEncodingSeparator, &split);
-  if (split.size() % 2 != 0) {
-    // Expected pairs of location and checksum.
-    return false;
-  }
-
-  for (auto it = split.begin(), end = split.end(); it != end; it += 2) {
-    locations->push_back(*it);
-  }
-
-  return true;
 }
 
 OatFile::OatClass OatFile::FindOatClass(const DexFile& dex_file,

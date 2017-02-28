@@ -36,7 +36,7 @@ namespace art {
 namespace mirror {
 
 inline uint32_t String::ClassSize(PointerSize pointer_size) {
-  uint32_t vtable_entries = Object::kVTableLength + 57;
+  uint32_t vtable_entries = Object::kVTableLength + 56;
   return Class::ComputeClassSize(true, vtable_entries, 0, 0, 0, 1, 2, pointer_size);
 }
 
@@ -308,16 +308,21 @@ inline int32_t String::GetHashCode() {
 }
 
 template<typename MemoryType>
-bool String::AllASCII(const MemoryType* const chars, const int length) {
+inline bool String::AllASCII(const MemoryType* chars, const int length) {
   static_assert(std::is_unsigned<MemoryType>::value, "Expecting unsigned MemoryType");
   for (int i = 0; i < length; ++i) {
-    // Valid ASCII characters are in range 1..0x7f. Zero is not considered ASCII
-    // because it would complicate the detection of ASCII strings in Modified-UTF8.
-    if ((chars[i] - 1u) >= 0x7fu) {
+    if (!IsASCII(chars[i])) {
       return false;
     }
   }
   return true;
+}
+
+inline bool String::DexFileStringAllASCII(const char* chars, const int length) {
+  // For strings from the dex file we just need to check that
+  // the terminating character is at the right position.
+  DCHECK_EQ(AllASCII(reinterpret_cast<const uint8_t*>(chars), length), chars[length] == 0);
+  return chars[length] == 0;
 }
 
 }  // namespace mirror

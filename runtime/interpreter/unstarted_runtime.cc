@@ -124,7 +124,7 @@ static void UnstartedRuntimeFindClass(Thread* self, Handle<mirror::String> class
                                       const std::string& method_name, bool initialize_class,
                                       bool abort_if_not_found)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  CHECK(className.Get() != nullptr);
+  CHECK(className != nullptr);
   std::string descriptor(DotToDescriptor(className->ToModifiedUtf8().c_str()));
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
 
@@ -175,56 +175,61 @@ static mirror::String* GetClassName(Thread* self, ShadowFrame* shadow_frame, siz
   return param->AsString();
 }
 
-void UnstartedRuntime::UnstartedClassForName(
-    Thread* self, ShadowFrame* shadow_frame, JValue* result, size_t arg_offset) {
+void UnstartedRuntime::UnstartedClassForNameCommon(Thread* self,
+                                                   ShadowFrame* shadow_frame,
+                                                   JValue* result,
+                                                   size_t arg_offset,
+                                                   bool long_form,
+                                                   const char* caller) {
   mirror::String* class_name = GetClassName(self, shadow_frame, arg_offset);
   if (class_name == nullptr) {
     return;
   }
+  bool initialize_class;
+  mirror::ClassLoader* class_loader;
+  if (long_form) {
+    initialize_class = shadow_frame->GetVReg(arg_offset + 1) != 0;
+    class_loader = down_cast<mirror::ClassLoader*>(shadow_frame->GetVRegReference(arg_offset + 2));
+  } else {
+    initialize_class = true;
+    // TODO: This is really only correct for the boot classpath, and for robustness we should
+    //       check the caller.
+    class_loader = nullptr;
+  }
+
+  ScopedObjectAccessUnchecked soa(self);
+  if (class_loader != nullptr && !ClassLinker::IsBootClassLoader(soa, class_loader)) {
+    AbortTransactionOrFail(self,
+                           "Only the boot classloader is supported: %s",
+                           mirror::Object::PrettyTypeOf(class_loader).c_str());
+    return;
+  }
+
   StackHandleScope<1> hs(self);
   Handle<mirror::String> h_class_name(hs.NewHandle(class_name));
   UnstartedRuntimeFindClass(self,
                             h_class_name,
                             ScopedNullHandle<mirror::ClassLoader>(),
                             result,
-                            "Class.forName",
-                            true,
+                            caller,
+                            initialize_class,
                             false);
   CheckExceptionGenerateClassNotFound(self);
 }
 
+void UnstartedRuntime::UnstartedClassForName(
+    Thread* self, ShadowFrame* shadow_frame, JValue* result, size_t arg_offset) {
+  UnstartedClassForNameCommon(self, shadow_frame, result, arg_offset, false, "Class.forName");
+}
+
 void UnstartedRuntime::UnstartedClassForNameLong(
     Thread* self, ShadowFrame* shadow_frame, JValue* result, size_t arg_offset) {
-  mirror::String* class_name = GetClassName(self, shadow_frame, arg_offset);
-  if (class_name == nullptr) {
-    return;
-  }
-  bool initialize_class = shadow_frame->GetVReg(arg_offset + 1) != 0;
-  mirror::ClassLoader* class_loader =
-      down_cast<mirror::ClassLoader*>(shadow_frame->GetVRegReference(arg_offset + 2));
-  StackHandleScope<2> hs(self);
-  Handle<mirror::String> h_class_name(hs.NewHandle(class_name));
-  Handle<mirror::ClassLoader> h_class_loader(hs.NewHandle(class_loader));
-  UnstartedRuntimeFindClass(self, h_class_name, h_class_loader, result, "Class.forName",
-                            initialize_class, false);
-  CheckExceptionGenerateClassNotFound(self);
+  UnstartedClassForNameCommon(self, shadow_frame, result, arg_offset, true, "Class.forName");
 }
 
 void UnstartedRuntime::UnstartedClassClassForName(
     Thread* self, ShadowFrame* shadow_frame, JValue* result, size_t arg_offset) {
-  mirror::String* class_name = GetClassName(self, shadow_frame, arg_offset);
-  if (class_name == nullptr) {
-    return;
-  }
-  bool initialize_class = shadow_frame->GetVReg(arg_offset + 1) != 0;
-  mirror::ClassLoader* class_loader =
-      down_cast<mirror::ClassLoader*>(shadow_frame->GetVRegReference(arg_offset + 2));
-  StackHandleScope<2> hs(self);
-  Handle<mirror::String> h_class_name(hs.NewHandle(class_name));
-  Handle<mirror::ClassLoader> h_class_loader(hs.NewHandle(class_loader));
-  UnstartedRuntimeFindClass(self, h_class_name, h_class_loader, result, "Class.classForName",
-                            initialize_class, false);
-  CheckExceptionGenerateClassNotFound(self);
+  UnstartedClassForNameCommon(self, shadow_frame, result, arg_offset, true, "Class.classForName");
 }
 
 void UnstartedRuntime::UnstartedClassNewInstance(
@@ -239,7 +244,7 @@ void UnstartedRuntime::UnstartedClassNewInstance(
   Handle<mirror::Class> h_klass(hs.NewHandle(klass));
 
   // Check that it's not null.
-  if (h_klass.Get() == nullptr) {
+  if (h_klass == nullptr) {
     AbortTransactionOrFail(self, "Class reference is null for newInstance");
     return;
   }
@@ -263,7 +268,7 @@ void UnstartedRuntime::UnstartedClassNewInstance(
     auto* cons = h_klass->FindDeclaredDirectMethod("<init>", "()V", cl->GetImagePointerSize());
     if (cons != nullptr) {
       Handle<mirror::Object> h_obj(hs.NewHandle(klass->AllocObject(self)));
-      CHECK(h_obj.Get() != nullptr);  // We don't expect OOM at compile-time.
+      CHECK(h_obj != nullptr);  // We don't expect OOM at compile-time.
       EnterInterpreterFromInvoke(self, cons, h_obj.Get(), nullptr, nullptr);
       if (!self->IsExceptionPending()) {
         result->SetL(h_obj.Get());
@@ -440,6 +445,20 @@ void UnstartedRuntime::UnstartedClassGetInnerClassFlags(
   result->SetI(mirror::Class::GetInnerClassFlags(klass, default_value));
 }
 
+void UnstartedRuntime::UnstartedClassGetSignatureAnnotation(
+    Thread* self, ShadowFrame* shadow_frame, JValue* result, size_t arg_offset) {
+  StackHandleScope<1> hs(self);
+  Handle<mirror::Class> klass(hs.NewHandle(
+      reinterpret_cast<mirror::Class*>(shadow_frame->GetVRegReference(arg_offset))));
+
+  if (klass->IsProxyClass() || klass->GetDexCache() == nullptr) {
+    result->SetL(nullptr);
+    return;
+  }
+
+  result->SetL(annotations::GetSignatureAnnotationForClass(klass));
+}
+
 void UnstartedRuntime::UnstartedClassIsAnonymousClass(
     Thread* self, ShadowFrame* shadow_frame, JValue* result, size_t arg_offset) {
   StackHandleScope<1> hs(self);
@@ -542,7 +561,7 @@ static void GetResourceAsStream(Thread* self,
 
   // Create byte array for content.
   Handle<mirror::ByteArray> h_array(hs.NewHandle(mirror::ByteArray::Alloc(self, map_size)));
-  if (h_array.Get() == nullptr) {
+  if (h_array == nullptr) {
     AbortTransactionOrFail(self, "Could not find/create byte array class");
     return;
   }
@@ -556,7 +575,7 @@ static void GetResourceAsStream(Thread* self,
       runtime->GetClassLinker()->FindClass(self,
                                            "Ljava/io/ByteArrayInputStream;",
                                            ScopedNullHandle<mirror::ClassLoader>())));
-  if (h_class.Get() == nullptr) {
+  if (h_class == nullptr) {
     AbortTransactionOrFail(self, "Could not find ByteArrayInputStream class");
     return;
   }
@@ -566,7 +585,7 @@ static void GetResourceAsStream(Thread* self,
   }
 
   Handle<mirror::Object> h_obj(hs.NewHandle(h_class->AllocObject(self)));
-  if (h_obj.Get() == nullptr) {
+  if (h_obj == nullptr) {
     AbortTransactionOrFail(self, "Could not allocate ByteArrayInputStream object");
     return;
   }
@@ -611,6 +630,72 @@ void UnstartedRuntime::UnstartedClassLoaderGetResourceAsStream(
   }
 
   GetResourceAsStream(self, shadow_frame, result, arg_offset);
+}
+
+void UnstartedRuntime::UnstartedConstructorNewInstance0(
+    Thread* self, ShadowFrame* shadow_frame, JValue* result, size_t arg_offset) {
+  // This is a cutdown version of java_lang_reflect_Constructor.cc's implementation.
+  StackHandleScope<4> hs(self);
+  Handle<mirror::Constructor> m = hs.NewHandle(
+      reinterpret_cast<mirror::Constructor*>(shadow_frame->GetVRegReference(arg_offset)));
+  Handle<mirror::ObjectArray<mirror::Object>> args = hs.NewHandle(
+      reinterpret_cast<mirror::ObjectArray<mirror::Object>*>(
+          shadow_frame->GetVRegReference(arg_offset + 1)));
+  Handle<mirror::Class> c(hs.NewHandle(m->GetDeclaringClass()));
+  if (UNLIKELY(c->IsAbstract())) {
+    AbortTransactionOrFail(self, "Cannot handle abstract classes");
+    return;
+  }
+  // Verify that we can access the class.
+  if (!m->IsAccessible() && !c->IsPublic()) {
+    // Go 2 frames back, this method is always called from newInstance0, which is called from
+    // Constructor.newInstance(Object... args).
+    ObjPtr<mirror::Class> caller = GetCallingClass(self, 2);
+    // If caller is null, then we called from JNI, just avoid the check since JNI avoids most
+    // access checks anyways. TODO: Investigate if this the correct behavior.
+    if (caller != nullptr && !caller->CanAccess(c.Get())) {
+      AbortTransactionOrFail(self, "Cannot access class");
+      return;
+    }
+  }
+  if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(self, c, true, true)) {
+    DCHECK(self->IsExceptionPending());
+    return;
+  }
+  if (c->IsClassClass()) {
+    AbortTransactionOrFail(self, "new Class() is not supported");
+    return;
+  }
+
+  // String constructor is replaced by a StringFactory method in InvokeMethod.
+  if (c->IsStringClass()) {
+    // We don't support strings.
+    AbortTransactionOrFail(self, "String construction is not supported");
+    return;
+  }
+
+  Handle<mirror::Object> receiver = hs.NewHandle(c->AllocObject(self));
+  if (receiver == nullptr) {
+    AbortTransactionOrFail(self, "Could not allocate");
+    return;
+  }
+
+  // It's easier to use reflection to make the call, than create the uint32_t array.
+  {
+    ScopedObjectAccessUnchecked soa(self);
+    ScopedLocalRef<jobject> method_ref(self->GetJniEnv(),
+                                       soa.AddLocalReference<jobject>(m.Get()));
+    ScopedLocalRef<jobject> object_ref(self->GetJniEnv(),
+                                       soa.AddLocalReference<jobject>(receiver.Get()));
+    ScopedLocalRef<jobject> args_ref(self->GetJniEnv(),
+                                     soa.AddLocalReference<jobject>(args.Get()));
+    InvokeMethod(soa, method_ref.get(), object_ref.get(), args_ref.get(), 2);
+  }
+  if (self->IsExceptionPending()) {
+    AbortTransactionOrFail(self, "Failed running constructor");
+  } else {
+    result->SetL(receiver.Get());
+  }
 }
 
 void UnstartedRuntime::UnstartedVmClassLoaderFindLoadedClass(
@@ -800,7 +885,7 @@ static void GetSystemProperty(Thread* self,
   StackHandleScope<4> hs(self);
   Handle<mirror::String> h_key(
       hs.NewHandle(reinterpret_cast<mirror::String*>(shadow_frame->GetVRegReference(arg_offset))));
-  if (h_key.Get() == nullptr) {
+  if (h_key == nullptr) {
     AbortTransactionOrFail(self, "getProperty key was null");
     return;
   }
@@ -815,7 +900,7 @@ static void GetSystemProperty(Thread* self,
       class_linker->FindClass(self,
                               "Ljava/lang/AndroidHardcodedSystemProperties;",
                               ScopedNullHandle<mirror::ClassLoader>())));
-  if (h_props_class.Get() == nullptr) {
+  if (h_props_class == nullptr) {
     AbortTransactionOrFail(self, "Could not find AndroidHardcodedSystemProperties");
     return;
   }
@@ -837,7 +922,7 @@ static void GetSystemProperty(Thread* self,
   ObjPtr<mirror::Object> props = static_properties->GetObject(h_props_class.Get());
   Handle<mirror::ObjectArray<mirror::ObjectArray<mirror::String>>> h_2string_array(hs.NewHandle(
       props->AsObjectArray<mirror::ObjectArray<mirror::String>>()));
-  if (h_2string_array.Get() == nullptr) {
+  if (h_2string_array == nullptr) {
     AbortTransactionOrFail(self, "Field %s is null", kAndroidHardcodedSystemPropertiesFieldName);
     return;
   }
@@ -849,7 +934,7 @@ static void GetSystemProperty(Thread* self,
       hs.NewHandle<mirror::ObjectArray<mirror::String>>(nullptr));
   for (int32_t i = 0; i < prop_count; ++i) {
     h_string_array.Assign(h_2string_array->Get(i));
-    if (h_string_array.Get() == nullptr ||
+    if (h_string_array == nullptr ||
         h_string_array->GetLength() != 2 ||
         h_string_array->Get(0) == nullptr) {
       AbortTransactionOrFail(self,
@@ -924,7 +1009,7 @@ static ObjPtr<mirror::Object> CreateInstanceOf(Thread* self, const char* class_d
   StackHandleScope<2> hs(self);
   Handle<mirror::Class> h_class(hs.NewHandle(klass));
   Handle<mirror::Object> h_obj(hs.NewHandle(h_class->AllocObject(self)));
-  if (h_obj.Get() != nullptr) {
+  if (h_obj != nullptr) {
     ArtMethod* init_method = h_class->FindDirectMethod(
         "<init>", "()V", class_linker->GetImagePointerSize());
     if (init_method == nullptr) {
@@ -951,6 +1036,59 @@ void UnstartedRuntime::UnstartedThreadLocalGet(
   } else {
     AbortTransactionOrFail(self,
                            "ThreadLocal.get() does not support %s",
+                           GetImmediateCaller(shadow_frame).c_str());
+  }
+}
+
+void UnstartedRuntime::UnstartedThreadCurrentThread(
+    Thread* self, ShadowFrame* shadow_frame, JValue* result, size_t arg_offset ATTRIBUTE_UNUSED) {
+  if (CheckCallers(shadow_frame,
+                   { "void java.lang.Thread.init(java.lang.ThreadGroup, java.lang.Runnable, "
+                         "java.lang.String, long)",
+                     "void java.lang.Thread.<init>()",
+                     "void java.util.logging.LogManager$Cleaner.<init>("
+                         "java.util.logging.LogManager)" })) {
+    // Whitelist LogManager$Cleaner, which is an unstarted Thread (for a shutdown hook). The
+    // Thread constructor only asks for the current thread to set up defaults and add the
+    // thread as unstarted to the ThreadGroup. A faked-up main thread peer is good enough for
+    // these purposes.
+    Runtime::Current()->InitThreadGroups(self);
+    jobject main_peer =
+        self->CreateCompileTimePeer(self->GetJniEnv(),
+                                    "main",
+                                    false,
+                                    Runtime::Current()->GetMainThreadGroup());
+    if (main_peer == nullptr) {
+      AbortTransactionOrFail(self, "Failed allocating peer");
+      return;
+    }
+
+    result->SetL(self->DecodeJObject(main_peer));
+    self->GetJniEnv()->DeleteLocalRef(main_peer);
+  } else {
+    AbortTransactionOrFail(self,
+                           "Thread.currentThread() does not support %s",
+                           GetImmediateCaller(shadow_frame).c_str());
+  }
+}
+
+void UnstartedRuntime::UnstartedThreadGetNativeState(
+    Thread* self, ShadowFrame* shadow_frame, JValue* result, size_t arg_offset ATTRIBUTE_UNUSED) {
+  if (CheckCallers(shadow_frame,
+                   { "java.lang.Thread$State java.lang.Thread.getState()",
+                     "java.lang.ThreadGroup java.lang.Thread.getThreadGroup()",
+                     "void java.lang.Thread.init(java.lang.ThreadGroup, java.lang.Runnable, "
+                         "java.lang.String, long)",
+                     "void java.lang.Thread.<init>()",
+                     "void java.util.logging.LogManager$Cleaner.<init>("
+                         "java.util.logging.LogManager)" })) {
+    // Whitelist reading the state of the "main" thread when creating another (unstarted) thread
+    // for LogManager. Report the thread as "new" (it really only counts that it isn't terminated).
+    constexpr int32_t kJavaRunnable = 1;
+    result->SetI(kJavaRunnable);
+  } else {
+    AbortTransactionOrFail(self,
+                           "Thread.getNativeState() does not support %s",
                            GetImmediateCaller(shadow_frame).c_str());
   }
 }
@@ -1192,17 +1330,18 @@ void UnstartedRuntime::UnstartedStringCharAt(
   result->SetC(string->CharAt(index));
 }
 
-// This allows setting chars from the new style of String objects during compilation.
-void UnstartedRuntime::UnstartedStringSetCharAt(
-    Thread* self, ShadowFrame* shadow_frame, JValue* result ATTRIBUTE_UNUSED, size_t arg_offset) {
-  jint index = shadow_frame->GetVReg(arg_offset + 1);
-  jchar c = shadow_frame->GetVReg(arg_offset + 2);
-  mirror::String* string = shadow_frame->GetVRegReference(arg_offset)->AsString();
+// This allows creating String objects with replaced characters during compilation.
+// String.doReplace(char, char) is called from String.replace(char, char) when there is a match.
+void UnstartedRuntime::UnstartedStringDoReplace(
+    Thread* self, ShadowFrame* shadow_frame, JValue* result, size_t arg_offset) {
+  jchar old_c = shadow_frame->GetVReg(arg_offset + 1);
+  jchar new_c = shadow_frame->GetVReg(arg_offset + 2);
+  ObjPtr<mirror::String> string = shadow_frame->GetVRegReference(arg_offset)->AsString();
   if (string == nullptr) {
-    AbortTransactionOrFail(self, "String.setCharAt with null object");
+    AbortTransactionOrFail(self, "String.replaceWithMatch with null object");
     return;
   }
-  string->SetCharAt(index, c);
+  result->SetL(string->DoReplace(self, old_c, new_c));
 }
 
 // This allows creating the new style of String objects during compilation.

@@ -29,6 +29,7 @@
 #include "base/arena_allocator.h"
 #include "base/dumpable.h"
 #include "base/histogram-inl.h"
+#include "base/memory_tool.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "base/time_utils.h"
@@ -188,6 +189,7 @@ Heap::Heap(size_t initial_size,
       disable_thread_flip_count_(0),
       thread_flip_running_(false),
       collector_type_running_(kCollectorTypeNone),
+      thread_running_gc_(nullptr),
       last_gc_type_(collector::kGcTypeNone),
       next_gc_type_(collector::kGcTypePartial),
       capacity_(capacity),
@@ -286,7 +288,7 @@ Heap::Heap(size_t initial_size,
   if (foreground_collector_type_ == kCollectorTypeCC) {
     // Need to use a low address so that we can allocate a contiguous
     // 2 * Xmx space when there's no image (dex2oat for target).
-#if defined(__LP64__)
+#if defined(__LP64__) || !defined(ADDRESS_SANITIZER)
     CHECK_GE(300 * MB, non_moving_space_capacity);
     requested_alloc_space_begin = reinterpret_cast<uint8_t*>(300 * MB) - non_moving_space_capacity;
 #else
@@ -367,7 +369,7 @@ Heap::Heap(size_t initial_size,
                              &error_str));
     CHECK(non_moving_space_mem_map != nullptr) << error_str;
     // Try to reserve virtual memory at a lower address if we have a separate non moving space.
-#if defined(__LP64__)
+#if defined(__LP64__) || !defined(ADDRESS_SANITIZER)
     request_begin = reinterpret_cast<uint8_t*>(300 * MB);
 #else
     // For 32-bit, use 0x20000000 because asan reserves 0x04000000 - 0x20000000.
@@ -935,7 +937,14 @@ void Heap::VisitObjectsInternalRegionSpace(ObjectCallback callback, void* arg) {
       // calls VerifyHeapReferences() as part of the zygote compaction
       // which then would call here without the moving GC disabled,
       // which is fine.
-      DCHECK(IsMovingGCDisabled(self));
+      bool is_thread_running_gc = false;
+      if (kIsDebugBuild) {
+        MutexLock mu(self, *gc_complete_lock_);
+        is_thread_running_gc = self == thread_running_gc_;
+      }
+      // If we are not the thread running the GC on in a GC exclusive region, then moving GC
+      // must be disabled.
+      DCHECK(is_thread_running_gc || IsMovingGCDisabled(self));
     }
     region_space_->Walk(callback, arg);
   }
@@ -987,7 +996,9 @@ void Heap::AddSpace(space::Space* space) {
     // Continuous spaces don't necessarily have bitmaps.
     accounting::ContinuousSpaceBitmap* live_bitmap = continuous_space->GetLiveBitmap();
     accounting::ContinuousSpaceBitmap* mark_bitmap = continuous_space->GetMarkBitmap();
-    if (live_bitmap != nullptr) {
+    // The region space bitmap is not added since VisitObjects visits the region space objects with
+    // special handling.
+    if (live_bitmap != nullptr && !space->IsRegionSpace()) {
       CHECK(mark_bitmap != nullptr);
       live_bitmap_->AddContinuousSpaceBitmap(live_bitmap);
       mark_bitmap_->AddContinuousSpaceBitmap(mark_bitmap);
@@ -1028,7 +1039,7 @@ void Heap::RemoveSpace(space::Space* space) {
     // Continuous spaces don't necessarily have bitmaps.
     accounting::ContinuousSpaceBitmap* live_bitmap = continuous_space->GetLiveBitmap();
     accounting::ContinuousSpaceBitmap* mark_bitmap = continuous_space->GetMarkBitmap();
-    if (live_bitmap != nullptr) {
+    if (live_bitmap != nullptr && !space->IsRegionSpace()) {
       DCHECK(mark_bitmap != nullptr);
       live_bitmap_->RemoveContinuousSpaceBitmap(live_bitmap);
       mark_bitmap_->RemoveContinuousSpaceBitmap(mark_bitmap);
@@ -1384,6 +1395,7 @@ void Heap::StartGC(Thread* self, GcCause cause, CollectorType collector_type) {
   // Ensure there is only one GC at a time.
   WaitForGcToCompleteLocked(cause, self);
   collector_type_running_ = collector_type;
+  thread_running_gc_ = self;
 }
 
 void Heap::TrimSpaces(Thread* self) {
@@ -2783,6 +2795,7 @@ void Heap::FinishGC(Thread* self, collector::GcType gc_type) {
   }
   // Reset.
   running_collection_is_blocking_ = false;
+  thread_running_gc_ = nullptr;
   // Wake anyone who may have been waiting for the GC to complete.
   gc_complete_cond_->Broadcast(self);
 }
@@ -3319,7 +3332,7 @@ struct IdentityMarkHeapReferenceVisitor : public MarkObjectVisitor {
   virtual mirror::Object* MarkObject(mirror::Object* obj) OVERRIDE {
     return obj;
   }
-  virtual void MarkHeapReference(mirror::HeapReference<mirror::Object>*) OVERRIDE {
+  virtual void MarkHeapReference(mirror::HeapReference<mirror::Object>*, bool) OVERRIDE {
   }
 };
 

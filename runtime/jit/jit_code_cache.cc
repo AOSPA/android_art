@@ -686,6 +686,10 @@ void JitCodeCache::NotifyMethodRedefined(ArtMethod* method) {
 // shouldn't be used since it is no longer logically in the jit code cache.
 // TODO We should add DCHECKS that validate that the JIT is paused when this method is entered.
 void JitCodeCache::MoveObsoleteMethod(ArtMethod* old_method, ArtMethod* new_method) {
+  // Native methods have no profiling info and need no special handling from the JIT code cache.
+  if (old_method->IsNative()) {
+    return;
+  }
   MutexLock mu(Thread::Current(), lock_);
   // Update ProfilingInfo to the new one and remove it from the old_method.
   if (old_method->GetProfilingInfo(kRuntimePointerSize) != nullptr) {
@@ -1241,15 +1245,55 @@ void* JitCodeCache::MoreCore(const void* mspace, intptr_t increment) NO_THREAD_S
 }
 
 void JitCodeCache::GetProfiledMethods(const std::set<std::string>& dex_base_locations,
-                                      std::vector<MethodReference>& methods) {
+                                      std::vector<ProfileMethodInfo>& methods) {
   ScopedTrace trace(__FUNCTION__);
   MutexLock mu(Thread::Current(), lock_);
   for (const ProfilingInfo* info : profiling_infos_) {
     ArtMethod* method = info->GetMethod();
     const DexFile* dex_file = method->GetDexFile();
-    if (ContainsElement(dex_base_locations, dex_file->GetBaseLocation())) {
-      methods.emplace_back(dex_file,  method->GetDexMethodIndex());
+    if (!ContainsElement(dex_base_locations, dex_file->GetBaseLocation())) {
+      // Skip dex files which are not profiled.
+      continue;
     }
+    std::vector<ProfileMethodInfo::ProfileInlineCache> inline_caches;
+    for (size_t i = 0; i < info->number_of_inline_caches_; ++i) {
+      std::vector<ProfileMethodInfo::ProfileClassReference> profile_classes;
+      const InlineCache& cache = info->cache_[i];
+      for (size_t k = 0; k < InlineCache::kIndividualCacheSize; k++) {
+        mirror::Class* cls = cache.classes_[k].Read();
+        if (cls == nullptr) {
+          break;
+        }
+
+        const DexFile* class_dex_file = nullptr;
+        dex::TypeIndex type_index;
+
+        if (cls->GetDexCache() == nullptr) {
+          DCHECK(cls->IsArrayClass()) << cls->PrettyClass();
+          class_dex_file = dex_file;
+          type_index = cls->FindTypeIndexInOtherDexFile(*dex_file);
+        } else {
+          class_dex_file = &(cls->GetDexFile());
+          type_index = cls->GetDexTypeIndex();
+        }
+        if (!type_index.IsValid()) {
+          // Could be a proxy class or an array for which we couldn't find the type index.
+          // TODO(calin): can we really miss the type index for arrays here?
+          continue;
+        }
+        if (ContainsElement(dex_base_locations, class_dex_file->GetBaseLocation())) {
+          // Only consider classes from the same apk (including multidex).
+          profile_classes.emplace_back(/*ProfileMethodInfo::ProfileClassReference*/
+              class_dex_file, type_index);
+        }
+      }
+      if (!profile_classes.empty()) {
+        inline_caches.emplace_back(/*ProfileMethodInfo::ProfileInlineCache*/
+            cache.dex_pc_, profile_classes);
+      }
+    }
+    methods.emplace_back(/*ProfileMethodInfo*/
+        dex_file, method->GetDexMethodIndex(), inline_caches);
   }
 }
 

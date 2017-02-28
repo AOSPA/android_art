@@ -44,10 +44,10 @@ For eg, for compiler type as optimizing, use --optimizing.
 In the end, the script will print the failed and skipped tests if any.
 
 """
+import argparse
 import fnmatch
 import itertools
 import json
-from optparse import OptionParser
 import os
 import re
 import subprocess
@@ -95,12 +95,15 @@ COLOR_NORMAL = '\033[0m'
 # The mutex object is used by the threads for exclusive access of test_count
 # to make any changes in its value.
 test_count_mutex = threading.Lock()
+
 # The set contains the list of all the possible run tests that are in art/test
 # directory.
 RUN_TEST_SET = set()
+
 # The semaphore object is used by the testrunner to limit the number of
 # threads to the user requested concurrency value.
 semaphore = threading.Semaphore(1)
+
 # The mutex object is used to provide exclusive access to a thread to print
 # its output.
 print_mutex = threading.Lock()
@@ -112,7 +115,6 @@ n_thread = 1
 test_count = 0
 total_test_count = 0
 verbose = False
-last_print_length = 0
 dry_run = False
 build = False
 gdb = False
@@ -131,8 +133,7 @@ def gather_test_info():
   VARIANT_TYPE_DICT['run'] = {'ndebug', 'debug'}
   VARIANT_TYPE_DICT['target'] = {'target', 'host'}
   VARIANT_TYPE_DICT['trace'] = {'trace', 'ntrace', 'stream'}
-  VARIANT_TYPE_DICT['image'] = {'picimage', 'no-image', 'npicimage',
-                                'multinpicimage', 'multipicimage'}
+  VARIANT_TYPE_DICT['image'] = {'picimage', 'no-image', 'multipicimage'}
   VARIANT_TYPE_DICT['debuggable'] = {'ndebuggable', 'debuggable'}
   VARIANT_TYPE_DICT['gc'] = {'gcstress', 'gcverify', 'cms'}
   VARIANT_TYPE_DICT['prebuild'] = {'no-prebuild', 'no-dex2oat', 'prebuild'}
@@ -166,12 +167,12 @@ def setup_test_env():
     TARGET_TYPES.add('host')
     TARGET_TYPES.add('target')
 
-  if env.ART_TEST_RUN_TEST_PREBUILD:
-    PREBUILD_TYPES.add('prebuild')
   if env.ART_TEST_RUN_TEST_NO_PREBUILD:
     PREBUILD_TYPES.add('no-prebuild')
   if env.ART_TEST_RUN_TEST_NO_DEX2OAT:
     PREBUILD_TYPES.add('no-dex2oat')
+  if env.ART_TEST_RUN_TEST_PREBUILD or not PREBUILD_TYPES: # Default
+    PREBUILD_TYPES.add('prebuild')
 
   if env.ART_TEST_INTERPRETER_ACCESS_CHECKS:
     COMPILER_TYPES.add('interp-ac')
@@ -179,66 +180,60 @@ def setup_test_env():
     COMPILER_TYPES.add('interpreter')
   if env.ART_TEST_JIT:
     COMPILER_TYPES.add('jit')
-
-  if env.ART_TEST_OPTIMIZING:
-    COMPILER_TYPES.add('optimizing')
-    OPTIMIZING_COMPILER_TYPES.add('optimizing')
   if env.ART_TEST_OPTIMIZING_GRAPH_COLOR:
     COMPILER_TYPES.add('regalloc_gc')
     OPTIMIZING_COMPILER_TYPES.add('regalloc_gc')
+  if env.ART_TEST_OPTIMIZING or not COMPILER_TYPES: # Default
+    COMPILER_TYPES.add('optimizing')
+    OPTIMIZING_COMPILER_TYPES.add('optimizing')
 
-  if not RELOCATE_TYPES:
-    RELOCATE_TYPES.add('no-relocate')
   if env.ART_TEST_RUN_TEST_RELOCATE:
     RELOCATE_TYPES.add('relocate')
   if env.ART_TEST_RUN_TEST_RELOCATE_NO_PATCHOAT:
     RELOCATE_TYPES.add('relocate-npatchoat')
+  if not RELOCATE_TYPES: # Default
+    RELOCATE_TYPES.add('no-relocate')
 
-  if not TRACE_TYPES:
-    TRACE_TYPES.add('ntrace')
   if env.ART_TEST_TRACE:
     TRACE_TYPES.add('trace')
   if env.ART_TEST_TRACE_STREAM:
     TRACE_TYPES.add('stream')
+  if not TRACE_TYPES: # Default
+    TRACE_TYPES.add('ntrace')
 
-  if not GC_TYPES:
-    GC_TYPES.add('cms')
   if env.ART_TEST_GC_STRESS:
     GC_TYPES.add('gcstress')
   if env.ART_TEST_GC_VERIFY:
     GC_TYPES.add('gcverify')
+  if not GC_TYPES: # Default
+    GC_TYPES.add('cms')
 
-  if not JNI_TYPES:
-    JNI_TYPES.add('checkjni')
   if env.ART_TEST_JNI_FORCECOPY:
     JNI_TYPES.add('forcecopy')
+  if not JNI_TYPES: # Default
+    JNI_TYPES.add('checkjni')
 
-  if env.ART_TEST_RUN_TEST_IMAGE:
-    IMAGE_TYPES.add('picimage')
   if env.ART_TEST_RUN_TEST_NO_IMAGE:
     IMAGE_TYPES.add('no-image')
   if env.ART_TEST_RUN_TEST_MULTI_IMAGE:
     IMAGE_TYPES.add('multipicimage')
-  if env.ART_TEST_NPIC_IMAGE:
-    IMAGE_TYPES.add('npicimage')
-  if env.ART_TEST_RUN_TEST_MULTI_IMAGE:
-    IMAGE_TYPES.add('multinpicimage')
+  if env.ART_TEST_RUN_TEST_IMAGE or not IMAGE_TYPES: # Default
+    IMAGE_TYPES.add('picimage')
 
-  if not PICTEST_TYPES:
-    PICTEST_TYPES.add('npictest')
   if env.ART_TEST_PIC_TEST:
     PICTEST_TYPES.add('pictest')
+  if not PICTEST_TYPES: # Default
+    PICTEST_TYPES.add('npictest')
 
-  if env.ART_TEST_RUN_TEST_DEBUG:
-    RUN_TYPES.add('debug')
   if env.ART_TEST_RUN_TEST_NDEBUG:
     RUN_TYPES.add('ndebug')
-
-  if not DEBUGGABLE_TYPES:
-    DEBUGGABLE_TYPES.add('ndebuggable')
+  if env.ART_TEST_RUN_TEST_DEBUG or not RUN_TYPES: # Default
+    RUN_TYPES.add('debug')
 
   if env.ART_TEST_RUN_TEST_DEBUGGABLE:
     DEBUGGABLE_TYPES.add('debuggable')
+  if not DEBUGGABLE_TYPES: # Default
+    DEBUGGABLE_TYPES.add('ndebuggable')
 
   if not ADDRESS_SIZES:
     ADDRESS_SIZES_TARGET['target'].add(env.ART_PHONY_TEST_TARGET_SUFFIX)
@@ -388,10 +383,6 @@ def run_tests(tests):
 
       if image == 'no-image':
         options_test += ' --no-image'
-      elif image == 'npicimage':
-        options_test += ' --npic-image'
-      elif image == 'multinpicimage':
-        options_test += ' --npic-image --multi-image'
       elif image == 'multipicimage':
         options_test += ' --multi-image'
 
@@ -445,52 +436,107 @@ def run_test(command, test, test_variant, test_name):
     test_variant: The set of variant for the test.
     test_name: The name of the test along with the variants.
   """
-  global last_print_length
-  global test_count
   global stop_testrunner
-  if is_test_disabled(test, test_variant):
-    test_skipped = True
-  else:
-    test_skipped = False
-    proc = subprocess.Popen(command.split(), stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
-    script_output = proc.stdout.read().strip()
-    test_passed = not proc.wait()
-
-  # If verbose is set to True, every test information is printed on a new line.
-  # If not, the information is printed on the same line overriding the
-  # previous test output.
-  if not verbose:
-    suffix = '\r'
-    prefix = ' ' * last_print_length + '\r'
-  else:
-    suffix = '\n'
-    prefix = ''
-  test_count_mutex.acquire()
-  test_count += 1
-  percent = (test_count * 100) / total_test_count
-  out = '[ ' + str(percent) + '% ' + str(test_count) + '/' + str(total_test_count) + ' ] '
-  test_count_mutex.release()
-  out += test_name + ' '
-  if not test_skipped:
-    if test_passed:
-      out += COLOR_PASS + 'PASS' + COLOR_NORMAL
-      last_print_length = len(out)
+  try:
+    if is_test_disabled(test, test_variant):
+      test_skipped = True
     else:
-      failed_tests.append(test_name)
-      out += COLOR_ERROR + 'FAIL' + COLOR_NORMAL
-      out += '\n' + command + '\n' + script_output
-      if not env.ART_TEST_KEEP_GOING:
-        stop_testrunner = True
-      last_print_length = 0
-  elif not dry_run:
-    out += COLOR_SKIP + 'SKIP' + COLOR_NORMAL
-    last_print_length = len(out)
-    skipped_tests.append(test_name)
-  print_mutex.acquire()
-  print_text(prefix + out + suffix)
-  print_mutex.release()
-  semaphore.release()
+      test_skipped = False
+      proc = subprocess.Popen(command.split(), stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
+      script_output = proc.stdout.read().strip()
+      test_passed = not proc.wait()
 
+    if not test_skipped:
+      if test_passed:
+        print_test_info(test_name, 'PASS')
+      else:
+        failed_tests.append(test_name)
+        if not env.ART_TEST_KEEP_GOING:
+          stop_testrunner = True
+        print_test_info(test_name, 'FAIL', ('%s\n%s') % (
+          command, script_output))
+    elif not dry_run:
+      print_test_info(test_name, 'SKIP')
+      skipped_tests.append(test_name)
+    else:
+      print_test_info(test_name, '')
+  except Exception, e:
+    failed_tests.append(test_name)
+    print_text(('%s\n%s\n') % (command, str(e)))
+  finally:
+    semaphore.release()
+
+
+def print_test_info(test_name, result, failed_test_info=""):
+  """Print the continous test information
+
+  If verbose is set to True, it continuously prints test status information
+  on a new line.
+  If verbose is set to False, it keeps on erasing test
+  information by overriding it with the latest test information. Also,
+  in this case it stictly makes sure that the information length doesn't
+  exceed the console width. It does so by shortening the test_name.
+
+  When a test fails, it prints the output of the run-test script and
+  command used to invoke the script. It doesn't override the failing
+  test information in either of the cases.
+  """
+
+  global test_count
+  info = ''
+  if not verbose:
+    # Without --verbose, the testrunner erases passing test info. It
+    # does that by overriding the printed text with white spaces all across
+    # the console width.
+    console_width = int(os.popen('stty size', 'r').read().split()[1])
+    info = '\r' + ' ' * console_width + '\r'
+  try:
+    print_mutex.acquire()
+    test_count += 1
+    percent = (test_count * 100) / total_test_count
+    progress_info = ('[ %d%% %d/%d ]') % (
+      percent,
+      test_count,
+      total_test_count)
+
+    if result == "FAIL":
+      info += ('%s %s %s\n%s\n') % (
+        progress_info,
+        test_name,
+        COLOR_ERROR + 'FAIL' + COLOR_NORMAL,
+        failed_test_info)
+    else:
+      result_text = ''
+      if result == 'PASS':
+        result_text += COLOR_PASS + 'PASS' + COLOR_NORMAL
+      elif result == 'SKIP':
+        result_text += COLOR_SKIP + 'SKIP' + COLOR_NORMAL
+
+      if verbose:
+        info += ('%s %s %s\n') % (
+          progress_info,
+          test_name,
+          result_text)
+      else:
+        total_output_length = 2 # Two spaces
+        total_output_length += len(progress_info)
+        total_output_length += len(result)
+        allowed_test_length = console_width - total_output_length
+        test_name_len = len(test_name)
+        if allowed_test_length < test_name_len:
+          test_name = ('%s...%s') % (
+            test_name[:(allowed_test_length - 3)/2],
+            test_name[-(allowed_test_length - 3)/2:])
+          info += ('%s %s %s') % (
+            progress_info,
+            test_name,
+            result_text)
+    print_text(info)
+  except Exception, e:
+    print_text(('%s\n%s\n') % (test_name, str(e)))
+    failed_tests.append(test_name)
+  finally:
+    print_mutex.release()
 
 def get_disabled_test_info():
   """Generate set of known failures.
@@ -550,6 +596,8 @@ def is_test_disabled(test, variant_set):
   """
   if dry_run:
     return True
+  if test in env.EXTRA_DISABLED_TESTS:
+    return True
   variants_list = DISABLED_TEST_CONTAINER.get(test, {})
   for variants in variants_list:
     variants_present = True
@@ -588,7 +636,12 @@ def print_text(output):
 
 def print_analysis():
   if not verbose:
-    print_text(' ' * last_print_length + '\r')
+    # Without --verbose, the testrunner erases passing test info. It
+    # does that by overriding the printed text with white spaces all across
+    # the console width.
+    console_width = int(os.popen('stty size', 'r').read().split()[1])
+    eraser_text = '\r' + ' ' * console_width + '\r'
+    print_text(eraser_text)
   if skipped_tests:
     print_text(COLOR_SKIP + 'SKIPPED TESTS' + COLOR_NORMAL + '\n')
     for test in skipped_tests:
@@ -612,8 +665,12 @@ def parse_test_name(test_name):
   variants required to run the test. Again, it returns the test_name
   without the variant information like 001-HelloWorld.
   """
-  if test_name in RUN_TEST_SET:
-    return {test_name}
+  test_set = set()
+  for test in RUN_TEST_SET:
+    if test.startswith(test_name):
+      test_set.add(test)
+  if test_set:
+    return test_set
 
   regex = '^test-art-'
   regex += '(' + '|'.join(VARIANT_TYPE_DICT['target']) + ')-'
@@ -645,6 +702,7 @@ def parse_test_name(test_name):
     DEBUGGABLE_TYPES.add(match.group(11))
     ADDRESS_SIZES.add(match.group(13))
     return {match.group(12)}
+  raise ValueError(test_name + " is not a valid test")
 
 
 def parse_option():
@@ -655,23 +713,26 @@ def parse_option():
   global gdb
   global gdb_arg
 
-  parser = OptionParser()
-  parser.add_option('-t', '--test', dest='test', help='name of the test')
-  parser.add_option('-j', type='int', dest='n_thread')
+  parser = argparse.ArgumentParser(description="Runs all or a subset of the ART test suite.")
+  parser.add_argument('-t', '--test', dest='test', help='name of the test')
+  parser.add_argument('-j', type=int, dest='n_thread')
   for variant in TOTAL_VARIANTS_SET:
     flag = '--' + variant
     flag_dest = variant.replace('-', '_')
     if variant == '32' or variant == '64':
       flag_dest = 'n' + flag_dest
-    parser.add_option(flag, action='store_true', dest=flag_dest)
-  parser.add_option('--verbose', '-v', action='store_true', dest='verbose')
-  parser.add_option('--dry-run', action='store_true', dest='dry_run')
-  parser.add_option('-b', '--build-dependencies', action='store_true', dest='build')
-  parser.add_option('--gdb', action='store_true', dest='gdb')
-  parser.add_option('--gdb-arg', dest='gdb_arg')
+    parser.add_argument(flag, action='store_true', dest=flag_dest)
+  parser.add_argument('--verbose', '-v', action='store_true', dest='verbose')
+  parser.add_argument('--dry-run', action='store_true', dest='dry_run')
+  parser.add_argument("--skip", action="append", dest="skips", default=[],
+                      help="Skip the given test in all circumstances.")
+  parser.add_argument('-b', '--build-dependencies', action='store_true', dest='build')
+  parser.add_argument('--gdb', action='store_true', dest='gdb')
+  parser.add_argument('--gdb-arg', dest='gdb_arg')
 
-  options = parser.parse_args()[0]
+  options = parser.parse_args()
   test = ''
+  env.EXTRA_DISABLED_TESTS.update(set(options.skips))
   if options.test:
     test = parse_test_name(options.test)
   if options.pictest:
@@ -734,10 +795,6 @@ def parse_option():
     TRACE_TYPES.add('ntrace')
   if options.cms:
     GC_TYPES.add('cms')
-  if options.npicimage:
-    IMAGE_TYPES.add('npicimage')
-  if options.multinpicimage:
-    IMAGE_TYPES.add('multinpicimage')
   if options.multipicimage:
     IMAGE_TYPES.add('multipicimage')
   if options.verbose:
@@ -783,15 +840,13 @@ def main():
     while threading.active_count() > 1:
       time.sleep(0.1)
     print_analysis()
-    if failed_tests:
-      sys.exit(1)
-    sys.exit(0)
-  except SystemExit:
-    pass
-  except:
+  except Exception, e:
     print_analysis()
+    print_text(str(e))
     sys.exit(1)
-
+  if failed_tests:
+    sys.exit(1)
+  sys.exit(0)
 
 if __name__ == '__main__':
   main()

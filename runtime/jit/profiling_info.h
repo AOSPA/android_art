@@ -39,7 +39,7 @@ class Class;
 // Once the classes_ array is full, we consider the INVOKE to be megamorphic.
 class InlineCache {
  public:
-  static constexpr uint16_t kIndividualCacheSize = 5;
+  static constexpr uint8_t kIndividualCacheSize = 5;
 
  private:
   uint32_t dex_pc_;
@@ -73,7 +73,9 @@ class ProfilingInfo {
     return method_;
   }
 
-  InlineCache* GetInlineCache(uint32_t dex_pc);
+  // Mutator lock only required for debugging output.
+  InlineCache* GetInlineCache(uint32_t dex_pc)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool IsMethodBeingCompiled(bool osr) const {
     return osr

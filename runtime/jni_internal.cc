@@ -196,7 +196,7 @@ static jfieldID FindFieldID(const ScopedObjectAccess& soa, jclass jni_class, con
   StackHandleScope<2> hs(soa.Self());
   Handle<mirror::Class> c(
       hs.NewHandle(EnsureInitialized(soa.Self(), soa.Decode<mirror::Class>(jni_class))));
-  if (c.Get() == nullptr) {
+  if (c == nullptr) {
     return nullptr;
   }
   ArtField* field = nullptr;
@@ -2265,7 +2265,18 @@ class JNI {
 
       VLOG(jni) << "[Registering JNI native method " << m->PrettyMethod() << "]";
 
-      is_fast = is_fast || m->IsFastNative();  // Merge with @FastNative state.
+      if (UNLIKELY(is_fast)) {
+        // There are a few reasons to switch:
+        // 1) We don't support !bang JNI anymore, it will turn to a hard error later.
+        // 2) @FastNative is actually faster. At least 1.5x faster than !bang JNI.
+        //    and switching is super easy, remove ! in C code, add annotation in .java code.
+        // 3) Good chance of hitting DCHECK failures in ScopedFastNativeObjectAccess
+        //    since that checks for presence of @FastNative and not for ! in the descriptor.
+        LOG(WARNING) << "!bang JNI is deprecated. Switch to @FastNative for " << m->PrettyMethod();
+        is_fast = false;
+        // TODO: make this a hard register error in the future.
+      }
+
       m->RegisterNative(fnPtr, is_fast);
     }
     return JNI_OK;

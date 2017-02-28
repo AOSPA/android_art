@@ -92,7 +92,7 @@ ART_GTEST_class_linker_test_DEX_DEPS := AllFields ErroneousA ErroneousB Erroneou
 ART_GTEST_class_table_test_DEX_DEPS := XandY
 ART_GTEST_compiler_driver_test_DEX_DEPS := AbstractMethod StaticLeafMethods ProfileTestMultiDex
 ART_GTEST_dex_cache_test_DEX_DEPS := Main Packages MethodTypes
-ART_GTEST_dex_file_test_DEX_DEPS := GetMethodSignature Main Nested
+ART_GTEST_dex_file_test_DEX_DEPS := GetMethodSignature Main Nested MultiDex
 ART_GTEST_dex2oat_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) Statics VerifierDeps
 ART_GTEST_exception_test_DEX_DEPS := ExceptionHandle
 ART_GTEST_image_test_DEX_DEPS := ImageLayoutA ImageLayoutB
@@ -102,6 +102,7 @@ ART_GTEST_jni_compiler_test_DEX_DEPS := MyClassNatives
 ART_GTEST_jni_internal_test_DEX_DEPS := AllFields StaticLeafMethods
 ART_GTEST_oat_file_assistant_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS)
 ART_GTEST_dexoptanalyzer_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS)
+ART_GTEST_image_space_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS)
 ART_GTEST_oat_file_test_DEX_DEPS := Main MultiDex
 ART_GTEST_oat_test_DEX_DEPS := Main
 ART_GTEST_object_test_DEX_DEPS := ProtoCompare ProtoCompare2 StaticsFromCode XandY
@@ -118,20 +119,20 @@ ART_GTEST_verifier_deps_test_DEX_DEPS := VerifierDeps MultiDex
 ART_GTEST_dex_to_dex_decompiler_test_DEX_DEPS := VerifierDeps DexToDexDecompiler
 
 # The elf writer test has dependencies on core.oat.
-ART_GTEST_elf_writer_test_HOST_DEPS := $(HOST_CORE_IMAGE_optimizing_no-pic_64) $(HOST_CORE_IMAGE_optimizing_no-pic_32)
-ART_GTEST_elf_writer_test_TARGET_DEPS := $(TARGET_CORE_IMAGE_optimizing_no-pic_64) $(TARGET_CORE_IMAGE_optimizing_no-pic_32)
+ART_GTEST_elf_writer_test_HOST_DEPS := $(HOST_CORE_IMAGE_DEFAULT_64) $(HOST_CORE_IMAGE_DEFAULT_32)
+ART_GTEST_elf_writer_test_TARGET_DEPS := $(TARGET_CORE_IMAGE_DEFAULT_64) $(TARGET_CORE_IMAGE_DEFAULT_32)
 
 ART_GTEST_dex2oat_environment_tests_HOST_DEPS := \
-  $(HOST_CORE_IMAGE_optimizing_pic_64) \
-  $(HOST_CORE_IMAGE_optimizing_pic_32) \
-  $(HOST_CORE_IMAGE_interpreter_pic_64) \
-  $(HOST_CORE_IMAGE_interpreter_pic_32) \
+  $(HOST_CORE_IMAGE_optimizing_64) \
+  $(HOST_CORE_IMAGE_optimizing_32) \
+  $(HOST_CORE_IMAGE_interpreter_64) \
+  $(HOST_CORE_IMAGE_interpreter_32) \
   $(HOST_OUT_EXECUTABLES)/patchoatd
 ART_GTEST_dex2oat_environment_tests_TARGET_DEPS := \
-  $(TARGET_CORE_IMAGE_optimizing_pic_64) \
-  $(TARGET_CORE_IMAGE_optimizing_pic_32) \
-  $(TARGET_CORE_IMAGE_interpreter_pic_64) \
-  $(TARGET_CORE_IMAGE_interpreter_pic_32) \
+  $(TARGET_CORE_IMAGE_optimizing_64) \
+  $(TARGET_CORE_IMAGE_optimizing_32) \
+  $(TARGET_CORE_IMAGE_interpreter_64) \
+  $(TARGET_CORE_IMAGE_interpreter_32) \
   $(TARGET_OUT_EXECUTABLES)/patchoatd
 
 ART_GTEST_oat_file_assistant_test_HOST_DEPS := \
@@ -146,69 +147,74 @@ ART_GTEST_dexoptanalyzer_test_TARGET_DEPS := \
   $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS) \
   dexoptanalyzerd
 
+ART_GTEST_image_space_test_HOST_DEPS := \
+  $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS)
+ART_GTEST_image_space_test_TARGET_DEPS := \
+  $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS)
+
 ART_GTEST_dex2oat_test_HOST_DEPS := \
   $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS)
 ART_GTEST_dex2oat_test_TARGET_DEPS := \
   $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS)
 
 # TODO: document why this is needed.
-ART_GTEST_proxy_test_HOST_DEPS := $(HOST_CORE_IMAGE_optimizing_no-pic_64) $(HOST_CORE_IMAGE_optimizing_no-pic_32)
+ART_GTEST_proxy_test_HOST_DEPS := $(HOST_CORE_IMAGE_DEFAULT_64) $(HOST_CORE_IMAGE_DEFAULT_32)
 
 # The dexdump test requires an image and the dexdump utility.
 # TODO: rename into dexdump when migration completes
 ART_GTEST_dexdump_test_HOST_DEPS := \
-  $(HOST_CORE_IMAGE_optimizing_no-pic_64) \
-  $(HOST_CORE_IMAGE_optimizing_no-pic_32) \
+  $(HOST_CORE_IMAGE_DEFAULT_64) \
+  $(HOST_CORE_IMAGE_DEFAULT_32) \
   $(HOST_OUT_EXECUTABLES)/dexdump2
 ART_GTEST_dexdump_test_TARGET_DEPS := \
-  $(TARGET_CORE_IMAGE_optimizing_no-pic_64) \
-  $(TARGET_CORE_IMAGE_optimizing_no-pic_32) \
+  $(TARGET_CORE_IMAGE_DEFAULT_64) \
+  $(TARGET_CORE_IMAGE_DEFAULT_32) \
   dexdump2
 
 # The dexlayout test requires an image and the dexlayout utility.
 # TODO: rename into dexdump when migration completes
 ART_GTEST_dexlayout_test_HOST_DEPS := \
-  $(HOST_CORE_IMAGE_optimizing_no-pic_64) \
-  $(HOST_CORE_IMAGE_optimizing_no-pic_32) \
+  $(HOST_CORE_IMAGE_DEFAULT_64) \
+  $(HOST_CORE_IMAGE_DEFAULT_32) \
   $(HOST_OUT_EXECUTABLES)/dexlayout \
   $(HOST_OUT_EXECUTABLES)/dexdump2
 ART_GTEST_dexlayout_test_TARGET_DEPS := \
-  $(TARGET_CORE_IMAGE_optimizing_no-pic_64) \
-  $(TARGET_CORE_IMAGE_optimizing_no-pic_32) \
+  $(TARGET_CORE_IMAGE_DEFAULT_64) \
+  $(TARGET_CORE_IMAGE_DEFAULT_32) \
   dexlayout \
   dexdump2
 
 # The dexlist test requires an image and the dexlist utility.
 ART_GTEST_dexlist_test_HOST_DEPS := \
-  $(HOST_CORE_IMAGE_optimizing_no-pic_64) \
-  $(HOST_CORE_IMAGE_optimizing_no-pic_32) \
+  $(HOST_CORE_IMAGE_DEFAULT_64) \
+  $(HOST_CORE_IMAGE_DEFAULT_32) \
   $(HOST_OUT_EXECUTABLES)/dexlist
 ART_GTEST_dexlist_test_TARGET_DEPS := \
-  $(TARGET_CORE_IMAGE_optimizing_no-pic_64) \
-  $(TARGET_CORE_IMAGE_optimizing_no-pic_32) \
+  $(TARGET_CORE_IMAGE_DEFAULT_64) \
+  $(TARGET_CORE_IMAGE_DEFAULT_32) \
   dexlist
 
 # The imgdiag test has dependencies on core.oat since it needs to load it during the test.
 # For the host, also add the installed tool (in the base size, that should suffice). For the
 # target, just the module is fine, the sync will happen late enough.
 ART_GTEST_imgdiag_test_HOST_DEPS := \
-  $(HOST_CORE_IMAGE_optimizing_no-pic_64) \
-  $(HOST_CORE_IMAGE_optimizing_no-pic_32) \
+  $(HOST_CORE_IMAGE_DEFAULT_64) \
+  $(HOST_CORE_IMAGE_DEFAULT_32) \
   $(HOST_OUT_EXECUTABLES)/imgdiagd
 ART_GTEST_imgdiag_test_TARGET_DEPS := \
-  $(TARGET_CORE_IMAGE_optimizing_no-pic_64) \
-  $(TARGET_CORE_IMAGE_optimizing_no-pic_32) \
+  $(TARGET_CORE_IMAGE_DEFAULT_64) \
+  $(TARGET_CORE_IMAGE_DEFAULT_32) \
   imgdiagd
 
 # Oatdump test requires an image and oatfile to dump.
 ART_GTEST_oatdump_test_HOST_DEPS := \
-  $(HOST_CORE_IMAGE_optimizing_no-pic_64) \
-  $(HOST_CORE_IMAGE_optimizing_no-pic_32) \
+  $(HOST_CORE_IMAGE_DEFAULT_64) \
+  $(HOST_CORE_IMAGE_DEFAULT_32) \
   $(HOST_OUT_EXECUTABLES)/oatdumpd \
   $(HOST_OUT_EXECUTABLES)/oatdumpds
 ART_GTEST_oatdump_test_TARGET_DEPS := \
-  $(TARGET_CORE_IMAGE_optimizing_no-pic_64) \
-  $(TARGET_CORE_IMAGE_optimizing_no-pic_32) \
+  $(TARGET_CORE_IMAGE_DEFAULT_64) \
+  $(TARGET_CORE_IMAGE_DEFAULT_32) \
   oatdump
 
 # Profile assistant tests requires profman utility.
@@ -627,6 +633,9 @@ ART_GTEST_oat_file_assistant_test_TARGET_DEPS :=
 ART_GTEST_dexoptanalyzer_test_DEX_DEPS :=
 ART_GTEST_dexoptanalyzer_test_HOST_DEPS :=
 ART_GTEST_dexoptanalyzer_test_TARGET_DEPS :=
+ART_GTEST_image_space_test_DEX_DEPS :=
+ART_GTEST_image_space_test_HOST_DEPS :=
+ART_GTEST_image_space_test_TARGET_DEPS :=
 ART_GTEST_dex2oat_test_DEX_DEPS :=
 ART_GTEST_dex2oat_test_HOST_DEPS :=
 ART_GTEST_dex2oat_test_TARGET_DEPS :=

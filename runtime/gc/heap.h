@@ -1189,6 +1189,9 @@ class Heap {
   // True while the garbage collector is running.
   volatile CollectorType collector_type_running_ GUARDED_BY(gc_complete_lock_);
 
+  // The thread currently running the GC.
+  volatile Thread* thread_running_gc_ GUARDED_BY(gc_complete_lock_);
+
   // Last Gc type we ran. Used by WaitForConcurrentGc to know which Gc was waited on.
   volatile collector::GcType last_gc_type_ GUARDED_BY(gc_complete_lock_);
   collector::GcType next_gc_type_;

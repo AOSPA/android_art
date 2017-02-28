@@ -95,12 +95,12 @@
 #include "mirror/field.h"
 #include "mirror/method.h"
 #include "mirror/method_handle_impl.h"
+#include "mirror/method_handles_lookup.h"
 #include "mirror/method_type.h"
 #include "mirror/stack_trace_element.h"
 #include "mirror/throwable.h"
 #include "monitor.h"
 #include "native/dalvik_system_DexFile.h"
-#include "native/dalvik_system_InMemoryDexClassLoader_DexData.h"
 #include "native/dalvik_system_VMDebug.h"
 #include "native/dalvik_system_VMRuntime.h"
 #include "native/dalvik_system_VMStack.h"
@@ -1533,7 +1533,6 @@ jobject Runtime::GetSystemClassLoader() const {
 
 void Runtime::RegisterRuntimeNativeMethods(JNIEnv* env) {
   register_dalvik_system_DexFile(env);
-  register_dalvik_system_InMemoryDexClassLoader_DexData(env);
   register_dalvik_system_VMDebug(env);
   register_dalvik_system_VMRuntime(env);
   register_dalvik_system_VMStack(env);
@@ -1715,6 +1714,7 @@ void Runtime::VisitConstantRoots(RootVisitor* visitor) {
   mirror::Field::VisitRoots(visitor);
   mirror::MethodType::VisitRoots(visitor);
   mirror::MethodHandleImpl::VisitRoots(visitor);
+  mirror::MethodHandlesLookup::VisitRoots(visitor);
   mirror::EmulatedStackFrame::VisitRoots(visitor);
   mirror::ClassExt::VisitRoots(visitor);
   // Visit all the primitive array types classes.

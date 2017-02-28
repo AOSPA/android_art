@@ -446,6 +446,26 @@ class X86_64Assembler FINAL : public Assembler {
   void mulpd(XmmRegister dst, XmmRegister src);
   void divpd(XmmRegister dst, XmmRegister src);
 
+  void movdqa(XmmRegister dst, XmmRegister src);     // move
+  void movdqa(XmmRegister dst, const Address& src);  // load aligned
+  void movdqu(XmmRegister dst, const Address& src);  // load unaligned
+  void movdqa(const Address& dst, XmmRegister src);  // store aligned
+  void movdqu(const Address& dst, XmmRegister src);  // store unaligned
+
+  void paddb(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
+  void psubb(XmmRegister dst, XmmRegister src);
+
+  void paddw(XmmRegister dst, XmmRegister src);
+  void psubw(XmmRegister dst, XmmRegister src);
+  void pmullw(XmmRegister dst, XmmRegister src);
+
+  void paddd(XmmRegister dst, XmmRegister src);
+  void psubd(XmmRegister dst, XmmRegister src);
+  void pmulld(XmmRegister dst, XmmRegister src);
+
+  void paddq(XmmRegister dst, XmmRegister src);
+  void psubq(XmmRegister dst, XmmRegister src);
+
   void cvtsi2ss(XmmRegister dst, CpuRegister src);  // Note: this is the r/m32 version.
   void cvtsi2ss(XmmRegister dst, CpuRegister src, bool is64bit);
   void cvtsi2ss(XmmRegister dst, const Address& src, bool is64bit);
@@ -487,16 +507,37 @@ class X86_64Assembler FINAL : public Assembler {
   void xorpd(XmmRegister dst, XmmRegister src);
   void xorps(XmmRegister dst, const Address& src);
   void xorps(XmmRegister dst, XmmRegister src);
+  void pxor(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
 
   void andpd(XmmRegister dst, const Address& src);
   void andpd(XmmRegister dst, XmmRegister src);
-  void andps(XmmRegister dst, XmmRegister src);
+  void andps(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
+  void pand(XmmRegister dst, XmmRegister src);
 
-  void orpd(XmmRegister dst, XmmRegister src);
+  void orpd(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
   void orps(XmmRegister dst, XmmRegister src);
+  void por(XmmRegister dst, XmmRegister src);
 
   void shufpd(XmmRegister dst, XmmRegister src, const Immediate& imm);
   void shufps(XmmRegister dst, XmmRegister src, const Immediate& imm);
+  void pshufd(XmmRegister dst, XmmRegister src, const Immediate& imm);
+
+  void punpcklbw(XmmRegister dst, XmmRegister src);
+  void punpcklwd(XmmRegister dst, XmmRegister src);
+  void punpckldq(XmmRegister dst, XmmRegister src);
+  void punpcklqdq(XmmRegister dst, XmmRegister src);
+
+  void psllw(XmmRegister reg, const Immediate& shift_count);
+  void pslld(XmmRegister reg, const Immediate& shift_count);
+  void psllq(XmmRegister reg, const Immediate& shift_count);
+
+  void psraw(XmmRegister reg, const Immediate& shift_count);
+  void psrad(XmmRegister reg, const Immediate& shift_count);
+  // no psraq
+
+  void psrlw(XmmRegister reg, const Immediate& shift_count);
+  void psrld(XmmRegister reg, const Immediate& shift_count);
+  void psrlq(XmmRegister reg, const Immediate& shift_count);
 
   void flds(const Address& src);
   void fstps(const Address& dst);

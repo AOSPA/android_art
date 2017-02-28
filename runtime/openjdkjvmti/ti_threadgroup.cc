@@ -116,11 +116,12 @@ jvmtiError ThreadGroupUtil::GetThreadGroupInfo(jvmtiEnv* env,
       tmp_str = name_obj->ToModifiedUtf8();
       tmp_cstr = tmp_str.c_str();
     }
-    jvmtiError result =
-        CopyString(env, tmp_cstr, reinterpret_cast<unsigned char**>(&info_ptr->name));
-    if (result != ERR(NONE)) {
+    jvmtiError result;
+    JvmtiUniquePtr<char[]> copy = CopyString(env, tmp_cstr, &result);
+    if (copy == nullptr) {
       return result;
     }
+    info_ptr->name = copy.release();
   }
 
   // Parent.
@@ -155,7 +156,7 @@ jvmtiError ThreadGroupUtil::GetThreadGroupInfo(jvmtiEnv* env,
 static bool IsInDesiredThreadGroup(art::Handle<art::mirror::Object> desired_thread_group,
                                    art::ObjPtr<art::mirror::Object> peer)
     REQUIRES_SHARED(art::Locks::mutator_lock_) {
-  CHECK(desired_thread_group.Get() != nullptr);
+  CHECK(desired_thread_group != nullptr);
 
   art::ArtField* thread_group_field =
       art::jni::DecodeArtField(art::WellKnownClasses::java_lang_Thread_group);
@@ -167,7 +168,7 @@ static bool IsInDesiredThreadGroup(art::Handle<art::mirror::Object> desired_thre
 static void GetThreads(art::Handle<art::mirror::Object> thread_group,
                        std::vector<art::ObjPtr<art::mirror::Object>>* thread_peers)
     REQUIRES_SHARED(art::Locks::mutator_lock_) REQUIRES(!art::Locks::thread_list_lock_) {
-  CHECK(thread_group.Get() != nullptr);
+  CHECK(thread_group != nullptr);
 
   art::MutexLock mu(art::Thread::Current(), *art::Locks::thread_list_lock_);
   for (art::Thread* t : art::Runtime::Current()->GetThreadList()->GetList()) {
@@ -187,7 +188,7 @@ static void GetThreads(art::Handle<art::mirror::Object> thread_group,
 static void GetChildThreadGroups(art::Handle<art::mirror::Object> thread_group,
                                  std::vector<art::ObjPtr<art::mirror::Object>>* thread_groups)
     REQUIRES_SHARED(art::Locks::mutator_lock_) {
-  CHECK(thread_group.Get() != nullptr);
+  CHECK(thread_group != nullptr);
 
   // Get the ThreadGroup[] "groups" out of this thread group...
   art::ArtField* groups_field =
@@ -239,45 +240,38 @@ jvmtiError ThreadGroupUtil::GetThreadGroupChildren(jvmtiEnv* env,
   std::vector<art::ObjPtr<art::mirror::Object>> thread_groups;
   GetChildThreadGroups(thread_group, &thread_groups);
 
-  jthread* thread_data = nullptr;
-  JvmtiUniquePtr peers_uptr;
+  JvmtiUniquePtr<jthread[]> peers_uptr;
   if (!thread_peers.empty()) {
-    unsigned char* data;
-    jvmtiError res = env->Allocate(sizeof(jthread) * thread_peers.size(), &data);
-    if (res != ERR(NONE)) {
+    jvmtiError res;
+    peers_uptr = AllocJvmtiUniquePtr<jthread[]>(env, thread_peers.size(), &res);
+    if (peers_uptr == nullptr) {
       return res;
     }
-    thread_data = reinterpret_cast<jthread*>(data);
-    peers_uptr = MakeJvmtiUniquePtr(env, data);
   }
 
-  jthreadGroup* group_data = nullptr;
+  JvmtiUniquePtr<jthreadGroup[]> group_uptr;
   if (!thread_groups.empty()) {
-    unsigned char* data;
-    jvmtiError res = env->Allocate(sizeof(jthreadGroup) * thread_groups.size(), &data);
-    if (res != ERR(NONE)) {
+    jvmtiError res;
+    group_uptr = AllocJvmtiUniquePtr<jthreadGroup[]>(env, thread_groups.size(), &res);
+    if (group_uptr == nullptr) {
       return res;
     }
-    group_data = reinterpret_cast<jthreadGroup*>(data);
   }
 
   // Can't fail anymore from here on.
 
   // Copy data into out buffers.
   for (size_t i = 0; i != thread_peers.size(); ++i) {
-    thread_data[i] = soa.AddLocalReference<jthread>(thread_peers[i]);
+    peers_uptr[i] = soa.AddLocalReference<jthread>(thread_peers[i]);
   }
   for (size_t i = 0; i != thread_groups.size(); ++i) {
-    group_data[i] = soa.AddLocalReference<jthreadGroup>(thread_groups[i]);
+    group_uptr[i] = soa.AddLocalReference<jthreadGroup>(thread_groups[i]);
   }
 
   *thread_count_ptr = static_cast<jint>(thread_peers.size());
-  *threads_ptr = thread_data;
+  *threads_ptr = peers_uptr.release();
   *group_count_ptr = static_cast<jint>(thread_groups.size());
-  *groups_ptr = group_data;
-
-  // Everything's fine.
-  peers_uptr.release();
+  *groups_ptr = group_uptr.release();
 
   return ERR(NONE);
 }

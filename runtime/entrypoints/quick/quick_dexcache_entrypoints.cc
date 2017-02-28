@@ -32,17 +32,22 @@
 namespace art {
 
 static inline void BssWriteBarrier(ArtMethod* outer_method) REQUIRES_SHARED(Locks::mutator_lock_) {
-  // For AOT code, we need a write barrier for the class loader that holds
-  // the GC roots in the .bss.
+  // For AOT code, we need a write barrier for the class loader that holds the
+  // GC roots in the .bss.
   const DexFile* dex_file = outer_method->GetDexFile();
   if (dex_file != nullptr &&
       dex_file->GetOatDexFile() != nullptr &&
       !dex_file->GetOatDexFile()->GetOatFile()->GetBssGcRoots().empty()) {
-    mirror::ClassLoader* class_loader = outer_method->GetClassLoader();
-    if (class_loader != nullptr) {
-      DCHECK(!class_loader->GetClassTable()->InsertOatFile(dex_file->GetOatDexFile()->GetOatFile()))
+    ObjPtr<mirror::ClassLoader> class_loader = outer_method->GetClassLoader();
+    if (kIsDebugBuild) {
+      ClassTable* class_table =
+          Runtime::Current()->GetClassLinker()->ClassTableForClassLoader(class_loader);
+      CHECK(class_table != nullptr &&
+            !class_table->InsertOatFile(dex_file->GetOatDexFile()->GetOatFile()))
           << "Oat file with .bss GC roots was not registered in class table: "
           << dex_file->GetOatDexFile()->GetOatFile()->GetLocation();
+    }
+    if (class_loader != nullptr) {
       // Note that we emit the barrier before the compiled code stores the String or Class
       // as a GC root. This is OK as there is no suspend point point in between.
       Runtime::Current()->GetHeap()->WriteBarrierEveryFieldOf(class_loader);

@@ -41,7 +41,7 @@ static jobject GetThreadStack(const ScopedFastNativeObjectAccess& soa, jobject p
     Thread* heap_task_thread =
         Runtime::Current()->GetHeap()->GetTaskProcessor()->GetRunningThread();
     // heap_task_thread could be null if the daemons aren't yet started.
-    if (heap_task_thread != nullptr && decoded_peer == heap_task_thread->GetPeer()) {
+    if (heap_task_thread != nullptr && decoded_peer == heap_task_thread->GetPeerFromOtherThread()) {
       return nullptr;
     }
     // Suspend thread to build stack trace.
@@ -139,11 +139,11 @@ static jobjectArray VMStack_getThreadStackTrace(JNIEnv* env, jclass, jobject jav
 }
 
 static JNINativeMethod gMethods[] = {
-  NATIVE_METHOD(VMStack, fillStackTraceElements, "!(Ljava/lang/Thread;[Ljava/lang/StackTraceElement;)I"),
-  NATIVE_METHOD(VMStack, getCallingClassLoader, "!()Ljava/lang/ClassLoader;"),
-  NATIVE_METHOD(VMStack, getClosestUserClassLoader, "!()Ljava/lang/ClassLoader;"),
-  NATIVE_METHOD(VMStack, getStackClass2, "!()Ljava/lang/Class;"),
-  NATIVE_METHOD(VMStack, getThreadStackTrace, "!(Ljava/lang/Thread;)[Ljava/lang/StackTraceElement;"),
+  FAST_NATIVE_METHOD(VMStack, fillStackTraceElements, "(Ljava/lang/Thread;[Ljava/lang/StackTraceElement;)I"),
+  FAST_NATIVE_METHOD(VMStack, getCallingClassLoader, "()Ljava/lang/ClassLoader;"),
+  FAST_NATIVE_METHOD(VMStack, getClosestUserClassLoader, "()Ljava/lang/ClassLoader;"),
+  FAST_NATIVE_METHOD(VMStack, getStackClass2, "()Ljava/lang/Class;"),
+  FAST_NATIVE_METHOD(VMStack, getThreadStackTrace, "(Ljava/lang/Thread;)[Ljava/lang/StackTraceElement;"),
 };
 
 void register_dalvik_system_VMStack(JNIEnv* env) {

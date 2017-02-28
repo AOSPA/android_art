@@ -940,9 +940,11 @@ void ImageWriter::PruneNonImageClasses() {
     }
     ObjPtr<mirror::DexCache> dex_cache = self->DecodeJObject(data.weak_root)->AsDexCache();
     for (size_t i = 0; i < dex_cache->NumResolvedTypes(); i++) {
-      Class* klass = dex_cache->GetResolvedType(dex::TypeIndex(i));
+      mirror::TypeDexCachePair pair =
+          dex_cache->GetResolvedTypes()[i].load(std::memory_order_relaxed);
+      mirror::Class* klass = pair.object.Read();
       if (klass != nullptr && !KeepClass(klass)) {
-        dex_cache->SetResolvedType(dex::TypeIndex(i), nullptr);
+        dex_cache->ClearResolvedType(dex::TypeIndex(pair.index));
       }
     }
     ArtMethod** resolved_methods = dex_cache->GetResolvedMethods();
@@ -1078,7 +1080,7 @@ ObjectArray<Object>* ImageWriter::CreateImageRoots(size_t oat_index) const {
   }
   Handle<ObjectArray<Object>> dex_caches(
       hs.NewHandle(ObjectArray<Object>::Alloc(self, object_array_class.Get(), dex_cache_count)));
-  CHECK(dex_caches.Get() != nullptr) << "Failed to allocate a dex cache array.";
+  CHECK(dex_caches != nullptr) << "Failed to allocate a dex cache array.";
   {
     ReaderMutexLock mu(self, *Locks::dex_lock_);
     size_t non_image_dex_caches = 0;
@@ -1922,8 +1924,7 @@ void ImageWriter::CopyAndFixupNativeData(size_t oat_index) {
     // above comment for intern tables.
     ClassTable temp_class_table;
     temp_class_table.ReadFromMemory(class_table_memory_ptr);
-    CHECK_EQ(class_loaders_.size(), compile_app_image_ ? 1u : 0u);
-    mirror::ClassLoader* class_loader = compile_app_image_ ? *class_loaders_.begin() : nullptr;
+    ObjPtr<mirror::ClassLoader> class_loader = GetClassLoader();
     CHECK_EQ(temp_class_table.NumZygoteClasses(class_loader),
              table->NumNonZygoteClasses(class_loader) + table->NumZygoteClasses(class_loader));
     UnbufferedRootVisitor visitor(&root_visitor, RootInfo(kRootUnknown));
@@ -2213,7 +2214,7 @@ void ImageWriter::FixupDexCache(mirror::DexCache* orig_dex_cache,
     orig_dex_cache->FixupStrings(NativeCopyLocation(orig_strings, orig_dex_cache),
                                  ImageAddressVisitor(this));
   }
-  GcRoot<mirror::Class>* orig_types = orig_dex_cache->GetResolvedTypes();
+  mirror::TypeDexCacheType* orig_types = orig_dex_cache->GetResolvedTypes();
   if (orig_types != nullptr) {
     copy_dex_cache->SetFieldPtrWithSize<false>(mirror::DexCache::ResolvedTypesOffset(),
                                                NativeLocationInImage(orig_types),
@@ -2253,6 +2254,14 @@ void ImageWriter::FixupDexCache(mirror::DexCache* orig_dex_cache,
                                                PointerSize::k64);
     orig_dex_cache->FixupResolvedMethodTypes(NativeCopyLocation(orig_method_types, orig_dex_cache),
                                              ImageAddressVisitor(this));
+  }
+  GcRoot<mirror::CallSite>* orig_call_sites = orig_dex_cache->GetResolvedCallSites();
+  if (orig_call_sites != nullptr) {
+    copy_dex_cache->SetFieldPtrWithSize<false>(mirror::DexCache::ResolvedCallSitesOffset(),
+                                               NativeLocationInImage(orig_call_sites),
+                                               PointerSize::k64);
+    orig_dex_cache->FixupResolvedCallSites(NativeCopyLocation(orig_call_sites, orig_dex_cache),
+                                           ImageAddressVisitor(this));
   }
 
   // Remove the DexFile pointers. They will be fixed up when the runtime loads the oat file. Leaving

@@ -105,7 +105,6 @@ art::ObjPtr<art::mirror::LongArray> ClassLoaderHelper::GetDexFileCookie(
   // mCookie is nulled out if the DexFile has been closed but mInternalCookie sticks around until
   // the object is finalized. Since they always point to the same array if mCookie is not null we
   // just use the mInternalCookie field. We will update one or both of these fields later.
-  // TODO Should I get the class from the classloader or directly?
   art::ArtField* internal_cookie_field = java_dex_file_obj->GetClass()->FindDeclaredInstanceField(
       "mInternalCookie", "Ljava/lang/Object;");
   // TODO Add check that mCookie is either null or same as mInternalCookie
@@ -113,23 +112,20 @@ art::ObjPtr<art::mirror::LongArray> ClassLoaderHelper::GetDexFileCookie(
   return internal_cookie_field->GetObject(java_dex_file_obj.Get())->AsLongArray();
 }
 
-// TODO Really wishing I had that mirror of java.lang.DexFile now.
 art::ObjPtr<art::mirror::LongArray> ClassLoaderHelper::AllocateNewDexFileCookie(
     art::Thread* self,
     art::Handle<art::mirror::LongArray> cookie,
     const art::DexFile* dex_file) {
   art::StackHandleScope<1> hs(self);
-  CHECK(cookie.Get() != nullptr);
+  CHECK(cookie != nullptr);
   CHECK_GE(cookie->GetLength(), 1);
   art::Handle<art::mirror::LongArray> new_cookie(
       hs.NewHandle(art::mirror::LongArray::Alloc(self, cookie->GetLength() + 1)));
-  if (new_cookie.Get() == nullptr) {
+  if (new_cookie == nullptr) {
     self->AssertPendingOOMException();
     return nullptr;
   }
   // Copy the oat-dex field at the start.
-  // TODO Should I clear this field?
-  // TODO This is a really crappy thing here with the first element being different.
   new_cookie->SetWithoutChecks<false>(0, cookie->GetWithoutChecks(0));
   // This must match the casts in runtime/native/dalvik_system_DexFile.cc:ConvertDexFilesToJavaArray
   new_cookie->SetWithoutChecks<false>(
@@ -183,13 +179,13 @@ art::ObjPtr<art::mirror::Object> ClassLoaderHelper::FindSourceDexFileObject(
   // Start navigating the fields of the loader (now known to be a BaseDexClassLoader derivative)
   art::Handle<art::mirror::Object> path_list(
       hs.NewHandle(path_list_field->GetObject(loader.Get())));
-  CHECK(path_list.Get() != nullptr);
+  CHECK(path_list != nullptr);
   CHECK(!self->IsExceptionPending());
   art::Handle<art::mirror::ObjectArray<art::mirror::Object>> dex_elements_list(hs.NewHandle(
       dex_path_list_element_field->GetObject(path_list.Get())->
       AsObjectArray<art::mirror::Object>()));
   CHECK(!self->IsExceptionPending());
-  CHECK(dex_elements_list.Get() != nullptr);
+  CHECK(dex_elements_list != nullptr);
   size_t num_elements = dex_elements_list->GetLength();
   // Iterate over the DexPathList$Element to find the right one
   for (size_t i = 0; i < num_elements; i++) {

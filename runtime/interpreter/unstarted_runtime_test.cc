@@ -29,6 +29,8 @@
 #include "handle_scope-inl.h"
 #include "interpreter/interpreter_common.h"
 #include "mirror/class_loader.h"
+#include "mirror/object_array-inl.h"
+#include "mirror/object-inl.h"
 #include "mirror/string-inl.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
@@ -960,7 +962,7 @@ TEST_F(UnstartedRuntimeTest, ThreadLocalGet) {
         class_linker->FindClass(self,
                                 "Lsun/misc/FloatingDecimal;",
                                 ScopedNullHandle<mirror::ClassLoader>()));
-    ASSERT_TRUE(floating_decimal.Get() != nullptr);
+    ASSERT_TRUE(floating_decimal != nullptr);
     ASSERT_TRUE(class_linker->EnsureInitialized(self, floating_decimal, true, true));
 
     ArtMethod* caller_method = floating_decimal->FindDeclaredDirectMethod(
@@ -1014,7 +1016,7 @@ TEST_F(UnstartedRuntimeTest, FloatConversion) {
           class_linker->FindClass(self,
                                   "Ljava/lang/Double;",
                                   ScopedNullHandle<mirror::ClassLoader>()));
-  ASSERT_TRUE(double_class.Get() != nullptr);
+  ASSERT_TRUE(double_class != nullptr);
   ASSERT_TRUE(class_linker->EnsureInitialized(self, double_class, true, true));
 
   ArtMethod* method = double_class->FindDeclaredDirectMethod("toString",
@@ -1035,6 +1037,332 @@ TEST_F(UnstartedRuntimeTest, FloatConversion) {
 
   std::string mod_utf = string_result->ToModifiedUtf8();
   EXPECT_EQ("1.23", mod_utf);
+
+  ShadowFrame::DeleteDeoptimizedFrame(shadow_frame);
+}
+
+TEST_F(UnstartedRuntimeTest, ThreadCurrentThread) {
+  Thread* self = Thread::Current();
+  ScopedObjectAccess soa(self);
+
+  JValue result;
+  ShadowFrame* shadow_frame = ShadowFrame::CreateDeoptimizedFrame(10, nullptr, nullptr, 0);
+
+  StackHandleScope<1> hs(self);
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+  Handle<mirror::Class> thread_class = hs.NewHandle(
+      class_linker->FindClass(self, "Ljava/lang/Thread;", ScopedNullHandle<mirror::ClassLoader>()));
+  ASSERT_TRUE(thread_class.Get() != nullptr);
+  ASSERT_TRUE(class_linker->EnsureInitialized(self, thread_class, true, true));
+
+  // Negative test. In general, currentThread should fail (as we should not leak a peer that will
+  // be recreated at runtime).
+  PrepareForAborts();
+
+  {
+    Transaction transaction;
+    Runtime::Current()->EnterTransactionMode(&transaction);
+    UnstartedThreadCurrentThread(self, shadow_frame, &result, 0);
+    Runtime::Current()->ExitTransactionMode();
+    ASSERT_TRUE(self->IsExceptionPending());
+    ASSERT_TRUE(transaction.IsAborted());
+    self->ClearException();
+  }
+
+  ShadowFrame::DeleteDeoptimizedFrame(shadow_frame);
+}
+
+TEST_F(UnstartedRuntimeTest, LogManager) {
+  Thread* self = Thread::Current();
+  ScopedObjectAccess soa(self);
+
+  StackHandleScope<1> hs(self);
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+  Handle<mirror::Class> log_manager_class = hs.NewHandle(
+      class_linker->FindClass(self,
+                              "Ljava/util/logging/LogManager;",
+                              ScopedNullHandle<mirror::ClassLoader>()));
+  ASSERT_TRUE(log_manager_class.Get() != nullptr);
+  ASSERT_TRUE(class_linker->EnsureInitialized(self, log_manager_class, true, true));
+}
+
+class UnstartedClassForNameTest : public UnstartedRuntimeTest {
+ public:
+  template <typename T>
+  void RunTest(T& runner, bool in_transaction, bool should_succeed) {
+    Thread* self = Thread::Current();
+    ScopedObjectAccess soa(self);
+
+    // Ensure that Class is initialized.
+    {
+      ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+      StackHandleScope<1> hs(self);
+      Handle<mirror::Class> h_class = hs.NewHandle(mirror::Class::GetJavaLangClass());
+      CHECK(class_linker->EnsureInitialized(self, h_class, true, true));
+    }
+
+    // A selection of classes from different core classpath components.
+    constexpr const char* kTestCases[] = {
+        "java.net.CookieManager",  // From libcore.
+        "dalvik.system.ClassExt",  // From libart.
+    };
+
+    if (in_transaction) {
+      // For transaction mode, we cannot load any classes, as the pre-fence initialization of
+      // classes isn't transactional. Load them ahead of time.
+      ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+      for (const char* name : kTestCases) {
+        class_linker->FindClass(self,
+                                DotToDescriptor(name).c_str(),
+                                ScopedNullHandle<mirror::ClassLoader>());
+        CHECK(!self->IsExceptionPending()) << self->GetException()->Dump();
+      }
+    }
+
+    if (!should_succeed) {
+      // Negative test. In general, currentThread should fail (as we should not leak a peer that will
+      // be recreated at runtime).
+      PrepareForAborts();
+    }
+
+    JValue result;
+    ShadowFrame* shadow_frame = ShadowFrame::CreateDeoptimizedFrame(10, nullptr, nullptr, 0);
+
+    for (const char* name : kTestCases) {
+      mirror::String* name_string = mirror::String::AllocFromModifiedUtf8(self, name);
+      CHECK(name_string != nullptr);
+
+      Transaction transaction;
+      if (in_transaction) {
+        Runtime::Current()->EnterTransactionMode(&transaction);
+      }
+      CHECK(!self->IsExceptionPending());
+
+      runner(self, shadow_frame, name_string, &result);
+
+      if (in_transaction) {
+        Runtime::Current()->ExitTransactionMode();
+      }
+
+      if (should_succeed) {
+        CHECK(!self->IsExceptionPending()) << name << " " << self->GetException()->Dump();
+        CHECK(result.GetL() != nullptr) << name;
+      } else {
+        CHECK(self->IsExceptionPending()) << name;
+        if (in_transaction) {
+          ASSERT_TRUE(transaction.IsAborted());
+        }
+        self->ClearException();
+      }
+    }
+
+    ShadowFrame::DeleteDeoptimizedFrame(shadow_frame);
+  }
+
+  mirror::ClassLoader* GetBootClassLoader() REQUIRES_SHARED(Locks::mutator_lock_) {
+    Thread* self = Thread::Current();
+    StackHandleScope<2> hs(self);
+    MutableHandle<mirror::ClassLoader> boot_cp = hs.NewHandle<mirror::ClassLoader>(nullptr);
+
+    {
+      ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+
+      // Create the fake boot classloader. Any instance is fine, they are technically interchangeable.
+      Handle<mirror::Class> boot_cp_class = hs.NewHandle(
+          class_linker->FindClass(self,
+                                  "Ljava/lang/BootClassLoader;",
+                                  ScopedNullHandle<mirror::ClassLoader>()));
+      CHECK(boot_cp_class != nullptr);
+      CHECK(class_linker->EnsureInitialized(self, boot_cp_class, true, true));
+
+      boot_cp.Assign(boot_cp_class->AllocObject(self)->AsClassLoader());
+      CHECK(boot_cp != nullptr);
+
+      ArtMethod* boot_cp_init = boot_cp_class->FindDeclaredDirectMethod(
+          "<init>", "()V", class_linker->GetImagePointerSize());
+      CHECK(boot_cp_init != nullptr);
+
+      JValue result;
+      ShadowFrame* shadow_frame = ShadowFrame::CreateDeoptimizedFrame(10, nullptr, boot_cp_init, 0);
+      shadow_frame->SetVRegReference(0, boot_cp.Get());
+
+      // create instruction data for invoke-direct {v0} of method with fake index
+      uint16_t inst_data[3] = { 0x1070, 0x0000, 0x0010 };
+      const Instruction* inst = Instruction::At(inst_data);
+
+      interpreter::DoCall<false, false>(boot_cp_init,
+                                        self,
+                                        *shadow_frame,
+                                        inst,
+                                        inst_data[0],
+                                        &result);
+      CHECK(!self->IsExceptionPending());
+
+      ShadowFrame::DeleteDeoptimizedFrame(shadow_frame);
+    }
+
+    return boot_cp.Get();
+  }
+};
+
+TEST_F(UnstartedClassForNameTest, ClassForName) {
+  auto runner = [](Thread* self, ShadowFrame* shadow_frame, mirror::String* name, JValue* result)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    shadow_frame->SetVRegReference(0, name);
+    UnstartedClassForName(self, shadow_frame, result, 0);
+  };
+  RunTest(runner, false, true);
+}
+
+TEST_F(UnstartedClassForNameTest, ClassForNameLong) {
+  auto runner = [](Thread* self, ShadowFrame* shadow_frame, mirror::String* name, JValue* result)
+            REQUIRES_SHARED(Locks::mutator_lock_) {
+    shadow_frame->SetVRegReference(0, name);
+    shadow_frame->SetVReg(1, 0);
+    shadow_frame->SetVRegReference(2, nullptr);
+    UnstartedClassForNameLong(self, shadow_frame, result, 0);
+  };
+  RunTest(runner, false, true);
+}
+
+TEST_F(UnstartedClassForNameTest, ClassForNameLongWithClassLoader) {
+  Thread* self = Thread::Current();
+  ScopedObjectAccess soa(self);
+
+  StackHandleScope<1> hs(self);
+  Handle<mirror::ClassLoader> boot_cp = hs.NewHandle(GetBootClassLoader());
+
+  auto runner = [&](Thread* th, ShadowFrame* shadow_frame, mirror::String* name, JValue* result)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    shadow_frame->SetVRegReference(0, name);
+    shadow_frame->SetVReg(1, 0);
+    shadow_frame->SetVRegReference(2, boot_cp.Get());
+    UnstartedClassForNameLong(th, shadow_frame, result, 0);
+  };
+  RunTest(runner, false, true);
+}
+
+TEST_F(UnstartedClassForNameTest, ClassForNameLongWithClassLoaderTransaction) {
+  Thread* self = Thread::Current();
+  ScopedObjectAccess soa(self);
+
+  StackHandleScope<1> hs(self);
+  Handle<mirror::ClassLoader> boot_cp = hs.NewHandle(GetBootClassLoader());
+
+  auto runner = [&](Thread* th, ShadowFrame* shadow_frame, mirror::String* name, JValue* result)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    shadow_frame->SetVRegReference(0, name);
+    shadow_frame->SetVReg(1, 0);
+    shadow_frame->SetVRegReference(2, boot_cp.Get());
+    UnstartedClassForNameLong(th, shadow_frame, result, 0);
+  };
+  RunTest(runner, true, true);
+}
+
+TEST_F(UnstartedClassForNameTest, ClassForNameLongWithClassLoaderFail) {
+  Thread* self = Thread::Current();
+  ScopedObjectAccess soa(self);
+
+  StackHandleScope<2> hs(self);
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+  jobject path_jobj = class_linker->CreatePathClassLoader(self, {});
+  ASSERT_TRUE(path_jobj != nullptr);
+  Handle<mirror::ClassLoader> path_cp = hs.NewHandle<mirror::ClassLoader>(
+      self->DecodeJObject(path_jobj)->AsClassLoader());
+
+  auto runner = [&](Thread* th, ShadowFrame* shadow_frame, mirror::String* name, JValue* result)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    shadow_frame->SetVRegReference(0, name);
+    shadow_frame->SetVReg(1, 0);
+    shadow_frame->SetVRegReference(2, path_cp.Get());
+    UnstartedClassForNameLong(th, shadow_frame, result, 0);
+  };
+  RunTest(runner, true, false);
+}
+
+TEST_F(UnstartedRuntimeTest, ClassGetSignatureAnnotation) {
+  Thread* self = Thread::Current();
+  ScopedObjectAccess soa(self);
+
+  StackHandleScope<1> hs(self);
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+  Handle<mirror::Class> list_class = hs.NewHandle(
+      class_linker->FindClass(self,
+                              "Ljava/util/List;",
+                              ScopedNullHandle<mirror::ClassLoader>()));
+  ASSERT_TRUE(list_class.Get() != nullptr);
+  ASSERT_TRUE(class_linker->EnsureInitialized(self, list_class, true, true));
+
+  JValue result;
+  ShadowFrame* shadow_frame = ShadowFrame::CreateDeoptimizedFrame(10, nullptr, nullptr, 0);
+
+  shadow_frame->SetVRegReference(0, list_class.Get());
+  UnstartedClassGetSignatureAnnotation(self, shadow_frame, &result, 0);
+  ASSERT_TRUE(result.GetL() != nullptr);
+  ASSERT_FALSE(self->IsExceptionPending());
+
+  ShadowFrame::DeleteDeoptimizedFrame(shadow_frame);
+
+  ASSERT_TRUE(result.GetL()->IsObjectArray());
+  ObjPtr<mirror::ObjectArray<mirror::Object>> array =
+      result.GetL()->AsObjectArray<mirror::Object>();
+  std::ostringstream oss;
+  for (int32_t i = 0; i != array->GetLength(); ++i) {
+    ObjPtr<mirror::Object> elem = array->Get(i);
+    ASSERT_TRUE(elem != nullptr);
+    ASSERT_TRUE(elem->IsString());
+    oss << elem->AsString()->ToModifiedUtf8();
+  }
+  std::string output_string = oss.str();
+  ASSERT_EQ(output_string, "<E:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/Collection<TE;>;");
+}
+
+TEST_F(UnstartedRuntimeTest, ConstructorNewInstance0) {
+  Thread* self = Thread::Current();
+  ScopedObjectAccess soa(self);
+
+  StackHandleScope<4> hs(self);
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+
+  // Get Throwable.
+  Handle<mirror::Class> throw_class = hs.NewHandle(mirror::Throwable::GetJavaLangThrowable());
+  ASSERT_TRUE(class_linker->EnsureInitialized(self, throw_class, true, true));
+
+  // Get an input object.
+  Handle<mirror::String> input = hs.NewHandle(mirror::String::AllocFromModifiedUtf8(self, "abd"));
+
+  // Find the constructor.
+  ArtMethod* throw_cons = throw_class->FindDeclaredDirectMethod(
+      "<init>", "(Ljava/lang/String;)V", class_linker->GetImagePointerSize());
+  ASSERT_TRUE(throw_cons != nullptr);
+
+  Handle<mirror::Constructor> cons = hs.NewHandle(
+      mirror::Constructor::CreateFromArtMethod<kRuntimePointerSize, false>(self, throw_cons));
+  ASSERT_TRUE(cons != nullptr);
+
+  Handle<mirror::ObjectArray<mirror::Object>> args = hs.NewHandle(
+      class_linker->AllocObjectArray<mirror::Object>(self, 1));
+  ASSERT_TRUE(args != nullptr);
+  args->Set(0, input.Get());
+
+  // OK, we're ready now.
+  JValue result;
+  ShadowFrame* shadow_frame = ShadowFrame::CreateDeoptimizedFrame(10, nullptr, nullptr, 0);
+  shadow_frame->SetVRegReference(0, cons.Get());
+  shadow_frame->SetVRegReference(1, args.Get());
+  UnstartedConstructorNewInstance0(self, shadow_frame, &result, 0);
+
+  ASSERT_TRUE(result.GetL() != nullptr);
+  ASSERT_FALSE(self->IsExceptionPending());
+
+  // Should be a new object.
+  ASSERT_NE(result.GetL(), input.Get());
+  // Should be a String.
+  ASSERT_EQ(mirror::Throwable::GetJavaLangThrowable(), result.GetL()->GetClass());
+  // Should have the right string.
+  ObjPtr<mirror::String> result_msg =
+      reinterpret_cast<mirror::Throwable*>(result.GetL())->GetDetailMessage();
+  EXPECT_EQ(input.Get(), result_msg.Ptr());
 
   ShadowFrame::DeleteDeoptimizedFrame(shadow_frame);
 }

@@ -101,6 +101,7 @@ class CompilerDriverTest : public CommonCompilerTest {
 };
 
 // Disabled due to 10 second runtime on host
+// TODO: Update the test for hash-based dex cache arrays. Bug: 30627598
 TEST_F(CompilerDriverTest, DISABLED_LARGE_CompileDexLibCore) {
   CompileAll(nullptr);
 
@@ -246,6 +247,11 @@ class CompilerDriverProfileTest : public CompilerDriverTest {
     return &profile_info_;
   }
 
+  CompilerFilter::Filter GetCompilerFilter() const OVERRIDE {
+    // Use a profile based filter.
+    return CompilerFilter::kSpeedProfile;
+  }
+
   std::unordered_set<std::string> GetExpectedMethodsForClass(const std::string& clazz) {
     if (clazz == "Main") {
       return std::unordered_set<std::string>({
@@ -304,7 +310,6 @@ TEST_F(CompilerDriverProfileTest, ProfileGuidedCompilation) {
 
   // Need to enable dex-file writability. Methods rejected to be compiled will run through the
   // dex-to-dex compiler.
-  ProfileCompilationInfo info;
   for (const DexFile* dex_file : GetDexFiles(class_loader)) {
     ASSERT_TRUE(dex_file->EnableWrite());
   }

@@ -155,7 +155,7 @@ static jbyteArray charsToBytes(JNIEnv* env, jstring java_string, jint offset, ji
   ScopedObjectAccess soa(env);
   StackHandleScope<1> hs(soa.Self());
   Handle<mirror::String> string(hs.NewHandle(soa.Decode<mirror::String>(java_string)));
-  if (string.Get() == nullptr) {
+  if (string == nullptr) {
     return nullptr;
   }
 
@@ -192,7 +192,7 @@ static jbyteArray CharsetUtils_toUtf8Bytes(JNIEnv* env, jclass, jstring java_str
   ScopedObjectAccess soa(env);
   StackHandleScope<1> hs(soa.Self());
   Handle<mirror::String> string(hs.NewHandle(soa.Decode<mirror::String>(java_string)));
-  if (string.Get() == nullptr) {
+  if (string == nullptr) {
     return nullptr;
   }
 
@@ -249,11 +249,11 @@ static jbyteArray CharsetUtils_toUtf8Bytes(JNIEnv* env, jclass, jstring java_str
 }
 
 static JNINativeMethod gMethods[] = {
-  NATIVE_METHOD(CharsetUtils, asciiBytesToChars, "!([BII[C)V"),
-  NATIVE_METHOD(CharsetUtils, isoLatin1BytesToChars, "!([BII[C)V"),
-  NATIVE_METHOD(CharsetUtils, toAsciiBytes, "!(Ljava/lang/String;II)[B"),
-  NATIVE_METHOD(CharsetUtils, toIsoLatin1Bytes, "!(Ljava/lang/String;II)[B"),
-  NATIVE_METHOD(CharsetUtils, toUtf8Bytes, "!(Ljava/lang/String;II)[B"),
+  FAST_NATIVE_METHOD(CharsetUtils, asciiBytesToChars, "([BII[C)V"),
+  FAST_NATIVE_METHOD(CharsetUtils, isoLatin1BytesToChars, "([BII[C)V"),
+  FAST_NATIVE_METHOD(CharsetUtils, toAsciiBytes, "(Ljava/lang/String;II)[B"),
+  FAST_NATIVE_METHOD(CharsetUtils, toIsoLatin1Bytes, "(Ljava/lang/String;II)[B"),
+  FAST_NATIVE_METHOD(CharsetUtils, toUtf8Bytes, "(Ljava/lang/String;II)[B"),
 };
 
 void register_libcore_util_CharsetUtils(JNIEnv* env) {

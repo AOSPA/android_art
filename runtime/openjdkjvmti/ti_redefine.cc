@@ -170,10 +170,6 @@ class ObsoleteMethodStackVisitor : public art::StackVisitor {
       // We cannot ensure that the right dex file is used in inlined frames so we don't support
       // redefining them.
       DCHECK(!IsInInlinedFrame()) << "Inlined frames are not supported when using redefinition";
-      // TODO We should really support intrinsic obsolete methods.
-      // TODO We should really support redefining intrinsics.
-      // We don't support intrinsics so check for them here.
-      DCHECK(!old_method->IsIntrinsic());
       art::ArtMethod* new_obsolete_method = obsolete_maps_->FindObsoleteVersion(old_method);
       if (new_obsolete_method == nullptr) {
         // Create a new Obsolete Method and put it in the list.
@@ -323,7 +319,6 @@ jvmtiError Redefiner::RedefineClasses(ArtJvmTiEnv* env,
     // This makes cleanup easier (since we unambiguously own the bytes) and also is useful since we
     // will need to keep the original bytes around unaltered for subsequent RetransformClasses calls
     // to get the passed in bytes.
-    // TODO Implement saving the original bytes.
     unsigned char* class_bytes_copy = nullptr;
     jvmtiError res = env->Allocate(definitions[i].class_byte_count, &class_bytes_copy);
     if (res != OK) {
@@ -396,8 +391,8 @@ jvmtiError Redefiner::AddRedefinition(ArtJvmTiEnv* env, const ArtClassDefinition
     *error_msg_ = "Unable to get class signature!";
     return ret;
   }
-  JvmtiUniquePtr generic_unique_ptr(MakeJvmtiUniquePtr(env, generic_ptr_unused));
-  JvmtiUniquePtr signature_unique_ptr(MakeJvmtiUniquePtr(env, signature_ptr));
+  JvmtiUniquePtr<char> generic_unique_ptr(MakeJvmtiUniquePtr(env, generic_ptr_unused));
+  JvmtiUniquePtr<char> signature_unique_ptr(MakeJvmtiUniquePtr(env, signature_ptr));
   std::unique_ptr<art::MemMap> map(MoveDataToMemMap(original_dex_location,
                                                     def.dex_len,
                                                     def.dex_data.get(),
@@ -518,6 +513,11 @@ void Redefiner::ClassRedefinition::FindAndAllocateObsoleteMethods(art::mirror::C
   CallbackCtx ctx(&map, linker->GetAllocatorForClassLoader(art_klass->GetClassLoader()));
   // Add all the declared methods to the map
   for (auto& m : art_klass->GetDeclaredMethods(art::kRuntimePointerSize)) {
+    if (m.IsIntrinsic()) {
+      LOG(WARNING) << "Redefining intrinsic method " << m.PrettyMethod() << ". This may cause the "
+                   << "unexpected use of the original definition of " << m.PrettyMethod() << "in "
+                   << "methods that have already been compiled.";
+    }
     // It is possible to simply filter out some methods where they cannot really become obsolete,
     // such as native methods and keep their original (possibly optimized) implementations. We don't
     // do this, however, since we would need to mark these functions (still in the classes
@@ -526,8 +526,6 @@ void Redefiner::ClassRedefinition::FindAndAllocateObsoleteMethods(art::mirror::C
     // error checking from the interpreter which ensure we don't try to start executing obsolete
     // methods.
     ctx.obsolete_methods.insert(&m);
-    // TODO Allow this or check in IsModifiableClass.
-    DCHECK(!m.IsIntrinsic());
   }
   {
     art::MutexLock mu(driver_->self_, *art::Locks::thread_list_lock_);
@@ -674,7 +672,6 @@ bool Redefiner::ClassRedefinition::CheckSameFields() {
 }
 
 bool Redefiner::ClassRedefinition::CheckClass() {
-  // TODO Might just want to put it in a ObjPtr and NoSuspend assert.
   art::StackHandleScope<1> hs(driver_->self_);
   // Easy check that only 1 class def is present.
   if (dex_file_->NumClassDefs() != 1) {
@@ -747,12 +744,9 @@ bool Redefiner::ClassRedefinition::CheckClass() {
       }
     }
   }
-  LOG(WARNING) << "No verification is done on annotations of redefined classes.";
-
   return true;
 }
 
-// TODO Move this to use IsRedefinable when that function is made.
 bool Redefiner::ClassRedefinition::CheckRedefinable() {
   std::string err;
   art::StackHandleScope<1> hs(driver_->self_);
@@ -885,7 +879,6 @@ class RedefinitionDataHolder {
   DISALLOW_COPY_AND_ASSIGN(RedefinitionDataHolder);
 };
 
-// TODO Stash and update soft failure state
 bool Redefiner::ClassRedefinition::CheckVerification(int32_t klass_index,
                                                      const RedefinitionDataHolder& holder) {
   DCHECK_EQ(dex_file_->NumClassDefs(), 1u);
@@ -977,8 +970,7 @@ bool Redefiner::ClassRedefinition::FinishRemainingAllocations(
     art::Handle<art::mirror::Object> dex_file_obj(hs.NewHandle(
         ClassLoaderHelper::FindSourceDexFileObject(driver_->self_, loader)));
     holder->SetJavaDexFile(klass_index, dex_file_obj.Get());
-    if (dex_file_obj.Get() == nullptr) {
-      // TODO Better error msg.
+    if (dex_file_obj == nullptr) {
       RecordFailure(ERR(INTERNAL), "Unable to find dex file!");
       return false;
     }
@@ -1126,11 +1118,6 @@ jvmtiError Redefiner::Run() {
   self_->TransitionFromRunnableToSuspended(art::ThreadState::kNative);
   runtime_->GetThreadList()->SuspendAll(
       "Final installation of redefined Classes!", /*long_suspend*/true);
-  // TODO We need to invalidate all breakpoints in the redefined class with the debugger.
-  // TODO We need to deal with any instrumentation/debugger deoptimized_methods_.
-  // TODO We need to update all debugger MethodIDs so they note the method they point to is
-  // obsolete or implement some other well defined semantics.
-  // TODO We need to decide on & implement semantics for JNI jmethodids when we redefine methods.
   counter = 0;
   for (Redefiner::ClassRedefinition& redef : redefinitions_) {
     art::ScopedAssertNoThreadSuspension nts("Updating runtime objects for redefinition");
@@ -1145,6 +1132,10 @@ jvmtiError Redefiner::Run() {
                       holder.GetOriginalDexFileBytes(counter));
     counter++;
   }
+  // TODO We should check for if any of the redefined methods are intrinsic methods here and, if any
+  // are, force a full-world deoptimization before finishing redefinition. If we don't do this then
+  // methods that have been jitted prior to the current redefinition being applied might continue
+  // to use the old versions of the intrinsics!
   // TODO Shrink the obsolete method maps if possible?
   // TODO Put this into a scoped thing.
   runtime_->GetThreadList()->ResumeAll();
@@ -1183,18 +1174,18 @@ void Redefiner::ClassRedefinition::UpdateMethods(art::ObjPtr<art::mirror::Class>
     }
     const art::DexFile::ProtoId* proto_id = dex_file_->FindProtoId(method_return_idx,
                                                                    new_type_list);
-    // TODO Return false, cleanup.
     CHECK(proto_id != nullptr || old_type_list == nullptr);
     const art::DexFile::MethodId* method_id = dex_file_->FindMethodId(declaring_class_id,
                                                                       *new_name_id,
                                                                       *proto_id);
-    // TODO Return false, cleanup.
     CHECK(method_id != nullptr);
     uint32_t dex_method_idx = dex_file_->GetIndexForMethodId(*method_id);
     method.SetDexMethodIndex(dex_method_idx);
     linker->SetEntryPointsToInterpreter(&method);
     method.SetCodeItemOffset(dex_file_->FindCodeItemOffset(class_def, dex_method_idx));
     method.SetDexCacheResolvedMethods(new_dex_cache->GetResolvedMethods(), image_pointer_size);
+    // Clear all the intrinsics related flags.
+    method.ClearAccessFlags(art::kAccIntrinsic | (~art::kAccFlagsNotUsedByIntrinsic));
     // Notify the jit that this method is redefined.
     art::jit::Jit* jit = driver_->runtime_->GetJit();
     if (jit != nullptr) {
@@ -1212,7 +1203,6 @@ void Redefiner::ClassRedefinition::UpdateFields(art::ObjPtr<art::mirror::Class> 
           dex_file_->FindTypeId(field.GetDeclaringClass()->GetDescriptor(&declaring_class_name));
       const art::DexFile::StringId* new_name_id = dex_file_->FindStringId(field.GetName());
       const art::DexFile::TypeId* new_type_id = dex_file_->FindTypeId(field.GetTypeDescriptor());
-      // TODO Handle error, cleanup.
       CHECK(new_name_id != nullptr && new_type_id != nullptr && new_declaring_id != nullptr);
       const art::DexFile::FieldId* new_field_id =
           dex_file_->FindFieldId(*new_declaring_id, *new_name_id, *new_type_id);
@@ -1250,13 +1240,13 @@ bool Redefiner::ClassRedefinition::EnsureClassAllocationsFinished() {
   art::StackHandleScope<2> hs(driver_->self_);
   art::Handle<art::mirror::Class> klass(hs.NewHandle(
       driver_->self_->DecodeJObject(klass_)->AsClass()));
-  if (klass.Get() == nullptr) {
+  if (klass == nullptr) {
     RecordFailure(ERR(INVALID_CLASS), "Unable to decode class argument!");
     return false;
   }
   // Allocate the classExt
   art::Handle<art::mirror::ClassExt> ext(hs.NewHandle(klass->EnsureExtDataPresent(driver_->self_)));
-  if (ext.Get() == nullptr) {
+  if (ext == nullptr) {
     // No memory. Clear exception (it's not useful) and return error.
     // TODO This doesn't need to be fatal. We could just not support obsolete methods after hitting
     // this case.

@@ -170,12 +170,6 @@ endif
 ifeq ($(ART_TEST_RUN_TEST_MULTI_IMAGE),true)
   IMAGE_TYPES := multipicimage
 endif
-ifeq ($(ART_TEST_NPIC_IMAGE),true)
-  IMAGE_TYPES += npicimage
-  ifeq ($(ART_TEST_RUN_TEST_MULTI_IMAGE),true)
-    IMAGE_TYPES := multinpicimage
-  endif
-endif
 PICTEST_TYPES := npictest
 ifeq ($(ART_TEST_PIC_TEST),true)
   PICTEST_TYPES += pictest
@@ -878,32 +872,36 @@ define core-image-dependencies
     endif
   endif
   ifeq ($(2),no-image)
-    $(1)_prereq_rules += $$($(call name-to-var,$(1))_CORE_IMAGE_$$(image_suffix)_pic_$(4))
+    $(1)_prereq_rules += $$($(call name-to-var,$(1))_CORE_IMAGE_$$(image_suffix)_$(4))
   else
-    ifeq ($(2),npicimage)
-      $(1)_prereq_rules += $$($(call name-to-var,$(1))_CORE_IMAGE_$$(image_suffix)_no-pic_$(4))
+    ifeq ($(2),picimage)
+      $(1)_prereq_rules += $$($(call name-to-var,$(1))_CORE_IMAGE_$$(image_suffix)_$(4))
     else
-      ifeq ($(2),picimage)
-        $(1)_prereq_rules += $$($(call name-to-var,$(1))_CORE_IMAGE_$$(image_suffix)_pic_$(4))
-      else
-        ifeq ($(2),multinpicimage)
-          $(1)_prereq_rules += $$($(call name-to-var,$(1))_CORE_IMAGE_$$(image_suffix)_no-pic_multi_$(4))
-        else
-          ifeq ($(2),multipicimage)
-             $(1)_prereq_rules += $$($(call name-to-var,$(1))_CORE_IMAGE_$$(image_suffix)_pic_multi_$(4))
-          endif
-        endif
+      ifeq ($(2),multipicimage)
+        $(1)_prereq_rules += $$($(call name-to-var,$(1))_CORE_IMAGE_$$(image_suffix)_multi_$(4))
       endif
     endif
   endif
 endef
 
+COMPILER_TYPES_2 := optimizing
+COMPILER_TYPES_2 += interpreter
+COMPILER_TYPES_2 += jit
+COMPILER_TYPES_2 += regalloc_gc
+COMPILER_TYPES_2 += interp-ac
+ALL_ADDRESS_SIZES_2 := 32 64
+IMAGE_TYPES_2 := picimage
+IMAGE_TYPES_2 += no-image
+IMAGE_TYPES_2 += npicimage
+IMAGE_TYPES_2 += multinpicimage
+IMAGE_TYPES_2 += multipicimage
+
 # Add core image dependencies required for given target - HOST or TARGET,
 # IMAGE_TYPE, COMPILER_TYPE and ADDRESS_SIZE to the prereq_rules.
 $(foreach target, $(TARGET_TYPES), \
-  $(foreach image, $(IMAGE_TYPES), \
-    $(foreach compiler, $(COMPILER_TYPES), \
-      $(foreach address_size, $(ALL_ADDRESS_SIZES), $(eval \
+  $(foreach image, $(IMAGE_TYPES_2), \
+    $(foreach compiler, $(COMPILER_TYPES_2), \
+      $(foreach address_size, $(ALL_ADDRESS_SIZES_2), $(eval \
         $(call core-image-dependencies,$(target),$(image),$(compiler),$(address_size)))))))
 
 test-art-host-run-test-dependencies : $(host_prereq_rules)
@@ -1081,50 +1079,29 @@ define define-test-art-run-test
     # Add the core dependency. This is required for pre-building.
     # Use the PIC image, as it is the default in run-test, to match dependencies.
     ifeq ($(1),host)
-      prereq_rule += $$(HOST_CORE_IMAGE_$$(image_suffix)_pic_$(13))
+      prereq_rule += $$(HOST_CORE_IMAGE_$$(image_suffix)_$(13))
     else
-      prereq_rule += $$(TARGET_CORE_IMAGE_$$(image_suffix)_pic_$(13))
+      prereq_rule += $$(TARGET_CORE_IMAGE_$$(image_suffix)_$(13))
     endif
   else
-    ifeq ($(9),npicimage)
-      test_groups += ART_RUN_TEST_$$(uc_host_or_target)_IMAGE_RULES
-      run_test_options += --npic-image
-      # Add the core dependency.
+    ifeq ($(9),picimage)
+      test_groups += ART_RUN_TEST_$$(uc_host_or_target)_PICIMAGE_RULES
       ifeq ($(1),host)
-        prereq_rule += $$(HOST_CORE_IMAGE_$$(image_suffix)_no-pic_$(13))
+        prereq_rule += $$(HOST_CORE_IMAGE_$$(image_suffix)_$(13))
       else
-        prereq_rule += $$(TARGET_CORE_IMAGE_$$(image_suffix)_no-pic_$(13))
+        prereq_rule += $$(TARGET_CORE_IMAGE_$$(image_suffix)_$(13))
       endif
     else
-      ifeq ($(9),picimage)
+      ifeq ($(9),multipicimage)
         test_groups += ART_RUN_TEST_$$(uc_host_or_target)_PICIMAGE_RULES
+        run_test_options += --multi-image
         ifeq ($(1),host)
-          prereq_rule += $$(HOST_CORE_IMAGE_$$(image_suffix)_pic_$(13))
+          prereq_rule += $$(HOST_CORE_IMAGE_$$(image_suffix)_multi_$(13))
         else
-          prereq_rule += $$(TARGET_CORE_IMAGE_$$(image_suffix)_pic_$(13))
+          prereq_rule += $$(TARGET_CORE_IMAGE_$$(image_suffix)_multi_$(13))
         endif
       else
-        ifeq ($(9),multinpicimage)
-          test_groups += ART_RUN_TEST_$$(uc_host_or_target)_IMAGE_RULES
-          run_test_options += --npic-image --multi-image
-                ifeq ($(1),host)
-                        prereq_rule += $$(HOST_CORE_IMAGE_$$(image_suffix)_no-pic_multi_$(13))
-                else
-                        prereq_rule += $$(TARGET_CORE_IMAGE_$$(image_suffix)_no-pic_multi_$(13))
-                endif
-        else
-          ifeq ($(9),multipicimage)
-            test_groups += ART_RUN_TEST_$$(uc_host_or_target)_PICIMAGE_RULES
-                        run_test_options += --multi-image
-                        ifeq ($(1),host)
-                        prereq_rule += $$(HOST_CORE_IMAGE_$$(image_suffix)_pic_multi_$(13))
-                        else
-                        prereq_rule += $$(TARGET_CORE_IMAGE_$$(image_suffix)_pic_multi_$(13))
-                        endif
-          else
-            $$(error found $(9) expected $(IMAGE_TYPES))
-          endif
-        endif
+        $$(error found $(9) expected $(IMAGE_TYPES))
       endif
     endif
   endif

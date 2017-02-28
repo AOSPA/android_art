@@ -41,7 +41,7 @@ static const char kDexFileLayoutInputDex[] =
     "AAAAdQEAAAAQAAABAAAAjAEAAA==";
 
 static const char kDexFileLayoutInputProfile[] =
-    "cHJvADAwMgABAAsAAAABAPUpbf5jbGFzc2VzLmRleAEA";
+    "cHJvADAwMwABCwABAAAAAAD1KW3+Y2xhc3Nlcy5kZXgBAA==";
 
 static const char kDexFileLayoutExpectedOutputDex[] =
     "ZGV4CjAzNQD1KW3+B8NAB0f2A/ZVIBJ0aHrGIqcpVTAUAgAAcAAAAHhWNBIAAAAAAAAAAIwBAAAH"
@@ -55,19 +55,87 @@ static const char kDexFileLayoutExpectedOutputDex[] =
     "qAAAAAYAAAACAAAAwAAAAAEgAAACAAAAAAEAAAIgAAAHAAAAMAEAAAMgAAACAAAAaQEAAAAgAAAC"
     "AAAAdQEAAAAQAAABAAAAjAEAAA==";
 
-static void WriteFileBase64(const char* base64, const char* location) {
+// Dex file with multiple code items that have the same debug_info_off_. Constructed by a modified
+// dexlayout on XandY.
+static const char kDexFileDuplicateOffset[] =
+    "ZGV4CjAzNwAQfXfPCB8qCxo7MqdFhmHZQwCv8+udHD8MBAAAcAAAAHhWNBIAAAAAAAAAAFQDAAAT"
+    "AAAAcAAAAAgAAAC8AAAAAQAAANwAAAABAAAA6AAAAAUAAADwAAAAAwAAABgBAACUAgAAeAEAABQC"
+    "AAAeAgAAJgIAACsCAAAyAgAANwIAAFsCAAB7AgAAngIAALICAAC1AgAAvQIAAMUCAADIAgAA1QIA"
+    "AOkCAADvAgAA9QIAAPwCAAACAAAAAwAAAAQAAAAFAAAABgAAAAcAAAAIAAAACQAAAAkAAAAHAAAA"
+    "AAAAAAIAAQASAAAAAAAAAAEAAAABAAAAAQAAAAIAAAAAAAAAAgAAAAEAAAAGAAAAAQAAAAAAAAAA"
+    "AAAABgAAAAAAAAAKAAAAAAAAACsDAAAAAAAAAQAAAAAAAAAGAAAAAAAAAAsAAAD0AQAANQMAAAAA"
+    "AAACAAAAAAAAAAAAAAAAAAAACwAAAAQCAAA/AwAAAAAAAAIAAAAUAwAAGgMAAAEAAAAjAwAAAQAB"
+    "AAEAAAAFAAAABAAAAHAQBAAAAA4AAQABAAEAAAAFAAAABAAAAHAQBAAAAA4AAQAAAAEAAAAFAAAA"
+    "CAAAACIAAQBwEAEAAABpAAAADgABAAEAAQAAAAUAAAAEAAAAcBAAAAAADgB4AQAAAAAAAAAAAAAA"
+    "AAAAhAEAAAAAAAAAAAAAAAAAAAg8Y2xpbml0PgAGPGluaXQ+AANMWDsABUxZJFo7AANMWTsAIkxk"
+    "YWx2aWsvYW5ub3RhdGlvbi9FbmNsb3NpbmdDbGFzczsAHkxkYWx2aWsvYW5ub3RhdGlvbi9Jbm5l"
+    "ckNsYXNzOwAhTGRhbHZpay9hbm5vdGF0aW9uL01lbWJlckNsYXNzZXM7ABJMamF2YS9sYW5nL09i"
+    "amVjdDsAAVYABlguamF2YQAGWS5qYXZhAAFaAAthY2Nlc3NGbGFncwASZW1pdHRlcjogamFjay00"
+    "LjI1AARuYW1lAAR0aGlzAAV2YWx1ZQABegARAAcOABMABw4AEgAHDnYAEQAHDgACAwERGAICBAIN"
+    "BAgPFwwCBQERHAEYAQAAAQAAgIAEjAMAAAEAAYCABKQDAQACAAAIAoiABLwDAYCABNwDAAAADwAA"
+    "AAAAAAABAAAAAAAAAAEAAAATAAAAcAAAAAIAAAAIAAAAvAAAAAMAAAABAAAA3AAAAAQAAAABAAAA"
+    "6AAAAAUAAAAFAAAA8AAAAAYAAAADAAAAGAEAAAMQAAACAAAAeAEAAAEgAAAEAAAAjAEAAAYgAAAC"
+    "AAAA9AEAAAIgAAATAAAAFAIAAAMgAAAEAAAA/wIAAAQgAAADAAAAFAMAAAAgAAADAAAAKwMAAAAQ"
+    "AAABAAAAVAMAAA==";
+
+// Dex file with null value for annotations_off in the annotation_set_ref_list.
+// Constructed by building a dex file with annotations and hex editing.
+static const char kNullSetRefListElementInputDex[] =
+    "ZGV4CjAzNQB1iA+7ZwgkF+7E6ZesYFc2lRAR3qnRAanwAwAAcAAAAHhWNBIAAAAAAAAAACADAAAS"
+    "AAAAcAAAAAgAAAC4AAAAAwAAANgAAAABAAAA/AAAAAQAAAAEAQAAAgAAACQBAACMAgAAZAEAAOgB"
+    "AADwAQAAAAIAAAMCAAAQAgAAIAIAADQCAABIAgAAawIAAI0CAAC1AgAAyAIAANECAADUAgAA2QIA"
+    "ANwCAADjAgAA6QIAAAMAAAAEAAAABQAAAAYAAAAHAAAACAAAAAkAAAAMAAAAAgAAAAMAAAAAAAAA"
+    "DAAAAAcAAAAAAAAADQAAAAcAAADgAQAABgAGAAsAAAAAAAEAAAAAAAAAAgAOAAAAAQAAABAAAAAC"
+    "AAEAAAAAAAAAAAAAAAAAAgAAAAAAAAABAAAAsAEAAAgDAAAAAAAAAQAAAAEmAAACAAAA2AEAAAoA"
+    "AADIAQAAFgMAAAAAAAACAAAAAAAAAHwBAAABAAAA/AIAAAAAAAABAAAAAgMAAAEAAQABAAAA8AIA"
+    "AAQAAABwEAMAAAAOAAIAAgAAAAAA9QIAAAEAAAAOAAAAAAAAAAAAAAAAAAAAAQAAAAEAAABkAQAA"
+    "cAEAAAAAAAAAAAAAAAAAAAEAAAAEAAAAAgAAAAMAAwAGPGluaXQ+AA5Bbm5vQ2xhc3MuamF2YQAB"
+    "TAALTEFubm9DbGFzczsADkxNeUFubm90YXRpb247ABJMamF2YS9sYW5nL09iamVjdDsAEkxqYXZh"
+    "L2xhbmcvU3RyaW5nOwAhTGphdmEvbGFuZy9hbm5vdGF0aW9uL0Fubm90YXRpb247ACBMamF2YS9s"
+    "YW5nL2Fubm90YXRpb24vUmV0ZW50aW9uOwAmTGphdmEvbGFuZy9hbm5vdGF0aW9uL1JldGVudGlv"
+    "blBvbGljeTsAEU15QW5ub3RhdGlvbi5qYXZhAAdSVU5USU1FAAFWAANWTEwAAWEABWFOYW1lAARu"
+    "YW1lAAV2YWx1ZQABAAcOAAICAAAHDgABBQERGwABAQEQFw8AAAIAAICABIQDAQmcAwAAAAECgQgA"
+    "AAARAAAAAAAAAAEAAAAAAAAAAQAAABIAAABwAAAAAgAAAAgAAAC4AAAAAwAAAAMAAADYAAAABAAA"
+    "AAEAAAD8AAAABQAAAAQAAAAEAQAABgAAAAIAAAAkAQAAAhAAAAEAAABkAQAAAxAAAAMAAABwAQAA"
+    "ASAAAAIAAACEAQAABiAAAAIAAACwAQAAARAAAAIAAADYAQAAAiAAABIAAADoAQAAAyAAAAIAAADw"
+    "AgAABCAAAAIAAAD8AgAAACAAAAIAAAAIAwAAABAAAAEAAAAgAwAA";
+
+// Dex file with catch handler unreferenced by try blocks.
+// Constructed by building a dex file with try/catch blocks and hex editing.
+static const char kUnreferencedCatchHandlerInputDex[] =
+    "ZGV4CjAzNQD+exd52Y0f9nY5x5GmInXq5nXrO6Kl2RV4AwAAcAAAAHhWNBIAAAAAAAAAANgCAAAS"
+    "AAAAcAAAAAgAAAC4AAAAAwAAANgAAAABAAAA/AAAAAQAAAAEAQAAAQAAACQBAAA0AgAARAEAANYB"
+    "AADeAQAA5gEAAO4BAAAAAgAADwIAACYCAAA9AgAAUQIAAGUCAAB5AgAAfwIAAIUCAACIAgAAjAIA"
+    "AKECAACnAgAArAIAAAQAAAAFAAAABgAAAAcAAAAIAAAACQAAAAwAAAAOAAAADAAAAAYAAAAAAAAA"
+    "DQAAAAYAAADIAQAADQAAAAYAAADQAQAABQABABAAAAAAAAAAAAAAAAAAAgAPAAAAAQABABEAAAAD"
+    "AAAAAAAAAAAAAAABAAAAAwAAAAAAAAADAAAAAAAAAMgCAAAAAAAAAQABAAEAAAC1AgAABAAAAHAQ"
+    "AwAAAA4AAwABAAIAAgC6AgAAIQAAAGIAAAAaAQoAbiACABAAYgAAABoBCwBuIAIAEAAOAA0AYgAA"
+    "ABoBAQBuIAIAEAAo8A0AYgAAABoBAgBuIAIAEAAo7gAAAAAAAAcAAQAHAAAABwABAAIBAg8BAhgA"
+    "AQAAAAQAAAABAAAABwAGPGluaXQ+AAZDYXRjaDEABkNhdGNoMgAQSGFuZGxlclRlc3QuamF2YQAN"
+    "TEhhbmRsZXJUZXN0OwAVTGphdmEvaW8vUHJpbnRTdHJlYW07ABVMamF2YS9sYW5nL0V4Y2VwdGlv"
+    "bjsAEkxqYXZhL2xhbmcvT2JqZWN0OwASTGphdmEvbGFuZy9TdHJpbmc7ABJMamF2YS9sYW5nL1N5"
+    "c3RlbTsABFRyeTEABFRyeTIAAVYAAlZMABNbTGphdmEvbGFuZy9TdHJpbmc7AARtYWluAANvdXQA"
+    "B3ByaW50bG4AAQAHDgAEAQAHDn17AncdHoseAAAAAgAAgYAExAIBCdwCAAANAAAAAAAAAAEAAAAA"
+    "AAAAAQAAABIAAABwAAAAAgAAAAgAAAC4AAAAAwAAAAMAAADYAAAABAAAAAEAAAD8AAAABQAAAAQA"
+    "AAAEAQAABgAAAAEAAAAkAQAAASAAAAIAAABEAQAAARAAAAIAAADIAQAAAiAAABIAAADWAQAAAyAA"
+    "AAIAAAC1AgAAACAAAAEAAADIAgAAABAAAAEAAADYAgAA";
+
+static void WriteBase64ToFile(const char* base64, File* file) {
   // Decode base64.
   CHECK(base64 != nullptr);
   size_t length;
   std::unique_ptr<uint8_t[]> bytes(DecodeBase64(base64, &length));
-  CHECK(bytes.get() != nullptr);
-
-  // Write to provided file.
-  std::unique_ptr<File> file(OS::CreateEmptyFile(location));
-  CHECK(file.get() != nullptr);
+  CHECK(bytes != nullptr);
   if (!file->WriteFully(bytes.get(), length)) {
     PLOG(FATAL) << "Failed to write base64 as file";
   }
+}
+
+static void WriteFileBase64(const char* base64, const char* location) {
+  // Write to provided file.
+  std::unique_ptr<File> file(OS::CreateEmptyFile(location));
+  CHECK(file != nullptr);
+  WriteBase64ToFile(base64, file.get());
   if (file->FlushCloseOrErase() != 0) {
     PLOG(FATAL) << "Could not flush and close test file.";
   }
@@ -171,7 +239,7 @@ class DexLayoutTest : public CommonRuntimeTest {
     EXPECT_TRUE(OS::FileExists(dexlayout.c_str())) << dexlayout << " should be a valid file path";
 
     std::vector<std::string> dexlayout_exec_argv =
-    { dexlayout, "-w", tmp_dir, "-o", tmp_name, "-p", profile_file, dex_file };
+        { dexlayout, "-w", tmp_dir, "-o", tmp_name, "-p", profile_file, dex_file };
     if (!::art::Exec(dexlayout_exec_argv, error_msg)) {
       return false;
     }
@@ -183,6 +251,40 @@ class DexLayoutTest : public CommonRuntimeTest {
 
     std::vector<std::string> rm_exec_argv =
         { "/bin/rm", dex_file, profile_file, expected_output, output_dex };
+    if (!::art::Exec(rm_exec_argv, error_msg)) {
+      return false;
+    }
+    return true;
+  }
+
+  // Runs UnreferencedCatchHandlerTest.
+  bool UnreferencedCatchHandlerExec(std::string* error_msg) {
+    ScratchFile tmp_file;
+    std::string tmp_name = tmp_file.GetFilename();
+    size_t tmp_last_slash = tmp_name.rfind("/");
+    std::string tmp_dir = tmp_name.substr(0, tmp_last_slash + 1);
+
+    // Write inputs and expected outputs.
+    std::string input_dex = tmp_dir + "classes.dex";
+    WriteFileBase64(kUnreferencedCatchHandlerInputDex, input_dex.c_str());
+    std::string output_dex = tmp_dir + "classes.dex.new";
+
+    std::string dexlayout = GetTestAndroidRoot() + "/bin/dexlayout";
+    EXPECT_TRUE(OS::FileExists(dexlayout.c_str())) << dexlayout << " should be a valid file path";
+
+    std::vector<std::string> dexlayout_exec_argv =
+        { dexlayout, "-w", tmp_dir, "-o", "/dev/null", input_dex };
+    if (!::art::Exec(dexlayout_exec_argv, error_msg)) {
+      return false;
+    }
+
+    // Diff input and output. They should be the same.
+    std::vector<std::string> diff_exec_argv = { "/usr/bin/diff", input_dex, output_dex };
+    if (!::art::Exec(diff_exec_argv, error_msg)) {
+      return false;
+    }
+
+    std::vector<std::string> rm_exec_argv = { "/bin/rm", input_dex, output_dex };
     if (!::art::Exec(rm_exec_argv, error_msg)) {
       return false;
     }
@@ -210,6 +312,50 @@ TEST_F(DexLayoutTest, DexFileLayout) {
   TEST_DISABLED_FOR_TARGET();
   std::string error_msg;
   ASSERT_TRUE(DexFileLayoutExec(&error_msg)) << error_msg;
+}
+
+TEST_F(DexLayoutTest, DuplicateOffset) {
+  ScratchFile temp;
+  WriteBase64ToFile(kDexFileDuplicateOffset, temp.GetFile());
+  EXPECT_EQ(temp.GetFile()->Flush(), 0);
+  std::string dexlayout = GetTestAndroidRoot() + "/bin/dexlayout";
+  EXPECT_TRUE(OS::FileExists(dexlayout.c_str())) << dexlayout << " should be a valid file path";
+  std::vector<std::string> dexlayout_exec_argv = {
+      dexlayout,
+      "-a",
+      "-i",
+      "-o",
+      "/dev/null",
+      temp.GetFilename()};
+  std::string error_msg;
+  const bool result = ::art::Exec(dexlayout_exec_argv, &error_msg);
+  EXPECT_TRUE(result);
+  if (!result) {
+    LOG(ERROR) << "Error " << error_msg;
+  }
+}
+
+TEST_F(DexLayoutTest, NullSetRefListElement) {
+  ScratchFile temp;
+  WriteBase64ToFile(kNullSetRefListElementInputDex, temp.GetFile());
+  EXPECT_EQ(temp.GetFile()->Flush(), 0);
+  std::string dexlayout = GetTestAndroidRoot() + "/bin/dexlayout";
+  EXPECT_TRUE(OS::FileExists(dexlayout.c_str())) << dexlayout << " should be a valid file path";
+  std::vector<std::string> dexlayout_exec_argv =
+      { dexlayout, "-o", "/dev/null", temp.GetFilename() };
+  std::string error_msg;
+  const bool result = ::art::Exec(dexlayout_exec_argv, &error_msg);
+  EXPECT_TRUE(result);
+  if (!result) {
+    LOG(ERROR) << "Error " << error_msg;
+  }
+}
+
+TEST_F(DexLayoutTest, UnreferencedCatchHandler) {
+  // Disable test on target.
+  TEST_DISABLED_FOR_TARGET();
+  std::string error_msg;
+  ASSERT_TRUE(UnreferencedCatchHandlerExec(&error_msg)) << error_msg;
 }
 
 }  // namespace art

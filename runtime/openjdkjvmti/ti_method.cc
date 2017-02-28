@@ -34,7 +34,9 @@
 #include "art_jvmti.h"
 #include "art_method-inl.h"
 #include "base/enums.h"
+#include "dex_file_annotations.h"
 #include "jni_internal.h"
+#include "mirror/object_array-inl.h"
 #include "modifiers.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread-inl.h"
@@ -108,37 +110,54 @@ jvmtiError MethodUtil::GetMethodName(jvmtiEnv* env,
   art::ArtMethod* art_method = art::jni::DecodeArtMethod(method);
   art_method = art_method->GetInterfaceMethodIfProxy(art::kRuntimePointerSize);
 
-  JvmtiUniquePtr name_copy;
+  JvmtiUniquePtr<char[]> name_copy;
   if (name_ptr != nullptr) {
     const char* method_name = art_method->GetName();
     if (method_name == nullptr) {
       method_name = "<error>";
     }
-    unsigned char* tmp;
-    jvmtiError ret = CopyString(env, method_name, &tmp);
-    if (ret != ERR(NONE)) {
+    jvmtiError ret;
+    name_copy = CopyString(env, method_name, &ret);
+    if (name_copy == nullptr) {
       return ret;
     }
-    name_copy = MakeJvmtiUniquePtr(env, tmp);
-    *name_ptr = reinterpret_cast<char*>(tmp);
+    *name_ptr = name_copy.get();
   }
 
-  JvmtiUniquePtr signature_copy;
+  JvmtiUniquePtr<char[]> signature_copy;
   if (signature_ptr != nullptr) {
     const art::Signature sig = art_method->GetSignature();
     std::string str = sig.ToString();
-    unsigned char* tmp;
-    jvmtiError ret = CopyString(env, str.c_str(), &tmp);
-    if (ret != ERR(NONE)) {
+    jvmtiError ret;
+    signature_copy = CopyString(env, str.c_str(), &ret);
+    if (signature_copy == nullptr) {
       return ret;
     }
-    signature_copy = MakeJvmtiUniquePtr(env, tmp);
-    *signature_ptr = reinterpret_cast<char*>(tmp);
+    *signature_ptr = signature_copy.get();
   }
 
-  // TODO: Support generic signature.
   if (generic_ptr != nullptr) {
     *generic_ptr = nullptr;
+    if (!art_method->GetDeclaringClass()->IsProxyClass()) {
+      art::mirror::ObjectArray<art::mirror::String>* str_array =
+          art::annotations::GetSignatureAnnotationForMethod(art_method);
+      if (str_array != nullptr) {
+        std::ostringstream oss;
+        for (int32_t i = 0; i != str_array->GetLength(); ++i) {
+          oss << str_array->Get(i)->ToModifiedUtf8();
+        }
+        std::string output_string = oss.str();
+        jvmtiError ret;
+        JvmtiUniquePtr<char[]> generic_copy = CopyString(env, output_string.c_str(), &ret);
+        if (generic_copy == nullptr) {
+          return ret;
+        }
+        *generic_ptr = generic_copy.release();
+      } else if (soa.Self()->IsExceptionPending()) {
+        // TODO: Should we report an error here?
+        soa.Self()->ClearException();
+      }
+    }
   }
 
   // Everything is fine, release the buffers.

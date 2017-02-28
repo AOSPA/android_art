@@ -223,13 +223,10 @@ class ArtMethod FINAL {
   }
 
   bool IsObsolete() {
-    // TODO Should maybe make this IsIntrinsic check not needed
-    return !IsIntrinsic() && (GetAccessFlags() & kAccObsoleteMethod) != 0;
+    return (GetAccessFlags() & kAccObsoleteMethod) != 0;
   }
 
   void SetIsObsolete() {
-    // TODO We should really support redefining intrinsic if possible.
-    DCHECK(!IsIntrinsic());
     AddAccessFlags(kAccObsoleteMethod);
   }
 
@@ -432,6 +429,7 @@ class ArtMethod FINAL {
   }
 
   ProfilingInfo* GetProfilingInfo(PointerSize pointer_size) {
+    DCHECK(!IsNative());
     return reinterpret_cast<ProfilingInfo*>(GetDataPtrSize(pointer_size));
   }
 

@@ -311,9 +311,6 @@ CompilerDriver::CompilerDriver(
 
   compiler_->Init();
 
-  if (compiler_options->VerifyOnlyProfile()) {
-    CHECK(profile_compilation_info_ != nullptr) << "Requires profile";
-  }
   if (GetCompilerOptions().IsBootImage()) {
     CHECK(image_classes_.get() != nullptr) << "Expected image classes for boot image";
   }
@@ -583,7 +580,7 @@ static void CompileMethod(Thread* self,
                           InvokeType invoke_type,
                           uint16_t class_def_idx,
                           uint32_t method_idx,
-                          jobject class_loader,
+                          Handle<mirror::ClassLoader> class_loader,
                           const DexFile& dex_file,
                           optimizer::DexToDexCompilationLevel dex_to_dex_compilation_level,
                           bool compilation_enabled,
@@ -624,9 +621,6 @@ static void CompileMethod(Thread* self,
       // Look-up the ArtMethod associated with this code_item (if any)
       // -- It is later used to lookup any [optimization] annotations for this method.
       ScopedObjectAccess soa(self);
-      StackHandleScope<1> hs(soa.Self());
-      Handle<mirror::ClassLoader> class_loader_handle(hs.NewHandle(
-          soa.Decode<mirror::ClassLoader>(class_loader)));
 
       // TODO: Lookup annotation from DexFile directly without resolving method.
       ArtMethod* method =
@@ -634,7 +628,7 @@ static void CompileMethod(Thread* self,
               dex_file,
               method_idx,
               dex_cache,
-              class_loader_handle,
+              class_loader,
               /* referrer */ nullptr,
               invoke_type);
 
@@ -681,9 +675,14 @@ static void CompileMethod(Thread* self,
 
     if (compile) {
       // NOTE: if compiler declines to compile this method, it will return null.
-      compiled_method = driver->GetCompiler()->Compile(code_item, access_flags, invoke_type,
-                                                       class_def_idx, method_idx, class_loader,
-                                                       dex_file, dex_cache);
+      compiled_method = driver->GetCompiler()->Compile(code_item,
+                                                       access_flags,
+                                                       invoke_type,
+                                                       class_def_idx,
+                                                       method_idx,
+                                                       class_loader,
+                                                       dex_file,
+                                                       dex_cache);
     }
     if (compiled_method == nullptr &&
         dex_to_dex_compilation_level != optimizer::DexToDexCompilationLevel::kDontDexToDexCompile) {
@@ -730,12 +729,14 @@ void CompilerDriver::CompileOne(Thread* self, ArtMethod* method, TimingLogger* t
   uint32_t method_idx = method->GetDexMethodIndex();
   uint32_t access_flags = method->GetAccessFlags();
   InvokeType invoke_type = method->GetInvokeType();
-  StackHandleScope<1> hs(self);
+  StackHandleScope<2> hs(self);
   Handle<mirror::DexCache> dex_cache(hs.NewHandle(method->GetDexCache()));
+  Handle<mirror::ClassLoader> class_loader(
+      hs.NewHandle(method->GetDeclaringClass()->GetClassLoader()));
   {
     ScopedObjectAccessUnchecked soa(self);
     ScopedLocalRef<jobject> local_class_loader(
-        soa.Env(), soa.AddLocalReference<jobject>(method->GetDeclaringClass()->GetClassLoader()));
+        soa.Env(), soa.AddLocalReference<jobject>(class_loader.Get()));
     jclass_loader = soa.Env()->NewGlobalRef(local_class_loader.get());
     // Find the dex_file
     dex_file = method->GetDexFile();
@@ -769,7 +770,7 @@ void CompilerDriver::CompileOne(Thread* self, ArtMethod* method, TimingLogger* t
                 invoke_type,
                 class_def_idx,
                 method_idx,
-                jclass_loader,
+                class_loader,
                 *dex_file,
                 dex_to_dex_compilation_level,
                 true,
@@ -795,7 +796,7 @@ void CompilerDriver::CompileOne(Thread* self, ArtMethod* method, TimingLogger* t
                   invoke_type,
                   class_def_idx,
                   method_idx,
-                  jclass_loader,
+                  class_loader,
                   *dex_file,
                   dex_to_dex_compilation_level,
                   true,
@@ -960,7 +961,7 @@ static void EnsureVerifiedOrVerifyAtRuntime(jobject jclass_loader,
       const DexFile::ClassDef& class_def = dex_file->GetClassDef(i);
       const char* descriptor = dex_file->GetClassDescriptor(class_def);
       cls.Assign(class_linker->FindClass(soa.Self(), descriptor, class_loader));
-      if (cls.Get() == nullptr) {
+      if (cls == nullptr) {
         soa.Self()->ClearException();
       } else if (&cls->GetDexFile() == dex_file) {
         DCHECK(cls->IsErroneous() || cls->IsVerified() || cls->IsCompileTimeVerified())
@@ -1053,10 +1054,15 @@ bool CompilerDriver::IsMethodToCompile(const MethodReference& method_ref) const 
 }
 
 bool CompilerDriver::ShouldCompileBasedOnProfile(const MethodReference& method_ref) const {
-  if (profile_compilation_info_ == nullptr) {
-    // If we miss profile information it means that we don't do a profile guided compilation.
-    // Return true, and let the other filters decide if the method should be compiled.
+  // Profile compilation info may be null if no profile is passed.
+  if (!CompilerFilter::DependsOnProfile(compiler_options_->GetCompilerFilter())) {
+    // Use the compiler filter instead of the presence of profile_compilation_info_ since
+    // we may want to have full speed compilation along with profile based layout optimizations.
     return true;
+  }
+  // If we are using a profile filter but do not have a profile compilation info, compile nothing.
+  if (profile_compilation_info_ == nullptr) {
+    return false;
   }
   bool result = profile_compilation_info_->ContainsMethod(method_ref);
 
@@ -1070,22 +1076,30 @@ bool CompilerDriver::ShouldCompileBasedOnProfile(const MethodReference& method_r
 
 class ResolveCatchBlockExceptionsClassVisitor : public ClassVisitor {
  public:
-  explicit ResolveCatchBlockExceptionsClassVisitor(
-      std::set<std::pair<dex::TypeIndex, const DexFile*>>& exceptions_to_resolve)
-     : exceptions_to_resolve_(exceptions_to_resolve) {}
+  ResolveCatchBlockExceptionsClassVisitor() : classes_() {}
 
   virtual bool operator()(ObjPtr<mirror::Class> c) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
-    const auto pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
-    for (auto& m : c->GetMethods(pointer_size)) {
-      ResolveExceptionsForMethod(&m);
-    }
+    classes_.push_back(c);
     return true;
   }
 
- private:
-  void ResolveExceptionsForMethod(ArtMethod* method_handle)
+  void FindExceptionTypesToResolve(
+      std::set<std::pair<dex::TypeIndex, const DexFile*>>* exceptions_to_resolve)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    const DexFile::CodeItem* code_item = method_handle->GetCodeItem();
+    const auto pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
+    for (ObjPtr<mirror::Class> klass : classes_) {
+      for (ArtMethod& method : klass->GetMethods(pointer_size)) {
+        FindExceptionTypesToResolveForMethod(&method, exceptions_to_resolve);
+      }
+    }
+  }
+
+ private:
+  void FindExceptionTypesToResolveForMethod(
+      ArtMethod* method,
+      std::set<std::pair<dex::TypeIndex, const DexFile*>>* exceptions_to_resolve)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    const DexFile::CodeItem* code_item = method->GetCodeItem();
     if (code_item == nullptr) {
       return;  // native or abstract method
     }
@@ -1105,9 +1119,9 @@ class ResolveCatchBlockExceptionsClassVisitor : public ClassVisitor {
         dex::TypeIndex encoded_catch_handler_handlers_type_idx =
             dex::TypeIndex(DecodeUnsignedLeb128(&encoded_catch_handler_list));
         // Add to set of types to resolve if not already in the dex cache resolved types
-        if (!method_handle->IsResolvedTypeIdx(encoded_catch_handler_handlers_type_idx)) {
-          exceptions_to_resolve_.emplace(encoded_catch_handler_handlers_type_idx,
-                                         method_handle->GetDexFile());
+        if (!method->IsResolvedTypeIdx(encoded_catch_handler_handlers_type_idx)) {
+          exceptions_to_resolve->emplace(encoded_catch_handler_handlers_type_idx,
+                                         method->GetDexFile());
         }
         // ignore address associated with catch handler
         DecodeUnsignedLeb128(&encoded_catch_handler_list);
@@ -1119,7 +1133,7 @@ class ResolveCatchBlockExceptionsClassVisitor : public ClassVisitor {
     }
   }
 
-  std::set<std::pair<dex::TypeIndex, const DexFile*>>& exceptions_to_resolve_;
+  std::vector<ObjPtr<mirror::Class>> classes_;
 };
 
 class RecordImageClassesVisitor : public ClassVisitor {
@@ -1155,7 +1169,7 @@ void CompilerDriver::LoadImageClasses(TimingLogger* timings) {
     StackHandleScope<1> hs(self);
     Handle<mirror::Class> klass(
         hs.NewHandle(class_linker->FindSystemClass(self, descriptor.c_str())));
-    if (klass.Get() == nullptr) {
+    if (klass == nullptr) {
       VLOG(compiler) << "Failed to find class " << descriptor;
       image_classes_->erase(it++);
       self->ClearException();
@@ -1173,8 +1187,14 @@ void CompilerDriver::LoadImageClasses(TimingLogger* timings) {
       hs.NewHandle(class_linker->FindSystemClass(self, "Ljava/lang/Throwable;")));
   do {
     unresolved_exception_types.clear();
-    ResolveCatchBlockExceptionsClassVisitor visitor(unresolved_exception_types);
-    class_linker->VisitClasses(&visitor);
+    {
+      // Thread suspension is not allowed while ResolveCatchBlockExceptionsClassVisitor
+      // is using a std::vector<ObjPtr<mirror::Class>>.
+      ScopedAssertNoThreadSuspension ants(__FUNCTION__);
+      ResolveCatchBlockExceptionsClassVisitor visitor;
+      class_linker->VisitClasses(&visitor);
+      visitor.FindExceptionTypesToResolve(&unresolved_exception_types);
+    }
     for (const auto& exception_type : unresolved_exception_types) {
       dex::TypeIndex exception_type_idx = exception_type.first;
       const DexFile* dex_file = exception_type.second;
@@ -1182,13 +1202,13 @@ void CompilerDriver::LoadImageClasses(TimingLogger* timings) {
       Handle<mirror::DexCache> dex_cache(hs2.NewHandle(class_linker->RegisterDexFile(*dex_file,
                                                                                      nullptr)));
       Handle<mirror::Class> klass(hs2.NewHandle(
-          (dex_cache.Get() != nullptr)
+          (dex_cache != nullptr)
               ? class_linker->ResolveType(*dex_file,
                                           exception_type_idx,
                                           dex_cache,
                                           ScopedNullHandle<mirror::ClassLoader>())
               : nullptr));
-      if (klass.Get() == nullptr) {
+      if (klass == nullptr) {
         const DexFile::TypeId& type_id = dex_file->GetTypeId(exception_type_idx);
         const char* descriptor = dex_file->GetTypeDescriptor(type_id);
         LOG(FATAL) << "Failed to resolve class " << descriptor;
@@ -1425,19 +1445,14 @@ void CompilerDriver::MarkForDexToDexCompilation(Thread* self, const MethodRefere
   dex_to_dex_references_.back().GetMethodIndexes().SetBit(method_ref.dex_method_index);
 }
 
-bool CompilerDriver::CanAccessTypeWithoutChecks(uint32_t referrer_idx,
-                                                Handle<mirror::DexCache> dex_cache,
-                                                dex::TypeIndex type_idx) {
-  // Get type from dex cache assuming it was populated by the verifier
-  mirror::Class* resolved_class = dex_cache->GetResolvedType(type_idx);
+bool CompilerDriver::CanAccessTypeWithoutChecks(ObjPtr<mirror::Class> referrer_class,
+                                                ObjPtr<mirror::Class> resolved_class) {
   if (resolved_class == nullptr) {
     stats_->TypeNeedsAccessCheck();
     return false;  // Unknown class needs access checks.
   }
-  const DexFile::MethodId& method_id = dex_cache->GetDexFile()->GetMethodId(referrer_idx);
   bool is_accessible = resolved_class->IsPublic();  // Public classes are always accessible.
   if (!is_accessible) {
-    mirror::Class* referrer_class = dex_cache->GetResolvedType(method_id.class_idx_);
     if (referrer_class == nullptr) {
       stats_->TypeNeedsAccessCheck();
       return false;  // Incomplete referrer knowledge needs access check.
@@ -1454,12 +1469,9 @@ bool CompilerDriver::CanAccessTypeWithoutChecks(uint32_t referrer_idx,
   return is_accessible;
 }
 
-bool CompilerDriver::CanAccessInstantiableTypeWithoutChecks(uint32_t referrer_idx,
-                                                            Handle<mirror::DexCache> dex_cache,
-                                                            dex::TypeIndex type_idx,
+bool CompilerDriver::CanAccessInstantiableTypeWithoutChecks(ObjPtr<mirror::Class> referrer_class,
+                                                            ObjPtr<mirror::Class> resolved_class,
                                                             bool* finalizable) {
-  // Get type from dex cache assuming it was populated by the verifier.
-  mirror::Class* resolved_class = dex_cache->GetResolvedType(type_idx);
   if (resolved_class == nullptr) {
     stats_->TypeNeedsAccessCheck();
     // Be conservative.
@@ -1467,10 +1479,8 @@ bool CompilerDriver::CanAccessInstantiableTypeWithoutChecks(uint32_t referrer_id
     return false;  // Unknown class needs access checks.
   }
   *finalizable = resolved_class->IsFinalizable();
-  const DexFile::MethodId& method_id = dex_cache->GetDexFile()->GetMethodId(referrer_idx);
   bool is_accessible = resolved_class->IsPublic();  // Public classes are always accessible.
   if (!is_accessible) {
-    mirror::Class* referrer_class = dex_cache->GetResolvedType(method_id.class_idx_);
     if (referrer_class == nullptr) {
       stats_->TypeNeedsAccessCheck();
       return false;  // Incomplete referrer knowledge needs access check.
@@ -1514,9 +1524,7 @@ ArtField* CompilerDriver::ComputeInstanceFieldInfo(uint32_t field_idx,
   mirror::Class* referrer_class;
   Handle<mirror::DexCache> dex_cache(mUnit->GetDexCache());
   {
-    StackHandleScope<1> hs(soa.Self());
-    Handle<mirror::ClassLoader> class_loader_handle(
-        hs.NewHandle(soa.Decode<mirror::ClassLoader>(mUnit->GetClassLoader())));
+    Handle<mirror::ClassLoader> class_loader_handle = mUnit->GetClassLoader();
     resolved_field = ResolveField(soa, dex_cache, class_loader_handle, mUnit, field_idx, false);
     referrer_class = resolved_field != nullptr
         ? ResolveCompilingMethodsClass(soa, dex_cache, class_loader_handle, mUnit) : nullptr;
@@ -1877,7 +1885,7 @@ class ResolveTypeVisitor : public CompilationVisitor {
     Handle<mirror::DexCache> dex_cache(hs.NewHandle(class_linker->RegisterDexFile(
         dex_file,
         class_loader.Get())));
-    ObjPtr<mirror::Class> klass = (dex_cache.Get() != nullptr)
+    ObjPtr<mirror::Class> klass = (dex_cache != nullptr)
         ? class_linker->ResolveType(dex_file, dex::TypeIndex(type_idx), dex_cache, class_loader)
         : nullptr;
 
@@ -1978,7 +1986,7 @@ static void LoadAndUpdateStatus(const DexFile& dex_file,
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   Handle<mirror::Class> cls(hs.NewHandle<mirror::Class>(
       class_linker->FindClass(self, descriptor, class_loader)));
-  if (cls.Get() != nullptr) {
+  if (cls != nullptr) {
     // Check that the class is resolved with the current dex file. We might get
     // a boot image class, or a class in a different dex file for multidex, and
     // we should not update the status in that case.
@@ -2126,7 +2134,7 @@ class VerifyClassVisitor : public CompilationVisitor {
     Handle<mirror::Class> klass(
         hs.NewHandle(class_linker->FindClass(soa.Self(), descriptor, class_loader)));
     verifier::MethodVerifier::FailureKind failure_kind;
-    if (klass.Get() == nullptr) {
+    if (klass == nullptr) {
       CHECK(soa.Self()->IsExceptionPending());
       soa.Self()->ClearException();
 
@@ -2228,7 +2236,7 @@ class SetVerifiedClassVisitor : public CompilationVisitor {
     Handle<mirror::Class> klass(
         hs.NewHandle(class_linker->FindClass(soa.Self(), descriptor, class_loader)));
     // Class might have failed resolution. Then don't set it to verified.
-    if (klass.Get() != nullptr) {
+    if (klass != nullptr) {
       // Only do this if the class is resolved. If even resolution fails, quickening will go very,
       // very wrong.
       if (klass->IsResolved() && !klass->IsErroneousResolved()) {
@@ -2290,7 +2298,7 @@ class InitializeClassVisitor : public CompilationVisitor {
     Handle<mirror::Class> klass(
         hs.NewHandle(manager_->GetClassLinker()->FindClass(soa.Self(), descriptor, class_loader)));
 
-    if (klass.Get() != nullptr && !SkipClass(jclass_loader, dex_file, klass.Get())) {
+    if (klass != nullptr && !SkipClass(jclass_loader, dex_file, klass.Get())) {
       // Only try to initialize classes that were successfully verified.
       if (klass->IsVerified()) {
         // Attempt to initialize the class but bail if we either need to initialize the super-class
@@ -2540,7 +2548,7 @@ class CompileClassVisitor : public CompilationVisitor {
     Handle<mirror::Class> klass(
         hs.NewHandle(class_linker->FindClass(soa.Self(), descriptor, class_loader)));
     Handle<mirror::DexCache> dex_cache;
-    if (klass.Get() == nullptr) {
+    if (klass == nullptr) {
       soa.Self()->AssertPendingException();
       soa.Self()->ClearException();
       dex_cache = hs.NewHandle(class_linker->FindDexCache(soa.Self(), dex_file));
@@ -2588,10 +2596,18 @@ class CompileClassVisitor : public CompilationVisitor {
         continue;
       }
       previous_direct_method_idx = method_idx;
-      CompileMethod(soa.Self(), driver, it.GetMethodCodeItem(), it.GetMethodAccessFlags(),
-                    it.GetMethodInvokeType(class_def), class_def_index,
-                    method_idx, jclass_loader, dex_file, dex_to_dex_compilation_level,
-                    compilation_enabled, dex_cache);
+      CompileMethod(soa.Self(),
+                    driver,
+                    it.GetMethodCodeItem(),
+                    it.GetMethodAccessFlags(),
+                    it.GetMethodInvokeType(class_def),
+                    class_def_index,
+                    method_idx,
+                    class_loader,
+                    dex_file,
+                    dex_to_dex_compilation_level,
+                    compilation_enabled,
+                    dex_cache);
       it.Next();
     }
     // Compile virtual methods
@@ -2605,10 +2621,17 @@ class CompileClassVisitor : public CompilationVisitor {
         continue;
       }
       previous_virtual_method_idx = method_idx;
-      CompileMethod(soa.Self(), driver, it.GetMethodCodeItem(), it.GetMethodAccessFlags(),
-                    it.GetMethodInvokeType(class_def), class_def_index,
-                    method_idx, jclass_loader, dex_file, dex_to_dex_compilation_level,
-                    compilation_enabled, dex_cache);
+      CompileMethod(soa.Self(),
+                    driver, it.GetMethodCodeItem(),
+                    it.GetMethodAccessFlags(),
+                    it.GetMethodInvokeType(class_def),
+                    class_def_index,
+                    method_idx,
+                    class_loader,
+                    dex_file,
+                    dex_to_dex_compilation_level,
+                    compilation_enabled,
+                    dex_cache);
       it.Next();
     }
     DCHECK(!it.HasNext());

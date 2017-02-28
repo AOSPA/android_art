@@ -31,8 +31,10 @@
   V(ClassGetDeclaringClass, "java.lang.Class java.lang.Class.getDeclaringClass()") \
   V(ClassGetEnclosingClass, "java.lang.Class java.lang.Class.getEnclosingClass()") \
   V(ClassGetInnerClassFlags, "int java.lang.Class.getInnerClassFlags(int)") \
+  V(ClassGetSignatureAnnotation, "java.lang.String[] java.lang.Class.getSignatureAnnotation()") \
   V(ClassIsAnonymousClass, "boolean java.lang.Class.isAnonymousClass()") \
   V(ClassLoaderGetResourceAsStream, "java.io.InputStream java.lang.ClassLoader.getResourceAsStream(java.lang.String)") \
+  V(ConstructorNewInstance0, "java.lang.Object java.lang.reflect.Constructor.newInstance0(java.lang.Object[])") \
   V(VmClassLoaderFindLoadedClass, "java.lang.Class java.lang.VMClassLoader.findLoadedClass(java.lang.ClassLoader, java.lang.String)") \
   V(VoidLookupType, "java.lang.Class java.lang.Void.lookupType()") \
   V(SystemArraycopy, "void java.lang.System.arraycopy(java.lang.Object, int, java.lang.Object, int, int)") \
@@ -61,11 +63,13 @@
   V(RuntimeAvailableProcessors, "int java.lang.Runtime.availableProcessors()") \
   V(StringGetCharsNoCheck, "void java.lang.String.getCharsNoCheck(int, int, char[], int)") \
   V(StringCharAt, "char java.lang.String.charAt(int)") \
-  V(StringSetCharAt, "void java.lang.String.setCharAt(int, char)") \
+  V(StringDoReplace, "java.lang.String java.lang.String.doReplace(char, char)") \
   V(StringFactoryNewStringFromChars, "java.lang.String java.lang.StringFactory.newStringFromChars(int, int, char[])") \
   V(StringFactoryNewStringFromString, "java.lang.String java.lang.StringFactory.newStringFromString(java.lang.String)") \
   V(StringFastSubstring, "java.lang.String java.lang.String.fastSubstring(int, int)") \
   V(StringToCharArray, "char[] java.lang.String.toCharArray()") \
+  V(ThreadCurrentThread, "java.lang.Thread java.lang.Thread.currentThread()") \
+  V(ThreadGetNativeState, "int java.lang.Thread.nativeGetStatus(boolean)") \
   V(UnsafeCompareAndSwapLong, "boolean sun.misc.Unsafe.compareAndSwapLong(java.lang.Object, long, long, long)") \
   V(UnsafeCompareAndSwapObject, "boolean sun.misc.Unsafe.compareAndSwapObject(java.lang.Object, long, java.lang.Object, java.lang.Object)") \
   V(UnsafeGetObjectVolatile, "java.lang.Object sun.misc.Unsafe.getObjectVolatile(java.lang.Object, long)") \
