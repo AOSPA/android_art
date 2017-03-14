@@ -25,7 +25,34 @@ public class Main {
     doTest();
     new TestConfig().doFollowReferencesTest();
 
+    Runtime.getRuntime().gc();
+    Runtime.getRuntime().gc();
+
     doStringTest();
+
+    Runtime.getRuntime().gc();
+    Runtime.getRuntime().gc();
+
+    doPrimitiveArrayTest();
+    doPrimitiveFieldTest();
+
+    Runtime.getRuntime().gc();
+    Runtime.getRuntime().gc();
+
+    // Test klass filter.
+    System.out.println("--- klass ---");
+    new TestConfig(A.class, 0).doFollowReferencesTest();
+
+    // Test heap filter.
+    System.out.println("--- heap_filter ---");
+    System.out.println("---- tagged objects");
+    new TestConfig(null, 0x4).doFollowReferencesTest();
+    System.out.println("---- untagged objects");
+    new TestConfig(null, 0x8).doFollowReferencesTest();
+    System.out.println("---- tagged classes");
+    new TestConfig(null, 0x10).doFollowReferencesTest();
+    System.out.println("---- untagged classes");
+    new TestConfig(null, 0x20).doFollowReferencesTest();
   }
 
   public static void doTest() throws Exception {
@@ -37,14 +64,121 @@ public class Main {
   }
 
   public static void doStringTest() throws Exception {
-    final String str = "HelloWorld";
+    final String str = new String("HelloWorld");
+    final String str2 = new String("");
     Object o = new Object() {
       String s = str;
+      String s2 = str2;
     };
 
     setTag(str, 1);
+    setTag(str2, 2);
     System.out.println(Arrays.toString(followReferencesString(o)));
     System.out.println(getTag(str));
+    System.out.println(getTag(str2));
+  }
+
+  public static void doPrimitiveArrayTest() throws Exception {
+    final boolean[] zArray = new boolean[] { false, true };
+    setTag(zArray, 1);
+
+    final byte[] bArray = new byte[] { 1, 2, 3 };
+    setTag(bArray, 2);
+
+    final char[] cArray = new char[] { 'A', 'Z' };
+    setTag(cArray, 3);
+
+    final short[] sArray = new short[] { 1, 2, 3 };
+    setTag(sArray, 4);
+
+    final int[] iArray = new int[] { 1, 2, 3 };
+    setTag(iArray, 5);
+
+    final float[] fArray = new float[] { 0.0f, 1.0f };
+    setTag(fArray, 6);
+
+    final long[] lArray = new long[] { 1, 2, 3 };
+    setTag(lArray, 7);
+
+    final double[] dArray = new double[] { 0.0, 1.0 };
+    setTag(dArray, 8);
+
+    Object o = new Object() {
+      Object z = zArray;
+      Object b = bArray;
+      Object c = cArray;
+      Object s = sArray;
+      Object i = iArray;
+      Object f = fArray;
+      Object l = lArray;
+      Object d = dArray;
+    };
+
+    System.out.println(followReferencesPrimitiveArray(o));
+    System.out.print(getTag(zArray));
+    System.out.print(getTag(bArray));
+    System.out.print(getTag(cArray));
+    System.out.print(getTag(sArray));
+    System.out.print(getTag(iArray));
+    System.out.print(getTag(fArray));
+    System.out.print(getTag(lArray));
+    System.out.println(getTag(dArray));
+  }
+
+  public static void doPrimitiveFieldTest() throws Exception {
+    // Force GCs to clean up dirt.
+    Runtime.getRuntime().gc();
+    Runtime.getRuntime().gc();
+
+    doTestPrimitiveFieldsClasses();
+
+    doTestPrimitiveFieldsIntegral();
+
+    // Force GCs to clean up dirt.
+    Runtime.getRuntime().gc();
+    Runtime.getRuntime().gc();
+
+    doTestPrimitiveFieldsFloat();
+
+    // Force GCs to clean up dirt.
+    Runtime.getRuntime().gc();
+    Runtime.getRuntime().gc();
+  }
+
+  private static void doTestPrimitiveFieldsClasses() {
+    setTag(IntObject.class, 10000);
+    System.out.println(followReferencesPrimitiveFields(IntObject.class));
+    System.out.println(getTag(IntObject.class));
+    setTag(IntObject.class, 0);
+
+    setTag(FloatObject.class, 10000);
+    System.out.println(followReferencesPrimitiveFields(FloatObject.class));
+    System.out.println(getTag(FloatObject.class));
+    setTag(FloatObject.class, 0);
+
+    setTag(Inf1.class, 10000);
+    System.out.println(followReferencesPrimitiveFields(Inf1.class));
+    System.out.println(getTag(Inf1.class));
+    setTag(Inf1.class, 0);
+
+    setTag(Inf2.class, 10000);
+    System.out.println(followReferencesPrimitiveFields(Inf2.class));
+    System.out.println(getTag(Inf2.class));
+    setTag(Inf2.class, 0);
+  }
+
+  private static void doTestPrimitiveFieldsIntegral() {
+    IntObject intObject = new IntObject();
+    setTag(intObject, 10000);
+    System.out.println(followReferencesPrimitiveFields(intObject));
+    System.out.println(getTag(intObject));
+  }
+
+  private static void doTestPrimitiveFieldsFloat() {
+    FloatObject floatObject = new FloatObject();
+    setTag(floatObject, 10000);
+    System.out.println(followReferencesPrimitiveFields(floatObject));
+    System.out.println(getTag(floatObject));
   }
 
   private static void run() {
@@ -238,7 +372,35 @@ public class Main {
     }
   }
 
+  private static interface Inf1 {
+    public final static int A = 1;
+  }
+
+  private static interface Inf2 extends Inf1 {
+    public final static int B = 1;
+  }
+
+  private static class IntObject implements Inf1 {
+    byte b = (byte)1;
+    char c= 'a';
+    short s = (short)2;
+    int i = 3;
+    long l = 4;
+    Object o = new Object();
+    static int sI = 5;
+  }
+
+  private static class FloatObject extends IntObject implements Inf2 {
+    float f = 1.23f;
+    double d = 1.23;
+    Object p = new Object();
+    static int sI = 6;
+  }
+
   public static class Verifier {
+    // Should roots with vreg=-1 be printed?
+    public final static boolean PRINT_ROOTS_WITH_UNKNOWN_VREG = false;
+
     public static class Node {
       public String referrer;
 
@@ -323,6 +485,9 @@ public class Main {
             continue;
           }
           lastRoot = l;
+          if (!PRINT_ROOTS_WITH_UNKNOWN_VREG && l.indexOf("vreg=-1") > 0) {
+            continue;
+          }
           System.out.println(l);
         }
       }
@@ -424,4 +589,6 @@ public class Main {
   public static native String[] followReferences(int heapFilter, Class<?> klassFilter,
       Object initialObject, int stopAfter, int followSet, Object jniRef);
   public static native String[] followReferencesString(Object initialObject);
+  public static native String followReferencesPrimitiveArray(Object initialObject);
+  public static native String followReferencesPrimitiveFields(Object initialObject);
 }

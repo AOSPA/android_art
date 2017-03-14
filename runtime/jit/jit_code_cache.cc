@@ -987,8 +987,11 @@ void JitCodeCache::GarbageCollectCache(Thread* self) {
           const void* entry_point = info->GetMethod()->GetEntryPointFromQuickCompiledCode();
           if (ContainsPc(entry_point)) {
             info->SetSavedEntryPoint(entry_point);
-            Runtime::Current()->GetInstrumentation()->UpdateMethodsCode(
-                info->GetMethod(), GetQuickToInterpreterBridge());
+            // Don't call Instrumentation::UpdateMethods, as it can check the declaring
+            // class of the method. We may be concurrently running a GC which makes accessing
+            // the class unsafe. We know it is OK to bypass the instrumentation as we've just
+            // checked that the current entry point is JIT compiled code.
+            info->GetMethod()->SetEntryPointFromQuickCompiledCode(GetQuickToInterpreterBridge());
           }
         }
 
@@ -1259,10 +1262,21 @@ void JitCodeCache::GetProfiledMethods(const std::set<std::string>& dex_base_loca
     for (size_t i = 0; i < info->number_of_inline_caches_; ++i) {
       std::vector<ProfileMethodInfo::ProfileClassReference> profile_classes;
       const InlineCache& cache = info->cache_[i];
+      ArtMethod* caller = info->GetMethod();
+      bool is_missing_types = false;
       for (size_t k = 0; k < InlineCache::kIndividualCacheSize; k++) {
         mirror::Class* cls = cache.classes_[k].Read();
         if (cls == nullptr) {
           break;
+        }
+
+        // Check if the receiver is in the boot class path or if it's in the
+        // same class loader as the caller. If not, skip it, as there is not
+        // much we can do during AOT.
+        if (!cls->IsBootStrapClassLoaded() &&
+            caller->GetClassLoader() != cls->GetClassLoader()) {
+          is_missing_types = true;
+          continue;
         }
 
         const DexFile* class_dex_file = nullptr;
@@ -1270,6 +1284,9 @@ void JitCodeCache::GetProfiledMethods(const std::set<std::string>& dex_base_loca
 
         if (cls->GetDexCache() == nullptr) {
           DCHECK(cls->IsArrayClass()) << cls->PrettyClass();
+          // Make a best effort to find the type index in the method's dex file.
+          // We could search all open dex files but that might turn expensive
+          // and probably not worth it.
           class_dex_file = dex_file;
           type_index = cls->FindTypeIndexInOtherDexFile(*dex_file);
         } else {
@@ -1278,18 +1295,20 @@ void JitCodeCache::GetProfiledMethods(const std::set<std::string>& dex_base_loca
         }
         if (!type_index.IsValid()) {
           // Could be a proxy class or an array for which we couldn't find the type index.
-          // TODO(calin): can we really miss the type index for arrays here?
+          is_missing_types = true;
           continue;
         }
         if (ContainsElement(dex_base_locations, class_dex_file->GetBaseLocation())) {
           // Only consider classes from the same apk (including multidex).
           profile_classes.emplace_back(/*ProfileMethodInfo::ProfileClassReference*/
               class_dex_file, type_index);
+        } else {
+          is_missing_types = true;
         }
       }
       if (!profile_classes.empty()) {
         inline_caches.emplace_back(/*ProfileMethodInfo::ProfileInlineCache*/
-            cache.dex_pc_, profile_classes);
+            cache.dex_pc_, is_missing_types, profile_classes);
       }
     }
     methods.emplace_back(/*ProfileMethodInfo*/

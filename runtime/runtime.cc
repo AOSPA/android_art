@@ -114,6 +114,7 @@
 #include "native/java_lang_Thread.h"
 #include "native/java_lang_Throwable.h"
 #include "native/java_lang_VMClassLoader.h"
+#include "native/java_lang_Void.h"
 #include "native/java_lang_invoke_MethodHandleImpl.h"
 #include "native/java_lang_ref_FinalizerReference.h"
 #include "native/java_lang_ref_Reference.h"
@@ -1556,6 +1557,7 @@ void Runtime::RegisterRuntimeNativeMethods(JNIEnv* env) {
   register_java_lang_Thread(env);
   register_java_lang_Throwable(env);
   register_java_lang_VMClassLoader(env);
+  register_java_lang_Void(env);
   register_java_util_concurrent_atomic_AtomicLong(env);
   register_libcore_util_CharsetUtils(env);
   register_org_apache_harmony_dalvik_ddmc_DdmServer(env);
@@ -1961,9 +1963,7 @@ void Runtime::SetCalleeSaveMethod(ArtMethod* method, CalleeSaveType type) {
 }
 
 void Runtime::RegisterAppInfo(const std::vector<std::string>& code_paths,
-                              const std::string& profile_output_filename,
-                              const std::string& foreign_dex_profile_path,
-                              const std::string& app_dir) {
+                              const std::string& profile_output_filename) {
   if (jit_.get() == nullptr) {
     // We are not JITing. Nothing to do.
     return;
@@ -1985,18 +1985,7 @@ void Runtime::RegisterAppInfo(const std::vector<std::string>& code_paths,
     return;
   }
 
-  jit_->StartProfileSaver(profile_output_filename,
-                          code_paths,
-                          foreign_dex_profile_path,
-                          app_dir);
-}
-
-void Runtime::NotifyDexLoaded(const std::string& dex_location) {
-  VLOG(profiler) << "Notify dex loaded: " << dex_location;
-  // We know that if the ProfileSaver is started then we can record profile information.
-  if (ProfileSaver::IsStarted()) {
-    ProfileSaver::NotifyDexUse(dex_location);
-  }
+  jit_->StartProfileSaver(profile_output_filename, code_paths);
 }
 
 // Transaction support.

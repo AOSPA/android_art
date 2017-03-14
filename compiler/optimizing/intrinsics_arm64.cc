@@ -853,7 +853,6 @@ static void GenUnsafeGet(HInvoke* invoke,
   DCHECK((type == Primitive::kPrimInt) ||
          (type == Primitive::kPrimLong) ||
          (type == Primitive::kPrimNot));
-  MacroAssembler* masm = codegen->GetVIXLAssembler();
   Location base_loc = locations->InAt(1);
   Register base = WRegisterFrom(base_loc);      // Object pointer.
   Location offset_loc = locations->InAt(2);
@@ -863,8 +862,7 @@ static void GenUnsafeGet(HInvoke* invoke,
 
   if (type == Primitive::kPrimNot && kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
     // UnsafeGetObject/UnsafeGetObjectVolatile with Baker's read barrier case.
-    UseScratchRegisterScope temps(masm);
-    Register temp = temps.AcquireW();
+    Register temp = WRegisterFrom(locations->GetTemp(0));
     codegen->GenerateReferenceLoadWithBakerReadBarrier(invoke,
                                                        trg_loc,
                                                        base,
@@ -901,6 +899,9 @@ static void CreateIntIntIntToIntLocations(ArenaAllocator* arena, HInvoke* invoke
                                                            kIntrinsified);
   if (can_call && kUseBakerReadBarrier) {
     locations->SetCustomSlowPathCallerSaves(RegisterSet::Empty());  // No caller-save registers.
+    // We need a temporary register for the read barrier marking slow
+    // path in CodeGeneratorARM64::GenerateReferenceLoadWithBakerReadBarrier.
+    locations->AddTemp(Location::RequiresRegister());
   }
   locations->SetInAt(0, Location::NoLocation());        // Unused receiver.
   locations->SetInAt(1, Location::RequiresRegister());
@@ -2381,9 +2382,14 @@ void IntrinsicLocationsBuilderARM64::VisitSystemArrayCopy(HInvoke* invoke) {
     // Temporary register IP0, obtained from the VIXL scratch register
     // pool, cannot be used in ReadBarrierSystemArrayCopySlowPathARM64
     // (because that register is clobbered by ReadBarrierMarkRegX
-    // entry points). Get an extra temporary register from the
-    // register allocator.
+    // entry points). It cannot be used in calls to
+    // CodeGeneratorARM64::GenerateFieldLoadWithBakerReadBarrier
+    // either. For these reasons, get a third extra temporary register
+    // from the register allocator.
     locations->AddTemp(Location::RequiresRegister());
+  } else {
+    // Cases other than Baker read barriers: the third temporary will
+    // be acquired from the VIXL scratch register pool.
   }
 }
 
@@ -2494,11 +2500,12 @@ void IntrinsicCodeGeneratorARM64::VisitSystemArrayCopy(HInvoke* invoke) {
     // We use a block to end the scratch scope before the write barrier, thus
     // freeing the temporary registers so they can be used in `MarkGCCard`.
     UseScratchRegisterScope temps(masm);
-    // Note: Because it is acquired from VIXL's scratch register pool,
-    // `temp3` might be IP0, and thus cannot be used as `ref` argument
-    // of CodeGeneratorARM64::GenerateFieldLoadWithBakerReadBarrier
-    // calls below (see ReadBarrierMarkSlowPathARM64 for more details).
-    Register temp3 = temps.AcquireW();
+    Register temp3;
+    if (kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
+      temp3 = WRegisterFrom(locations->GetTemp(2));
+    } else {
+      temp3 = temps.AcquireW();
+    }
 
     if (!optimizations.GetDoesNotNeedTypeCheck()) {
       // Check whether all elements of the source array are assignable to the component
@@ -2704,19 +2711,7 @@ void IntrinsicCodeGeneratorARM64::VisitSystemArrayCopy(HInvoke* invoke) {
 
     Register src_curr_addr = temp1.X();
     Register dst_curr_addr = temp2.X();
-    Register src_stop_addr;
-    if (kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
-      // Temporary register IP0, obtained from the VIXL scratch
-      // register pool as `temp3`, cannot be used in
-      // ReadBarrierSystemArrayCopySlowPathARM64 (because that
-      // register is clobbered by ReadBarrierMarkRegX entry points).
-      // So another temporary register allocated by the register
-      // allocator instead.
-      DCHECK_EQ(LocationFrom(temp3).reg(), IP0);
-      src_stop_addr = XRegisterFrom(locations->GetTemp(2));
-    } else {
-      src_stop_addr = temp3.X();
-    }
+    Register src_stop_addr = temp3.X();
 
     GenSystemArrayCopyAddresses(masm,
                                 Primitive::kPrimNot,
@@ -2732,6 +2727,8 @@ void IntrinsicCodeGeneratorARM64::VisitSystemArrayCopy(HInvoke* invoke) {
     const int32_t element_size = Primitive::ComponentSize(Primitive::kPrimNot);
 
     if (kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
+      // TODO: Also convert this intrinsic to the IsGcMarking strategy?
+
       // SystemArrayCopy implementation for Baker read barriers (see
       // also CodeGeneratorARM::GenerateReferenceLoadWithBakerReadBarrier):
       //
@@ -2758,10 +2755,11 @@ void IntrinsicCodeGeneratorARM64::VisitSystemArrayCopy(HInvoke* invoke) {
       __ Cmp(src_curr_addr, src_stop_addr);
       __ B(&done, eq);
 
-      Register tmp = temps.AcquireW();
       // Make sure `tmp` is not IP0, as it is clobbered by
       // ReadBarrierMarkRegX entry points in
       // ReadBarrierSystemArrayCopySlowPathARM64.
+      temps.Exclude(ip0);
+      Register tmp = temps.AcquireW();
       DCHECK_NE(LocationFrom(tmp).reg(), IP0);
 
       // /* int32_t */ monitor = src->monitor_
@@ -2922,6 +2920,79 @@ void IntrinsicCodeGeneratorARM64::VisitReferenceGetReferent(HInvoke* invoke) {
   }
   codegen_->GetAssembler()->MaybeUnpoisonHeapReference(out);
   __ Bind(slow_path->GetExitLabel());
+}
+
+void IntrinsicLocationsBuilderARM64::VisitIntegerValueOf(HInvoke* invoke) {
+  InvokeRuntimeCallingConvention calling_convention;
+  IntrinsicVisitor::ComputeIntegerValueOfLocations(
+      invoke,
+      codegen_,
+      calling_convention.GetReturnLocation(Primitive::kPrimNot),
+      Location::RegisterLocation(calling_convention.GetRegisterAt(0).GetCode()));
+}
+
+void IntrinsicCodeGeneratorARM64::VisitIntegerValueOf(HInvoke* invoke) {
+  IntrinsicVisitor::IntegerValueOfInfo info = IntrinsicVisitor::ComputeIntegerValueOfInfo();
+  LocationSummary* locations = invoke->GetLocations();
+  MacroAssembler* masm = GetVIXLAssembler();
+
+  Register out = RegisterFrom(locations->Out(), Primitive::kPrimNot);
+  UseScratchRegisterScope temps(masm);
+  Register temp = temps.AcquireW();
+  InvokeRuntimeCallingConvention calling_convention;
+  Register argument = calling_convention.GetRegisterAt(0);
+  if (invoke->InputAt(0)->IsConstant()) {
+    int32_t value = invoke->InputAt(0)->AsIntConstant()->GetValue();
+    if (value >= info.low && value <= info.high) {
+      // Just embed the j.l.Integer in the code.
+      ScopedObjectAccess soa(Thread::Current());
+      mirror::Object* boxed = info.cache->Get(value + (-info.low));
+      DCHECK(boxed != nullptr && Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(boxed));
+      uint32_t address = dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(boxed));
+      __ Ldr(out.W(), codegen_->DeduplicateBootImageAddressLiteral(address));
+    } else {
+      // Allocate and initialize a new j.l.Integer.
+      // TODO: If we JIT, we could allocate the j.l.Integer now, and store it in the
+      // JIT object table.
+      uint32_t address =
+          dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(info.integer));
+      __ Ldr(argument.W(), codegen_->DeduplicateBootImageAddressLiteral(address));
+      codegen_->InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
+      CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+      __ Mov(temp.W(), value);
+      __ Str(temp.W(), HeapOperand(out.W(), info.value_offset));
+      // `value` is a final field :-( Ideally, we'd merge this memory barrier with the allocation
+      // one.
+      codegen_->GenerateMemoryBarrier(MemBarrierKind::kStoreStore);
+    }
+  } else {
+    Register in = RegisterFrom(locations->InAt(0), Primitive::kPrimInt);
+    // Check bounds of our cache.
+    __ Add(out.W(), in.W(), -info.low);
+    __ Cmp(out.W(), info.high - info.low + 1);
+    vixl::aarch64::Label allocate, done;
+    __ B(&allocate, hs);
+    // If the value is within the bounds, load the j.l.Integer directly from the array.
+    uint32_t data_offset = mirror::Array::DataOffset(kHeapReferenceSize).Uint32Value();
+    uint32_t address = dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(info.cache));
+    __ Ldr(temp.W(), codegen_->DeduplicateBootImageAddressLiteral(data_offset + address));
+    MemOperand source = HeapOperand(
+        temp, out.X(), LSL, Primitive::ComponentSizeShift(Primitive::kPrimNot));
+    codegen_->Load(Primitive::kPrimNot, out, source);
+    codegen_->GetAssembler()->MaybeUnpoisonHeapReference(out);
+    __ B(&done);
+    __ Bind(&allocate);
+    // Otherwise allocate and initialize a new j.l.Integer.
+    address = dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(info.integer));
+    __ Ldr(argument.W(), codegen_->DeduplicateBootImageAddressLiteral(address));
+    codegen_->InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
+    CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+    __ Str(in.W(), HeapOperand(out.W(), info.value_offset));
+    // `value` is a final field :-( Ideally, we'd merge this memory barrier with the allocation
+    // one.
+    codegen_->GenerateMemoryBarrier(MemBarrierKind::kStoreStore);
+    __ Bind(&done);
+  }
 }
 
 UNIMPLEMENTED_INTRINSIC(ARM64, IntegerHighestOneBit)

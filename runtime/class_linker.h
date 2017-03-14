@@ -266,16 +266,16 @@ class ClassLinker {
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_, !Roles::uninterruptible_);
 
+  mirror::Class* ResolveType(dex::TypeIndex type_idx, ArtField* referrer)
+      REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(!Locks::dex_lock_, !Roles::uninterruptible_);
+
   // Look up a resolved type with the given ID from the DexFile. The ClassLoader is used to search
   // for the type, since it may be referenced from but not contained within the given DexFile.
   ObjPtr<mirror::Class> LookupResolvedType(const DexFile& dex_file,
                                            dex::TypeIndex type_idx,
                                            ObjPtr<mirror::DexCache> dex_cache,
                                            ObjPtr<mirror::ClassLoader> class_loader)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  static ObjPtr<mirror::Class> LookupResolvedType(dex::TypeIndex type_idx,
-                                                  ObjPtr<mirror::DexCache> dex_cache,
-                                                  ObjPtr<mirror::ClassLoader> class_loader)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Resolve a type with the given ID from the DexFile, storing the
@@ -617,7 +617,8 @@ class ClassLinker {
   std::set<DexCacheResolvedClasses> GetResolvedClasses(bool ignore_boot_classes)
       REQUIRES(!Locks::dex_lock_);
 
-  std::unordered_set<std::string> GetClassDescriptorsForProfileKeys(
+  // Returns the class descriptors for loaded dex files.
+  std::unordered_set<std::string> GetClassDescriptorsForResolvedClasses(
       const std::set<DexCacheResolvedClasses>& classes)
       REQUIRES(!Locks::dex_lock_);
 

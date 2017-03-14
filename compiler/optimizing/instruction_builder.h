@@ -93,6 +93,10 @@ class HInstructionBuilder : public ValueObject {
   HBasicBlock* FindBlockStartingAt(uint32_t dex_pc) const;
 
   ArenaVector<HInstruction*>* GetLocalsFor(HBasicBlock* block);
+  // Out of line version of GetLocalsFor(), which has a fast path that is
+  // beneficial to get inlined by callers.
+  ArenaVector<HInstruction*>* GetLocalsForWithAllocation(
+      HBasicBlock* block, ArenaVector<HInstruction*>* locals, const size_t vregs);
   HInstruction* ValueOfLocalAt(HBasicBlock* block, size_t local);
   HInstruction* LoadLocal(uint32_t register_index, Primitive::Type type) const;
   HInstruction* LoadNullCheckedLocal(uint32_t register_index, uint32_t dex_pc);
@@ -106,8 +110,11 @@ class HInstructionBuilder : public ValueObject {
 
   // Returns whether the current method needs access check for the type.
   // Output parameter finalizable is set to whether the type is finalizable.
-  bool NeedsAccessCheck(dex::TypeIndex type_index, /*out*/bool* finalizable) const
+  bool NeedsAccessCheck(dex::TypeIndex type_index,
+                        Handle<mirror::DexCache> dex_cache,
+                        /*out*/bool* finalizable) const
       REQUIRES_SHARED(Locks::mutator_lock_);
+  bool NeedsAccessCheck(dex::TypeIndex type_index, /*out*/bool* finalizable) const;
 
   template<typename T>
   void Unop_12x(const Instruction& instruction, Primitive::Type type, uint32_t dex_pc);
@@ -296,12 +303,6 @@ class HInstructionBuilder : public ValueObject {
   // Try to resolve a field using the class linker. Return null if it could not
   // be found.
   ArtField* ResolveField(uint16_t field_idx, bool is_static, bool is_put);
-
-  ObjPtr<mirror::Class> LookupResolvedType(dex::TypeIndex type_index,
-                                           const DexCompilationUnit& compilation_unit) const
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  ObjPtr<mirror::Class> LookupReferrerClass() const REQUIRES_SHARED(Locks::mutator_lock_);
 
   ArenaAllocator* const arena_;
   HGraph* const graph_;

@@ -17,6 +17,7 @@
 #ifndef ART_COMPILER_OPTIMIZING_OPTIMIZING_COMPILER_STATS_H_
 #define ART_COMPILER_OPTIMIZING_OPTIMIZING_COMPILER_STATS_H_
 
+#include <atomic>
 #include <iomanip>
 #include <string>
 #include <type_traits>
@@ -67,14 +68,18 @@ enum MethodCompilationStat {
   kImplicitNullCheckGenerated,
   kExplicitNullCheckGenerated,
   kSimplifyIf,
+  kInstructionSunk,
   kLastStat
 };
 
 class OptimizingCompilerStats {
  public:
-  OptimizingCompilerStats() {}
+  OptimizingCompilerStats() {
+    // The std::atomic<> default constructor leaves values uninitialized, so initialize them now.
+    Reset();
+  }
 
-  void RecordStat(MethodCompilationStat stat, size_t count = 1) {
+  void RecordStat(MethodCompilationStat stat, uint32_t count = 1) {
     compile_stats_[stat] += count;
   }
 
@@ -93,12 +98,27 @@ class OptimizingCompilerStats {
           << " methods: " << std::fixed << std::setprecision(2)
           << compiled_percent << "% (" << compile_stats_[kCompiled] << ") compiled.";
 
-      for (int i = 0; i < kLastStat; i++) {
+      for (size_t i = 0; i < kLastStat; i++) {
         if (compile_stats_[i] != 0) {
           LOG(INFO) << PrintMethodCompilationStat(static_cast<MethodCompilationStat>(i)) << ": "
               << compile_stats_[i];
         }
       }
+    }
+  }
+
+  void AddTo(OptimizingCompilerStats* other_stats) {
+    for (size_t i = 0; i != kLastStat; ++i) {
+      uint32_t count = compile_stats_[i];
+      if (count != 0) {
+        other_stats->RecordStat(static_cast<MethodCompilationStat>(i), count);
+      }
+    }
+  }
+
+  void Reset() {
+    for (size_t i = 0; i != kLastStat; ++i) {
+      compile_stats_[i] = 0u;
     }
   }
 
@@ -147,6 +167,7 @@ class OptimizingCompilerStats {
       case kImplicitNullCheckGenerated: name = "ImplicitNullCheckGenerated"; break;
       case kExplicitNullCheckGenerated: name = "ExplicitNullCheckGenerated"; break;
       case kSimplifyIf: name = "SimplifyIf"; break;
+      case kInstructionSunk: name = "InstructionSunk"; break;
 
       case kLastStat:
         LOG(FATAL) << "invalid stat "
@@ -156,7 +177,7 @@ class OptimizingCompilerStats {
     return "OptStat#" + name;
   }
 
-  AtomicInteger compile_stats_[kLastStat];
+  std::atomic<uint32_t> compile_stats_[kLastStat];
 
   DISALLOW_COPY_AND_ASSIGN(OptimizingCompilerStats);
 };

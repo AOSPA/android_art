@@ -36,18 +36,22 @@ namespace art {
  */
 struct ProfileMethodInfo {
   struct ProfileClassReference {
+    ProfileClassReference() : dex_file(nullptr) {}
     ProfileClassReference(const DexFile* dex, const dex::TypeIndex& index)
         : dex_file(dex), type_index(index) {}
 
     const DexFile* dex_file;
-    const dex::TypeIndex type_index;
+    dex::TypeIndex type_index;
   };
 
   struct ProfileInlineCache {
-    ProfileInlineCache(uint32_t pc, const std::vector<ProfileClassReference>& profile_classes)
-        : dex_pc(pc), classes(profile_classes) {}
+    ProfileInlineCache(uint32_t pc,
+                       bool missing_types,
+                       const std::vector<ProfileClassReference>& profile_classes)
+        : dex_pc(pc), is_missing_types(missing_types), classes(profile_classes) {}
 
     const uint32_t dex_pc;
+    const bool is_missing_types;
     const std::vector<ProfileClassReference> classes;
   };
 
@@ -91,6 +95,11 @@ class ProfileCompilationInfo {
       return dex_checksum == other.dex_checksum && dex_location == other.dex_location;
     }
 
+    bool MatchesDex(const DexFile* dex_file) const {
+      return dex_checksum == dex_file->GetLocationChecksum() &&
+           dex_location == GetProfileDexFileKey(dex_file->GetLocation());
+    }
+
     std::string dex_location;
     uint32_t dex_checksum;
   };
@@ -128,18 +137,30 @@ class ProfileCompilationInfo {
 
   // Encodes the actual inline cache for a given dex pc (whether or not the receiver is
   // megamorphic and its possible types).
-  // If the receiver is megamorphic the set of classes will be empty.
+  // If the receiver is megamorphic or is missing types the set of classes will be empty.
   struct DexPcData {
-    DexPcData() : is_megamorphic(false) {}
+    DexPcData() : is_missing_types(false), is_megamorphic(false) {}
     void AddClass(uint16_t dex_profile_idx, const dex::TypeIndex& type_idx);
-    void SetMegamorphic() {
+    void SetIsMegamorphic() {
+      if (is_missing_types) return;
       is_megamorphic = true;
       classes.clear();
     }
+    void SetIsMissingTypes() {
+      is_megamorphic = false;
+      is_missing_types = true;
+      classes.clear();
+    }
     bool operator==(const DexPcData& other) const {
-      return is_megamorphic == other.is_megamorphic && classes == other.classes;
+      return is_megamorphic == other.is_megamorphic &&
+          is_missing_types == other.is_missing_types &&
+          classes == other.classes;
     }
 
+    // Not all runtime types can be encoded in the profile. For example if the receiver
+    // type is in a dex file which is not tracked for profiling its type cannot be
+    // encoded. When types are missing this field will be set to true.
+    bool is_missing_types;
     bool is_megamorphic;
     ClassSet classes;
   };
@@ -218,9 +239,8 @@ class ProfileCompilationInfo {
   bool Equals(const ProfileCompilationInfo& other);
 
   // Return the class descriptors for all of the classes in the profiles' class sets.
-  // Note the dex location is actually the profile key, the caller needs to call back in to the
-  // profile info stuff to generate a map back to the dex location.
-  std::set<DexCacheResolvedClasses> GetResolvedClasses() const;
+  std::set<DexCacheResolvedClasses> GetResolvedClasses(
+      const std::unordered_set<std::string>& dex_files_locations) const;
 
   // Clear the resolved classes from the current object.
   void ClearResolvedClasses();

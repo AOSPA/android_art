@@ -512,6 +512,7 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
   void Ldpc(GpuRegister rs, uint32_t imm18);  // MIPS64
   void Lui(GpuRegister rt, uint16_t imm16);
   void Aui(GpuRegister rt, GpuRegister rs, uint16_t imm16);
+  void Daui(GpuRegister rt, GpuRegister rs, uint16_t imm16);  // MIPS64
   void Dahi(GpuRegister rs, uint16_t imm16);  // MIPS64
   void Dati(GpuRegister rs, uint16_t imm16);  // MIPS64
   void Sync(uint32_t stype);
@@ -654,6 +655,44 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
   void Addiu32(GpuRegister rt, GpuRegister rs, int32_t value);
   void Daddiu64(GpuRegister rt, GpuRegister rs, int64_t value, GpuRegister rtmp = AT);  // MIPS64
 
+  //
+  // Heap poisoning.
+  //
+
+  // Poison a heap reference contained in `src` and store it in `dst`.
+  void PoisonHeapReference(GpuRegister dst, GpuRegister src) {
+    // dst = -src.
+    // Negate the 32-bit ref.
+    Dsubu(dst, ZERO, src);
+    // And constrain it to 32 bits (zero-extend into bits 32 through 63) as on Arm64 and x86/64.
+    Dext(dst, dst, 0, 32);
+  }
+  // Poison a heap reference contained in `reg`.
+  void PoisonHeapReference(GpuRegister reg) {
+    // reg = -reg.
+    PoisonHeapReference(reg, reg);
+  }
+  // Unpoison a heap reference contained in `reg`.
+  void UnpoisonHeapReference(GpuRegister reg) {
+    // reg = -reg.
+    // Negate the 32-bit ref.
+    Dsubu(reg, ZERO, reg);
+    // And constrain it to 32 bits (zero-extend into bits 32 through 63) as on Arm64 and x86/64.
+    Dext(reg, reg, 0, 32);
+  }
+  // Poison a heap reference contained in `reg` if heap poisoning is enabled.
+  void MaybePoisonHeapReference(GpuRegister reg) {
+    if (kPoisonHeapReferences) {
+      PoisonHeapReference(reg);
+    }
+  }
+  // Unpoison a heap reference contained in `reg` if heap poisoning is enabled.
+  void MaybeUnpoisonHeapReference(GpuRegister reg) {
+    if (kPoisonHeapReferences) {
+      UnpoisonHeapReference(reg);
+    }
+  }
+
   void Bind(Label* label) OVERRIDE {
     Bind(down_cast<Mips64Label*>(label));
   }
@@ -733,6 +772,191 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
   void Bc1nez(FpuRegister ft, Mips64Label* label);
 
   void EmitLoad(ManagedRegister m_dst, GpuRegister src_register, int32_t src_offset, size_t size);
+
+ private:
+  // This will be used as an argument for loads/stores
+  // when there is no need for implicit null checks.
+  struct NoImplicitNullChecker {
+    void operator()() const {}
+  };
+
+ public:
+  template <typename ImplicitNullChecker = NoImplicitNullChecker>
+  void LoadFromOffset(LoadOperandType type,
+                      GpuRegister reg,
+                      GpuRegister base,
+                      int32_t offset,
+                      ImplicitNullChecker null_checker = NoImplicitNullChecker()) {
+    if (!IsInt<16>(offset) ||
+        (type == kLoadDoubleword && !IsAligned<kMips64DoublewordSize>(offset) &&
+         !IsInt<16>(static_cast<int32_t>(offset + kMips64WordSize)))) {
+      LoadConst32(AT, offset & ~(kMips64DoublewordSize - 1));
+      Daddu(AT, AT, base);
+      base = AT;
+      offset &= (kMips64DoublewordSize - 1);
+    }
+
+    switch (type) {
+      case kLoadSignedByte:
+        Lb(reg, base, offset);
+        break;
+      case kLoadUnsignedByte:
+        Lbu(reg, base, offset);
+        break;
+      case kLoadSignedHalfword:
+        Lh(reg, base, offset);
+        break;
+      case kLoadUnsignedHalfword:
+        Lhu(reg, base, offset);
+        break;
+      case kLoadWord:
+        CHECK_ALIGNED(offset, kMips64WordSize);
+        Lw(reg, base, offset);
+        break;
+      case kLoadUnsignedWord:
+        CHECK_ALIGNED(offset, kMips64WordSize);
+        Lwu(reg, base, offset);
+        break;
+      case kLoadDoubleword:
+        if (!IsAligned<kMips64DoublewordSize>(offset)) {
+          CHECK_ALIGNED(offset, kMips64WordSize);
+          Lwu(reg, base, offset);
+          null_checker();
+          Lwu(TMP2, base, offset + kMips64WordSize);
+          Dinsu(reg, TMP2, 32, 32);
+        } else {
+          Ld(reg, base, offset);
+          null_checker();
+        }
+        break;
+    }
+    if (type != kLoadDoubleword) {
+      null_checker();
+    }
+  }
+
+  template <typename ImplicitNullChecker = NoImplicitNullChecker>
+  void LoadFpuFromOffset(LoadOperandType type,
+                         FpuRegister reg,
+                         GpuRegister base,
+                         int32_t offset,
+                         ImplicitNullChecker null_checker = NoImplicitNullChecker()) {
+    if (!IsInt<16>(offset) ||
+        (type == kLoadDoubleword && !IsAligned<kMips64DoublewordSize>(offset) &&
+         !IsInt<16>(static_cast<int32_t>(offset + kMips64WordSize)))) {
+      LoadConst32(AT, offset & ~(kMips64DoublewordSize - 1));
+      Daddu(AT, AT, base);
+      base = AT;
+      offset &= (kMips64DoublewordSize - 1);
+    }
+
+    switch (type) {
+      case kLoadWord:
+        CHECK_ALIGNED(offset, kMips64WordSize);
+        Lwc1(reg, base, offset);
+        null_checker();
+        break;
+      case kLoadDoubleword:
+        if (!IsAligned<kMips64DoublewordSize>(offset)) {
+          CHECK_ALIGNED(offset, kMips64WordSize);
+          Lwc1(reg, base, offset);
+          null_checker();
+          Lw(TMP2, base, offset + kMips64WordSize);
+          Mthc1(TMP2, reg);
+        } else {
+          Ldc1(reg, base, offset);
+          null_checker();
+        }
+        break;
+      default:
+        LOG(FATAL) << "UNREACHABLE";
+    }
+  }
+
+  template <typename ImplicitNullChecker = NoImplicitNullChecker>
+  void StoreToOffset(StoreOperandType type,
+                     GpuRegister reg,
+                     GpuRegister base,
+                     int32_t offset,
+                     ImplicitNullChecker null_checker = NoImplicitNullChecker()) {
+    if (!IsInt<16>(offset) ||
+        (type == kStoreDoubleword && !IsAligned<kMips64DoublewordSize>(offset) &&
+         !IsInt<16>(static_cast<int32_t>(offset + kMips64WordSize)))) {
+      LoadConst32(AT, offset & ~(kMips64DoublewordSize - 1));
+      Daddu(AT, AT, base);
+      base = AT;
+      offset &= (kMips64DoublewordSize - 1);
+    }
+
+    switch (type) {
+      case kStoreByte:
+        Sb(reg, base, offset);
+        break;
+      case kStoreHalfword:
+        Sh(reg, base, offset);
+        break;
+      case kStoreWord:
+        CHECK_ALIGNED(offset, kMips64WordSize);
+        Sw(reg, base, offset);
+        break;
+      case kStoreDoubleword:
+        if (!IsAligned<kMips64DoublewordSize>(offset)) {
+          CHECK_ALIGNED(offset, kMips64WordSize);
+          Sw(reg, base, offset);
+          null_checker();
+          Dsrl32(TMP2, reg, 0);
+          Sw(TMP2, base, offset + kMips64WordSize);
+        } else {
+          Sd(reg, base, offset);
+          null_checker();
+        }
+        break;
+      default:
+        LOG(FATAL) << "UNREACHABLE";
+    }
+    if (type != kStoreDoubleword) {
+      null_checker();
+    }
+  }
+
+  template <typename ImplicitNullChecker = NoImplicitNullChecker>
+  void StoreFpuToOffset(StoreOperandType type,
+                        FpuRegister reg,
+                        GpuRegister base,
+                        int32_t offset,
+                        ImplicitNullChecker null_checker = NoImplicitNullChecker()) {
+    if (!IsInt<16>(offset) ||
+        (type == kStoreDoubleword && !IsAligned<kMips64DoublewordSize>(offset) &&
+         !IsInt<16>(static_cast<int32_t>(offset + kMips64WordSize)))) {
+      LoadConst32(AT, offset & ~(kMips64DoublewordSize - 1));
+      Daddu(AT, AT, base);
+      base = AT;
+      offset &= (kMips64DoublewordSize - 1);
+    }
+
+    switch (type) {
+      case kStoreWord:
+        CHECK_ALIGNED(offset, kMips64WordSize);
+        Swc1(reg, base, offset);
+        null_checker();
+        break;
+      case kStoreDoubleword:
+        if (!IsAligned<kMips64DoublewordSize>(offset)) {
+          CHECK_ALIGNED(offset, kMips64WordSize);
+          Mfhc1(TMP2, reg);
+          Swc1(reg, base, offset);
+          null_checker();
+          Sw(TMP2, base, offset + kMips64WordSize);
+        } else {
+          Sdc1(reg, base, offset);
+          null_checker();
+        }
+        break;
+      default:
+        LOG(FATAL) << "UNREACHABLE";
+    }
+  }
+
   void LoadFromOffset(LoadOperandType type, GpuRegister reg, GpuRegister base, int32_t offset);
   void LoadFpuFromOffset(LoadOperandType type, FpuRegister reg, GpuRegister base, int32_t offset);
   void StoreToOffset(StoreOperandType type, GpuRegister reg, GpuRegister base, int32_t offset);

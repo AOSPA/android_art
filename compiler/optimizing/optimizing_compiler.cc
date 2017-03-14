@@ -56,6 +56,7 @@
 #include "builder.h"
 #include "cha_guard_optimization.h"
 #include "code_generator.h"
+#include "code_sinking.h"
 #include "compiled_method.h"
 #include "compiler.h"
 #include "constant_folding.h"
@@ -306,7 +307,7 @@ class OptimizingCompiler FINAL : public Compiler {
                           InvokeType invoke_type,
                           uint16_t class_def_idx,
                           uint32_t method_idx,
-                          Handle<mirror::ClassLoader> class_loader,
+                          jobject class_loader,
                           const DexFile& dex_file,
                           Handle<mirror::DexCache> dex_cache) const OVERRIDE;
 
@@ -375,7 +376,7 @@ class OptimizingCompiler FINAL : public Compiler {
                             InvokeType invoke_type,
                             uint16_t class_def_idx,
                             uint32_t method_idx,
-                            Handle<mirror::ClassLoader> class_loader,
+                            jobject class_loader,
                             const DexFile& dex_file,
                             Handle<mirror::DexCache> dex_cache,
                             ArtMethod* method,
@@ -506,7 +507,7 @@ static HOptimization* BuildOptimization(
   } else if (opt_name == HInductionVarAnalysis::kInductionPassName) {
     return new (arena) HInductionVarAnalysis(graph);
   } else if (opt_name == InstructionSimplifier::kInstructionSimplifierPassName) {
-    return new (arena) InstructionSimplifier(graph, stats, pass_name.c_str());
+    return new (arena) InstructionSimplifier(graph, codegen, stats, pass_name.c_str());
   } else if (opt_name == IntrinsicsRecognizer::kIntrinsicsRecognizerPassName) {
     return new (arena) IntrinsicsRecognizer(graph, stats);
   } else if (opt_name == LICM::kLoopInvariantCodeMotionPassName) {
@@ -518,9 +519,11 @@ static HOptimization* BuildOptimization(
   } else if (opt_name == SideEffectsAnalysis::kSideEffectsAnalysisPassName) {
     return new (arena) SideEffectsAnalysis(graph);
   } else if (opt_name == HLoopOptimization::kLoopOptimizationPassName) {
-    return new (arena) HLoopOptimization(graph, most_recent_induction);
+    return new (arena) HLoopOptimization(graph, driver, most_recent_induction);
   } else if (opt_name == CHAGuardOptimization::kCHAGuardOptimizationPassName) {
     return new (arena) CHAGuardOptimization(graph);
+  } else if (opt_name == CodeSinking::kCodeSinkingPassName) {
+    return new (arena) CodeSinking(graph, stats);
 #ifdef ART_ENABLE_CODEGEN_arm
   } else if (opt_name == arm::DexCacheArrayFixups::kDexCacheArrayFixupsArmPassName) {
     return new (arena) arm::DexCacheArrayFixups(graph, codegen, stats);
@@ -765,28 +768,32 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
   HDeadCodeElimination* dce3 = new (arena) HDeadCodeElimination(
       graph, stats, "dead_code_elimination$final");
   HConstantFolding* fold1 = new (arena) HConstantFolding(graph, "constant_folding");
-  InstructionSimplifier* simplify1 = new (arena) InstructionSimplifier(graph, stats);
+  InstructionSimplifier* simplify1 = new (arena) InstructionSimplifier(graph, codegen, stats);
   HSelectGenerator* select_generator = new (arena) HSelectGenerator(graph, stats);
   HConstantFolding* fold2 = new (arena) HConstantFolding(
       graph, "constant_folding$after_inlining");
   HConstantFolding* fold3 = new (arena) HConstantFolding(graph, "constant_folding$after_bce");
-  SideEffectsAnalysis* side_effects = new (arena) SideEffectsAnalysis(graph);
-  GVNOptimization* gvn = new (arena) GVNOptimization(graph, *side_effects);
-  LICM* licm = new (arena) LICM(graph, *side_effects, stats);
-  LoadStoreElimination* lse = new (arena) LoadStoreElimination(graph, *side_effects);
+  SideEffectsAnalysis* side_effects1 = new (arena) SideEffectsAnalysis(
+      graph, "side_effects$before_gvn");
+  SideEffectsAnalysis* side_effects2 = new (arena) SideEffectsAnalysis(
+      graph, "side_effects$before_lse");
+  GVNOptimization* gvn = new (arena) GVNOptimization(graph, *side_effects1);
+  LICM* licm = new (arena) LICM(graph, *side_effects1, stats);
   HInductionVarAnalysis* induction = new (arena) HInductionVarAnalysis(graph);
-  BoundsCheckElimination* bce = new (arena) BoundsCheckElimination(graph, *side_effects, induction);
-  HLoopOptimization* loop = new (arena) HLoopOptimization(graph, induction);
+  BoundsCheckElimination* bce = new (arena) BoundsCheckElimination(graph, *side_effects1, induction);
+  HLoopOptimization* loop = new (arena) HLoopOptimization(graph, driver, induction);
+  LoadStoreElimination* lse = new (arena) LoadStoreElimination(graph, *side_effects2);
   HSharpening* sharpening = new (arena) HSharpening(
       graph, codegen, dex_compilation_unit, driver, handles);
   InstructionSimplifier* simplify2 = new (arena) InstructionSimplifier(
-      graph, stats, "instruction_simplifier$after_inlining");
+      graph, codegen, stats, "instruction_simplifier$after_inlining");
   InstructionSimplifier* simplify3 = new (arena) InstructionSimplifier(
-      graph, stats, "instruction_simplifier$after_bce");
+      graph, codegen, stats, "instruction_simplifier$after_bce");
   InstructionSimplifier* simplify4 = new (arena) InstructionSimplifier(
-      graph, stats, "instruction_simplifier$before_codegen");
+      graph, codegen, stats, "instruction_simplifier$before_codegen");
   IntrinsicsRecognizer* intrinsics = new (arena) IntrinsicsRecognizer(graph, stats);
   CHAGuardOptimization* cha_guard = new (arena) CHAGuardOptimization(graph);
+  CodeSinking* code_sinking = new (arena) CodeSinking(graph, stats);
 
   HOptimization* optimizations1[] = {
     intrinsics,
@@ -806,7 +813,7 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
     fold2,  // TODO: if we don't inline we can also skip fold2.
     simplify2,
     dce2,
-    side_effects,
+    side_effects1,
     gvn,
     licm,
     induction,
@@ -814,9 +821,11 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
     loop,
     fold3,  // evaluates code generated by dynamic bce
     simplify3,
+    side_effects2,
     lse,
     cha_guard,
     dce3,
+    code_sinking,
     // The codegen has a few assumptions that only the instruction simplifier
     // can satisfy. For example, the code generator does not expect to see a
     // HTypeConversion from a type to the same type.
@@ -875,7 +884,7 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* arena,
                                               InvokeType invoke_type,
                                               uint16_t class_def_idx,
                                               uint32_t method_idx,
-                                              Handle<mirror::ClassLoader> class_loader,
+                                              jobject class_loader,
                                               const DexFile& dex_file,
                                               Handle<mirror::DexCache> dex_cache,
                                               ArtMethod* method,
@@ -946,8 +955,11 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* arena,
   const uint8_t* interpreter_metadata = nullptr;
   if (method == nullptr) {
     ScopedObjectAccess soa(Thread::Current());
+    StackHandleScope<1> hs(soa.Self());
+    Handle<mirror::ClassLoader> loader(hs.NewHandle(
+        soa.Decode<mirror::ClassLoader>(class_loader)));
     method = compiler_driver->ResolveMethod(
-        soa, dex_cache, class_loader, &dex_compilation_unit, method_idx, invoke_type);
+        soa, dex_cache, loader, &dex_compilation_unit, method_idx, invoke_type);
   }
   // For AOT compilation, we may not get a method, for example if its class is erroneous.
   // JIT should always have a method.
@@ -956,6 +968,16 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* arena,
     graph->SetArtMethod(method);
     ScopedObjectAccess soa(Thread::Current());
     interpreter_metadata = method->GetQuickenedInfo(class_linker->GetImagePointerSize());
+    dex::TypeIndex type_index = method->GetDeclaringClass()->GetDexTypeIndex();
+
+    // Update the dex cache if the type is not in it yet. Note that under AOT,
+    // the verifier must have set it, but under JIT, there's no guarantee, as we
+    // don't necessarily run the verifier.
+    // The compiler and the compiler driver assume the compiling class is
+    // in the dex cache.
+    if (dex_cache->GetResolvedType(type_index) == nullptr) {
+      dex_cache->SetResolvedType(type_index, method->GetDeclaringClass());
+    }
   }
 
   std::unique_ptr<CodeGenerator> codegen(
@@ -1036,7 +1058,7 @@ CompiledMethod* OptimizingCompiler::Compile(const DexFile::CodeItem* code_item,
                                             InvokeType invoke_type,
                                             uint16_t class_def_idx,
                                             uint32_t method_idx,
-                                            Handle<mirror::ClassLoader> jclass_loader,
+                                            jobject jclass_loader,
                                             const DexFile& dex_file,
                                             Handle<mirror::DexCache> dex_cache) const {
   CompilerDriver* compiler_driver = GetCompilerDriver();
@@ -1150,6 +1172,7 @@ bool OptimizingCompiler::JitCompile(Thread* self,
   Handle<mirror::DexCache> dex_cache(hs.NewHandle(method->GetDexCache()));
   DCHECK(method->IsCompilable());
 
+  jobject jclass_loader = class_loader.ToJObject();
   const DexFile* dex_file = method->GetDexFile();
   const uint16_t class_def_idx = method->GetClassDefIndex();
   const DexFile::CodeItem* code_item = dex_file->GetCodeItem(method->GetCodeItemOffset());
@@ -1173,7 +1196,7 @@ bool OptimizingCompiler::JitCompile(Thread* self,
                    invoke_type,
                    class_def_idx,
                    method_idx,
-                   class_loader,
+                   jclass_loader,
                    *dex_file,
                    dex_cache,
                    method,

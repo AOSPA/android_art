@@ -1187,6 +1187,7 @@ static void GenUnsafeGet(HInvoke* invoke,
 
     case Primitive::kPrimNot:
       __ Lwu(trg, TMP, 0);
+      __ MaybeUnpoisonHeapReference(trg);
       break;
 
     case Primitive::kPrimLong:
@@ -1285,7 +1286,12 @@ static void GenUnsafePut(LocationSummary* locations,
   switch (type) {
     case Primitive::kPrimInt:
     case Primitive::kPrimNot:
-      __ Sw(value, TMP, 0);
+      if (kPoisonHeapReferences && type == Primitive::kPrimNot) {
+        __ PoisonHeapReference(AT, value);
+        __ Sw(AT, TMP, 0);
+      } else {
+        __ Sw(value, TMP, 0);
+      }
       break;
 
     case Primitive::kPrimLong:
@@ -1454,13 +1460,23 @@ static void GenCas(LocationSummary* locations, Primitive::Type type, CodeGenerat
     codegen->MarkGCCard(base, value, value_can_be_null);
   }
 
+  Mips64Label loop_head, exit_loop;
+  __ Daddu(TMP, base, offset);
+
+  if (kPoisonHeapReferences && type == Primitive::kPrimNot) {
+    __ PoisonHeapReference(expected);
+    // Do not poison `value`, if it is the same register as
+    // `expected`, which has just been poisoned.
+    if (value != expected) {
+      __ PoisonHeapReference(value);
+    }
+  }
+
   // do {
   //   tmp_value = [tmp_ptr] - expected;
   // } while (tmp_value == 0 && failure([tmp_ptr] <- r_new_value));
   // result = tmp_value != 0;
 
-  Mips64Label loop_head, exit_loop;
-  __ Daddu(TMP, base, offset);
   __ Sync(0);
   __ Bind(&loop_head);
   if (type == Primitive::kPrimLong) {
@@ -1469,6 +1485,11 @@ static void GenCas(LocationSummary* locations, Primitive::Type type, CodeGenerat
     // Note: We will need a read barrier here, when read barrier
     // support is added to the MIPS64 back end.
     __ Ll(out, TMP);
+    if (type == Primitive::kPrimNot) {
+      // The LL instruction sign-extends the 32-bit value, but
+      // 32-bit references must be zero-extended. Zero-extend `out`.
+      __ Dext(out, out, 0, 32);
+    }
   }
   __ Dsubu(out, out, expected);         // If we didn't get the 'expected'
   __ Sltiu(out, out, 1);                // value, set 'out' to false, and
@@ -1487,6 +1508,15 @@ static void GenCas(LocationSummary* locations, Primitive::Type type, CodeGenerat
                                 // cycle atomically then retry.
   __ Bind(&exit_loop);
   __ Sync(0);
+
+  if (kPoisonHeapReferences && type == Primitive::kPrimNot) {
+    __ UnpoisonHeapReference(expected);
+    // Do not unpoison `value`, if it is the same register as
+    // `expected`, which has just been unpoisoned.
+    if (value != expected) {
+      __ UnpoisonHeapReference(value);
+    }
+  }
 }
 
 // boolean sun.misc.Unsafe.compareAndSwapInt(Object o, long offset, int expected, int x)
@@ -1593,19 +1623,24 @@ void IntrinsicCodeGeneratorMIPS64::VisitStringEquals(HInvoke* invoke) {
     return;
   }
 
-  // Check if input is null, return false if it is.
-  __ Beqzc(arg, &return_false);
+  StringEqualsOptimizations optimizations(invoke);
+  if (!optimizations.GetArgumentNotNull()) {
+    // Check if input is null, return false if it is.
+    __ Beqzc(arg, &return_false);
+  }
 
   // Reference equality check, return true if same reference.
   __ Beqc(str, arg, &return_true);
 
-  // Instanceof check for the argument by comparing class fields.
-  // All string objects must have the same type since String cannot be subclassed.
-  // Receiver must be a string object, so its class field is equal to all strings' class fields.
-  // If the argument is a string object, its class field must be equal to receiver's class field.
-  __ Lw(temp1, str, class_offset);
-  __ Lw(temp2, arg, class_offset);
-  __ Bnec(temp1, temp2, &return_false);
+  if (!optimizations.GetArgumentIsString()) {
+    // Instanceof check for the argument by comparing class fields.
+    // All string objects must have the same type since String cannot be subclassed.
+    // Receiver must be a string object, so its class field is equal to all strings' class fields.
+    // If the argument is a string object, its class field must be equal to receiver's class field.
+    __ Lw(temp1, str, class_offset);
+    __ Lw(temp2, arg, class_offset);
+    __ Bnec(temp1, temp2, &return_false);
+  }
 
   // Load `count` fields of this and argument strings.
   __ Lw(temp1, str, count_offset);
@@ -2074,6 +2109,8 @@ UNIMPLEMENTED_INTRINSIC(MIPS64, UnsafeGetAndAddLong)
 UNIMPLEMENTED_INTRINSIC(MIPS64, UnsafeGetAndSetInt)
 UNIMPLEMENTED_INTRINSIC(MIPS64, UnsafeGetAndSetLong)
 UNIMPLEMENTED_INTRINSIC(MIPS64, UnsafeGetAndSetObject)
+
+UNIMPLEMENTED_INTRINSIC(MIPS64, IntegerValueOf)
 
 UNREACHABLE_INTRINSICS(MIPS64)
 

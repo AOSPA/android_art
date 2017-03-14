@@ -104,6 +104,13 @@ inline uint32_t CodeAlignmentSize(uint32_t header_offset, const CompiledMethod& 
 // Defines the location of the raw dex file to write.
 class OatWriter::DexFileSource {
  public:
+  enum Type {
+    kNone,
+    kZipEntry,
+    kRawFile,
+    kRawData,
+  };
+
   explicit DexFileSource(ZipEntry* zip_entry)
       : type_(kZipEntry), source_(zip_entry) {
     DCHECK(source_ != nullptr);
@@ -119,6 +126,7 @@ class OatWriter::DexFileSource {
     DCHECK(source_ != nullptr);
   }
 
+  Type GetType() const { return type_; }
   bool IsZipEntry() const { return type_ == kZipEntry; }
   bool IsRawFile() const { return type_ == kRawFile; }
   bool IsRawData() const { return type_ == kRawData; }
@@ -147,13 +155,6 @@ class OatWriter::DexFileSource {
   }
 
  private:
-  enum Type {
-    kNone,
-    kZipEntry,
-    kRawFile,
-    kRawData,
-  };
-
   Type type_;
   const void* source_;
 };
@@ -1060,7 +1061,6 @@ class OatWriter::WriteCodeMethodVisitor : public OatDexMethodVisitor {
   WriteCodeMethodVisitor(OatWriter* writer, OutputStream* out, const size_t file_offset,
                          size_t relative_offset) SHARED_LOCK_FUNCTION(Locks::mutator_lock_)
     : OatDexMethodVisitor(writer, relative_offset),
-      class_loader_(writer->HasImage() ? writer->image_writer_->GetClassLoader() : nullptr),
       out_(out),
       file_offset_(file_offset),
       soa_(Thread::Current()),
@@ -1224,7 +1224,7 @@ class OatWriter::WriteCodeMethodVisitor : public OatDexMethodVisitor {
                 break;
               }
               default: {
-                DCHECK_EQ(patch.GetType(), LinkerPatch::Type::kRecordPosition);
+                DCHECK(false) << "Unexpected linker patch type: " << patch.GetType();
                 break;
               }
             }
@@ -1246,7 +1246,6 @@ class OatWriter::WriteCodeMethodVisitor : public OatDexMethodVisitor {
   }
 
  private:
-  ObjPtr<mirror::ClassLoader> class_loader_;
   OutputStream* const out_;
   const size_t file_offset_;
   const ScopedObjectAccess soa_;
@@ -1305,12 +1304,10 @@ class OatWriter::WriteCodeMethodVisitor : public OatDexMethodVisitor {
   }
 
   mirror::Class* GetTargetType(const LinkerPatch& patch) REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK(writer_->HasImage());
     ObjPtr<mirror::DexCache> dex_cache = GetDexCache(patch.TargetTypeDexFile());
-    ObjPtr<mirror::Class> type =
-        ClassLinker::LookupResolvedType(patch.TargetTypeIndex(), dex_cache, class_loader_);
+    mirror::Class* type = dex_cache->GetResolvedType(patch.TargetTypeIndex());
     CHECK(type != nullptr);
-    return type.Ptr();
+    return type;
   }
 
   mirror::String* GetTargetString(const LinkerPatch& patch) REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -2259,6 +2256,10 @@ bool OatWriter::LayoutAndWriteDexFile(OutputStream* out, OatDexFile* oat_dex_fil
     ZipEntry* zip_entry = oat_dex_file->source_.GetZipEntry();
     std::unique_ptr<MemMap> mem_map(
         zip_entry->ExtractToMemMap(location.c_str(), "classes.dex", &error_msg));
+    if (mem_map == nullptr) {
+      LOG(ERROR) << "Failed to extract dex file to mem map for layout: " << error_msg;
+      return false;
+    }
     dex_file = DexFile::Open(location,
                              zip_entry->GetCrc32(),
                              std::move(mem_map),
@@ -2266,7 +2267,8 @@ bool OatWriter::LayoutAndWriteDexFile(OutputStream* out, OatDexFile* oat_dex_fil
                              /* verify_checksum */ true,
                              &error_msg);
   } else {
-    DCHECK(oat_dex_file->source_.IsRawFile());
+    CHECK(oat_dex_file->source_.IsRawFile())
+        << static_cast<size_t>(oat_dex_file->source_.GetType());
     File* raw_file = oat_dex_file->source_.GetRawFile();
     dex_file = DexFile::OpenDex(raw_file->Fd(), location, /* verify_checksum */ true, &error_msg);
   }

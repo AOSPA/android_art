@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <iostream>
 #include <vector>
 
 #include "android-base/stringprintf.h"
@@ -29,6 +30,7 @@
 #include "native_stack_dump.h"
 #include "openjdkjvmti/jvmti.h"
 #include "runtime.h"
+#include "scoped_thread_state_change-inl.h"
 #include "thread-inl.h"
 #include "thread_list.h"
 
@@ -279,8 +281,14 @@ extern "C" JNIEXPORT jobjectArray JNICALL Java_Main_followReferences(JNIEnv* env
                         jlong size,
                         jint length,
                         const jvmtiHeapReferenceInfo* reference_info)
+          REQUIRES_SHARED(Locks::mutator_lock_)
           : Elem(referrer, referree, size, length) {
         memcpy(&info_, reference_info, sizeof(jvmtiHeapReferenceInfo));
+        // Debug stack trace for failure condition. Remove when done.
+        if (info_.stack_local.depth == 3 && info_.stack_local.slot == 13) {
+          DumpNativeStack(std::cerr, GetTid());
+          Thread::Current()->DumpJavaStack(std::cerr, false, false);
+        }
       }
 
      protected:
@@ -521,7 +529,7 @@ extern "C" JNIEXPORT jobjectArray JNICALL Java_Main_followReferencesString(
         std::unique_ptr<char[]> mod_utf(new char[utf_byte_count + 1]);
         memset(mod_utf.get(), 0, utf_byte_count + 1);
         ConvertUtf16ToModifiedUtf8(mod_utf.get(), utf_byte_count, value, value_length);
-        p->data.push_back(android::base::StringPrintf("%" PRId64 "@%" PRId64 " (% " PRId64 ", '%s')",
+        p->data.push_back(android::base::StringPrintf("%" PRId64 "@%" PRId64 " (%" PRId64 ", '%s')",
                                                       *tag_ptr,
                                                       class_tag,
                                                       size,
@@ -553,6 +561,187 @@ extern "C" JNIEXPORT jobjectArray JNICALL Java_Main_followReferencesString(
                                               return env->NewStringUTF(fsc.data[i].c_str());
                                             });
   return retArray;
+}
+
+
+extern "C" JNIEXPORT jstring JNICALL Java_Main_followReferencesPrimitiveArray(
+    JNIEnv* env, jclass klass ATTRIBUTE_UNUSED, jobject initial_object) {
+  struct FindArrayCallbacks {
+    static jint JNICALL FollowReferencesCallback(
+        jvmtiHeapReferenceKind reference_kind ATTRIBUTE_UNUSED,
+        const jvmtiHeapReferenceInfo* reference_info ATTRIBUTE_UNUSED,
+        jlong class_tag ATTRIBUTE_UNUSED,
+        jlong referrer_class_tag ATTRIBUTE_UNUSED,
+        jlong size ATTRIBUTE_UNUSED,
+        jlong* tag_ptr ATTRIBUTE_UNUSED,
+        jlong* referrer_tag_ptr ATTRIBUTE_UNUSED,
+        jint length ATTRIBUTE_UNUSED,
+        void* user_data ATTRIBUTE_UNUSED) {
+      return JVMTI_VISIT_OBJECTS;  // Continue visiting.
+    }
+
+    static jint JNICALL ArrayValueCallback(jlong class_tag,
+                                           jlong size,
+                                           jlong* tag_ptr,
+                                           jint element_count,
+                                           jvmtiPrimitiveType element_type,
+                                           const void* elements,
+                                           void* user_data) {
+      FindArrayCallbacks* p = reinterpret_cast<FindArrayCallbacks*>(user_data);
+      if (*tag_ptr != 0) {
+        std::ostringstream oss;
+        oss << *tag_ptr
+            << '@'
+            << class_tag
+            << " ("
+            << size
+            << ", "
+            << element_count
+            << "x"
+            << static_cast<char>(element_type)
+            << " '";
+        size_t element_size;
+        switch (element_type) {
+          case JVMTI_PRIMITIVE_TYPE_BOOLEAN:
+          case JVMTI_PRIMITIVE_TYPE_BYTE:
+            element_size = 1;
+            break;
+          case JVMTI_PRIMITIVE_TYPE_CHAR:
+          case JVMTI_PRIMITIVE_TYPE_SHORT:
+            element_size = 2;
+            break;
+          case JVMTI_PRIMITIVE_TYPE_INT:
+          case JVMTI_PRIMITIVE_TYPE_FLOAT:
+            element_size = 4;
+            break;
+          case JVMTI_PRIMITIVE_TYPE_LONG:
+          case JVMTI_PRIMITIVE_TYPE_DOUBLE:
+            element_size = 8;
+            break;
+          default:
+            LOG(FATAL) << "Unknown type " << static_cast<size_t>(element_type);
+            UNREACHABLE();
+        }
+        const uint8_t* data = reinterpret_cast<const uint8_t*>(elements);
+        for (size_t i = 0; i != element_size * element_count; ++i) {
+          oss << android::base::StringPrintf("%02x", data[i]);
+        }
+        oss << "')";
+
+        if (!p->data.empty()) {
+          p->data += "\n";
+        }
+        p->data += oss.str();
+        // Update the tag to test whether that works.
+        *tag_ptr = *tag_ptr + 1;
+      }
+      return 0;
+    }
+
+    std::string data;
+  };
+
+  jvmtiHeapCallbacks callbacks;
+  memset(&callbacks, 0, sizeof(jvmtiHeapCallbacks));
+  callbacks.heap_reference_callback = FindArrayCallbacks::FollowReferencesCallback;
+  callbacks.array_primitive_value_callback = FindArrayCallbacks::ArrayValueCallback;
+
+  FindArrayCallbacks fac;
+  jvmtiError ret = jvmti_env->FollowReferences(0, nullptr, initial_object, &callbacks, &fac);
+  if (JvmtiErrorToException(env, ret)) {
+    return nullptr;
+  }
+  return env->NewStringUTF(fac.data.c_str());
+}
+
+static constexpr const char* GetPrimitiveTypeName(jvmtiPrimitiveType type) {
+  switch (type) {
+    case JVMTI_PRIMITIVE_TYPE_BOOLEAN:
+      return "boolean";
+    case JVMTI_PRIMITIVE_TYPE_BYTE:
+      return "byte";
+    case JVMTI_PRIMITIVE_TYPE_CHAR:
+      return "char";
+    case JVMTI_PRIMITIVE_TYPE_SHORT:
+      return "short";
+    case JVMTI_PRIMITIVE_TYPE_INT:
+      return "int";
+    case JVMTI_PRIMITIVE_TYPE_FLOAT:
+      return "float";
+    case JVMTI_PRIMITIVE_TYPE_LONG:
+      return "long";
+    case JVMTI_PRIMITIVE_TYPE_DOUBLE:
+      return "double";
+  }
+  LOG(FATAL) << "Unknown type " << static_cast<size_t>(type);
+  UNREACHABLE();
+}
+
+extern "C" JNIEXPORT jstring JNICALL Java_Main_followReferencesPrimitiveFields(
+    JNIEnv* env, jclass klass ATTRIBUTE_UNUSED, jobject initial_object) {
+  struct FindFieldCallbacks {
+    static jint JNICALL FollowReferencesCallback(
+        jvmtiHeapReferenceKind reference_kind ATTRIBUTE_UNUSED,
+        const jvmtiHeapReferenceInfo* reference_info ATTRIBUTE_UNUSED,
+        jlong class_tag ATTRIBUTE_UNUSED,
+        jlong referrer_class_tag ATTRIBUTE_UNUSED,
+        jlong size ATTRIBUTE_UNUSED,
+        jlong* tag_ptr ATTRIBUTE_UNUSED,
+        jlong* referrer_tag_ptr ATTRIBUTE_UNUSED,
+        jint length ATTRIBUTE_UNUSED,
+        void* user_data ATTRIBUTE_UNUSED) {
+      return JVMTI_VISIT_OBJECTS;  // Continue visiting.
+    }
+
+    static jint JNICALL PrimitiveFieldValueCallback(jvmtiHeapReferenceKind kind,
+                                                    const jvmtiHeapReferenceInfo* info,
+                                                    jlong class_tag,
+                                                    jlong* tag_ptr,
+                                                    jvalue value,
+                                                    jvmtiPrimitiveType value_type,
+                                                    void* user_data) {
+      FindFieldCallbacks* p = reinterpret_cast<FindFieldCallbacks*>(user_data);
+      if (*tag_ptr != 0) {
+        std::ostringstream oss;
+        oss << *tag_ptr
+            << '@'
+            << class_tag
+            << " ("
+            << (kind == JVMTI_HEAP_REFERENCE_FIELD ? "instance, " : "static, ")
+            << GetPrimitiveTypeName(value_type)
+            << ", index="
+            << info->field.index
+            << ") ";
+        // Be lazy, always print eight bytes.
+        static_assert(sizeof(jvalue) == sizeof(uint64_t), "Unexpected jvalue size");
+        uint64_t val;
+        memcpy(&val, &value, sizeof(uint64_t));  // To avoid undefined behavior.
+        oss << android::base::StringPrintf("%016" PRIx64, val);
+
+        if (!p->data.empty()) {
+          p->data += "\n";
+        }
+        p->data += oss.str();
+        // Update the tag to test whether that works.
+        *tag_ptr = *tag_ptr + 1;
+      }
+      return 0;
+    }
+
+    std::string data;
+  };
+
+  jvmtiHeapCallbacks callbacks;
+  memset(&callbacks, 0, sizeof(jvmtiHeapCallbacks));
+  callbacks.heap_reference_callback = FindFieldCallbacks::FollowReferencesCallback;
+  callbacks.primitive_field_callback = FindFieldCallbacks::PrimitiveFieldValueCallback;
+
+  FindFieldCallbacks ffc;
+  jvmtiError ret = jvmti_env->FollowReferences(0, nullptr, initial_object, &callbacks, &ffc);
+  if (JvmtiErrorToException(env, ret)) {
+    return nullptr;
+  }
+  return env->NewStringUTF(ffc.data.c_str());
 }
 
 }  // namespace Test913Heaps

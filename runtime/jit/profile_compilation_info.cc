@@ -37,7 +37,8 @@
 namespace art {
 
 const uint8_t ProfileCompilationInfo::kProfileMagic[] = { 'p', 'r', 'o', '\0' };
-const uint8_t ProfileCompilationInfo::kProfileVersion[] = { '0', '0', '3', '\0' };  // inline caches
+// Last profile version: fix the order of dex files in the profile.
+const uint8_t ProfileCompilationInfo::kProfileVersion[] = { '0', '0', '4', '\0' };
 
 static constexpr uint16_t kMaxDexFileKeyLength = PATH_MAX;
 
@@ -46,16 +47,19 @@ static constexpr uint16_t kMaxDexFileKeyLength = PATH_MAX;
 // using the same test profile.
 static constexpr bool kDebugIgnoreChecksum = false;
 
-static constexpr uint8_t kMegamorphicEncoding = 7;
+static constexpr uint8_t kIsMissingTypesEncoding = 6;
+static constexpr uint8_t kIsMegamorphicEncoding = 7;
 
 static_assert(sizeof(InlineCache::kIndividualCacheSize) == sizeof(uint8_t),
               "InlineCache::kIndividualCacheSize does not have the expect type size");
-static_assert(InlineCache::kIndividualCacheSize < kMegamorphicEncoding,
+static_assert(InlineCache::kIndividualCacheSize < kIsMegamorphicEncoding,
+              "InlineCache::kIndividualCacheSize is larger than expected");
+static_assert(InlineCache::kIndividualCacheSize < kIsMissingTypesEncoding,
               "InlineCache::kIndividualCacheSize is larger than expected");
 
 void ProfileCompilationInfo::DexPcData::AddClass(uint16_t dex_profile_idx,
                                                  const dex::TypeIndex& type_idx) {
-  if (is_megamorphic) {
+  if (is_megamorphic || is_missing_types) {
     return;
   }
   classes.emplace(dex_profile_idx, type_idx);
@@ -206,7 +210,8 @@ static constexpr size_t kLineHeaderSize =
  *       Classes are grouped per their dex files and the line
  *       `dex_profile_index,class_id1,class_id2...,dex_profile_index2,...` encodes the
  *       mapping from `dex_profile_index` to the set of classes `class_id1,class_id2...`
- *    M stands for megamorphic and it's encoded as the byte kMegamorphicEncoding.
+ *    M stands for megamorphic or missing types and it's encoded as either
+ *    the byte kIsMegamorphicEncoding or kIsMissingTypesEncoding.
  *    When present, there will be no class ids following.
  **/
 bool ProfileCompilationInfo::Save(int fd) {
@@ -222,15 +227,23 @@ bool ProfileCompilationInfo::Save(int fd) {
   DCHECK_LE(info_.size(), std::numeric_limits<uint8_t>::max());
   AddUintToBuffer(&buffer, static_cast<uint8_t>(info_.size()));
 
+  // Make sure we write the dex files in order of their profile index. This
+  // avoids writing the index in the output file and simplifies the parsing logic.
+  std::vector<const std::string*> ordered_info_location(info_.size());
+  std::vector<const DexFileData*> ordered_info_data(info_.size());
   for (const auto& it : info_) {
+    ordered_info_location[it.second.profile_index] = &(it.first);
+    ordered_info_data[it.second.profile_index] = &(it.second);
+  }
+  for (size_t i = 0; i < info_.size(); i++) {
     if (buffer.size() > kMaxSizeToKeepBeforeWriting) {
       if (!WriteBuffer(fd, buffer.data(), buffer.size())) {
         return false;
       }
       buffer.clear();
     }
-    const std::string& dex_location = it.first;
-    const DexFileData& dex_data = it.second;
+    const std::string& dex_location = *ordered_info_location[i];
+    const DexFileData& dex_data = *ordered_info_data[i];
 
     // Note that we allow dex files without any methods or classes, so that
     // inline caches can refer valid dex files.
@@ -289,10 +302,19 @@ void ProfileCompilationInfo::AddInlineCacheToBuffer(std::vector<uint8_t>* buffer
     // Add the dex pc.
     AddUintToBuffer(buffer, dex_pc);
 
-    if (dex_pc_data.is_megamorphic) {
-      // Add the megamorphic encoding if needed and continue.
-      // If megamorphic, we don't add the rest of the classes.
-      AddUintToBuffer(buffer, kMegamorphicEncoding);
+    // Add the megamorphic/missing_types encoding if needed and continue.
+    // In either cases we don't add any classes to the profiles and so there's
+    // no point to continue.
+    // TODO(calin): in case we miss types there is still value to add the
+    // rest of the classes. They can be added without bumping the profile version.
+    if (dex_pc_data.is_missing_types) {
+      DCHECK(!dex_pc_data.is_megamorphic);  // at this point the megamorphic flag should not be set.
+      DCHECK_EQ(classes.size(), 0u);
+      AddUintToBuffer(buffer, kIsMissingTypesEncoding);
+      continue;
+    } else if (dex_pc_data.is_megamorphic) {
+      DCHECK_EQ(classes.size(), 0u);
+      AddUintToBuffer(buffer, kIsMegamorphicEncoding);
       continue;
     }
 
@@ -403,11 +425,21 @@ bool ProfileCompilationInfo::AddMethod(const std::string& dex_location,
   for (const auto& pmi_inline_cache_it : pmi.inline_caches) {
     uint16_t pmi_ic_dex_pc = pmi_inline_cache_it.first;
     const DexPcData& pmi_ic_dex_pc_data = pmi_inline_cache_it.second;
-    auto dex_pc_data_it = inline_cache_it->second.FindOrAdd(pmi_ic_dex_pc);
-    if (pmi_ic_dex_pc_data.is_megamorphic) {
-      dex_pc_data_it->second.SetMegamorphic();
+    DexPcData& dex_pc_data = inline_cache_it->second.FindOrAdd(pmi_ic_dex_pc)->second;
+    if (dex_pc_data.is_missing_types || dex_pc_data.is_megamorphic) {
+      // We are already megamorphic or we are missing types; no point in going forward.
       continue;
     }
+
+    if (pmi_ic_dex_pc_data.is_missing_types) {
+      dex_pc_data.SetIsMissingTypes();
+      continue;
+    }
+    if (pmi_ic_dex_pc_data.is_megamorphic) {
+      dex_pc_data.SetIsMegamorphic();
+      continue;
+    }
+
     for (const ClassReference& class_ref : pmi_ic_dex_pc_data.classes) {
       const DexReference& dex_ref = pmi.dex_references[class_ref.dex_profile_index];
       DexFileData* class_dex_data = GetOrAddDexFileData(
@@ -416,7 +448,7 @@ bool ProfileCompilationInfo::AddMethod(const std::string& dex_location,
       if (class_dex_data == nullptr) {  // checksum mismatch
         return false;
       }
-      dex_pc_data_it->second.AddClass(class_dex_data->profile_index, class_ref.type_index);
+      dex_pc_data.AddClass(class_dex_data->profile_index, class_ref.type_index);
     }
   }
   return true;
@@ -432,6 +464,11 @@ bool ProfileCompilationInfo::AddMethod(const ProfileMethodInfo& pmi) {
   auto inline_cache_it = data->method_map.FindOrAdd(pmi.dex_method_index);
 
   for (const ProfileMethodInfo::ProfileInlineCache& cache : pmi.inline_caches) {
+    if (cache.is_missing_types) {
+      auto dex_pc_data_it = inline_cache_it->second.FindOrAdd(cache.dex_pc);
+      dex_pc_data_it->second.SetIsMissingTypes();
+      continue;
+    }
     for (const ProfileMethodInfo::ProfileClassReference& class_ref : cache.classes) {
       DexFileData* class_dex_data = GetOrAddDexFileData(
           GetProfileDexFileKey(class_ref.dex_file->GetLocation()),
@@ -440,6 +477,10 @@ bool ProfileCompilationInfo::AddMethod(const ProfileMethodInfo& pmi) {
         return false;
       }
       auto dex_pc_data_it = inline_cache_it->second.FindOrAdd(cache.dex_pc);
+      if (dex_pc_data_it->second.is_missing_types) {
+        // Don't bother adding classes if we are missing types.
+        break;
+      }
       dex_pc_data_it->second.AddClass(class_dex_data->profile_index, class_ref.type_index);
     }
   }
@@ -478,8 +519,12 @@ bool ProfileCompilationInfo::ReadInlineCache(SafeBuffer& buffer,
     READ_UINT(uint16_t, buffer, dex_pc, error);
     READ_UINT(uint8_t, buffer, dex_to_classes_map_size, error);
     auto dex_pc_data_it = inline_cache->FindOrAdd(dex_pc);
-    if (dex_to_classes_map_size == kMegamorphicEncoding) {
-      dex_pc_data_it->second.SetMegamorphic();
+    if (dex_to_classes_map_size == kIsMissingTypesEncoding) {
+      dex_pc_data_it->second.SetIsMissingTypes();
+      continue;
+    }
+    if (dex_to_classes_map_size == kIsMegamorphicEncoding) {
+      dex_pc_data_it->second.SetIsMegamorphic();
       continue;
     }
     for (; dex_to_classes_map_size > 0; dex_to_classes_map_size--) {
@@ -797,10 +842,13 @@ bool ProfileCompilationInfo::MergeWith(const ProfileCompilationInfo& other) {
   SafeMap<uint8_t, uint8_t> dex_profile_index_remap;
   for (const auto& other_it : other.info_) {
     const std::string& other_dex_location = other_it.first;
+    uint32_t other_checksum = other_it.second.checksum;
     const DexFileData& other_dex_data = other_it.second;
-    auto info_it = info_.FindOrAdd(other_dex_location, DexFileData(other_dex_data.checksum, 0));
-    const DexFileData& dex_data = info_it->second;
-    dex_profile_index_remap.Put(other_dex_data.profile_index, dex_data.profile_index);
+    const DexFileData* dex_data = GetOrAddDexFileData(other_dex_location, other_checksum);
+    if (dex_data == nullptr) {
+      return false;  // Could happen if we exceed the number of allowed dex files.
+    }
+    dex_profile_index_remap.Put(other_dex_data.profile_index, dex_data->profile_index);
   }
 
   // Merge the actual profile data.
@@ -823,8 +871,10 @@ bool ProfileCompilationInfo::MergeWith(const ProfileCompilationInfo& other) {
         uint16_t other_dex_pc = other_ic_it.first;
         const ClassSet& other_class_set = other_ic_it.second.classes;
         auto class_set = method_it->second.FindOrAdd(other_dex_pc);
-        if (other_ic_it.second.is_megamorphic) {
-          class_set->second.SetMegamorphic();
+        if (other_ic_it.second.is_missing_types) {
+          class_set->second.SetIsMissingTypes();
+        } else if (other_ic_it.second.is_megamorphic) {
+          class_set->second.SetIsMegamorphic();
         } else {
           for (const auto& class_it : other_class_set) {
             class_set->second.AddClass(dex_profile_index_remap.Get(
@@ -949,10 +999,17 @@ std::string ProfileCompilationInfo::DumpInfo(const std::vector<const DexFile*>* 
   os << "ProfileInfo:";
 
   const std::string kFirstDexFileKeySubstitute = ":classes.dex";
+  // Write the entries in profile index order.
+  std::vector<const std::string*> ordered_info_location(info_.size());
+  std::vector<const DexFileData*> ordered_info_data(info_.size());
   for (const auto& it : info_) {
+    ordered_info_location[it.second.profile_index] = &(it.first);
+    ordered_info_data[it.second.profile_index] = &(it.second);
+  }
+  for (size_t profile_index = 0; profile_index < info_.size(); profile_index++) {
     os << "\n";
-    const std::string& location = it.first;
-    const DexFileData& dex_data = it.second;
+    const std::string& location = *ordered_info_location[profile_index];
+    const DexFileData& dex_data = *ordered_info_data[profile_index];
     if (print_full_dex_location) {
       os << location;
     } else {
@@ -960,6 +1017,7 @@ std::string ProfileCompilationInfo::DumpInfo(const std::vector<const DexFile*>* 
       std::string multidex_suffix = DexFile::GetMultiDexSuffix(location);
       os << (multidex_suffix.empty() ? kFirstDexFileKeySubstitute : multidex_suffix);
     }
+    os << " [index=" << static_cast<uint32_t>(dex_data.profile_index) << "]";
     const DexFile* dex_file = nullptr;
     if (dex_files != nullptr) {
       for (size_t i = 0; i < dex_files->size(); i++) {
@@ -979,8 +1037,10 @@ std::string ProfileCompilationInfo::DumpInfo(const std::vector<const DexFile*>* 
       os << "[";
       for (const auto& inline_cache_it : method_it.second) {
         os << "{" << std::hex << inline_cache_it.first << std::dec << ":";
-        if (inline_cache_it.second.is_megamorphic) {
-          os << "M";
+        if (inline_cache_it.second.is_missing_types) {
+          os << "MT";
+        } else if (inline_cache_it.second.is_megamorphic) {
+          os << "MM";
         } else {
           for (const ClassReference& class_ref : inline_cache_it.second.classes) {
             os << "(" << static_cast<uint32_t>(class_ref.dex_profile_index)
@@ -1022,7 +1082,8 @@ void ProfileCompilationInfo::GetClassNames(const std::vector<const DexFile*>* de
     const DexFile* dex_file = nullptr;
     if (dex_files != nullptr) {
       for (size_t i = 0; i < dex_files->size(); i++) {
-        if (location == (*dex_files)[i]->GetLocation()) {
+        if (location == GetProfileDexFileKey((*dex_files)[i]->GetLocation()) &&
+            dex_data.checksum == (*dex_files)[i]->GetLocationChecksum()) {
           dex_file = (*dex_files)[i];
         }
       }
@@ -1039,15 +1100,22 @@ bool ProfileCompilationInfo::Equals(const ProfileCompilationInfo& other) {
   return info_.Equals(other.info_);
 }
 
-std::set<DexCacheResolvedClasses> ProfileCompilationInfo::GetResolvedClasses() const {
+std::set<DexCacheResolvedClasses> ProfileCompilationInfo::GetResolvedClasses(
+    const std::unordered_set<std::string>& dex_files_locations) const {
+  std::unordered_map<std::string, std::string> key_to_location_map;
+  for (const std::string& location : dex_files_locations) {
+    key_to_location_map.emplace(GetProfileDexFileKey(location), location);
+  }
   std::set<DexCacheResolvedClasses> ret;
   for (auto&& pair : info_) {
     const std::string& profile_key = pair.first;
-    const DexFileData& data = pair.second;
-    // TODO: Is it OK to use the same location for both base and dex location here?
-    DexCacheResolvedClasses classes(profile_key, profile_key, data.checksum);
-    classes.AddClasses(data.class_set.begin(), data.class_set.end());
-    ret.insert(classes);
+    auto it = key_to_location_map.find(profile_key);
+    if (it != key_to_location_map.end()) {
+      const DexFileData& data = pair.second;
+      DexCacheResolvedClasses classes(it->second, it->second, data.checksum);
+      classes.AddClasses(data.class_set.begin(), data.class_set.end());
+      ret.insert(classes);
+    }
   }
   return ret;
 }
@@ -1108,7 +1176,7 @@ bool ProfileCompilationInfo::OfflineProfileMethodInfo::operator==(
   }
 
   // We can't use a simple equality test because we need to match the dex files
-  // of the inline caches which might have different profile indices.
+  // of the inline caches which might have different profile indexes.
   for (const auto& inline_cache_it : inline_caches) {
     uint16_t dex_pc = inline_cache_it.first;
     const DexPcData dex_pc_data = inline_cache_it.second;
@@ -1117,7 +1185,8 @@ bool ProfileCompilationInfo::OfflineProfileMethodInfo::operator==(
       return false;
     }
     const DexPcData& other_dex_pc_data = other_it->second;
-    if (dex_pc_data.is_megamorphic != other_dex_pc_data.is_megamorphic) {
+    if (dex_pc_data.is_megamorphic != other_dex_pc_data.is_megamorphic ||
+        dex_pc_data.is_missing_types != other_dex_pc_data.is_missing_types) {
       return false;
     }
     for (const ClassReference& class_ref : dex_pc_data.classes) {

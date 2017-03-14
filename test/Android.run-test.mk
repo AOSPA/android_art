@@ -222,6 +222,7 @@ define name-to-var
 $(shell echo $(1) | tr '[:lower:]' '[:upper:]' | tr '-' '_')
 endef  # name-to-var
 
+# Disable 115-native-bridge, it fails when run through make b/35984597.
 # Disable 153-reference-stress temporarily until a fix arrives. b/33389022.
 # Disable 080-oom-fragmentation due to flakes. b/33795328
 # Disable 497-inlining-and-class-loader and 542-unresolved-access-check until
@@ -229,6 +230,7 @@ endef  # name-to-var
 #     register a dex file that's already registered with a different loader.
 #     b/34193123
 ART_TEST_RUN_TEST_SKIP += \
+  115-native-bridge \
   153-reference-stress \
   080-oom-fragmentation \
   497-inlining-and-class-loader \
@@ -240,10 +242,8 @@ ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),
 
 
 # Disable 149-suspend-all-stress, its output is flaky (b/28988206).
-# Disable 577-profile-foreign-dex (b/27454772).
 TEST_ART_BROKEN_ALL_TARGET_TESTS := \
   149-suspend-all-stress \
-  577-profile-foreign-dex \
 
 ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),$(PREBUILD_TYPES), \
     $(COMPILER_TYPES), $(RELOCATE_TYPES),$(TRACE_TYPES),$(GC_TYPES),$(JNI_TYPES), \
@@ -368,6 +368,7 @@ TEST_ART_BROKEN_INTERPRETER_ACCESS_CHECK_TESTS :=
 # Tests that are broken with GC stress.
 # * 137-cfi needs to unwind a second forked process. We're using a primitive sleep to wait till we
 #   hope the second process got into the expected state. The slowness of gcstress makes this bad.
+# * 152-dead-large-object requires a heap larger than what gcstress uses.
 # * 908-gc-start-finish expects GCs only to be run at clear points. The reduced heap size makes
 #   this non-deterministic. Same for 913.
 # * 961-default-iface-resolution-gen and 964-default-iface-init-genare very long tests that often
@@ -375,6 +376,7 @@ TEST_ART_BROKEN_INTERPRETER_ACCESS_CHECK_TESTS :=
 #   slows down allocations significantly which these tests do a lot.
 TEST_ART_BROKEN_GCSTRESS_RUN_TESTS := \
   137-cfi \
+  152-dead-large-object \
   154-gc-loop \
   908-gc-start-finish \
   913-heaps \
@@ -525,12 +527,14 @@ TEST_ART_BROKEN_INTERPRETER_RUN_TESTS :=
 # Known broken tests for the JIT.
 # CFI unwinding expects managed frames, and the test does not iterate enough to even compile. JIT
 # also uses Generic JNI instead of the JNI compiler.
+# 154-gc-loop requires more deterministic GC behavior than what JIT does.
 # Test 906 iterates the heap filtering with different options. No instances should be created
 # between those runs to be able to have precise checks.
 # Test 629 requires compilation.
 # 912: b/34655682
 TEST_ART_BROKEN_JIT_RUN_TESTS := \
   137-cfi \
+  154-gc-loop \
   629-vdex-speed \
   904-object-allocation \
   906-iterate-heap \
@@ -620,16 +624,18 @@ TEST_ART_BROKEN_OPTIMIZING_READ_BARRIER_RUN_TESTS :=
 TEST_ART_BROKEN_JIT_READ_BARRIER_RUN_TESTS :=
 
 # Tests failing in non-Baker read barrier configurations with the Optimizing compiler (AOT).
-# 537: Expects an array copy to be intrinsified, but calling-on-slowpath intrinsics are not yet
+# 537 and 641: Expect an array copy to be intrinsified, but calling-on-slowpath intrinsics are not yet
 #      handled in non-Baker read barrier configurations.
 TEST_ART_BROKEN_OPTIMIZING_NON_BAKER_READ_BARRIER_RUN_TESTS := \
-  537-checker-arraycopy
+  537-checker-arraycopy \
+  641-checker-arraycopy
 
 # Tests failing in non-Baker read barrier configurations with JIT (Optimizing compiler).
-# 537: Expects an array copy to be intrinsified, but calling-on-slowpath intrinsics are not yet
+# 537 and 641: Expect an array copy to be intrinsified, but calling-on-slowpath intrinsics are not yet
 #      handled in non-Baker read barrier configurations.
 TEST_ART_BROKEN_JIT_NON_BAKER_READ_BARRIER_RUN_TESTS := \
-  537-checker-arraycopy
+  537-checker-arraycopy \
+  641-checker-arraycopy
 
 ifeq ($(ART_USE_READ_BARRIER),true)
   ifneq (,$(filter interpreter,$(COMPILER_TYPES)))
@@ -809,6 +815,12 @@ endif
 # Also need libopenjdkjvmti.
 TEST_ART_TARGET_SYNC_DEPS += libopenjdkjvmti
 TEST_ART_TARGET_SYNC_DEPS += libopenjdkjvmtid
+
+TEST_ART_TARGET_SYNC_DEPS += $(TARGET_OUT_JAVA_LIBRARIES)/core-libart-testdex.jar
+TEST_ART_TARGET_SYNC_DEPS += $(TARGET_OUT_JAVA_LIBRARIES)/core-oj-testdex.jar
+TEST_ART_TARGET_SYNC_DEPS += $(TARGET_OUT_JAVA_LIBRARIES)/okhttp-testdex.jar
+TEST_ART_TARGET_SYNC_DEPS += $(TARGET_OUT_JAVA_LIBRARIES)/bouncycastle-testdex.jar
+TEST_ART_TARGET_SYNC_DEPS += $(TARGET_OUT_JAVA_LIBRARIES)/conscrypt-testdex.jar
 
 # All tests require the host executables. The tests also depend on the core images, but on
 # specific version depending on the compiler.

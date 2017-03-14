@@ -101,7 +101,6 @@ class CompilerDriverTest : public CommonCompilerTest {
 };
 
 // Disabled due to 10 second runtime on host
-// TODO: Update the test for hash-based dex cache arrays. Bug: 30627598
 TEST_F(CompilerDriverTest, DISABLED_LARGE_CompileDexLibCore) {
   CompileAll(nullptr);
 
@@ -240,9 +239,8 @@ class CompilerDriverProfileTest : public CompilerDriverTest {
 
     ProfileCompilationInfo info;
     for (const std::unique_ptr<const DexFile>& dex_file : dex_files) {
-      std::string key = ProfileCompilationInfo::GetProfileDexFileKey(dex_file->GetLocation());
-      profile_info_.AddMethodIndex(key, dex_file->GetLocationChecksum(), 1);
-      profile_info_.AddMethodIndex(key, dex_file->GetLocationChecksum(), 2);
+      profile_info_.AddMethodIndex(dex_file->GetLocation(), dex_file->GetLocationChecksum(), 1);
+      profile_info_.AddMethodIndex(dex_file->GetLocation(), dex_file->GetLocationChecksum(), 2);
     }
     return &profile_info_;
   }

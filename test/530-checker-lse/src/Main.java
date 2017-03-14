@@ -747,6 +747,69 @@ public class Main {
     return 1.0f;
   }
 
+  /// CHECK-START: TestClass2 Main.testStoreStore() load_store_elimination (before)
+  /// CHECK: NewInstance
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldSet
+
+  /// CHECK-START: TestClass2 Main.testStoreStore() load_store_elimination (after)
+  /// CHECK: NewInstance
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldSet
+  /// CHECK-NOT: InstanceFieldSet
+
+  private static TestClass2 testStoreStore() {
+    TestClass2 obj = new TestClass2();
+    obj.i = 41;
+    obj.j = 42;
+    obj.i = 41;
+    obj.j = 43;
+    return obj;
+  }
+
+  /// CHECK-START: int Main.testStoreStoreWithDeoptimize(int[]) load_store_elimination (before)
+  /// CHECK: NewInstance
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldSet
+  /// CHECK: Deoptimize
+  /// CHECK: ArraySet
+  /// CHECK: ArraySet
+  /// CHECK: ArraySet
+  /// CHECK: ArraySet
+  /// CHECK: ArrayGet
+  /// CHECK: ArrayGet
+  /// CHECK: ArrayGet
+  /// CHECK: ArrayGet
+
+  /// CHECK-START: int Main.testStoreStoreWithDeoptimize(int[]) load_store_elimination (after)
+  /// CHECK: NewInstance
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldSet
+  /// CHECK-NOT: InstanceFieldSet
+  /// CHECK: Deoptimize
+  /// CHECK: ArraySet
+  /// CHECK: ArraySet
+  /// CHECK: ArraySet
+  /// CHECK: ArraySet
+  /// CHECK-NOT: ArrayGet
+
+  private static int testStoreStoreWithDeoptimize(int[] arr) {
+    TestClass2 obj = new TestClass2();
+    obj.i = 41;
+    obj.j = 42;
+    obj.i = 41;
+    obj.j = 43;
+    arr[0] = 1;  // One HDeoptimize here.
+    arr[1] = 1;
+    arr[2] = 1;
+    arr[3] = 1;
+    return arr[0] + arr[1] + arr[2] + arr[3];
+  }
+
   /// CHECK-START: double Main.getCircleArea(double, boolean) load_store_elimination (before)
   /// CHECK: NewInstance
 
@@ -783,6 +846,86 @@ public class Main {
     darr[2] = circle1.getRadius();
     darr[3] = circle1.getRadius();
     return new Circle(Math.PI).getArea();
+  }
+
+  /// CHECK-START: int Main.testAllocationEliminationOfArray1() load_store_elimination (before)
+  /// CHECK: NewArray
+  /// CHECK: ArraySet
+  /// CHECK: ArraySet
+  /// CHECK: ArrayGet
+  /// CHECK: ArrayGet
+  /// CHECK: ArrayGet
+  /// CHECK: ArrayGet
+
+  /// CHECK-START: int Main.testAllocationEliminationOfArray1() load_store_elimination (after)
+  /// CHECK-NOT: NewArray
+  /// CHECK-NOT: ArraySet
+  /// CHECK-NOT: ArrayGet
+  private static int testAllocationEliminationOfArray1() {
+    int[] array = new int[4];
+    array[2] = 4;
+    array[3] = 7;
+    return array[0] + array[1] + array[2] + array[3];
+  }
+
+  /// CHECK-START: int Main.testAllocationEliminationOfArray2() load_store_elimination (before)
+  /// CHECK: NewArray
+  /// CHECK: ArraySet
+  /// CHECK: ArraySet
+  /// CHECK: ArrayGet
+
+  /// CHECK-START: int Main.testAllocationEliminationOfArray2() load_store_elimination (after)
+  /// CHECK: NewArray
+  /// CHECK: ArraySet
+  /// CHECK: ArraySet
+  /// CHECK: ArrayGet
+  private static int testAllocationEliminationOfArray2() {
+    // Cannot eliminate array allocation since array is accessed with non-constant
+    // index.
+    int[] array = new int[4];
+    array[2] = 4;
+    array[3] = 7;
+    int sum = 0;
+    for (int e : array) {
+      sum += e;
+    }
+    return sum;
+  }
+
+  /// CHECK-START: int Main.testAllocationEliminationOfArray3(int) load_store_elimination (before)
+  /// CHECK: NewArray
+  /// CHECK: ArraySet
+  /// CHECK: ArrayGet
+
+  /// CHECK-START: int Main.testAllocationEliminationOfArray3(int) load_store_elimination (after)
+  /// CHECK-NOT: NewArray
+  /// CHECK-NOT: ArraySet
+  /// CHECK-NOT: ArrayGet
+  private static int testAllocationEliminationOfArray3(int i) {
+    int[] array = new int[4];
+    array[i] = 4;
+    return array[i];
+  }
+
+  /// CHECK-START: int Main.testAllocationEliminationOfArray4(int) load_store_elimination (before)
+  /// CHECK: NewArray
+  /// CHECK: ArraySet
+  /// CHECK: ArraySet
+  /// CHECK: ArrayGet
+  /// CHECK: ArrayGet
+
+  /// CHECK-START: int Main.testAllocationEliminationOfArray4(int) load_store_elimination (after)
+  /// CHECK: NewArray
+  /// CHECK: ArraySet
+  /// CHECK: ArraySet
+  /// CHECK: ArrayGet
+  /// CHECK-NOT: ArrayGet
+  private static int testAllocationEliminationOfArray4(int i) {
+    // Cannot eliminate array allocation due to index aliasing between 1 and i.
+    int[] array = new int[4];
+    array[1] = 2;
+    array[i] = 4;
+    return array[1] + array[i];
   }
 
   static void assertIntEquals(int result, int expected) {
@@ -865,6 +1008,15 @@ public class Main {
     assertDoubleEquals(darray[0], Math.PI);
     assertDoubleEquals(darray[1], Math.PI);
     assertDoubleEquals(darray[2], Math.PI);
+
+    assertIntEquals(testAllocationEliminationOfArray1(), 11);
+    assertIntEquals(testAllocationEliminationOfArray2(), 11);
+    assertIntEquals(testAllocationEliminationOfArray3(2), 4);
+    assertIntEquals(testAllocationEliminationOfArray4(2), 6);
+
+    assertIntEquals(testStoreStore().i, 41);
+    assertIntEquals(testStoreStore().j, 43);
+    assertIntEquals(testStoreStoreWithDeoptimize(new int[4]), 4);
   }
 
   static boolean sFlag;

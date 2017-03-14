@@ -213,9 +213,31 @@ public class Main {
   /// CHECK-START: long Main.geoLongDivLastValue(long) instruction_simplifier$after_bce (after)
   /// CHECK-DAG: <<Long:j\d+>> LongConstant 0    loop:none
   /// CHECK-DAG:               Return [<<Long>>] loop:none
+  //
+  // Tests overflow in the divisor (while updating intermediate result).
   static long geoLongDivLastValue(long x) {
     for (int i = 0; i < 10; i++) {
       x /= 1081788608;
+    }
+    return x;
+  }
+
+  /// CHECK-START: long Main.geoLongDivLastValue() loop_optimization (before)
+  /// CHECK-DAG: Phi loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: Phi loop:<<Loop>>      outer_loop:none
+  //
+  /// CHECK-START: long Main.geoLongDivLastValue() loop_optimization (after)
+  /// CHECK-NOT: Phi
+  //
+  /// CHECK-START: long Main.geoLongDivLastValue() instruction_simplifier$after_bce (after)
+  /// CHECK-DAG: <<Long:j\d+>> LongConstant 0    loop:none
+  /// CHECK-DAG:               Return [<<Long>>] loop:none
+  //
+  // Tests overflow in the divisor (while updating base).
+  static long geoLongDivLastValue() {
+    long x = -1;
+    for (int i2 = 0; i2 < 2; i2++) {
+      x /= (Long.MAX_VALUE);
     }
     return x;
   }
@@ -237,6 +259,15 @@ public class Main {
       x *= 1081788608;
     }
     return x;
+  }
+
+  // If vectorized, the narrowing subscript should not cause
+  // type inconsistencies in the synthesized code.
+  static void narrowingSubscript(float[] a) {
+    float val = 2.0f;
+    for (long i = 0; i < a.length; i++) {
+      a[(int) i] += val;
+    }
   }
 
   public static void main(String[] args) {
@@ -286,6 +317,8 @@ public class Main {
     expectEquals(0L, geoLongDivLastValue(9223372036854775807L));
     expectEquals(0L, geoLongDivLastValue(-9223372036854775808L));
 
+    expectEquals(0L, geoLongDivLastValue());
+
     expectEquals(                   0L, geoLongMulLastValue(0L));
     expectEquals(-8070450532247928832L, geoLongMulLastValue(1L));
     expectEquals( 2305843009213693952L, geoLongMulLastValue(2L));
@@ -295,6 +328,12 @@ public class Main {
     expectEquals(                   0L, geoLongMulLastValue(-2147483648L));
     expectEquals( 8070450532247928832L, geoLongMulLastValue(9223372036854775807L));
     expectEquals(                   0L, geoLongMulLastValue(-9223372036854775808L));
+
+    float[] a = new float[16];
+    narrowingSubscript(a);
+    for (int i = 0; i < 16; i++) {
+      expectEquals(2.0f, a[i]);
+    }
 
     System.out.println("passed");
   }
@@ -306,6 +345,12 @@ public class Main {
   }
 
   private static void expectEquals(long expected, long result) {
+    if (expected != result) {
+      throw new Error("Expected: " + expected + ", found: " + result);
+    }
+  }
+
+  private static void expectEquals(float expected, float result) {
     if (expected != result) {
       throw new Error("Expected: " + expected + ", found: " + result);
     }

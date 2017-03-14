@@ -299,7 +299,6 @@ class InstructionCodeGeneratorARM : public InstructionCodeGenerator {
   void GenerateCompareTestAndBranch(HCondition* condition,
                                     Label* true_target,
                                     Label* false_target);
-  void GenerateVcmp(HInstruction* instruction);
   void GenerateFPJumps(HCondition* cond, Label* true_label, Label* false_label);
   void GenerateLongComparesAndJumps(HCondition* cond, Label* true_label, Label* false_label);
   void DivRemOneOrMinusOne(HBinaryOperation* instruction);
@@ -422,6 +421,8 @@ class CodeGeneratorARM : public CodeGenerator {
     return CommonGetLabelOf<Label>(block_labels_, block);
   }
 
+  Label* GetFinalLabel(HInstruction* instruction, Label* final_label);
+
   void Initialize() OVERRIDE {
     block_labels_ = CommonInitializeLabels<Label>();
   }
@@ -520,9 +521,6 @@ class CodeGeneratorARM : public CodeGenerator {
                                              Location index,
                                              Location temp,
                                              bool needs_null_check);
-  // Factored implementation used by GenerateFieldLoadWithBakerReadBarrier
-  // and GenerateArrayLoadWithBakerReadBarrier.
-
   // Factored implementation, used by GenerateFieldLoadWithBakerReadBarrier,
   // GenerateArrayLoadWithBakerReadBarrier and some intrinsics.
   //
@@ -544,6 +542,15 @@ class CodeGeneratorARM : public CodeGenerator {
                                                  bool needs_null_check,
                                                  bool always_update_field = false,
                                                  Register* temp2 = nullptr);
+
+  // Generate a heap reference load (with no read barrier).
+  void GenerateRawReferenceLoad(HInstruction* instruction,
+                                Location ref,
+                                Register obj,
+                                uint32_t offset,
+                                Location index,
+                                ScaleFactor scale_factor,
+                                bool needs_null_check);
 
   // Generate a read barrier for a heap reference within `instruction`
   // using a slow path.
@@ -642,8 +649,6 @@ class CodeGeneratorARM : public CodeGenerator {
   ArenaDeque<PcRelativePatchInfo> pc_relative_type_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> type_bss_entry_patches_;
-  // Deduplication map for patchable boot image addresses.
-  Uint32ToLiteralMap boot_image_address_patches_;
 
   // Patches for string literals in JIT compiled code.
   StringToLiteralMap jit_string_patches_;

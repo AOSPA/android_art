@@ -26,11 +26,6 @@
         "bug": "http://b/28988206"
     },
     {
-        "test": "577-profile-foreign-dex",
-        "description": "Disable 577-profile-foreign-dex",
-        "bug": "http://b/27454772"
-    },
-    {
         "tests": ["002-sleep",
                   "053-wait-some",
                   "055-enum-performance",
@@ -106,6 +101,11 @@
                         "slowness of gcstress makes this bad."]
     },
     {
+        "test": "152-dead-large-object",
+        "variant": "gcstress",
+        "description": ["152-dead-large-object requires a heap larger than what gcstress uses."]
+    },
+    {
         "tests": ["908-gc-start-finish",
                   "913-heaps"],
         "variant": "gcstress",
@@ -124,9 +124,13 @@
                         "lot."]
     },
     {
-        "tests": ["964-default-iface-init-gen",
-                 "154-gc-loop"],
+        "test": "964-default-iface-init-gen",
         "variant": "gcstress"
+    },
+    {
+        "tests": "154-gc-loop",
+        "variant": "gcstress | jit",
+        "description": ["154-gc-loop depends GC not happening too often"]
     },
     {
         "test": "115-native-bridge",
@@ -293,7 +297,7 @@
         "tests": ["000-nop",
                   "134-nodex2oat-nofallback",
                   "147-stripped-dex-fallback",
-                 "595-profile-saving"],
+                  "595-profile-saving"],
         "description": "The doesn't compile anything",
         "env_vars": {"ART_TEST_BISECTION": "true"},
         "variant": "optimizing | regalloc_gc"
@@ -318,7 +322,7 @@
     },
     {
         "tests": ["115-native-bridge",
-                 "088-monitor-verification"],
+                  "088-monitor-verification"],
         "description": "The test assume they are always compiled.",
         "env_vars": {"ART_TEST_BISECTION": "true"},
         "variant": "optimizing | regalloc_gc"
@@ -331,7 +335,8 @@
         "variant": "optimizing | regalloc_gc"
     },
     {
-        "test": "537-checker-arraycopy",
+        "tests": ["537-checker-arraycopy",
+                  "641-checker-arraycopy"],
         "env_vars": {"ART_USE_READ_BARRIER": "true"},
         "variant": "interpreter | optimizing | regalloc_gc | jit"
     }

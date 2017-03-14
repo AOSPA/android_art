@@ -238,10 +238,11 @@ bool ImageWriter::Write(int image_fd,
       case ImageHeader::kStorageModeLZ4: {
         const size_t compressed_max_size = LZ4_compressBound(image_data_size);
         compressed_data.reset(new char[compressed_max_size]);
-        data_size = LZ4_compress(
+        data_size = LZ4_compress_default(
             reinterpret_cast<char*>(image_info.image_->Begin()) + sizeof(ImageHeader),
             &compressed_data[0],
-            image_data_size);
+            image_data_size,
+            compressed_max_size);
 
         break;
       }
@@ -940,11 +941,9 @@ void ImageWriter::PruneNonImageClasses() {
     }
     ObjPtr<mirror::DexCache> dex_cache = self->DecodeJObject(data.weak_root)->AsDexCache();
     for (size_t i = 0; i < dex_cache->NumResolvedTypes(); i++) {
-      mirror::TypeDexCachePair pair =
-          dex_cache->GetResolvedTypes()[i].load(std::memory_order_relaxed);
-      mirror::Class* klass = pair.object.Read();
+      Class* klass = dex_cache->GetResolvedType(dex::TypeIndex(i));
       if (klass != nullptr && !KeepClass(klass)) {
-        dex_cache->ClearResolvedType(dex::TypeIndex(pair.index));
+        dex_cache->SetResolvedType(dex::TypeIndex(i), nullptr);
       }
     }
     ArtMethod** resolved_methods = dex_cache->GetResolvedMethods();
@@ -1924,7 +1923,8 @@ void ImageWriter::CopyAndFixupNativeData(size_t oat_index) {
     // above comment for intern tables.
     ClassTable temp_class_table;
     temp_class_table.ReadFromMemory(class_table_memory_ptr);
-    ObjPtr<mirror::ClassLoader> class_loader = GetClassLoader();
+    CHECK_EQ(class_loaders_.size(), compile_app_image_ ? 1u : 0u);
+    mirror::ClassLoader* class_loader = compile_app_image_ ? *class_loaders_.begin() : nullptr;
     CHECK_EQ(temp_class_table.NumZygoteClasses(class_loader),
              table->NumNonZygoteClasses(class_loader) + table->NumZygoteClasses(class_loader));
     UnbufferedRootVisitor visitor(&root_visitor, RootInfo(kRootUnknown));
@@ -2214,7 +2214,7 @@ void ImageWriter::FixupDexCache(mirror::DexCache* orig_dex_cache,
     orig_dex_cache->FixupStrings(NativeCopyLocation(orig_strings, orig_dex_cache),
                                  ImageAddressVisitor(this));
   }
-  mirror::TypeDexCacheType* orig_types = orig_dex_cache->GetResolvedTypes();
+  GcRoot<mirror::Class>* orig_types = orig_dex_cache->GetResolvedTypes();
   if (orig_types != nullptr) {
     copy_dex_cache->SetFieldPtrWithSize<false>(mirror::DexCache::ResolvedTypesOffset(),
                                                NativeLocationInImage(orig_types),

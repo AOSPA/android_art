@@ -20,7 +20,7 @@
 #include "base/mutex.h"
 #include "dex_file-inl.h"
 #include "dex_instruction-inl.h"
-#include "optimizing/bytecode_utils.h"
+#include "bytecode_utils.h"
 
 namespace art {
 namespace optimizer {
@@ -185,7 +185,7 @@ bool DexDecompiler::Decompile() {
   }
 
   if (quickened_info_ptr_ != quickened_info_end_) {
-    LOG(ERROR) << "Failed to use all values in quickening info."
+    LOG(FATAL) << "Failed to use all values in quickening info."
                << " Actual: " << std::hex << quickened_info_ptr_
                << " Expected: " << quickened_info_end_;
     return false;

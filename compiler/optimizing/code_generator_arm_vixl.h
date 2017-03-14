@@ -45,6 +45,11 @@ static constexpr bool kArmUseVIXL32 = true;
 namespace art {
 namespace arm {
 
+// This constant is used as an approximate margin when emission of veneer and literal pools
+// must be blocked.
+static constexpr int kMaxMacroInstructionSizeInBytes =
+    15 * vixl::aarch32::kMaxInstructionSizeInBytes;
+
 static const vixl::aarch32::Register kParameterCoreRegistersVIXL[] = {
     vixl::aarch32::r1,
     vixl::aarch32::r2,
@@ -396,7 +401,6 @@ class InstructionCodeGeneratorARMVIXL : public InstructionCodeGenerator {
   void GenerateCompareTestAndBranch(HCondition* condition,
                                     vixl::aarch32::Label* true_target,
                                     vixl::aarch32::Label* false_target);
-  void GenerateVcmp(HInstruction* instruction);
   void GenerateFPJumps(HCondition* cond,
                        vixl::aarch32::Label* true_label,
                        vixl::aarch32::Label* false_label);
@@ -504,6 +508,8 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
     block = FirstNonEmptyBlock(block);
     return &(block_labels_[block->GetBlockId()]);
   }
+
+  vixl32::Label* GetFinalLabel(HInstruction* instruction, vixl32::Label* final_label);
 
   void Initialize() OVERRIDE {
     block_labels_.resize(GetGraph()->GetBlocks().size());
@@ -625,6 +631,15 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
                                                  bool always_update_field = false,
                                                  vixl::aarch32::Register* temp2 = nullptr);
 
+  // Generate a heap reference load (with no read barrier).
+  void GenerateRawReferenceLoad(HInstruction* instruction,
+                                Location ref,
+                                vixl::aarch32::Register obj,
+                                uint32_t offset,
+                                Location index,
+                                ScaleFactor scale_factor,
+                                bool needs_null_check);
+
   // Generate a read barrier for a heap reference within `instruction`
   // using a slow path.
   //
@@ -738,8 +753,6 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
   ArenaDeque<PcRelativePatchInfo> pc_relative_type_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> type_bss_entry_patches_;
-  // Deduplication map for patchable boot image addresses.
-  Uint32ToLiteralMap boot_image_address_patches_;
 
   // Patches for string literals in JIT compiled code.
   StringToLiteralMap jit_string_patches_;

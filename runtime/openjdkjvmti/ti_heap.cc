@@ -25,12 +25,14 @@
 #include "gc_root-inl.h"
 #include "jni_env_ext.h"
 #include "jni_internal.h"
+#include "jvmti_weak_table-inl.h"
 #include "mirror/class.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
 #include "object_callbacks.h"
 #include "object_tagging.h"
 #include "obj_ptr-inl.h"
+#include "primitive.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread-inl.h"
@@ -39,6 +41,21 @@
 namespace openjdkjvmti {
 
 namespace {
+
+struct IndexCache {
+  // The number of interface fields implemented by the class. This is a prefix to all assigned
+  // field indices.
+  size_t interface_fields;
+
+  // It would be nice to also cache the following, but it is complicated to wire up into the
+  // generic visit:
+  // The number of fields in interfaces and superclasses. This is the first index assigned to
+  // fields of the class.
+  // size_t superclass_fields;
+};
+using IndexCachingTable = JvmtiWeakTable<IndexCache>;
+
+static IndexCachingTable gIndexCachingTable;
 
 // Report the contents of a string, if a callback is set.
 jint ReportString(art::ObjPtr<art::mirror::Object> obj,
@@ -49,25 +66,28 @@ jint ReportString(art::ObjPtr<art::mirror::Object> obj,
   if (UNLIKELY(cb->string_primitive_value_callback != nullptr) && obj->IsString()) {
     art::ObjPtr<art::mirror::String> str = obj->AsString();
     int32_t string_length = str->GetLength();
-    jvmtiError alloc_error;
-    JvmtiUniquePtr<uint16_t[]> data = AllocJvmtiUniquePtr<uint16_t[]>(env,
-                                                                      string_length,
-                                                                      &alloc_error);
-    if (data == nullptr) {
-      // TODO: Not really sure what to do here. Should we abort the iteration and go all the way
-      //       back? For now just warn.
-      LOG(WARNING) << "Unable to allocate buffer for string reporting! Silently dropping value.";
-      return 0;
-    }
+    JvmtiUniquePtr<uint16_t[]> data;
 
-    if (str->IsCompressed()) {
-      uint8_t* compressed_data = str->GetValueCompressed();
-      for (int32_t i = 0; i != string_length; ++i) {
-        data[i] = compressed_data[i];
+    if (string_length > 0) {
+      jvmtiError alloc_error;
+      data = AllocJvmtiUniquePtr<uint16_t[]>(env, string_length, &alloc_error);
+      if (data == nullptr) {
+        // TODO: Not really sure what to do here. Should we abort the iteration and go all the way
+        //       back? For now just warn.
+        LOG(WARNING) << "Unable to allocate buffer for string reporting! Silently dropping value."
+                     << " >" << str->ToModifiedUtf8() << "<";
+        return 0;
       }
-    } else {
-      // Can copy directly.
-      memcpy(data.get(), str->GetValue(), string_length * sizeof(uint16_t));
+
+      if (str->IsCompressed()) {
+        uint8_t* compressed_data = str->GetValueCompressed();
+        for (int32_t i = 0; i != string_length; ++i) {
+          data[i] = compressed_data[i];
+        }
+      } else {
+        // Can copy directly.
+        memcpy(data.get(), str->GetValue(), string_length * sizeof(uint16_t));
+      }
     }
 
     const jlong class_tag = tag_table->GetTagOrZero(obj->GetClass());
@@ -89,32 +109,515 @@ jint ReportString(art::ObjPtr<art::mirror::Object> obj,
   return 0;
 }
 
-}  // namespace
+// Report the contents of a primitive array, if a callback is set.
+jint ReportPrimitiveArray(art::ObjPtr<art::mirror::Object> obj,
+                          jvmtiEnv* env,
+                          ObjectTagTable* tag_table,
+                          const jvmtiHeapCallbacks* cb,
+                          const void* user_data) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  if (UNLIKELY(cb->array_primitive_value_callback != nullptr) &&
+      obj->IsArrayInstance() &&
+      !obj->IsObjectArray()) {
+    art::ObjPtr<art::mirror::Array> array = obj->AsArray();
+    int32_t array_length = array->GetLength();
+    size_t component_size = array->GetClass()->GetComponentSize();
+    art::Primitive::Type art_prim_type = array->GetClass()->GetComponentType()->GetPrimitiveType();
+    jvmtiPrimitiveType prim_type =
+        static_cast<jvmtiPrimitiveType>(art::Primitive::Descriptor(art_prim_type)[0]);
+    DCHECK(prim_type == JVMTI_PRIMITIVE_TYPE_BOOLEAN ||
+           prim_type == JVMTI_PRIMITIVE_TYPE_BYTE ||
+           prim_type == JVMTI_PRIMITIVE_TYPE_CHAR ||
+           prim_type == JVMTI_PRIMITIVE_TYPE_SHORT ||
+           prim_type == JVMTI_PRIMITIVE_TYPE_INT ||
+           prim_type == JVMTI_PRIMITIVE_TYPE_LONG ||
+           prim_type == JVMTI_PRIMITIVE_TYPE_FLOAT ||
+           prim_type == JVMTI_PRIMITIVE_TYPE_DOUBLE);
 
-struct IterateThroughHeapData {
-  IterateThroughHeapData(HeapUtil* _heap_util,
-                         jvmtiEnv* _env,
-                         jint heap_filter,
-                         art::ObjPtr<art::mirror::Class> klass,
-                         const jvmtiHeapCallbacks* _callbacks,
-                         const void* _user_data)
-      : heap_util(_heap_util),
-        filter_klass(klass),
-        env(_env),
-        callbacks(_callbacks),
-        user_data(_user_data),
-        filter_out_tagged((heap_filter & JVMTI_HEAP_FILTER_TAGGED) != 0),
+    const jlong class_tag = tag_table->GetTagOrZero(obj->GetClass());
+    jlong array_tag = tag_table->GetTagOrZero(obj.Ptr());
+    const jlong saved_array_tag = array_tag;
+
+    jint result;
+    if (array_length == 0) {
+      result = cb->array_primitive_value_callback(class_tag,
+                                                  obj->SizeOf(),
+                                                  &array_tag,
+                                                  0,
+                                                  prim_type,
+                                                  nullptr,
+                                                  const_cast<void*>(user_data));
+    } else {
+      jvmtiError alloc_error;
+      JvmtiUniquePtr<char[]> data = AllocJvmtiUniquePtr<char[]>(env,
+                                                                array_length * component_size,
+                                                                &alloc_error);
+      if (data == nullptr) {
+        // TODO: Not really sure what to do here. Should we abort the iteration and go all the way
+        //       back? For now just warn.
+        LOG(WARNING) << "Unable to allocate buffer for array reporting! Silently dropping value.";
+        return 0;
+      }
+
+      memcpy(data.get(), array->GetRawData(component_size, 0), array_length * component_size);
+
+      result = cb->array_primitive_value_callback(class_tag,
+                                                  obj->SizeOf(),
+                                                  &array_tag,
+                                                  array_length,
+                                                  prim_type,
+                                                  data.get(),
+                                                  const_cast<void*>(user_data));
+    }
+
+    if (array_tag != saved_array_tag) {
+      tag_table->Set(obj.Ptr(), array_tag);
+    }
+
+    return result;
+  }
+  return 0;
+}
+
+template <typename UserData>
+bool VisitorFalse(art::ObjPtr<art::mirror::Object> obj ATTRIBUTE_UNUSED,
+                  art::ObjPtr<art::mirror::Class> klass ATTRIBUTE_UNUSED,
+                  art::ArtField& field ATTRIBUTE_UNUSED,
+                  size_t field_index ATTRIBUTE_UNUSED,
+                  UserData* user_data ATTRIBUTE_UNUSED) {
+  return false;
+}
+
+template <typename UserData, bool kCallVisitorOnRecursion>
+class FieldVisitor {
+ public:
+  // Report the contents of a primitive fields of the given object, if a callback is set.
+  template <typename StaticPrimitiveVisitor,
+            typename StaticReferenceVisitor,
+            typename InstancePrimitiveVisitor,
+            typename InstanceReferenceVisitor>
+  static bool ReportFields(art::ObjPtr<art::mirror::Object> obj,
+                           UserData* user_data,
+                           StaticPrimitiveVisitor& static_prim_visitor,
+                           StaticReferenceVisitor& static_ref_visitor,
+                           InstancePrimitiveVisitor& instance_prim_visitor,
+                           InstanceReferenceVisitor& instance_ref_visitor)
+      REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    FieldVisitor fv(user_data);
+
+    if (obj->IsClass()) {
+      // When visiting a class, we only visit the static fields of the given class. No field of
+      // superclasses is visited.
+      art::ObjPtr<art::mirror::Class> klass = obj->AsClass();
+      // Only report fields on resolved classes. We need valid field data.
+      if (!klass->IsResolved()) {
+        return false;
+      }
+      return fv.ReportFieldsImpl(nullptr,
+                                 obj->AsClass(),
+                                 obj->AsClass()->IsInterface(),
+                                 static_prim_visitor,
+                                 static_ref_visitor,
+                                 instance_prim_visitor,
+                                 instance_ref_visitor);
+    } else {
+      // See comment above. Just double-checking here, but an instance *should* mean the class was
+      // resolved.
+      DCHECK(obj->GetClass()->IsResolved() || obj->GetClass()->IsErroneousResolved());
+      return fv.ReportFieldsImpl(obj,
+                                 obj->GetClass(),
+                                 false,
+                                 static_prim_visitor,
+                                 static_ref_visitor,
+                                 instance_prim_visitor,
+                                 instance_ref_visitor);
+    }
+  }
+
+ private:
+  explicit FieldVisitor(UserData* user_data) : user_data_(user_data) {}
+
+  // Report the contents of fields of the given object. If obj is null, report the static fields,
+  // otherwise the instance fields.
+  template <typename StaticPrimitiveVisitor,
+            typename StaticReferenceVisitor,
+            typename InstancePrimitiveVisitor,
+            typename InstanceReferenceVisitor>
+  bool ReportFieldsImpl(art::ObjPtr<art::mirror::Object> obj,
+                        art::ObjPtr<art::mirror::Class> klass,
+                        bool skip_java_lang_object,
+                        StaticPrimitiveVisitor& static_prim_visitor,
+                        StaticReferenceVisitor& static_ref_visitor,
+                        InstancePrimitiveVisitor& instance_prim_visitor,
+                        InstanceReferenceVisitor& instance_ref_visitor)
+      REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    // Compute the offset of field indices.
+    size_t interface_field_count = CountInterfaceFields(klass);
+
+    size_t tmp;
+    bool aborted = ReportFieldsRecursive(obj,
+                                         klass,
+                                         interface_field_count,
+                                         skip_java_lang_object,
+                                         static_prim_visitor,
+                                         static_ref_visitor,
+                                         instance_prim_visitor,
+                                         instance_ref_visitor,
+                                         &tmp);
+    return aborted;
+  }
+
+  // Visit primitive fields in an object (instance). Return true if the visit was aborted.
+  template <typename StaticPrimitiveVisitor,
+            typename StaticReferenceVisitor,
+            typename InstancePrimitiveVisitor,
+            typename InstanceReferenceVisitor>
+  bool ReportFieldsRecursive(art::ObjPtr<art::mirror::Object> obj,
+                             art::ObjPtr<art::mirror::Class> klass,
+                             size_t interface_fields,
+                             bool skip_java_lang_object,
+                             StaticPrimitiveVisitor& static_prim_visitor,
+                             StaticReferenceVisitor& static_ref_visitor,
+                             InstancePrimitiveVisitor& instance_prim_visitor,
+                             InstanceReferenceVisitor& instance_ref_visitor,
+                             size_t* field_index_out)
+      REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    DCHECK(klass != nullptr);
+    size_t field_index;
+    if (klass->GetSuperClass() == nullptr) {
+      // j.l.Object. Start with the fields from interfaces.
+      field_index = interface_fields;
+      if (skip_java_lang_object) {
+        *field_index_out = field_index;
+        return false;
+      }
+    } else {
+      // Report superclass fields.
+      if (kCallVisitorOnRecursion) {
+        if (ReportFieldsRecursive(obj,
+                                  klass->GetSuperClass(),
+                                  interface_fields,
+                                  skip_java_lang_object,
+                                  static_prim_visitor,
+                                  static_ref_visitor,
+                                  instance_prim_visitor,
+                                  instance_ref_visitor,
+                                  &field_index)) {
+          return true;
+        }
+      } else {
+        // Still call, but with empty visitor. This is required for correct counting.
+        ReportFieldsRecursive(obj,
+                              klass->GetSuperClass(),
+                              interface_fields,
+                              skip_java_lang_object,
+                              VisitorFalse<UserData>,
+                              VisitorFalse<UserData>,
+                              VisitorFalse<UserData>,
+                              VisitorFalse<UserData>,
+                              &field_index);
+      }
+    }
+
+    // Now visit fields for the current klass.
+
+    for (auto& static_field : klass->GetSFields()) {
+      if (static_field.IsPrimitiveType()) {
+        if (static_prim_visitor(obj,
+                                klass,
+                                static_field,
+                                field_index,
+                                user_data_)) {
+          return true;
+        }
+      } else {
+        if (static_ref_visitor(obj,
+                               klass,
+                               static_field,
+                               field_index,
+                               user_data_)) {
+          return true;
+        }
+      }
+      field_index++;
+    }
+
+    for (auto& instance_field : klass->GetIFields()) {
+      if (instance_field.IsPrimitiveType()) {
+        if (instance_prim_visitor(obj,
+                                  klass,
+                                  instance_field,
+                                  field_index,
+                                  user_data_)) {
+          return true;
+        }
+      } else {
+        if (instance_ref_visitor(obj,
+                                 klass,
+                                 instance_field,
+                                 field_index,
+                                 user_data_)) {
+          return true;
+        }
+      }
+      field_index++;
+    }
+
+    *field_index_out = field_index;
+    return false;
+  }
+
+  // Implements a visit of the implemented interfaces of a given class.
+  template <typename T>
+  struct RecursiveInterfaceVisit {
+    static void VisitStatic(art::Thread* self, art::ObjPtr<art::mirror::Class> klass, T& visitor)
+        REQUIRES_SHARED(art::Locks::mutator_lock_) {
+      RecursiveInterfaceVisit rv;
+      rv.Visit(self, klass, visitor);
+    }
+
+    void Visit(art::Thread* self, art::ObjPtr<art::mirror::Class> klass, T& visitor)
+        REQUIRES_SHARED(art::Locks::mutator_lock_) {
+      // First visit the parent, to get the order right.
+      // (We do this in preparation for actual visiting of interface fields.)
+      if (klass->GetSuperClass() != nullptr) {
+        Visit(self, klass->GetSuperClass(), visitor);
+      }
+      for (uint32_t i = 0; i != klass->NumDirectInterfaces(); ++i) {
+        art::ObjPtr<art::mirror::Class> inf_klass =
+            art::mirror::Class::GetDirectInterface(self, klass, i);
+        DCHECK(inf_klass != nullptr);
+        VisitInterface(self, inf_klass, visitor);
+      }
+    }
+
+    void VisitInterface(art::Thread* self, art::ObjPtr<art::mirror::Class> inf_klass, T& visitor)
+        REQUIRES_SHARED(art::Locks::mutator_lock_) {
+      auto it = visited_interfaces.find(inf_klass.Ptr());
+      if (it != visited_interfaces.end()) {
+        return;
+      }
+      visited_interfaces.insert(inf_klass.Ptr());
+
+      // Let the visitor know about this one. Note that this order is acceptable, as the ordering
+      // of these fields never matters for known visitors.
+      visitor(inf_klass);
+
+      // Now visit the superinterfaces.
+      for (uint32_t i = 0; i != inf_klass->NumDirectInterfaces(); ++i) {
+        art::ObjPtr<art::mirror::Class> super_inf_klass =
+            art::mirror::Class::GetDirectInterface(self, inf_klass, i);
+        DCHECK(super_inf_klass != nullptr);
+        VisitInterface(self, super_inf_klass, visitor);
+      }
+    }
+
+    std::unordered_set<art::mirror::Class*> visited_interfaces;
+  };
+
+  // Counting interface fields. Note that we cannot use the interface table, as that only contains
+  // "non-marker" interfaces (= interfaces with methods).
+  static size_t CountInterfaceFields(art::ObjPtr<art::mirror::Class> klass)
+      REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    // Do we have a cached value?
+    IndexCache tmp;
+    if (gIndexCachingTable.GetTag(klass.Ptr(), &tmp)) {
+      return tmp.interface_fields;
+    }
+
+    size_t count = 0;
+    auto visitor = [&count](art::ObjPtr<art::mirror::Class> inf_klass)
+        REQUIRES_SHARED(art::Locks::mutator_lock_) {
+      DCHECK(inf_klass->IsInterface());
+      DCHECK_EQ(0u, inf_klass->NumInstanceFields());
+      count += inf_klass->NumStaticFields();
+    };
+    RecursiveInterfaceVisit<decltype(visitor)>::VisitStatic(art::Thread::Current(), klass, visitor);
+
+    // Store this into the cache.
+    tmp.interface_fields = count;
+    gIndexCachingTable.Set(klass.Ptr(), tmp);
+
+    return count;
+  }
+
+  UserData* user_data_;
+};
+
+// Debug helper. Prints the structure of an object.
+template <bool kStatic, bool kRef>
+struct DumpVisitor {
+  static bool Callback(art::ObjPtr<art::mirror::Object> obj ATTRIBUTE_UNUSED,
+                       art::ObjPtr<art::mirror::Class> klass ATTRIBUTE_UNUSED,
+                       art::ArtField& field,
+                       size_t field_index,
+                       void* user_data ATTRIBUTE_UNUSED)
+      REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    LOG(ERROR) << (kStatic ? "static " : "instance ")
+               << (kRef ? "ref " : "primitive ")
+               << field.PrettyField()
+               << " @ "
+               << field_index;
+    return false;
+  }
+};
+ATTRIBUTE_UNUSED
+void DumpObjectFields(art::ObjPtr<art::mirror::Object> obj)
+    REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  if (obj->IsClass()) {
+    FieldVisitor<void, false>:: ReportFields(obj,
+                                             nullptr,
+                                             DumpVisitor<true, false>::Callback,
+                                             DumpVisitor<true, true>::Callback,
+                                             DumpVisitor<false, false>::Callback,
+                                             DumpVisitor<false, true>::Callback);
+  } else {
+    FieldVisitor<void, true>::ReportFields(obj,
+                                           nullptr,
+                                           DumpVisitor<true, false>::Callback,
+                                           DumpVisitor<true, true>::Callback,
+                                           DumpVisitor<false, false>::Callback,
+                                           DumpVisitor<false, true>::Callback);
+  }
+}
+
+class ReportPrimitiveField {
+ public:
+  static bool Report(art::ObjPtr<art::mirror::Object> obj,
+                     ObjectTagTable* tag_table,
+                     const jvmtiHeapCallbacks* cb,
+                     const void* user_data)
+      REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    if (UNLIKELY(cb->primitive_field_callback != nullptr)) {
+      jlong class_tag = tag_table->GetTagOrZero(obj->GetClass());
+      ReportPrimitiveField rpf(tag_table, class_tag, cb, user_data);
+      if (obj->IsClass()) {
+        return FieldVisitor<ReportPrimitiveField, false>::ReportFields(
+            obj,
+            &rpf,
+            ReportPrimitiveFieldCallback<true>,
+            VisitorFalse<ReportPrimitiveField>,
+            VisitorFalse<ReportPrimitiveField>,
+            VisitorFalse<ReportPrimitiveField>);
+      } else {
+        return FieldVisitor<ReportPrimitiveField, true>::ReportFields(
+            obj,
+            &rpf,
+            VisitorFalse<ReportPrimitiveField>,
+            VisitorFalse<ReportPrimitiveField>,
+            ReportPrimitiveFieldCallback<false>,
+            VisitorFalse<ReportPrimitiveField>);
+      }
+    }
+    return false;
+  }
+
+
+ private:
+  ReportPrimitiveField(ObjectTagTable* tag_table,
+                       jlong class_tag,
+                       const jvmtiHeapCallbacks* cb,
+                       const void* user_data)
+      : tag_table_(tag_table), class_tag_(class_tag), cb_(cb), user_data_(user_data) {}
+
+  template <bool kReportStatic>
+  static bool ReportPrimitiveFieldCallback(art::ObjPtr<art::mirror::Object> obj,
+                                           art::ObjPtr<art::mirror::Class> klass,
+                                           art::ArtField& field,
+                                           size_t field_index,
+                                           ReportPrimitiveField* user_data)
+      REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    art::Primitive::Type art_prim_type = field.GetTypeAsPrimitiveType();
+    jvmtiPrimitiveType prim_type =
+        static_cast<jvmtiPrimitiveType>(art::Primitive::Descriptor(art_prim_type)[0]);
+    DCHECK(prim_type == JVMTI_PRIMITIVE_TYPE_BOOLEAN ||
+           prim_type == JVMTI_PRIMITIVE_TYPE_BYTE ||
+           prim_type == JVMTI_PRIMITIVE_TYPE_CHAR ||
+           prim_type == JVMTI_PRIMITIVE_TYPE_SHORT ||
+           prim_type == JVMTI_PRIMITIVE_TYPE_INT ||
+           prim_type == JVMTI_PRIMITIVE_TYPE_LONG ||
+           prim_type == JVMTI_PRIMITIVE_TYPE_FLOAT ||
+           prim_type == JVMTI_PRIMITIVE_TYPE_DOUBLE);
+    jvmtiHeapReferenceInfo info;
+    info.field.index = field_index;
+
+    jvalue value;
+    memset(&value, 0, sizeof(jvalue));
+    art::ObjPtr<art::mirror::Object> src = kReportStatic ? klass : obj;
+    switch (art_prim_type) {
+      case art::Primitive::Type::kPrimBoolean:
+        value.z = field.GetBoolean(src) == 0 ? JNI_FALSE : JNI_TRUE;
+        break;
+      case art::Primitive::Type::kPrimByte:
+        value.b = field.GetByte(src);
+        break;
+      case art::Primitive::Type::kPrimChar:
+        value.c = field.GetChar(src);
+        break;
+      case art::Primitive::Type::kPrimShort:
+        value.s = field.GetShort(src);
+        break;
+      case art::Primitive::Type::kPrimInt:
+        value.i = field.GetInt(src);
+        break;
+      case art::Primitive::Type::kPrimLong:
+        value.j = field.GetLong(src);
+        break;
+      case art::Primitive::Type::kPrimFloat:
+        value.f = field.GetFloat(src);
+        break;
+      case art::Primitive::Type::kPrimDouble:
+        value.d = field.GetDouble(src);
+        break;
+      case art::Primitive::Type::kPrimVoid:
+      case art::Primitive::Type::kPrimNot: {
+        LOG(FATAL) << "Should not reach here";
+        UNREACHABLE();
+      }
+    }
+
+    jlong obj_tag = user_data->tag_table_->GetTagOrZero(src.Ptr());
+    const jlong saved_obj_tag = obj_tag;
+
+    jint ret = user_data->cb_->primitive_field_callback(kReportStatic
+                                                            ? JVMTI_HEAP_REFERENCE_STATIC_FIELD
+                                                            : JVMTI_HEAP_REFERENCE_FIELD,
+                                                        &info,
+                                                        user_data->class_tag_,
+                                                        &obj_tag,
+                                                        value,
+                                                        prim_type,
+                                                        const_cast<void*>(user_data->user_data_));
+
+    if (saved_obj_tag != obj_tag) {
+      user_data->tag_table_->Set(src.Ptr(), obj_tag);
+    }
+
+    if ((ret & JVMTI_VISIT_ABORT) != 0) {
+      return true;
+    }
+
+    return false;
+  }
+
+  ObjectTagTable* tag_table_;
+  jlong class_tag_;
+  const jvmtiHeapCallbacks* cb_;
+  const void* user_data_;
+};
+
+struct HeapFilter {
+  explicit HeapFilter(jint heap_filter)
+      : filter_out_tagged((heap_filter & JVMTI_HEAP_FILTER_TAGGED) != 0),
         filter_out_untagged((heap_filter & JVMTI_HEAP_FILTER_UNTAGGED) != 0),
         filter_out_class_tagged((heap_filter & JVMTI_HEAP_FILTER_CLASS_TAGGED) != 0),
         filter_out_class_untagged((heap_filter & JVMTI_HEAP_FILTER_CLASS_UNTAGGED) != 0),
         any_filter(filter_out_tagged ||
                    filter_out_untagged ||
                    filter_out_class_tagged ||
-                   filter_out_class_untagged),
-        stop_reports(false) {
+                   filter_out_class_untagged) {
   }
 
-  bool ShouldReportByHeapFilter(jlong tag, jlong class_tag) {
+  bool ShouldReportByHeapFilter(jlong tag, jlong class_tag) const {
     if (!any_filter) {
       return true;
     }
@@ -131,16 +634,45 @@ struct IterateThroughHeapData {
     return true;
   }
 
-  HeapUtil* heap_util;
-  art::ObjPtr<art::mirror::Class> filter_klass;
-  jvmtiEnv* env;
-  const jvmtiHeapCallbacks* callbacks;
-  const void* user_data;
   const bool filter_out_tagged;
   const bool filter_out_untagged;
   const bool filter_out_class_tagged;
   const bool filter_out_class_untagged;
   const bool any_filter;
+};
+
+}  // namespace
+
+void HeapUtil::Register() {
+  art::Runtime::Current()->AddSystemWeakHolder(&gIndexCachingTable);
+}
+
+void HeapUtil::Unregister() {
+  art::Runtime::Current()->RemoveSystemWeakHolder(&gIndexCachingTable);
+}
+
+struct IterateThroughHeapData {
+  IterateThroughHeapData(HeapUtil* _heap_util,
+                         jvmtiEnv* _env,
+                         art::ObjPtr<art::mirror::Class> klass,
+                         jint _heap_filter,
+                         const jvmtiHeapCallbacks* _callbacks,
+                         const void* _user_data)
+      : heap_util(_heap_util),
+        heap_filter(_heap_filter),
+        filter_klass(klass),
+        env(_env),
+        callbacks(_callbacks),
+        user_data(_user_data),
+        stop_reports(false) {
+  }
+
+  HeapUtil* heap_util;
+  const HeapFilter heap_filter;
+  art::ObjPtr<art::mirror::Class> filter_klass;
+  jvmtiEnv* env;
+  const jvmtiHeapCallbacks* callbacks;
+  const void* user_data;
 
   bool stop_reports;
 };
@@ -163,7 +695,7 @@ static void IterateThroughHeapObjectCallback(art::mirror::Object* obj, void* arg
   ithd->heap_util->GetTags()->GetTag(klass.Ptr(), &class_tag);
   // For simplicity, even if we find a tag = 0, assume 0 = not tagged.
 
-  if (!ithd->ShouldReportByHeapFilter(tag, class_tag)) {
+  if (!ithd->heap_filter.ShouldReportByHeapFilter(tag, class_tag)) {
     return;
   }
 
@@ -202,8 +734,21 @@ static void IterateThroughHeapObjectCallback(art::mirror::Object* obj, void* arg
     ithd->stop_reports = (string_ret & JVMTI_VISIT_ABORT) != 0;
   }
 
-  // TODO Implement array primitive callback.
-  // TODO Implement primitive field callback.
+  if (!ithd->stop_reports) {
+    jint array_ret = ReportPrimitiveArray(obj,
+                                          ithd->env,
+                                          ithd->heap_util->GetTags(),
+                                          ithd->callbacks,
+                                          ithd->user_data);
+    ithd->stop_reports = (array_ret & JVMTI_VISIT_ABORT) != 0;
+  }
+
+  if (!ithd->stop_reports) {
+    ithd->stop_reports = ReportPrimitiveField::Report(obj,
+                                                      ithd->heap_util->GetTags(),
+                                                      ithd->callbacks,
+                                                      ithd->user_data);
+  }
 }
 
 jvmtiError HeapUtil::IterateThroughHeap(jvmtiEnv* env,
@@ -215,18 +760,13 @@ jvmtiError HeapUtil::IterateThroughHeap(jvmtiEnv* env,
     return ERR(NULL_POINTER);
   }
 
-  if (callbacks->array_primitive_value_callback != nullptr) {
-    // TODO: Implement.
-    return ERR(NOT_IMPLEMENTED);
-  }
-
   art::Thread* self = art::Thread::Current();
   art::ScopedObjectAccess soa(self);      // Now we know we have the shared lock.
 
   IterateThroughHeapData ithd(this,
                               env,
-                              heap_filter,
                               soa.Decode<art::mirror::Class>(klass),
+                              heap_filter,
                               callbacks,
                               user_data);
 
@@ -241,11 +781,15 @@ class FollowReferencesHelper FINAL {
                          jvmtiEnv* jvmti_env,
                          art::ObjPtr<art::mirror::Object> initial_object,
                          const jvmtiHeapCallbacks* callbacks,
+                         art::ObjPtr<art::mirror::Class> class_filter,
+                         jint heap_filter,
                          const void* user_data)
       : env(jvmti_env),
         tag_table_(h->GetTags()),
         initial_object_(initial_object),
         callbacks_(callbacks),
+        class_filter_(class_filter),
+        heap_filter_(heap_filter),
         user_data_(user_data),
         start_(0),
         stop_reports_(false) {
@@ -480,64 +1024,49 @@ class FollowReferencesHelper FINAL {
       return;
     }
 
-    // TODO: We'll probably have to rewrite this completely with our own visiting logic, if we
-    //       want to have a chance of getting the field indices computed halfway efficiently. For
-    //       now, ignore them altogether.
-
-    struct InstanceReferenceVisitor {
-      explicit InstanceReferenceVisitor(FollowReferencesHelper* helper_)
-          : helper(helper_), stop_reports(false) {}
-
-      void operator()(art::mirror::Object* src,
-                      art::MemberOffset field_offset,
-                      bool is_static ATTRIBUTE_UNUSED) const
-          REQUIRES_SHARED(art::Locks::mutator_lock_)
-          REQUIRES(!*helper->tag_table_->GetAllowDisallowLock()) {
-        if (stop_reports) {
-          return;
-        }
-
-        art::mirror::Object* trg = src->GetFieldObjectReferenceAddr(field_offset)->AsMirrorPtr();
+    // All instance fields.
+    auto report_instance_field = [&](art::ObjPtr<art::mirror::Object> src,
+                                     art::ObjPtr<art::mirror::Class> obj_klass ATTRIBUTE_UNUSED,
+                                     art::ArtField& field,
+                                     size_t field_index,
+                                     void* user_data ATTRIBUTE_UNUSED)
+        REQUIRES_SHARED(art::Locks::mutator_lock_)
+        REQUIRES(!*tag_table_->GetAllowDisallowLock()) {
+      art::ObjPtr<art::mirror::Object> field_value = field.GetObject(src);
+      if (field_value != nullptr) {
         jvmtiHeapReferenceInfo reference_info;
         memset(&reference_info, 0, sizeof(reference_info));
 
-        // TODO: Implement spec-compliant numbering.
-        reference_info.field.index = field_offset.Int32Value();
+        reference_info.field.index = field_index;
 
         jvmtiHeapReferenceKind kind =
-            field_offset.Int32Value() == art::mirror::Object::ClassOffset().Int32Value()
+            field.GetOffset().Int32Value() == art::mirror::Object::ClassOffset().Int32Value()
                 ? JVMTI_HEAP_REFERENCE_CLASS
                 : JVMTI_HEAP_REFERENCE_FIELD;
         const jvmtiHeapReferenceInfo* reference_info_ptr =
             kind == JVMTI_HEAP_REFERENCE_CLASS ? nullptr : &reference_info;
 
-        stop_reports = !helper->ReportReferenceMaybeEnqueue(kind, reference_info_ptr, src, trg);
+        return !ReportReferenceMaybeEnqueue(kind, reference_info_ptr, src.Ptr(), field_value.Ptr());
       }
-
-      void VisitRoot(art::mirror::CompressedReference<art::mirror::Object>* root ATTRIBUTE_UNUSED)
-          const {
-        LOG(FATAL) << "Unreachable";
-      }
-      void VisitRootIfNonNull(
-          art::mirror::CompressedReference<art::mirror::Object>* root ATTRIBUTE_UNUSED) const {
-        LOG(FATAL) << "Unreachable";
-      }
-
-      // "mutable" required by the visitor API.
-      mutable FollowReferencesHelper* helper;
-      mutable bool stop_reports;
+      return false;
     };
-
-    InstanceReferenceVisitor visitor(this);
-    // Visit references, not native roots.
-    obj->VisitReferences<false>(visitor, art::VoidFunctor());
-
-    stop_reports_ = visitor.stop_reports;
-
-    if (!stop_reports_) {
-      jint string_ret = ReportString(obj, env, tag_table_, callbacks_, user_data_);
-      stop_reports_ = (string_ret & JVMTI_VISIT_ABORT) != 0;
+    stop_reports_ = FieldVisitor<void, true>::ReportFields(obj,
+                                                           nullptr,
+                                                           VisitorFalse<void>,
+                                                           VisitorFalse<void>,
+                                                           VisitorFalse<void>,
+                                                           report_instance_field);
+    if (stop_reports_) {
+      return;
     }
+
+    jint string_ret = ReportString(obj, env, tag_table_, callbacks_, user_data_);
+    stop_reports_ = (string_ret & JVMTI_VISIT_ABORT) != 0;
+    if (stop_reports_) {
+      return;
+    }
+
+    stop_reports_ = ReportPrimitiveField::Report(obj, tag_table_, callbacks_, user_data_);
   }
 
   void VisitArray(art::mirror::Object* array)
@@ -568,6 +1097,11 @@ class FollowReferencesHelper FINAL {
             break;
           }
         }
+      }
+    } else {
+      if (!stop_reports_) {
+        jint array_ret = ReportPrimitiveArray(array, env, tag_table_, callbacks_, user_data_);
+        stop_reports_ = (array_ret & JVMTI_VISIT_ABORT) != 0;
       }
     }
   }
@@ -626,26 +1160,38 @@ class FollowReferencesHelper FINAL {
     DCHECK_EQ(h_klass.Get(), klass);
 
     // Declared static fields.
-    for (auto& field : klass->GetSFields()) {
-      if (!field.IsPrimitiveType()) {
-        art::ObjPtr<art::mirror::Object> field_value = field.GetObject(klass);
-        if (field_value != nullptr) {
-          jvmtiHeapReferenceInfo reference_info;
-          memset(&reference_info, 0, sizeof(reference_info));
+    auto report_static_field = [&](art::ObjPtr<art::mirror::Object> obj ATTRIBUTE_UNUSED,
+                                   art::ObjPtr<art::mirror::Class> obj_klass,
+                                   art::ArtField& field,
+                                   size_t field_index,
+                                   void* user_data ATTRIBUTE_UNUSED)
+        REQUIRES_SHARED(art::Locks::mutator_lock_)
+        REQUIRES(!*tag_table_->GetAllowDisallowLock()) {
+      art::ObjPtr<art::mirror::Object> field_value = field.GetObject(obj_klass);
+      if (field_value != nullptr) {
+        jvmtiHeapReferenceInfo reference_info;
+        memset(&reference_info, 0, sizeof(reference_info));
 
-          // TODO: Implement spec-compliant numbering.
-          reference_info.field.index = field.GetOffset().Int32Value();
+        reference_info.field.index = static_cast<jint>(field_index);
 
-          stop_reports_ = !ReportReferenceMaybeEnqueue(JVMTI_HEAP_REFERENCE_STATIC_FIELD,
-                                                       &reference_info,
-                                                       klass,
-                                                       field_value.Ptr());
-          if (stop_reports_) {
-            return;
-          }
-        }
+        return !ReportReferenceMaybeEnqueue(JVMTI_HEAP_REFERENCE_STATIC_FIELD,
+                                            &reference_info,
+                                            obj_klass.Ptr(),
+                                            field_value.Ptr());
       }
+      return false;
+    };
+    stop_reports_ = FieldVisitor<void, false>::ReportFields(klass,
+                                                            nullptr,
+                                                            VisitorFalse<void>,
+                                                            report_static_field,
+                                                            VisitorFalse<void>,
+                                                            VisitorFalse<void>);
+    if (stop_reports_) {
+      return;
     }
+
+    stop_reports_ = ReportPrimitiveField::Report(klass, tag_table_, callbacks_, user_data_);
   }
 
   void MaybeEnqueue(art::mirror::Object* obj) REQUIRES_SHARED(art::Locks::mutator_lock_) {
@@ -682,11 +1228,20 @@ class FollowReferencesHelper FINAL {
       return 0;
     }
 
+    if (UNLIKELY(class_filter_ != nullptr) && class_filter_ != referree->GetClass()) {
+      return JVMTI_VISIT_OBJECTS;
+    }
+
     const jlong class_tag = tag_table_->GetTagOrZero(referree->GetClass());
+    jlong tag = tag_table_->GetTagOrZero(referree);
+
+    if (!heap_filter_.ShouldReportByHeapFilter(tag, class_tag)) {
+      return JVMTI_VISIT_OBJECTS;
+    }
+
     const jlong referrer_class_tag =
         referrer == nullptr ? 0 : tag_table_->GetTagOrZero(referrer->GetClass());
     const jlong size = static_cast<jlong>(referree->SizeOf());
-    jlong tag = tag_table_->GetTagOrZero(referree);
     jlong saved_tag = tag;
     jlong referrer_tag = 0;
     jlong saved_referrer_tag = 0;
@@ -701,6 +1256,7 @@ class FollowReferencesHelper FINAL {
         referrer_tag_ptr = &referrer_tag;
       }
     }
+
     jint length = -1;
     if (referree->IsArrayInstance()) {
       length = referree->AsArray()->GetLength();
@@ -730,6 +1286,8 @@ class FollowReferencesHelper FINAL {
   ObjectTagTable* tag_table_;
   art::ObjPtr<art::mirror::Object> initial_object_;
   const jvmtiHeapCallbacks* callbacks_;
+  art::ObjPtr<art::mirror::Class> class_filter_;
+  const HeapFilter heap_filter_;
   const void* user_data_;
 
   std::vector<art::mirror::Object*> worklist_;
@@ -744,18 +1302,13 @@ class FollowReferencesHelper FINAL {
 };
 
 jvmtiError HeapUtil::FollowReferences(jvmtiEnv* env,
-                                      jint heap_filter ATTRIBUTE_UNUSED,
-                                      jclass klass ATTRIBUTE_UNUSED,
+                                      jint heap_filter,
+                                      jclass klass,
                                       jobject initial_object,
                                       const jvmtiHeapCallbacks* callbacks,
                                       const void* user_data) {
   if (callbacks == nullptr) {
     return ERR(NULL_POINTER);
-  }
-
-  if (callbacks->array_primitive_value_callback != nullptr) {
-    // TODO: Implement.
-    return ERR(NOT_IMPLEMENTED);
   }
 
   art::Thread* self = art::Thread::Current();
@@ -771,10 +1324,15 @@ jvmtiError HeapUtil::FollowReferences(jvmtiEnv* env,
     art::ScopedThreadSuspension sts(self, art::kWaitingForVisitObjects);
     art::ScopedSuspendAll ssa("FollowReferences");
 
+    art::ObjPtr<art::mirror::Class> class_filter = klass == nullptr
+        ? nullptr
+        : art::ObjPtr<art::mirror::Class>::DownCast(self->DecodeJObject(klass));
     FollowReferencesHelper frh(this,
                                env,
                                self->DecodeJObject(initial_object),
                                callbacks,
+                               class_filter,
+                               heap_filter,
                                user_data);
     frh.Init();
     frh.Work();

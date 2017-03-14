@@ -1662,6 +1662,7 @@ DEFINE_FUNCTION art_quick_imt_conflict_trampoline
 .Lconflict_trampoline:
     // Call the runtime stub to populate the ImtConflictTable and jump to the
     // resolved method.
+    movq %r10, %rdi  // Load interface method
     INVOKE_TRAMPOLINE_BODY artInvokeInterfaceTrampoline
 #endif  // __APPLE__
 END_FUNCTION art_quick_imt_conflict_trampoline
@@ -2098,18 +2099,6 @@ DEFINE_FUNCTION art_quick_instance_of
     RESTORE_FP_CALLEE_SAVE_FRAME
     ret
 END_FUNCTION art_quick_instance_of
-
-
-// Return from a nested signal:
-// Entry:
-//  rdi: address of jmp_buf in TLS
-
-DEFINE_FUNCTION art_nested_signal_return
-                                    // first arg to longjmp is already in correct register
-    movq LITERAL(1), %rsi           // second arg to longjmp (1)
-    call PLT_SYMBOL(longjmp)
-    UNREACHABLE
-END_FUNCTION art_nested_signal_return
 
 // Create a function `name` calling the ReadBarrier::Mark routine,
 // getting its argument and returning its result through register

@@ -297,7 +297,6 @@ class InstructionCodeGeneratorMIPS : public InstructionCodeGenerator {
   void GenerateDivRemWithAnyConstant(HBinaryOperation* instruction);
   void GenerateDivRemIntegral(HBinaryOperation* instruction);
   void HandleGoto(HInstruction* got, HBasicBlock* successor);
-  auto GetImplicitNullChecker(HInstruction* instruction);
   void GenPackedSwitchWithCompares(Register value_reg,
                                    int32_t lower_bound,
                                    uint32_t num_entries,
@@ -536,8 +535,6 @@ class CodeGeneratorMIPS : public CodeGenerator {
   ArenaDeque<PcRelativePatchInfo> pc_relative_type_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> type_bss_entry_patches_;
-  // Deduplication map for patchable boot image addresses.
-  Uint32ToLiteralMap boot_image_address_patches_;
   // Patches for string root accesses in JIT compiled code.
   ArenaDeque<JitPatchInfo> jit_string_patches_;
   // Patches for class root accesses in JIT compiled code.

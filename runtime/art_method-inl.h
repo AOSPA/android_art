@@ -55,8 +55,10 @@ inline mirror::Class* ArtMethod::GetDeclaringClass() {
   if (kIsDebugBuild) {
     if (!IsRuntimeMethod()) {
       CHECK(result != nullptr) << this;
-      CHECK(result->IsIdxLoaded() || result->IsErroneous())
-          << result->GetStatus() << " " << result->PrettyClass();
+      if (kCheckDeclaringClassState) {
+        CHECK(result->IsIdxLoaded() || result->IsErroneous())
+            << result->GetStatus() << " " << result->PrettyClass();
+      }
     } else {
       CHECK(result == nullptr) << this;
     }
@@ -89,7 +91,7 @@ ALWAYS_INLINE static inline void DoGetAccessFlagsHelper(ArtMethod* method)
 
 template <ReadBarrierOption kReadBarrierOption>
 inline uint32_t ArtMethod::GetAccessFlags() {
-  if (kIsDebugBuild) {
+  if (kCheckDeclaringClassState) {
     Thread* self = Thread::Current();
     if (!Locks::mutator_lock_->IsSharedHeld(self)) {
       if (self->IsThreadSuspensionAllowable()) {
@@ -118,8 +120,10 @@ inline uint16_t ArtMethod::GetMethodIndexDuringLinking() {
 }
 
 inline uint32_t ArtMethod::GetDexMethodIndex() {
-  DCHECK(IsRuntimeMethod() || GetDeclaringClass()->IsIdxLoaded() ||
-         GetDeclaringClass()->IsErroneous());
+  if (kCheckDeclaringClassState) {
+    CHECK(IsRuntimeMethod() || GetDeclaringClass()->IsIdxLoaded() ||
+          GetDeclaringClass()->IsErroneous());
+  }
   return GetDexMethodIndexUnchecked();
 }
 
@@ -175,19 +179,12 @@ inline bool ArtMethod::HasSameDexCacheResolvedMethods(ArtMethod* other, PointerS
 }
 
 inline mirror::Class* ArtMethod::GetClassFromTypeIndex(dex::TypeIndex type_idx, bool resolve) {
-  // TODO: Refactor this function into two functions, Resolve...() and Lookup...()
-  // so that we can properly annotate it with no-suspension possible / suspension possible.
   ObjPtr<mirror::DexCache> dex_cache = GetDexCache();
   ObjPtr<mirror::Class> type = dex_cache->GetResolvedType(type_idx);
-  if (UNLIKELY(type == nullptr)) {
+  if (UNLIKELY(type == nullptr) && resolve) {
     ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-    if (resolve) {
-      type = class_linker->ResolveType(type_idx, this);
-      CHECK(type != nullptr || Thread::Current()->IsExceptionPending());
-    } else {
-      type = class_linker->LookupResolvedType(
-          *dex_cache->GetDexFile(), type_idx, dex_cache, GetClassLoader());
-    }
+    type = class_linker->ResolveType(type_idx, this);
+    CHECK(type != nullptr || Thread::Current()->IsExceptionPending());
   }
   return type.Ptr();
 }

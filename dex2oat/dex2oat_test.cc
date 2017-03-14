@@ -37,6 +37,8 @@
 
 namespace art {
 
+using android::base::StringPrintf;
+
 class Dex2oatTest : public Dex2oatEnvironmentTest {
  public:
   virtual void TearDown() OVERRIDE {
@@ -52,10 +54,19 @@ class Dex2oatTest : public Dex2oatEnvironmentTest {
                            const std::string& odex_location,
                            CompilerFilter::Filter filter,
                            const std::vector<std::string>& extra_args = {},
-                           bool expect_success = true) {
+                           bool expect_success = true,
+                           bool use_fd = false) {
+    std::unique_ptr<File> oat_file;
     std::vector<std::string> args;
     args.push_back("--dex-file=" + dex_location);
-    args.push_back("--oat-file=" + odex_location);
+    if (use_fd) {
+      oat_file.reset(OS::CreateEmptyFile(odex_location.c_str()));
+      CHECK(oat_file != nullptr) << odex_location;
+      args.push_back("--oat-fd=" + std::to_string(oat_file->Fd()));
+      args.push_back("--oat-location=" + odex_location);
+    } else {
+      args.push_back("--oat-file=" + odex_location);
+    }
     args.push_back("--compiler-filter=" + CompilerFilter::NameOfFilter(filter));
     args.push_back("--runtime-arg");
     args.push_back("-Xnorelocate");
@@ -64,6 +75,9 @@ class Dex2oatTest : public Dex2oatEnvironmentTest {
 
     std::string error_msg;
     bool success = Dex2Oat(args, &error_msg);
+    if (oat_file != nullptr) {
+      ASSERT_EQ(oat_file->FlushClose(), 0) << "Could not flush and close oat file";
+    }
 
     if (expect_success) {
       ASSERT_TRUE(success) << error_msg << std::endl << output_;
@@ -570,40 +584,152 @@ class Dex2oatLayoutTest : public Dex2oatTest {
   // Emits a profile with a single dex file with the given location and a single class index of 1.
   void GenerateProfile(const std::string& test_profile,
                        const std::string& dex_location,
+                       size_t num_classes,
                        uint32_t checksum) {
     int profile_test_fd = open(test_profile.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0644);
     CHECK_GE(profile_test_fd, 0);
 
     ProfileCompilationInfo info;
     std::string profile_key = ProfileCompilationInfo::GetProfileDexFileKey(dex_location);
-    info.AddClassIndex(profile_key, checksum, dex::TypeIndex(1));
+    for (size_t i = 0; i < num_classes; ++i) {
+      info.AddClassIndex(profile_key, checksum, dex::TypeIndex(1 + i));
+    }
     bool result = info.Save(profile_test_fd);
     close(profile_test_fd);
     ASSERT_TRUE(result);
   }
 
-  void RunTest() {
-    std::string dex_location = GetScratchDir() + "/DexNoOat.jar";
-    std::string profile_location = GetScratchDir() + "/primary.prof";
-    std::string odex_location = GetOdexDir() + "/DexOdexNoOat.odex";
-
-    Copy(GetDexSrc2(), dex_location);
+  void CompileProfileOdex(const std::string& dex_location,
+                          const std::string& odex_location,
+                          const std::string& app_image_file_name,
+                          bool use_fd,
+                          size_t num_profile_classes,
+                          const std::vector<std::string>& extra_args = {},
+                          bool expect_success = true) {
+    const std::string profile_location = GetScratchDir() + "/primary.prof";
     const char* location = dex_location.c_str();
     std::string error_msg;
     std::vector<std::unique_ptr<const DexFile>> dex_files;
     ASSERT_TRUE(DexFile::Open(location, location, true, &error_msg, &dex_files));
     EXPECT_EQ(dex_files.size(), 1U);
     std::unique_ptr<const DexFile>& dex_file = dex_files[0];
-    GenerateProfile(profile_location, dex_location, dex_file->GetLocationChecksum());
+    GenerateProfile(profile_location,
+                    dex_location,
+                    num_profile_classes,
+                    dex_file->GetLocationChecksum());
+    std::vector<std::string> copy(extra_args);
+    copy.push_back("--profile-file=" + profile_location);
+    std::unique_ptr<File> app_image_file;
+    if (!app_image_file_name.empty()) {
+      if (use_fd) {
+        app_image_file.reset(OS::CreateEmptyFile(app_image_file_name.c_str()));
+        copy.push_back("--app-image-fd=" + std::to_string(app_image_file->Fd()));
+      } else {
+        copy.push_back("--app-image-file=" + app_image_file_name);
+      }
+    }
+    GenerateOdexForTest(dex_location,
+                        odex_location,
+                        CompilerFilter::kSpeedProfile,
+                        copy,
+                        expect_success,
+                        use_fd);
+    if (app_image_file != nullptr) {
+      ASSERT_EQ(app_image_file->FlushCloseOrErase(), 0) << "Could not flush and close art file";
+    }
+  }
 
-    const std::vector<std::string>& extra_args = { "--profile-file=" + profile_location };
-    GenerateOdexForTest(dex_location, odex_location, CompilerFilter::kSpeedProfile, extra_args);
+  uint64_t GetImageSize(const std::string& image_file_name) {
+    EXPECT_FALSE(image_file_name.empty());
+    std::unique_ptr<File> file(OS::OpenFileForReading(image_file_name.c_str()));
+    CHECK(file != nullptr);
+    ImageHeader image_header;
+    const bool success = file->ReadFully(&image_header, sizeof(image_header));
+    CHECK(success);
+    CHECK(image_header.IsValid());
+    ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+    return image_header.GetImageSize();
+  }
 
+  void RunTest(bool app_image) {
+    std::string dex_location = GetScratchDir() + "/DexNoOat.jar";
+    std::string odex_location = GetOdexDir() + "/DexOdexNoOat.odex";
+    std::string app_image_file = app_image ? (GetOdexDir() + "/DexOdexNoOat.art"): "";
+    Copy(GetDexSrc2(), dex_location);
+
+    uint64_t image_file_empty_profile = 0;
+    if (app_image) {
+      CompileProfileOdex(dex_location,
+                         odex_location,
+                         app_image_file,
+                         /* use_fd */ false,
+                         /* num_profile_classes */ 0);
+      CheckValidity();
+      ASSERT_TRUE(success_);
+      // Don't check the result since CheckResult relies on the class being in the profile.
+      image_file_empty_profile = GetImageSize(app_image_file);
+      EXPECT_GT(image_file_empty_profile, 0u);
+    }
+
+    // Small profile.
+    CompileProfileOdex(dex_location,
+                       odex_location,
+                       app_image_file,
+                       /* use_fd */ false,
+                       /* num_profile_classes */ 1);
     CheckValidity();
     ASSERT_TRUE(success_);
-    CheckResult(dex_location, odex_location);
+    CheckResult(dex_location, odex_location, app_image_file);
+
+    if (app_image) {
+      // Test that the profile made a difference by adding more classes.
+      const uint64_t image_file_small_profile = GetImageSize(app_image_file);
+      CHECK_LT(image_file_empty_profile, image_file_small_profile);
+    }
   }
-  void CheckResult(const std::string& dex_location, const std::string& odex_location) {
+
+  void RunTestVDex() {
+    std::string dex_location = GetScratchDir() + "/DexNoOat.jar";
+    std::string odex_location = GetOdexDir() + "/DexOdexNoOat.odex";
+    std::string vdex_location = GetOdexDir() + "/DexOdexNoOat.vdex";
+    std::string app_image_file_name = GetOdexDir() + "/DexOdexNoOat.art";
+    Copy(GetDexSrc2(), dex_location);
+
+    std::unique_ptr<File> vdex_file1(OS::CreateEmptyFile(vdex_location.c_str()));
+    CHECK(vdex_file1 != nullptr) << vdex_location;
+    ScratchFile vdex_file2;
+    {
+      std::string input_vdex = "--input-vdex-fd=-1";
+      std::string output_vdex = StringPrintf("--output-vdex-fd=%d", vdex_file1->Fd());
+      CompileProfileOdex(dex_location,
+                         odex_location,
+                         app_image_file_name,
+                         /* use_fd */ true,
+                         /* num_profile_classes */ 1,
+                         { input_vdex, output_vdex });
+      EXPECT_GT(vdex_file1->GetLength(), 0u);
+    }
+    {
+      // Test that vdex and dexlayout fail gracefully.
+      std::string input_vdex = StringPrintf("--input-vdex-fd=%d", vdex_file1->Fd());
+      std::string output_vdex = StringPrintf("--output-vdex-fd=%d", vdex_file2.GetFd());
+      CompileProfileOdex(dex_location,
+                         odex_location,
+                         app_image_file_name,
+                         /* use_fd */ true,
+                         /* num_profile_classes */ 1,
+                         { input_vdex, output_vdex },
+                         /* expect_success */ false);
+      EXPECT_EQ(vdex_file2.GetFile()->GetLength(), 0u);
+    }
+    ASSERT_EQ(vdex_file1->FlushCloseOrErase(), 0) << "Could not flush and close vdex file";
+    CheckValidity();
+    ASSERT_FALSE(success_);
+  }
+
+  void CheckResult(const std::string& dex_location,
+                   const std::string& odex_location,
+                   const std::string& app_image_file_name) {
     // Host/target independent checks.
     std::string error_msg;
     std::unique_ptr<OatFile> odex_file(OatFile::Open(odex_location.c_str(),
@@ -639,29 +765,47 @@ class Dex2oatLayoutTest : public Dex2oatTest {
     }
 
     EXPECT_EQ(odex_file->GetCompilerFilter(), CompilerFilter::kSpeedProfile);
+
+    if (!app_image_file_name.empty()) {
+      // Go peek at the image header to make sure it was large enough to contain the class.
+      std::unique_ptr<File> file(OS::OpenFileForReading(app_image_file_name.c_str()));
+      ImageHeader image_header;
+      bool success = file->ReadFully(&image_header, sizeof(image_header));
+      ASSERT_TRUE(success);
+      ASSERT_TRUE(image_header.IsValid());
+      EXPECT_GT(image_header.GetImageSection(ImageHeader::kSectionObjects).Size(), 0u);
+    }
   }
 
-    // Check whether the dex2oat run was really successful.
-    void CheckValidity() {
-      if (kIsTargetBuild) {
-        CheckTargetValidity();
-      } else {
-        CheckHostValidity();
-      }
+  // Check whether the dex2oat run was really successful.
+  void CheckValidity() {
+    if (kIsTargetBuild) {
+      CheckTargetValidity();
+    } else {
+      CheckHostValidity();
     }
+  }
 
-    void CheckTargetValidity() {
-      // TODO: Ignore for now.
-    }
+  void CheckTargetValidity() {
+    // TODO: Ignore for now.
+  }
 
-    // On the host, we can get the dex2oat output. Here, look for "dex2oat took."
-    void CheckHostValidity() {
-      EXPECT_NE(output_.find("dex2oat took"), std::string::npos) << output_;
-    }
-  };
+  // On the host, we can get the dex2oat output. Here, look for "dex2oat took."
+  void CheckHostValidity() {
+    EXPECT_NE(output_.find("dex2oat took"), std::string::npos) << output_;
+  }
+};
 
 TEST_F(Dex2oatLayoutTest, TestLayout) {
-  RunTest();
+  RunTest(/* app-image */ false);
+}
+
+TEST_F(Dex2oatLayoutTest, TestLayoutAppImage) {
+  RunTest(/* app-image */ true);
+}
+
+TEST_F(Dex2oatLayoutTest, TestVdexLayout) {
+  RunTestVDex();
 }
 
 class Dex2oatWatchdogTest : public Dex2oatTest {

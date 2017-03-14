@@ -616,8 +616,8 @@ class CodeGeneratorARM64 : public CodeGenerator {
                                              Location index,
                                              vixl::aarch64::Register temp,
                                              bool needs_null_check);
-  // Factored implementation used by GenerateFieldLoadWithBakerReadBarrier
-  // and GenerateArrayLoadWithBakerReadBarrier.
+  // Factored implementation, used by GenerateFieldLoadWithBakerReadBarrier,
+  // GenerateArrayLoadWithBakerReadBarrier and some intrinsics.
   //
   // Load the object reference located at the address
   // `obj + offset + (index << scale_factor)`, held by object `obj`, into
@@ -635,6 +635,16 @@ class CodeGeneratorARM64 : public CodeGenerator {
                                                  bool needs_null_check,
                                                  bool use_load_acquire,
                                                  bool always_update_field = false);
+
+  // Generate a heap reference load (with no read barrier).
+  void GenerateRawReferenceLoad(HInstruction* instruction,
+                                Location ref,
+                                vixl::aarch64::Register obj,
+                                uint32_t offset,
+                                Location index,
+                                size_t scale_factor,
+                                bool needs_null_check,
+                                bool use_load_acquire);
 
   // Generate a read barrier for a heap reference within `instruction`
   // using a slow path.
@@ -761,8 +771,6 @@ class CodeGeneratorARM64 : public CodeGenerator {
   ArenaDeque<PcRelativePatchInfo> pc_relative_type_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> type_bss_entry_patches_;
-  // Deduplication map for patchable boot image addresses.
-  Uint32ToLiteralMap boot_image_address_patches_;
 
   // Patches for string literals in JIT compiled code.
   StringToLiteralMap jit_string_patches_;

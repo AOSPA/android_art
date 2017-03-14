@@ -1806,6 +1806,7 @@ DEFINE_FUNCTION art_quick_imt_conflict_trampoline
 .Lconflict_trampoline:
     // Call the runtime stub to populate the ImtConflictTable and jump to the
     // resolved method.
+    movl %edi, %eax  // Load interface method
     POP EDI
     INVOKE_TRAMPOLINE_BODY artInvokeInterfaceTrampoline
 END_FUNCTION art_quick_imt_conflict_trampoline
@@ -2135,19 +2136,6 @@ DEFINE_FUNCTION art_quick_string_compareto
     POP esi                       // pop callee save reg
     ret
 END_FUNCTION art_quick_string_compareto
-
-// Return from a nested signal:
-// Entry:
-//  eax: address of jmp_buf in TLS
-
-DEFINE_FUNCTION art_nested_signal_return
-    SETUP_GOT_NOSAVE ebx            // sets %ebx for call into PLT
-    movl LITERAL(1), %ecx
-    PUSH ecx                        // second arg to longjmp (1)
-    PUSH eax                        // first arg to longjmp (jmp_buf)
-    call PLT_SYMBOL(longjmp)
-    UNREACHABLE
-END_FUNCTION art_nested_signal_return
 
 // Create a function `name` calling the ReadBarrier::Mark routine,
 // getting its argument and returning its result through register

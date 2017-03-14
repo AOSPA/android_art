@@ -16,6 +16,7 @@
 
 #include "loop_optimization.h"
 
+#include "driver/compiler_driver.h"
 #include "linear_order.h"
 
 namespace art {
@@ -57,8 +58,10 @@ static bool IsEarlyExit(HLoopInformation* loop_info) {
 //
 
 HLoopOptimization::HLoopOptimization(HGraph* graph,
+                                     CompilerDriver* compiler_driver,
                                      HInductionVarAnalysis* induction_analysis)
     : HOptimization(graph, kLoopOptimizationPassName),
+      compiler_driver_(compiler_driver),
       induction_range_(induction_analysis),
       loop_allocator_(nullptr),
       top_loop_(nullptr),
@@ -69,7 +72,7 @@ HLoopOptimization::HLoopOptimization(HGraph* graph,
 }
 
 void HLoopOptimization::Run() {
-  // Well-behaved loops only.
+  // Skip if there is no loop or the graph has try-catch/irreducible loops.
   // TODO: make this less of a sledgehammer.
   if (!graph_->HasLoops() || graph_->HasTryCatch() || graph_->HasIrreducibleLoops()) {
     return;
@@ -85,6 +88,7 @@ void HLoopOptimization::Run() {
   LocalRun();
 
   if (top_loop_ == nullptr) {
+    // All loops have been eliminated.
     graph_->SetHasLoops(false);
   }
 

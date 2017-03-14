@@ -26,9 +26,11 @@
 #include "jit/jit.h"
 #include "jni_internal.h"
 #include "JNIHelp.h"
+#include "non_debuggable_classes.h"
 #include "scoped_thread_state_change-inl.h"
 #include "ScopedUtfChars.h"
 #include "thread-inl.h"
+#include "thread_list.h"
 #include "trace.h"
 
 #if defined(__linux__)
@@ -38,6 +40,10 @@
 #include <sys/resource.h>
 
 namespace art {
+
+// Set to true to always determine the non-debuggable classes even if we would not allow a debugger
+// to actually attach.
+static constexpr bool kAlwaysCollectNonDebuggableClasses = kIsDebugBuild;
 
 using android::base::StringPrintf;
 
@@ -65,6 +71,82 @@ static void EnableDebugger() {
   rl.rlim_max = RLIM_INFINITY;
   if (setrlimit(RLIMIT_CORE, &rl) == -1) {
     PLOG(ERROR) << "setrlimit(RLIMIT_CORE) failed for pid " << getpid();
+  }
+}
+
+class ClassSet {
+ public:
+  // The number of classes we reasonably expect to have to look at. Realistically the number is more
+  // ~10 but there is little harm in having some extra.
+  static constexpr int kClassSetCapacity = 100;
+
+  explicit ClassSet(Thread* const self) : self_(self) {
+    self_->GetJniEnv()->PushFrame(kClassSetCapacity);
+  }
+
+  ~ClassSet() {
+    self_->GetJniEnv()->PopFrame();
+  }
+
+  void AddClass(ObjPtr<mirror::Class> klass) REQUIRES(Locks::mutator_lock_) {
+    class_set_.insert(self_->GetJniEnv()->AddLocalReference<jclass>(klass.Ptr()));
+  }
+
+  const std::unordered_set<jclass>& GetClasses() const {
+    return class_set_;
+  }
+
+ private:
+  Thread* const self_;
+  std::unordered_set<jclass> class_set_;
+};
+
+static void DoCollectNonDebuggableCallback(Thread* thread, void* data)
+    REQUIRES(Locks::mutator_lock_) {
+  class NonDebuggableStacksVisitor : public StackVisitor {
+   public:
+    NonDebuggableStacksVisitor(Thread* t, ClassSet* class_set)
+        : StackVisitor(t, nullptr, StackVisitor::StackWalkKind::kIncludeInlinedFrames),
+          class_set_(class_set) {}
+
+    ~NonDebuggableStacksVisitor() OVERRIDE {}
+
+    bool VisitFrame() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+      if (GetMethod()->IsRuntimeMethod()) {
+        return true;
+      }
+      class_set_->AddClass(GetMethod()->GetDeclaringClass());
+      if (kIsDebugBuild) {
+        LOG(INFO) << GetMethod()->GetDeclaringClass()->PrettyClass()
+                  << " might not be fully debuggable/deoptimizable due to "
+                  << GetMethod()->PrettyMethod() << " appearing on the stack during zygote fork.";
+      }
+      return true;
+    }
+
+   private:
+    ClassSet* class_set_;
+  };
+  NonDebuggableStacksVisitor visitor(thread, reinterpret_cast<ClassSet*>(data));
+  visitor.WalkStack();
+}
+
+static void CollectNonDebuggableClasses() REQUIRES(!Locks::mutator_lock_) {
+  Runtime* const runtime = Runtime::Current();
+  Thread* const self = Thread::Current();
+  // Get the mutator lock.
+  ScopedObjectAccess soa(self);
+  ClassSet classes(self);
+  {
+    // Drop the shared mutator lock.
+    ScopedThreadSuspension sts(self, art::ThreadState::kNative);
+    // Get exclusive mutator lock with suspend all.
+    ScopedSuspendAll suspend("Checking stacks for non-obsoletable methods!", /*long_suspend*/false);
+    MutexLock mu(Thread::Current(), *Locks::thread_list_lock_);
+    runtime->GetThreadList()->ForEach(DoCollectNonDebuggableCallback, &classes);
+  }
+  for (jclass klass : classes.GetClasses()) {
+    NonDebuggableClasses::AddNonDebuggableClass(klass);
   }
 }
 
@@ -131,12 +213,17 @@ static void EnableDebugFeatures(uint32_t debug_flags) {
     debug_flags &= ~DEBUG_ALWAYS_JIT;
   }
 
+  bool needs_non_debuggable_classes = false;
   if ((debug_flags & DEBUG_JAVA_DEBUGGABLE) != 0) {
     runtime->AddCompilerOption("--debuggable");
     runtime->SetJavaDebuggable(true);
     // Deoptimize the boot image as it may be non-debuggable.
     runtime->DeoptimizeBootImage();
     debug_flags &= ~DEBUG_JAVA_DEBUGGABLE;
+    needs_non_debuggable_classes = true;
+  }
+  if (needs_non_debuggable_classes || kAlwaysCollectNonDebuggableClasses) {
+    CollectNonDebuggableClasses();
   }
 
   if ((debug_flags & DEBUG_NATIVE_DEBUGGABLE) != 0) {

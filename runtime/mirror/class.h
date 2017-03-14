@@ -206,10 +206,10 @@ class MANAGED Class FINAL : public Object {
     return status >= kStatusResolved || status == kStatusErrorResolved;
   }
 
-  // Returns true if the class was compile-time verified.
+  // Returns true if the class should be verified at runtime.
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
-  bool IsCompileTimeVerified() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetStatus<kVerifyFlags>() >= kStatusRetryVerificationAtRuntime;
+  bool ShouldVerifyAtRuntime() REQUIRES_SHARED(Locks::mutator_lock_) {
+    return GetStatus<kVerifyFlags>() == kStatusRetryVerificationAtRuntime;
   }
 
   // Returns true if the class has been verified.
@@ -595,7 +595,7 @@ class MANAGED Class FINAL : public Object {
   // The size of java.lang.Class.class.
   static uint32_t ClassClassSize(PointerSize pointer_size) {
     // The number of vtable entries in java.lang.Class.
-    uint32_t vtable_entries = Object::kVTableLength + 73;
+    uint32_t vtable_entries = Object::kVTableLength + 70;
     return ComputeClassSize(true, vtable_entries, 0, 0, 4, 1, 0, pointer_size);
   }
 

@@ -1734,11 +1734,11 @@ class SideEffects : public ValueObject {
 // A HEnvironment object contains the values of virtual registers at a given location.
 class HEnvironment : public ArenaObject<kArenaAllocEnvironment> {
  public:
-  HEnvironment(ArenaAllocator* arena,
-               size_t number_of_vregs,
-               ArtMethod* method,
-               uint32_t dex_pc,
-               HInstruction* holder)
+  ALWAYS_INLINE HEnvironment(ArenaAllocator* arena,
+                             size_t number_of_vregs,
+                             ArtMethod* method,
+                             uint32_t dex_pc,
+                             HInstruction* holder)
      : vregs_(number_of_vregs, arena->Adapter(kArenaAllocEnvironmentVRegs)),
        locations_(number_of_vregs, arena->Adapter(kArenaAllocEnvironmentLocations)),
        parent_(nullptr),
@@ -1747,7 +1747,7 @@ class HEnvironment : public ArenaObject<kArenaAllocEnvironment> {
        holder_(holder) {
   }
 
-  HEnvironment(ArenaAllocator* arena, const HEnvironment& to_copy, HInstruction* holder)
+  ALWAYS_INLINE HEnvironment(ArenaAllocator* arena, const HEnvironment& to_copy, HInstruction* holder)
       : HEnvironment(arena,
                      to_copy.Size(),
                      to_copy.GetMethod(),
@@ -1914,6 +1914,9 @@ class HInstruction : public ArenaObject<kArenaAllocInstruction> {
 
   virtual bool IsControlFlow() const { return false; }
 
+  // Can the instruction throw?
+  // TODO: We should rename to CanVisiblyThrow, as some instructions (like HNewInstance),
+  // could throw OOME, but it is still OK to remove them if they are unused.
   virtual bool CanThrow() const { return false; }
   bool CanThrowIntoCatchBlock() const { return CanThrow() && block_->IsTryBlock(); }
 
@@ -3912,6 +3915,7 @@ class HInvoke : public HVariableInputSizeInstruction {
   bool IsIntrinsic() const { return intrinsic_ != Intrinsics::kNone; }
 
   ArtMethod* GetResolvedMethod() const { return resolved_method_; }
+  void SetResolvedMethod(ArtMethod* method) { resolved_method_ = method; }
 
   DECLARE_ABSTRACT_INSTRUCTION(Invoke);
 
@@ -3954,7 +3958,7 @@ class HInvoke : public HVariableInputSizeInstruction {
   }
 
   uint32_t number_of_arguments_;
-  ArtMethod* const resolved_method_;
+  ArtMethod* resolved_method_;
   const uint32_t dex_method_index_;
   Intrinsics intrinsic_;
 
@@ -5541,8 +5545,6 @@ class HLoadClass FINAL : public HInstruction {
 
     // Use a known boot image Class* address, embedded in the code by the codegen.
     // Used for boot image classes referenced by apps in AOT- and JIT-compiled code.
-    // Note: codegen needs to emit a linker patch if indicated by compiler options'
-    // GetIncludePatchInformation().
     kBootImageAddress,
 
     // Load from an entry in the .bss section using a PC-relative load.
@@ -5746,8 +5748,6 @@ class HLoadString FINAL : public HInstruction {
 
     // Use a known boot image String* address, embedded in the code by the codegen.
     // Used for boot image strings referenced by apps in AOT- and JIT-compiled code.
-    // Note: codegen needs to emit a linker patch if indicated by compiler options'
-    // GetIncludePatchInformation().
     kBootImageAddress,
 
     // Load from an entry in the .bss section using a PC-relative load.

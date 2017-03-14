@@ -79,6 +79,100 @@ public class Main {
 
     System.out.println(iterateThroughHeapString(getTag(s)));
     System.out.println(getTag(s));
+
+    boolean[] zArray = new boolean[] { false, true };
+    setTag(zArray, 1);
+    System.out.println(iterateThroughHeapPrimitiveArray(getTag(zArray)));
+    System.out.println(getTag(zArray));
+
+    byte[] bArray = new byte[] { 1, 2, 3 };
+    setTag(bArray, 1);
+    System.out.println(iterateThroughHeapPrimitiveArray(getTag(bArray)));
+    System.out.println(getTag(bArray));
+
+    char[] cArray = new char[] { 'A', 'Z' };
+    setTag(cArray, 1);
+    System.out.println(iterateThroughHeapPrimitiveArray(getTag(cArray)));
+    System.out.println(getTag(cArray));
+
+    short[] sArray = new short[] { 1, 2, 3 };
+    setTag(sArray, 1);
+    System.out.println(iterateThroughHeapPrimitiveArray(getTag(sArray)));
+    System.out.println(getTag(sArray));
+
+    int[] iArray = new int[] { 1, 2, 3 };
+    setTag(iArray, 1);
+    System.out.println(iterateThroughHeapPrimitiveArray(getTag(iArray)));
+    System.out.println(getTag(iArray));
+
+    float[] fArray = new float[] { 0.0f, 1.0f };
+    setTag(fArray, 1);
+    System.out.println(iterateThroughHeapPrimitiveArray(getTag(fArray)));
+    System.out.println(getTag(fArray));
+
+    long[] lArray = new long[] { 1, 2, 3 };
+    setTag(lArray, 1);
+    System.out.println(iterateThroughHeapPrimitiveArray(getTag(lArray)));
+    System.out.println(getTag(lArray));
+
+    double[] dArray = new double[] { 0.0, 1.0 };
+    setTag(dArray, 1);
+    System.out.println(iterateThroughHeapPrimitiveArray(getTag(dArray)));
+    System.out.println(getTag(dArray));
+
+    // Force GCs to clean up dirt.
+    Runtime.getRuntime().gc();
+    Runtime.getRuntime().gc();
+
+    doTestPrimitiveFieldsClasses();
+
+    doTestPrimitiveFieldsIntegral();
+
+    // Force GCs to clean up dirt.
+    Runtime.getRuntime().gc();
+    Runtime.getRuntime().gc();
+
+    doTestPrimitiveFieldsFloat();
+
+    // Force GCs to clean up dirt.
+    Runtime.getRuntime().gc();
+    Runtime.getRuntime().gc();
+  }
+
+  private static void doTestPrimitiveFieldsClasses() {
+    setTag(IntObject.class, 10000);
+    System.out.println(iterateThroughHeapPrimitiveFields(10000));
+    System.out.println(getTag(IntObject.class));
+    setTag(IntObject.class, 0);
+
+    setTag(FloatObject.class, 10000);
+    System.out.println(iterateThroughHeapPrimitiveFields(10000));
+    System.out.println(getTag(FloatObject.class));
+    setTag(FloatObject.class, 0);
+
+    setTag(Inf1.class, 10000);
+    System.out.println(iterateThroughHeapPrimitiveFields(10000));
+    System.out.println(getTag(Inf1.class));
+    setTag(Inf1.class, 0);
+
+    setTag(Inf2.class, 10000);
+    System.out.println(iterateThroughHeapPrimitiveFields(10000));
+    System.out.println(getTag(Inf2.class));
+    setTag(Inf2.class, 0);
+  }
+
+  private static void doTestPrimitiveFieldsIntegral() {
+    IntObject intObject = new IntObject();
+    setTag(intObject, 10000);
+    System.out.println(iterateThroughHeapPrimitiveFields(10000));
+    System.out.println(getTag(intObject));
+  }
+
+  private static void doTestPrimitiveFieldsFloat() {
+    FloatObject floatObject = new FloatObject();
+    setTag(floatObject, 10000);
+    System.out.println(iterateThroughHeapPrimitiveFields(10000));
+    System.out.println(getTag(floatObject));
   }
 
   static class A {
@@ -132,6 +226,31 @@ public class Main {
     return ret;
   }
 
+  private static interface Inf1 {
+    public final static int A = 1;
+  }
+
+  private static interface Inf2 extends Inf1 {
+    public final static int B = 1;
+  }
+
+  private static class IntObject implements Inf1 {
+    byte b = (byte)1;
+    char c= 'a';
+    short s = (short)2;
+    int i = 3;
+    long l = 4;
+    Object o = new Object();
+    static int sI = 5;
+  }
+
+  private static class FloatObject extends IntObject implements Inf2 {
+    float f = 1.23f;
+    double d = 1.23;
+    Object p = new Object();
+    static int sI = 6;
+  }
+
   private static native void setTag(Object o, long tag);
   private static native long getTag(Object o);
 
@@ -147,4 +266,6 @@ public class Main {
   private static native int iterateThroughHeapAdd(int heapFilter,
       Class<?> klassFilter);
   private static native String iterateThroughHeapString(long tag);
+  private static native String iterateThroughHeapPrimitiveArray(long tag);
+  private static native String iterateThroughHeapPrimitiveFields(long tag);
 }
