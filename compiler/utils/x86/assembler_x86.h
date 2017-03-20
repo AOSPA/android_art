@@ -487,9 +487,18 @@ class X86Assembler FINAL : public Assembler {
   void andps(XmmRegister dst, const Address& src);
   void pand(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
 
+  void andnpd(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
+  void andnps(XmmRegister dst, XmmRegister src);
+  void pandn(XmmRegister dst, XmmRegister src);
+
   void orpd(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
   void orps(XmmRegister dst, XmmRegister src);
   void por(XmmRegister dst, XmmRegister src);
+
+  void pcmpeqb(XmmRegister dst, XmmRegister src);
+  void pcmpeqw(XmmRegister dst, XmmRegister src);
+  void pcmpeqd(XmmRegister dst, XmmRegister src);
+  void pcmpeqq(XmmRegister dst, XmmRegister src);
 
   void shufpd(XmmRegister dst, XmmRegister src, const Immediate& imm);
   void shufps(XmmRegister dst, XmmRegister src, const Immediate& imm);

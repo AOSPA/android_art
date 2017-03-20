@@ -41,6 +41,54 @@ ArenaAllocator* IntrinsicCodeGeneratorARM::GetAllocator() {
 
 using IntrinsicSlowPathARM = IntrinsicSlowPath<InvokeDexCallingConventionVisitorARM>;
 
+#define __ assembler->
+
+// Compute base address for the System.arraycopy intrinsic in `base`.
+static void GenSystemArrayCopyBaseAddress(ArmAssembler* assembler,
+                                          Primitive::Type type,
+                                          const Register& array,
+                                          const Location& pos,
+                                          const Register& base) {
+  // This routine is only used by the SystemArrayCopy intrinsic at the
+  // moment. We can allow Primitive::kPrimNot as `type` to implement
+  // the SystemArrayCopyChar intrinsic.
+  DCHECK_EQ(type, Primitive::kPrimNot);
+  const int32_t element_size = Primitive::ComponentSize(type);
+  const uint32_t element_size_shift = Primitive::ComponentSizeShift(type);
+  const uint32_t data_offset = mirror::Array::DataOffset(element_size).Uint32Value();
+
+  if (pos.IsConstant()) {
+    int32_t constant = pos.GetConstant()->AsIntConstant()->GetValue();
+    __ AddConstant(base, array, element_size * constant + data_offset);
+  } else {
+    __ add(base, array, ShifterOperand(pos.AsRegister<Register>(), LSL, element_size_shift));
+    __ AddConstant(base, data_offset);
+  }
+}
+
+// Compute end address for the System.arraycopy intrinsic in `end`.
+static void GenSystemArrayCopyEndAddress(ArmAssembler* assembler,
+                                         Primitive::Type type,
+                                         const Location& copy_length,
+                                         const Register& base,
+                                         const Register& end) {
+  // This routine is only used by the SystemArrayCopy intrinsic at the
+  // moment. We can allow Primitive::kPrimNot as `type` to implement
+  // the SystemArrayCopyChar intrinsic.
+  DCHECK_EQ(type, Primitive::kPrimNot);
+  const int32_t element_size = Primitive::ComponentSize(type);
+  const uint32_t element_size_shift = Primitive::ComponentSizeShift(type);
+
+  if (copy_length.IsConstant()) {
+    int32_t constant = copy_length.GetConstant()->AsIntConstant()->GetValue();
+    __ AddConstant(end, base, element_size * constant);
+  } else {
+    __ add(end, base, ShifterOperand(copy_length.AsRegister<Register>(), LSL, element_size_shift));
+  }
+}
+
+#undef __
+
 // NOLINT on __ macro to suppress wrong warning/fix (misc-macro-parentheses) from clang-tidy.
 #define __ down_cast<ArmAssembler*>(codegen->GetAssembler())->  // NOLINT
 
@@ -55,6 +103,7 @@ class ReadBarrierSystemArrayCopySlowPathARM : public SlowPathCode {
 
   void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
     CodeGeneratorARM* arm_codegen = down_cast<CodeGeneratorARM*>(codegen);
+    ArmAssembler* assembler = arm_codegen->GetAssembler();
     LocationSummary* locations = instruction_->GetLocations();
     DCHECK(locations->CanCall());
     DCHECK(instruction_->IsInvokeStaticOrDirect())
@@ -63,9 +112,8 @@ class ReadBarrierSystemArrayCopySlowPathARM : public SlowPathCode {
     DCHECK(instruction_->GetLocations()->Intrinsified());
     DCHECK_EQ(instruction_->AsInvoke()->GetIntrinsic(), Intrinsics::kSystemArrayCopy);
 
-    int32_t element_size = Primitive::ComponentSize(Primitive::kPrimNot);
-    uint32_t element_size_shift = Primitive::ComponentSizeShift(Primitive::kPrimNot);
-    uint32_t offset = mirror::Array::DataOffset(element_size).Uint32Value();
+    Primitive::Type type = Primitive::kPrimNot;
+    const int32_t element_size = Primitive::ComponentSize(type);
 
     Register dest = locations->InAt(2).AsRegister<Register>();
     Location dest_pos = locations->InAt(3);
@@ -76,15 +124,7 @@ class ReadBarrierSystemArrayCopySlowPathARM : public SlowPathCode {
 
     __ Bind(GetEntryLabel());
     // Compute the base destination address in `dst_curr_addr`.
-    if (dest_pos.IsConstant()) {
-      int32_t constant = dest_pos.GetConstant()->AsIntConstant()->GetValue();
-      __ AddConstant(dst_curr_addr, dest, element_size * constant + offset);
-    } else {
-      __ add(dst_curr_addr,
-             dest,
-             ShifterOperand(dest_pos.AsRegister<Register>(), LSL, element_size_shift));
-      __ AddConstant(dst_curr_addr, offset);
-    }
+    GenSystemArrayCopyBaseAddress(assembler, type, dest, dest_pos, dst_curr_addr);
 
     Label loop;
     __ Bind(&loop);
@@ -108,6 +148,8 @@ class ReadBarrierSystemArrayCopySlowPathARM : public SlowPathCode {
     DCHECK_NE(src_stop_addr, IP);
     DCHECK_NE(tmp, IP);
     DCHECK(0 <= tmp && tmp < kNumberOfCoreRegisters) << tmp;
+    // TODO: Load the entrypoint once before the loop, instead of
+    // loading it at every iteration.
     int32_t entry_point_offset =
         CodeGenerator::GetReadBarrierMarkEntryPointsOffset<kArmPointerSize>(tmp);
     // This runtime call does not require a stack map.
@@ -1925,138 +1967,113 @@ void IntrinsicCodeGeneratorARM::VisitSystemArrayCopy(HInvoke* invoke) {
     __ CompareAndBranchIfNonZero(temp3, intrinsic_slow_path->GetEntryLabel());
   }
 
-  int32_t element_size = Primitive::ComponentSize(Primitive::kPrimNot);
-  uint32_t element_size_shift = Primitive::ComponentSizeShift(Primitive::kPrimNot);
-  uint32_t offset = mirror::Array::DataOffset(element_size).Uint32Value();
-
-  // Compute the base source address in `temp1`.
-  if (src_pos.IsConstant()) {
-    int32_t constant = src_pos.GetConstant()->AsIntConstant()->GetValue();
-    __ AddConstant(temp1, src, element_size * constant + offset);
+  if (length.IsConstant() && length.GetConstant()->AsIntConstant()->GetValue() == 0) {
+    // Null constant length: not need to emit the loop code at all.
   } else {
-    __ add(temp1, src, ShifterOperand(src_pos.AsRegister<Register>(), LSL, element_size_shift));
-    __ AddConstant(temp1, offset);
-  }
+    Label done;
+    const Primitive::Type type = Primitive::kPrimNot;
+    const int32_t element_size = Primitive::ComponentSize(type);
 
-  // Compute the end source address in `temp3`.
-  if (length.IsConstant()) {
-    int32_t constant = length.GetConstant()->AsIntConstant()->GetValue();
-    __ AddConstant(temp3, temp1, element_size * constant);
-  } else {
-    __ add(temp3, temp1, ShifterOperand(length.AsRegister<Register>(), LSL, element_size_shift));
-  }
-
-  if (kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
-    // TODO: Also convert this intrinsic to the IsGcMarking strategy?
-
-    // The base destination address is computed later, as `temp2` is
-    // used for intermediate computations.
-
-    // SystemArrayCopy implementation for Baker read barriers (see
-    // also CodeGeneratorARM::GenerateReferenceLoadWithBakerReadBarrier):
-    //
-    //   if (src_ptr != end_ptr) {
-    //     uint32_t rb_state = Lockword(src->monitor_).ReadBarrierState();
-    //     lfence;  // Load fence or artificial data dependency to prevent load-load reordering
-    //     bool is_gray = (rb_state == ReadBarrier::GrayState());
-    //     if (is_gray) {
-    //       // Slow-path copy.
-    //       do {
-    //         *dest_ptr++ = MaybePoison(ReadBarrier::Mark(MaybeUnpoison(*src_ptr++)));
-    //       } while (src_ptr != end_ptr)
-    //     } else {
-    //       // Fast-path copy.
-    //       do {
-    //         *dest_ptr++ = *src_ptr++;
-    //       } while (src_ptr != end_ptr)
-    //     }
-    //   }
-
-    Label loop, done;
-
-    // Don't enter copy loop if `length == 0`.
-    __ cmp(temp1, ShifterOperand(temp3));
-    __ b(&done, EQ);
-
-    // /* int32_t */ monitor = src->monitor_
-    __ LoadFromOffset(kLoadWord, temp2, src, monitor_offset);
-    // /* LockWord */ lock_word = LockWord(monitor)
-    static_assert(sizeof(LockWord) == sizeof(int32_t),
-                  "art::LockWord and int32_t have different sizes.");
-
-    // Introduce a dependency on the lock_word including the rb_state,
-    // which shall prevent load-load reordering without using
-    // a memory barrier (which would be more expensive).
-    // `src` is unchanged by this operation, but its value now depends
-    // on `temp2`.
-    __ add(src, src, ShifterOperand(temp2, LSR, 32));
-
-    // Slow path used to copy array when `src` is gray.
-    SlowPathCode* read_barrier_slow_path =
-        new (GetAllocator()) ReadBarrierSystemArrayCopySlowPathARM(invoke);
-    codegen_->AddSlowPath(read_barrier_slow_path);
-
-    // Given the numeric representation, it's enough to check the low bit of the
-    // rb_state. We do that by shifting the bit out of the lock word with LSRS
-    // which can be a 16-bit instruction unlike the TST immediate.
-    static_assert(ReadBarrier::WhiteState() == 0, "Expecting white to have value 0");
-    static_assert(ReadBarrier::GrayState() == 1, "Expecting gray to have value 1");
-    __ Lsrs(temp2, temp2, LockWord::kReadBarrierStateShift + 1);
-    // Carry flag is the last bit shifted out by LSRS.
-    __ b(read_barrier_slow_path->GetEntryLabel(), CS);
-
-    // Fast-path copy.
-
-    // Compute the base destination address in `temp2`.
-    if (dest_pos.IsConstant()) {
-      int32_t constant = dest_pos.GetConstant()->AsIntConstant()->GetValue();
-      __ AddConstant(temp2, dest, element_size * constant + offset);
-    } else {
-      __ add(temp2, dest, ShifterOperand(dest_pos.AsRegister<Register>(), LSL, element_size_shift));
-      __ AddConstant(temp2, offset);
+    if (length.IsRegister()) {
+      // Don't enter the copy loop if the length is null.
+      __ CompareAndBranchIfZero(length.AsRegister<Register>(), &done);
     }
 
-    // Iterate over the arrays and do a raw copy of the objects. We don't need to
-    // poison/unpoison.
-    __ Bind(&loop);
-    __ ldr(IP, Address(temp1, element_size, Address::PostIndex));
-    __ str(IP, Address(temp2, element_size, Address::PostIndex));
-    __ cmp(temp1, ShifterOperand(temp3));
-    __ b(&loop, NE);
+    if (kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
+      // TODO: Also convert this intrinsic to the IsGcMarking strategy?
 
-    __ Bind(read_barrier_slow_path->GetExitLabel());
-    __ Bind(&done);
-  } else {
-    // Non read barrier code.
+      // SystemArrayCopy implementation for Baker read barriers (see
+      // also CodeGeneratorARM::GenerateReferenceLoadWithBakerReadBarrier):
+      //
+      //   uint32_t rb_state = Lockword(src->monitor_).ReadBarrierState();
+      //   lfence;  // Load fence or artificial data dependency to prevent load-load reordering
+      //   bool is_gray = (rb_state == ReadBarrier::GrayState());
+      //   if (is_gray) {
+      //     // Slow-path copy.
+      //     do {
+      //       *dest_ptr++ = MaybePoison(ReadBarrier::Mark(MaybeUnpoison(*src_ptr++)));
+      //     } while (src_ptr != end_ptr)
+      //   } else {
+      //     // Fast-path copy.
+      //     do {
+      //       *dest_ptr++ = *src_ptr++;
+      //     } while (src_ptr != end_ptr)
+      //   }
 
-    // Compute the base destination address in `temp2`.
-    if (dest_pos.IsConstant()) {
-      int32_t constant = dest_pos.GetConstant()->AsIntConstant()->GetValue();
-      __ AddConstant(temp2, dest, element_size * constant + offset);
+      // /* int32_t */ monitor = src->monitor_
+      __ LoadFromOffset(kLoadWord, temp2, src, monitor_offset);
+      // /* LockWord */ lock_word = LockWord(monitor)
+      static_assert(sizeof(LockWord) == sizeof(int32_t),
+                    "art::LockWord and int32_t have different sizes.");
+
+      // Introduce a dependency on the lock_word including the rb_state,
+      // which shall prevent load-load reordering without using
+      // a memory barrier (which would be more expensive).
+      // `src` is unchanged by this operation, but its value now depends
+      // on `temp2`.
+      __ add(src, src, ShifterOperand(temp2, LSR, 32));
+
+      // Compute the base source address in `temp1`.
+      // Note that `temp1` (the base source address) is computed from
+      // `src` (and `src_pos`) here, and thus honors the artificial
+      // dependency of `src` on `temp2`.
+      GenSystemArrayCopyBaseAddress(GetAssembler(), type, src, src_pos, temp1);
+      // Compute the end source address in `temp3`.
+      GenSystemArrayCopyEndAddress(GetAssembler(), type, length, temp1, temp3);
+      // The base destination address is computed later, as `temp2` is
+      // used for intermediate computations.
+
+      // Slow path used to copy array when `src` is gray.
+      // Note that the base destination address is computed in `temp2`
+      // by the slow path code.
+      SlowPathCode* read_barrier_slow_path =
+          new (GetAllocator()) ReadBarrierSystemArrayCopySlowPathARM(invoke);
+      codegen_->AddSlowPath(read_barrier_slow_path);
+
+      // Given the numeric representation, it's enough to check the low bit of the
+      // rb_state. We do that by shifting the bit out of the lock word with LSRS
+      // which can be a 16-bit instruction unlike the TST immediate.
+      static_assert(ReadBarrier::WhiteState() == 0, "Expecting white to have value 0");
+      static_assert(ReadBarrier::GrayState() == 1, "Expecting gray to have value 1");
+      __ Lsrs(temp2, temp2, LockWord::kReadBarrierStateShift + 1);
+      // Carry flag is the last bit shifted out by LSRS.
+      __ b(read_barrier_slow_path->GetEntryLabel(), CS);
+
+      // Fast-path copy.
+      // Compute the base destination address in `temp2`.
+      GenSystemArrayCopyBaseAddress(GetAssembler(), type, dest, dest_pos, temp2);
+      // Iterate over the arrays and do a raw copy of the objects. We don't need to
+      // poison/unpoison.
+      Label loop;
+      __ Bind(&loop);
+      __ ldr(IP, Address(temp1, element_size, Address::PostIndex));
+      __ str(IP, Address(temp2, element_size, Address::PostIndex));
+      __ cmp(temp1, ShifterOperand(temp3));
+      __ b(&loop, NE);
+
+      __ Bind(read_barrier_slow_path->GetExitLabel());
     } else {
-      __ add(temp2, dest, ShifterOperand(dest_pos.AsRegister<Register>(), LSL, element_size_shift));
-      __ AddConstant(temp2, offset);
+      // Non read barrier code.
+      // Compute the base source address in `temp1`.
+      GenSystemArrayCopyBaseAddress(GetAssembler(), type, src, src_pos, temp1);
+      // Compute the base destination address in `temp2`.
+      GenSystemArrayCopyBaseAddress(GetAssembler(), type, dest, dest_pos, temp2);
+      // Compute the end source address in `temp3`.
+      GenSystemArrayCopyEndAddress(GetAssembler(), type, length, temp1, temp3);
+      // Iterate over the arrays and do a raw copy of the objects. We don't need to
+      // poison/unpoison.
+      Label loop;
+      __ Bind(&loop);
+      __ ldr(IP, Address(temp1, element_size, Address::PostIndex));
+      __ str(IP, Address(temp2, element_size, Address::PostIndex));
+      __ cmp(temp1, ShifterOperand(temp3));
+      __ b(&loop, NE);
     }
-
-    // Iterate over the arrays and do a raw copy of the objects. We don't need to
-    // poison/unpoison.
-    Label loop, done;
-    __ cmp(temp1, ShifterOperand(temp3));
-    __ b(&done, EQ);
-    __ Bind(&loop);
-    __ ldr(IP, Address(temp1, element_size, Address::PostIndex));
-    __ str(IP, Address(temp2, element_size, Address::PostIndex));
-    __ cmp(temp1, ShifterOperand(temp3));
-    __ b(&loop, NE);
     __ Bind(&done);
   }
 
   // We only need one card marking on the destination array.
-  codegen_->MarkGCCard(temp1,
-                       temp2,
-                       dest,
-                       Register(kNoRegister),
-                       /* value_can_be_null */ false);
+  codegen_->MarkGCCard(temp1, temp2, dest, Register(kNoRegister), /* value_can_be_null */ false);
 
   __ Bind(intrinsic_slow_path->GetExitLabel());
 }

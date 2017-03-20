@@ -55,6 +55,12 @@ mirror::Class* ClassTable::LookupByDescriptor(ObjPtr<mirror::Class> klass) {
   return nullptr;
 }
 
+// To take into account http://b/35845221
+#pragma clang diagnostic push
+#if __clang_major__ < 4
+#pragma clang diagnostic ignored "-Wunreachable-code"
+#endif
+
 mirror::Class* ClassTable::UpdateClass(const char* descriptor, mirror::Class* klass, size_t hash) {
   WriterMutexLock mu(Thread::Current(), lock_);
   // Should only be updating latest table.
@@ -80,6 +86,8 @@ mirror::Class* ClassTable::UpdateClass(const char* descriptor, mirror::Class* kl
   return existing;
 }
 
+#pragma clang diagnostic pop
+
 size_t ClassTable::CountDefiningLoaderClasses(ObjPtr<mirror::ClassLoader> defining_loader,
                                               const ClassSet& set) const {
   size_t count = 0;
@@ -103,6 +111,20 @@ size_t ClassTable::NumZygoteClasses(ObjPtr<mirror::ClassLoader> defining_loader)
 size_t ClassTable::NumNonZygoteClasses(ObjPtr<mirror::ClassLoader> defining_loader) const {
   ReaderMutexLock mu(Thread::Current(), lock_);
   return CountDefiningLoaderClasses(defining_loader, classes_.back());
+}
+
+size_t ClassTable::NumReferencedZygoteClasses() const {
+  ReaderMutexLock mu(Thread::Current(), lock_);
+  size_t sum = 0;
+  for (size_t i = 0; i < classes_.size() - 1; ++i) {
+    sum += classes_[i].Size();
+  }
+  return sum;
+}
+
+size_t ClassTable::NumReferencedNonZygoteClasses() const {
+  ReaderMutexLock mu(Thread::Current(), lock_);
+  return classes_.back().Size();
 }
 
 mirror::Class* ClassTable::Lookup(const char* descriptor, size_t hash) {

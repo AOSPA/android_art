@@ -581,6 +581,18 @@ TEST_F(AssemblerX86Test, PAnd) {
   DriverStr(RepeatFF(&x86::X86Assembler::pand, "pand %{reg2}, %{reg1}"), "pand");
 }
 
+TEST_F(AssemblerX86Test, AndnPD) {
+  DriverStr(RepeatFF(&x86::X86Assembler::andnpd, "andnpd %{reg2}, %{reg1}"), "andnpd");
+}
+
+TEST_F(AssemblerX86Test, AndnPS) {
+  DriverStr(RepeatFF(&x86::X86Assembler::andnps, "andnps %{reg2}, %{reg1}"), "andnps");
+}
+
+TEST_F(AssemblerX86Test, PAndn) {
+  DriverStr(RepeatFF(&x86::X86Assembler::pandn, "pandn %{reg2}, %{reg1}"), "pandn");
+}
+
 TEST_F(AssemblerX86Test, OrPD) {
   DriverStr(RepeatFF(&x86::X86Assembler::orpd, "orpd %{reg2}, %{reg1}"), "orpd");
 }
@@ -591,6 +603,22 @@ TEST_F(AssemblerX86Test, OrPS) {
 
 TEST_F(AssemblerX86Test, POr) {
   DriverStr(RepeatFF(&x86::X86Assembler::por, "por %{reg2}, %{reg1}"), "por");
+}
+
+TEST_F(AssemblerX86Test, PCmpeqB) {
+  DriverStr(RepeatFF(&x86::X86Assembler::pcmpeqb, "pcmpeqb %{reg2}, %{reg1}"), "cmpeqb");
+}
+
+TEST_F(AssemblerX86Test, PCmpeqW) {
+  DriverStr(RepeatFF(&x86::X86Assembler::pcmpeqw, "pcmpeqw %{reg2}, %{reg1}"), "cmpeqw");
+}
+
+TEST_F(AssemblerX86Test, PCmpeqD) {
+  DriverStr(RepeatFF(&x86::X86Assembler::pcmpeqd, "pcmpeqd %{reg2}, %{reg1}"), "cmpeqd");
+}
+
+TEST_F(AssemblerX86Test, PCmpeqQ) {
+  DriverStr(RepeatFF(&x86::X86Assembler::pcmpeqq, "pcmpeqq %{reg2}, %{reg1}"), "cmpeqq");
 }
 
 TEST_F(AssemblerX86Test, ShufPS) {

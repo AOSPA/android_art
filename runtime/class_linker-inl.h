@@ -78,6 +78,18 @@ inline mirror::String* ClassLinker::ResolveString(dex::StringIndex string_idx,
   return string.Ptr();
 }
 
+inline ObjPtr<mirror::Class> ClassLinker::LookupResolvedType(
+    dex::TypeIndex type_idx,
+    ObjPtr<mirror::DexCache> dex_cache,
+    ObjPtr<mirror::ClassLoader> class_loader) {
+  ObjPtr<mirror::Class> type = dex_cache->GetResolvedType(type_idx);
+  if (type == nullptr) {
+    type = Runtime::Current()->GetClassLinker()->LookupResolvedType(
+        *dex_cache->GetDexFile(), type_idx, dex_cache, class_loader);
+  }
+  return type;
+}
+
 inline mirror::Class* ClassLinker::ResolveType(dex::TypeIndex type_idx, ArtMethod* referrer) {
   Thread::PoisonObjectPointersIfDebug();
   if (kIsDebugBuild) {
@@ -91,25 +103,6 @@ inline mirror::Class* ClassLinker::ResolveType(dex::TypeIndex type_idx, ArtMetho
     Handle<mirror::ClassLoader> class_loader(hs.NewHandle(declaring_class->GetClassLoader()));
     const DexFile& dex_file = *dex_cache->GetDexFile();
     resolved_type = ResolveType(dex_file, type_idx, dex_cache, class_loader);
-    // Note: We cannot check here to see whether we added the type to the cache. The type
-    //       might be an erroneous class, which results in it being hidden from us.
-  }
-  return resolved_type.Ptr();
-}
-
-inline mirror::Class* ClassLinker::ResolveType(dex::TypeIndex type_idx, ArtField* referrer) {
-  Thread::PoisonObjectPointersIfDebug();
-  ObjPtr<mirror::Class> declaring_class = referrer->GetDeclaringClass();
-  ObjPtr<mirror::DexCache> dex_cache_ptr = declaring_class->GetDexCache();
-  ObjPtr<mirror::Class> resolved_type = dex_cache_ptr->GetResolvedType(type_idx);
-  if (UNLIKELY(resolved_type == nullptr)) {
-    StackHandleScope<2> hs(Thread::Current());
-    Handle<mirror::DexCache> dex_cache(hs.NewHandle(dex_cache_ptr));
-    Handle<mirror::ClassLoader> class_loader(hs.NewHandle(declaring_class->GetClassLoader()));
-    const DexFile& dex_file = *dex_cache->GetDexFile();
-    resolved_type = ResolveType(dex_file, type_idx, dex_cache, class_loader);
-    // Note: We cannot check here to see whether we added the type to the cache. The type
-    //       might be an erroneous class, which results in it being hidden from us.
   }
   return resolved_type.Ptr();
 }
@@ -168,9 +161,15 @@ inline ArtMethod* ClassLinker::ResolveMethod(Thread* self,
   return resolved_method;
 }
 
-inline ArtField* ClassLinker::GetResolvedField(uint32_t field_idx,
-                                               ObjPtr<mirror::DexCache> dex_cache) {
-  return dex_cache->GetResolvedField(field_idx, image_pointer_size_);
+inline ArtField* ClassLinker::LookupResolvedField(uint32_t field_idx,
+                                                  ArtMethod* referrer,
+                                                  bool is_static) {
+  ObjPtr<mirror::DexCache> dex_cache = referrer->GetDexCache();
+  ArtField* field = dex_cache->GetResolvedField(field_idx, image_pointer_size_);
+  if (field == nullptr) {
+    field = LookupResolvedField(field_idx, dex_cache, referrer->GetClassLoader(), is_static);
+  }
+  return field;
 }
 
 inline ArtField* ClassLinker::ResolveField(uint32_t field_idx,
@@ -178,7 +177,8 @@ inline ArtField* ClassLinker::ResolveField(uint32_t field_idx,
                                            bool is_static) {
   Thread::PoisonObjectPointersIfDebug();
   ObjPtr<mirror::Class> declaring_class = referrer->GetDeclaringClass();
-  ArtField* resolved_field = GetResolvedField(field_idx, referrer->GetDexCache());
+  ArtField* resolved_field =
+      referrer->GetDexCache()->GetResolvedField(field_idx, image_pointer_size_);
   if (UNLIKELY(resolved_field == nullptr)) {
     StackHandleScope<2> hs(Thread::Current());
     Handle<mirror::DexCache> dex_cache(hs.NewHandle(referrer->GetDexCache()));

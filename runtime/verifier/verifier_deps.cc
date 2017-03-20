@@ -68,13 +68,17 @@ const VerifierDeps::DexFileDeps* VerifierDeps::GetDexFileDeps(const DexFile& dex
   return (it == dex_deps_.end()) ? nullptr : it->second.get();
 }
 
+// Access flags that impact vdex verification.
+static constexpr uint32_t kAccVdexAccessFlags =
+    kAccPublic | kAccPrivate | kAccProtected | kAccStatic | kAccInterface;
+
 template <typename T>
 uint16_t VerifierDeps::GetAccessFlags(T* element) {
   static_assert(kAccJavaFlagsMask == 0xFFFF, "Unexpected value of a constant");
   if (element == nullptr) {
     return VerifierDeps::kUnresolvedMarker;
   } else {
-    uint16_t access_flags = Low16Bits(element->GetAccessFlags());
+    uint16_t access_flags = Low16Bits(element->GetAccessFlags()) & kAccVdexAccessFlags;
     CHECK_NE(access_flags, VerifierDeps::kUnresolvedMarker);
     return access_flags;
   }
@@ -458,8 +462,7 @@ void VerifierDeps::AddAssignability(const DexFile& dex_file,
   }
 
   if (!IsInClassPath(source)) {
-    if (!destination->IsInterface()) {
-      DCHECK(!source->IsInterface());
+    if (!destination->IsInterface() && !source->IsInterface()) {
       // Find the super class at the classpath boundary. Only that class
       // can change the assignability.
       do {

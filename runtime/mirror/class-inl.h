@@ -29,6 +29,7 @@
 #include "dex_file.h"
 #include "gc/heap-inl.h"
 #include "iftable.h"
+#include "class_ext-inl.h"
 #include "object_array-inl.h"
 #include "read_barrier-inl.h"
 #include "reference-inl.h"
@@ -80,6 +81,12 @@ template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
 inline ClassLoader* Class::GetClassLoader() {
   return GetFieldObject<ClassLoader, kVerifyFlags, kReadBarrierOption>(
       OFFSET_OF_OBJECT_MEMBER(Class, class_loader_));
+}
+
+template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
+inline ClassExt* Class::GetExtData() {
+  return GetFieldObject<ClassExt, kVerifyFlags, kReadBarrierOption>(
+      OFFSET_OF_OBJECT_MEMBER(Class, ext_data_));
 }
 
 template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
@@ -841,7 +848,7 @@ inline void Class::AssertInitializedOrInitializingInThread(Thread* self) {
   }
 }
 
-inline ObjectArray<Class>* Class::GetInterfaces() {
+inline ObjectArray<Class>* Class::GetProxyInterfaces() {
   CHECK(IsProxyClass());
   // First static field.
   auto* field = GetStaticField(0);
@@ -850,7 +857,7 @@ inline ObjectArray<Class>* Class::GetInterfaces() {
   return GetFieldObject<ObjectArray<Class>>(field_offset);
 }
 
-inline ObjectArray<ObjectArray<Class>>* Class::GetThrows() {
+inline ObjectArray<ObjectArray<Class>>* Class::GetProxyThrows() {
   CHECK(IsProxyClass());
   // Second static field.
   auto* field = GetStaticField(1);
@@ -920,7 +927,7 @@ inline uint32_t Class::NumDirectInterfaces() {
   } else if (IsArrayClass()) {
     return 2;
   } else if (IsProxyClass()) {
-    ObjectArray<Class>* interfaces = GetInterfaces();
+    ObjectArray<Class>* interfaces = GetProxyInterfaces();
     return interfaces != nullptr ? interfaces->GetLength() : 0;
   } else {
     const DexFile::TypeList* interfaces = GetInterfaceTypeList();
@@ -950,6 +957,10 @@ void Class::VisitNativeRoots(Visitor& visitor, PointerSize pointer_size) {
   }
   for (ArtMethod& method : GetMethods(pointer_size)) {
     method.VisitRoots<kReadBarrierOption>(visitor, pointer_size);
+  }
+  ObjPtr<ClassExt> ext(GetExtData<kDefaultVerifyFlags, kReadBarrierOption>());
+  if (!ext.IsNull()) {
+    ext->VisitNativeRoots<kReadBarrierOption, Visitor>(visitor, pointer_size);
   }
 }
 

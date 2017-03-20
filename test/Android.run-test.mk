@@ -353,8 +353,13 @@ TEST_ART_BROKEN_NO_RELOCATE_TESTS :=
 
 # Temporarily disable some broken tests when forcing access checks in interpreter b/22414682
 # 629 requires compilation.
+# 030, 080 and 530: b/36377828
 TEST_ART_BROKEN_INTERPRETER_ACCESS_CHECK_TESTS := \
   137-cfi \
+  030-bad-finalizer \
+  530-checker-lse \
+  530-checker-lse2 \
+  080-oom-throw \
   629-vdex-speed
 
 ifneq (,$(filter interp-ac,$(COMPILER_TYPES)))
@@ -381,7 +386,7 @@ TEST_ART_BROKEN_GCSTRESS_RUN_TESTS := \
   908-gc-start-finish \
   913-heaps \
   961-default-iface-resolution-gen \
-  964-default-iface-init-gen
+  964-default-iface-init-gen \
 
 ifneq (,$(filter gcstress,$(GC_TYPES)))
   ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),$(PREBUILD_TYPES), \
@@ -432,6 +437,9 @@ TEST_ART_BROKEN_FALLBACK_RUN_TESTS := \
   138-duplicate-classes-check2 \
   147-stripped-dex-fallback \
   554-jit-profile-file \
+  616-cha \
+  616-cha-abstract \
+  912-classes \
   629-vdex-speed
 
 # This test fails without an image.
@@ -440,6 +448,12 @@ TEST_ART_BROKEN_NO_IMAGE_RUN_TESTS := \
   137-cfi \
   138-duplicate-classes-check \
   018-stack-overflow \
+  476-clinit-inline-static-invoke \
+  496-checker-inlining-class-loader \
+  637-checker-throw-inline \
+  616-cha \
+  616-cha-abstract \
+  912-classes \
   961-default-iface-resolution-gen \
   964-default-iface-init \
   968-default-partial-compile-gen \

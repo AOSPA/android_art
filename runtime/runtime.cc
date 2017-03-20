@@ -106,7 +106,6 @@
 #include "native/dalvik_system_VMStack.h"
 #include "native/dalvik_system_ZygoteHooks.h"
 #include "native/java_lang_Class.h"
-#include "native/java_lang_DexCache.h"
 #include "native/java_lang_Object.h"
 #include "native/java_lang_String.h"
 #include "native/java_lang_StringFactory.h"
@@ -286,6 +285,13 @@ Runtime::~Runtime() {
     LOG(WARNING) << "Current thread not detached in Runtime shutdown";
   }
 
+  if (jit_ != nullptr) {
+    // Stop the profile saver thread before marking the runtime as shutting down.
+    // The saver will try to dump the profiles before being sopped and that
+    // requires holding the mutator lock.
+    jit_->StopProfileSaver();
+  }
+
   {
     ScopedTrace trace2("Wait for shutdown cond");
     MutexLock mu(self, *Locks::runtime_shutdown_lock_);
@@ -327,8 +333,6 @@ Runtime::~Runtime() {
     // Delete thread pool before the thread list since we don't want to wait forever on the
     // JIT compiler threads.
     jit_->DeleteThreadPool();
-    // Similarly, stop the profile saver thread before deleting the thread list.
-    jit_->StopProfileSaver();
   }
 
   // TODO Maybe do some locking.
@@ -1539,7 +1543,6 @@ void Runtime::RegisterRuntimeNativeMethods(JNIEnv* env) {
   register_dalvik_system_VMStack(env);
   register_dalvik_system_ZygoteHooks(env);
   register_java_lang_Class(env);
-  register_java_lang_DexCache(env);
   register_java_lang_Object(env);
   register_java_lang_invoke_MethodHandleImpl(env);
   register_java_lang_ref_FinalizerReference(env);
@@ -2152,6 +2155,19 @@ void Runtime::CreateJit() {
   jit_.reset(jit::Jit::Create(jit_options_.get(), &error_msg));
   if (jit_.get() == nullptr) {
     LOG(WARNING) << "Failed to create JIT " << error_msg;
+    return;
+  }
+
+  // In case we have a profile path passed as a command line argument,
+  // register the current class path for profiling now. Note that we cannot do
+  // this before we create the JIT and having it here is the most convenient way.
+  // This is used when testing profiles with dalvikvm command as there is no
+  // framework to register the dex files for profiling.
+  if (jit_options_->GetSaveProfilingInfo() &&
+      !jit_options_->GetProfileSaverOptions().GetProfilePath().empty()) {
+    std::vector<std::string> dex_filenames;
+    Split(class_path_string_, ':', &dex_filenames);
+    RegisterAppInfo(dex_filenames, jit_options_->GetProfileSaverOptions().GetProfilePath());
   }
 }
 

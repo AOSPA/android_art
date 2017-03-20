@@ -109,57 +109,6 @@ inline bool operator==(const SrcMapElem& lhs, const SrcMapElem& rhs) {
   return lhs.from_ == rhs.from_ && lhs.to_ == rhs.to_;
 }
 
-template <class Allocator>
-class SrcMap FINAL : public std::vector<SrcMapElem, Allocator> {
- public:
-  using std::vector<SrcMapElem, Allocator>::begin;
-  using typename std::vector<SrcMapElem, Allocator>::const_iterator;
-  using std::vector<SrcMapElem, Allocator>::empty;
-  using std::vector<SrcMapElem, Allocator>::end;
-  using std::vector<SrcMapElem, Allocator>::resize;
-  using std::vector<SrcMapElem, Allocator>::shrink_to_fit;
-  using std::vector<SrcMapElem, Allocator>::size;
-
-  explicit SrcMap() {}
-  explicit SrcMap(const Allocator& alloc) : std::vector<SrcMapElem, Allocator>(alloc) {}
-
-  template <class InputIt>
-  SrcMap(InputIt first, InputIt last, const Allocator& alloc)
-      : std::vector<SrcMapElem, Allocator>(first, last, alloc) {}
-
-  void push_back(const SrcMapElem& elem) {
-    if (!empty()) {
-      // Check that the addresses are inserted in sorted order.
-      DCHECK_GE(elem.from_, this->back().from_);
-      // If two consequitive entries map to the same value, ignore the later.
-      // E.g. for map {{0, 1}, {4, 1}, {8, 2}}, all values in [0,8) map to 1.
-      if (elem.to_ == this->back().to_) {
-        return;
-      }
-    }
-    std::vector<SrcMapElem, Allocator>::push_back(elem);
-  }
-
-  // Returns true and the corresponding "to" value if the mapping is found.
-  // Oterwise returns false and 0.
-  std::pair<bool, int32_t> Find(uint32_t from) const {
-    // Finds first mapping such that lb.from_ >= from.
-    auto lb = std::lower_bound(begin(), end(), SrcMapElem {from, INT32_MIN});
-    if (lb != end() && lb->from_ == from) {
-      // Found exact match.
-      return std::make_pair(true, lb->to_);
-    } else if (lb != begin()) {
-      // The previous mapping is still in effect.
-      return std::make_pair(true, (--lb)->to_);
-    } else {
-      // Not found because 'from' is smaller than first entry in the map.
-      return std::make_pair(false, 0);
-    }
-  }
-};
-
-using DefaultSrcMap = SrcMap<std::allocator<SrcMapElem>>;
-
 class LinkerPatch {
  public:
   // Note: We explicitly specify the underlying type of the enum because GCC
@@ -420,7 +369,7 @@ class CompiledMethod FINAL : public CompiledCode {
                  const size_t frame_size_in_bytes,
                  const uint32_t core_spill_mask,
                  const uint32_t fp_spill_mask,
-                 const ArrayRef<const SrcMapElem>& src_mapping_table,
+                 const ArrayRef<const uint8_t>& method_info,
                  const ArrayRef<const uint8_t>& vmap_table,
                  const ArrayRef<const uint8_t>& cfi_info,
                  const ArrayRef<const LinkerPatch>& patches);
@@ -434,7 +383,7 @@ class CompiledMethod FINAL : public CompiledCode {
       const size_t frame_size_in_bytes,
       const uint32_t core_spill_mask,
       const uint32_t fp_spill_mask,
-      const ArrayRef<const SrcMapElem>& src_mapping_table,
+      const ArrayRef<const uint8_t>& method_info,
       const ArrayRef<const uint8_t>& vmap_table,
       const ArrayRef<const uint8_t>& cfi_info,
       const ArrayRef<const LinkerPatch>& patches);
@@ -453,8 +402,8 @@ class CompiledMethod FINAL : public CompiledCode {
     return fp_spill_mask_;
   }
 
-  ArrayRef<const SrcMapElem> GetSrcMappingTable() const {
-    return GetArray(src_mapping_table_);
+  ArrayRef<const uint8_t> GetMethodInfo() const {
+    return GetArray(method_info_);
   }
 
   ArrayRef<const uint8_t> GetVmapTable() const {
@@ -476,9 +425,9 @@ class CompiledMethod FINAL : public CompiledCode {
   const uint32_t core_spill_mask_;
   // For quick code, a bit mask describing spilled FPR callee-save registers.
   const uint32_t fp_spill_mask_;
-  // For quick code, a set of pairs (PC, DEX) mapping from native PC offset to DEX offset.
-  const LengthPrefixedArray<SrcMapElem>* const src_mapping_table_;
-  // For quick code, a uleb128 encoded map from GPR/FPR register to dex register. Size prefixed.
+  // For quick code, method specific information that is not very dedupe friendly (method indices).
+  const LengthPrefixedArray<uint8_t>* const method_info_;
+  // For quick code, holds code infos which contain stack maps, inline information, and etc.
   const LengthPrefixedArray<uint8_t>* const vmap_table_;
   // For quick code, a FDE entry for the debug_frame section.
   const LengthPrefixedArray<uint8_t>* const cfi_info_;

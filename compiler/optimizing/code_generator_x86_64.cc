@@ -983,7 +983,7 @@ Location CodeGeneratorX86_64::GenerateCalleeMethodStaticOrDirectCall(HInvokeStat
       callee_method = invoke->GetLocations()->InAt(invoke->GetSpecialInputIndex());
       break;
     case HInvokeStaticOrDirect::MethodLoadKind::kDirectAddress:
-      __ movq(temp.AsRegister<CpuRegister>(), Immediate(invoke->GetMethodAddress()));
+      Load64BitValue(temp.AsRegister<CpuRegister>(), invoke->GetMethodAddress());
       break;
     case HInvokeStaticOrDirect::MethodLoadKind::kDexCachePcRelative: {
       __ movq(temp.AsRegister<CpuRegister>(),
@@ -5531,7 +5531,7 @@ void InstructionCodeGeneratorX86_64::VisitLoadClass(HLoadClass* cls) NO_THREAD_S
       uint32_t address = dchecked_integral_cast<uint32_t>(
           reinterpret_cast<uintptr_t>(cls->GetClass().Get()));
       DCHECK_NE(address, 0u);
-      __ movl(out, Immediate(address));  // Zero-extended.
+      __ movl(out, Immediate(static_cast<int32_t>(address)));  // Zero-extended.
       break;
     }
     case HLoadClass::LoadKind::kBssEntry: {
@@ -5666,7 +5666,7 @@ void InstructionCodeGeneratorX86_64::VisitLoadString(HLoadString* load) NO_THREA
       uint32_t address = dchecked_integral_cast<uint32_t>(
           reinterpret_cast<uintptr_t>(load->GetString().Get()));
       DCHECK_NE(address, 0u);
-      __ movl(out, Immediate(address));  // Zero-extended.
+      __ movl(out, Immediate(static_cast<int32_t>(address)));  // Zero-extended.
       return;  // No dex cache slow path.
     }
     case HLoadString::LoadKind::kBssEntry: {

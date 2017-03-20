@@ -941,9 +941,11 @@ void ImageWriter::PruneNonImageClasses() {
     }
     ObjPtr<mirror::DexCache> dex_cache = self->DecodeJObject(data.weak_root)->AsDexCache();
     for (size_t i = 0; i < dex_cache->NumResolvedTypes(); i++) {
-      Class* klass = dex_cache->GetResolvedType(dex::TypeIndex(i));
+      mirror::TypeDexCachePair pair =
+          dex_cache->GetResolvedTypes()[i].load(std::memory_order_relaxed);
+      mirror::Class* klass = pair.object.Read();
       if (klass != nullptr && !KeepClass(klass)) {
-        dex_cache->SetResolvedType(dex::TypeIndex(i), nullptr);
+        dex_cache->ClearResolvedType(dex::TypeIndex(pair.index));
       }
     }
     ArtMethod** resolved_methods = dex_cache->GetResolvedMethods();
@@ -966,16 +968,14 @@ void ImageWriter::PruneNonImageClasses() {
             << Class::PrettyClass(declaring_class) << " not in class linker table";
       }
     }
-    ArtField** resolved_fields = dex_cache->GetResolvedFields();
+    mirror::FieldDexCacheType* resolved_fields = dex_cache->GetResolvedFields();
     for (size_t i = 0; i < dex_cache->NumResolvedFields(); i++) {
-      ArtField* field = mirror::DexCache::GetElementPtrSize(resolved_fields, i, target_ptr_size_);
+      auto pair = mirror::DexCache::GetNativePairPtrSize(resolved_fields, i, target_ptr_size_);
+      ArtField* field = pair.object;
       if (field != nullptr && !KeepClass(field->GetDeclaringClass().Ptr())) {
-        dex_cache->SetResolvedField(i, nullptr, target_ptr_size_);
+        dex_cache->ClearResolvedField(pair.index, target_ptr_size_);
       }
     }
-    // Clean the dex field. It might have been populated during the initialization phase, but
-    // contains data only valid during a real run.
-    dex_cache->SetFieldObject<false>(mirror::DexCache::DexOffset(), nullptr);
   }
 
   // Drop the array class cache in the ClassLinker, as these are roots holding those classes live.
@@ -1575,10 +1575,8 @@ void ImageWriter::CalculateNewObjectOffsets() {
     }
     // Calculate the size of the class table.
     ReaderMutexLock mu(self, *Locks::classlinker_classes_lock_);
-    CHECK_EQ(class_loaders_.size(), compile_app_image_ ? 1u : 0u);
-    mirror::ClassLoader* class_loader = compile_app_image_ ? *class_loaders_.begin() : nullptr;
-    DCHECK_EQ(image_info.class_table_->NumZygoteClasses(class_loader), 0u);
-    if (image_info.class_table_->NumNonZygoteClasses(class_loader) != 0u) {
+    DCHECK_EQ(image_info.class_table_->NumReferencedZygoteClasses(), 0u);
+    if (image_info.class_table_->NumReferencedNonZygoteClasses() != 0u) {
       image_info.class_table_bytes_ += image_info.class_table_->WriteToMemory(nullptr);
     }
   }
@@ -1594,7 +1592,7 @@ void ImageWriter::CalculateNewObjectOffsets() {
           break;
         }
         case kBinDexCacheArray:
-          bin_offset = RoundUp(bin_offset, DexCacheArraysLayout::Alignment());
+          bin_offset = RoundUp(bin_offset, DexCacheArraysLayout::Alignment(target_ptr_size_));
           break;
         case kBinImTable:
         case kBinIMTConflictTable: {
@@ -1923,10 +1921,8 @@ void ImageWriter::CopyAndFixupNativeData(size_t oat_index) {
     // above comment for intern tables.
     ClassTable temp_class_table;
     temp_class_table.ReadFromMemory(class_table_memory_ptr);
-    CHECK_EQ(class_loaders_.size(), compile_app_image_ ? 1u : 0u);
-    mirror::ClassLoader* class_loader = compile_app_image_ ? *class_loaders_.begin() : nullptr;
-    CHECK_EQ(temp_class_table.NumZygoteClasses(class_loader),
-             table->NumNonZygoteClasses(class_loader) + table->NumZygoteClasses(class_loader));
+    CHECK_EQ(temp_class_table.NumReferencedZygoteClasses(),
+             table->NumReferencedNonZygoteClasses() + table->NumReferencedZygoteClasses());
     UnbufferedRootVisitor visitor(&root_visitor, RootInfo(kRootUnknown));
     temp_class_table.VisitRoots(visitor);
   }
@@ -2214,7 +2210,7 @@ void ImageWriter::FixupDexCache(mirror::DexCache* orig_dex_cache,
     orig_dex_cache->FixupStrings(NativeCopyLocation(orig_strings, orig_dex_cache),
                                  ImageAddressVisitor(this));
   }
-  GcRoot<mirror::Class>* orig_types = orig_dex_cache->GetResolvedTypes();
+  mirror::TypeDexCacheType* orig_types = orig_dex_cache->GetResolvedTypes();
   if (orig_types != nullptr) {
     copy_dex_cache->SetFieldPtrWithSize<false>(mirror::DexCache::ResolvedTypesOffset(),
                                                NativeLocationInImage(orig_types),
@@ -2235,16 +2231,17 @@ void ImageWriter::FixupDexCache(mirror::DexCache* orig_dex_cache,
       mirror::DexCache::SetElementPtrSize(copy_methods, i, copy, target_ptr_size_);
     }
   }
-  ArtField** orig_fields = orig_dex_cache->GetResolvedFields();
+  mirror::FieldDexCacheType* orig_fields = orig_dex_cache->GetResolvedFields();
   if (orig_fields != nullptr) {
     copy_dex_cache->SetFieldPtrWithSize<false>(mirror::DexCache::ResolvedFieldsOffset(),
                                                NativeLocationInImage(orig_fields),
                                                PointerSize::k64);
-    ArtField** copy_fields = NativeCopyLocation(orig_fields, orig_dex_cache);
+    mirror::FieldDexCacheType* copy_fields = NativeCopyLocation(orig_fields, orig_dex_cache);
     for (size_t i = 0, num = orig_dex_cache->NumResolvedFields(); i != num; ++i) {
-      ArtField* orig = mirror::DexCache::GetElementPtrSize(orig_fields, i, target_ptr_size_);
-      ArtField* copy = NativeLocationInImage(orig);
-      mirror::DexCache::SetElementPtrSize(copy_fields, i, copy, target_ptr_size_);
+      mirror::FieldDexCachePair orig =
+          mirror::DexCache::GetNativePairPtrSize(orig_fields, i, target_ptr_size_);
+      mirror::FieldDexCachePair copy(NativeLocationInImage(orig.object), orig.index);
+      mirror::DexCache::SetNativePairPtrSize(copy_fields, i, copy, target_ptr_size_);
     }
   }
   mirror::MethodTypeDexCacheType* orig_method_types = orig_dex_cache->GetResolvedMethodTypes();

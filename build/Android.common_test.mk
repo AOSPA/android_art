@@ -54,11 +54,11 @@ ART_TEST_FULL ?= false
 ART_TEST_QUIET ?= true
 
 # Do you want interpreter tests run?
-ART_TEST_INTERPRETER ?= $(ART_TEST_FULL)
-ART_TEST_INTERPRETER_ACCESS_CHECKS ?= $(ART_TEST_FULL)
+ART_TEST_INTERPRETER ?= true
+ART_TEST_INTERPRETER_ACCESS_CHECKS ?= true
 
 # Do you want JIT tests run?
-ART_TEST_JIT ?= $(ART_TEST_FULL)
+ART_TEST_JIT ?= true
 
 # Do you want optimizing compiler tests run?
 ART_TEST_OPTIMIZING ?= true
@@ -215,6 +215,7 @@ define build-art-test-dex
     LOCAL_MODULE_PATH := $(3)
     LOCAL_DEX_PREOPT_IMAGE_LOCATION := $(TARGET_CORE_IMG_OUT)
     ifneq ($(wildcard $(LOCAL_PATH)/$(2)/main.list),)
+      LOCAL_DX_FLAGS := --multi-dex --main-dex-list=$(LOCAL_PATH)/$(2)/main.list --minimal-main-dex
       LOCAL_JACK_FLAGS := -D jack.dex.output.policy=minimal-multidex -D jack.preprocessor=true -D jack.preprocessor.file=$(LOCAL_PATH)/$(2)/main.jpp
     endif
     include $(BUILD_JAVA_LIBRARY)
@@ -230,6 +231,7 @@ define build-art-test-dex
     LOCAL_JAVA_LIBRARIES := $(HOST_CORE_JARS)
     LOCAL_DEX_PREOPT_IMAGE := $(HOST_CORE_IMG_LOCATION)
     ifneq ($(wildcard $(LOCAL_PATH)/$(2)/main.list),)
+      LOCAL_DX_FLAGS := --multi-dex --main-dex-list=$(LOCAL_PATH)/$(2)/main.list --minimal-main-dex
       LOCAL_JACK_FLAGS := -D jack.dex.output.policy=minimal-multidex -D jack.preprocessor=true -D jack.preprocessor.file=$(LOCAL_PATH)/$(2)/main.jpp
     endif
     include $(BUILD_HOST_DALVIK_JAVA_LIBRARY)

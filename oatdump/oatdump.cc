@@ -596,7 +596,7 @@ class OatDumper {
       kByteKindStackMapInlineInfoIndex,
       kByteKindStackMapRegisterMaskIndex,
       kByteKindStackMapStackMaskIndex,
-      kByteKindInlineInfoMethodIndex,
+      kByteKindInlineInfoMethodIndexIdx,
       kByteKindInlineInfoDexPc,
       kByteKindInlineInfoExtraData,
       kByteKindInlineInfoDexRegisterMap,
@@ -605,7 +605,7 @@ class OatDumper {
       // Special ranges for std::accumulate convenience.
       kByteKindStackMapFirst = kByteKindStackMapNativePc,
       kByteKindStackMapLast = kByteKindStackMapStackMaskIndex,
-      kByteKindInlineInfoFirst = kByteKindInlineInfoMethodIndex,
+      kByteKindInlineInfoFirst = kByteKindInlineInfoMethodIndexIdx,
       kByteKindInlineInfoLast = kByteKindInlineInfoIsLast,
     };
     int64_t bits[kByteKindCount] = {};
@@ -685,8 +685,8 @@ class OatDumper {
         {
           ScopedIndentation indent1(&os);
           Dump(os,
-               "InlineInfoMethodIndex         ",
-               bits[kByteKindInlineInfoMethodIndex],
+               "InlineInfoMethodIndexIdx      ",
+               bits[kByteKindInlineInfoMethodIndexIdx],
                inline_info_bits,
                "inline info");
           Dump(os,
@@ -1363,7 +1363,8 @@ class OatDumper {
         CodeInfo code_info(raw_code_info);
         DCHECK(code_item != nullptr);
         ScopedIndentation indent1(vios);
-        DumpCodeInfo(vios, code_info, oat_method, *code_item);
+        MethodInfo method_info = oat_method.GetOatQuickMethodHeader()->GetOptimizedMethodInfo();
+        DumpCodeInfo(vios, code_info, oat_method, *code_item, method_info);
       }
     } else if (IsMethodGeneratedByDexToDexCompiler(oat_method, code_item)) {
       // We don't encode the size in the table, so just emit that we have quickened
@@ -1379,12 +1380,14 @@ class OatDumper {
   void DumpCodeInfo(VariableIndentationOutputStream* vios,
                     const CodeInfo& code_info,
                     const OatFile::OatMethod& oat_method,
-                    const DexFile::CodeItem& code_item) {
+                    const DexFile::CodeItem& code_item,
+                    const MethodInfo& method_info) {
     code_info.Dump(vios,
                    oat_method.GetCodeOffset(),
                    code_item.registers_size_,
                    options_.dump_code_info_stack_maps_,
-                   instruction_set_);
+                   instruction_set_,
+                   method_info);
   }
 
   void DumpVregLocations(std::ostream& os, const OatFile::OatMethod& oat_method,
@@ -1592,6 +1595,7 @@ class OatDumper {
     } else if (!bad_input && IsMethodGeneratedByOptimizingCompiler(oat_method, code_item)) {
       // The optimizing compiler outputs its CodeInfo data in the vmap table.
       StackMapsHelper helper(oat_method.GetVmapTable(), instruction_set_);
+      MethodInfo method_info(oat_method.GetOatQuickMethodHeader()->GetOptimizedMethodInfo());
       {
         CodeInfoEncoding encoding(helper.GetEncoding());
         StackMapEncoding stack_map_encoding(encoding.stack_map.encoding);
@@ -1652,8 +1656,9 @@ class OatDumper {
           const size_t num_inline_infos = encoding.inline_info.num_entries;
           if (num_inline_infos > 0u) {
             stats_.AddBits(
-                Stats::kByteKindInlineInfoMethodIndex,
-                encoding.inline_info.encoding.GetMethodIndexEncoding().BitSize() * num_inline_infos);
+                Stats::kByteKindInlineInfoMethodIndexIdx,
+                encoding.inline_info.encoding.GetMethodIndexIdxEncoding().BitSize() *
+                    num_inline_infos);
             stats_.AddBits(
                 Stats::kByteKindInlineInfoDexPc,
                 encoding.inline_info.encoding.GetDexPcEncoding().BitSize() * num_inline_infos);
@@ -1679,6 +1684,7 @@ class OatDumper {
           stack_map.Dump(vios,
                          helper.GetCodeInfo(),
                          helper.GetEncoding(),
+                         method_info,
                          oat_method.GetCodeOffset(),
                          code_item->registers_size_,
                          instruction_set_);
@@ -2210,13 +2216,13 @@ class ImageDumper {
           ScopedIndentation indent2(&state->vios_);
           auto* resolved_fields = dex_cache->GetResolvedFields();
           for (size_t i = 0, length = dex_cache->NumResolvedFields(); i < length; ++i) {
-            auto* elem = mirror::DexCache::GetElementPtrSize(
-                resolved_fields, i, image_pointer_size);
+            auto* elem = mirror::DexCache::GetNativePairPtrSize(
+                resolved_fields, i, image_pointer_size).object;
             size_t run = 0;
             for (size_t j = i + 1;
-                 j != length && elem == mirror::DexCache::GetElementPtrSize(resolved_fields,
-                                                                            j,
-                                                                            image_pointer_size);
+                 j != length &&
+                 elem == mirror::DexCache::GetNativePairPtrSize(
+                     resolved_fields, j, image_pointer_size).object;
                  ++j) {
               ++run;
             }
@@ -2244,9 +2250,14 @@ class ImageDumper {
           ScopedIndentation indent2(&state->vios_);
           auto* resolved_types = dex_cache->GetResolvedTypes();
           for (size_t i = 0; i < num_types; ++i) {
-            auto* elem = resolved_types[i].Read();
+            auto pair = resolved_types[i].load(std::memory_order_relaxed);
             size_t run = 0;
-            for (size_t j = i + 1; j != num_types && elem == resolved_types[j].Read(); ++j) {
+            for (size_t j = i + 1; j != num_types; ++j) {
+              auto other_pair = resolved_types[j].load(std::memory_order_relaxed);
+              if (pair.index != other_pair.index ||
+                  pair.object.Read() != other_pair.object.Read()) {
+                break;
+              }
               ++run;
             }
             if (run == 0) {
@@ -2256,12 +2267,13 @@ class ImageDumper {
               i = i + run;
             }
             std::string msg;
+            auto* elem = pair.object.Read();
             if (elem == nullptr) {
               msg = "null";
             } else {
               msg = elem->PrettyClass();
             }
-            os << StringPrintf("%p   %s\n", elem, msg.c_str());
+            os << StringPrintf("%p   %u %s\n", elem, pair.index, msg.c_str());
           }
         }
       }

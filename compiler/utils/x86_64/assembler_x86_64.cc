@@ -1375,6 +1375,32 @@ void X86_64Assembler::pand(XmmRegister dst, XmmRegister src) {
   EmitXmmRegisterOperand(dst.LowBits(), src);
 }
 
+void X86_64Assembler::andnpd(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitOptionalRex32(dst, src);
+  EmitUint8(0x0F);
+  EmitUint8(0x55);
+  EmitXmmRegisterOperand(dst.LowBits(), src);
+}
+
+void X86_64Assembler::andnps(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitOptionalRex32(dst, src);
+  EmitUint8(0x0F);
+  EmitUint8(0x55);
+  EmitXmmRegisterOperand(dst.LowBits(), src);
+}
+
+void X86_64Assembler::pandn(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitOptionalRex32(dst, src);
+  EmitUint8(0x0F);
+  EmitUint8(0xDF);
+  EmitXmmRegisterOperand(dst.LowBits(), src);
+}
+
 void X86_64Assembler::orpd(XmmRegister dst, XmmRegister src) {
   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
   EmitUint8(0x66);
@@ -1398,6 +1424,43 @@ void X86_64Assembler::por(XmmRegister dst, XmmRegister src) {
   EmitOptionalRex32(dst, src);
   EmitUint8(0x0F);
   EmitUint8(0xEB);
+  EmitXmmRegisterOperand(dst.LowBits(), src);
+}
+
+void X86_64Assembler::pcmpeqb(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitOptionalRex32(dst, src);
+  EmitUint8(0x0F);
+  EmitUint8(0x74);
+  EmitXmmRegisterOperand(dst.LowBits(), src);
+}
+
+void X86_64Assembler::pcmpeqw(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitOptionalRex32(dst, src);
+  EmitUint8(0x0F);
+  EmitUint8(0x75);
+  EmitXmmRegisterOperand(dst.LowBits(), src);
+}
+
+void X86_64Assembler::pcmpeqd(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitOptionalRex32(dst, src);
+  EmitUint8(0x0F);
+  EmitUint8(0x76);
+  EmitXmmRegisterOperand(dst.LowBits(), src);
+}
+
+void X86_64Assembler::pcmpeqq(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitOptionalRex32(dst, src);
+  EmitUint8(0x0F);
+  EmitUint8(0x38);
+  EmitUint8(0x29);
   EmitXmmRegisterOperand(dst.LowBits(), src);
 }
 

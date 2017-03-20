@@ -64,10 +64,6 @@ void Class::VisitRoots(RootVisitor* visitor) {
   java_lang_Class_.VisitRootIfNonNull(visitor, RootInfo(kRootStickyClass));
 }
 
-ClassExt* Class::GetExtData() {
-  return GetFieldObject<ClassExt>(OFFSET_OF_OBJECT_MEMBER(Class, ext_data_));
-}
-
 ClassExt* Class::EnsureExtDataPresent(Thread* self) {
   ObjPtr<ClassExt> existing(GetExtData());
   if (!existing.IsNull()) {
@@ -946,12 +942,13 @@ ObjPtr<Class> Class::GetDirectInterface(Thread* self, ObjPtr<Class> klass, uint3
     DCHECK(interface != nullptr);
     return interface;
   } else if (klass->IsProxyClass()) {
-    ObjPtr<ObjectArray<Class>> interfaces = klass->GetInterfaces();
+    ObjPtr<ObjectArray<Class>> interfaces = klass->GetProxyInterfaces();
     DCHECK(interfaces != nullptr);
     return interfaces->Get(idx);
   } else {
     dex::TypeIndex type_idx = klass->GetDirectInterfaceTypeIdx(idx);
-    ObjPtr<Class> interface = klass->GetDexCache()->GetResolvedType(type_idx);
+    ObjPtr<Class> interface = ClassLinker::LookupResolvedType(
+        type_idx, klass->GetDexCache(), klass->GetClassLoader());
     return interface;
   }
 }

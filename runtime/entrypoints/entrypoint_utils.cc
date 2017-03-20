@@ -138,7 +138,7 @@ JValue InvokeProxyInvocationHandler(ScopedObjectAccessAlreadyRunnable& soa, cons
             reinterpret_cast<uintptr_t>(&virtual_methods.At(0))) / method_size;
         CHECK_LT(throws_index, static_cast<int>(num_virtuals));
         mirror::ObjectArray<mirror::Class>* declared_exceptions =
-            proxy_class->GetThrows()->Get(throws_index);
+            proxy_class->GetProxyThrows()->Get(throws_index);
         mirror::Class* exception_class = exception->GetClass();
         for (int32_t i = 0; i < declared_exceptions->GetLength() && !declares_exception; i++) {
           mirror::Class* declared_exception = declared_exceptions->Get(i);
@@ -201,12 +201,14 @@ static inline ArtMethod* DoGetCalleeSaveMethodCaller(ArtMethod* outer_method,
       DCHECK(current_code->IsOptimized());
       uintptr_t native_pc_offset = current_code->NativeQuickPcOffset(caller_pc);
       CodeInfo code_info = current_code->GetOptimizedCodeInfo();
+      MethodInfo method_info = current_code->GetOptimizedMethodInfo();
       CodeInfoEncoding encoding = code_info.ExtractEncoding();
       StackMap stack_map = code_info.GetStackMapForNativePcOffset(native_pc_offset, encoding);
       DCHECK(stack_map.IsValid());
       if (stack_map.HasInlineInfo(encoding.stack_map.encoding)) {
         InlineInfo inline_info = code_info.GetInlineInfoOf(stack_map, encoding);
         caller = GetResolvedMethod(outer_method,
+                                   method_info,
                                    inline_info,
                                    encoding.inline_info.encoding,
                                    inline_info.GetDepth(encoding.inline_info.encoding) - 1);

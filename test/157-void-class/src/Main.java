@@ -35,11 +35,7 @@ public class Main {
         }
         // Clear the resolved types of the ojluni dex file to make sure there is no entry
         // for "V", i.e. void.
-        // TODO: Enable clearing the dex cache when we switch to the hash-based type array
-        // and do a proper lookup. Currently, ClassLinker fully relies on the DexCache.
-        if (false) {
-            clearResolvedTypes(Integer.class);
-        }
+        clearResolvedTypes(Integer.class);
         // With java.lang.Void being compile-time verified but uninitialized, initialize
         // it now. Previously, this would indirectly initialize TYPE with the current,
         // i.e. zero-initialized, value of TYPE. The only thing that could prevent the

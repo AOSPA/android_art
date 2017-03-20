@@ -266,16 +266,16 @@ class ClassLinker {
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_, !Roles::uninterruptible_);
 
-  mirror::Class* ResolveType(dex::TypeIndex type_idx, ArtField* referrer)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!Locks::dex_lock_, !Roles::uninterruptible_);
-
   // Look up a resolved type with the given ID from the DexFile. The ClassLoader is used to search
   // for the type, since it may be referenced from but not contained within the given DexFile.
   ObjPtr<mirror::Class> LookupResolvedType(const DexFile& dex_file,
                                            dex::TypeIndex type_idx,
                                            ObjPtr<mirror::DexCache> dex_cache,
                                            ObjPtr<mirror::ClassLoader> class_loader)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  static ObjPtr<mirror::Class> LookupResolvedType(dex::TypeIndex type_idx,
+                                                  ObjPtr<mirror::DexCache> dex_cache,
+                                                  ObjPtr<mirror::ClassLoader> class_loader)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Resolve a type with the given ID from the DexFile, storing the
@@ -333,7 +333,7 @@ class ClassLinker {
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_, !Roles::uninterruptible_);
 
-  ArtField* GetResolvedField(uint32_t field_idx, ObjPtr<mirror::DexCache> dex_cache)
+  ArtField* LookupResolvedField(uint32_t field_idx, ArtMethod* referrer, bool is_static)
       REQUIRES_SHARED(Locks::mutator_lock_);
   ArtField* ResolveField(uint32_t field_idx, ArtMethod* referrer, bool is_static)
       REQUIRES_SHARED(Locks::mutator_lock_)
@@ -840,6 +840,13 @@ class ClassLinker {
                              size_t hash,
                              ObjPtr<mirror::ClassLoader> class_loader)
       REQUIRES(!Locks::classlinker_classes_lock_)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Find a field by its field index.
+  ArtField* LookupResolvedField(uint32_t field_idx,
+                                ObjPtr<mirror::DexCache> dex_cache,
+                                ObjPtr<mirror::ClassLoader> class_loader,
+                                bool is_static)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void RegisterDexFileLocked(const DexFile& dex_file,

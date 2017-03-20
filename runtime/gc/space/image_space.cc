@@ -1237,9 +1237,9 @@ class ImageSpaceLoader {
           }
           dex_cache->FixupStrings<kWithoutReadBarrier>(new_strings, fixup_adapter);
         }
-        GcRoot<mirror::Class>* types = dex_cache->GetResolvedTypes();
+        mirror::TypeDexCacheType* types = dex_cache->GetResolvedTypes();
         if (types != nullptr) {
-          GcRoot<mirror::Class>* new_types = fixup_adapter.ForwardObject(types);
+          mirror::TypeDexCacheType* new_types = fixup_adapter.ForwardObject(types);
           if (types != new_types) {
             dex_cache->SetResolvedTypes(new_types);
           }
@@ -1259,17 +1259,18 @@ class ImageSpaceLoader {
             }
           }
         }
-        ArtField** fields = dex_cache->GetResolvedFields();
+        mirror::FieldDexCacheType* fields = dex_cache->GetResolvedFields();
         if (fields != nullptr) {
-          ArtField** new_fields = fixup_adapter.ForwardObject(fields);
+          mirror::FieldDexCacheType* new_fields = fixup_adapter.ForwardObject(fields);
           if (fields != new_fields) {
             dex_cache->SetResolvedFields(new_fields);
           }
           for (size_t j = 0, num = dex_cache->NumResolvedFields(); j != num; ++j) {
-            ArtField* orig = mirror::DexCache::GetElementPtrSize(new_fields, j, pointer_size);
-            ArtField* copy = fixup_adapter.ForwardObject(orig);
-            if (orig != copy) {
-              mirror::DexCache::SetElementPtrSize(new_fields, j, copy, pointer_size);
+            mirror::FieldDexCachePair orig =
+                mirror::DexCache::GetNativePairPtrSize(new_fields, j, pointer_size);
+            mirror::FieldDexCachePair copy(fixup_adapter.ForwardObject(orig.object), orig.index);
+            if (orig.object != copy.object) {
+              mirror::DexCache::SetNativePairPtrSize(new_fields, j, copy, pointer_size);
             }
           }
         }
