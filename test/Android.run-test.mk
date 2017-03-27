@@ -229,12 +229,14 @@ endef  # name-to-var
 #     they are rewritten. These tests use a broken class loader that tries to
 #     register a dex file that's already registered with a different loader.
 #     b/34193123
+# Disable 638-checker-inline-caches until b/36371709 is fixed.
 ART_TEST_RUN_TEST_SKIP += \
   115-native-bridge \
   153-reference-stress \
   080-oom-fragmentation \
   497-inlining-and-class-loader \
-  542-unresolved-access-check
+  542-unresolved-access-check \
+  638-checker-inline-caches
 
 ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),$(PREBUILD_TYPES), \
         $(COMPILER_TYPES),$(RELOCATE_TYPES),$(TRACE_TYPES),$(GC_TYPES),$(JNI_TYPES), \
@@ -444,12 +446,16 @@ TEST_ART_BROKEN_FALLBACK_RUN_TESTS := \
 
 # This test fails without an image.
 # 018, 961, 964, 968 often time out. b/34369284
+# 508: b/36365552
+# 597: b/36467228
 TEST_ART_BROKEN_NO_IMAGE_RUN_TESTS := \
   137-cfi \
   138-duplicate-classes-check \
   018-stack-overflow \
   476-clinit-inline-static-invoke \
   496-checker-inlining-class-loader \
+  508-referrer-method \
+  597-deopt-new-string \
   637-checker-throw-inline \
   616-cha \
   616-cha-abstract \

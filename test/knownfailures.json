@@ -339,8 +339,14 @@
     {
         "tests": ["476-clinit-inline-static-invoke",
                   "496-checker-inlining-class-loader",
+                  "508-referrer-method",
                   "637-checker-throw-inline"],
         "bug": "http://b/36365552",
+        "variant": "no-image & jit"
+    },
+    {
+        "tests": ["597-deopt-new-string"],
+        "bug": "http://b/36467228",
         "variant": "no-image & jit"
     },
     {
@@ -350,5 +356,16 @@
                   "080-oom-throw"],
         "bug": "http://b/36377828",
         "variant": "interp-ac"
+    },
+    {
+        "tests": "638-checker-inline-caches",
+        "description": ["Disable 638-checker-inline-caches temporarily until a fix",
+                        "arrives."],
+        "bug": "http://b/36371709"
+    },
+    {
+        "tests": "080-oom-throw",
+        "bug": "http://b/36501991",
+        "variant": "interpreter & target"
     }
 ]
