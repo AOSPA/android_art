@@ -582,11 +582,6 @@ endif
   LOCAL_NATIVE_COVERAGE := $(ART_COVERAGE)
 
   ifeq ($$(art_target_or_host),target)
-    ifneq ($$(art_ndebug_or_debug),debug)
-      # Leave the symbols in the shared library so that stack unwinders can
-      # produce meaningful name resolution.
-      LOCAL_STRIP_MODULE := keep_symbols
-    endif
     include $$(BUILD_SHARED_LIBRARY)
   else # host
     ifeq ($$(art_static_or_shared),static)
