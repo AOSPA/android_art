@@ -261,13 +261,12 @@ jvmtiError Redefiner::GetClassRedefinitionError(art::Handle<art::mirror::Class> 
 
 // Moves dex data to an anonymous, read-only mmap'd region.
 std::unique_ptr<art::MemMap> Redefiner::MoveDataToMemMap(const std::string& original_location,
-                                                         jint data_len,
-                                                         const unsigned char* dex_data,
+                                                         art::ArraySlice<const unsigned char> data,
                                                          std::string* error_msg) {
   std::unique_ptr<art::MemMap> map(art::MemMap::MapAnonymous(
       StringPrintf("%s-transformed", original_location.c_str()).c_str(),
       nullptr,
-      data_len,
+      data.size(),
       PROT_READ|PROT_WRITE,
       /*low_4gb*/false,
       /*reuse*/false,
@@ -275,7 +274,7 @@ std::unique_ptr<art::MemMap> Redefiner::MoveDataToMemMap(const std::string& orig
   if (map == nullptr) {
     return map;
   }
-  memcpy(map->Begin(), dex_data, data_len);
+  memcpy(map->Begin(), &data.At(0), data.size());
   // Make the dex files mmap read only. This matches how other DexFiles are mmaped and prevents
   // programs from corrupting it.
   map->Protect(PROT_READ);
@@ -344,13 +343,7 @@ jvmtiError Redefiner::RedefineClasses(ArtJvmTiEnv* env,
     memcpy(class_bytes_copy, definitions[i].class_bytes, definitions[i].class_byte_count);
 
     ArtClassDefinition def;
-    def.dex_len = definitions[i].class_byte_count;
-    def.dex_data = MakeJvmtiUniquePtr(env, class_bytes_copy);
-    // We are definitely modified.
-    def.SetModified();
-    def.original_dex_file = art::ArraySlice<const unsigned char>(definitions[i].class_bytes,
-                                                                 definitions[i].class_byte_count);
-    res = Transformer::FillInTransformationData(env, definitions[i].klass, &def);
+    res = def.Init(env, definitions[i]);
     if (res != OK) {
       return res;
     }
@@ -386,7 +379,7 @@ jvmtiError Redefiner::RedefineClassesDirect(ArtJvmTiEnv* env,
   Redefiner r(runtime, self, error_msg);
   for (const ArtClassDefinition& def : definitions) {
     // Only try to transform classes that have been modified.
-    if (def.IsModified(self)) {
+    if (def.IsModified()) {
       jvmtiError res = r.AddRedefinition(env, def);
       if (res != OK) {
         return res;
@@ -399,25 +392,24 @@ jvmtiError Redefiner::RedefineClassesDirect(ArtJvmTiEnv* env,
 jvmtiError Redefiner::AddRedefinition(ArtJvmTiEnv* env, const ArtClassDefinition& def) {
   std::string original_dex_location;
   jvmtiError ret = OK;
-  if ((ret = GetClassLocation(env, def.klass, &original_dex_location))) {
+  if ((ret = GetClassLocation(env, def.GetClass(), &original_dex_location))) {
     *error_msg_ = "Unable to get original dex file location!";
     return ret;
   }
   char* generic_ptr_unused = nullptr;
   char* signature_ptr = nullptr;
-  if ((ret = env->GetClassSignature(def.klass, &signature_ptr, &generic_ptr_unused)) != OK) {
+  if ((ret = env->GetClassSignature(def.GetClass(), &signature_ptr, &generic_ptr_unused)) != OK) {
     *error_msg_ = "Unable to get class signature!";
     return ret;
   }
   JvmtiUniquePtr<char> generic_unique_ptr(MakeJvmtiUniquePtr(env, generic_ptr_unused));
   JvmtiUniquePtr<char> signature_unique_ptr(MakeJvmtiUniquePtr(env, signature_ptr));
   std::unique_ptr<art::MemMap> map(MoveDataToMemMap(original_dex_location,
-                                                    def.dex_len,
-                                                    def.dex_data.get(),
+                                                    def.GetDexData(),
                                                     error_msg_));
   std::ostringstream os;
   if (map.get() == nullptr) {
-    os << "Failed to create anonymous mmap for modified dex file of class " << def.name
+    os << "Failed to create anonymous mmap for modified dex file of class " << def.GetName()
        << "in dex file " << original_dex_location << " because: " << *error_msg_;
     *error_msg_ = os.str();
     return ERR(OUT_OF_MEMORY);
@@ -434,16 +426,16 @@ jvmtiError Redefiner::AddRedefinition(ArtJvmTiEnv* env, const ArtClassDefinition
                                                                   /*verify_checksum*/true,
                                                                   error_msg_));
   if (dex_file.get() == nullptr) {
-    os << "Unable to load modified dex file for " << def.name << ": " << *error_msg_;
+    os << "Unable to load modified dex file for " << def.GetName() << ": " << *error_msg_;
     *error_msg_ = os.str();
     return ERR(INVALID_CLASS_FORMAT);
   }
   redefinitions_.push_back(
       Redefiner::ClassRedefinition(this,
-                                   def.klass,
+                                   def.GetClass(),
                                    dex_file.release(),
                                    signature_ptr,
-                                   def.original_dex_file));
+                                   def.GetNewOriginalDexFile()));
   return OK;
 }
 
@@ -469,7 +461,7 @@ void Redefiner::RecordFailure(jvmtiError result,
   result_ = result;
 }
 
-art::mirror::ByteArray* Redefiner::ClassRedefinition::AllocateOrGetOriginalDexFileBytes() {
+art::mirror::Object* Redefiner::ClassRedefinition::AllocateOrGetOriginalDexFile() {
   // If we have been specifically given a new set of bytes use that
   if (original_dex_file_.size() != 0) {
     return art::mirror::ByteArray::AllocateAndFill(
@@ -481,24 +473,21 @@ art::mirror::ByteArray* Redefiner::ClassRedefinition::AllocateOrGetOriginalDexFi
   // See if we already have one set.
   art::ObjPtr<art::mirror::ClassExt> ext(GetMirrorClass()->GetExtData());
   if (!ext.IsNull()) {
-    art::ObjPtr<art::mirror::ByteArray> old_original_bytes(ext->GetOriginalDexFileBytes());
-    if (!old_original_bytes.IsNull()) {
+    art::ObjPtr<art::mirror::Object> old_original_dex_file(ext->GetOriginalDexFile());
+    if (!old_original_dex_file.IsNull()) {
       // We do. Use it.
-      return old_original_bytes.Ptr();
+      return old_original_dex_file.Ptr();
     }
   }
 
-  // Copy the current dex_file
-  const art::DexFile& current_dex_file = GetMirrorClass()->GetDexFile();
+  // return the current dex_cache which has the dex file in it.
+  art::ObjPtr<art::mirror::DexCache> current_dex_cache(GetMirrorClass()->GetDexCache());
   // TODO Handle this or make it so it cannot happen.
-  if (current_dex_file.NumClassDefs() != 1) {
+  if (current_dex_cache->GetDexFile()->NumClassDefs() != 1) {
     LOG(WARNING) << "Current dex file has more than one class in it. Calling RetransformClasses "
                  << "on this class might fail if no transformations are applied to it!";
   }
-  return art::mirror::ByteArray::AllocateAndFill(
-      driver_->self_,
-      reinterpret_cast<const signed char*>(current_dex_file.Begin()),
-      current_dex_file.Size());
+  return current_dex_cache.Ptr();
 }
 
 struct CallbackCtx {
@@ -847,9 +836,9 @@ class RedefinitionDataHolder {
     return art::down_cast<art::mirror::Class*>(GetSlot(klass_index, kSlotMirrorClass));
   }
 
-  art::mirror::ByteArray* GetOriginalDexFileBytes(jint klass_index) const
+  art::mirror::Object* GetOriginalDexFile(jint klass_index) const
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
-    return art::down_cast<art::mirror::ByteArray*>(GetSlot(klass_index, kSlotOrigDexFile));
+    return art::down_cast<art::mirror::Object*>(GetSlot(klass_index, kSlotOrigDexFile));
   }
 
   void SetSourceClassLoader(jint klass_index, art::mirror::ClassLoader* loader)
@@ -872,7 +861,7 @@ class RedefinitionDataHolder {
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     SetSlot(klass_index, kSlotMirrorClass, klass);
   }
-  void SetOriginalDexFileBytes(jint klass_index, art::mirror::ByteArray* bytes)
+  void SetOriginalDexFile(jint klass_index, art::mirror::Object* bytes)
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     SetSlot(klass_index, kSlotOrigDexFile, bytes);
   }
@@ -985,9 +974,9 @@ class RedefinitionDataIter {
   art::mirror::Class* GetMirrorClass() const REQUIRES_SHARED(art::Locks::mutator_lock_) {
     return holder_.GetMirrorClass(idx_);
   }
-  art::mirror::ByteArray* GetOriginalDexFileBytes() const
+  art::mirror::Object* GetOriginalDexFile() const
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
-    return holder_.GetOriginalDexFileBytes(idx_);
+    return holder_.GetOriginalDexFile(idx_);
   }
   int32_t GetIndex() const {
     return idx_;
@@ -1010,9 +999,9 @@ class RedefinitionDataIter {
   void SetMirrorClass(art::mirror::Class* klass) REQUIRES_SHARED(art::Locks::mutator_lock_) {
     holder_.SetMirrorClass(idx_, klass);
   }
-  void SetOriginalDexFileBytes(art::mirror::ByteArray* bytes)
+  void SetOriginalDexFile(art::mirror::Object* bytes)
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
-    holder_.SetOriginalDexFileBytes(idx_, bytes);
+    holder_.SetOriginalDexFile(idx_, bytes);
   }
 
  private:
@@ -1138,8 +1127,8 @@ bool Redefiner::ClassRedefinition::FinishRemainingAllocations(
   }
 
   // We won't always need to set this field.
-  cur_data->SetOriginalDexFileBytes(AllocateOrGetOriginalDexFileBytes());
-  if (cur_data->GetOriginalDexFileBytes() == nullptr) {
+  cur_data->SetOriginalDexFile(AllocateOrGetOriginalDexFile());
+  if (cur_data->GetOriginalDexFile() == nullptr) {
     driver_->self_->AssertPendingOOMException();
     driver_->self_->ClearException();
     RecordFailure(ERR(OUT_OF_MEMORY), "Unable to allocate array for original dex file");
@@ -1285,7 +1274,7 @@ jvmtiError Redefiner::Run() {
     art::mirror::Class* klass = data.GetMirrorClass();
     // TODO Rewrite so we don't do a stack walk for each and every class.
     redef.FindAndAllocateObsoleteMethods(klass);
-    redef.UpdateClass(klass, data.GetNewDexCache(), data.GetOriginalDexFileBytes());
+    redef.UpdateClass(klass, data.GetNewDexCache(), data.GetOriginalDexFile());
   }
   // TODO We should check for if any of the redefined methods are intrinsic methods here and, if any
   // are, force a full-world deoptimization before finishing redefinition. If we don't do this then
@@ -1365,7 +1354,7 @@ void Redefiner::ClassRedefinition::UpdateFields(art::ObjPtr<art::mirror::Class> 
 void Redefiner::ClassRedefinition::UpdateClass(
     art::ObjPtr<art::mirror::Class> mclass,
     art::ObjPtr<art::mirror::DexCache> new_dex_cache,
-    art::ObjPtr<art::mirror::ByteArray> original_dex_file) {
+    art::ObjPtr<art::mirror::Object> original_dex_file) {
   DCHECK_EQ(dex_file_->NumClassDefs(), 1u);
   const art::DexFile::ClassDef& class_def = dex_file_->GetClassDef(0);
   UpdateMethods(mclass, new_dex_cache, class_def);
@@ -1379,7 +1368,7 @@ void Redefiner::ClassRedefinition::UpdateClass(
   mclass->SetDexTypeIndex(dex_file_->GetIndexForTypeId(*dex_file_->FindTypeId(class_sig_.c_str())));
   art::ObjPtr<art::mirror::ClassExt> ext(mclass->GetExtData());
   CHECK(!ext.IsNull());
-  ext->SetOriginalDexFileBytes(original_dex_file);
+  ext->SetOriginalDexFile(original_dex_file);
 }
 
 // This function does all (java) allocations we need to do for the Class being redefined.

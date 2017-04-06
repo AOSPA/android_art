@@ -322,9 +322,11 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
       codegen_.DumpCoreRegister(stream, location.high());
     } else if (location.IsUnallocated()) {
       stream << "unallocated";
-    } else {
-      DCHECK(location.IsDoubleStackSlot());
+    } else if (location.IsDoubleStackSlot()) {
       stream << "2x" << location.GetStackIndex() << "(sp)";
+    } else {
+      DCHECK(location.IsSIMDStackSlot());
+      stream << "4x" << location.GetStackIndex() << "(sp)";
     }
   }
 
@@ -501,6 +503,10 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
 
   void VisitTryBoundary(HTryBoundary* try_boundary) OVERRIDE {
     StartAttributeStream("kind") << (try_boundary->IsEntry() ? "entry" : "exit");
+  }
+
+  void VisitDeoptimize(HDeoptimize* deoptimize) OVERRIDE {
+    StartAttributeStream("kind") << deoptimize->GetKind();
   }
 
 #if defined(ART_ENABLE_CODEGEN_arm) || defined(ART_ENABLE_CODEGEN_arm64)

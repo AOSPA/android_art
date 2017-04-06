@@ -332,8 +332,12 @@
     {
         "tests": ["912-classes",
                   "616-cha",
-                  "616-cha-abstract"],
-        "bug": "http://b/36344364 http://b36344221",
+                  "616-cha-abstract",
+                  "616-cha-interface",
+                  "616-cha-interface-default",
+                  "616-cha-miranda",
+                  "616-cha-proxy-method-inline"],
+        "bug": "http://b/36344364 http://b/36344221",
         "variant": "no-dex2oat | relocate-npatchoat"
     },
     {
@@ -358,14 +362,9 @@
         "variant": "interp-ac"
     },
     {
-        "tests": "638-checker-inline-caches",
-        "description": ["Disable 638-checker-inline-caches temporarily until a fix",
-                        "arrives."],
-        "bug": "http://b/36371709"
-    },
-    {
-        "tests": "080-oom-throw",
-        "bug": "http://b/36501991",
-        "variant": "interpreter & target"
+        "tests": ["629-vdex-speed",
+                  "634-vdex-duplicate"],
+        "description": ["Profile driven dexlayout does not work with vdex."],
+        "variant": "speed-profile"
     }
 ]

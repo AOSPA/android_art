@@ -469,8 +469,10 @@ bool LiveInterval::SameRegisterKind(Location other) const {
   }
 }
 
-bool LiveInterval::NeedsTwoSpillSlots() const {
-  return type_ == Primitive::kPrimLong || type_ == Primitive::kPrimDouble;
+size_t LiveInterval::NumberOfSpillSlotsNeeded() const {
+  // TODO: detect vector operation.
+  // Return number of needed spill slots based on type.
+  return (type_ == Primitive::kPrimLong || type_ == Primitive::kPrimDouble) ? 2 : 1;
 }
 
 Location LiveInterval::ToLocation() const {
@@ -494,10 +496,11 @@ Location LiveInterval::ToLocation() const {
     if (defined_by->IsConstant()) {
       return defined_by->GetLocations()->Out();
     } else if (GetParent()->HasSpillSlot()) {
-      if (NeedsTwoSpillSlots()) {
-        return Location::DoubleStackSlot(GetParent()->GetSpillSlot());
-      } else {
-        return Location::StackSlot(GetParent()->GetSpillSlot());
+      switch (NumberOfSpillSlotsNeeded()) {
+        case 1: return Location::StackSlot(GetParent()->GetSpillSlot());
+        case 2: return Location::DoubleStackSlot(GetParent()->GetSpillSlot());
+        case 4: return Location::SIMDStackSlot(GetParent()->GetSpillSlot());
+        default: LOG(FATAL) << "Unexpected number of spill slots"; UNREACHABLE();
       }
     } else {
       return Location();

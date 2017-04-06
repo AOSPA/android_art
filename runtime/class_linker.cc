@@ -3505,13 +3505,12 @@ ObjPtr<mirror::DexCache> ClassLinker::FindDexCache(Thread* self, const DexFile& 
     return dex_cache;
   }
   // Failure, dump diagnostic and abort.
-  std::string location(dex_file.GetLocation());
   for (const DexCacheData& data : dex_caches_) {
     if (DecodeDexCache(self, data) != nullptr) {
-      LOG(ERROR) << "Registered dex file " << data.dex_file->GetLocation();
+      LOG(FATAL_WITHOUT_ABORT) << "Registered dex file " << data.dex_file->GetLocation();
     }
   }
-  LOG(FATAL) << "Failed to find DexCache for DexFile " << location;
+  LOG(FATAL) << "Failed to find DexCache for DexFile " << dex_file.GetLocation();
   UNREACHABLE();
 }
 
@@ -6724,10 +6723,11 @@ static void CheckClassOwnsVTableEntries(Thread* self,
     ArtMethod* m = check_vtable->GetElementPtrSize<ArtMethod*>(i, pointer_size);
     CHECK(m != nullptr);
 
-    CHECK_EQ(m->GetMethodIndexDuringLinking(), i)
-        << m->PrettyMethod()
-        << " has an unexpected method index for its spot in the vtable for class"
-        << klass->PrettyClass();
+    if (m->GetMethodIndexDuringLinking() != i) {
+      LOG(WARNING) << m->PrettyMethod()
+                   << " has an unexpected method index for its spot in the vtable for class"
+                   << klass->PrettyClass();
+    }
     ArraySlice<ArtMethod> virtuals = klass->GetVirtualMethodsSliceUnchecked(pointer_size);
     auto is_same_method = [m] (const ArtMethod& meth) {
       return &meth == m;
@@ -7821,7 +7821,7 @@ mirror::String* ClassLinker::ResolveString(const DexFile& dex_file,
 
 mirror::String* ClassLinker::LookupString(const DexFile& dex_file,
                                           dex::StringIndex string_idx,
-                                          Handle<mirror::DexCache> dex_cache) {
+                                          ObjPtr<mirror::DexCache> dex_cache) {
   DCHECK(dex_cache != nullptr);
   ObjPtr<mirror::String> resolved = dex_cache->GetResolvedString(string_idx);
   if (resolved != nullptr) {

@@ -183,10 +183,13 @@ class SuspendCheckSlowPathX86 : public SlowPathCode {
       : SlowPathCode(instruction), successor_(successor) {}
 
   void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+    LocationSummary* locations = instruction_->GetLocations();
     CodeGeneratorX86* x86_codegen = down_cast<CodeGeneratorX86*>(codegen);
     __ Bind(GetEntryLabel());
+    SaveLiveRegisters(codegen, locations);  // only saves full width XMM for SIMD
     x86_codegen->InvokeRuntime(kQuickTestSuspend, instruction_, instruction_->GetDexPc(), this);
     CheckEntrypointTypes<kQuickTestSuspend, void, void>();
+    RestoreLiveRegisters(codegen, locations);  // only saves full width XMM for SIMD
     if (successor_ == nullptr) {
       __ jmp(GetReturnLabel());
     } else {
@@ -720,7 +723,7 @@ class ReadBarrierForHeapReferenceSlowPathX86 : public SlowPathCode {
            instruction_->IsArrayGet() ||
            instruction_->IsInstanceOf() ||
            instruction_->IsCheckCast() ||
-           (instruction_->IsInvokeVirtual()) && instruction_->GetLocations()->Intrinsified())
+           (instruction_->IsInvokeVirtual() && instruction_->GetLocations()->Intrinsified()))
         << "Unexpected instruction in read barrier for heap reference slow path: "
         << instruction_->DebugName();
 
@@ -963,12 +966,20 @@ size_t CodeGeneratorX86::RestoreCoreRegister(size_t stack_index, uint32_t reg_id
 }
 
 size_t CodeGeneratorX86::SaveFloatingPointRegister(size_t stack_index, uint32_t reg_id) {
-  __ movsd(Address(ESP, stack_index), XmmRegister(reg_id));
+  if (GetGraph()->HasSIMD()) {
+    __ movups(Address(ESP, stack_index), XmmRegister(reg_id));
+  } else {
+    __ movsd(Address(ESP, stack_index), XmmRegister(reg_id));
+  }
   return GetFloatingPointSpillSlotSize();
 }
 
 size_t CodeGeneratorX86::RestoreFloatingPointRegister(size_t stack_index, uint32_t reg_id) {
-  __ movsd(XmmRegister(reg_id), Address(ESP, stack_index));
+  if (GetGraph()->HasSIMD()) {
+    __ movups(XmmRegister(reg_id), Address(ESP, stack_index));
+  } else {
+    __ movsd(XmmRegister(reg_id), Address(ESP, stack_index));
+  }
   return GetFloatingPointSpillSlotSize();
 }
 
@@ -5699,7 +5710,11 @@ void InstructionCodeGeneratorX86::VisitParallelMove(HParallelMove* instruction) 
 void LocationsBuilderX86::VisitSuspendCheck(HSuspendCheck* instruction) {
   LocationSummary* locations =
       new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kCallOnSlowPath);
-  locations->SetCustomSlowPathCallerSaves(RegisterSet::Empty());  // No caller-save registers.
+  // In suspend check slow path, usually there are no caller-save registers at all.
+  // If SIMD instructions are present, however, we force spilling all live SIMD
+  // registers in full width (since the runtime only saves/restores lower part).
+  locations->SetCustomSlowPathCallerSaves(
+      GetGraph()->HasSIMD() ? RegisterSet::AllFpu() : RegisterSet::Empty());
 }
 
 void InstructionCodeGeneratorX86::VisitSuspendCheck(HSuspendCheck* instruction) {
@@ -5802,9 +5817,11 @@ void ParallelMoveResolverX86::EmitMove(size_t index) {
       __ movd(destination.AsRegisterPairHigh<Register>(), src_reg);
     } else if (destination.IsStackSlot()) {
       __ movss(Address(ESP, destination.GetStackIndex()), source.AsFpuRegister<XmmRegister>());
-    } else {
-      DCHECK(destination.IsDoubleStackSlot());
+    } else if (destination.IsDoubleStackSlot()) {
       __ movsd(Address(ESP, destination.GetStackIndex()), source.AsFpuRegister<XmmRegister>());
+    } else {
+      DCHECK(destination.IsSIMDStackSlot());
+      __ movups(Address(ESP, destination.GetStackIndex()), source.AsFpuRegister<XmmRegister>());
     }
   } else if (source.IsStackSlot()) {
     if (destination.IsRegister()) {
@@ -5826,6 +5843,9 @@ void ParallelMoveResolverX86::EmitMove(size_t index) {
       DCHECK(destination.IsDoubleStackSlot()) << destination;
       MoveMemoryToMemory64(destination.GetStackIndex(), source.GetStackIndex());
     }
+  } else if (source.IsSIMDStackSlot()) {
+    DCHECK(destination.IsFpuRegister());
+    __ movups(destination.AsFpuRegister<XmmRegister>(), Address(ESP, source.GetStackIndex()));
   } else if (source.IsConstant()) {
     HConstant* constant = source.GetConstant();
     if (constant->IsIntConstant() || constant->IsNullConstant()) {

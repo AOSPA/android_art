@@ -48,10 +48,12 @@ import argparse
 import fnmatch
 import itertools
 import json
+import multiprocessing
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -115,7 +117,7 @@ failed_tests = []
 skipped_tests = []
 
 # Flags
-n_thread = 1
+n_thread = -1
 test_count = 0
 total_test_count = 0
 verbose = False
@@ -257,8 +259,25 @@ def setup_test_env():
     ADDRESS_SIZES_TARGET['host'] = ADDRESS_SIZES_TARGET['host'].union(ADDRESS_SIZES)
     ADDRESS_SIZES_TARGET['target'] = ADDRESS_SIZES_TARGET['target'].union(ADDRESS_SIZES)
 
+  global n_thread
+  if n_thread is -1:
+    if 'target' in TARGET_TYPES:
+      n_thread = get_default_threads('target')
+    else:
+      n_thread = get_default_threads('host')
+
   global semaphore
   semaphore = threading.Semaphore(n_thread)
+
+  if not sys.stdout.isatty():
+    global COLOR_ERROR
+    global COLOR_PASS
+    global COLOR_SKIP
+    global COLOR_NORMAL
+    COLOR_ERROR = ''
+    COLOR_PASS = ''
+    COLOR_SKIP = ''
+    COLOR_NORMAL = ''
 
 
 def run_tests(tests):
@@ -415,8 +434,10 @@ def run_tests(tests):
           options_test += ' --instruction-set-features ' + \
                           env.HOST_2ND_ARCH_PREFIX_DEX2OAT_HOST_INSTRUCTION_SET_FEATURES
 
-      options_test = (' --output-path %s/run-test-output/%s') % (
-        env.ART_HOST_TEST_DIR, test_name) + options_test
+      # TODO(http://36039166): This is a temporary solution to
+      # fix build breakages.
+      options_test = (' --output-path %s') % (
+          tempfile.mkdtemp(dir=env.ART_HOST_TEST_DIR)) + options_test
 
       run_test_sh = env.ANDROID_BUILD_TOP + '/art/test/run-test'
       command = run_test_sh + ' ' + options_test + ' ' + test
@@ -462,7 +483,7 @@ def run_test(command, test, test_variant, test_name):
       if test_passed:
         print_test_info(test_name, 'PASS')
       else:
-        failed_tests.append(test_name)
+        failed_tests.append((test_name, script_output))
         if not env.ART_TEST_KEEP_GOING:
           stop_testrunner = True
         print_test_info(test_name, 'FAIL', ('%s\n%s') % (
@@ -473,13 +494,13 @@ def run_test(command, test, test_variant, test_name):
     else:
       print_test_info(test_name, '')
   except subprocess.TimeoutExpired as e:
-    failed_tests.append(test_name)
-    print_test_info(test_name, 'TIMEOUT', 'timed out in %d\n%s' % (
+    failed_tests.append((test_name, 'Timed out in %d seconds'))
+    print_test_info(test_name, 'TIMEOUT', 'Timed out in %d seconds\n%s' % (
         timeout, command))
   except Exception as e:
-    failed_tests.append(test_name)
-    print_test_info(test_name, 'FAIL')
-    print_text(('%s\n%s\n\n') % (command, str(e)))
+    failed_tests.append((test_name, str(e)))
+    print_test_info(test_name, 'FAIL',
+    ('%s\n%s\n\n') % (command, str(e)))
   finally:
     semaphore.release()
 
@@ -693,16 +714,16 @@ def print_analysis():
 
   # Prints the list of skipped tests, if any.
   if skipped_tests:
-    print_text(COLOR_SKIP + 'SKIPPED TESTS' + COLOR_NORMAL + '\n')
+    print_text(COLOR_SKIP + 'SKIPPED TESTS: ' + COLOR_NORMAL + '\n')
     for test in skipped_tests:
       print_text(test + '\n')
     print_text('\n')
 
   # Prints the list of failed tests, if any.
   if failed_tests:
-    print_text(COLOR_ERROR + 'FAILED TESTS' + COLOR_NORMAL + '\n')
-    for test in failed_tests:
-      print_text(test + '\n')
+    print_text(COLOR_ERROR + 'FAILED: ' + COLOR_NORMAL + '\n')
+    for test_info in failed_tests:
+      print_text(('%s\n%s\n' % (test_info[0], test_info[1])))
 
 
 def parse_test_name(test_name):
@@ -773,6 +794,15 @@ def setup_env_for_build_target(build_target, parser, options):
   target_options['dry_run'] = options['dry_run']
 
   return target_options
+
+def get_default_threads(target):
+  if target is 'target':
+    adb_command = 'adb shell cat /sys/devices/system/cpu/present'
+    cpu_info_proc = subprocess.Popen(adb_command.split(), stdout=subprocess.PIPE)
+    cpu_info = cpu_info_proc.stdout.read()
+    return int(cpu_info.split('-')[1])
+  else:
+    return multiprocessing.cpu_count()
 
 def parse_option():
   global verbose
@@ -895,6 +925,7 @@ def parse_option():
     if options['gdb_arg']:
       gdb_arg = options['gdb_arg']
   timeout = options['timeout']
+
   return test
 
 def main():
@@ -908,7 +939,7 @@ def main():
     if 'target' in TARGET_TYPES:
       build_targets += 'test-art-target-run-test-dependencies'
     build_command = 'make'
-    build_command += ' -j' + str(n_thread)
+    build_command += ' -j'
     build_command += ' -C ' + env.ANDROID_BUILD_TOP
     build_command += ' ' + build_targets
     # Add 'dist' to avoid Jack issues b/36169180.

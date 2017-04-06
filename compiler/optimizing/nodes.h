@@ -323,6 +323,7 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
         temporaries_vreg_slots_(0),
         has_bounds_checks_(false),
         has_try_catch_(false),
+        has_simd_(false),
         has_loops_(false),
         has_irreducible_loops_(false),
         debuggable_(debuggable),
@@ -340,6 +341,7 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
         cached_long_constants_(std::less<int64_t>(), arena->Adapter(kArenaAllocConstantsMap)),
         cached_double_constants_(std::less<int64_t>(), arena->Adapter(kArenaAllocConstantsMap)),
         cached_current_method_(nullptr),
+        art_method_(nullptr),
         inexact_object_rti_(ReferenceTypeInfo::CreateInvalid()),
         osr_(osr),
         cha_single_implementation_list_(arena->Adapter(kArenaAllocCHA)) {
@@ -560,6 +562,9 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   bool HasTryCatch() const { return has_try_catch_; }
   void SetHasTryCatch(bool value) { has_try_catch_ = value; }
 
+  bool HasSIMD() const { return has_simd_; }
+  void SetHasSIMD(bool value) { has_simd_ = value; }
+
   bool HasLoops() const { return has_loops_; }
   void SetHasLoops(bool value) { has_loops_ = value; }
 
@@ -651,6 +656,11 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   // it up to date in the presence of code elimination so there might be
   // false positives.
   bool has_try_catch_;
+
+  // Flag whether SIMD instructions appear in the graph. If true, the
+  // code generators may have to be more careful spilling the wider
+  // contents of SIMD registers.
+  bool has_simd_;
 
   // Flag whether there are any loops in the graph. We can skip loop
   // optimization if it's false. It's only best effort to keep it up
@@ -2071,6 +2081,7 @@ class HInstruction : public ArenaObject<kArenaAllocInstruction> {
   void SetLocations(LocationSummary* locations) { locations_ = locations; }
 
   void ReplaceWith(HInstruction* instruction);
+  void ReplaceUsesDominatedBy(HInstruction* dominator, HInstruction* replacement);
   void ReplaceInput(HInstruction* replacement, size_t index);
 
   // This is almost the same as doing `ReplaceWith()`. But in this helper, the
@@ -2934,27 +2945,96 @@ class HTryBoundary FINAL : public HTemplateInstruction<0> {
 };
 
 // Deoptimize to interpreter, upon checking a condition.
-class HDeoptimize FINAL : public HTemplateInstruction<1> {
+class HDeoptimize FINAL : public HVariableInputSizeInstruction {
  public:
-  // We set CanTriggerGC to prevent any intermediate address to be live
-  // at the point of the `HDeoptimize`.
-  HDeoptimize(HInstruction* cond, uint32_t dex_pc)
-      : HTemplateInstruction(SideEffects::CanTriggerGC(), dex_pc) {
+  enum class Kind {
+    kBCE,
+    kInline,
+    kLast = kInline
+  };
+
+  // Use this constructor when the `HDeoptimize` acts as a barrier, where no code can move
+  // across.
+  HDeoptimize(ArenaAllocator* arena, HInstruction* cond, Kind kind, uint32_t dex_pc)
+      : HVariableInputSizeInstruction(
+            SideEffects::All(),
+            dex_pc,
+            arena,
+            /* number_of_inputs */ 1,
+            kArenaAllocMisc) {
+    SetPackedFlag<kFieldCanBeMoved>(false);
+    SetPackedField<DeoptimizeKindField>(kind);
     SetRawInputAt(0, cond);
   }
 
-  bool CanBeMoved() const OVERRIDE { return true; }
-  bool InstructionDataEquals(const HInstruction* other ATTRIBUTE_UNUSED) const OVERRIDE {
-    return true;
+  // Use this constructor when the `HDeoptimize` guards an instruction, and any user
+  // that relies on the deoptimization to pass should have its input be the `HDeoptimize`
+  // instead of `guard`.
+  // We set CanTriggerGC to prevent any intermediate address to be live
+  // at the point of the `HDeoptimize`.
+  HDeoptimize(ArenaAllocator* arena,
+              HInstruction* cond,
+              HInstruction* guard,
+              Kind kind,
+              uint32_t dex_pc)
+      : HVariableInputSizeInstruction(
+            SideEffects::CanTriggerGC(),
+            dex_pc,
+            arena,
+            /* number_of_inputs */ 2,
+            kArenaAllocMisc) {
+    SetPackedFlag<kFieldCanBeMoved>(true);
+    SetPackedField<DeoptimizeKindField>(kind);
+    SetRawInputAt(0, cond);
+    SetRawInputAt(1, guard);
   }
+
+  bool CanBeMoved() const OVERRIDE { return GetPackedFlag<kFieldCanBeMoved>(); }
+
+  bool InstructionDataEquals(const HInstruction* other) const OVERRIDE {
+    return (other->CanBeMoved() == CanBeMoved()) && (other->AsDeoptimize()->GetKind() == GetKind());
+  }
+
   bool NeedsEnvironment() const OVERRIDE { return true; }
+
   bool CanThrow() const OVERRIDE { return true; }
+
+  Kind GetKind() const { return GetPackedField<DeoptimizeKindField>(); }
+
+  Primitive::Type GetType() const OVERRIDE {
+    return GuardsAnInput() ? GuardedInput()->GetType() : Primitive::kPrimVoid;
+  }
+
+  bool GuardsAnInput() const {
+    return InputCount() == 2;
+  }
+
+  HInstruction* GuardedInput() const {
+    DCHECK(GuardsAnInput());
+    return InputAt(1);
+  }
+
+  void RemoveGuard() {
+    RemoveInputAt(1);
+  }
 
   DECLARE_INSTRUCTION(Deoptimize);
 
  private:
+  static constexpr size_t kFieldCanBeMoved = kNumberOfGenericPackedBits;
+  static constexpr size_t kFieldDeoptimizeKind = kNumberOfGenericPackedBits + 1;
+  static constexpr size_t kFieldDeoptimizeKindSize =
+      MinimumBitsToStore(static_cast<size_t>(Kind::kLast));
+  static constexpr size_t kNumberOfDeoptimizePackedBits =
+      kFieldDeoptimizeKind + kFieldDeoptimizeKindSize;
+  static_assert(kNumberOfDeoptimizePackedBits <= kMaxNumberOfPackedBits,
+                "Too many packed fields.");
+  using DeoptimizeKindField = BitField<Kind, kFieldDeoptimizeKind, kFieldDeoptimizeKindSize>;
+
   DISALLOW_COPY_AND_ASSIGN(HDeoptimize);
 };
+
+std::ostream& operator<<(std::ostream& os, const HDeoptimize::Kind& rhs);
 
 // Represents a should_deoptimize flag. Currently used for CHA-based devirtualization.
 // The compiled code checks this flag value in a guard before devirtualized call and

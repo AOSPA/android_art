@@ -528,7 +528,8 @@ class BCEVisitor : public HGraphVisitor {
         has_dom_based_dynamic_bce_(false),
         initial_block_size_(graph->GetBlocks().size()),
         side_effects_(side_effects),
-        induction_range_(induction_analysis) {}
+        induction_range_(induction_analysis),
+        next_(nullptr) {}
 
   void VisitBasicBlock(HBasicBlock* block) OVERRIDE {
     DCHECK(!IsAddedBlock(block));
@@ -1618,8 +1619,8 @@ class BCEVisitor : public HGraphVisitor {
   void InsertDeoptInLoop(HLoopInformation* loop, HBasicBlock* block, HInstruction* condition) {
     HInstruction* suspend = loop->GetSuspendCheck();
     block->InsertInstructionBefore(condition, block->GetLastInstruction());
-    HDeoptimize* deoptimize =
-        new (GetGraph()->GetArena()) HDeoptimize(condition, suspend->GetDexPc());
+    HDeoptimize* deoptimize = new (GetGraph()->GetArena()) HDeoptimize(
+        GetGraph()->GetArena(), condition, HDeoptimize::Kind::kBCE, suspend->GetDexPc());
     block->InsertInstructionBefore(deoptimize, block->GetLastInstruction());
     if (suspend->HasEnvironment()) {
       deoptimize->CopyEnvironmentFromWithLoopPhiAdjustment(
@@ -1631,8 +1632,8 @@ class BCEVisitor : public HGraphVisitor {
   void InsertDeoptInBlock(HBoundsCheck* bounds_check, HInstruction* condition) {
     HBasicBlock* block = bounds_check->GetBlock();
     block->InsertInstructionBefore(condition, bounds_check);
-    HDeoptimize* deoptimize =
-        new (GetGraph()->GetArena()) HDeoptimize(condition, bounds_check->GetDexPc());
+    HDeoptimize* deoptimize = new (GetGraph()->GetArena()) HDeoptimize(
+        GetGraph()->GetArena(), condition, HDeoptimize::Kind::kBCE, bounds_check->GetDexPc());
     block->InsertInstructionBefore(deoptimize, bounds_check);
     deoptimize->CopyEnvironmentFrom(bounds_check->GetEnvironment());
   }

@@ -43,6 +43,7 @@
 #include "common_throws.h"
 #include "dex_file_annotations.h"
 #include "events-inl.h"
+#include "fixed_up_dex_file.h"
 #include "gc/heap.h"
 #include "gc_root.h"
 #include "handle.h"
@@ -55,6 +56,8 @@
 #include "mirror/object_reference.h"
 #include "mirror/object-inl.h"
 #include "mirror/reference.h"
+#include "primitive.h"
+#include "reflection.h"
 #include "runtime.h"
 #include "runtime_callbacks.h"
 #include "ScopedLocalRef.h"
@@ -78,9 +81,9 @@ static std::unique_ptr<const art::DexFile> MakeSingleDexFile(art::Thread* self,
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
   // Make the mmap
   std::string error_msg;
+  art::ArraySlice<const unsigned char> final_data(final_dex_data, final_len);
   std::unique_ptr<art::MemMap> map(Redefiner::MoveDataToMemMap(orig_location,
-                                                               final_len,
-                                                               final_dex_data,
+                                                               final_data,
                                                                &error_msg));
   if (map.get() == nullptr) {
     LOG(WARNING) << "Unable to allocate mmap for redefined dex file! Error was: " << error_msg;
@@ -161,6 +164,8 @@ struct ClassCallback : public art::ClassLoadCallback {
     art::JNIEnvExt* env = self->GetJniEnv();
     ScopedLocalRef<jobject> loader(
         env, class_loader.IsNull() ? nullptr : env->AddLocalReference<jobject>(class_loader.Get()));
+    std::unique_ptr<FixedUpDexFile> dex_file_copy(FixedUpDexFile::Create(initial_dex_file));
+
     // Go back to native.
     art::ScopedThreadSuspension sts(self, art::ThreadState::kNative);
     // Call all Non-retransformable agents.
@@ -174,14 +179,14 @@ struct ClassCallback : public art::ClassLoadCallback {
         loader.get(),
         name.c_str(),
         static_cast<jobject>(nullptr),  // Android doesn't seem to have protection domains
-        static_cast<jint>(initial_dex_file.Size()),
-        static_cast<const unsigned char*>(initial_dex_file.Begin()),
+        static_cast<jint>(dex_file_copy->Size()),
+        static_cast<const unsigned char*>(dex_file_copy->Begin()),
         static_cast<jint*>(&post_no_redefine_len),
         static_cast<unsigned char**>(&post_no_redefine_dex_data));
     if (post_no_redefine_dex_data == nullptr) {
       DCHECK_EQ(post_no_redefine_len, 0);
-      post_no_redefine_dex_data = const_cast<unsigned char*>(initial_dex_file.Begin());
-      post_no_redefine_len = initial_dex_file.Size();
+      post_no_redefine_dex_data = const_cast<unsigned char*>(dex_file_copy->Begin());
+      post_no_redefine_len = dex_file_copy->Size();
     } else {
       post_no_redefine_unique_ptr = std::unique_ptr<const unsigned char>(post_no_redefine_dex_data);
       DCHECK_GT(post_no_redefine_len, 0);
@@ -210,7 +215,7 @@ struct ClassCallback : public art::ClassLoadCallback {
       DCHECK_GT(final_len, 0);
     }
 
-    if (final_dex_data != initial_dex_file.Begin()) {
+    if (final_dex_data != dex_file_copy->Begin()) {
       LOG(WARNING) << "Changing class " << descriptor;
       art::ScopedObjectAccess soa(self);
       art::StackHandleScope<2> hs(self);
@@ -228,14 +233,22 @@ struct ClassCallback : public art::ClassLoadCallback {
       }
 
       // Allocate the byte array to store the dex file bytes in.
-      art::Handle<art::mirror::ByteArray> arr(hs.NewHandle(
-          art::mirror::ByteArray::AllocateAndFill(
-              self,
-              reinterpret_cast<const signed char*>(post_no_redefine_dex_data),
-              post_no_redefine_len)));
+      art::MutableHandle<art::mirror::Object> arr(hs.NewHandle<art::mirror::Object>(nullptr));
+      if (post_no_redefine_dex_data == dex_file_copy->Begin() && name != "java/lang/Long") {
+        // we didn't have any non-retransformable agents. We can just cache a pointer to the
+        // initial_dex_file. It will be kept live by the class_loader.
+        jlong dex_ptr = reinterpret_cast<uintptr_t>(&initial_dex_file);
+        art::JValue val;
+        val.SetJ(dex_ptr);
+        arr.Assign(art::BoxPrimitive(art::Primitive::kPrimLong, val));
+      } else {
+        arr.Assign(art::mirror::ByteArray::AllocateAndFill(
+            self,
+            reinterpret_cast<const signed char*>(post_no_redefine_dex_data),
+            post_no_redefine_len));
+      }
       if (arr.IsNull()) {
-        LOG(WARNING) << "Unable to allocate byte array for initial dex-file bytes. Aborting "
-                     << "transformation";
+        LOG(WARNING) << "Unable to allocate memory for initial dex-file. Aborting transformation";
         self->AssertPendingOOMException();
         return;
       }
@@ -259,7 +272,7 @@ struct ClassCallback : public art::ClassLoadCallback {
       }
 
       // Actually set the ClassExt's original bytes once we have actually succeeded.
-      ext->SetOriginalDexFileBytes(arr.Get());
+      ext->SetOriginalDexFile(arr.Get());
       // Set the return values
       *final_class_def = &dex_file->GetClassDef(0);
       *final_dex_file = dex_file.release();

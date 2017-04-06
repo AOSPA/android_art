@@ -36,7 +36,8 @@ class CHAGuardVisitor : HGraphVisitor {
       : HGraphVisitor(graph),
         block_has_cha_guard_(GetGraph()->GetBlocks().size(),
                              0,
-                             graph->GetArena()->Adapter(kArenaAllocCHA)) {
+                             graph->GetArena()->Adapter(kArenaAllocCHA)),
+        instruction_iterator_(nullptr) {
     number_of_guards_to_visit_ = GetGraph()->GetNumberOfCHAGuards();
     DCHECK_NE(number_of_guards_to_visit_, 0u);
     // Will recount number of guards during guard optimization.
@@ -201,8 +202,8 @@ bool CHAGuardVisitor::HoistGuard(HShouldDeoptimizeFlag* flag,
     HInstruction* suspend = loop_info->GetSuspendCheck();
     // Need a new deoptimize instruction that copies the environment
     // of the suspend instruction for the loop.
-    HDeoptimize* deoptimize =
-        new (GetGraph()->GetArena()) HDeoptimize(compare, suspend->GetDexPc());
+    HDeoptimize* deoptimize = new (GetGraph()->GetArena()) HDeoptimize(
+        GetGraph()->GetArena(), compare, HDeoptimize::Kind::kInline, suspend->GetDexPc());
     pre_header->InsertInstructionBefore(deoptimize, pre_header->GetLastInstruction());
     deoptimize->CopyEnvironmentFromWithLoopPhiAdjustment(
         suspend->GetEnvironment(), loop_info->GetHeader());
