@@ -17,11 +17,14 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "base/macros.h"
+#include "android-base/macros.h"
+
 #include "jni.h"
 #include "jvmti.h"
-#include "ti-agent/common_helper.h"
-#include "ti-agent/common_load.h"
+
+// Test infrastructure
+#include "jvmti_helper.h"
+#include "test_env.h"
 
 namespace art {
 namespace Test908GcStartFinish {
@@ -45,7 +48,7 @@ extern "C" JNIEXPORT void JNICALL Java_Main_setupGcCallback(
   callbacks.GarbageCollectionStart = GarbageCollectionStart;
 
   jvmtiError ret = jvmti_env->SetEventCallbacks(&callbacks, sizeof(callbacks));
-  JvmtiErrorToException(env, ret);
+  JvmtiErrorToException(env, jvmti_env, ret);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_Main_enableGcTracking(JNIEnv* env,
@@ -55,14 +58,14 @@ extern "C" JNIEXPORT void JNICALL Java_Main_enableGcTracking(JNIEnv* env,
       enable ? JVMTI_ENABLE : JVMTI_DISABLE,
       JVMTI_EVENT_GARBAGE_COLLECTION_START,
       nullptr);
-  if (JvmtiErrorToException(env, ret)) {
+  if (JvmtiErrorToException(env, jvmti_env, ret)) {
     return;
   }
   ret = jvmti_env->SetEventNotificationMode(
       enable ? JVMTI_ENABLE : JVMTI_DISABLE,
       JVMTI_EVENT_GARBAGE_COLLECTION_FINISH,
       nullptr);
-  if (JvmtiErrorToException(env, ret)) {
+  if (JvmtiErrorToException(env, jvmti_env, ret)) {
     return;
   }
 }

@@ -16,15 +16,16 @@
 
 #include <inttypes.h>
 
+#include "android-base/logging.h"
+#include "android-base/macros.h"
 #include "android-base/stringprintf.h"
-#include "base/logging.h"
-#include "base/macros.h"
 #include "jni.h"
 #include "jvmti.h"
-#include "ScopedUtfChars.h"
+#include "scoped_utf_chars.h"
 
-#include "ti-agent/common_helper.h"
-#include "ti-agent/common_load.h"
+// Test infrastructure
+#include "jvmti_helper.h"
+#include "test_env.h"
 
 namespace art {
 namespace Test929Search {
@@ -36,7 +37,7 @@ extern "C" JNIEXPORT void JNICALL Java_Main_addToBootClassLoader(
     return;
   }
   jvmtiError result = jvmti_env->AddToBootstrapClassLoaderSearch(utf.c_str());
-  JvmtiErrorToException(env, result);
+  JvmtiErrorToException(env, jvmti_env, result);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_Main_addToSystemClassLoader(
@@ -46,7 +47,7 @@ extern "C" JNIEXPORT void JNICALL Java_Main_addToSystemClassLoader(
     return;
   }
   jvmtiError result = jvmti_env->AddToSystemClassLoaderSearch(utf.c_str());
-  JvmtiErrorToException(env, result);
+  JvmtiErrorToException(env, jvmti_env, result);
 }
 
 }  // namespace Test929Search

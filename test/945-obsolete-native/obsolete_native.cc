@@ -25,9 +25,11 @@
 #include "base/macros.h"
 #include "jni.h"
 #include "jvmti.h"
-#include "ScopedLocalRef.h"
-#include "ti-agent/common_helper.h"
-#include "ti-agent/common_load.h"
+#include "scoped_local_ref.h"
+
+// Test infrastructure
+#include "jni_binder.h"
+#include "test_env.h"
 
 namespace art {
 namespace Test945ObsoleteNative {

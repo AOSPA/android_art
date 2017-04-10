@@ -19,13 +19,11 @@
 
 #include "jni.h"
 #include "jvmti.h"
-#include "ScopedLocalRef.h"
 
 namespace art {
+
 namespace common_redefine {
-
 jint OnLoad(JavaVM* vm, char* options, void* reserved);
-
 }  // namespace common_redefine
 
 namespace common_retransform {
@@ -35,53 +33,6 @@ jint OnLoad(JavaVM* vm, char* options, void* reserved);
 namespace common_transform {
 jint OnLoad(JavaVM* vm, char* options, void* reserved);
 }  // namespace common_transform
-
-
-extern bool RuntimeIsJVM;
-
-bool IsJVM();
-
-template <typename T>
-static jobjectArray CreateObjectArray(JNIEnv* env,
-                                      jint length,
-                                      const char* component_type_descriptor,
-                                      T src) {
-  if (length < 0) {
-    return nullptr;
-  }
-
-  ScopedLocalRef<jclass> obj_class(env, env->FindClass(component_type_descriptor));
-  if (obj_class.get() == nullptr) {
-    return nullptr;
-  }
-
-  ScopedLocalRef<jobjectArray> ret(env, env->NewObjectArray(length, obj_class.get(), nullptr));
-  if (ret.get() == nullptr) {
-    return nullptr;
-  }
-
-  for (jint i = 0; i < length; ++i) {
-    jobject element = src(i);
-    env->SetObjectArrayElement(ret.get(), static_cast<jint>(i), element);
-    env->DeleteLocalRef(element);
-    if (env->ExceptionCheck()) {
-      return nullptr;
-    }
-  }
-
-  return ret.release();
-}
-
-void SetAllCapabilities(jvmtiEnv* env);
-
-bool JvmtiErrorToException(JNIEnv* env, jvmtiError error);
-
-// Load the class through JNI. Inspect it, find all native methods. Construct the corresponding
-// mangled name, run dlsym and bind the method.
-//
-// This will abort on failure.
-void BindFunctions(jvmtiEnv* jvmti_env, JNIEnv* env, const char* class_name);
-void BindFunctionsOnClass(jvmtiEnv* jvmti_env, JNIEnv* env, jclass klass);
 
 }  // namespace art
 

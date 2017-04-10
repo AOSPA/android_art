@@ -19,14 +19,16 @@
 #include <stdio.h>
 #include <vector>
 
-#include "base/macros.h"
+#include "android-base/macros.h"
+
 #include "jni.h"
 #include "jvmti.h"
-#include "ScopedLocalRef.h"
-#include "ScopedUtfChars.h"
+#include "scoped_local_ref.h"
+#include "scoped_utf_chars.h"
 
-#include "ti-agent/common_helper.h"
-#include "ti-agent/common_load.h"
+// Test infrastructure
+#include "jni_helper.h"
+#include "test_env.h"
 
 namespace art {
 namespace Test907GetLoadedClasses {
