@@ -80,6 +80,10 @@
 #include "well_known_classes.h"
 #include "zip_archive.h"
 
+#ifdef __APPLE__
+#define CLOCK_MONOTONIC CLOCK_REALTIME
+#endif
+
 namespace art {
 
 static constexpr size_t kDefaultMinDexFilesForSwap = 2;
