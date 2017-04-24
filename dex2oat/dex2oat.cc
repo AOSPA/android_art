@@ -80,6 +80,10 @@
 #include "well_known_classes.h"
 #include "zip_archive.h"
 
+#ifdef __APPLE__
+#define CLOCK_MONOTONIC CLOCK_REALTIME
+#endif
+
 namespace art {
 
 static constexpr size_t kDefaultMinDexFilesForSwap = 2;
@@ -415,7 +419,9 @@ class WatchDog {
     pthread_condattr_t condattr;
     CHECK_WATCH_DOG_PTHREAD_CALL(pthread_mutex_init, (&mutex_, nullptr), reason);
     CHECK_WATCH_DOG_PTHREAD_CALL(pthread_condattr_init, (&condattr), reason);
+#ifndef __APPLE__
     CHECK_WATCH_DOG_PTHREAD_CALL(pthread_condattr_setclock, (&condattr, CLOCK_MONOTONIC), reason);
+#endif
     CHECK_WATCH_DOG_PTHREAD_CALL(pthread_cond_init, (&cond_, &condattr), reason);
     CHECK_WATCH_DOG_PTHREAD_CALL(pthread_condattr_destroy, (&condattr), reason);
     CHECK_WATCH_DOG_PTHREAD_CALL(pthread_attr_init, (&attr_), reason);
