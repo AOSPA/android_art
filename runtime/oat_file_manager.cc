@@ -440,8 +440,12 @@ static bool AreSharedLibrariesOk(const std::string& shared_libraries,
     return false;
   }
 
+  // Check that the loaded dex files have the same order and checksums as the shared libraries.
   for (size_t i = 0; i < dex_files.size(); ++i) {
-    if (dex_files[i]->GetLocation() != shared_libraries_split[i * 2]) {
+    std::string absolute_library_path =
+        OatFile::ResolveRelativeEncodedDexLocation(dex_files[i]->GetLocation().c_str(),
+                                                   shared_libraries_split[i * 2]);
+    if (dex_files[i]->GetLocation() != absolute_library_path) {
       return false;
     }
     char* end;
@@ -606,7 +610,6 @@ bool OatFileManager::HasCollisions(const OatFile* oat_file,
 
 std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
     const char* dex_location,
-    const char* oat_location,
     jobject class_loader,
     jobjectArray dex_elements,
     const OatFile** out_oat_file,
@@ -621,8 +624,9 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
   Locks::mutator_lock_->AssertNotHeld(self);
   Runtime* const runtime = Runtime::Current();
 
+  // TODO(calin): remove the explicit oat_location for OatFileAssistant
   OatFileAssistant oat_file_assistant(dex_location,
-                                      oat_location,
+                                      /*oat_location*/ nullptr,
                                       kRuntimeISA,
                                       !runtime->IsAotCompiler());
 
