@@ -528,6 +528,10 @@ endif
   LOCAL_C_INCLUDES += art/sigchainlib
   LOCAL_C_INCLUDES += art
 
+  ifneq ($(TARGET_BUILD_VARIANT),user)
+    LOCAL_CFLAGS += -O0 -Wno-frame-larger-than=
+  endif
+
   ifeq ($$(art_static_or_shared),static)
     LOCAL_STATIC_LIBRARIES := libnativehelper
     LOCAL_STATIC_LIBRARIES += libnativebridge
