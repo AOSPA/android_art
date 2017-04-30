@@ -2242,13 +2242,25 @@ void IntrinsicCodeGeneratorARM::VisitMathFloor(HInvoke* invoke) {
              FromLowSToD(invoke->GetLocations()->InAt(0).AsFpuRegisterPairLow<SRegister>()));
 }
 
+void IntrinsicLocationsBuilderARM::VisitMathRint(HInvoke* invoke) {
+  if (features_.HasARMv8AInstructions()) {
+    CreateFPToFPLocations(arena_, invoke);
+  }
+}
+
+void IntrinsicCodeGeneratorARM::VisitMathRint(HInvoke* invoke) {
+  ArmAssembler* assembler = GetAssembler();
+  DCHECK(codegen_->GetInstructionSetFeatures().HasARMv8AInstructions());
+  __ vrintdn(FromLowSToD(invoke->GetLocations()->Out().AsFpuRegisterPairLow<SRegister>()),
+             FromLowSToD(invoke->GetLocations()->InAt(0).AsFpuRegisterPairLow<SRegister>()));
+}
+
 UNIMPLEMENTED_INTRINSIC(ARM, MathMinDoubleDouble)
 UNIMPLEMENTED_INTRINSIC(ARM, MathMinFloatFloat)
 UNIMPLEMENTED_INTRINSIC(ARM, MathMaxDoubleDouble)
 UNIMPLEMENTED_INTRINSIC(ARM, MathMaxFloatFloat)
 UNIMPLEMENTED_INTRINSIC(ARM, MathMinLongLong)
 UNIMPLEMENTED_INTRINSIC(ARM, MathMaxLongLong)
-UNIMPLEMENTED_INTRINSIC(ARM, MathRint)
 UNIMPLEMENTED_INTRINSIC(ARM, MathRoundDouble)   // Could be done by changing rounding mode, maybe?
 UNIMPLEMENTED_INTRINSIC(ARM, MathRoundFloat)    // Could be done by changing rounding mode, maybe?
 UNIMPLEMENTED_INTRINSIC(ARM, UnsafeCASLong)     // High register pressure.
