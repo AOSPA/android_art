@@ -23,8 +23,6 @@
 #include "jni.h"
 #include "object_callbacks.h"
 #include "offsets.h"
-#include "gc/accounting/atomic_stack.h"
-#include "gc/accounting/read_barrier_table.h"
 #include "gc/accounting/space_bitmap.h"
 #include "mirror/object.h"
 #include "mirror/object_reference.h"
@@ -40,8 +38,11 @@ class RootInfo;
 namespace gc {
 
 namespace accounting {
+  template<typename T> class AtomicStack;
+  typedef AtomicStack<mirror::Object> ObjectStack;
   typedef SpaceBitmap<kObjectAlignment> ContinuousSpaceBitmap;
   class HeapBitmap;
+  class ReadBarrierTable;
 }  // namespace accounting
 
 namespace space {
@@ -106,7 +107,9 @@ class ConcurrentCopying : public GarbageCollector {
     return IsMarked(ref) == ref;
   }
   template<bool kGrayImmuneObject = true, bool kFromGCThread = false>
-  ALWAYS_INLINE mirror::Object* Mark(mirror::Object* from_ref)
+  ALWAYS_INLINE mirror::Object* Mark(mirror::Object* from_ref,
+                                     mirror::Object* holder = nullptr,
+                                     MemberOffset offset = MemberOffset(0))
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_, !skipped_blocks_lock_, !immune_gray_stack_lock_);
   ALWAYS_INLINE mirror::Object* MarkFromReadBarrier(mirror::Object* from_ref)
@@ -130,7 +133,10 @@ class ConcurrentCopying : public GarbageCollector {
  private:
   void PushOntoMarkStack(mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_);
-  mirror::Object* Copy(mirror::Object* from_ref) REQUIRES_SHARED(Locks::mutator_lock_)
+  mirror::Object* Copy(mirror::Object* from_ref,
+                       mirror::Object* holder,
+                       MemberOffset offset)
+      REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_, !skipped_blocks_lock_, !immune_gray_stack_lock_);
   void Scan(mirror::Object* to_ref) REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_);
@@ -224,7 +230,10 @@ class ConcurrentCopying : public GarbageCollector {
   void DisableMarking() REQUIRES_SHARED(Locks::mutator_lock_);
   void IssueDisableMarkingCheckpoint() REQUIRES_SHARED(Locks::mutator_lock_);
   void ExpandGcMarkStack() REQUIRES_SHARED(Locks::mutator_lock_);
-  mirror::Object* MarkNonMoving(mirror::Object* from_ref) REQUIRES_SHARED(Locks::mutator_lock_)
+  mirror::Object* MarkNonMoving(mirror::Object* from_ref,
+                                mirror::Object* holder = nullptr,
+                                MemberOffset offset = MemberOffset(0))
+      REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_, !skipped_blocks_lock_);
   ALWAYS_INLINE mirror::Object* MarkUnevacFromSpaceRegion(mirror::Object* from_ref,
       accounting::SpaceBitmap<kObjectAlignment>* bitmap)
@@ -315,6 +324,11 @@ class ConcurrentCopying : public GarbageCollector {
   bool gc_grays_immune_objects_;
   Mutex immune_gray_stack_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
   std::vector<mirror::Object*> immune_gray_stack_ GUARDED_BY(immune_gray_stack_lock_);
+
+  // Class of java.lang.Object. Filled in from WellKnownClasses in FlipCallback. Must
+  // be filled in before flipping thread roots so that FillDummyObject can run. Not
+  // ObjPtr since the GC may transition to suspended and runnable between phases.
+  mirror::Class* java_lang_Object_;
 
   class AssertToSpaceInvariantFieldVisitor;
   class AssertToSpaceInvariantObjectVisitor;

@@ -23,10 +23,10 @@
 
 #include "class_linker-inl.h"
 #include "common_runtime_test.h"
-#include "dex_file.h"
+#include "dex_file-inl.h"
 #include "scoped_thread_state_change-inl.h"
 #include "utils.h"
-#include "verifier_log_mode.h"
+#include "verifier_enums.h"
 
 namespace art {
 namespace verifier {
@@ -41,15 +41,15 @@ class MethodVerifierTest : public CommonRuntimeTest {
 
     // Verify the class
     std::string error_msg;
-    MethodVerifier::FailureKind failure = MethodVerifier::VerifyClass(
+    FailureKind failure = MethodVerifier::VerifyClass(
         self, klass, nullptr, true, HardFailLogMode::kLogWarning, &error_msg);
 
     if (android::base::StartsWith(descriptor, "Ljava/lang/invoke")) {
-      ASSERT_TRUE(failure == MethodVerifier::kSoftFailure ||
-                  failure == MethodVerifier::kNoFailure) << error_msg;
+      ASSERT_TRUE(failure == FailureKind::kSoftFailure ||
+                  failure == FailureKind::kNoFailure) << error_msg;
 
     } else {
-      ASSERT_TRUE(failure == MethodVerifier::kNoFailure) << error_msg;
+      ASSERT_TRUE(failure == FailureKind::kNoFailure) << error_msg;
     }
   }
 

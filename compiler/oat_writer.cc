@@ -55,7 +55,6 @@
 #include "type_lookup_table.h"
 #include "utils/dex_cache_arrays_layout-inl.h"
 #include "vdex_file.h"
-#include "verifier/method_verifier.h"
 #include "verifier/verifier_deps.h"
 #include "zip_archive.h"
 
@@ -1346,6 +1345,12 @@ class OatWriter::WriteCodeMethodVisitor : public OatDexMethodVisitor {
               case LinkerPatch::Type::kType: {
                 mirror::Class* type = GetTargetType(patch);
                 PatchObjectAddress(&patched_code_, literal_offset, type);
+                break;
+              }
+              case LinkerPatch::Type::kBakerReadBarrierBranch: {
+                writer_->relative_patcher_->PatchBakerReadBarrierBranch(&patched_code_,
+                                                                        patch,
+                                                                        offset_ + literal_offset);
                 break;
               }
               default: {
