@@ -45,7 +45,6 @@
 #include "dex_file-inl.h"
 #include "dex_instruction-inl.h"
 #include "dex/dex_to_dex_compiler.h"
-#include "dex/dex_to_dex_decompiler.h"
 #include "dex/verification_results.h"
 #include "dex/verified_method.h"
 #include "driver/compiler_options.h"
@@ -421,7 +420,7 @@ INTRINSICS_LIST(SETUP_INTRINSICS)
   // Compile:
   // 1) Compile all classes and methods enabled for compilation. May fall back to dex-to-dex
   //    compilation.
-  if (GetCompilerOptions().IsAnyMethodCompilationEnabled()) {
+  if (GetCompilerOptions().IsAnyCompilationEnabled()) {
     Compile(class_loader, dex_files, timings);
   }
   if (dump_stats_) {
@@ -429,61 +428,6 @@ INTRINSICS_LIST(SETUP_INTRINSICS)
   }
 
   FreeThreadPools();
-}
-
-// In-place unquicken the given `dex_files` based on `quickening_info`.
-static void Unquicken(const std::vector<const DexFile*>& dex_files,
-                      const ArrayRef<const uint8_t>& quickening_info,
-                      bool decompile_return_instruction) {
-  const uint8_t* quickening_info_ptr = quickening_info.data();
-  const uint8_t* const quickening_info_end = quickening_info.data() + quickening_info.size();
-  for (const DexFile* dex_file : dex_files) {
-    for (uint32_t i = 0; i < dex_file->NumClassDefs(); ++i) {
-      const DexFile::ClassDef& class_def = dex_file->GetClassDef(i);
-      const uint8_t* class_data = dex_file->GetClassData(class_def);
-      if (class_data == nullptr) {
-        continue;
-      }
-      ClassDataItemIterator it(*dex_file, class_data);
-      // Skip fields
-      while (it.HasNextStaticField()) {
-        it.Next();
-      }
-      while (it.HasNextInstanceField()) {
-        it.Next();
-      }
-
-      while (it.HasNextDirectMethod()) {
-        const DexFile::CodeItem* code_item = it.GetMethodCodeItem();
-        if (code_item != nullptr) {
-          uint32_t quickening_size = *reinterpret_cast<const uint32_t*>(quickening_info_ptr);
-          quickening_info_ptr += sizeof(uint32_t);
-          optimizer::ArtDecompileDEX(*code_item,
-                                     ArrayRef<const uint8_t>(quickening_info_ptr, quickening_size),
-                                     decompile_return_instruction);
-          quickening_info_ptr += quickening_size;
-        }
-        it.Next();
-      }
-
-      while (it.HasNextVirtualMethod()) {
-        const DexFile::CodeItem* code_item = it.GetMethodCodeItem();
-        if (code_item != nullptr) {
-          uint32_t quickening_size = *reinterpret_cast<const uint32_t*>(quickening_info_ptr);
-          quickening_info_ptr += sizeof(uint32_t);
-          optimizer::ArtDecompileDEX(*code_item,
-                                     ArrayRef<const uint8_t>(quickening_info_ptr, quickening_size),
-                                     decompile_return_instruction);
-          quickening_info_ptr += quickening_size;
-        }
-        it.Next();
-      }
-      DCHECK(!it.HasNext());
-    }
-  }
-  if (quickening_info_ptr != quickening_info_end) {
-    LOG(FATAL) << "Failed to use all quickening info";
-  }
 }
 
 void CompilerDriver::CompileAll(jobject class_loader,
@@ -494,15 +438,12 @@ void CompilerDriver::CompileAll(jobject class_loader,
     // TODO: we unquicken unconditionnally, as we don't know
     // if the boot image has changed. How exactly we'll know is under
     // experimentation.
-    if (vdex_file->GetQuickeningInfo().size() != 0) {
-      TimingLogger::ScopedTiming t("Unquicken", timings);
-      // We do not decompile a RETURN_VOID_NO_BARRIER into a RETURN_VOID, as the quickening
-      // optimization does not depend on the boot image (the optimization relies on not
-      // having final fields in a class, which does not change for an app).
-      Unquicken(dex_files,
-                vdex_file->GetQuickeningInfo(),
-                /* decompile_return_instruction */ false);
-    }
+    TimingLogger::ScopedTiming t("Unquicken", timings);
+    // We do not decompile a RETURN_VOID_NO_BARRIER into a RETURN_VOID, as the quickening
+    // optimization does not depend on the boot image (the optimization relies on not
+    // having final fields in a class, which does not change for an app).
+    VdexFile::Unquicken(dex_files, vdex_file->GetQuickeningInfo());
+
     Runtime::Current()->GetCompilerCallbacks()->SetVerifierDeps(
         new verifier::VerifierDeps(dex_files, vdex_file->GetVerifierDepsData()));
   }
@@ -514,7 +455,7 @@ static optimizer::DexToDexCompilationLevel GetDexToDexCompilationLevel(
     const DexFile& dex_file, const DexFile::ClassDef& class_def)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   auto* const runtime = Runtime::Current();
-  DCHECK(driver.GetCompilerOptions().IsAnyMethodCompilationEnabled());
+  DCHECK(driver.GetCompilerOptions().IsQuickeningCompilationEnabled());
   const char* descriptor = dex_file.GetClassDescriptor(class_def);
   ClassLinker* class_linker = runtime->GetClassLinker();
   mirror::Class* klass = class_linker->FindClass(self, descriptor, class_loader);
@@ -986,7 +927,8 @@ void CompilerDriver::PreCompile(jobject class_loader,
   LoadImageClasses(timings);
   VLOG(compiler) << "LoadImageClasses: " << GetMemoryUsageString(false);
 
-  if (compiler_options_->IsAnyMethodCompilationEnabled()) {
+  if (compiler_options_->IsAnyCompilationEnabled()) {
+    // Resolve eagerly to prepare for compilation.
     Resolve(class_loader, dex_files, timings);
     VLOG(compiler) << "Resolve: " << GetMemoryUsageString(false);
   }
@@ -1014,7 +956,7 @@ void CompilerDriver::PreCompile(jobject class_loader,
                << "situations. Please check the log.";
   }
 
-  if (compiler_options_->IsAnyMethodCompilationEnabled()) {
+  if (compiler_options_->IsAnyCompilationEnabled()) {
     if (kIsDebugBuild) {
       EnsureVerifiedOrVerifyAtRuntime(class_loader, dex_files);
     }
@@ -2017,7 +1959,7 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
     return false;
   }
 
-  bool compiler_only_verifies = !GetCompilerOptions().IsAnyMethodCompilationEnabled();
+  bool compiler_only_verifies = !GetCompilerOptions().IsAnyCompilationEnabled();
 
   // We successfully validated the dependencies, now update class status
   // of verified classes. Note that the dependencies also record which classes

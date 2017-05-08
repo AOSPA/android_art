@@ -161,7 +161,7 @@ class Dex2oatTest : public Dex2oatEnvironmentTest {
     runtime->AddCurrentRuntimeFeaturesAsDex2OatArguments(&argv);
 
     if (!runtime->IsVerificationEnabled()) {
-      argv.push_back("--compiler-filter=verify-none");
+      argv.push_back("--compiler-filter=assume-verified");
     }
 
     if (runtime->MustRelocateIfPossible()) {
@@ -514,7 +514,7 @@ class Dex2oatVeryLargeTest : public Dex2oatTest {
       }
 
       // If the input filter was "below," it should have been used.
-      if (!CompilerFilter::IsAsGoodAs(CompilerFilter::kVerifyAtRuntime, filter)) {
+      if (!CompilerFilter::IsAsGoodAs(CompilerFilter::kExtract, filter)) {
         EXPECT_EQ(odex_file->GetCompilerFilter(), filter);
       }
     } else {
@@ -536,11 +536,11 @@ class Dex2oatVeryLargeTest : public Dex2oatTest {
   void CheckHostResult(bool expect_large) {
     if (!kIsTargetBuild) {
       if (expect_large) {
-        EXPECT_NE(output_.find("Very large app, downgrading to verify-at-runtime."),
+        EXPECT_NE(output_.find("Very large app, downgrading to extract."),
                   std::string::npos)
             << output_;
       } else {
-        EXPECT_EQ(output_.find("Very large app, downgrading to verify-at-runtime."),
+        EXPECT_EQ(output_.find("Very large app, downgrading to extract."),
                   std::string::npos)
             << output_;
       }
@@ -567,21 +567,21 @@ class Dex2oatVeryLargeTest : public Dex2oatTest {
 };
 
 TEST_F(Dex2oatVeryLargeTest, DontUseVeryLarge) {
-  RunTest(CompilerFilter::kVerifyNone, false);
-  RunTest(CompilerFilter::kVerifyAtRuntime, false);
-  RunTest(CompilerFilter::kInterpretOnly, false);
+  RunTest(CompilerFilter::kAssumeVerified, false);
+  RunTest(CompilerFilter::kExtract, false);
+  RunTest(CompilerFilter::kQuicken, false);
   RunTest(CompilerFilter::kSpeed, false);
 
-  RunTest(CompilerFilter::kVerifyNone, false, { "--very-large-app-threshold=1000000" });
-  RunTest(CompilerFilter::kVerifyAtRuntime, false, { "--very-large-app-threshold=1000000" });
-  RunTest(CompilerFilter::kInterpretOnly, false, { "--very-large-app-threshold=1000000" });
+  RunTest(CompilerFilter::kAssumeVerified, false, { "--very-large-app-threshold=1000000" });
+  RunTest(CompilerFilter::kExtract, false, { "--very-large-app-threshold=1000000" });
+  RunTest(CompilerFilter::kQuicken, false, { "--very-large-app-threshold=1000000" });
   RunTest(CompilerFilter::kSpeed, false, { "--very-large-app-threshold=1000000" });
 }
 
 TEST_F(Dex2oatVeryLargeTest, UseVeryLarge) {
-  RunTest(CompilerFilter::kVerifyNone, false, { "--very-large-app-threshold=100" });
-  RunTest(CompilerFilter::kVerifyAtRuntime, false, { "--very-large-app-threshold=100" });
-  RunTest(CompilerFilter::kInterpretOnly, true, { "--very-large-app-threshold=100" });
+  RunTest(CompilerFilter::kAssumeVerified, false, { "--very-large-app-threshold=100" });
+  RunTest(CompilerFilter::kExtract, false, { "--very-large-app-threshold=100" });
+  RunTest(CompilerFilter::kQuicken, true, { "--very-large-app-threshold=100" });
   RunTest(CompilerFilter::kSpeed, true, { "--very-large-app-threshold=100" });
 }
 
@@ -736,12 +736,12 @@ class Dex2oatLayoutTest : public Dex2oatTest {
                          /* use_fd */ true,
                          /* num_profile_classes */ 1,
                          { input_vdex, output_vdex },
-                         /* expect_success */ false);
-      EXPECT_EQ(vdex_file2.GetFile()->GetLength(), 0u);
+                         /* expect_success */ true);
+      EXPECT_GT(vdex_file2.GetFile()->GetLength(), 0u);
     }
     ASSERT_EQ(vdex_file1->FlushCloseOrErase(), 0) << "Could not flush and close vdex file";
     CheckValidity();
-    ASSERT_FALSE(success_);
+    ASSERT_TRUE(success_);
   }
 
   void CheckResult(const std::string& dex_location,

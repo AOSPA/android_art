@@ -268,20 +268,17 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      Default: Optimizing");
   UsageError("");
   UsageError("  --compiler-filter="
-                "(verify-none"
-                "|verify-at-runtime"
-                "|verify-profile"
-                "|interpret-only"
-                "|time"
+                "(assume-verified"
+                "|extract"
+                "|verify"
+                "|quicken"
                 "|space-profile"
                 "|space"
-                "|balanced"
                 "|speed-profile"
                 "|speed"
                 "|everything-profile"
                 "|everything):");
   UsageError("      select compiler filter.");
-  UsageError("      verify-profile requires a --profile(-fd) to also be passed in.");
   UsageError("      Example: --compiler-filter=everything");
   UsageError("      Default: speed");
   UsageError("");
@@ -721,6 +718,10 @@ class Dex2Oat FINAL {
       Usage("Can't have both --input-vdex-fd and --input-vdex");
     }
 
+    if (output_vdex_fd_ != -1 && !output_vdex_.empty()) {
+      Usage("Can't have both --output-vdex-fd and --output-vdex");
+    }
+
     if (!oat_filenames_.empty() && oat_fd_ != -1) {
       Usage("--oat-file should not be used with --oat-fd");
     }
@@ -1125,6 +1126,8 @@ class Dex2Oat FINAL {
         ParseInputVdexFd(option);
       } else if (option.starts_with("--input-vdex=")) {
         input_vdex_ = option.substr(strlen("--input-vdex=")).data();
+      } else if (option.starts_with("--output-vdex=")) {
+        output_vdex_ = option.substr(strlen("--output-vdex=")).data();
       } else if (option.starts_with("--output-vdex-fd=")) {
         ParseOutputVdexFd(option);
       } else if (option.starts_with("--oat-file=")) {
@@ -1260,6 +1263,7 @@ class Dex2Oat FINAL {
     }
 
     // OAT and VDEX file handling
+    bool eagerly_unquicken_vdex = DoDexLayoutOptimizations();
 
     if (oat_fd_ == -1) {
       DCHECK(!oat_filenames_.empty());
@@ -1281,12 +1285,15 @@ class Dex2Oat FINAL {
           input_vdex_file_ = VdexFile::Open(input_vdex_,
                                             /* writable */ false,
                                             /* low_4gb */ false,
+                                            eagerly_unquicken_vdex,
                                             &error_msg);
         }
 
         DCHECK_EQ(output_vdex_fd_, -1);
-        std::string vdex_filename = ReplaceFileExtension(oat_filename, "vdex");
-        if (vdex_filename == input_vdex_) {
+        std::string vdex_filename = output_vdex_.empty()
+            ? ReplaceFileExtension(oat_filename, "vdex")
+            : output_vdex_;
+        if (vdex_filename == input_vdex_ && output_vdex_.empty()) {
           update_input_vdex_ = true;
           std::unique_ptr<File> vdex_file(OS::OpenFileReadWrite(vdex_filename.c_str()));
           vdex_files_.push_back(std::move(vdex_file));
@@ -1328,6 +1335,7 @@ class Dex2Oat FINAL {
                                             "vdex",
                                             /* writable */ false,
                                             /* low_4gb */ false,
+                                            eagerly_unquicken_vdex,
                                             &error_msg);
           // If there's any problem with the passed vdex, just warn and proceed
           // without it.
@@ -1570,14 +1578,14 @@ class Dex2Oat FINAL {
 
     // If we need to downgrade the compiler-filter for size reasons, do that check now.
     if (!IsBootImage() && IsVeryLarge(dex_files_)) {
-      if (!CompilerFilter::IsAsGoodAs(CompilerFilter::kVerifyAtRuntime,
+      if (!CompilerFilter::IsAsGoodAs(CompilerFilter::kExtract,
                                       compiler_options_->GetCompilerFilter())) {
-        LOG(INFO) << "Very large app, downgrading to verify-at-runtime.";
+        LOG(INFO) << "Very large app, downgrading to extract.";
         // Note: this change won't be reflected in the key-value store, as that had to be
         //       finalized before loading the dex files. This setup is currently required
         //       to get the size from the DexFile objects.
         // TODO: refactor. b/29790079
-        compiler_options_->SetCompilerFilter(CompilerFilter::kVerifyAtRuntime);
+        compiler_options_->SetCompilerFilter(CompilerFilter::kExtract);
       }
     }
 
@@ -2085,15 +2093,11 @@ class Dex2Oat FINAL {
   }
 
   bool DoProfileGuidedOptimizations() const {
-    return UseProfile() && compiler_options_->GetCompilerFilter() != CompilerFilter::kVerifyProfile;
+    return UseProfile();
   }
 
   bool DoDexLayoutOptimizations() const {
     return DoProfileGuidedOptimizations();
-  }
-
-  bool HasInputVdexFile() const {
-    return input_vdex_file_ != nullptr || input_vdex_fd_ != -1 || !input_vdex_.empty();
   }
 
   bool LoadProfile() {
@@ -2149,16 +2153,6 @@ class Dex2Oat FINAL {
       dex_files_size += dex_file->GetHeader().file_size_;
     }
     return dex_files_size >= very_large_threshold_;
-  }
-
-  template <typename T>
-  static std::vector<T*> MakeNonOwningPointerVector(const std::vector<std::unique_ptr<T>>& src) {
-    std::vector<T*> result;
-    result.reserve(src.size());
-    for (const std::unique_ptr<T>& t : src) {
-      result.push_back(t.get());
-    }
-    return result;
   }
 
   std::vector<std::string> GetClassPathLocations(const std::string& class_path) {
@@ -2693,6 +2687,7 @@ class Dex2Oat FINAL {
   int input_vdex_fd_;
   int output_vdex_fd_;
   std::string input_vdex_;
+  std::string output_vdex_;
   std::unique_ptr<VdexFile> input_vdex_file_;
   std::vector<const char*> dex_filenames_;
   std::vector<const char*> dex_locations_;
@@ -2895,13 +2890,6 @@ static dex2oat::ReturnCode Dex2oat(int argc, char** argv) {
   if (dex2oat->UseProfile()) {
     if (!dex2oat->LoadProfile()) {
       LOG(ERROR) << "Failed to process profile file";
-      return dex2oat::ReturnCode::kOther;
-    }
-  }
-
-  if (dex2oat->DoDexLayoutOptimizations()) {
-    if (dex2oat->HasInputVdexFile()) {
-      LOG(ERROR) << "Dexlayout is incompatible with an input VDEX";
       return dex2oat::ReturnCode::kOther;
     }
   }

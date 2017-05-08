@@ -905,6 +905,7 @@ static bool OpenDexFilesFromImage(const std::string& image_location,
     std::unique_ptr<VdexFile> vdex_file(VdexFile::Open(vdex_filename,
                                                        false /* writable */,
                                                        false /* low_4gb */,
+                                                       false, /* unquicken */
                                                        &error_msg));
     if (vdex_file.get() == nullptr) {
       return false;
@@ -1961,10 +1962,21 @@ void Runtime::SetInstructionSet(InstructionSet instruction_set) {
   }
 }
 
+void Runtime::ClearInstructionSet() {
+  instruction_set_ = InstructionSet::kNone;
+}
+
 void Runtime::SetCalleeSaveMethod(ArtMethod* method, CalleeSaveType type) {
   DCHECK_LT(static_cast<int>(type), static_cast<int>(kLastCalleeSaveType));
   CHECK(method != nullptr);
   callee_save_methods_[type] = reinterpret_cast<uintptr_t>(method);
+}
+
+void Runtime::ClearCalleeSaveMethods() {
+  for (size_t i = 0; i < static_cast<size_t>(kLastCalleeSaveType); ++i) {
+    CalleeSaveType type = static_cast<CalleeSaveType>(i);
+    callee_save_methods_[type] = reinterpret_cast<uintptr_t>(nullptr);
+  }
 }
 
 void Runtime::RegisterAppInfo(const std::vector<std::string>& code_paths,
@@ -2132,7 +2144,7 @@ void Runtime::SetFaultMessage(const std::string& message) {
 void Runtime::AddCurrentRuntimeFeaturesAsDex2OatArguments(std::vector<std::string>* argv)
     const {
   if (GetInstrumentation()->InterpretOnly()) {
-    argv->push_back("--compiler-filter=interpret-only");
+    argv->push_back("--compiler-filter=quicken");
   }
 
   // Make the dex2oat instruction set match that of the launching runtime. If we have multiple

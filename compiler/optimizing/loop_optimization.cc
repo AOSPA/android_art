@@ -839,17 +839,22 @@ bool HLoopOptimization::VectorizeUse(LoopNode* node,
     // TODO: accept symbolic, albeit loop invariant shift factors.
     HInstruction* opa = instruction->InputAt(0);
     HInstruction* opb = instruction->InputAt(1);
-    if (VectorizeUse(node, opa, generate_code, type, restrictions) && opb->IsIntConstant()) {
-      if (generate_code) {
-        // Make sure shift factor only looks at lower bits, as defined for sequential shifts.
-        // Note that even the narrower SIMD shifts do the right thing after that.
-        int32_t mask = (instruction->GetType() == Primitive::kPrimLong)
-            ? kMaxLongShiftDistance
-            : kMaxIntShiftDistance;
-        HInstruction* s = graph_->GetIntConstant(opb->AsIntConstant()->GetValue() & mask);
-        GenerateVecOp(instruction, vector_map_->Get(opa), s, type);
+    int64_t value = 0;
+    if (VectorizeUse(node, opa, generate_code, type, restrictions) && IsInt64AndGet(opb, &value)) {
+      // Make sure shift distance only looks at lower bits, as defined for sequential shifts.
+      int64_t mask = (instruction->GetType() == Primitive::kPrimLong)
+          ? kMaxLongShiftDistance
+          : kMaxIntShiftDistance;
+      int64_t distance = value & mask;
+      // Restrict shift distance to packed data type width.
+      int64_t max_distance = Primitive::ComponentSize(type) * 8;
+      if (0 <= distance && distance < max_distance) {
+        if (generate_code) {
+          HInstruction* s = graph_->GetIntConstant(distance);
+          GenerateVecOp(instruction, vector_map_->Get(opa), s, type);
+        }
+        return true;
       }
-      return true;
     }
   } else if (instruction->IsInvokeStaticOrDirect()) {
     // Accept particular intrinsics.
@@ -1001,8 +1006,9 @@ void HLoopOptimization::GenerateVecMem(HInstruction* org,
       vector = new (global_allocator_) HVecStore(
           global_allocator_, org->InputAt(0), opa, opb, type, vector_length_);
     } else  {
+      bool is_string_char_at = org->AsArrayGet()->IsStringCharAt();
       vector = new (global_allocator_) HVecLoad(
-          global_allocator_, org->InputAt(0), opa, type, vector_length_);
+          global_allocator_, org->InputAt(0), opa, type, vector_length_, is_string_char_at);
     }
   } else {
     // Scalar store or load.
@@ -1010,7 +1016,9 @@ void HLoopOptimization::GenerateVecMem(HInstruction* org,
     if (opb != nullptr) {
       vector = new (global_allocator_) HArraySet(org->InputAt(0), opa, opb, type, kNoDexPc);
     } else  {
-      vector = new (global_allocator_) HArrayGet(org->InputAt(0), opa, type, kNoDexPc);
+      bool is_string_char_at = org->AsArrayGet()->IsStringCharAt();
+      vector = new (global_allocator_) HArrayGet(
+          org->InputAt(0), opa, type, kNoDexPc, is_string_char_at);
     }
   }
   vector_map_->Put(org, vector);

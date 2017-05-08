@@ -451,15 +451,15 @@ fi
 if [ "$INTERPRETER" = "y" ]; then
     INT_OPTS="-Xint"
     if [ "$VERIFY" = "y" ] ; then
-      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=interpret-only"
-      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=interpret-only"
+      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=quicken"
+      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=quicken"
     elif [ "$VERIFY" = "s" ]; then
-      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=verify-at-runtime"
-      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=verify-at-runtime"
+      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=extract"
+      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=extract"
       DEX_VERIFY="${DEX_VERIFY} -Xverify:softfail"
     else # VERIFY = "n"
-      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=verify-none"
-      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=verify-none"
+      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=assume-verified"
+      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=assume-verified"
       DEX_VERIFY="${DEX_VERIFY} -Xverify:none"
     fi
 fi
@@ -467,11 +467,11 @@ fi
 if [ "$JIT" = "y" ]; then
     INT_OPTS="-Xusejit:true"
     if [ "$VERIFY" = "y" ] ; then
-      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=interpret-only"
-      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=interpret-only"
+      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=quicken"
+      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=quicken"
     else
-      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=verify-none"
-      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=verify-none"
+      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=assume-verified"
+      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=assume-verified"
       DEX_VERIFY="${DEX_VERIFY} -Xverify:none"
     fi
 fi
@@ -546,6 +546,11 @@ if [ "$PROFILE" = "y" ] || [ "$RANDOM_PROFILE" = "y" ]; then
   profman_cmdline="${ANDROID_ROOT}/bin/profman  \
     --apk=$DEX_LOCATION/$TEST_NAME.jar \
     --dex-location=$DEX_LOCATION/$TEST_NAME.jar"
+  if [ -f $DEX_LOCATION/$TEST_NAME-ex.jar ]; then
+    profman_cmdline="${profman_cmdline} \
+      --apk=$DEX_LOCATION/$TEST_NAME-ex.jar \
+      --dex-location=$DEX_LOCATION/$TEST_NAME-ex.jar"
+  fi
   COMPILE_FLAGS="${COMPILE_FLAGS} --profile-file=$DEX_LOCATION/$TEST_NAME.prof"
   FLAGS="${FLAGS} -Xcompiler-option --profile-file=$DEX_LOCATION/$TEST_NAME.prof"
   if [ "$PROFILE" = "y" ]; then
@@ -585,8 +590,12 @@ if [ "$PREBUILD" = "y" ]; then
     # Use -k 1m to SIGKILL it a minute later if it hasn't ended.
     dex2oat_cmdline="timeout -k 1m -s SIGRTMIN+2 1m ${dex2oat_cmdline}"
   fi
-  if [ "$TEST_VDEX" = "y" ]; then
+  if [ "$PROFILE" = "y" ] || [ "$RANDOM_PROFILE" = "y" ]; then
+    vdex_cmdline="${dex2oat_cmdline} ${VDEX_FILTER} --input-vdex=$DEX_LOCATION/oat/$ISA/$TEST_NAME.vdex --output-vdex=$DEX_LOCATION/oat/$ISA/$TEST_NAME.vdex"
+  elif [ "$TEST_VDEX" = "y" ]; then
     vdex_cmdline="${dex2oat_cmdline} ${VDEX_FILTER} --input-vdex=$DEX_LOCATION/oat/$ISA/$TEST_NAME.vdex"
+  elif [ "$PROFILE" = "y" ] || [ "$RANDOM_PROFILE" = "y" ]; then
+    vdex_cmdline="${dex2oat_cmdline} --input-vdex=$DEX_LOCATION/oat/$ISA/$TEST_NAME.vdex --output-vdex=$DEX_LOCATION/oat/$ISA/$TEST_NAME.vdex"
   fi
 fi
 
