@@ -1366,6 +1366,26 @@ class Dex2Oat FINAL {
       oat_filenames_.push_back(oat_location_.c_str());
     }
 
+    // If we're updating in place a vdex file, be defensive and put an invalid vdex magic in case
+    // dex2oat gets killed.
+    // Note: we're only invalidating the magic data in the file, as dex2oat needs the rest of
+    // the information to remain valid.
+    if (update_input_vdex_) {
+      std::unique_ptr<BufferedOutputStream> vdex_out(MakeUnique<BufferedOutputStream>(
+          MakeUnique<FileOutputStream>(vdex_files_.back().get())));
+      if (!vdex_out->WriteFully(&VdexFile::Header::kVdexInvalidMagic,
+                                arraysize(VdexFile::Header::kVdexInvalidMagic))) {
+        PLOG(ERROR) << "Failed to invalidate vdex header. File: " << vdex_out->GetLocation();
+        return false;
+      }
+
+      if (!vdex_out->Flush()) {
+        PLOG(ERROR) << "Failed to flush stream after invalidating header of vdex file."
+                    << " File: " << vdex_out->GetLocation();
+        return false;
+      }
+    }
+
     // Swap file handling
     //
     // If the swap fd is not -1, we assume this is the file descriptor of an open but unlinked file
@@ -2423,8 +2443,8 @@ class Dex2Oat FINAL {
       // which uses an unstarted runtime.
       raw_options.push_back(std::make_pair("-Xgc:nonconcurrent", nullptr));
 
-      // Also force the free-list implementation for large objects.
-      raw_options.push_back(std::make_pair("-XX:LargeObjectSpace=freelist", nullptr));
+      // The default LOS implementation (map) is not deterministic. So disable it.
+      raw_options.push_back(std::make_pair("-XX:LargeObjectSpace=disabled", nullptr));
 
       // We also need to turn off the nonmoving space. For that, we need to disable HSpace
       // compaction (done above) and ensure that neither foreground nor background collectors
