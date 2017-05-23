@@ -20,7 +20,6 @@
 #include "base/logging.h"
 #include "base/macros.h"
 
-#include "agent_startup.h"
 #include "common_helper.h"
 #include "jni_binder.h"
 #include "jvmti_helper.h"
@@ -60,31 +59,17 @@ static jint MinimalOnLoad(JavaVM* vm,
 // MinimalOnLoad.
 static AgentLib agents[] = {
   { "901-hello-ti-agent", Test901HelloTi::OnLoad, nullptr },
-  { "902-hello-transformation", common_redefine::OnLoad, nullptr },
   { "909-attach-agent", nullptr, Test909AttachAgent::OnAttach },
-  { "914-hello-obsolescence", common_redefine::OnLoad, nullptr },
-  { "915-obsolete-2", common_redefine::OnLoad, nullptr },
   { "916-obsolete-jit", common_redefine::OnLoad, nullptr },
-  { "917-fields-transformation", common_redefine::OnLoad, nullptr },
-  { "919-obsolete-fields", common_redefine::OnLoad, nullptr },
   { "921-hello-failure", common_retransform::OnLoad, nullptr },
-  { "926-multi-obsolescence", common_redefine::OnLoad, nullptr },
-  { "930-hello-retransform", common_retransform::OnLoad, nullptr },
-  { "932-transform-saves", common_retransform::OnLoad, nullptr },
   { "934-load-transform", common_retransform::OnLoad, nullptr },
   { "935-non-retransformable", common_transform::OnLoad, nullptr },
   { "936-search-onload", Test936SearchOnload::OnLoad, nullptr },
   { "937-hello-retransform-package", common_retransform::OnLoad, nullptr },
   { "938-load-transform-bcp", common_retransform::OnLoad, nullptr },
   { "939-hello-transformation-bcp", common_redefine::OnLoad, nullptr },
-  { "940-recursive-obsolete", common_redefine::OnLoad, nullptr },
   { "941-recursive-obsolete-jit", common_redefine::OnLoad, nullptr },
-  { "942-private-recursive", common_redefine::OnLoad, nullptr },
   { "943-private-recursive-jit", common_redefine::OnLoad, nullptr },
-  { "944-transform-classloaders", common_redefine::OnLoad, nullptr },
-  { "945-obsolete-native", common_redefine::OnLoad, nullptr },
-  { "981-dedup-original-dex", common_retransform::OnLoad, nullptr },
-  { "982-ok-no-retransform", common_retransform::OnLoad, nullptr },
   { "983-source-transform-verify", Test983SourceTransformVerify::OnLoad, nullptr },
 };
 
@@ -131,8 +116,6 @@ extern "C" JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM* vm, char* options, void* 
 
   SetIsJVM(remaining_options);
 
-  BindOnLoad(vm, nullptr);
-
   AgentLib* lib = FindAgent(name_option);
   OnLoad fn = nullptr;
   if (lib == nullptr) {
@@ -154,8 +137,6 @@ extern "C" JNIEXPORT jint JNICALL Agent_OnAttach(JavaVM* vm, char* options, void
     printf("Unable to find agent name in options: %s\n", options);
     return -1;
   }
-
-  BindOnAttach(vm, nullptr);
 
   AgentLib* lib = FindAgent(name_option);
   if (lib == nullptr) {

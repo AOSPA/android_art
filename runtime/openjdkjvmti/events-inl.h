@@ -131,6 +131,9 @@ inline void EventHandler::DispatchClassFileLoadHookEvent(art::Thread* thread,
   unsigned char* current_class_data = const_cast<unsigned char*>(class_data);
   ArtJvmTiEnv* last_env = nullptr;
   for (ArtJvmTiEnv* env : envs) {
+    if (env == nullptr) {
+      continue;
+    }
     if (ShouldDispatch<kEvent>(env, thread)) {
       jint new_len = 0;
       unsigned char* new_data = nullptr;
@@ -171,7 +174,9 @@ inline void EventHandler::DispatchClassFileLoadHookEvent(art::Thread* thread,
 template <ArtJvmtiEvent kEvent, typename ...Args>
 inline void EventHandler::DispatchEvent(art::Thread* thread, Args... args) const {
   for (ArtJvmTiEnv* env : envs) {
-    DispatchEvent<kEvent, Args...>(env, thread, args...);
+    if (env != nullptr) {
+      DispatchEvent<kEvent, Args...>(env, thread, args...);
+    }
   }
 }
 
@@ -182,6 +187,27 @@ inline void EventHandler::DispatchEvent(ArtJvmTiEnv* env, art::Thread* thread, A
     FnType* callback = impl::GetCallback<kEvent>(env);
     if (callback != nullptr) {
       (*callback)(env, args...);
+    }
+  }
+}
+
+// Need to give a custom specialization for NativeMethodBind since it has to deal with an out
+// variable.
+template <>
+inline void EventHandler::DispatchEvent<ArtJvmtiEvent::kNativeMethodBind>(art::Thread* thread,
+                                                                          JNIEnv* jnienv,
+                                                                          jthread jni_thread,
+                                                                          jmethodID method,
+                                                                          void* cur_method,
+                                                                          void** new_method) const {
+  *new_method = cur_method;
+  for (ArtJvmTiEnv* env : envs) {
+    if (env != nullptr && ShouldDispatch<ArtJvmtiEvent::kNativeMethodBind>(env, thread)) {
+      auto callback = impl::GetCallback<ArtJvmtiEvent::kNativeMethodBind>(env);
+      (*callback)(env, jnienv, jni_thread, method, cur_method, new_method);
+      if (*new_method != nullptr) {
+        cur_method = *new_method;
+      }
     }
   }
 }
@@ -253,6 +279,9 @@ inline bool EventHandler::ShouldDispatch(ArtJvmTiEnv* env,
 inline void EventHandler::RecalculateGlobalEventMask(ArtJvmtiEvent event) {
   bool union_value = false;
   for (const ArtJvmTiEnv* stored_env : envs) {
+    if (stored_env == nullptr) {
+      continue;
+    }
     union_value |= stored_env->event_masks.global_event_mask.Test(event);
     union_value |= stored_env->event_masks.unioned_thread_event_mask.Test(event);
     if (union_value) {

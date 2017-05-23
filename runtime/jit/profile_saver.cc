@@ -16,6 +16,7 @@
 
 #include "profile_saver.h"
 
+#include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -170,14 +171,6 @@ void ProfileSaver::NotifyJitActivityInternal() {
   }
 }
 
-ProfileSaver::ProfileInfoCache* ProfileSaver::GetCachedProfiledInfo(const std::string& filename) {
-  auto info_it = profile_cache_.find(filename);
-  if (info_it == profile_cache_.end()) {
-    info_it = profile_cache_.Put(filename, ProfileInfoCache());
-  }
-  return &info_it->second;
-}
-
 // Get resolved methods that have a profile info or more than kStartupMethodSamples samples.
 // Excludes native methods and classes in the boot image.
 class GetMethodsVisitor : public ClassVisitor {
@@ -211,6 +204,10 @@ class GetMethodsVisitor : public ClassVisitor {
 
 void ProfileSaver::FetchAndCacheResolvedClassesAndMethods() {
   ScopedTrace trace(__PRETTY_FUNCTION__);
+
+  // Resolve any new registered locations.
+  ResolveTrackedLocations();
+
   ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
   std::set<DexCacheResolvedClasses> resolved_classes =
       class_linker->GetResolvedClasses(/*ignore boot classes*/ true);
@@ -247,9 +244,11 @@ void ProfileSaver::FetchAndCacheResolvedClassesAndMethods() {
                        << " (" << classes.GetDexLocation() << ")";
       }
     }
-    ProfileInfoCache* cached_info = GetCachedProfiledInfo(filename);
-    cached_info->profile.AddMethodsAndClasses(profile_methods_for_location,
-                                              resolved_classes_for_location);
+    auto info_it = profile_cache_.Put(filename, ProfileCompilationInfo());
+
+    ProfileCompilationInfo* cached_info = &(info_it->second);
+    cached_info->AddMethodsAndClasses(profile_methods_for_location,
+                                      resolved_classes_for_location);
     total_number_of_profile_entries_cached += resolved_classes_for_location.size();
   }
   max_number_of_profile_entries_cached_ = std::max(
@@ -259,6 +258,10 @@ void ProfileSaver::FetchAndCacheResolvedClassesAndMethods() {
 
 bool ProfileSaver::ProcessProfilingInfo(bool force_save, /*out*/uint16_t* number_of_new_methods) {
   ScopedTrace trace(__PRETTY_FUNCTION__);
+
+  // Resolve any new registered locations.
+  ResolveTrackedLocations();
+
   SafeMap<std::string, std::set<std::string>> tracked_locations;
   {
     // Make a copy so that we don't hold the lock while doing I/O.
@@ -288,16 +291,22 @@ bool ProfileSaver::ProcessProfilingInfo(bool force_save, /*out*/uint16_t* number
       jit_code_cache_->GetProfiledMethods(locations, profile_methods);
       total_number_of_code_cache_queries_++;
     }
+    ProfileCompilationInfo info;
+    if (!info.Load(filename, /*clear_if_invalid*/ true)) {
+      LOG(ERROR) << "Could not forcefully load profile " << filename;
+      continue;
+    }
+    uint64_t last_save_number_of_methods = info.GetNumberOfMethods();
+    uint64_t last_save_number_of_classes = info.GetNumberOfResolvedClasses();
 
-    ProfileInfoCache* cached_info = GetCachedProfiledInfo(filename);
-    ProfileCompilationInfo* cached_profile = &cached_info->profile;
-    cached_profile->AddMethodsAndClasses(profile_methods, std::set<DexCacheResolvedClasses>());
-    int64_t delta_number_of_methods =
-        cached_profile->GetNumberOfMethods() -
-        static_cast<int64_t>(cached_info->last_save_number_of_methods);
-    int64_t delta_number_of_classes =
-        cached_profile->GetNumberOfResolvedClasses() -
-        static_cast<int64_t>(cached_info->last_save_number_of_classes);
+    info.AddMethodsAndClasses(profile_methods, std::set<DexCacheResolvedClasses>());
+    auto profile_cache_it = profile_cache_.find(filename);
+    if (profile_cache_it != profile_cache_.end()) {
+      info.MergeWith(profile_cache_it->second);
+    }
+
+    int64_t delta_number_of_methods = info.GetNumberOfMethods() - last_save_number_of_methods;
+    int64_t delta_number_of_classes = info.GetNumberOfResolvedClasses() - last_save_number_of_classes;
 
     if (!force_save &&
         delta_number_of_methods < options_.GetMinMethodsToSave() &&
@@ -315,12 +324,12 @@ bool ProfileSaver::ProcessProfilingInfo(bool force_save, /*out*/uint16_t* number
     uint64_t bytes_written;
     // Force the save. In case the profile data is corrupted or the the profile
     // has the wrong version this will "fix" the file to the correct format.
-    if (cached_profile->MergeAndSave(filename, &bytes_written, /*force*/ true)) {
-      cached_info->last_save_number_of_methods = cached_profile->GetNumberOfMethods();
-      cached_info->last_save_number_of_classes = cached_profile->GetNumberOfResolvedClasses();
-      // Clear resolved classes. No need to store them around as
-      // they don't change after the first write.
-      cached_profile->ClearResolvedClasses();
+    if (info.Save(filename, &bytes_written)) {
+      // We managed to save the profile. Clear the cache stored during startup.
+      if (profile_cache_it != profile_cache_.end()) {
+        profile_cache_.erase(profile_cache_it);
+        total_number_of_profile_entries_cached = 0;
+      }
       if (bytes_written > 0) {
         total_number_of_writes_++;
         total_bytes_written_ += bytes_written;
@@ -336,13 +345,8 @@ bool ProfileSaver::ProcessProfilingInfo(bool force_save, /*out*/uint16_t* number
       LOG(WARNING) << "Could not save profiling info to " << filename;
       total_number_of_failed_writes_++;
     }
-    total_number_of_profile_entries_cached +=
-        cached_profile->GetNumberOfMethods() +
-        cached_profile->GetNumberOfResolvedClasses();
   }
-  max_number_of_profile_entries_cached_ = std::max(
-      max_number_of_profile_entries_cached_,
-      total_number_of_profile_entries_cached);
+
   return profile_file_saved;
 }
 
@@ -431,6 +435,16 @@ void ProfileSaver::Start(const ProfileSaverOptions& options,
       pthread_create,
       (&profiler_pthread_, nullptr, &RunProfileSaverThread, reinterpret_cast<void*>(instance_)),
       "Profile saver thread");
+
+#if defined(ART_TARGET_ANDROID)
+  // At what priority to schedule the saver threads. 9 is the lowest foreground priority on device.
+  static constexpr int kProfileSaverPthreadPriority = 9;
+  int result = setpriority(
+      PRIO_PROCESS, pthread_gettid_np(profiler_pthread_), kProfileSaverPthreadPriority);
+  if (result != 0) {
+    PLOG(ERROR) << "Failed to setpriority to :" << kProfileSaverPthreadPriority;
+  }
+#endif
 }
 
 void ProfileSaver::Stop(bool dump_info) {
@@ -451,9 +465,6 @@ void ProfileSaver::Stop(bool dump_info) {
       return;
     }
     instance_->shutting_down_ = true;
-    if (dump_info) {
-      instance_->DumpInfo(LOG_STREAM(INFO));
-    }
   }
 
   {
@@ -470,6 +481,9 @@ void ProfileSaver::Stop(bool dump_info) {
 
   {
     MutexLock profiler_mutex(Thread::Current(), *Locks::profiler_lock_);
+    if (dump_info) {
+      instance_->DumpInfo(LOG_STREAM(INFO));
+    }
     instance_ = nullptr;
     profiler_pthread_ = 0U;
   }
@@ -486,15 +500,32 @@ bool ProfileSaver::IsStarted() {
   return instance_ != nullptr;
 }
 
-void ProfileSaver::AddTrackedLocations(const std::string& output_filename,
-                                       const std::vector<std::string>& code_paths) {
-  auto it = tracked_dex_base_locations_.find(output_filename);
-  if (it == tracked_dex_base_locations_.end()) {
-    tracked_dex_base_locations_.Put(output_filename,
-                                    std::set<std::string>(code_paths.begin(), code_paths.end()));
+static void AddTrackedLocationsToMap(const std::string& output_filename,
+                                     const std::vector<std::string>& code_paths,
+                                     SafeMap<std::string, std::set<std::string>>* map) {
+  auto it = map->find(output_filename);
+  if (it == map->end()) {
+    map->Put(output_filename, std::set<std::string>(code_paths.begin(), code_paths.end()));
   } else {
     it->second.insert(code_paths.begin(), code_paths.end());
   }
+}
+
+void ProfileSaver::AddTrackedLocations(const std::string& output_filename,
+                                       const std::vector<std::string>& code_paths) {
+  // Add the code paths to the list of tracked location.
+  AddTrackedLocationsToMap(output_filename, code_paths, &tracked_dex_base_locations_);
+  // The code paths may contain symlinks which could fool the profiler.
+  // If the dex file is compiled with an absolute location but loaded with symlink
+  // the profiler could skip the dex due to location mismatch.
+  // To avoid this, we add the code paths to the temporary cache of 'to_be_resolved'
+  // locations. When the profiler thread executes we will resolve the paths to their
+  // real paths.
+  // Note that we delay taking the realpath to avoid spending more time than needed
+  // when registering location (as it is done during app launch).
+  AddTrackedLocationsToMap(output_filename,
+                           code_paths,
+                           &tracked_dex_base_locations_to_be_resolved_);
 }
 
 void ProfileSaver::DumpInstanceInfo(std::ostream& os) {
@@ -539,10 +570,47 @@ bool ProfileSaver::HasSeenMethod(const std::string& profile,
                                  uint16_t method_idx) {
   MutexLock mu(Thread::Current(), *Locks::profiler_lock_);
   if (instance_ != nullptr) {
-    const ProfileCompilationInfo& info = instance_->GetCachedProfiledInfo(profile)->profile;
+    ProfileCompilationInfo info;
+    if (!info.Load(profile, /*clear_if_invalid*/false)) {
+      return false;
+    }
     return info.ContainsMethod(MethodReference(dex_file, method_idx));
   }
   return false;
+}
+
+void ProfileSaver::ResolveTrackedLocations() {
+  SafeMap<std::string, std::set<std::string>> locations_to_be_resolved;
+  {
+    // Make a copy so that we don't hold the lock while doing I/O.
+    MutexLock mu(Thread::Current(), *Locks::profiler_lock_);
+    locations_to_be_resolved = tracked_dex_base_locations_to_be_resolved_;
+    tracked_dex_base_locations_to_be_resolved_.clear();
+  }
+
+  // Resolve the locations.
+  SafeMap<std::string, std::vector<std::string>> resolved_locations_map;
+  for (const auto& it : locations_to_be_resolved) {
+    const std::string& filename = it.first;
+    const std::set<std::string>& locations = it.second;
+    auto resolved_locations_it = resolved_locations_map.Put(
+        filename,
+        std::vector<std::string>(locations.size()));
+
+    for (const auto& location : locations) {
+      UniqueCPtr<const char[]> location_real(realpath(location.c_str(), nullptr));
+      // Note that it's ok if we cannot get the real path.
+      if (location_real != nullptr) {
+        resolved_locations_it->second.emplace_back(location_real.get());
+      }
+    }
+  }
+
+  // Add the resolved locations to the tracked collection.
+  MutexLock mu(Thread::Current(), *Locks::profiler_lock_);
+  for (const auto& it : resolved_locations_map) {
+    AddTrackedLocationsToMap(it.first, it.second, &tracked_dex_base_locations_);
+  }
 }
 
 }   // namespace art

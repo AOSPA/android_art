@@ -35,9 +35,12 @@
 
 #include "android-base/stringprintf.h"
 
+#include "art_field-inl.h"
+#include "art_method-inl.h"
 #include "art_jvmti.h"
 #include "base/array_slice.h"
 #include "base/logging.h"
+#include "class_linker-inl.h"
 #include "debugger.h"
 #include "dex_file.h"
 #include "dex_file_types.h"
@@ -63,7 +66,7 @@
 #include "ti_class_loader.h"
 #include "transform.h"
 #include "verifier/method_verifier.h"
-#include "verifier/verifier_log_mode.h"
+#include "verifier/verifier_enums.h"
 
 namespace openjdkjvmti {
 
@@ -1060,7 +1063,7 @@ bool Redefiner::ClassRedefinition::CheckVerification(const RedefinitionDataIter&
   art::StackHandleScope<2> hs(driver_->self_);
   std::string error;
   // TODO Make verification log level lower
-  art::verifier::MethodVerifier::FailureKind failure =
+  art::verifier::FailureKind failure =
       art::verifier::MethodVerifier::VerifyClass(driver_->self_,
                                                  dex_file_.get(),
                                                  hs.NewHandle(iter.GetNewDexCache()),
@@ -1071,7 +1074,7 @@ bool Redefiner::ClassRedefinition::CheckVerification(const RedefinitionDataIter&
                                                  /*log_level*/
                                                  art::verifier::HardFailLogMode::kLogWarning,
                                                  &error);
-  bool passes = failure == art::verifier::MethodVerifier::kNoFailure;
+  bool passes = failure == art::verifier::FailureKind::kNoFailure;
   if (!passes) {
     RecordFailure(ERR(FAILS_VERIFICATION), "Failed to verify class. Error was: " + error);
   }
@@ -1418,14 +1421,18 @@ void Redefiner::ClassRedefinition::RestoreObsoleteMethodMapsIfUnneeded(
   art::mirror::Class* klass = GetMirrorClass();
   art::mirror::ClassExt* ext = klass->GetExtData();
   art::mirror::PointerArray* methods = ext->GetObsoleteMethods();
-  int32_t old_length =
-      cur_data->GetOldDexCaches() == nullptr ? 0 : cur_data->GetOldDexCaches()->GetLength();
+  art::mirror::PointerArray* old_methods = cur_data->GetOldObsoleteMethods();
+  int32_t old_length = old_methods == nullptr ? 0 : old_methods->GetLength();
   int32_t expected_length =
       old_length + klass->NumDirectMethods() + klass->NumDeclaredVirtualMethods();
   // Check to make sure we are only undoing this one.
   if (expected_length == methods->GetLength()) {
-    for (int32_t i = old_length; i < expected_length; i++) {
-      if (methods->GetElementPtrSize<art::ArtMethod*>(i, art::kRuntimePointerSize) != nullptr) {
+    for (int32_t i = 0; i < expected_length; i++) {
+      art::ArtMethod* expected = nullptr;
+      if (i < old_length) {
+        expected = old_methods->GetElementPtrSize<art::ArtMethod*>(i, art::kRuntimePointerSize);
+      }
+      if (methods->GetElementPtrSize<art::ArtMethod*>(i, art::kRuntimePointerSize) != expected) {
         // We actually have some new obsolete methods. Just abort since we cannot safely shrink the
         // obsolete methods array.
         return;

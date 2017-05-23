@@ -21,6 +21,7 @@
 #include "android-base/stringprintf.h"
 
 #include "arch/instruction_set.h"
+#include "art_method-inl.h"
 #include "debugger.h"
 #include "java_vm_ext.h"
 #include "jit/jit.h"
@@ -191,8 +192,8 @@ static void EnableDebugFeatures(uint32_t debug_flags) {
 
   const bool safe_mode = (debug_flags & DEBUG_ENABLE_SAFEMODE) != 0;
   if (safe_mode) {
-    // Ensure that any (secondary) oat files will be interpreted.
-    runtime->AddCompilerOption("--compiler-filter=interpret-only");
+    // Only quicken oat files.
+    runtime->AddCompilerOption("--compiler-filter=quicken");
     runtime->SetSafeMode(true);
     debug_flags &= ~DEBUG_ENABLE_SAFEMODE;
   }

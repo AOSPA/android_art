@@ -254,10 +254,11 @@ static jobject DexFile_createCookieWithArray(JNIEnv* env,
   return CreateSingleDexFileCookie(env, std::move(dex_mem_map));
 }
 
+// TODO(calin): clean up the unused parameters (here and in libcore).
 static jobject DexFile_openDexFileNative(JNIEnv* env,
                                          jclass,
                                          jstring javaSourceName,
-                                         jstring javaOutputName,
+                                         jstring javaOutputName ATTRIBUTE_UNUSED,
                                          jint flags ATTRIBUTE_UNUSED,
                                          jobject class_loader,
                                          jobjectArray dex_elements) {
@@ -265,10 +266,7 @@ static jobject DexFile_openDexFileNative(JNIEnv* env,
   if (sourceName.c_str() == nullptr) {
     return 0;
   }
-  NullableScopedUtfChars outputName(env, javaOutputName);
-  if (env->ExceptionCheck()) {
-    return 0;
-  }
+
   Runtime* const runtime = Runtime::Current();
   ClassLinker* linker = runtime->GetClassLinker();
   std::vector<std::unique_ptr<const DexFile>> dex_files;
@@ -276,7 +274,6 @@ static jobject DexFile_openDexFileNative(JNIEnv* env,
   const OatFile* oat_file = nullptr;
 
   dex_files = runtime->GetOatFileManager().OpenDexFilesFromOat(sourceName.c_str(),
-                                                               outputName.c_str(),
                                                                class_loader,
                                                                dex_elements,
                                                                /*out*/ &oat_file,
@@ -625,6 +622,31 @@ static jstring DexFile_getNonProfileGuidedCompilerFilter(JNIEnv* env,
   return env->NewStringUTF(new_filter_str.c_str());
 }
 
+static jstring DexFile_getSafeModeCompilerFilter(JNIEnv* env,
+                                                 jclass javeDexFileClass ATTRIBUTE_UNUSED,
+                                                 jstring javaCompilerFilter) {
+  ScopedUtfChars compiler_filter(env, javaCompilerFilter);
+  if (env->ExceptionCheck()) {
+    return nullptr;
+  }
+
+  CompilerFilter::Filter filter;
+  if (!CompilerFilter::ParseCompilerFilter(compiler_filter.c_str(), &filter)) {
+    return javaCompilerFilter;
+  }
+
+  CompilerFilter::Filter new_filter = CompilerFilter::GetSafeModeFilterFrom(filter);
+
+  // Filter stayed the same, return input.
+  if (filter == new_filter) {
+    return javaCompilerFilter;
+  }
+
+  // Create a new string object and return.
+  std::string new_filter_str = CompilerFilter::NameOfFilter(new_filter);
+  return env->NewStringUTF(new_filter_str.c_str());
+}
+
 static jboolean DexFile_isBackedByOatFile(JNIEnv* env, jclass, jobject cookie) {
   const OatFile* oat_file = nullptr;
   std::vector<const DexFile*> dex_files;
@@ -697,6 +719,9 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(DexFile, isProfileGuidedCompilerFilter, "(Ljava/lang/String;)Z"),
   NATIVE_METHOD(DexFile,
                 getNonProfileGuidedCompilerFilter,
+                "(Ljava/lang/String;)Ljava/lang/String;"),
+  NATIVE_METHOD(DexFile,
+                getSafeModeCompilerFilter,
                 "(Ljava/lang/String;)Ljava/lang/String;"),
   NATIVE_METHOD(DexFile, isBackedByOatFile, "(Ljava/lang/Object;)Z"),
   NATIVE_METHOD(DexFile, getDexFileStatus,

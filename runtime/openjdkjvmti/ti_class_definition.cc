@@ -32,10 +32,12 @@
 #include "ti_class_definition.h"
 
 #include "base/array_slice.h"
+#include "class_linker-inl.h"
 #include "dex_file.h"
 #include "fixed_up_dex_file.h"
 #include "handle_scope-inl.h"
 #include "handle.h"
+#include "mirror/class_ext.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
 #include "reflection.h"
@@ -102,7 +104,9 @@ static jvmtiError GetDexDataForRetransformation(ArtJvmTiEnv* env,
       } else if (orig_dex->IsDexCache()) {
         dex_file = orig_dex->AsDexCache()->GetDexFile();
       } else {
-        DCHECK_EQ(orig_dex->GetClass()->GetPrimitiveType(), art::Primitive::kPrimLong);
+        DCHECK(orig_dex->GetClass()->DescriptorEquals("Ljava/lang/Long;"))
+            << "Expected java/lang/Long but found object of type "
+            << orig_dex->GetClass()->PrettyClass();
         art::ObjPtr<art::mirror::Class> prim_long_class(
             art::Runtime::Current()->GetClassLinker()->GetClassRoot(
                 art::ClassLinker::kPrimitiveLong));

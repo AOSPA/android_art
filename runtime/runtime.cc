@@ -83,6 +83,7 @@
 #include "instrumentation.h"
 #include "intern_table.h"
 #include "interpreter/interpreter.h"
+#include "java_vm_ext.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
 #include "jni_internal.h"
@@ -261,19 +262,15 @@ Runtime::Runtime()
   std::fill(callee_save_methods_, callee_save_methods_ + arraysize(callee_save_methods_), 0u);
   interpreter::CheckInterpreterAsmConstants();
   callbacks_.reset(new RuntimeCallbacks());
+  for (size_t i = 0; i <= static_cast<size_t>(DeoptimizationKind::kLast); ++i) {
+    deoptimization_counts_[i] = 0u;
+  }
 }
 
 Runtime::~Runtime() {
   ScopedTrace trace("Runtime shutdown");
   if (is_native_bridge_loaded_) {
     UnloadNativeBridge();
-  }
-
-  if (dump_gc_performance_on_shutdown_) {
-    // This can't be called from the Heap destructor below because it
-    // could call RosAlloc::InspectAll() which needs the thread_list
-    // to be still alive.
-    heap_->DumpGcPerformanceInfo(LOG_STREAM(INFO));
   }
 
   Thread* self = Thread::Current();
@@ -283,6 +280,13 @@ Runtime::~Runtime() {
     self = Thread::Current();
   } else {
     LOG(WARNING) << "Current thread not detached in Runtime shutdown";
+  }
+
+  if (dump_gc_performance_on_shutdown_) {
+    // This can't be called from the Heap destructor below because it
+    // could call RosAlloc::InspectAll() which needs the thread_list
+    // to be still alive.
+    heap_->DumpGcPerformanceInfo(LOG_STREAM(INFO));
   }
 
   if (jit_ != nullptr) {
@@ -904,6 +908,7 @@ static bool OpenDexFilesFromImage(const std::string& image_location,
     std::unique_ptr<VdexFile> vdex_file(VdexFile::Open(vdex_filename,
                                                        false /* writable */,
                                                        false /* low_4gb */,
+                                                       false, /* unquicken */
                                                        &error_msg));
     if (vdex_file.get() == nullptr) {
       return false;
@@ -1175,12 +1180,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   if (!no_sig_chain_) {
     // Dex2Oat's Runtime does not need the signal chain or the fault handler.
-
-    // Initialize the signal chain so that any calls to sigaction get
-    // correctly routed to the next in the chain regardless of whether we
-    // have claimed the signal or not.
-    InitializeSignalChain();
-
     if (implicit_null_checks_ || implicit_so_checks_ || implicit_suspend_checks_) {
       fault_manager.Init();
 
@@ -1568,6 +1567,23 @@ void Runtime::RegisterRuntimeNativeMethods(JNIEnv* env) {
   register_sun_misc_Unsafe(env);
 }
 
+std::ostream& operator<<(std::ostream& os, const DeoptimizationKind& kind) {
+  os << GetDeoptimizationKindName(kind);
+  return os;
+}
+
+void Runtime::DumpDeoptimizations(std::ostream& os) {
+  for (size_t i = 0; i <= static_cast<size_t>(DeoptimizationKind::kLast); ++i) {
+    if (deoptimization_counts_[i] != 0) {
+      os << "Number of "
+         << GetDeoptimizationKindName(static_cast<DeoptimizationKind>(i))
+         << " deoptimizations: "
+         << deoptimization_counts_[i]
+         << "\n";
+    }
+  }
+}
+
 void Runtime::DumpForSigQuit(std::ostream& os) {
   GetClassLinker()->DumpForSigQuit(os);
   GetInternTable()->DumpForSigQuit(os);
@@ -1579,6 +1595,7 @@ void Runtime::DumpForSigQuit(std::ostream& os) {
   } else {
     os << "Running non JIT\n";
   }
+  DumpDeoptimizations(os);
   TrackedAllocators::Dump(os);
   os << "\n";
 
@@ -1722,6 +1739,7 @@ void Runtime::VisitConstantRoots(RootVisitor* visitor) {
   mirror::MethodHandlesLookup::VisitRoots(visitor);
   mirror::EmulatedStackFrame::VisitRoots(visitor);
   mirror::ClassExt::VisitRoots(visitor);
+  mirror::CallSite::VisitRoots(visitor);
   // Visit all the primitive array types classes.
   mirror::PrimitiveArray<uint8_t>::VisitRoots(visitor);   // BooleanArray
   mirror::PrimitiveArray<int8_t>::VisitRoots(visitor);    // ByteArray
@@ -1959,10 +1977,21 @@ void Runtime::SetInstructionSet(InstructionSet instruction_set) {
   }
 }
 
+void Runtime::ClearInstructionSet() {
+  instruction_set_ = InstructionSet::kNone;
+}
+
 void Runtime::SetCalleeSaveMethod(ArtMethod* method, CalleeSaveType type) {
   DCHECK_LT(static_cast<int>(type), static_cast<int>(kLastCalleeSaveType));
   CHECK(method != nullptr);
   callee_save_methods_[type] = reinterpret_cast<uintptr_t>(method);
+}
+
+void Runtime::ClearCalleeSaveMethods() {
+  for (size_t i = 0; i < static_cast<size_t>(kLastCalleeSaveType); ++i) {
+    CalleeSaveType type = static_cast<CalleeSaveType>(i);
+    callee_save_methods_[type] = reinterpret_cast<uintptr_t>(nullptr);
+  }
 }
 
 void Runtime::RegisterAppInfo(const std::vector<std::string>& code_paths,
@@ -2130,7 +2159,7 @@ void Runtime::SetFaultMessage(const std::string& message) {
 void Runtime::AddCurrentRuntimeFeaturesAsDex2OatArguments(std::vector<std::string>* argv)
     const {
   if (GetInstrumentation()->InterpretOnly()) {
-    argv->push_back("--compiler-filter=interpret-only");
+    argv->push_back("--compiler-filter=quicken");
   }
 
   // Make the dex2oat instruction set match that of the launching runtime. If we have multiple

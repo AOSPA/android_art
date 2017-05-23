@@ -23,6 +23,7 @@
 #include "debugger.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "interpreter/interpreter.h"
+#include "java_vm_ext.h"
 #include "jit_code_cache.h"
 #include "oat_file_manager.h"
 #include "oat_quick_method_header.h"
@@ -352,6 +353,7 @@ Jit::~Jit() {
   DCHECK(!profile_saver_options_.IsEnabled() || !ProfileSaver::IsStarted());
   if (dump_info_on_shutdown_) {
     DumpInfo(LOG_STREAM(INFO));
+    Runtime::Current()->DumpDeoptimizations(LOG_STREAM(INFO));
   }
   DeleteThreadPool();
   if (jit_compiler_handle_ != nullptr) {

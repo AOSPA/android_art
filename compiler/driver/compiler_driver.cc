@@ -45,7 +45,6 @@
 #include "dex_file-inl.h"
 #include "dex_instruction-inl.h"
 #include "dex/dex_to_dex_compiler.h"
-#include "dex/dex_to_dex_decompiler.h"
 #include "dex/verification_results.h"
 #include "dex/verified_method.h"
 #include "driver/compiler_options.h"
@@ -61,6 +60,7 @@
 #include "mirror/class-inl.h"
 #include "mirror/dex_cache-inl.h"
 #include "mirror/object-inl.h"
+#include "mirror/object-refvisitor-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/throwable.h"
 #include "scoped_thread_state_change-inl.h"
@@ -77,8 +77,8 @@
 #include "vdex_file.h"
 #include "verifier/method_verifier.h"
 #include "verifier/method_verifier-inl.h"
-#include "verifier/verifier_log_mode.h"
 #include "verifier/verifier_deps.h"
+#include "verifier/verifier_enums.h"
 
 namespace art {
 
@@ -420,7 +420,7 @@ INTRINSICS_LIST(SETUP_INTRINSICS)
   // Compile:
   // 1) Compile all classes and methods enabled for compilation. May fall back to dex-to-dex
   //    compilation.
-  if (GetCompilerOptions().IsAnyMethodCompilationEnabled()) {
+  if (GetCompilerOptions().IsAnyCompilationEnabled()) {
     Compile(class_loader, dex_files, timings);
   }
   if (dump_stats_) {
@@ -428,61 +428,6 @@ INTRINSICS_LIST(SETUP_INTRINSICS)
   }
 
   FreeThreadPools();
-}
-
-// In-place unquicken the given `dex_files` based on `quickening_info`.
-static void Unquicken(const std::vector<const DexFile*>& dex_files,
-                      const ArrayRef<const uint8_t>& quickening_info,
-                      bool decompile_return_instruction) {
-  const uint8_t* quickening_info_ptr = quickening_info.data();
-  const uint8_t* const quickening_info_end = quickening_info.data() + quickening_info.size();
-  for (const DexFile* dex_file : dex_files) {
-    for (uint32_t i = 0; i < dex_file->NumClassDefs(); ++i) {
-      const DexFile::ClassDef& class_def = dex_file->GetClassDef(i);
-      const uint8_t* class_data = dex_file->GetClassData(class_def);
-      if (class_data == nullptr) {
-        continue;
-      }
-      ClassDataItemIterator it(*dex_file, class_data);
-      // Skip fields
-      while (it.HasNextStaticField()) {
-        it.Next();
-      }
-      while (it.HasNextInstanceField()) {
-        it.Next();
-      }
-
-      while (it.HasNextDirectMethod()) {
-        const DexFile::CodeItem* code_item = it.GetMethodCodeItem();
-        if (code_item != nullptr) {
-          uint32_t quickening_size = *reinterpret_cast<const uint32_t*>(quickening_info_ptr);
-          quickening_info_ptr += sizeof(uint32_t);
-          optimizer::ArtDecompileDEX(*code_item,
-                                     ArrayRef<const uint8_t>(quickening_info_ptr, quickening_size),
-                                     decompile_return_instruction);
-          quickening_info_ptr += quickening_size;
-        }
-        it.Next();
-      }
-
-      while (it.HasNextVirtualMethod()) {
-        const DexFile::CodeItem* code_item = it.GetMethodCodeItem();
-        if (code_item != nullptr) {
-          uint32_t quickening_size = *reinterpret_cast<const uint32_t*>(quickening_info_ptr);
-          quickening_info_ptr += sizeof(uint32_t);
-          optimizer::ArtDecompileDEX(*code_item,
-                                     ArrayRef<const uint8_t>(quickening_info_ptr, quickening_size),
-                                     decompile_return_instruction);
-          quickening_info_ptr += quickening_size;
-        }
-        it.Next();
-      }
-      DCHECK(!it.HasNext());
-    }
-  }
-  if (quickening_info_ptr != quickening_info_end) {
-    LOG(FATAL) << "Failed to use all quickening info";
-  }
 }
 
 void CompilerDriver::CompileAll(jobject class_loader,
@@ -493,15 +438,12 @@ void CompilerDriver::CompileAll(jobject class_loader,
     // TODO: we unquicken unconditionnally, as we don't know
     // if the boot image has changed. How exactly we'll know is under
     // experimentation.
-    if (vdex_file->GetQuickeningInfo().size() != 0) {
-      TimingLogger::ScopedTiming t("Unquicken", timings);
-      // We do not decompile a RETURN_VOID_NO_BARRIER into a RETURN_VOID, as the quickening
-      // optimization does not depend on the boot image (the optimization relies on not
-      // having final fields in a class, which does not change for an app).
-      Unquicken(dex_files,
-                vdex_file->GetQuickeningInfo(),
-                /* decompile_return_instruction */ false);
-    }
+    TimingLogger::ScopedTiming t("Unquicken", timings);
+    // We do not decompile a RETURN_VOID_NO_BARRIER into a RETURN_VOID, as the quickening
+    // optimization does not depend on the boot image (the optimization relies on not
+    // having final fields in a class, which does not change for an app).
+    VdexFile::Unquicken(dex_files, vdex_file->GetQuickeningInfo());
+
     Runtime::Current()->GetCompilerCallbacks()->SetVerifierDeps(
         new verifier::VerifierDeps(dex_files, vdex_file->GetVerifierDepsData()));
   }
@@ -513,7 +455,7 @@ static optimizer::DexToDexCompilationLevel GetDexToDexCompilationLevel(
     const DexFile& dex_file, const DexFile::ClassDef& class_def)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   auto* const runtime = Runtime::Current();
-  DCHECK(driver.GetCompilerOptions().IsAnyMethodCompilationEnabled());
+  DCHECK(driver.GetCompilerOptions().IsQuickeningCompilationEnabled());
   const char* descriptor = dex_file.GetClassDescriptor(class_def);
   ClassLinker* class_linker = runtime->GetClassLinker();
   mirror::Class* klass = class_linker->FindClass(self, descriptor, class_loader);
@@ -985,7 +927,8 @@ void CompilerDriver::PreCompile(jobject class_loader,
   LoadImageClasses(timings);
   VLOG(compiler) << "LoadImageClasses: " << GetMemoryUsageString(false);
 
-  if (compiler_options_->IsAnyMethodCompilationEnabled()) {
+  if (compiler_options_->IsAnyCompilationEnabled()) {
+    // Resolve eagerly to prepare for compilation.
     Resolve(class_loader, dex_files, timings);
     VLOG(compiler) << "Resolve: " << GetMemoryUsageString(false);
   }
@@ -1013,7 +956,7 @@ void CompilerDriver::PreCompile(jobject class_loader,
                << "situations. Please check the log.";
   }
 
-  if (compiler_options_->IsAnyMethodCompilationEnabled()) {
+  if (compiler_options_->IsAnyCompilationEnabled()) {
     if (kIsDebugBuild) {
       EnsureVerifiedOrVerifyAtRuntime(class_loader, dex_files);
     }
@@ -2016,7 +1959,7 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
     return false;
   }
 
-  bool compiler_only_verifies = !GetCompilerOptions().IsAnyMethodCompilationEnabled();
+  bool compiler_only_verifies = !GetCompilerOptions().IsAnyCompilationEnabled();
 
   // We successfully validated the dependencies, now update class status
   // of verified classes. Note that the dependencies also record which classes
@@ -2087,16 +2030,18 @@ void CompilerDriver::Verify(jobject jclass_loader,
     }
   }
 
-  // Note: verification should not be pulling in classes anymore when compiling the boot image,
-  //       as all should have been resolved before. As such, doing this in parallel should still
-  //       be deterministic.
+  // Verification updates VerifierDeps and needs to run single-threaded to be deterministic.
+  bool force_determinism = GetCompilerOptions().IsForceDeterminism();
+  ThreadPool* verify_thread_pool =
+      force_determinism ? single_thread_pool_.get() : parallel_thread_pool_.get();
+  size_t verify_thread_count = force_determinism ? 1U : parallel_thread_count_;
   for (const DexFile* dex_file : dex_files) {
     CHECK(dex_file != nullptr);
     VerifyDexFile(jclass_loader,
                   *dex_file,
                   dex_files,
-                  parallel_thread_pool_.get(),
-                  parallel_thread_count_,
+                  verify_thread_pool,
+                  verify_thread_count,
                   timings);
   }
 
@@ -2131,7 +2076,7 @@ class VerifyClassVisitor : public CompilationVisitor {
         hs.NewHandle(soa.Decode<mirror::ClassLoader>(jclass_loader)));
     Handle<mirror::Class> klass(
         hs.NewHandle(class_linker->FindClass(soa.Self(), descriptor, class_loader)));
-    verifier::MethodVerifier::FailureKind failure_kind;
+    verifier::FailureKind failure_kind;
     if (klass == nullptr) {
       CHECK(soa.Self()->IsExceptionPending());
       soa.Self()->ClearException();
@@ -2154,7 +2099,7 @@ class VerifyClassVisitor : public CompilationVisitor {
                                                 true /* allow soft failures */,
                                                 log_level_,
                                                 &error_msg);
-      if (failure_kind == verifier::MethodVerifier::kHardFailure) {
+      if (failure_kind == verifier::FailureKind::kHardFailure) {
         LOG(ERROR) << "Verification failed on class " << PrettyDescriptor(descriptor)
                    << " because: " << error_msg;
         manager_->GetCompiler()->SetHadHardVerifierFailure();
@@ -2162,10 +2107,10 @@ class VerifyClassVisitor : public CompilationVisitor {
         // Force a soft failure for the VerifierDeps. This is a sanity measure, as
         // the vdex file already records that the class hasn't been resolved. It avoids
         // trying to do future verification optimizations when processing the vdex file.
-        DCHECK(failure_kind == verifier::MethodVerifier::kSoftFailure ||
-               failure_kind == verifier::MethodVerifier::kNoFailure)
+        DCHECK(failure_kind == verifier::FailureKind::kSoftFailure ||
+               failure_kind == verifier::FailureKind::kNoFailure)
             << failure_kind;
-        failure_kind = verifier::MethodVerifier::kSoftFailure;
+        failure_kind = verifier::FailureKind::kSoftFailure;
       }
     } else if (!SkipClass(jclass_loader, dex_file, klass.Get())) {
       CHECK(klass->IsResolved()) << klass->PrettyClass();
@@ -2181,6 +2126,10 @@ class VerifyClassVisitor : public CompilationVisitor {
       CHECK(klass->ShouldVerifyAtRuntime() || klass->IsVerified() || klass->IsErroneous())
           << klass->PrettyDescriptor() << ": state=" << klass->GetStatus();
 
+      // Class has a meaningful status for the compiler now, record it.
+      ClassReference ref(manager_->GetDexFile(), class_def_index);
+      manager_->GetCompiler()->RecordClassStatus(ref, klass->GetStatus());
+
       // It is *very* problematic if there are verification errors in the boot classpath. For example,
       // we rely on things working OK without verification when the decryption dialog is brought up.
       // So abort in a debug build if we find this violated.
@@ -2193,16 +2142,16 @@ class VerifyClassVisitor : public CompilationVisitor {
               << " failed to fully verify: state= " << klass->GetStatus();
         }
         if (klass->IsVerified()) {
-          DCHECK_EQ(failure_kind, verifier::MethodVerifier::kNoFailure);
+          DCHECK_EQ(failure_kind, verifier::FailureKind::kNoFailure);
         } else if (klass->ShouldVerifyAtRuntime()) {
-          DCHECK_EQ(failure_kind, verifier::MethodVerifier::kSoftFailure);
+          DCHECK_EQ(failure_kind, verifier::FailureKind::kSoftFailure);
         } else {
-          DCHECK_EQ(failure_kind, verifier::MethodVerifier::kHardFailure);
+          DCHECK_EQ(failure_kind, verifier::FailureKind::kHardFailure);
         }
       }
     } else {
       // Make the skip a soft failure, essentially being considered as verify at runtime.
-      failure_kind = verifier::MethodVerifier::kSoftFailure;
+      failure_kind = verifier::FailureKind::kSoftFailure;
     }
     verifier::VerifierDeps::MaybeRecordVerificationStatus(
         dex_file, class_def.class_idx_, failure_kind);

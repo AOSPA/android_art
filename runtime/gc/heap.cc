@@ -60,16 +60,19 @@
 #include "gc/space/space-inl.h"
 #include "gc/space/zygote_space.h"
 #include "gc/task_processor.h"
+#include "gc/verification.h"
 #include "entrypoints/quick/quick_alloc_entrypoints.h"
 #include "gc_pause_listener.h"
 #include "heap-inl.h"
 #include "image.h"
 #include "intern_table.h"
+#include "java_vm_ext.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
 #include "obj_ptr-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
+#include "mirror/object-refvisitor-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/reference-inl.h"
 #include "os.h"
@@ -134,6 +137,13 @@ static constexpr bool kDumpRosAllocStatsOnSigQuit = false;
 static constexpr double kExtraHeapGrowthMultiplier = kUseReadBarrier ? 1.0 : 0.0;
 
 static const char* kRegionSpaceName = "main space (region space)";
+
+// If true, we log all GCs in the both the foreground and background. Used for debugging.
+static constexpr bool kLogAllGCs = false;
+
+// How much we grow the TLAB if we can do it.
+static constexpr size_t kPartialTlabSize = 16 * KB;
+static constexpr bool kUsePartialTlabs = true;
 
 #if defined(__LP64__) || !defined(ADDRESS_SANITIZER)
 // 300 MB (0x12c00000) - (default non-moving space capacity).
@@ -278,6 +288,7 @@ Heap::Heap(size_t initial_size,
     CHECK_EQ(foreground_collector_type_, kCollectorTypeCC);
     CHECK_EQ(background_collector_type_, kCollectorTypeCCBackground);
   }
+  verification_.reset(new Verification(this));
   CHECK_GE(large_object_threshold, kMinLargeObjectThreshold);
   ScopedTrace trace(__FUNCTION__);
   Runtime* const runtime = Runtime::Current();
@@ -2337,9 +2348,7 @@ class ZygoteCompactingCollector FINAL : public collector::SemiSpace {
     size_t bin_size = object_addr - context->prev_;
     // Add the bin consisting of the end of the previous object to the start of the current object.
     collector->AddBin(bin_size, context->prev_);
-    // Turn off read barrier. ZygoteCompactingCollector doesn't use it (even in the CC build.)
-    context->prev_ = object_addr + RoundUp(obj->SizeOf<kDefaultVerifyFlags, kWithoutReadBarrier>(),
-                                           kObjectAlignment);
+    context->prev_ = object_addr + RoundUp(obj->SizeOf<kDefaultVerifyFlags>(), kObjectAlignment);
   }
 
   void AddBin(size_t size, uintptr_t position) {
@@ -2359,8 +2368,7 @@ class ZygoteCompactingCollector FINAL : public collector::SemiSpace {
 
   virtual mirror::Object* MarkNonForwardedObject(mirror::Object* obj)
       REQUIRES(Locks::heap_bitmap_lock_, Locks::mutator_lock_) {
-    // Turn off read barrier. ZygoteCompactingCollector doesn't use it (even in the CC build.)
-    size_t obj_size = obj->SizeOf<kDefaultVerifyFlags, kWithoutReadBarrier>();
+    size_t obj_size = obj->SizeOf<kDefaultVerifyFlags>();
     size_t alloc_size = RoundUp(obj_size, kObjectAlignment);
     mirror::Object* forward_address;
     // Find the smallest bin which we can move obj in.
@@ -2542,6 +2550,13 @@ void Heap::PreZygoteFork() {
     // to large objects.
     mod_union_table->SetCards();
   } else {
+    // Make sure to clear the zygote space cards so that we don't dirty pages in the next GC. There
+    // may be dirty cards from the zygote compaction or reference processing. These cards are not
+    // necessary to have marked since the zygote space may not refer to any objects not in the
+    // zygote or image spaces at this point.
+    mod_union_table->ProcessCards();
+    mod_union_table->ClearTable();
+
     // For CC we never collect zygote large objects. This means we do not need to set the cards for
     // the zygote mod-union table and we can also clear all of the existing image mod-union tables.
     // The existing mod-union tables are only for image spaces and may only reference zygote and
@@ -2758,7 +2773,7 @@ void Heap::LogGC(GcCause gc_cause, collector::GarbageCollector* collector) {
   const std::vector<uint64_t>& pause_times = GetCurrentGcIteration()->GetPauseTimes();
   // Print the GC if it is an explicit GC (e.g. Runtime.gc()) or a slow GC
   // (mutator time blocked >= long_pause_log_threshold_).
-  bool log_gc = gc_cause == kGcCauseExplicit;
+  bool log_gc = kLogAllGCs || gc_cause == kGcCauseExplicit;
   if (!log_gc && CareAboutPauseTimes()) {
     // GC for alloc pauses the allocating thread, so consider it as a pause.
     log_gc = duration > long_gc_log_threshold_ ||
@@ -3502,7 +3517,13 @@ collector::GcType Heap::WaitForGcToCompleteLocked(GcCause cause, Thread* self) {
     // is not the heap task daemon thread, it's considered as a
     // blocking GC (i.e., blocking itself).
     running_collection_is_blocking_ = true;
-    VLOG(gc) << "Starting a blocking GC " << cause;
+    // Don't log fake "GC" types that are only used for debugger or hidden APIs. If we log these,
+    // it results in log spam. kGcCauseExplicit is already logged in LogGC, so avoid it here too.
+    if (cause == kGcCauseForAlloc ||
+        cause == kGcCauseForNativeAlloc ||
+        cause == kGcCauseDisableMovingGc) {
+      VLOG(gc) << "Starting a blocking GC " << cause;
+    }
   }
   return last_gc_type;
 }
@@ -3682,20 +3703,21 @@ void Heap::RequestConcurrentGCAndSaveObject(Thread* self,
                                             ObjPtr<mirror::Object>* obj) {
   StackHandleScope<1> hs(self);
   HandleWrapperObjPtr<mirror::Object> wrapper(hs.NewHandleWrapper(obj));
-  RequestConcurrentGC(self, force_full);
+  RequestConcurrentGC(self, kGcCauseBackground, force_full);
 }
 
 class Heap::ConcurrentGCTask : public HeapTask {
  public:
-  ConcurrentGCTask(uint64_t target_time, bool force_full)
-      : HeapTask(target_time), force_full_(force_full) { }
+  ConcurrentGCTask(uint64_t target_time, GcCause cause, bool force_full)
+      : HeapTask(target_time), cause_(cause), force_full_(force_full) {}
   virtual void Run(Thread* self) OVERRIDE {
     gc::Heap* heap = Runtime::Current()->GetHeap();
-    heap->ConcurrentGC(self, force_full_);
+    heap->ConcurrentGC(self, cause_, force_full_);
     heap->ClearConcurrentGCRequest();
   }
 
  private:
+  const GcCause cause_;
   const bool force_full_;  // If true, force full (or partial) collection.
 };
 
@@ -3709,32 +3731,31 @@ void Heap::ClearConcurrentGCRequest() {
   concurrent_gc_pending_.StoreRelaxed(false);
 }
 
-void Heap::RequestConcurrentGC(Thread* self, bool force_full) {
+void Heap::RequestConcurrentGC(Thread* self, GcCause cause, bool force_full) {
   if (CanAddHeapTask(self) &&
       concurrent_gc_pending_.CompareExchangeStrongSequentiallyConsistent(false, true)) {
     task_processor_->AddTask(self, new ConcurrentGCTask(NanoTime(),  // Start straight away.
+                                                        cause,
                                                         force_full));
   }
 }
 
-void Heap::ConcurrentGC(Thread* self, bool force_full) {
+void Heap::ConcurrentGC(Thread* self, GcCause cause, bool force_full) {
   if (!Runtime::Current()->IsShuttingDown(self)) {
     // Wait for any GCs currently running to finish.
-    if (WaitForGcToComplete(kGcCauseBackground, self) == collector::kGcTypeNone) {
-      // If the we can't run the GC type we wanted to run, find the next appropriate one and try that
-      // instead. E.g. can't do partial, so do full instead.
+    if (WaitForGcToComplete(cause, self) == collector::kGcTypeNone) {
+      // If the we can't run the GC type we wanted to run, find the next appropriate one and try
+      // that instead. E.g. can't do partial, so do full instead.
       collector::GcType next_gc_type = next_gc_type_;
       // If forcing full and next gc type is sticky, override with a non-sticky type.
       if (force_full && next_gc_type == collector::kGcTypeSticky) {
         next_gc_type = NonStickyGcType();
       }
-      if (CollectGarbageInternal(next_gc_type, kGcCauseBackground, false) ==
-          collector::kGcTypeNone) {
+      if (CollectGarbageInternal(next_gc_type, cause, false) == collector::kGcTypeNone) {
         for (collector::GcType gc_type : gc_plan_) {
           // Attempt to run the collector, if we succeed, we are done.
           if (gc_type > next_gc_type &&
-              CollectGarbageInternal(gc_type, kGcCauseBackground, false) !=
-                  collector::kGcTypeNone) {
+              CollectGarbageInternal(gc_type, cause, false) != collector::kGcTypeNone) {
             break;
           }
         }
@@ -3936,7 +3957,7 @@ void Heap::RegisterNativeAllocation(JNIEnv* env, size_t bytes) {
     // Trigger another GC because there have been enough native bytes
     // allocated since the last GC.
     if (IsGcConcurrent()) {
-      RequestConcurrentGC(ThreadForEnv(env), /*force_full*/true);
+      RequestConcurrentGC(ThreadForEnv(env), kGcCauseForNativeAllocBackground, /*force_full*/true);
     } else {
       CollectGarbageInternal(NonStickyGcType(), kGcCauseForNativeAlloc, false);
     }
@@ -4178,7 +4199,21 @@ mirror::Object* Heap::AllocWithNewTLAB(Thread* self,
                                        size_t* usable_size,
                                        size_t* bytes_tl_bulk_allocated) {
   const AllocatorType allocator_type = GetCurrentAllocator();
-  if (allocator_type == kAllocatorTypeTLAB) {
+  if (kUsePartialTlabs && alloc_size <= self->TlabRemainingCapacity()) {
+    DCHECK_GT(alloc_size, self->TlabSize());
+    // There is enough space if we grow the TLAB. Lets do that. This increases the
+    // TLAB bytes.
+    const size_t min_expand_size = alloc_size - self->TlabSize();
+    const size_t expand_bytes = std::max(
+        min_expand_size,
+        std::min(self->TlabRemainingCapacity() - self->TlabSize(), kPartialTlabSize));
+    if (UNLIKELY(IsOutOfMemoryOnAllocation(allocator_type, expand_bytes, grow))) {
+      return nullptr;
+    }
+    *bytes_tl_bulk_allocated = expand_bytes;
+    self->ExpandTlab(expand_bytes);
+    DCHECK_LE(alloc_size, self->TlabSize());
+  } else if (allocator_type == kAllocatorTypeTLAB) {
     DCHECK(bump_pointer_space_ != nullptr);
     const size_t new_tlab_size = alloc_size + kDefaultTLABSize;
     if (UNLIKELY(IsOutOfMemoryOnAllocation(allocator_type, new_tlab_size, grow))) {
@@ -4198,15 +4233,18 @@ mirror::Object* Heap::AllocWithNewTLAB(Thread* self,
       if (LIKELY(!IsOutOfMemoryOnAllocation(allocator_type,
                                             space::RegionSpace::kRegionSize,
                                             grow))) {
+        const size_t new_tlab_size = kUsePartialTlabs
+            ? std::max(alloc_size, kPartialTlabSize)
+            : gc::space::RegionSpace::kRegionSize;
         // Try to allocate a tlab.
-        if (!region_space_->AllocNewTlab(self)) {
+        if (!region_space_->AllocNewTlab(self, new_tlab_size)) {
           // Failed to allocate a tlab. Try non-tlab.
           return region_space_->AllocNonvirtual<false>(alloc_size,
                                                        bytes_allocated,
                                                        usable_size,
                                                        bytes_tl_bulk_allocated);
         }
-        *bytes_tl_bulk_allocated = space::RegionSpace::kRegionSize;
+        *bytes_tl_bulk_allocated = new_tlab_size;
         // Fall-through to using the TLAB below.
       } else {
         // Check OOME for a non-tlab allocation.
@@ -4236,6 +4274,10 @@ mirror::Object* Heap::AllocWithNewTLAB(Thread* self,
   *bytes_allocated = alloc_size;
   *usable_size = alloc_size;
   return ret;
+}
+
+const Verification* Heap::GetVerification() const {
+  return verification_.get();
 }
 
 }  // namespace gc

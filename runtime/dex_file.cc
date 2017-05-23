@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/mman.h>  // For the PROT_* and MAP_* constants.
 #include <sys/stat.h>
 #include <zlib.h>
 
@@ -590,6 +591,10 @@ bool DexFile::CheckMagicAndVersion(std::string* error_msg) const {
 
 void DexFile::InitializeSectionsFromMapList() {
   const MapList* map_list = reinterpret_cast<const MapList*>(begin_ + header_->map_off_);
+  if (header_->map_off_ == 0 || header_->map_off_ > size_) {
+    // Bad offset. The dex file verifier runs after this method and will reject the file.
+    return;
+  }
   const size_t count = map_list->size_;
 
   size_t map_limit = header_->map_off_ + count * sizeof(MapItem);
@@ -1039,7 +1044,7 @@ bool DexFile::DecodeDebugLocalInfo(const CodeItem* code_item, bool is_static, ui
         }
 
         uint32_t name_idx = DecodeUnsignedLeb128P1(&stream);
-        uint32_t descriptor_idx = DecodeUnsignedLeb128P1(&stream);
+        uint16_t descriptor_idx = DecodeUnsignedLeb128P1(&stream);
         uint32_t signature_idx = kDexNoIndex;
         if (opcode == DBG_START_LOCAL_EXTENDED) {
           signature_idx = DecodeUnsignedLeb128P1(&stream);

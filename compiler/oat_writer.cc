@@ -55,7 +55,6 @@
 #include "type_lookup_table.h"
 #include "utils/dex_cache_arrays_layout-inl.h"
 #include "vdex_file.h"
-#include "verifier/method_verifier.h"
 #include "verifier/verifier_deps.h"
 #include "zip_archive.h"
 
@@ -1348,6 +1347,12 @@ class OatWriter::WriteCodeMethodVisitor : public OatDexMethodVisitor {
                 PatchObjectAddress(&patched_code_, literal_offset, type);
                 break;
               }
+              case LinkerPatch::Type::kBakerReadBarrierBranch: {
+                writer_->relative_patcher_->PatchBakerReadBarrierBranch(&patched_code_,
+                                                                        patch,
+                                                                        offset_ + literal_offset);
+                break;
+              }
               default: {
                 DCHECK(false) << "Unexpected linker patch type: " << patch.GetType();
                 break;
@@ -1670,7 +1675,7 @@ bool OatWriter::VisitDexMethods(DexMethodVisitor* visitor) {
       if (UNLIKELY(!visitor->StartClass(dex_file, class_def_index))) {
         return false;
       }
-      if (compiler_driver_->GetCompilerOptions().IsAnyMethodCompilationEnabled()) {
+      if (compiler_driver_->GetCompilerOptions().IsAnyCompilationEnabled()) {
         const DexFile::ClassDef& class_def = dex_file->GetClassDef(class_def_index);
         const uint8_t* class_data = dex_file->GetClassData(class_def);
         if (class_data != nullptr) {  // ie not an empty class, such as a marker interface
@@ -1752,7 +1757,7 @@ size_t OatWriter::InitOatClasses(size_t offset) {
 }
 
 size_t OatWriter::InitOatMaps(size_t offset) {
-  if (!compiler_driver_->GetCompilerOptions().IsAnyMethodCompilationEnabled()) {
+  if (!compiler_driver_->GetCompilerOptions().IsAnyCompilationEnabled()) {
     return offset;
   }
   {
@@ -1808,7 +1813,7 @@ size_t OatWriter::InitOatCode(size_t offset) {
 }
 
 size_t OatWriter::InitOatCodeDexFiles(size_t offset) {
-  if (!compiler_driver_->GetCompilerOptions().IsAnyMethodCompilationEnabled()) {
+  if (!compiler_driver_->GetCompilerOptions().IsAnyCompilationEnabled()) {
     return offset;
   }
   InitCodeMethodVisitor code_visitor(this, offset, vdex_quickening_info_offset_);
@@ -1977,7 +1982,7 @@ bool OatWriter::WriteQuickeningInfo(OutputStream* vdex_out) {
     return false;
   }
 
-  if (compiler_driver_->GetCompilerOptions().IsAnyMethodCompilationEnabled()) {
+  if (compiler_driver_->GetCompilerOptions().IsAnyCompilationEnabled()) {
     WriteQuickeningInfoMethodVisitor visitor(this, vdex_out, start_offset);
     if (!VisitDexMethods(&visitor)) {
       PLOG(ERROR) << "Failed to write the vdex quickening info. File: " << vdex_out->GetLocation();
@@ -2469,11 +2474,28 @@ bool OatWriter::LayoutAndWriteDexFile(OutputStream* out, OatDexFile* oat_dex_fil
                              /* verify */ true,
                              /* verify_checksum */ true,
                              &error_msg);
-  } else {
-    CHECK(oat_dex_file->source_.IsRawFile())
-        << static_cast<size_t>(oat_dex_file->source_.GetType());
+  } else if (oat_dex_file->source_.IsRawFile()) {
     File* raw_file = oat_dex_file->source_.GetRawFile();
     dex_file = DexFile::OpenDex(raw_file->Fd(), location, /* verify_checksum */ true, &error_msg);
+  } else {
+    // The source data is a vdex file.
+    CHECK(oat_dex_file->source_.IsRawData())
+        << static_cast<size_t>(oat_dex_file->source_.GetType());
+    const uint8_t* raw_dex_file = oat_dex_file->source_.GetRawData();
+    // Note: The raw data has already been checked to contain the header
+    // and all the data that the header specifies as the file size.
+    DCHECK(raw_dex_file != nullptr);
+    DCHECK(ValidateDexFileHeader(raw_dex_file, oat_dex_file->GetLocation()));
+    const UnalignedDexFileHeader* header = AsUnalignedDexFileHeader(raw_dex_file);
+    // Since the source may have had its layout changed, or may be quickened, don't verify it.
+    dex_file = DexFile::Open(raw_dex_file,
+                             header->file_size_,
+                             location,
+                             oat_dex_file->dex_file_location_checksum_,
+                             nullptr,
+                             /* verify */ false,
+                             /* verify_checksum */ false,
+                             &error_msg);
   }
   if (dex_file == nullptr) {
     LOG(ERROR) << "Failed to open dex file for layout: " << error_msg;

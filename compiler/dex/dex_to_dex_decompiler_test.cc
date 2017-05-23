@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "dex/dex_to_dex_decompiler.h"
+#include "dex_to_dex_decompiler.h"
 
 #include "class_linker.h"
 #include "compiler/common_compiler_test.h"
@@ -38,7 +38,7 @@ class DexToDexDecompilerTest : public CommonCompilerTest {
     TimingLogger timings("CompilerDriverTest::CompileAll", false, false);
     TimingLogger::ScopedTiming t(__FUNCTION__, &timings);
     compiler_options_->boot_image_ = false;
-    compiler_options_->SetCompilerFilter(CompilerFilter::kInterpretOnly);
+    compiler_options_->SetCompilerFilter(CompilerFilter::kQuicken);
     compiler_driver_->CompileAll(class_loader,
                                  GetDexFiles(class_loader),
                                  /* verifier_deps */ nullptr,

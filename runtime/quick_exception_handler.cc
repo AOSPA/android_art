@@ -32,7 +32,6 @@
 #include "oat_quick_method_header.h"
 #include "stack.h"
 #include "stack_map.h"
-#include "verifier/method_verifier.h"
 
 namespace art {
 
@@ -531,7 +530,7 @@ void QuickExceptionHandler::DeoptimizeStack() {
   PrepareForLongJumpToInvokeStubOrInterpreterBridge();
 }
 
-void QuickExceptionHandler::DeoptimizeSingleFrame() {
+void QuickExceptionHandler::DeoptimizeSingleFrame(DeoptimizationKind kind) {
   DCHECK(is_deoptimization_);
 
   if (VLOG_IS_ON(deopt) || kDebugExceptionDelivery) {
@@ -545,6 +544,10 @@ void QuickExceptionHandler::DeoptimizeSingleFrame() {
   // Compiled code made an explicit deoptimization.
   ArtMethod* deopt_method = visitor.GetSingleFrameDeoptMethod();
   DCHECK(deopt_method != nullptr);
+  LOG(INFO) << "Deoptimizing "
+            << deopt_method->PrettyMethod()
+            << " due to "
+            << GetDeoptimizationKindName(kind);
   if (Runtime::Current()->UseJitCompilation()) {
     Runtime::Current()->GetJit()->GetCodeCache()->InvalidateCompiledCodeFor(
         deopt_method, visitor.GetSingleFrameDeoptQuickMethodHeader());

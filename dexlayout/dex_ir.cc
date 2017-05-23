@@ -281,6 +281,16 @@ void Collections::ReadEncodedValue(
       item->SetDouble(conv.d);
       break;
     }
+    case DexFile::kDexAnnotationMethodType: {
+      const uint32_t proto_index = static_cast<uint32_t>(ReadVarWidth(data, length, false));
+      item->SetProtoId(GetProtoId(proto_index));
+      break;
+    }
+    case DexFile::kDexAnnotationMethodHandle: {
+      const uint32_t method_handle_index = static_cast<uint32_t>(ReadVarWidth(data, length, false));
+      item->SetMethodHandle(GetMethodHandle(method_handle_index));
+      break;
+    }
     case DexFile::kDexAnnotationString: {
       const uint32_t string_index = static_cast<uint32_t>(ReadVarWidth(data, length, false));
       item->SetStringId(GetStringId(string_index));
@@ -496,8 +506,8 @@ AnnotationsDirectoryItem* Collections::CreateAnnotationsDirectoryItem(const DexF
       dex_file.GetClassAnnotationSet(disk_annotations_item);
   AnnotationSetItem* class_annotation = nullptr;
   if (class_set_item != nullptr) {
-    uint32_t offset = disk_annotations_item->class_annotations_off_;
-    class_annotation = CreateAnnotationSetItem(dex_file, class_set_item, offset);
+    uint32_t item_offset = disk_annotations_item->class_annotations_off_;
+    class_annotation = CreateAnnotationSetItem(dex_file, class_set_item, item_offset);
   }
   const DexFile::FieldAnnotationsItem* fields =
       dex_file.GetFieldAnnotations(disk_annotations_item);
@@ -708,10 +718,12 @@ MethodItem* Collections::GenerateMethodItem(const DexFile& dex_file, ClassDataIt
   MethodId* method_item = GetMethodId(cdii.GetMemberIndex());
   uint32_t access_flags = cdii.GetRawMemberAccessFlags();
   const DexFile::CodeItem* disk_code_item = cdii.GetMethodCodeItem();
-  CodeItem* code_item = nullptr;
+  CodeItem* code_item = code_items_.GetExistingObject(cdii.GetMethodCodeItemOffset());;
   DebugInfoItem* debug_info = nullptr;
   if (disk_code_item != nullptr) {
-    code_item = CreateCodeItem(dex_file, *disk_code_item, cdii.GetMethodCodeItemOffset());
+    if (code_item == nullptr) {
+      code_item = CreateCodeItem(dex_file, *disk_code_item, cdii.GetMethodCodeItemOffset());
+    }
     debug_info = code_item->DebugInfo();
   }
   if (debug_info != nullptr) {
@@ -762,6 +774,207 @@ ClassData* Collections::CreateClassData(
     class_datas_.AddItem(class_data, offset);
   }
   return class_data;
+}
+
+void Collections::CreateCallSitesAndMethodHandles(const DexFile& dex_file) {
+  // Iterate through the map list and set the offset of the CallSiteIds and MethodHandleItems.
+  const DexFile::MapList* map =
+      reinterpret_cast<const DexFile::MapList*>(dex_file.Begin() + MapListOffset());
+  for (uint32_t i = 0; i < map->size_; ++i) {
+    const DexFile::MapItem* item = map->list_ + i;
+    switch (item->type_) {
+      case DexFile::kDexTypeCallSiteIdItem:
+        SetCallSiteIdsOffset(item->offset_);
+        break;
+      case DexFile::kDexTypeMethodHandleItem:
+        SetMethodHandleItemsOffset(item->offset_);
+        break;
+      default:
+        break;
+    }
+  }
+  // Populate MethodHandleItems first (CallSiteIds may depend on them).
+  for (uint32_t i = 0; i < dex_file.NumMethodHandles(); i++) {
+    CreateMethodHandleItem(dex_file, i);
+  }
+  // Populate CallSiteIds.
+  for (uint32_t i = 0; i < dex_file.NumCallSiteIds(); i++) {
+    CreateCallSiteId(dex_file, i);
+  }
+}
+
+void Collections::CreateCallSiteId(const DexFile& dex_file, uint32_t i) {
+  const DexFile::CallSiteIdItem& disk_call_site_id = dex_file.GetCallSiteId(i);
+  const uint8_t* disk_call_item_ptr = dex_file.Begin() + disk_call_site_id.data_off_;
+  EncodedArrayItem* call_site_item =
+      CreateEncodedArrayItem(disk_call_item_ptr, disk_call_site_id.data_off_);
+
+  CallSiteId* call_site_id = new CallSiteId(call_site_item);
+  call_site_ids_.AddIndexedItem(call_site_id, CallSiteIdsOffset() + i * CallSiteId::ItemSize(), i);
+}
+
+void Collections::CreateMethodHandleItem(const DexFile& dex_file, uint32_t i) {
+  const DexFile::MethodHandleItem& disk_method_handle = dex_file.GetMethodHandle(i);
+  uint16_t index = disk_method_handle.field_or_method_idx_;
+  DexFile::MethodHandleType type =
+      static_cast<DexFile::MethodHandleType>(disk_method_handle.method_handle_type_);
+  bool is_invoke = type == DexFile::MethodHandleType::kInvokeStatic ||
+                   type == DexFile::MethodHandleType::kInvokeInstance ||
+                   type == DexFile::MethodHandleType::kInvokeConstructor;
+  static_assert(DexFile::MethodHandleType::kLast == DexFile::MethodHandleType::kInvokeConstructor,
+                "Unexpected method handle types.");
+  IndexedItem* field_or_method_id;
+  if (is_invoke) {
+    field_or_method_id = GetMethodId(index);
+  } else {
+    field_or_method_id = GetFieldId(index);
+  }
+  MethodHandleItem* method_handle = new MethodHandleItem(type, field_or_method_id);
+  method_handle_items_.AddIndexedItem(
+      method_handle, MethodHandleItemsOffset() + i * MethodHandleItem::ItemSize(), i);
+}
+
+static uint32_t HeaderOffset(const dex_ir::Collections& collections ATTRIBUTE_UNUSED) {
+  return 0;
+}
+
+static uint32_t HeaderSize(const dex_ir::Collections& collections ATTRIBUTE_UNUSED) {
+  // Size is in elements, so there is only one header.
+  return 1;
+}
+
+// The description of each dex file section type.
+struct FileSectionDescriptor {
+ public:
+  std::string name;
+  uint16_t type;
+  // A function that when applied to a collection object, gives the size of the section.
+  std::function<uint32_t(const dex_ir::Collections&)> size_fn;
+  // A function that when applied to a collection object, gives the offset of the section.
+  std::function<uint32_t(const dex_ir::Collections&)> offset_fn;
+};
+
+static const FileSectionDescriptor kFileSectionDescriptors[] = {
+  {
+    "Header",
+    DexFile::kDexTypeHeaderItem,
+    &HeaderSize,
+    &HeaderOffset,
+  }, {
+    "StringId",
+    DexFile::kDexTypeStringIdItem,
+    &dex_ir::Collections::StringIdsSize,
+    &dex_ir::Collections::StringIdsOffset
+  }, {
+    "TypeId",
+    DexFile::kDexTypeTypeIdItem,
+    &dex_ir::Collections::TypeIdsSize,
+    &dex_ir::Collections::TypeIdsOffset
+  }, {
+    "ProtoId",
+    DexFile::kDexTypeProtoIdItem,
+    &dex_ir::Collections::ProtoIdsSize,
+    &dex_ir::Collections::ProtoIdsOffset
+  }, {
+    "FieldId",
+    DexFile::kDexTypeFieldIdItem,
+    &dex_ir::Collections::FieldIdsSize,
+    &dex_ir::Collections::FieldIdsOffset
+  }, {
+    "MethodId",
+    DexFile::kDexTypeMethodIdItem,
+    &dex_ir::Collections::MethodIdsSize,
+    &dex_ir::Collections::MethodIdsOffset
+  }, {
+    "ClassDef",
+    DexFile::kDexTypeClassDefItem,
+    &dex_ir::Collections::ClassDefsSize,
+    &dex_ir::Collections::ClassDefsOffset
+  }, {
+    "CallSiteId",
+    DexFile::kDexTypeCallSiteIdItem,
+    &dex_ir::Collections::CallSiteIdsSize,
+    &dex_ir::Collections::CallSiteIdsOffset
+  }, {
+    "MethodHandle",
+    DexFile::kDexTypeMethodHandleItem,
+    &dex_ir::Collections::MethodHandleItemsSize,
+    &dex_ir::Collections::MethodHandleItemsOffset
+  }, {
+    "StringData",
+    DexFile::kDexTypeStringDataItem,
+    &dex_ir::Collections::StringDatasSize,
+    &dex_ir::Collections::StringDatasOffset
+  }, {
+    "TypeList",
+    DexFile::kDexTypeTypeList,
+    &dex_ir::Collections::TypeListsSize,
+    &dex_ir::Collections::TypeListsOffset
+  }, {
+    "EncArr",
+    DexFile::kDexTypeEncodedArrayItem,
+    &dex_ir::Collections::EncodedArrayItemsSize,
+    &dex_ir::Collections::EncodedArrayItemsOffset
+  }, {
+    "Annotation",
+    DexFile::kDexTypeAnnotationItem,
+    &dex_ir::Collections::AnnotationItemsSize,
+    &dex_ir::Collections::AnnotationItemsOffset
+  }, {
+    "AnnoSet",
+    DexFile::kDexTypeAnnotationSetItem,
+    &dex_ir::Collections::AnnotationSetItemsSize,
+    &dex_ir::Collections::AnnotationSetItemsOffset
+  }, {
+    "AnnoSetRL",
+    DexFile::kDexTypeAnnotationSetRefList,
+    &dex_ir::Collections::AnnotationSetRefListsSize,
+    &dex_ir::Collections::AnnotationSetRefListsOffset
+  }, {
+    "AnnoDir",
+    DexFile::kDexTypeAnnotationsDirectoryItem,
+    &dex_ir::Collections::AnnotationsDirectoryItemsSize,
+    &dex_ir::Collections::AnnotationsDirectoryItemsOffset
+  }, {
+    "DebugInfo",
+    DexFile::kDexTypeDebugInfoItem,
+    &dex_ir::Collections::DebugInfoItemsSize,
+    &dex_ir::Collections::DebugInfoItemsOffset
+  }, {
+    "CodeItem",
+    DexFile::kDexTypeCodeItem,
+    &dex_ir::Collections::CodeItemsSize,
+    &dex_ir::Collections::CodeItemsOffset
+  }, {
+    "ClassData",
+    DexFile::kDexTypeClassDataItem,
+    &dex_ir::Collections::ClassDatasSize,
+    &dex_ir::Collections::ClassDatasOffset
+  }
+};
+
+std::vector<dex_ir::DexFileSection> GetSortedDexFileSections(dex_ir::Header* header,
+                                                             dex_ir::SortDirection direction) {
+  const dex_ir::Collections& collections = header->GetCollections();
+  std::vector<dex_ir::DexFileSection> sorted_sections;
+  // Build the table that will map from offset to color
+  for (const FileSectionDescriptor& s : kFileSectionDescriptors) {
+    sorted_sections.push_back(dex_ir::DexFileSection(s.name,
+                                                     s.type,
+                                                     s.size_fn(collections),
+                                                     s.offset_fn(collections)));
+  }
+  // Sort by offset.
+  std::sort(sorted_sections.begin(),
+            sorted_sections.end(),
+            [=](dex_ir::DexFileSection& a, dex_ir::DexFileSection& b) {
+              if (direction == SortDirection::kSortDescending) {
+                return a.offset > b.offset;
+              } else {
+                return a.offset < b.offset;
+              }
+            });
+  return sorted_sections;
 }
 
 }  // namespace dex_ir

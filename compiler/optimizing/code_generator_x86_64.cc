@@ -143,10 +143,10 @@ class SuspendCheckSlowPathX86_64 : public SlowPathCode {
     LocationSummary* locations = instruction_->GetLocations();
     CodeGeneratorX86_64* x86_64_codegen = down_cast<CodeGeneratorX86_64*>(codegen);
     __ Bind(GetEntryLabel());
-    SaveLiveRegisters(codegen, locations);  // only saves full width XMM for SIMD
+    SaveLiveRegisters(codegen, locations);  // Only saves full width XMM for SIMD.
     x86_64_codegen->InvokeRuntime(kQuickTestSuspend, instruction_, instruction_->GetDexPc(), this);
     CheckEntrypointTypes<kQuickTestSuspend, void, void>();
-    RestoreLiveRegisters(codegen, locations);  // only saves full width XMM for SIMD
+    RestoreLiveRegisters(codegen, locations);  // Only restores full width XMM for SIMD.
     if (successor_ == nullptr) {
       __ jmp(GetReturnLabel());
     } else {
@@ -397,8 +397,14 @@ class DeoptimizationSlowPathX86_64 : public SlowPathCode {
   void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
     CodeGeneratorX86_64* x86_64_codegen = down_cast<CodeGeneratorX86_64*>(codegen);
     __ Bind(GetEntryLabel());
+    LocationSummary* locations = instruction_->GetLocations();
+    SaveLiveRegisters(codegen, locations);
+    InvokeRuntimeCallingConvention calling_convention;
+    x86_64_codegen->Load32BitValue(
+        CpuRegister(calling_convention.GetRegisterAt(0)),
+        static_cast<uint32_t>(instruction_->AsDeoptimize()->GetDeoptimizationKind()));
     x86_64_codegen->InvokeRuntime(kQuickDeoptimize, instruction_, instruction_->GetDexPc(), this);
-    CheckEntrypointTypes<kQuickDeoptimize, void, void>();
+    CheckEntrypointTypes<kQuickDeoptimize, void, DeoptimizationKind>();
   }
 
   const char* GetDescription() const OVERRIDE { return "DeoptimizationSlowPathX86_64"; }
@@ -1710,7 +1716,10 @@ void InstructionCodeGeneratorX86_64::VisitIf(HIf* if_instr) {
 void LocationsBuilderX86_64::VisitDeoptimize(HDeoptimize* deoptimize) {
   LocationSummary* locations = new (GetGraph()->GetArena())
       LocationSummary(deoptimize, LocationSummary::kCallOnSlowPath);
-  locations->SetCustomSlowPathCallerSaves(RegisterSet::Empty());  // No caller-save registers.
+  InvokeRuntimeCallingConvention calling_convention;
+  RegisterSet caller_saves = RegisterSet::Empty();
+  caller_saves.Add(Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
+  locations->SetCustomSlowPathCallerSaves(caller_saves);
   if (IsBooleanValueOrMaterializedCondition(deoptimize->InputAt(0))) {
     locations->SetInAt(0, Location::Any());
   }
@@ -3660,7 +3669,7 @@ void InstructionCodeGeneratorX86_64::GenerateDivRemWithAnyConstant(HBinaryOperat
 void InstructionCodeGeneratorX86_64::GenerateDivRemIntegral(HBinaryOperation* instruction) {
   DCHECK(instruction->IsDiv() || instruction->IsRem());
   Primitive::Type type = instruction->GetResultType();
-  DCHECK(type == Primitive::kPrimInt || Primitive::kPrimLong);
+  DCHECK(type == Primitive::kPrimInt || type == Primitive::kPrimLong);
 
   bool is_div = instruction->IsDiv();
   LocationSummary* locations = instruction->GetLocations();

@@ -34,7 +34,7 @@
 
 #include "android-base/stringprintf.h"
 
-#include "art_method-inl.h"
+#include "art_method.h"
 #include "base/bit_vector.h"
 #include "base/enums.h"
 #include "base/stl_util.h"
@@ -193,7 +193,7 @@ bool OatFileBase::LoadVdex(const std::string& vdex_filename,
                            bool writable,
                            bool low_4gb,
                            std::string* error_msg) {
-  vdex_ = VdexFile::Open(vdex_filename, writable, low_4gb, error_msg);
+  vdex_ = VdexFile::Open(vdex_filename, writable, low_4gb, /* unquicken*/ false, error_msg);
   if (vdex_.get() == nullptr) {
     *error_msg = StringPrintf("Failed to load vdex file '%s' %s",
                               vdex_filename.c_str(),
@@ -1497,11 +1497,18 @@ CompilerFilter::Filter OatFile::GetCompilerFilter() const {
 
 static constexpr char kDexClassPathEncodingSeparator = '*';
 
-std::string OatFile::EncodeDexFileDependencies(const std::vector<const DexFile*>& dex_files) {
+std::string OatFile::EncodeDexFileDependencies(const std::vector<const DexFile*>& dex_files,
+                                               std::string& base_dir) {
   std::ostringstream out;
 
   for (const DexFile* dex_file : dex_files) {
-    out << dex_file->GetLocation().c_str();
+    const std::string& location = dex_file->GetLocation();
+    // Find paths that were relative and convert them back from absolute.
+    if (!base_dir.empty() && location.substr(0, base_dir.length()) == base_dir) {
+      out << location.substr(base_dir.length() + 1).c_str();
+    } else {
+      out << dex_file->GetLocation().c_str();
+    }
     out << kDexClassPathEncodingSeparator;
     out << dex_file->GetLocationChecksum();
     out << kDexClassPathEncodingSeparator;

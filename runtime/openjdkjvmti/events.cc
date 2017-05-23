@@ -36,10 +36,11 @@
 #include "gc/allocation_listener.h"
 #include "gc/gc_pause_listener.h"
 #include "gc/heap.h"
+#include "handle_scope-inl.h"
 #include "instrumentation.h"
 #include "jni_env_ext-inl.h"
 #include "mirror/class.h"
-#include "mirror/object.h"
+#include "mirror/object-inl.h"
 #include "runtime.h"
 #include "ScopedLocalRef.h"
 #include "scoped_thread_state_change-inl.h"
@@ -141,13 +142,21 @@ void EventMasks::HandleChangedCapabilities(const jvmtiCapabilities& caps, bool c
 }
 
 void EventHandler::RegisterArtJvmTiEnv(ArtJvmTiEnv* env) {
-  envs.push_back(env);
+  // Since we never shrink this array we might as well try to fill gaps.
+  auto it = std::find(envs.begin(), envs.end(), nullptr);
+  if (it != envs.end()) {
+    *it = env;
+  } else {
+    envs.push_back(env);
+  }
 }
 
 void EventHandler::RemoveArtJvmTiEnv(ArtJvmTiEnv* env) {
+  // Since we might be currently iterating over the envs list we cannot actually erase elements.
+  // Instead we will simply replace them with 'nullptr' and skip them manually.
   auto it = std::find(envs.begin(), envs.end(), env);
   if (it != envs.end()) {
-    envs.erase(it);
+    *it = nullptr;
     for (size_t i = static_cast<size_t>(ArtJvmtiEvent::kMinEventTypeVal);
          i <= static_cast<size_t>(ArtJvmtiEvent::kMaxEventTypeVal);
          ++i) {

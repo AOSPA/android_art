@@ -62,6 +62,7 @@ DRY_RUN="n" # if y prepare to run the test but don't run it.
 TEST_VDEX="n"
 TEST_IS_NDEBUG="n"
 APP_IMAGE="y"
+JVMTI_STRESS="n"
 VDEX_FILTER=""
 PROFILE="n"
 RANDOM_PROFILE="n"
@@ -144,6 +145,11 @@ while true; do
         shift
     elif [ "x$1" = "x--prebuild" ]; then
         PREBUILD="y"
+        shift
+    elif [ "x$1" = "x--jvmti-stress" ]; then
+        # APP_IMAGE doesn't really work with jvmti-torture
+        APP_IMAGE="n"
+        JVMTI_STRESS="y"
         shift
     elif [ "x$1" = "x--no-app-image" ]; then
         APP_IMAGE="n"
@@ -365,6 +371,30 @@ if [ "$IS_JVMTI_TEST" = "y" ]; then
   fi
 fi
 
+if [[ "$JVMTI_STRESS" = "y" ]]; then
+  plugin=libopenjdkjvmtid.so
+  agent=libtistressd.so
+  if  [[ "$TEST_IS_NDEBUG" = "y" ]]; then
+    agent=libtistress.so
+    plugin=libopenjdkjvmti.so
+  fi
+
+  file_1=$(mktemp --tmpdir=${DEX_LOCATION})
+  file_2=$(mktemp --tmpdir=${DEX_LOCATION})
+  if [[ "$USE_JVM" = "y" ]]; then
+    FLAGS="${FLAGS} -agentpath:${ANDROID_HOST_OUT}/nativetest64/${agent}=/bin/false,${file_1},${file_2}"
+  else
+    # TODO Remove need for DEXTER_BINARY!
+    FLAGS="${FLAGS} -agentpath:${agent}=${DEXTER_BINARY},${file_1},${file_2}"
+    if [ "$IS_JVMTI_TEST" = "n" ]; then
+      FLAGS="${FLAGS} -Xplugin:${plugin}"
+      FLAGS="${FLAGS} -Xcompiler-option --debuggable"
+      # Always make the compilation be debuggable.
+      COMPILE_FLAGS="${COMPILE_FLAGS} --debuggable"
+    fi
+  fi
+fi
+
 if [ "$USE_JVM" = "y" ]; then
   export LD_LIBRARY_PATH=${ANDROID_HOST_OUT}/lib64
   # Xmx is necessary since we don't pass down the ART flags to JVM.
@@ -421,15 +451,15 @@ fi
 if [ "$INTERPRETER" = "y" ]; then
     INT_OPTS="-Xint"
     if [ "$VERIFY" = "y" ] ; then
-      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=interpret-only"
-      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=interpret-only"
+      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=quicken"
+      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=quicken"
     elif [ "$VERIFY" = "s" ]; then
-      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=verify-at-runtime"
-      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=verify-at-runtime"
+      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=extract"
+      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=extract"
       DEX_VERIFY="${DEX_VERIFY} -Xverify:softfail"
     else # VERIFY = "n"
-      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=verify-none"
-      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=verify-none"
+      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=assume-verified"
+      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=assume-verified"
       DEX_VERIFY="${DEX_VERIFY} -Xverify:none"
     fi
 fi
@@ -437,11 +467,11 @@ fi
 if [ "$JIT" = "y" ]; then
     INT_OPTS="-Xusejit:true"
     if [ "$VERIFY" = "y" ] ; then
-      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=interpret-only"
-      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=interpret-only"
+      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=quicken"
+      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=quicken"
     else
-      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=verify-none"
-      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=verify-none"
+      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=assume-verified"
+      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=assume-verified"
       DEX_VERIFY="${DEX_VERIFY} -Xverify:none"
     fi
 fi
@@ -516,6 +546,11 @@ if [ "$PROFILE" = "y" ] || [ "$RANDOM_PROFILE" = "y" ]; then
   profman_cmdline="${ANDROID_ROOT}/bin/profman  \
     --apk=$DEX_LOCATION/$TEST_NAME.jar \
     --dex-location=$DEX_LOCATION/$TEST_NAME.jar"
+  if [ -f $DEX_LOCATION/$TEST_NAME-ex.jar ]; then
+    profman_cmdline="${profman_cmdline} \
+      --apk=$DEX_LOCATION/$TEST_NAME-ex.jar \
+      --dex-location=$DEX_LOCATION/$TEST_NAME-ex.jar"
+  fi
   COMPILE_FLAGS="${COMPILE_FLAGS} --profile-file=$DEX_LOCATION/$TEST_NAME.prof"
   FLAGS="${FLAGS} -Xcompiler-option --profile-file=$DEX_LOCATION/$TEST_NAME.prof"
   if [ "$PROFILE" = "y" ]; then
@@ -555,8 +590,12 @@ if [ "$PREBUILD" = "y" ]; then
     # Use -k 1m to SIGKILL it a minute later if it hasn't ended.
     dex2oat_cmdline="timeout -k 1m -s SIGRTMIN+2 1m ${dex2oat_cmdline}"
   fi
-  if [ "$TEST_VDEX" = "y" ]; then
+  if [ "$PROFILE" = "y" ] || [ "$RANDOM_PROFILE" = "y" ]; then
+    vdex_cmdline="${dex2oat_cmdline} ${VDEX_FILTER} --input-vdex=$DEX_LOCATION/oat/$ISA/$TEST_NAME.vdex --output-vdex=$DEX_LOCATION/oat/$ISA/$TEST_NAME.vdex"
+  elif [ "$TEST_VDEX" = "y" ]; then
     vdex_cmdline="${dex2oat_cmdline} ${VDEX_FILTER} --input-vdex=$DEX_LOCATION/oat/$ISA/$TEST_NAME.vdex"
+  elif [ "$PROFILE" = "y" ] || [ "$RANDOM_PROFILE" = "y" ]; then
+    vdex_cmdline="${dex2oat_cmdline} --input-vdex=$DEX_LOCATION/oat/$ISA/$TEST_NAME.vdex --output-vdex=$DEX_LOCATION/oat/$ISA/$TEST_NAME.vdex"
   fi
 fi
 
@@ -609,7 +648,7 @@ if [ "$HOST" = "n" ]; then
     adb root > /dev/null
     adb wait-for-device
     if [ "$QUIET" = "n" ]; then
-      adb shell rm -r $DEX_LOCATION
+      adb shell rm -rf $DEX_LOCATION
       adb shell mkdir -p $DEX_LOCATION
       adb push $TEST_NAME.jar $DEX_LOCATION
       adb push $TEST_NAME-ex.jar $DEX_LOCATION
@@ -677,6 +716,7 @@ if [ "$HOST" = "n" ]; then
 
     rm -f $cmdfile
 else
+    # Host run.
     export ANDROID_PRINTF_LOG=brief
 
     # By default, and for prebuild dex2oat, we are interested in errors being logged. In dev mode
@@ -733,7 +773,12 @@ else
 
     cd $ANDROID_BUILD_TOP
 
+    # Make sure we delete any existing compiler artifacts.
+    # This enables tests to call the RUN script multiple times in a row
+    # without worrying about interference.
+    rm -rf ${DEX_LOCATION}/oat
     rm -rf ${DEX_LOCATION}/dalvik-cache/
+
     mkdir -p ${mkdir_locations} || exit 1
     $profman_cmdline || { echo "Profman failed." >&2 ; exit 2; }
     $dex2oat_cmdline || { echo "Dex2oat failed." >&2 ; exit 2; }

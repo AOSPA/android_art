@@ -23,6 +23,7 @@
 #include "art_method-inl.h"
 #include "class_linker-inl.h"
 #include "common_compiler_test.h"
+#include "compiled_class.h"
 #include "dex_file.h"
 #include "dex_file_types.h"
 #include "gc/heap.h"
@@ -148,7 +149,6 @@ TEST_F(CompilerDriverTest, DISABLED_LARGE_CompileDexLibCore) {
 }
 
 TEST_F(CompilerDriverTest, AbstractMethodErrorStub) {
-  TEST_DISABLED_FOR_READ_BARRIER_WITH_OPTIMIZING_FOR_UNSUPPORTED_INSTRUCTION_SETS();
   jobject class_loader;
   {
     ScopedObjectAccess soa(Thread::Current());
@@ -191,7 +191,6 @@ class CompilerDriverMethodsTest : public CompilerDriverTest {
 };
 
 TEST_F(CompilerDriverMethodsTest, Selection) {
-  TEST_DISABLED_FOR_READ_BARRIER_WITH_OPTIMIZING_FOR_UNSUPPORTED_INSTRUCTION_SETS();
   Thread* self = Thread::Current();
   jobject class_loader;
   {
@@ -299,7 +298,6 @@ class CompilerDriverProfileTest : public CompilerDriverTest {
 };
 
 TEST_F(CompilerDriverProfileTest, ProfileGuidedCompilation) {
-  TEST_DISABLED_FOR_READ_BARRIER_WITH_OPTIMIZING_FOR_UNSUPPORTED_INSTRUCTION_SETS();
   Thread* self = Thread::Current();
   jobject class_loader;
   {
@@ -320,6 +318,47 @@ TEST_F(CompilerDriverProfileTest, ProfileGuidedCompilation) {
   std::unordered_set<std::string> s = GetExpectedMethodsForClass("Second");
   CheckCompiledMethods(class_loader, "LMain;", m);
   CheckCompiledMethods(class_loader, "LSecond;", s);
+}
+
+// Test that a verify only compiler filter updates the CompiledClass map,
+// which will be used for OatClass.
+class CompilerDriverVerifyTest : public CompilerDriverTest {
+ protected:
+  CompilerFilter::Filter GetCompilerFilter() const OVERRIDE {
+    return CompilerFilter::kVerify;
+  }
+
+  void CheckVerifiedClass(jobject class_loader, const std::string& clazz) const {
+    ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+    Thread* self = Thread::Current();
+    ScopedObjectAccess soa(self);
+    StackHandleScope<1> hs(self);
+    Handle<mirror::ClassLoader> h_loader(
+        hs.NewHandle(soa.Decode<mirror::ClassLoader>(class_loader)));
+    mirror::Class* klass = class_linker->FindClass(self, clazz.c_str(), h_loader);
+    ASSERT_NE(klass, nullptr);
+    EXPECT_TRUE(klass->IsVerified());
+
+    CompiledClass* compiled_class = compiler_driver_->GetCompiledClass(
+        ClassReference(&klass->GetDexFile(), klass->GetDexTypeIndex().index_));
+    ASSERT_NE(compiled_class, nullptr);
+    EXPECT_EQ(compiled_class->GetStatus(), mirror::Class::kStatusVerified);
+  }
+};
+
+TEST_F(CompilerDriverVerifyTest, VerifyCompilation) {
+  Thread* self = Thread::Current();
+  jobject class_loader;
+  {
+    ScopedObjectAccess soa(self);
+    class_loader = LoadDex("ProfileTestMultiDex");
+  }
+  ASSERT_NE(class_loader, nullptr);
+
+  CompileAll(class_loader);
+
+  CheckVerifiedClass(class_loader, "LMain;");
+  CheckVerifiedClass(class_loader, "LSecond;");
 }
 
 // TODO: need check-cast test (when stub complete & we can throw/catch

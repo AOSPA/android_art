@@ -61,14 +61,6 @@ class ProfileSaver {
                             uint16_t method_idx);
 
  private:
-  // A cache structure which keeps track of the data saved to disk.
-  // It is used to reduce the number of disk read/writes.
-  struct ProfileInfoCache {
-    ProfileCompilationInfo profile;
-    uint32_t last_save_number_of_methods = 0;
-    uint32_t last_save_number_of_classes = 0;
-  };
-
   ProfileSaver(const ProfileSaverOptions& options,
                const std::string& output_filename,
                jit::JitCodeCache* jit_code_cache,
@@ -102,15 +94,15 @@ class ProfileSaver {
                            const std::vector<std::string>& code_paths)
       REQUIRES(Locks::profiler_lock_);
 
-  // Retrieves the cached profile compilation info for the given profile file.
-  // If no entry exists, a new empty one will be created, added to the cache and
-  // then returned.
-  ProfileInfoCache* GetCachedProfiledInfo(const std::string& filename);
   // Fetches the current resolved classes and methods from the ClassLinker and stores them in the
   // profile_cache_ for later save.
   void FetchAndCacheResolvedClassesAndMethods();
 
   void DumpInfo(std::ostream& os);
+
+  // Resolve the realpath of the locations stored in tracked_dex_base_locations_to_be_resolved_
+  // and put the result in tracked_dex_base_locations_.
+  void ResolveTrackedLocations() REQUIRES(!Locks::profiler_lock_);
 
   // The only instance of the saver.
   static ProfileSaver* instance_ GUARDED_BY(Locks::profiler_lock_);
@@ -119,9 +111,15 @@ class ProfileSaver {
 
   jit::JitCodeCache* jit_code_cache_;
 
-  // Collection of code paths that the profiles tracks.
+  // Collection of code paths that the profiler tracks.
   // It maps profile locations to code paths (dex base locations).
   SafeMap<std::string, std::set<std::string>> tracked_dex_base_locations_
+      GUARDED_BY(Locks::profiler_lock_);
+
+  // Collection of code paths that the profiler tracks but may note have been resolved
+  // to their realpath. The resolution is done async to minimize the time it takes for
+  // someone to register a path.
+  SafeMap<std::string, std::set<std::string>> tracked_dex_base_locations_to_be_resolved_
       GUARDED_BY(Locks::profiler_lock_);
 
   bool shutting_down_ GUARDED_BY(Locks::profiler_lock_);
@@ -129,10 +127,11 @@ class ProfileSaver {
   uint32_t jit_activity_notifications_;
 
   // A local cache for the profile information. Maps each tracked file to its
-  // profile information. The size of this cache is usually very small and tops
+  // profile information. This is used to cache the startup classes so that
+  // we don't hammer the disk to save them right away.
+  // The size of this cache is usually very small and tops
   // to just a few hundreds entries in the ProfileCompilationInfo objects.
-  // It helps avoiding unnecessary writes to disk.
-  SafeMap<std::string, ProfileInfoCache> profile_cache_;
+  SafeMap<std::string, ProfileCompilationInfo> profile_cache_;
 
   // Save period condition support.
   Mutex wait_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
