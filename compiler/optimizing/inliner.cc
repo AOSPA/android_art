@@ -56,7 +56,7 @@ static constexpr size_t kMaximumNumberOfInstructionsForSmallMethod = 3;
 
 // Limit the number of dex registers that we accumulate while inlining
 // to avoid creating large amount of nested environments.
-static constexpr size_t kMaximumNumberOfCumulatedDexRegisters = 64;
+static constexpr size_t kMaximumNumberOfCumulatedDexRegisters = 32;
 
 // Limit recursive call inlining, which do not benefit from too
 // much inlining compared to code locality.
@@ -664,6 +664,12 @@ HInliner::InlineCacheType HInliner::ExtractClassesFromOfflineProfile(
     ObjPtr<mirror::DexCache> dex_cache =
         dex_profile_index_to_dex_cache[class_ref.dex_profile_index];
     DCHECK(dex_cache != nullptr);
+
+    if (!dex_cache->GetDexFile()->IsTypeIndexValid(class_ref.type_index)) {
+      VLOG(compiler) << "Profile data corrupt: type index " << class_ref.type_index
+            << "is invalid in location" << dex_cache->GetDexFile()->GetLocation();
+      return kInlineCacheNoData;
+    }
     ObjPtr<mirror::Class> clazz = ClassLinker::LookupResolvedType(
           class_ref.type_index,
           dex_cache,
