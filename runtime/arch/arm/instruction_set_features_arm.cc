@@ -41,7 +41,8 @@ const ArmInstructionSetFeatures* ArmInstructionSetFeatures::FromVariant(
   const bool smp = true;
 
   static const char* arm_variants_with_armv8a[] =
-  { "cortex-a53", "cortex-a57", "cortex-a35", "cortex-a72", "cortex-a53.a57", "cyclone", "denver", "kryo" };
+  { "cortex-a53", "cortex-a53.a57", "cortex-a57", "cortex-a72", "cortex-a73", "denver", "kryo" };
+
   bool has_armv8a =
       FindVariantInArray(arm_variants_with_armv8a, arraysize(arm_variants_with_armv8a), variant);
 
