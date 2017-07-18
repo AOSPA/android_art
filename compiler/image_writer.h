@@ -33,9 +33,10 @@
 #include "base/enums.h"
 #include "base/length_prefixed_array.h"
 #include "base/macros.h"
+#include "class_table.h"
 #include "driver/compiler_driver.h"
-#include "gc/space/space.h"
 #include "image.h"
+#include "intern_table.h"
 #include "lock_word.h"
 #include "mem_map.h"
 #include "mirror/dex_cache.h"
@@ -47,6 +48,10 @@
 
 namespace art {
 namespace gc {
+namespace accounting {
+template <size_t kAlignment> class SpaceBitmap;
+typedef SpaceBitmap<kObjectAlignment> ContinuousSpaceBitmap;
+}  // namespace accounting
 namespace space {
 class ImageSpace;
 }  // namespace space
@@ -57,7 +62,6 @@ class ClassLoader;
 }  // namespace mirror
 
 class ClassLoaderVisitor;
-class ClassTable;
 class ImtConflictTable;
 
 static constexpr int kInvalidFd = -1;
@@ -102,19 +106,6 @@ class ImageWriter FINAL {
   }
 
   ArtMethod* GetImageMethodAddress(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
-
-  template <typename PtrType>
-  PtrType GetDexCacheArrayElementImageAddress(const DexFile* dex_file, uint32_t offset)
-      const REQUIRES_SHARED(Locks::mutator_lock_) {
-    auto oat_it = dex_file_oat_index_map_.find(dex_file);
-    DCHECK(oat_it != dex_file_oat_index_map_.end());
-    const ImageInfo& image_info = GetImageInfo(oat_it->second);
-    auto it = image_info.dex_cache_array_starts_.find(dex_file);
-    DCHECK(it != image_info.dex_cache_array_starts_.end());
-    return reinterpret_cast<PtrType>(
-        image_info.image_begin_ + image_info.bin_slot_offsets_[kBinDexCacheArray] +
-            it->second + offset);
-  }
 
   size_t GetOatFileOffset(size_t oat_index) const {
     return GetImageInfo(oat_index).oat_offset_;

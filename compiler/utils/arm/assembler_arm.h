@@ -25,7 +25,7 @@
 #include "base/bit_utils.h"
 #include "base/enums.h"
 #include "base/logging.h"
-#include "base/stl_util.h"
+#include "base/stl_util_identity.h"
 #include "base/value_object.h"
 #include "constants_arm.h"
 #include "utils/arm/assembler_arm_shared.h"
@@ -651,6 +651,9 @@ class ArmAssembler : public Assembler {
   virtual void bl(Label* label, Condition cond = AL) = 0;
   virtual void blx(Register rm, Condition cond = AL) = 0;
   virtual void bx(Register rm, Condition cond = AL) = 0;
+
+  // ADR instruction loading register for branching to the label.
+  virtual void AdrCode(Register rt, Label* label) = 0;
 
   // Memory barriers.
   virtual void dmb(DmbOptions flavor) = 0;

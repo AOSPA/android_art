@@ -23,6 +23,7 @@
 
 #include "base/array_ref.h"
 #include "base/mutex.h"
+#include "dex_file_types.h"
 #include "handle.h"
 #include "method_resolution_kind.h"
 #include "obj_ptr.h"
@@ -39,7 +40,7 @@ class VariableIndentationOutputStream;
 namespace mirror {
 class Class;
 class ClassLoader;
-}
+}  // namespace mirror
 
 namespace verifier {
 

@@ -16,10 +16,13 @@
 
 #include "java_lang_Thread.h"
 
+#include "nativehelper/jni_macros.h"
+
 #include "common_throws.h"
 #include "jni_internal.h"
 #include "monitor.h"
 #include "mirror/object.h"
+#include "native_util.h"
 #include "scoped_fast_native_object_access-inl.h"
 #include "scoped_thread_state_change-inl.h"
 #include "ScopedUtfChars.h"
@@ -143,13 +146,16 @@ static void Thread_nativeSetName(JNIEnv* env, jobject peer, jstring java_name) {
   ThreadList* thread_list = Runtime::Current()->GetThreadList();
   bool timed_out;
   // Take suspend thread lock to avoid races with threads trying to suspend this one.
-  Thread* thread = thread_list->SuspendThreadByPeer(peer, true, false, &timed_out);
+  Thread* thread = thread_list->SuspendThreadByPeer(peer,
+                                                    /* request_suspension */ true,
+                                                    SuspendReason::kInternal,
+                                                    &timed_out);
   if (thread != nullptr) {
     {
       ScopedObjectAccess soa(env);
       thread->SetThreadName(name.c_str());
     }
-    thread_list->Resume(thread, false);
+    thread_list->Resume(thread, SuspendReason::kInternal);
   } else if (timed_out) {
     LOG(ERROR) << "Trying to set thread name to '" << name.c_str() << "' failed as the thread "
         "failed to suspend within a generous timeout.";

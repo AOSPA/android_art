@@ -24,8 +24,8 @@
 #include "nodes.h"
 #include "string_reference.h"
 #include "parallel_move_resolver.h"
+#include "type_reference.h"
 #include "utils/arm/assembler_thumb2.h"
-#include "utils/type_reference.h"
 
 namespace art {
 namespace arm {
@@ -299,7 +299,6 @@ class InstructionCodeGeneratorARM : public InstructionCodeGenerator {
   void GenerateCompareTestAndBranch(HCondition* condition,
                                     Label* true_target,
                                     Label* false_target);
-  void GenerateLongComparesAndJumps(HCondition* cond, Label* true_label, Label* false_label);
   void DivRemOneOrMinusOne(HBinaryOperation* instruction);
   void DivRemByPowerOfTwo(HBinaryOperation* instruction);
   void GenerateDivRemWithAnyConstant(HBinaryOperation* instruction);
@@ -456,9 +455,10 @@ class CodeGeneratorARM : public CodeGenerator {
       const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
       HInvokeStaticOrDirect* invoke) OVERRIDE;
 
-  Location GenerateCalleeMethodStaticOrDirectCall(HInvokeStaticOrDirect* invoke, Location temp);
-  void GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke, Location temp) OVERRIDE;
-  void GenerateVirtualCall(HInvokeVirtual* invoke, Location temp) OVERRIDE;
+  void GenerateStaticOrDirectCall(
+      HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path = nullptr) OVERRIDE;
+  void GenerateVirtualCall(
+      HInvokeVirtual* invoke, Location temp, SlowPathCode* slow_path = nullptr) OVERRIDE;
 
   void MoveFromReturnRegister(Location trg, Primitive::Type type) OVERRIDE;
 
@@ -482,15 +482,17 @@ class CodeGeneratorARM : public CodeGenerator {
     Label add_pc_label;
   };
 
-  PcRelativePatchInfo* NewPcRelativeStringPatch(const DexFile& dex_file,
-                                                dex::StringIndex string_index);
+  PcRelativePatchInfo* NewPcRelativeMethodPatch(MethodReference target_method);
+  PcRelativePatchInfo* NewMethodBssEntryPatch(MethodReference target_method);
   PcRelativePatchInfo* NewPcRelativeTypePatch(const DexFile& dex_file, dex::TypeIndex type_index);
   PcRelativePatchInfo* NewTypeBssEntryPatch(const DexFile& dex_file, dex::TypeIndex type_index);
-  PcRelativePatchInfo* NewPcRelativeDexCacheArrayPatch(const DexFile& dex_file,
-                                                       uint32_t element_offset);
-  Literal* DeduplicateBootImageStringLiteral(const DexFile& dex_file,
-                                             dex::StringIndex string_index);
-  Literal* DeduplicateBootImageTypeLiteral(const DexFile& dex_file, dex::TypeIndex type_index);
+  PcRelativePatchInfo* NewPcRelativeStringPatch(const DexFile& dex_file,
+                                                dex::StringIndex string_index);
+
+  // Add a new baker read barrier patch and return the label to be bound
+  // before the BNE instruction.
+  Label* NewBakerReadBarrierPatch(uint32_t custom_data);
+
   Literal* DeduplicateBootImageAddressLiteral(uint32_t address);
   Literal* DeduplicateJitStringLiteral(const DexFile& dex_file,
                                        dex::StringIndex string_index,
@@ -502,6 +504,10 @@ class CodeGeneratorARM : public CodeGenerator {
   void EmitLinkerPatches(ArenaVector<LinkerPatch>* linker_patches) OVERRIDE;
 
   void EmitJitRootPatches(uint8_t* code, const uint8_t* roots_data) OVERRIDE;
+
+  // Maybe add the reserved entrypoint register as a temporary for field load. This temp
+  // is added only for AOT compilation if link-time generated thunks for fields are enabled.
+  void MaybeAddBakerCcEntrypointTempForFields(LocationSummary* locations);
 
   // Fast path implementation of ReadBarrier::Barrier for a heap
   // reference field load when Baker's read barriers are used.
@@ -526,11 +532,6 @@ class CodeGeneratorARM : public CodeGenerator {
   // Load the object reference located at the address
   // `obj + offset + (index << scale_factor)`, held by object `obj`, into
   // `ref`, and mark it if needed.
-  //
-  // If `always_update_field` is true, the value of the reference is
-  // atomically updated in the holder (`obj`).  This operation
-  // requires an extra temporary register, which must be provided as a
-  // non-null pointer (`temp2`).
   void GenerateReferenceLoadWithBakerReadBarrier(HInstruction* instruction,
                                                  Location ref,
                                                  Register obj,
@@ -538,9 +539,27 @@ class CodeGeneratorARM : public CodeGenerator {
                                                  Location index,
                                                  ScaleFactor scale_factor,
                                                  Location temp,
-                                                 bool needs_null_check,
-                                                 bool always_update_field = false,
-                                                 Register* temp2 = nullptr);
+                                                 bool needs_null_check);
+
+  // Generate code checking whether the the reference field at the
+  // address `obj + field_offset`, held by object `obj`, needs to be
+  // marked, and if so, marking it and updating the field within `obj`
+  // with the marked value.
+  //
+  // This routine is used for the implementation of the
+  // UnsafeCASObject intrinsic with Baker read barriers.
+  //
+  // This method has a structure similar to
+  // GenerateReferenceLoadWithBakerReadBarrier, but note that argument
+  // `ref` is only as a temporary here, and thus its value should not
+  // be used afterwards.
+  void UpdateReferenceFieldWithBakerReadBarrier(HInstruction* instruction,
+                                                Location ref,
+                                                Register obj,
+                                                Location field_offset,
+                                                Location temp,
+                                                bool needs_null_check,
+                                                Register temp2);
 
   // Generate a heap reference load (with no read barrier).
   void GenerateRawReferenceLoad(HInstruction* instruction,
@@ -604,11 +623,18 @@ class CodeGeneratorARM : public CodeGenerator {
   void GenerateImplicitNullCheck(HNullCheck* instruction) OVERRIDE;
   void GenerateExplicitNullCheck(HNullCheck* instruction) OVERRIDE;
 
+  // `temp` is an extra temporary register that is used for some conditions;
+  // callers may not specify it, in which case the method will use a scratch
+  // register instead.
+  void GenerateConditionWithZero(IfCondition condition,
+                                 Register out,
+                                 Register in,
+                                 Register temp = kNoRegister);
+
  private:
   Register GetInvokeStaticOrDirectExtraParameter(HInvokeStaticOrDirect* invoke, Register temp);
 
   using Uint32ToLiteralMap = ArenaSafeMap<uint32_t, Literal*>;
-  using MethodToLiteralMap = ArenaSafeMap<MethodReference, Literal*, MethodReferenceComparator>;
   using StringToLiteralMap = ArenaSafeMap<StringReference,
                                           Literal*,
                                           StringReferenceValueComparator>;
@@ -616,8 +642,14 @@ class CodeGeneratorARM : public CodeGenerator {
                                         Literal*,
                                         TypeReferenceValueComparator>;
 
+  struct BakerReadBarrierPatchInfo {
+    explicit BakerReadBarrierPatchInfo(uint32_t data) : label(), custom_data(data) { }
+
+    Label label;
+    uint32_t custom_data;
+  };
+
   Literal* DeduplicateUint32Literal(uint32_t value, Uint32ToLiteralMap* map);
-  Literal* DeduplicateMethodLiteral(MethodReference target_method, MethodToLiteralMap* map);
   PcRelativePatchInfo* NewPcRelativePatch(const DexFile& dex_file,
                                           uint32_t offset_or_index,
                                           ArenaDeque<PcRelativePatchInfo>* patches);
@@ -636,18 +668,18 @@ class CodeGeneratorARM : public CodeGenerator {
 
   // Deduplication map for 32-bit literals, used for non-patchable boot image addresses.
   Uint32ToLiteralMap uint32_literals_;
-  // PC-relative patch info for each HArmDexCacheArraysBase.
-  ArenaDeque<PcRelativePatchInfo> pc_relative_dex_cache_patches_;
-  // Deduplication map for boot string literals for kBootImageLinkTimeAddress.
-  StringToLiteralMap boot_image_string_patches_;
-  // PC-relative String patch info; type depends on configuration (app .bss or boot image PIC).
-  ArenaDeque<PcRelativePatchInfo> pc_relative_string_patches_;
-  // Deduplication map for boot type literals for kBootImageLinkTimeAddress.
-  TypeToLiteralMap boot_image_type_patches_;
+  // PC-relative method patch info for kBootImageLinkTimePcRelative.
+  ArenaDeque<PcRelativePatchInfo> pc_relative_method_patches_;
+  // PC-relative method patch info for kBssEntry.
+  ArenaDeque<PcRelativePatchInfo> method_bss_entry_patches_;
   // PC-relative type patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<PcRelativePatchInfo> pc_relative_type_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> type_bss_entry_patches_;
+  // PC-relative String patch info; type depends on configuration (app .bss or boot image PIC).
+  ArenaDeque<PcRelativePatchInfo> pc_relative_string_patches_;
+  // Baker read barrier patch info.
+  ArenaDeque<BakerReadBarrierPatchInfo> baker_read_barrier_patches_;
 
   // Patches for string literals in JIT compiled code.
   StringToLiteralMap jit_string_patches_;

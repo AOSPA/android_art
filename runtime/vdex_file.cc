@@ -171,6 +171,10 @@ void VdexFile::Unquicken(const std::vector<const DexFile*>& dex_files,
     // least the size of quickening data for each method that has a code item.
     return;
   }
+  // We do not decompile a RETURN_VOID_NO_BARRIER into a RETURN_VOID, as the quickening
+  // optimization does not depend on the boot image (the optimization relies on not
+  // having final fields in a class, which does not change for an app).
+  constexpr bool kDecompileReturnInstruction = false;
   const uint8_t* quickening_info_ptr = quickening_info.data();
   const uint8_t* const quickening_info_end = quickening_info.data() + quickening_info.size();
   for (const DexFile* dex_file : dex_files) {
@@ -181,13 +185,7 @@ void VdexFile::Unquicken(const std::vector<const DexFile*>& dex_files,
         continue;
       }
       ClassDataItemIterator it(*dex_file, class_data);
-      // Skip fields
-      while (it.HasNextStaticField()) {
-        it.Next();
-      }
-      while (it.HasNextInstanceField()) {
-        it.Next();
-      }
+      it.SkipAllFields();
 
       while (it.HasNextDirectMethod()) {
         const DexFile::CodeItem* code_item = it.GetMethodCodeItem();
@@ -196,7 +194,7 @@ void VdexFile::Unquicken(const std::vector<const DexFile*>& dex_files,
           quickening_info_ptr += sizeof(uint32_t);
           optimizer::ArtDecompileDEX(*code_item,
                                      ArrayRef<const uint8_t>(quickening_info_ptr, quickening_size),
-                                     /* decompile_return_instruction */ false);
+                                     kDecompileReturnInstruction);
           quickening_info_ptr += quickening_size;
         }
         it.Next();
@@ -209,7 +207,7 @@ void VdexFile::Unquicken(const std::vector<const DexFile*>& dex_files,
           quickening_info_ptr += sizeof(uint32_t);
           optimizer::ArtDecompileDEX(*code_item,
                                      ArrayRef<const uint8_t>(quickening_info_ptr, quickening_size),
-                                     /* decompile_return_instruction */ false);
+                                     kDecompileReturnInstruction);
           quickening_info_ptr += quickening_size;
         }
         it.Next();

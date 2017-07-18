@@ -37,10 +37,10 @@
 #include "cutils/sched_policy.h"
 #include "debugger.h"
 #include "dex_file-inl.h"
-#include "gc/accounting/atomic_stack.h"
 #include "gc/accounting/card_table-inl.h"
 #include "gc/accounting/heap_bitmap-inl.h"
 #include "gc/accounting/mod_union_table-inl.h"
+#include "gc/accounting/read_barrier_table.h"
 #include "gc/accounting/remembered_set.h"
 #include "gc/accounting/space_bitmap-inl.h"
 #include "gc/collector/concurrent_copying.h"
@@ -63,6 +63,7 @@
 #include "gc/verification.h"
 #include "entrypoints/quick/quick_alloc_entrypoints.h"
 #include "gc_pause_listener.h"
+#include "gc_root.h"
 #include "heap-inl.h"
 #include "image.h"
 #include "intern_table.h"
@@ -88,8 +89,6 @@
 namespace art {
 
 namespace gc {
-
-using android::base::StringPrintf;
 
 static constexpr size_t kCollectorTransitionStressIterations = 0;
 static constexpr size_t kCollectorTransitionStressWait = 10 * 1000;  // Microseconds
@@ -150,8 +149,13 @@ static constexpr bool kUsePartialTlabs = true;
 static uint8_t* const kPreferredAllocSpaceBegin =
     reinterpret_cast<uint8_t*>(300 * MB - Heap::kDefaultNonMovingSpaceCapacity);
 #else
-// For 32-bit, use 0x20000000 because asan reserves 0x04000000 - 0x20000000.
+#ifdef __ANDROID__
+// For 32-bit Android, use 0x20000000 because asan reserves 0x04000000 - 0x20000000.
 static uint8_t* const kPreferredAllocSpaceBegin = reinterpret_cast<uint8_t*>(0x20000000);
+#else
+// For 32-bit host, use 0x40000000 because asan uses most of the space below this.
+static uint8_t* const kPreferredAllocSpaceBegin = reinterpret_cast<uint8_t*>(0x40000000);
+#endif
 #endif
 
 static inline bool CareAboutPauseTimes() {
@@ -210,6 +214,7 @@ Heap::Heap(size_t initial_size,
       disable_thread_flip_count_(0),
       thread_flip_running_(false),
       collector_type_running_(kCollectorTypeNone),
+      last_gc_cause_(kGcCauseNone),
       thread_running_gc_(nullptr),
       last_gc_type_(collector::kGcTypeNone),
       next_gc_type_(collector::kGcTypePartial),
@@ -558,6 +563,7 @@ Heap::Heap(size_t initial_size,
   native_blocking_gc_lock_ = new Mutex("Native blocking GC lock");
   native_blocking_gc_cond_.reset(new ConditionVariable("Native blocking GC condition variable",
                                                        *native_blocking_gc_lock_));
+  native_blocking_gc_is_assigned_ = false;
   native_blocking_gc_in_progress_ = false;
   native_blocking_gcs_finished_ = 0;
 
@@ -975,7 +981,46 @@ void Heap::VisitObjectsInternal(ObjectCallback callback, void* arg) {
   // TODO: Switch to standard begin and end to use ranged a based loop.
   for (auto* it = allocation_stack_->Begin(), *end = allocation_stack_->End(); it < end; ++it) {
     mirror::Object* const obj = it->AsMirrorPtr();
-    if (obj != nullptr && obj->GetClass() != nullptr) {
+
+    mirror::Class* kls = nullptr;
+    if (obj != nullptr && (kls = obj->GetClass()) != nullptr) {
+      // Below invariant is safe regardless of what space the Object is in.
+      // For speed reasons, only perform it when Rosalloc could possibly be used.
+      // (Disabled for read barriers because it never uses Rosalloc).
+      // (See the DCHECK in RosAllocSpace constructor).
+      if (!kUseReadBarrier) {
+        // Rosalloc has a race in allocation. Objects can be written into the allocation
+        // stack before their header writes are visible to this thread.
+        // See b/28790624 for more details.
+        //
+        // obj.class will either be pointing to a valid Class*, or it will point
+        // to a rosalloc free buffer.
+        //
+        // If it's pointing to a valid Class* then that Class's Class will be the
+        // ClassClass (whose Class is itself).
+        //
+        // A rosalloc free buffer will point to another rosalloc free buffer
+        // (or to null), and never to itself.
+        //
+        // Either way dereferencing while its not-null is safe because it will
+        // always point to another valid pointer or to null.
+        mirror::Class* klsClass = kls->GetClass();
+
+        if (klsClass == nullptr) {
+          continue;
+        } else if (klsClass->GetClass() != klsClass) {
+          continue;
+        }
+      } else {
+        // Ensure the invariant is not broken for non-rosalloc cases.
+        DCHECK(Heap::rosalloc_space_ == nullptr)
+            << "unexpected rosalloc with read barriers";
+        DCHECK(kls->GetClass() != nullptr)
+            << "invalid object: class does not have a class";
+        DCHECK_EQ(kls->GetClass()->GetClass(), kls->GetClass())
+            << "invalid object: class's class is not ClassClass";
+      }
+
       // Avoid the race condition caused by the object not yet being written into the allocation
       // stack or the class not yet being written in the object. Or, if
       // kUseThreadLocalAllocationStack, there can be nulls on the allocation stack.
@@ -1414,6 +1459,7 @@ void Heap::StartGC(Thread* self, GcCause cause, CollectorType collector_type) {
   // Ensure there is only one GC at a time.
   WaitForGcToCompleteLocked(cause, self);
   collector_type_running_ = collector_type;
+  last_gc_cause_ = cause;
   thread_running_gc_ = self;
 }
 
@@ -2632,6 +2678,10 @@ collector::GarbageCollector* Heap::Compact(space::ContinuousMemMapAllocSpace* ta
   }
 }
 
+void Heap::TraceHeapSize(size_t heap_size) {
+  ATRACE_INT("Heap size (KB)", heap_size / KB);
+}
+
 collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
                                                GcCause gc_cause,
                                                bool clear_soft_references) {
@@ -2680,14 +2730,16 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
     ++self->GetStats()->gc_for_alloc_count;
   }
   const uint64_t bytes_allocated_before_gc = GetBytesAllocated();
-  // Approximate heap size.
-  ATRACE_INT("Heap size (KB)", bytes_allocated_before_gc / KB);
 
   if (gc_type == NonStickyGcType()) {
     // Move all bytes from new_native_bytes_allocated_ to
     // old_native_bytes_allocated_ now that GC has been triggered, resetting
     // new_native_bytes_allocated_ to zero in the process.
     old_native_bytes_allocated_.FetchAndAddRelaxed(new_native_bytes_allocated_.ExchangeRelaxed(0));
+    if (gc_cause == kGcCauseForNativeAllocBlocking) {
+      MutexLock mu(self, *native_blocking_gc_lock_);
+      native_blocking_gc_in_progress_ = true;
+    }
   }
 
   DCHECK_LT(gc_type, collector::kGcTypeMax);
@@ -3489,6 +3541,7 @@ collector::GcType Heap::WaitForGcToComplete(GcCause cause, Thread* self) {
 
 collector::GcType Heap::WaitForGcToCompleteLocked(GcCause cause, Thread* self) {
   collector::GcType last_gc_type = collector::kGcTypeNone;
+  GcCause last_gc_cause = kGcCauseNone;
   uint64_t wait_start = NanoTime();
   while (collector_type_running_ != kCollectorTypeNone) {
     if (self != task_processor_->GetRunningThread()) {
@@ -3503,12 +3556,13 @@ collector::GcType Heap::WaitForGcToCompleteLocked(GcCause cause, Thread* self) {
     // We must wait, change thread state then sleep on gc_complete_cond_;
     gc_complete_cond_->Wait(self);
     last_gc_type = last_gc_type_;
+    last_gc_cause = last_gc_cause_;
   }
   uint64_t wait_time = NanoTime() - wait_start;
   total_wait_time_ += wait_time;
   if (wait_time > long_pause_log_threshold_) {
-    LOG(INFO) << "WaitForGcToComplete blocked for " << PrettyDuration(wait_time)
-        << " for cause " << cause;
+    LOG(INFO) << "WaitForGcToComplete blocked " << cause << " on " << last_gc_cause << " for "
+              << PrettyDuration(wait_time);
   }
   if (self != task_processor_->GetRunningThread()) {
     // The current thread is about to run a collection. If the thread
@@ -3519,6 +3573,7 @@ collector::GcType Heap::WaitForGcToCompleteLocked(GcCause cause, Thread* self) {
     // it results in log spam. kGcCauseExplicit is already logged in LogGC, so avoid it here too.
     if (cause == kGcCauseForAlloc ||
         cause == kGcCauseForNativeAlloc ||
+        cause == kGcCauseForNativeAllocBlocking ||
         cause == kGcCauseDisableMovingGc) {
       VLOG(gc) << "Starting a blocking GC " << cause;
     }
@@ -3579,6 +3634,8 @@ void Heap::GrowForUtilization(collector::GarbageCollector* collector_ran,
   // We know what our utilization is at this moment.
   // This doesn't actually resize any memory. It just lets the heap grow more when necessary.
   const uint64_t bytes_allocated = GetBytesAllocated();
+  // Trace the new heap size after the GC is finished.
+  TraceHeapSize(bytes_allocated);
   uint64_t target_size;
   collector::GcType gc_type = collector_ran->GetGcType();
   const double multiplier = HeapGrowthMultiplier();  // Use the multiplier to grow more for
@@ -3920,33 +3977,36 @@ void Heap::RegisterNativeAllocation(JNIEnv* env, size_t bytes) {
         // finish before addressing the fact that we exceeded the blocking
         // watermark again.
         do {
+          ScopedTrace trace("RegisterNativeAllocation: Wait For Prior Blocking GC Completion");
           native_blocking_gc_cond_->Wait(self);
         } while (native_blocking_gcs_finished_ == initial_gcs_finished);
         initial_gcs_finished++;
       }
 
       // It's possible multiple threads have seen that we exceeded the
-      // blocking watermark. Ensure that only one of those threads runs the
-      // blocking GC. The rest of the threads should instead wait for the
-      // blocking GC to complete.
+      // blocking watermark. Ensure that only one of those threads is assigned
+      // to run the blocking GC. The rest of the threads should instead wait
+      // for the blocking GC to complete.
       if (native_blocking_gcs_finished_ == initial_gcs_finished) {
-        if (native_blocking_gc_in_progress_) {
+        if (native_blocking_gc_is_assigned_) {
           do {
+            ScopedTrace trace("RegisterNativeAllocation: Wait For Blocking GC Completion");
             native_blocking_gc_cond_->Wait(self);
           } while (native_blocking_gcs_finished_ == initial_gcs_finished);
         } else {
-          native_blocking_gc_in_progress_ = true;
+          native_blocking_gc_is_assigned_ = true;
           run_gc = true;
         }
       }
     }
 
     if (run_gc) {
-      CollectGarbageInternal(NonStickyGcType(), kGcCauseForNativeAlloc, false);
+      CollectGarbageInternal(NonStickyGcType(), kGcCauseForNativeAllocBlocking, false);
       RunFinalization(env, kNativeAllocationFinalizeTimeout);
       CHECK(!env->ExceptionCheck());
 
       MutexLock mu(self, *native_blocking_gc_lock_);
+      native_blocking_gc_is_assigned_ = false;
       native_blocking_gc_in_progress_ = false;
       native_blocking_gcs_finished_++;
       native_blocking_gc_cond_->Broadcast(self);
@@ -3956,7 +4016,7 @@ void Heap::RegisterNativeAllocation(JNIEnv* env, size_t bytes) {
     // Trigger another GC because there have been enough native bytes
     // allocated since the last GC.
     if (IsGcConcurrent()) {
-      RequestConcurrentGC(ThreadForEnv(env), kGcCauseForNativeAllocBackground, /*force_full*/true);
+      RequestConcurrentGC(ThreadForEnv(env), kGcCauseForNativeAlloc, /*force_full*/true);
     } else {
       CollectGarbageInternal(NonStickyGcType(), kGcCauseForNativeAlloc, false);
     }
@@ -3998,7 +4058,7 @@ void Heap::CheckPreconditionsForAllocObject(ObjPtr<mirror::Class> c, size_t byte
       << " IsVariableSize=" << c->IsVariableSize()
       << " ObjectSize=" << c->GetObjectSize()
       << " sizeof(Class)=" << sizeof(mirror::Class)
-      << " klass=" << c.Ptr();
+      << verification_->DumpObjectInfo(c.Ptr(), /*tag*/ "klass");
   CHECK_GE(byte_count, sizeof(mirror::Object));
 }
 

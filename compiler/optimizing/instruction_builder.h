@@ -62,6 +62,7 @@ class HInstructionBuilder : public ValueObject {
         current_block_(nullptr),
         current_locals_(nullptr),
         latest_result_(nullptr),
+        current_this_parameter_(nullptr),
         compiler_driver_(driver),
         code_generator_(code_generator),
         dex_compilation_unit_(dex_compilation_unit),
@@ -193,12 +194,12 @@ class HInstructionBuilder : public ValueObject {
                               uint32_t register_index);
 
   // Builds a new array node and the instructions that fill it.
-  void BuildFilledNewArray(uint32_t dex_pc,
-                           dex::TypeIndex type_index,
-                           uint32_t number_of_vreg_arguments,
-                           bool is_range,
-                           uint32_t* args,
-                           uint32_t register_index);
+  HNewArray* BuildFilledNewArray(uint32_t dex_pc,
+                                 dex::TypeIndex type_index,
+                                 uint32_t number_of_vreg_arguments,
+                                 bool is_range,
+                                 uint32_t* args,
+                                 uint32_t register_index);
 
   void BuildFillArrayData(const Instruction& instruction, uint32_t dex_pc);
 
@@ -287,7 +288,11 @@ class HInstructionBuilder : public ValueObject {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Build a HNewInstance instruction.
-  bool BuildNewInstance(dex::TypeIndex type_index, uint32_t dex_pc);
+  HNewInstance* BuildNewInstance(dex::TypeIndex type_index, uint32_t dex_pc);
+
+  // Build a HConstructorFence for HNewInstance and HNewArray instructions. This ensures the
+  // happens-before ordering for default-initialization of the object referred to by new_instance.
+  void BuildConstructorFenceForAllocation(HInstruction* allocation);
 
   // Return whether the compiler can assume `cls` is initialized.
   bool IsInitialized(Handle<mirror::Class> cls) const
@@ -325,6 +330,11 @@ class HInstructionBuilder : public ValueObject {
   HBasicBlock* current_block_;
   ArenaVector<HInstruction*>* current_locals_;
   HInstruction* latest_result_;
+  // Current "this" parameter.
+  // Valid only after InitializeParameters() finishes.
+  // * Null for static methods.
+  // * Non-null for instance methods.
+  HParameterValue* current_this_parameter_;
 
   CompilerDriver* const compiler_driver_;
 

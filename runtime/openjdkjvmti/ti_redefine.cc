@@ -38,7 +38,7 @@
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "art_jvmti.h"
-#include "base/array_slice.h"
+#include "base/array_ref.h"
 #include "base/logging.h"
 #include "class_linker-inl.h"
 #include "debugger.h"
@@ -48,6 +48,7 @@
 #include "gc/allocation_listener.h"
 #include "gc/heap.h"
 #include "instrumentation.h"
+#include "intern_table.h"
 #include "jdwp/jdwp.h"
 #include "jdwp/jdwp_constants.h"
 #include "jdwp/jdwp_event.h"
@@ -63,6 +64,7 @@
 #include "object_lock.h"
 #include "runtime.h"
 #include "ScopedLocalRef.h"
+#include "ti_breakpoint.h"
 #include "ti_class_loader.h"
 #include "transform.h"
 #include "verifier/method_verifier.h"
@@ -264,7 +266,7 @@ jvmtiError Redefiner::GetClassRedefinitionError(art::Handle<art::mirror::Class> 
 
 // Moves dex data to an anonymous, read-only mmap'd region.
 std::unique_ptr<art::MemMap> Redefiner::MoveDataToMemMap(const std::string& original_location,
-                                                         art::ArraySlice<const unsigned char> data,
+                                                         art::ArrayRef<const unsigned char> data,
                                                          std::string* error_msg) {
   std::unique_ptr<art::MemMap> map(art::MemMap::MapAnonymous(
       StringPrintf("%s-transformed", original_location.c_str()).c_str(),
@@ -277,7 +279,7 @@ std::unique_ptr<art::MemMap> Redefiner::MoveDataToMemMap(const std::string& orig
   if (map == nullptr) {
     return map;
   }
-  memcpy(map->Begin(), &data.At(0), data.size());
+  memcpy(map->Begin(), data.data(), data.size());
   // Make the dex files mmap read only. This matches how other DexFiles are mmaped and prevents
   // programs from corrupting it.
   map->Protect(PROT_READ);
@@ -289,7 +291,7 @@ Redefiner::ClassRedefinition::ClassRedefinition(
     jclass klass,
     const art::DexFile* redefined_dex_file,
     const char* class_sig,
-    art::ArraySlice<const unsigned char> orig_dex_file) :
+    art::ArrayRef<const unsigned char> orig_dex_file) :
       driver_(driver),
       klass_(klass),
       dex_file_(redefined_dex_file),
@@ -379,7 +381,7 @@ jvmtiError Redefiner::RedefineClassesDirect(ArtJvmTiEnv* env,
   art::jit::ScopedJitSuspend suspend_jit;
   // Get shared mutator lock so we can lock all the classes.
   art::ScopedObjectAccess soa(self);
-  Redefiner r(runtime, self, error_msg);
+  Redefiner r(env, runtime, self, error_msg);
   for (const ArtClassDefinition& def : definitions) {
     // Only try to transform classes that have been modified.
     if (def.IsModified()) {
@@ -452,7 +454,30 @@ art::mirror::ClassLoader* Redefiner::ClassRedefinition::GetClassLoader() {
 
 art::mirror::DexCache* Redefiner::ClassRedefinition::CreateNewDexCache(
     art::Handle<art::mirror::ClassLoader> loader) {
-  return driver_->runtime_->GetClassLinker()->RegisterDexFile(*dex_file_, loader.Get()).Ptr();
+  art::StackHandleScope<2> hs(driver_->self_);
+  art::ClassLinker* cl = driver_->runtime_->GetClassLinker();
+  art::Handle<art::mirror::DexCache> cache(hs.NewHandle(
+      art::ObjPtr<art::mirror::DexCache>::DownCast(
+          cl->GetClassRoot(art::ClassLinker::kJavaLangDexCache)->AllocObject(driver_->self_))));
+  if (cache.IsNull()) {
+    driver_->self_->AssertPendingOOMException();
+    return nullptr;
+  }
+  art::Handle<art::mirror::String> location(hs.NewHandle(
+      cl->GetInternTable()->InternStrong(dex_file_->GetLocation().c_str())));
+  if (location.IsNull()) {
+    driver_->self_->AssertPendingOOMException();
+    return nullptr;
+  }
+  art::WriterMutexLock mu(driver_->self_, *art::Locks::dex_lock_);
+  art::mirror::DexCache::InitializeDexCache(driver_->self_,
+                                            cache.Get(),
+                                            location.Get(),
+                                            dex_file_.get(),
+                                            loader.IsNull() ? driver_->runtime_->GetLinearAlloc()
+                                                            : loader->GetAllocator(),
+                                            art::kRuntimePointerSize);
+  return cache.Get();
 }
 
 void Redefiner::RecordFailure(jvmtiError result,
@@ -469,7 +494,7 @@ art::mirror::Object* Redefiner::ClassRedefinition::AllocateOrGetOriginalDexFile(
   if (original_dex_file_.size() != 0) {
     return art::mirror::ByteArray::AllocateAndFill(
         driver_->self_,
-        reinterpret_cast<const signed char*>(&original_dex_file_.At(0)),
+        reinterpret_cast<const signed char*>(original_dex_file_.data()),
         original_dex_file_.size());
   }
 
@@ -577,9 +602,7 @@ bool Redefiner::ClassRedefinition::CheckSameMethods() {
   }
 
   // Skip all of the fields. We should have already checked this.
-  while (new_iter.HasNextStaticField() || new_iter.HasNextInstanceField()) {
-    new_iter.Next();
-  }
+  new_iter.SkipAllFields();
   // Check each of the methods. NB we don't need to specifically check for removals since the 2 dex
   // files have the same number of methods, which means there must be an equal amount of additions
   // and removals.
@@ -602,8 +625,8 @@ bool Redefiner::ClassRedefinition::CheckSameMethods() {
     // Since direct methods have different flags than virtual ones (specifically direct methods must
     // have kAccPrivate or kAccStatic or kAccConstructor flags) we can tell if a method changes from
     // virtual to direct.
-    uint32_t new_flags = new_iter.GetMethodAccessFlags();
-    if (new_flags != (old_method->GetAccessFlags() & art::kAccValidMethodFlags)) {
+    uint32_t new_flags = new_iter.GetMethodAccessFlags() & ~art::kAccPreviouslyWarm;
+    if (new_flags != (old_method->GetAccessFlags() & (art::kAccValidMethodFlags ^ art::kAccPreviouslyWarm))) {
       RecordFailure(ERR(UNSUPPORTED_REDEFINITION_METHOD_MODIFIERS_CHANGED),
                     StringPrintf("method '%s' (sig: %s) had different access flags",
                                  new_method_name,
@@ -1178,6 +1201,10 @@ bool Redefiner::ClassRedefinition::FinishRemainingAllocations(
   return true;
 }
 
+void Redefiner::ClassRedefinition::UnregisterJvmtiBreakpoints() {
+  BreakpointUtil::RemoveBreakpointsInClass(driver_->env_, GetMirrorClass());
+}
+
 void Redefiner::ClassRedefinition::UnregisterBreakpoints() {
   DCHECK(art::Dbg::IsDebuggerActive());
   art::JDWP::JdwpState* state = art::Dbg::GetJdwpState();
@@ -1293,8 +1320,10 @@ jvmtiError Redefiner::Run() {
 
   // At this point we can no longer fail without corrupting the runtime state.
   for (RedefinitionDataIter data = holder.begin(); data != holder.end(); ++data) {
+    art::ClassLinker* cl = runtime_->GetClassLinker();
+    cl->RegisterExistingDexCache(data.GetNewDexCache(), data.GetSourceClassLoader());
     if (data.GetSourceClassLoader() == nullptr) {
-      runtime_->GetClassLinker()->AppendToBootClassPath(self_, data.GetRedefinition().GetDexFile());
+      cl->AppendToBootClassPath(self_, data.GetRedefinition().GetDexFile());
     }
   }
   UnregisterAllBreakpoints();
@@ -1318,6 +1347,7 @@ jvmtiError Redefiner::Run() {
     // TODO Rewrite so we don't do a stack walk for each and every class.
     redef.FindAndAllocateObsoleteMethods(klass);
     redef.UpdateClass(klass, data.GetNewDexCache(), data.GetOriginalDexFile());
+    redef.UnregisterJvmtiBreakpoints();
   }
   RestoreObsoleteMethodMapsIfUnneeded(holder);
   // TODO We should check for if any of the redefined methods are intrinsic methods here and, if any

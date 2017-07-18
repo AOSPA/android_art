@@ -25,8 +25,8 @@
 #include "dex/verified_method.h"
 #include "dex_file.h"
 #include "dex_file_types.h"
+#include "driver/compiler_driver-inl.h"
 #include "driver/compiler_options.h"
-#include "driver/compiler_driver.h"
 #include "handle_scope-inl.h"
 #include "indenter.h"
 #include "mirror/class_loader.h"
@@ -151,9 +151,7 @@ class VerifierDepsTest : public CommonCompilerTest {
     CHECK(class_data != nullptr);
 
     ClassDataItemIterator it(*primary_dex_file_, class_data);
-    while (it.HasNextStaticField() || it.HasNextInstanceField()) {
-      it.Next();
-    }
+    it.SkipAllFields();
 
     ArtMethod* method = nullptr;
     while (it.HasNextDirectMethod()) {

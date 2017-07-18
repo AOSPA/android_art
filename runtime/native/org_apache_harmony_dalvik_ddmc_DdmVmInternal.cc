@@ -16,10 +16,14 @@
 
 #include "org_apache_harmony_dalvik_ddmc_DdmVmInternal.h"
 
+#include "nativehelper/jni_macros.h"
+
 #include "base/logging.h"
 #include "base/mutex.h"
 #include "debugger.h"
+#include "gc/heap.h"
 #include "jni_internal.h"
+#include "native_util.h"
 #include "scoped_fast_native_object_access-inl.h"
 #include "ScopedLocalRef.h"
 #include "ScopedPrimitiveArray.h"
@@ -62,7 +66,9 @@ static jobjectArray DdmVmInternal_getStackTraceById(JNIEnv* env, jclass, jint th
     }
 
     // Suspend thread to build stack trace.
-    Thread* thread = thread_list->SuspendThreadByThreadId(thin_lock_id, false, &timed_out);
+    Thread* thread = thread_list->SuspendThreadByThreadId(thin_lock_id,
+                                                          SuspendReason::kInternal,
+                                                          &timed_out);
     if (thread != nullptr) {
       {
         ScopedObjectAccess soa(env);
@@ -70,7 +76,7 @@ static jobjectArray DdmVmInternal_getStackTraceById(JNIEnv* env, jclass, jint th
         trace = Thread::InternalStackTraceToStackTraceElementArray(soa, internal_trace);
       }
       // Restart suspended thread.
-      thread_list->Resume(thread, false);
+      thread_list->Resume(thread, SuspendReason::kInternal);
     } else {
       if (timed_out) {
         LOG(ERROR) << "Trying to get thread's stack by id failed as the thread failed to suspend "

@@ -17,8 +17,9 @@
 #include "context_arm.h"
 
 #include "base/bit_utils.h"
+#include "base/bit_utils_iterator.h"
 #include "quick/quick_method_frame_info.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 
 namespace art {
 namespace arm {

@@ -19,6 +19,7 @@
 #include "arch/instruction_set_features.h"
 #include "art_field-inl.h"
 #include "art_method-inl.h"
+#include "base/callee_save_type.h"
 #include "base/enums.h"
 #include "class_linker.h"
 #include "compiled_method.h"
@@ -33,7 +34,7 @@
 #include "mirror/object-inl.h"
 #include "oat_quick_method_header.h"
 #include "scoped_thread_state_change-inl.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 #include "utils.h"
 
 namespace art {
@@ -166,8 +167,8 @@ void CommonCompilerTest::SetUp() {
     instruction_set_features_ = InstructionSetFeatures::FromCppDefines();
 
     runtime_->SetInstructionSet(instruction_set);
-    for (int i = 0; i < Runtime::kLastCalleeSaveType; i++) {
-      Runtime::CalleeSaveType type = Runtime::CalleeSaveType(i);
+    for (uint32_t i = 0; i < static_cast<uint32_t>(CalleeSaveType::kLastCalleeSaveType); ++i) {
+      CalleeSaveType type = CalleeSaveType(i);
       if (!runtime_->HasCalleeSaveMethod(type)) {
         runtime_->SetCalleeSaveMethod(runtime_->CreateCalleeSaveMethod(), type);
       }

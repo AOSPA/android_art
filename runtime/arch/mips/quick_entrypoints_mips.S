@@ -421,7 +421,7 @@
     SETUP_SAVE_EVERYTHING_FRAME_DECREMENTED_SP
 .endm
 
-.macro RESTORE_SAVE_EVERYTHING_FRAME
+.macro RESTORE_SAVE_EVERYTHING_FRAME restore_a0=1
     addiu  $sp, $sp, ARG_SLOT_SIZE                # remove argument slots on the stack
     .cfi_adjust_cfa_offset -ARG_SLOT_SIZE
 
@@ -490,8 +490,10 @@
     .cfi_restore 6
     lw     $a1, 160($sp)
     .cfi_restore 5
+    .if \restore_a0
     lw     $a0, 156($sp)
     .cfi_restore 4
+    .endif
     lw     $v1, 152($sp)
     .cfi_restore 3
     lw     $v0, 148($sp)
@@ -507,14 +509,24 @@
 .endm
 
     /*
-     * Macro that set calls through to artDeliverPendingExceptionFromCode, where the pending
-     * exception is Thread::Current()->exception_
+     * Macro that calls through to artDeliverPendingExceptionFromCode, where the pending
+     * exception is Thread::Current()->exception_ when the runtime method frame is ready.
+     * Requires $gp properly set up.
      */
-.macro DELIVER_PENDING_EXCEPTION
-    SETUP_SAVE_ALL_CALLEE_SAVES_FRAME    # save callee saves for throw
+.macro DELIVER_PENDING_EXCEPTION_FRAME_READY
     la      $t9, artDeliverPendingExceptionFromCode
     jalr    $zero, $t9                   # artDeliverPendingExceptionFromCode(Thread*)
     move    $a0, rSELF                   # pass Thread::Current
+.endm
+
+    /*
+     * Macro that calls through to artDeliverPendingExceptionFromCode, where the pending
+     * exception is Thread::Current()->exception_.
+     * Requires $gp properly set up.
+     */
+.macro DELIVER_PENDING_EXCEPTION
+    SETUP_SAVE_ALL_CALLEE_SAVES_FRAME    # save callee saves for throw
+    DELIVER_PENDING_EXCEPTION_FRAME_READY
 .endm
 
 .macro RETURN_IF_NO_EXCEPTION
@@ -1240,7 +1252,39 @@ END art_quick_handle_fill_data
     .extern artLockObjectFromCode
 ENTRY art_quick_lock_object
     beqz    $a0, art_quick_throw_null_pointer_exception
+    li      $t8, LOCK_WORD_THIN_LOCK_COUNT_ONE
+    li      $t3, LOCK_WORD_GC_STATE_MASK_SHIFTED_TOGGLED
+.Lretry_lock:
+    lw      $t0, THREAD_ID_OFFSET(rSELF)  # TODO: Can the thread ID really change during the loop?
+    ll      $t1, MIRROR_OBJECT_LOCK_WORD_OFFSET($a0)
+    and     $t2, $t1, $t3                 # zero the gc bits
+    bnez    $t2, .Lnot_unlocked           # already thin locked
+    # Unlocked case - $t1: original lock word that's zero except for the read barrier bits.
+    or      $t2, $t1, $t0                 # $t2 holds thread id with count of 0 with preserved read barrier bits
+    sc      $t2, MIRROR_OBJECT_LOCK_WORD_OFFSET($a0)
+    beqz    $t2, .Lretry_lock             # store failed, retry
     nop
+    jalr    $zero, $ra
+    sync                                  # full (LoadLoad|LoadStore) memory barrier
+.Lnot_unlocked:
+    # $t1: original lock word, $t0: thread_id with count of 0 and zero read barrier bits
+    srl     $t2, $t1, LOCK_WORD_STATE_SHIFT
+    bnez    $t2, .Lslow_lock              # if either of the top two bits are set, go slow path
+    xor     $t2, $t1, $t0                 # lock_word.ThreadId() ^ self->ThreadId()
+    andi    $t2, $t2, 0xFFFF              # zero top 16 bits
+    bnez    $t2, .Lslow_lock              # lock word and self thread id's match -> recursive lock
+                                          # otherwise contention, go to slow path
+    and     $t2, $t1, $t3                 # zero the gc bits
+    addu    $t2, $t2, $t8                 # increment count in lock word
+    srl     $t2, $t2, LOCK_WORD_STATE_SHIFT  # if the first gc state bit is set, we overflowed.
+    bnez    $t2, .Lslow_lock              # if we overflow the count go slow path
+    addu    $t2, $t1, $t8                 # increment count for real
+    sc      $t2, MIRROR_OBJECT_LOCK_WORD_OFFSET($a0)
+    beqz    $t2, .Lretry_lock             # store failed, retry
+    nop
+    jalr    $zero, $ra
+    nop
+.Lslow_lock:
     SETUP_SAVE_REFS_ONLY_FRAME            # save callee saves in case we block
     la      $t9, artLockObjectFromCode
     jalr    $t9                           # (Object* obj, Thread*)
@@ -1264,11 +1308,55 @@ END art_quick_lock_object_no_inline
     .extern artUnlockObjectFromCode
 ENTRY art_quick_unlock_object
     beqz    $a0, art_quick_throw_null_pointer_exception
+    li      $t8, LOCK_WORD_THIN_LOCK_COUNT_ONE
+    li      $t3, LOCK_WORD_GC_STATE_MASK_SHIFTED_TOGGLED
+.Lretry_unlock:
+#ifndef USE_READ_BARRIER
+    lw      $t1, MIRROR_OBJECT_LOCK_WORD_OFFSET($a0)
+#else
+    ll      $t1, MIRROR_OBJECT_LOCK_WORD_OFFSET($a0)  # Need to use atomic read-modify-write for read barrier
+#endif
+    srl     $t2, $t1, LOCK_WORD_STATE_SHIFT
+    bnez    $t2, .Lslow_unlock         # if either of the top two bits are set, go slow path
+    lw      $t0, THREAD_ID_OFFSET(rSELF)
+    and     $t2, $t1, $t3              # zero the gc bits
+    xor     $t2, $t2, $t0              # lock_word.ThreadId() ^ self->ThreadId()
+    andi    $t2, $t2, 0xFFFF           # zero top 16 bits
+    bnez    $t2, .Lslow_unlock         # do lock word and self thread id's match?
+    and     $t2, $t1, $t3              # zero the gc bits
+    bgeu    $t2, $t8, .Lrecursive_thin_unlock
+    # transition to unlocked
+    nor     $t2, $zero, $t3            # $t2 = LOCK_WORD_GC_STATE_MASK_SHIFTED
+    and     $t2, $t1, $t2              # $t2: zero except for the preserved gc bits
+    sync                               # full (LoadStore|StoreStore) memory barrier
+#ifndef USE_READ_BARRIER
+    jalr    $zero, $ra
+    sw      $t2, MIRROR_OBJECT_LOCK_WORD_OFFSET($a0)
+#else
+    sc      $t2, MIRROR_OBJECT_LOCK_WORD_OFFSET($a0)
+    beqz    $t2, .Lretry_unlock        # store failed, retry
     nop
-    SETUP_SAVE_REFS_ONLY_FRAME        # save callee saves in case exception allocation triggers GC
+    jalr    $zero, $ra
+    nop
+#endif
+.Lrecursive_thin_unlock:
+    # t1: original lock word
+    subu    $t2, $t1, $t8              # decrement count
+#ifndef USE_READ_BARRIER
+    jalr    $zero, $ra
+    sw      $t2, MIRROR_OBJECT_LOCK_WORD_OFFSET($a0)
+#else
+    sc      $t2, MIRROR_OBJECT_LOCK_WORD_OFFSET($a0)
+    beqz    $t2, .Lretry_unlock        # store failed, retry
+    nop
+    jalr    $zero, $ra
+    nop
+#endif
+.Lslow_unlock:
+    SETUP_SAVE_REFS_ONLY_FRAME         # save callee saves in case exception allocation triggers GC
     la      $t9, artUnlockObjectFromCode
-    jalr    $t9                       # (Object* obj, Thread*)
-    move    $a1, rSELF                # pass Thread::Current
+    jalr    $t9                        # (Object* obj, Thread*)
+    move    $a1, rSELF                 # pass Thread::Current
     RETURN_IF_ZERO
 END art_quick_unlock_object
 
@@ -1406,7 +1494,7 @@ ENTRY art_quick_aput_obj
     POISON_HEAP_REF $a2
     sw  $a2, MIRROR_OBJECT_ARRAY_DATA_OFFSET($t0)
     lw  $t0, THREAD_CARD_TABLE_OFFSET(rSELF)
-    srl $t1, $a0, 7
+    srl $t1, $a0, CARD_TABLE_CARD_SHIFT
     add $t1, $t1, $t0
     sb  $t0, ($t1)
     jalr $zero, $ra
@@ -1660,30 +1748,51 @@ ART_QUICK_ALLOC_OBJECT_ROSALLOC art_quick_alloc_object_initialized_rosalloc, art
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_tlab, TLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_region_tlab, RegionTLAB)
 
+// Macro for string and type resolution and initialization.
+// $a0 is both input and output.
+.macro ONE_ARG_SAVE_EVERYTHING_DOWNCALL name, entrypoint
+    .extern \entrypoint
+ENTRY_NO_GP \name
+    SETUP_SAVE_EVERYTHING_FRAME       # Save everything in case of GC.
+    move    $s2, $gp                  # Preserve $gp across the call for exception delivery.
+    la      $t9, \entrypoint
+    jalr    $t9                       # (uint32_t index, Thread*)
+    move    $a1, rSELF                # Pass Thread::Current (in delay slot).
+    beqz    $v0, 1f                   # Success?
+    move    $a0, $v0                  # Move result to $a0 (in delay slot).
+    RESTORE_SAVE_EVERYTHING_FRAME 0   # Restore everything except $a0.
+    jalr    $zero, $ra                # Return on success.
+    nop
+1:
+    move    $gp, $s2
+    DELIVER_PENDING_EXCEPTION_FRAME_READY
+END \name
+.endm
+
     /*
      * Entry from managed code to resolve a string, this stub will allocate a String and deliver an
      * exception on error. On success the String is returned. A0 holds the string index. The fast
      * path check for hit in strings cache has already been performed.
      */
-ONE_ARG_DOWNCALL art_quick_resolve_string, artResolveStringFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_string, artResolveStringFromCode
 
     /*
      * Entry from managed code when uninitialized static storage, this stub will run the class
      * initializer and deliver the exception on error. On success the static storage base is
      * returned.
      */
-ONE_ARG_DOWNCALL art_quick_initialize_static_storage, artInitializeStaticStorageFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_initialize_static_storage, artInitializeStaticStorageFromCode
 
     /*
      * Entry from managed code when dex cache misses for a type_idx.
      */
-ONE_ARG_DOWNCALL art_quick_initialize_type, artInitializeTypeFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_initialize_type, artInitializeTypeFromCode
 
     /*
      * Entry from managed code when type_idx needs to be checked for access and dex cache may also
      * miss.
      */
-ONE_ARG_DOWNCALL art_quick_initialize_type_and_verify_access, artInitializeTypeAndVerifyAccessFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_initialize_type_and_verify_access, artInitializeTypeAndVerifyAccessFromCode
 
     /*
      * Called by managed code when the value in rSUSPEND has been decremented to 0.
@@ -1854,7 +1963,8 @@ ENTRY art_quick_generic_jni_trampoline
     nop
 
 2:
-    lw $sp, THREAD_TOP_QUICK_FRAME_OFFSET(rSELF)
+    lw      $sp, THREAD_TOP_QUICK_FRAME_OFFSET(rSELF)
+    move    $gp, $s3               # restore $gp from $s3
     # This will create a new save-all frame, required by the runtime.
     DELIVER_PENDING_EXCEPTION
 END art_quick_generic_jni_trampoline
@@ -1893,10 +2003,11 @@ END art_invoke_obsolete_method_stub
 ENTRY art_quick_instrumentation_entry
     SETUP_SAVE_REFS_AND_ARGS_FRAME
     sw       $a0, 28($sp)   # save arg0 in free arg slot
-    move     $a3, $ra       # pass $ra
+    addiu    $a3, $sp, ARG_SLOT_SIZE      # Pass $sp.
     la       $t9, artInstrumentationMethodEntryFromCode
-    jalr     $t9            # (Method*, Object*, Thread*, LR)
+    jalr     $t9            # (Method*, Object*, Thread*, SP)
     move     $a2, rSELF     # pass Thread::Current
+    beqz     $v0, .Ldeliver_instrumentation_entry_exception
     move     $t9, $v0       # $t9 holds reference to code
     lw       $a0, 28($sp)   # restore arg0 from free arg slot
     RESTORE_SAVE_REFS_AND_ARGS_FRAME
@@ -1914,26 +2025,35 @@ art_quick_instrumentation_exit:
     SETUP_SAVE_REFS_ONLY_FRAME
     addiu    $sp, $sp, -16  # allocate temp storage on the stack
     .cfi_adjust_cfa_offset 16
-    sw       $v0, ARG_SLOT_SIZE+12($sp)
-    .cfi_rel_offset 2, ARG_SLOT_SIZE+12
-    sw       $v1, ARG_SLOT_SIZE+8($sp)
-    .cfi_rel_offset 3, ARG_SLOT_SIZE+8
+    sw       $v0, ARG_SLOT_SIZE+8($sp)
+    .cfi_rel_offset 2, ARG_SLOT_SIZE+8
+    sw       $v1, ARG_SLOT_SIZE+12($sp)
+    .cfi_rel_offset 3, ARG_SLOT_SIZE+12
     s.d      $f0, ARG_SLOT_SIZE($sp)
-    s.d      $f0, 16($sp)   # pass fpr result
-    move     $a2, $v0       # pass gpr result
-    move     $a3, $v1
-    addiu    $a1, $sp, ARG_SLOT_SIZE+16   # pass $sp (remove arg slots and temp storage)
+    addiu    $a3, $sp, ARG_SLOT_SIZE      # Pass fpr_res pointer.
+    addiu    $a2, $sp, ARG_SLOT_SIZE+8    # Pass gpr_res pointer.
+    addiu    $a1, $sp, ARG_SLOT_SIZE+16   # Pass $sp (remove arg slots and temp storage).
     la       $t9, artInstrumentationMethodExitFromCode
-    jalr     $t9            # (Thread*, SP, gpr_res, fpr_res)
-    move     $a0, rSELF     # pass Thread::Current
-    move     $t9, $v0       # set aside returned link register
-    move     $ra, $v1       # set link register for deoptimization
-    lw       $v0, ARG_SLOT_SIZE+12($sp)   # restore return values
-    lw       $v1, ARG_SLOT_SIZE+8($sp)
+    jalr     $t9                          # (Thread*, SP, gpr_res*, fpr_res*)
+    move     $a0, rSELF                   # Pass Thread::Current.
+    move     $t9, $v0                     # Set aside returned link register.
+    move     $ra, $v1                     # Set link register for deoptimization.
+    lw       $v0, ARG_SLOT_SIZE+8($sp)    # Restore return values.
+    lw       $v1, ARG_SLOT_SIZE+12($sp)
     l.d      $f0, ARG_SLOT_SIZE($sp)
-    jalr     $zero, $t9     # return
-    addiu    $sp, $sp, ARG_SLOT_SIZE+FRAME_SIZE_SAVE_REFS_ONLY+16  # restore stack
-    .cfi_adjust_cfa_offset -(ARG_SLOT_SIZE+FRAME_SIZE_SAVE_REFS_ONLY+16)
+    addiu    $sp, $sp, 16
+    .cfi_adjust_cfa_offset -16
+    RESTORE_SAVE_REFS_ONLY_FRAME
+    beqz     $t9, .Ldo_deliver_instrumentation_exception
+    nop                     # Deliver exception if we got nullptr as function.
+    jalr     $zero, $t9     # Otherwise, return.
+    nop
+.Ldeliver_instrumentation_entry_exception:
+    # Deliver exception for art_quick_instrumentation_entry placed after
+    # art_quick_instrumentation_exit so that the fallthrough works.
+    RESTORE_SAVE_REFS_AND_ARGS_FRAME
+.Ldo_deliver_instrumentation_exception:
+    DELIVER_PENDING_EXCEPTION
 END art_quick_instrumentation_exit
 
     /*
@@ -2211,8 +2331,32 @@ END art_quick_string_compareto
      */
 .macro READ_BARRIER_MARK_REG name, reg
 ENTRY \name
-    /* TODO: optimizations: mark bit, forwarding. */
-    addiu   $sp, $sp, -160      # includes 16 bytes of space for argument registers a0-a3
+    // Null check so that we can load the lock word.
+    bnez    \reg, .Lnot_null_\name
+    nop
+.Lret_rb_\name:
+    jalr    $zero, $ra
+    nop
+.Lnot_null_\name:
+    // Check lock word for mark bit, if marked return.
+    lw      $t9, MIRROR_OBJECT_LOCK_WORD_OFFSET(\reg)
+    .set push
+    .set noat
+    sll     $at, $t9, 31 - LOCK_WORD_MARK_BIT_SHIFT     # Move mark bit to sign bit.
+    bltz    $at, .Lret_rb_\name
+#if (LOCK_WORD_STATE_SHIFT != 30) || (LOCK_WORD_STATE_FORWARDING_ADDRESS != 3)
+    // The below code depends on the lock word state being in the highest bits
+    // and the "forwarding address" state having all bits set.
+#error "Unexpected lock word state shift or forwarding address state value."
+#endif
+    // Test that both the forwarding state bits are 1.
+    sll     $at, $t9, 1
+    and     $at, $at, $t9                               # Sign bit = 1 IFF both bits are 1.
+    bltz    $at, .Lret_forwarding_address\name
+    nop
+    .set pop
+
+    addiu   $sp, $sp, -160      # Includes 16 bytes of space for argument registers a0-a3.
     .cfi_adjust_cfa_offset 160
 
     sw      $ra, 156($sp)
@@ -2317,6 +2461,12 @@ ENTRY \name
     jalr    $zero, $ra
     addiu   $sp, $sp, 160
     .cfi_adjust_cfa_offset -160
+
+.Lret_forwarding_address\name:
+    jalr    $zero, $ra
+    // Shift left by the forwarding address shift. This clears out the state bits since they are
+    // in the top 2 bits of the lock word.
+    sll     \reg, $t9, LOCK_WORD_STATE_FORWARDING_ADDRESS_SHIFT
 END \name
 .endm
 

@@ -34,7 +34,7 @@ import dexfuzz.listeners.UpdatingConsoleListener;
  */
 public class DexFuzz {
   private static int majorVersion = 1;
-  private static int minorVersion = 1;
+  private static int minorVersion = 3;
   private static int seedChangeVersion = 0;
 
   /**
@@ -61,11 +61,14 @@ public class DexFuzz {
     multipleListener.addListener(statusListener);
 
     if (Options.repeat > 1 && Options.execute) {
-      // Add the live updating listener, but only if we're not printing out lots of logs.
-      if (!Log.likelyToLog()) {
+      // If executing repeatedly, take care of reporting progress to the user.
+      if (Options.quiet) {
+        // Nothing if quiet is requested.
+      } else if (!Log.likelyToLog()) {
+        // Add the live updating listener if we're not printing out lots of logs.
         multipleListener.addListener(new UpdatingConsoleListener());
       } else {
-        // If we are dumping out lots of logs, then use the ConsoleLogger instead.
+        // If we are dumping out lots of logs, then use the console logger instead.
         multipleListener.addListener(new ConsoleLoggerListener());
       }
       // Add the file logging listener.

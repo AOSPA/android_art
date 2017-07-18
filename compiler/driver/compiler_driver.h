@@ -23,7 +23,6 @@
 #include <vector>
 
 #include "arch/instruction_set.h"
-#include "base/arena_allocator.h"
 #include "base/array_ref.h"
 #include "base/bit_utils.h"
 #include "base/mutex.h"
@@ -38,7 +37,6 @@
 #include "method_reference.h"
 #include "mirror/class.h"  // For mirror::Class::Status.
 #include "os.h"
-#include "runtime.h"
 #include "safe_map.h"
 #include "thread_pool.h"
 #include "utils/atomic_method_ref_map.h"
@@ -56,12 +54,12 @@ class VerifierDepsTest;
 }  // namespace verifier
 
 class BitVector;
-class CompiledClass;
 class CompiledMethod;
 class CompilerOptions;
 class DexCompilationUnit;
 struct InlineIGetIPutData;
 class InstructionSetFeatures;
+class InternTable;
 class ParallelCompilationManager;
 class ScopedObjectAccess;
 template <class Allocator> class SrcMap;
@@ -121,21 +119,12 @@ class CompilerDriver {
                   TimingLogger* timings)
       REQUIRES(!Locks::mutator_lock_, !compiled_classes_lock_, !dex_to_dex_references_lock_);
 
-  void CompileAll(jobject class_loader,
-                  const std::vector<const DexFile*>& dex_files,
-                  VdexFile* vdex_file,
-                  TimingLogger* timings)
-      REQUIRES(!Locks::mutator_lock_, !compiled_classes_lock_, !dex_to_dex_references_lock_);
-
   // Compile a single Method.
   void CompileOne(Thread* self, ArtMethod* method, TimingLogger* timings)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!compiled_classes_lock_, !dex_to_dex_references_lock_);
 
-  VerificationResults* GetVerificationResults() const {
-    DCHECK(Runtime::Current()->IsAotCompiler());
-    return verification_results_;
-  }
+  VerificationResults* GetVerificationResults() const;
 
   InstructionSet GetInstructionSet() const {
     return instruction_set_;
@@ -164,7 +153,7 @@ class CompilerDriver {
   std::unique_ptr<const std::vector<uint8_t>> CreateQuickResolutionTrampoline() const;
   std::unique_ptr<const std::vector<uint8_t>> CreateQuickToInterpreterBridge() const;
 
-  CompiledClass* GetCompiledClass(ClassReference ref) const
+  bool GetCompiledClass(ClassReference ref, mirror::Class::Status* status) const
       REQUIRES(!compiled_classes_lock_);
 
   CompiledMethod* GetCompiledMethod(MethodReference ref) const;
@@ -179,6 +168,40 @@ class CompilerDriver {
                                      uint16_t class_def_index,
                                      bool requires)
       REQUIRES(!requires_constructor_barrier_lock_);
+
+  // Do the <init> methods for this class require a constructor barrier (prior to the return)?
+  // The answer is "yes", if and only if this class has any instance final fields.
+  // (This must not be called for any non-<init> methods; the answer would be "no").
+  //
+  // ---
+  //
+  // JLS 17.5.1 "Semantics of final fields" mandates that all final fields are frozen at the end
+  // of the invoked constructor. The constructor barrier is a conservative implementation means of
+  // enforcing the freezes happen-before the object being constructed is observable by another
+  // thread.
+  //
+  // Note: This question only makes sense for instance constructors;
+  // static constructors (despite possibly having finals) never need
+  // a barrier.
+  //
+  // JLS 12.4.2 "Detailed Initialization Procedure" approximately describes
+  // class initialization as:
+  //
+  //   lock(class.lock)
+  //     class.state = initializing
+  //   unlock(class.lock)
+  //
+  //   invoke <clinit>
+  //
+  //   lock(class.lock)
+  //     class.state = initialized
+  //   unlock(class.lock)              <-- acts as a release
+  //
+  // The last operation in the above example acts as an atomic release
+  // for any stores in <clinit>, which ends up being stricter
+  // than what a constructor barrier needs.
+  //
+  // See also QuasiAtomic::ThreadFenceForConstructor().
   bool RequiresConstructorBarrier(Thread* self,
                                   const DexFile* dex_file,
                                   uint16_t class_def_index)
@@ -231,9 +254,12 @@ class CompilerDriver {
 
   // Resolve a method. Returns null on failure, including incompatible class change.
   ArtMethod* ResolveMethod(
-      ScopedObjectAccess& soa, Handle<mirror::DexCache> dex_cache,
-      Handle<mirror::ClassLoader> class_loader, const DexCompilationUnit* mUnit,
-      uint32_t method_idx, InvokeType invoke_type, bool check_incompatible_class_change = true)
+      ScopedObjectAccess& soa,
+      Handle<mirror::DexCache> dex_cache,
+      Handle<mirror::ClassLoader> class_loader,
+      const DexCompilationUnit* mUnit,
+      uint32_t method_idx,
+      InvokeType invoke_type)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void ProcessedInstanceField(bool resolved);
@@ -358,19 +384,6 @@ class CompilerDriver {
   }
 
  private:
-  // Can `referrer_class` access the resolved `member`?
-  // Dispatch call to mirror::Class::CanAccessResolvedField or
-  // mirror::Class::CanAccessResolvedMember depending on the value of
-  // ArtMember.
-  template <typename ArtMember>
-  static bool CanAccessResolvedMember(mirror::Class* referrer_class,
-                                      mirror::Class* access_to,
-                                      ArtMember* member,
-                                      mirror::DexCache* dex_cache,
-                                      uint32_t field_idx)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
- private:
   void PreCompile(jobject class_loader,
                   const std::vector<const DexFile*>& dex_files,
                   TimingLogger* timings)
@@ -471,10 +484,10 @@ class CompilerDriver {
   std::map<ClassReference, bool> requires_constructor_barrier_
       GUARDED_BY(requires_constructor_barrier_lock_);
 
-  typedef SafeMap<const ClassReference, CompiledClass*> ClassTable;
+  using ClassStateTable = SafeMap<const ClassReference, mirror::Class::Status>;
   // All class references that this compiler has compiled.
   mutable Mutex compiled_classes_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
-  ClassTable compiled_classes_ GUARDED_BY(compiled_classes_lock_);
+  ClassStateTable compiled_classes_ GUARDED_BY(compiled_classes_lock_);
 
   typedef AtomicMethodRefMap<CompiledMethod*> MethodTable;
 

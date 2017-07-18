@@ -55,9 +55,24 @@ extern "C" void art_quick_invoke_stub(ArtMethod*, uint32_t*, uint32_t, Thread*, 
 extern "C" void art_quick_invoke_static_stub(ArtMethod*, uint32_t*, uint32_t, Thread*, JValue*,
                                              const char*);
 
+DEFINE_RUNTIME_DEBUG_FLAG(ArtMethod, kCheckDeclaringClassState);
+
 // Enforce that we he have the right index for runtime methods.
 static_assert(ArtMethod::kRuntimeMethodDexMethodIndex == DexFile::kDexNoIndex,
               "Wrong runtime-method dex method index");
+
+ArtMethod* ArtMethod::GetCanonicalMethod(PointerSize pointer_size) {
+  if (LIKELY(!IsDefault())) {
+    return this;
+  } else {
+    mirror::Class* declaring_class = GetDeclaringClass();
+    ArtMethod* ret = declaring_class->FindDeclaredVirtualMethod(declaring_class->GetDexCache(),
+                                                                GetDexMethodIndex(),
+                                                                pointer_size);
+    DCHECK(ret != nullptr);
+    return ret;
+  }
+}
 
 ArtMethod* ArtMethod::GetNonObsoleteMethod() {
   DCHECK_EQ(kRuntimePointerSize, Runtime::Current()->GetClassLinker()->GetImagePointerSize());
@@ -435,13 +450,7 @@ static uint32_t GetOatMethodIndexFromMethodIndex(const DexFile& dex_file,
   const uint8_t* class_data = dex_file.GetClassData(class_def);
   CHECK(class_data != nullptr);
   ClassDataItemIterator it(dex_file, class_data);
-  // Skip fields
-  while (it.HasNextStaticField()) {
-    it.Next();
-  }
-  while (it.HasNextInstanceField()) {
-    it.Next();
-  }
+  it.SkipAllFields();
   // Process methods
   size_t class_def_method_index = 0;
   while (it.HasNextDirectMethod()) {
@@ -666,7 +675,9 @@ const OatQuickMethodHeader* ArtMethod::GetOatQuickMethodHeader(uintptr_t pc) {
     }
     if (existing_entry_point == GetQuickInstrumentationEntryPoint()) {
       // We are running the generic jni stub, but the method is being instrumented.
-      DCHECK_EQ(pc, 0u) << "Should be a downcall";
+      // NB We would normally expect the pc to be zero but we can have non-zero pc's if
+      // instrumentation is installed or removed during the call which is using the generic jni
+      // trampoline.
       DCHECK(IsNative());
       return nullptr;
     }

@@ -30,13 +30,14 @@
 #include "obj_ptr-inl.h"
 #include "ScopedLocalRef.h"
 #include "scoped_thread_state_change-inl.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 
 namespace art {
 
 jclass WellKnownClasses::dalvik_annotation_optimization_CriticalNative;
 jclass WellKnownClasses::dalvik_annotation_optimization_FastNative;
 jclass WellKnownClasses::dalvik_system_BaseDexClassLoader;
+jclass WellKnownClasses::dalvik_system_DelegateLastClassLoader;
 jclass WellKnownClasses::dalvik_system_DexClassLoader;
 jclass WellKnownClasses::dalvik_system_DexFile;
 jclass WellKnownClasses::dalvik_system_DexPathList;
@@ -270,6 +271,7 @@ void WellKnownClasses::Init(JNIEnv* env) {
       CacheClass(env, "dalvik/annotation/optimization/CriticalNative");
   dalvik_annotation_optimization_FastNative = CacheClass(env, "dalvik/annotation/optimization/FastNative");
   dalvik_system_BaseDexClassLoader = CacheClass(env, "dalvik/system/BaseDexClassLoader");
+  dalvik_system_DelegateLastClassLoader = CacheClass(env, "dalvik/system/DelegateLastClassLoader");
   dalvik_system_DexClassLoader = CacheClass(env, "dalvik/system/DexClassLoader");
   dalvik_system_DexFile = CacheClass(env, "dalvik/system/DexFile");
   dalvik_system_DexPathList = CacheClass(env, "dalvik/system/DexPathList");

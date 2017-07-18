@@ -127,7 +127,7 @@ class DexoptAnalyzer FINAL {
     original_argc = argc;
     original_argv = argv;
 
-    InitLogging(argv, Runtime::Aborter);
+    InitLogging(argv, Runtime::Abort);
     // Skip over the command name.
     argv++;
     argc--;
@@ -216,6 +216,8 @@ class DexoptAnalyzer FINAL {
     if (!CreateRuntime()) {
       return kErrorCannotCreateRuntime;
     }
+    std::unique_ptr<Runtime> runtime(Runtime::Current());
+
     OatFileAssistant oat_file_assistant(dex_file_.c_str(), isa_, /*load_executable*/ false);
     // Always treat elements of the bootclasspath as up-to-date.
     // TODO(calin): this check should be in OatFileAssistant.

@@ -23,7 +23,6 @@
 #include "art_method-inl.h"
 #include "class_linker-inl.h"
 #include "common_compiler_test.h"
-#include "compiled_class.h"
 #include "dex_file.h"
 #include "dex_file_types.h"
 #include "gc/heap.h"
@@ -43,10 +42,7 @@ class CompilerDriverTest : public CommonCompilerTest {
   void CompileAll(jobject class_loader) REQUIRES(!Locks::mutator_lock_) {
     TimingLogger timings("CompilerDriverTest::CompileAll", false, false);
     TimingLogger::ScopedTiming t(__FUNCTION__, &timings);
-    compiler_driver_->CompileAll(class_loader,
-                                 GetDexFiles(class_loader),
-                                 /* verifier_deps */ nullptr,
-                                 &timings);
+    compiler_driver_->CompileAll(class_loader, GetDexFiles(class_loader), &timings);
     t.NewTiming("MakeAllExecutable");
     MakeAllExecutable(class_loader);
   }
@@ -240,8 +236,10 @@ class CompilerDriverProfileTest : public CompilerDriverTest {
 
     ProfileCompilationInfo info;
     for (const std::unique_ptr<const DexFile>& dex_file : dex_files) {
-      profile_info_.AddMethodIndex(dex_file->GetLocation(), dex_file->GetLocationChecksum(), 1);
-      profile_info_.AddMethodIndex(dex_file->GetLocation(), dex_file->GetLocationChecksum(), 2);
+      profile_info_.AddMethodIndex(ProfileCompilationInfo::MethodHotness::kFlagHot,
+                                   MethodReference(dex_file.get(), 1));
+      profile_info_.AddMethodIndex(ProfileCompilationInfo::MethodHotness::kFlagHot,
+                                   MethodReference(dex_file.get(), 2));
     }
     return &profile_info_;
   }
@@ -339,10 +337,11 @@ class CompilerDriverVerifyTest : public CompilerDriverTest {
     ASSERT_NE(klass, nullptr);
     EXPECT_TRUE(klass->IsVerified());
 
-    CompiledClass* compiled_class = compiler_driver_->GetCompiledClass(
-        ClassReference(&klass->GetDexFile(), klass->GetDexTypeIndex().index_));
-    ASSERT_NE(compiled_class, nullptr);
-    EXPECT_EQ(compiled_class->GetStatus(), mirror::Class::kStatusVerified);
+    mirror::Class::Status status;
+    bool found = compiler_driver_->GetCompiledClass(
+        ClassReference(&klass->GetDexFile(), klass->GetDexTypeIndex().index_), &status);
+    ASSERT_TRUE(found);
+    EXPECT_EQ(status, mirror::Class::kStatusVerified);
   }
 };
 

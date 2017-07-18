@@ -31,10 +31,11 @@
 #include "nodes.h"
 #include "optimizing_compiler_stats.h"
 #include "read_barrier_option.h"
+#include "stack.h"
 #include "stack_map_stream.h"
 #include "string_reference.h"
+#include "type_reference.h"
 #include "utils/label.h"
-#include "utils/type_reference.h"
 
 namespace art {
 
@@ -495,6 +496,8 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   static void CreateCommonInvokeLocationSummary(
       HInvoke* invoke, InvokeDexCallingConventionVisitor* visitor);
 
+  void GenerateInvokeStaticOrDirectRuntimeCall(
+      HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path);
   void GenerateInvokeUnresolvedRuntimeCall(HInvokeUnresolved* invoke);
 
   void GenerateInvokePolymorphicCall(HInvokePolymorphic* invoke);
@@ -541,7 +544,7 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
       case HLoadString::LoadKind::kBssEntry:
         DCHECK(load->NeedsEnvironment());
         return LocationSummary::kCallOnSlowPath;
-      case HLoadString::LoadKind::kDexCacheViaMethod:
+      case HLoadString::LoadKind::kRuntimeCall:
         DCHECK(load->NeedsEnvironment());
         return LocationSummary::kCallOnMainOnly;
       case HLoadString::LoadKind::kJitTableAddress:
@@ -563,17 +566,16 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
       HInvokeStaticOrDirect* invoke) = 0;
 
   // Generate a call to a static or direct method.
-  virtual void GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke, Location temp) = 0;
+  virtual void GenerateStaticOrDirectCall(
+      HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path = nullptr) = 0;
   // Generate a call to a virtual method.
-  virtual void GenerateVirtualCall(HInvokeVirtual* invoke, Location temp) = 0;
+  virtual void GenerateVirtualCall(
+      HInvokeVirtual* invoke, Location temp, SlowPathCode* slow_path = nullptr) = 0;
 
   // Copy the result of a call into the given target.
   virtual void MoveFromReturnRegister(Location trg, Primitive::Type type) = 0;
 
   virtual void GenerateNop() = 0;
-
-  uint32_t GetReferenceSlowFlagOffset() const;
-  uint32_t GetReferenceDisableFlagOffset() const;
 
   static QuickEntrypointEnum GetArrayAllocationEntrypoint(Handle<mirror::Class> array_klass);
 
@@ -842,7 +844,7 @@ class SlowPathGenerator {
     const uint32_t dex_pc = instruction->GetDexPc();
     auto iter = slow_path_map_.find(dex_pc);
     if (iter != slow_path_map_.end()) {
-      auto candidates = iter->second;
+      const ArenaVector<std::pair<InstructionType*, SlowPathCode*>>& candidates = iter->second;
       for (const auto& it : candidates) {
         InstructionType* other_instruction = it.first;
         SlowPathCodeType* other_slow_path = down_cast<SlowPathCodeType*>(it.second);

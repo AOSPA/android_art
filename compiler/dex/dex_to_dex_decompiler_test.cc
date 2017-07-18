@@ -39,10 +39,7 @@ class DexToDexDecompilerTest : public CommonCompilerTest {
     TimingLogger::ScopedTiming t(__FUNCTION__, &timings);
     compiler_options_->boot_image_ = false;
     compiler_options_->SetCompilerFilter(CompilerFilter::kQuicken);
-    compiler_driver_->CompileAll(class_loader,
-                                 GetDexFiles(class_loader),
-                                 /* verifier_deps */ nullptr,
-                                 &timings);
+    compiler_driver_->CompileAll(class_loader, GetDexFiles(class_loader), &timings);
   }
 
   void RunTest(const char* dex_name) {
@@ -85,13 +82,7 @@ class DexToDexDecompilerTest : public CommonCompilerTest {
         continue;
       }
       ClassDataItemIterator it(*updated_dex_file, class_data);
-      // Skip fields
-      while (it.HasNextStaticField()) {
-        it.Next();
-      }
-      while (it.HasNextInstanceField()) {
-        it.Next();
-      }
+      it.SkipAllFields();
 
       // Unquicken each method.
       while (it.HasNextDirectMethod()) {

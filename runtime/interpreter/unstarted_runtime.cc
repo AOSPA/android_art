@@ -50,7 +50,7 @@
 #include "mirror/string-inl.h"
 #include "nth_caller_visitor.h"
 #include "reflection.h"
-#include "thread.h"
+#include "thread-inl.h"
 #include "transaction.h"
 #include "well_known_classes.h"
 #include "zip_archive.h"
@@ -568,7 +568,7 @@ static void GetResourceAsStream(Thread* self,
   // Copy in content.
   memcpy(h_array->GetData(), mem_map->Begin(), map_size);
   // Be proactive releasing memory.
-  mem_map.release();
+  mem_map.reset();
 
   // Create a ByteArrayInputStream.
   Handle<mirror::Class> h_class(hs.NewHandle(

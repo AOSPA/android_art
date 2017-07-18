@@ -1526,7 +1526,7 @@ DEFINE_FUNCTION art_quick_aput_obj
     POISON_HEAP_REF edx
     movl %edx, MIRROR_OBJECT_ARRAY_DATA_OFFSET(%eax, %ecx, 4)
     movl %fs:THREAD_CARD_TABLE_OFFSET, %edx
-    shrl LITERAL(7), %eax
+    shrl LITERAL(CARD_TABLE_CARD_SHIFT), %eax
     movb %dl, (%edx, %eax)
     ret
 .Ldo_aput_null:
@@ -1567,7 +1567,7 @@ DEFINE_FUNCTION art_quick_aput_obj
     POISON_HEAP_REF edx
     movl %edx, MIRROR_OBJECT_ARRAY_DATA_OFFSET(%eax, %ecx, 4)  // do the aput
     movl %fs:THREAD_CARD_TABLE_OFFSET, %edx
-    shrl LITERAL(7), %eax
+    shrl LITERAL(CARD_TABLE_CARD_SHIFT), %eax
     movb %dl, (%edx, %eax)
     ret
     CFI_ADJUST_CFA_OFFSET(12)     // 3 POP after the jz for unwinding.
@@ -1948,17 +1948,23 @@ ONE_ARG_RUNTIME_EXCEPTION art_invoke_obsolete_method_stub, artInvokeObsoleteMeth
 DEFINE_FUNCTION art_quick_instrumentation_entry
     SETUP_SAVE_REFS_AND_ARGS_FRAME ebx, edx
     PUSH eax                      // Save eax which will be clobbered by the callee-save method.
-    subl LITERAL(12), %esp        // Align stack.
-    CFI_ADJUST_CFA_OFFSET(12)
-    pushl FRAME_SIZE_SAVE_REFS_AND_ARGS-4+16(%esp)  // Pass LR.
-    CFI_ADJUST_CFA_OFFSET(4)
+    subl LITERAL(16), %esp        // Align stack (12 bytes) and reserve space for the SP argument
+    CFI_ADJUST_CFA_OFFSET(16)     // (4 bytes). We lack the scratch registers to calculate the SP
+                                  // right now, so we will just fill it in later.
     pushl %fs:THREAD_SELF_OFFSET  // Pass Thread::Current().
     CFI_ADJUST_CFA_OFFSET(4)
     PUSH ecx                      // Pass receiver.
     PUSH eax                      // Pass Method*.
-    call SYMBOL(artInstrumentationMethodEntryFromCode) // (Method*, Object*, Thread*, LR)
+    leal 32(%esp), %eax           // Put original SP into eax
+    movl %eax, 12(%esp)           // set SP
+    call SYMBOL(artInstrumentationMethodEntryFromCode) // (Method*, Object*, Thread*, SP)
+
     addl LITERAL(28), %esp        // Pop arguments upto saved Method*.
     CFI_ADJUST_CFA_OFFSET(-28)
+
+    testl %eax, %eax
+    jz 1f                         // Test for null return (indicating exception) and handle it.
+
     movl 60(%esp), %edi           // Restore edi.
     movl %eax, 60(%esp)           // Place code* over edi, just under return pc.
     movl SYMBOL(art_quick_instrumentation_exit)@GOT(%ebx), %ebx
@@ -1980,9 +1986,15 @@ DEFINE_FUNCTION art_quick_instrumentation_entry
     addl LITERAL(60), %esp        // Wind stack back upto code*.
     CFI_ADJUST_CFA_OFFSET(-60)
     ret                           // Call method (and pop).
+1:
+    // Make caller handle exception
+    addl LITERAL(4), %esp
+    CFI_ADJUST_CFA_OFFSET(-4)
+    RESTORE_SAVE_REFS_AND_ARGS_FRAME
+    DELIVER_PENDING_EXCEPTION
 END_FUNCTION art_quick_instrumentation_entry
 
-DEFINE_FUNCTION art_quick_instrumentation_exit
+DEFINE_FUNCTION_CUSTOM_CFA art_quick_instrumentation_exit, 0
     pushl LITERAL(0)              // Push a fake return PC as there will be none on the stack.
     CFI_ADJUST_CFA_OFFSET(4)
     SETUP_SAVE_REFS_ONLY_FRAME ebx, ebx
@@ -1992,18 +2004,19 @@ DEFINE_FUNCTION art_quick_instrumentation_exit
     movq %xmm0, (%esp)
     PUSH edx                      // Save gpr return value.
     PUSH eax
-    subl LITERAL(16), %esp        // Align stack
-    CFI_ADJUST_CFA_OFFSET(16)
-    movq %xmm0, (%esp)            // Pass float return value.
-    PUSH edx                      // Pass gpr return value.
-    PUSH eax
+    leal 8(%esp), %eax            // Get pointer to fpr_result
+    movl %esp, %edx               // Get pointer to gpr_result
+    PUSH eax                      // Pass fpr_result
+    PUSH edx                      // Pass gpr_result
     PUSH ecx                      // Pass SP.
     pushl %fs:THREAD_SELF_OFFSET  // Pass Thread::Current.
     CFI_ADJUST_CFA_OFFSET(4)
-    call SYMBOL(artInstrumentationMethodExitFromCode)  // (Thread*, SP, gpr_result, fpr_result)
+    call SYMBOL(artInstrumentationMethodExitFromCode)  // (Thread*, SP, gpr_result*, fpr_result*)
+    testl %eax, %eax              // Check if we returned error.
+    jz 1f
     mov   %eax, %ecx              // Move returned link register.
-    addl LITERAL(32), %esp        // Pop arguments.
-    CFI_ADJUST_CFA_OFFSET(-32)
+    addl LITERAL(16), %esp        // Pop arguments.
+    CFI_ADJUST_CFA_OFFSET(-16)
     movl %edx, %ebx               // Move returned link register for deopt
                                   // (ebx is pretending to be our LR).
     POP eax                       // Restore gpr return value.
@@ -2015,6 +2028,11 @@ DEFINE_FUNCTION art_quick_instrumentation_exit
     addl LITERAL(4), %esp         // Remove fake return pc.
     CFI_ADJUST_CFA_OFFSET(-4)
     jmp   *%ecx                   // Return.
+1:
+    addl LITERAL(32), %esp
+    CFI_ADJUST_CFA_OFFSET(-32)
+    RESTORE_SAVE_REFS_ONLY_FRAME
+    DELIVER_PENDING_EXCEPTION
 END_FUNCTION art_quick_instrumentation_exit
 
     /*

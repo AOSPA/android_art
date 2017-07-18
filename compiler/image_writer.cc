@@ -27,6 +27,8 @@
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
+#include "base/callee_save_type.h"
+#include "base/enums.h"
 #include "base/logging.h"
 #include "base/unix_file/fd_file.h"
 #include "class_linker-inl.h"
@@ -44,10 +46,11 @@
 #include "gc/heap.h"
 #include "gc/space/large_object_space.h"
 #include "gc/space/space-inl.h"
+#include "gc/verification.h"
 #include "globals.h"
+#include "handle_scope-inl.h"
 #include "image.h"
 #include "imt_conflict_table.h"
-#include "intern_table.h"
 #include "jni_internal.h"
 #include "linear_alloc.h"
 #include "lock_word.h"
@@ -68,7 +71,6 @@
 #include "oat_file_manager.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
-#include "handle_scope-inl.h"
 #include "utils/dex_cache_arrays_layout-inl.h"
 
 using ::art::mirror::Class;
@@ -396,12 +398,18 @@ void ImageWriter::SetImageBinSlot(mirror::Object* object, BinSlot bin_slot) {
   // Before we stomp over the lock word, save the hash code for later.
   LockWord lw(object->GetLockWord(false));
   switch (lw.GetState()) {
-    case LockWord::kFatLocked: {
-      LOG(FATAL) << "Fat locked object " << object << " found during object copy";
-      break;
-    }
+    case LockWord::kFatLocked:
+      FALLTHROUGH_INTENDED;
     case LockWord::kThinLocked: {
-      LOG(FATAL) << "Thin locked object " << object << " found during object copy";
+      std::ostringstream oss;
+      bool thin = (lw.GetState() == LockWord::kThinLocked);
+      oss << (thin ? "Thin" : "Fat")
+          << " locked object " << object << "(" << object->PrettyTypeOf()
+          << ") found during object copy";
+      if (thin) {
+        oss << ". Lock owner:" << lw.ThinLockOwner();
+      }
+      LOG(FATAL) << oss.str();
       break;
     }
     case LockWord::kUnlocked:
@@ -469,6 +477,11 @@ void ImageWriter::PrepareDexCacheArraySlots() {
     if (dex_cache->GetResolvedMethodTypes() != nullptr) {
       AddDexCacheArrayRelocation(dex_cache->GetResolvedMethodTypes(),
                                  start + layout.MethodTypesOffset(),
+                                 dex_cache);
+    }
+    if (dex_cache->GetResolvedCallSites() != nullptr) {
+      AddDexCacheArrayRelocation(dex_cache->GetResolvedCallSites(),
+                                 start + layout.CallSitesOffset(),
                                  dex_cache);
     }
   }
@@ -944,11 +957,18 @@ void ImageWriter::PruneAndPreloadDexCache(ObjPtr<mirror::DexCache> dex_cache,
     ArtMethod* method =
         mirror::DexCache::GetElementPtrSize(resolved_methods, i, target_ptr_size_);
     DCHECK(method != nullptr) << "Expected resolution method instead of null method";
-    mirror::Class* declaring_class = method->GetDeclaringClass();
+    // Check if the referenced class is in the image. Note that we want to check the referenced
+    // class rather than the declaring class to preserve the semantics, i.e. using a MethodId
+    // results in resolving the referenced class and that can for example throw OOME.
+    ObjPtr<mirror::Class> referencing_class = class_linker->LookupResolvedType(
+        dex_file,
+        dex_file.GetMethodId(i).class_idx_,
+        dex_cache,
+        class_loader);
     // Copied methods may be held live by a class which was not an image class but have a
     // declaring class which is an image class. Set it to the resolution method to be safe and
     // prevent dangling pointers.
-    if (method->IsCopied() || !KeepClass(declaring_class)) {
+    if (method->IsCopied() || !KeepClass(referencing_class)) {
       mirror::DexCache::SetElementPtrSize(resolved_methods,
                                           i,
                                           resolution_method,
@@ -956,8 +976,8 @@ void ImageWriter::PruneAndPreloadDexCache(ObjPtr<mirror::DexCache> dex_cache,
     } else if (kIsDebugBuild) {
       // Check that the class is still in the classes table.
       ReaderMutexLock mu(Thread::Current(), *Locks::classlinker_classes_lock_);
-      CHECK(class_linker->ClassInClassTable(declaring_class)) << "Class "
-          << Class::PrettyClass(declaring_class) << " not in class linker table";
+      CHECK(class_linker->ClassInClassTable(referencing_class)) << "Class "
+          << Class::PrettyClass(referencing_class) << " not in class linker table";
     }
   }
   // Prune fields and make the contents of the field array deterministic.
@@ -1093,8 +1113,8 @@ void ImageWriter::CheckNonImageClassesRemovedCallback(Object* obj, void* arg) {
     if (!image_writer->KeepClass(klass)) {
       image_writer->DumpImageClasses();
       std::string temp;
-      CHECK(image_writer->KeepClass(klass)) << klass->GetDescriptor(&temp)
-                                            << " " << klass->PrettyDescriptor();
+      CHECK(image_writer->KeepClass(klass))
+          << Runtime::Current()->GetHeap()->GetVerification()->FirstPathFromRootSet(klass);
     }
   }
 }
@@ -1572,13 +1592,13 @@ void ImageWriter::CalculateNewObjectOffsets() {
   image_methods_[ImageHeader::kImtConflictMethod] = runtime->GetImtConflictMethod();
   image_methods_[ImageHeader::kImtUnimplementedMethod] = runtime->GetImtUnimplementedMethod();
   image_methods_[ImageHeader::kSaveAllCalleeSavesMethod] =
-      runtime->GetCalleeSaveMethod(Runtime::kSaveAllCalleeSaves);
+      runtime->GetCalleeSaveMethod(CalleeSaveType::kSaveAllCalleeSaves);
   image_methods_[ImageHeader::kSaveRefsOnlyMethod] =
-      runtime->GetCalleeSaveMethod(Runtime::kSaveRefsOnly);
+      runtime->GetCalleeSaveMethod(CalleeSaveType::kSaveRefsOnly);
   image_methods_[ImageHeader::kSaveRefsAndArgsMethod] =
-      runtime->GetCalleeSaveMethod(Runtime::kSaveRefsAndArgs);
+      runtime->GetCalleeSaveMethod(CalleeSaveType::kSaveRefsAndArgs);
   image_methods_[ImageHeader::kSaveEverythingMethod] =
-      runtime->GetCalleeSaveMethod(Runtime::kSaveEverything);
+      runtime->GetCalleeSaveMethod(CalleeSaveType::kSaveEverything);
   // Visit image methods first to have the main runtime methods in the first image.
   for (auto* m : image_methods_) {
     CHECK(m != nullptr);
@@ -2482,8 +2502,8 @@ void ImageWriter::CopyAndFixupMethod(ArtMethod* orig,
           GetOatAddress(kOatAddressQuickResolutionTrampoline), target_ptr_size_);
     } else {
       bool found_one = false;
-      for (size_t i = 0; i < static_cast<size_t>(Runtime::kLastCalleeSaveType); ++i) {
-        auto idx = static_cast<Runtime::CalleeSaveType>(i);
+      for (size_t i = 0; i < static_cast<size_t>(CalleeSaveType::kLastCalleeSaveType); ++i) {
+        auto idx = static_cast<CalleeSaveType>(i);
         if (runtime->HasCalleeSaveMethod(idx) && runtime->GetCalleeSaveMethod(idx) == orig) {
           found_one = true;
           break;

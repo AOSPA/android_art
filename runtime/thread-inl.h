@@ -19,18 +19,13 @@
 
 #include "thread.h"
 
-#ifdef ART_TARGET_ANDROID
-#include <bionic_tls.h>  // Access to our own TLS slot.
-#endif
-
-#include <pthread.h>
-
 #include "base/casts.h"
 #include "base/mutex-inl.h"
-#include "gc/heap.h"
+#include "base/time_utils.h"
 #include "jni_env_ext.h"
+#include "managed_stack-inl.h"
 #include "obj_ptr.h"
-#include "runtime.h"
+#include "thread-current-inl.h"
 #include "thread_pool.h"
 
 namespace art {
@@ -39,21 +34,6 @@ namespace art {
 static inline Thread* ThreadForEnv(JNIEnv* env) {
   JNIEnvExt* full_env(down_cast<JNIEnvExt*>(env));
   return full_env->self;
-}
-
-inline Thread* Thread::Current() {
-  // We rely on Thread::Current returning null for a detached thread, so it's not obvious
-  // that we can replace this with a direct %fs access on x86.
-  if (!is_started_) {
-    return nullptr;
-  } else {
-#ifdef ART_TARGET_ANDROID
-    void* thread = __get_tls()[TLS_SLOT_ART_THREAD_SELF];
-#else
-    void* thread = pthread_getspecific(Thread::pthread_key_self_);
-#endif
-    return reinterpret_cast<Thread*>(thread);
-  }
 }
 
 inline void Thread::AllowThreadSuspension() {
@@ -295,14 +275,6 @@ inline ThreadState Thread::TransitionFromSuspendedToRunnable() {
   return static_cast<ThreadState>(old_state);
 }
 
-inline void Thread::VerifyStack() {
-  if (kVerifyStack) {
-    if (Runtime::Current()->GetHeap()->IsObjectValidationEnabled()) {
-      VerifyStackImpl();
-    }
-  }
-}
-
 inline mirror::Object* Thread::AllocTlab(size_t bytes) {
   DCHECK_GE(TlabSize(), bytes);
   ++tlsPtr_.thread_local_objects;
@@ -358,12 +330,12 @@ inline void Thread::PoisonObjectPointersIfDebug() {
 inline bool Thread::ModifySuspendCount(Thread* self,
                                        int delta,
                                        AtomicInteger* suspend_barrier,
-                                       bool for_debugger) {
+                                       SuspendReason reason) {
   if (delta > 0 && ((kUseReadBarrier && this != self) || suspend_barrier != nullptr)) {
     // When delta > 0 (requesting a suspend), ModifySuspendCountInternal() may fail either if
     // active_suspend_barriers is full or we are in the middle of a thread flip. Retry in a loop.
     while (true) {
-      if (LIKELY(ModifySuspendCountInternal(self, delta, suspend_barrier, for_debugger))) {
+      if (LIKELY(ModifySuspendCountInternal(self, delta, suspend_barrier, reason))) {
         return true;
       } else {
         // Failure means the list of active_suspend_barriers is full or we are in the middle of a
@@ -382,8 +354,16 @@ inline bool Thread::ModifySuspendCount(Thread* self,
       }
     }
   } else {
-    return ModifySuspendCountInternal(self, delta, suspend_barrier, for_debugger);
+    return ModifySuspendCountInternal(self, delta, suspend_barrier, reason);
   }
+}
+
+inline ShadowFrame* Thread::PushShadowFrame(ShadowFrame* new_top_frame) {
+  return tlsPtr_.managed_stack.PushShadowFrame(new_top_frame);
+}
+
+inline ShadowFrame* Thread::PopShadowFrame() {
+  return tlsPtr_.managed_stack.PopShadowFrame();
 }
 
 }  // namespace art

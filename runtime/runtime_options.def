@@ -100,6 +100,8 @@ RUNTIME_OPTIONS_KEY (Unit,                NoSigChain)
 RUNTIME_OPTIONS_KEY (Unit,                ForceNativeBridge)
 RUNTIME_OPTIONS_KEY (LogVerbosity,        Verbose)
 RUNTIME_OPTIONS_KEY (unsigned int,        LockProfThreshold)
+RUNTIME_OPTIONS_KEY (unsigned int,        StackDumpLockProfThreshold)
+RUNTIME_OPTIONS_KEY (bool,                UseTombstonedTraces, false)
 RUNTIME_OPTIONS_KEY (std::string,         StackTraceFile)
 RUNTIME_OPTIONS_KEY (Unit,                MethodTrace)
 RUNTIME_OPTIONS_KEY (std::string,         MethodTraceFile,                "/data/misc/trace/method-trace-file.bin")
@@ -140,5 +142,7 @@ RUNTIME_OPTIONS_KEY (void (*)(int32_t status), \
                                                                           // We don't call abort(3) by default; see
                                                                           // Runtime::Abort.
 RUNTIME_OPTIONS_KEY (void (*)(),          HookAbort,                      nullptr)
+
+RUNTIME_OPTIONS_KEY (bool,                SlowDebug,                      false)
 
 #undef RUNTIME_OPTIONS_KEY

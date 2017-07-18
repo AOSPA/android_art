@@ -30,6 +30,13 @@ else
   HAS_SRC=false
 fi
 
+# .java files in src-art get compiled with libcore on the bootclasspath
+if [ -d src-art ]; then
+  HAS_SRC_ART=true
+else
+  HAS_SRC_ART=false
+fi
+
 if [ -d src2 ]; then
   HAS_SRC2=true
 else
@@ -60,15 +67,24 @@ else
   HAS_SRC_DEX2OAT_UNRESOLVED=false
 fi
 
+# DESUGAR=false run-test... will disable desugar.
+if [[ "$DESUGAR" == false ]]; then
+  USE_DESUGAR=false
+fi
+
 # Allow overriding ZIP_COMPRESSION_METHOD with e.g. 'store'
 ZIP_COMPRESSION_METHOD="deflate"
 # Align every ZIP file made by calling $ZIPALIGN command?
 WITH_ZIP_ALIGN=false
 ZIP_ALIGN_BYTES="-1"
 
-DX_FLAGS=""
+DX_FLAGS="--min-sdk-version=24"
+DX_VM_FLAGS=""
 SKIP_DX_MERGER="false"
 EXPERIMENTAL=""
+
+BUILD_MODE="target"
+DEV_MODE="no"
 
 # The key for default arguments if no experimental things are enabled.
 DEFAULT_EXPERIMENT="no-experiment"
@@ -82,9 +98,9 @@ JACK_EXPERIMENTAL_ARGS["method-handles"]="-D jack.java.source.version=1.7 -D jac
 JACK_EXPERIMENTAL_ARGS[${DEFAULT_EXPERIMENT}]="-D jack.java.source.version=1.8 -D jack.android.min-api-level=24"
 
 declare -A SMALI_EXPERIMENTAL_ARGS
-SMALI_EXPERIMENTAL_ARGS["default-methods"]="--api-level 24"
-SMALI_EXPERIMENTAL_ARGS["method-handles"]="--api-level 26"
-SMALI_EXPERIMENTAL_ARGS["agents"]="--api-level 26"
+SMALI_EXPERIMENTAL_ARGS["default-methods"]="--api 24"
+SMALI_EXPERIMENTAL_ARGS["method-handles"]="--api 26"
+SMALI_EXPERIMENTAL_ARGS["agents"]="--api 26"
 
 declare -A JAVAC_EXPERIMENTAL_ARGS
 JAVAC_EXPERIMENTAL_ARGS["default-methods"]="-source 1.8 -target 1.8"
@@ -94,11 +110,19 @@ JAVAC_EXPERIMENTAL_ARGS["method-handles"]="-source 1.8 -target 1.8"
 JAVAC_EXPERIMENTAL_ARGS[${DEFAULT_EXPERIMENT}]="-source 1.8 -target 1.8"
 JAVAC_EXPERIMENTAL_ARGS["agents"]="-source 1.8 -target 1.8"
 
+declare -A DX_EXPERIMENTAL_ARGS
+DX_EXPERIMENTAL_ARGS["method-handles"]="--min-sdk-version=26"
+
 while true; do
   if [ "x$1" = "x--dx-option" ]; then
     shift
     option="$1"
     DX_FLAGS="${DX_FLAGS} $option"
+    shift
+  elif [ "x$1" = "x--dx-vm-option" ]; then
+    shift
+    option="$1"
+    DX_VM_FLAGS="${DX_VM_FLAGS} $option"
     shift
   elif [ "x$1" = "x--jvm" ]; then
     shift
@@ -137,6 +161,15 @@ while true; do
     WITH_ZIP_ALIGN=true
     ZIP_ALIGN_BYTES="$1"
     shift
+  elif [ "x$1" = "x--host" ]; then
+    BUILD_MODE="host"
+    shift
+  elif [ "x$1" = "x--target" ]; then
+    BUILD_MODE="target"
+    shift
+  elif [ "x$1" = "x--dev" ]; then
+    DEV_MODE="yes"
+    shift
   elif expr "x$1" : "x--" >/dev/null 2>&1; then
     echo "unknown $0 option: $1" 1>&2
     exit 1
@@ -163,6 +196,7 @@ for experiment in ${EXPERIMENTAL}; do
   JACK_ARGS="${JACK_ARGS} ${JACK_EXPERIMENTAL_ARGS[${experiment}]}"
   SMALI_ARGS="${SMALI_ARGS} ${SMALI_EXPERIMENTAL_ARGS[${experiment}]}"
   JAVAC_ARGS="${JAVAC_ARGS} ${JAVAC_EXPERIMENTAL_ARGS[${experiment}]}"
+  DX_FLAGS="${DX_FLAGS} ${DX_EXPERIMENTAL_ARGS[${experiment}]}"
 done
 
 #########################################
@@ -185,12 +219,69 @@ function zip() {
   fi
 }
 
+function desugar() {
+  local desugar_args=--mode=host
+  if [[ $BUILD_MODE == target ]]; then
+    desugar_args=--mode=target
+  fi
+
+  if [[ $DEV_MODE == yes ]]; then
+    desugar_args="$desugar_args --show-commands"
+  fi
+
+  "$DESUGAR" --core-only $desugar_args "$@"
+}
+
+# Like regular javac but includes libcore on the bootclasspath.
+function javac_with_bootclasspath {
+  local javac_args=--mode=host
+  if [[ $BUILD_MODE == target ]]; then
+    javac_args=--mode=target
+  fi
+
+  if [[ $DEV_MODE == yes ]]; then
+    javac_args="$javac_args --show-commands"
+  fi
+
+  "$ANDROID_BUILD_TOP/art/tools/javac-helper.sh" --core-only $javac_args "$@"
+}
+
+# Make a "dex" file given a directory of classes in $1.
+# Also calls desugar on the classes first to convert lambdas.
+function make_dex() {
+  local name="$1"
+
+  local dx_input
+  if [[ "$USE_DESUGAR" == "true" ]]; then
+    # Make a jar first so desugar doesn't need every .class file individually.
+    jar cf "$name.before-desugar.jar" -C "$name" .
+
+    dx_input="${name}.desugar.jar"
+
+    # Make desugared JAR.
+    desugar --input "$name.before-desugar.jar" --output "$dx_input"
+  else
+    dx_input="${name}"
+  fi
+
+  # Make dex file from desugared JAR.
+  ${DX} -JXmx256m ${DX_VM_FLAGS} --debug --dex --dump-to=${name}.lst --output=${name}.dex --dump-width=1000 ${DX_FLAGS} "${dx_input}"
+}
+
+# Print the directory name only if it exists.
+function maybe_dir() {
+  local dirname="$1"
+  if [[ -d "$dirname" ]]; then
+    echo "$dirname"
+  fi
+}
+
 if [ -e classes.dex ]; then
   zip $TEST_NAME.jar classes.dex
   exit 0
 fi
 
-if ! [ "${HAS_SRC}" = "true" ] && ! [ "${HAS_SRC2}" = "true" ]; then
+if ! [ "${HAS_SRC}" = "true" ] && ! [ "${HAS_SRC2}" = "true" ] && ! [ "${HAS_SRC_ART}" = "true" ]; then
   # No src directory? Then forget about trying to run dx.
   SKIP_DX_MERGER="true"
 fi
@@ -209,24 +300,25 @@ if [ ${HAS_SRC_DEX2OAT_UNRESOLVED} = "true" ]; then
     ${JACK} --import classes.jill.jar --output-dex .
   else
     if [ ${NEED_DEX} = "true" ]; then
-      ${DX} -JXmx256m --debug --dex --dump-to=classes-ex.lst --output=classes.dex --dump-width=1000 ${DX_FLAGS} classes-ex
+      make_dex classes-ex
+      mv classes-ex.dex classes.dex   # rename it so it shows up as "classes.dex" in the zip file.
       zip ${TEST_NAME}-ex.jar classes.dex
-      ${DX} -JXmx256m --debug --dex --dump-to=classes.lst --output=classes.dex --dump-width=1000 ${DX_FLAGS} classes
+      make_dex classes
     fi
   fi
 else
   if [ ${USE_JACK} = "true" ]; then
     # Jack toolchain
-    if [ "${HAS_SRC}" = "true" ]; then
+    if [[ "$HAS_SRC" == true || "$HAS_SRC_ART" == true ]]; then
       if [ "${HAS_SRC_MULTIDEX}" = "true" ]; then
         # Compile src and src-multidex in the same .jack file. We will apply multidex partitioning
         # when creating the output .dex file.
-        ${JACK} ${JACK_ARGS} --output-jack src.jack src src src-multidex
+        ${JACK} ${JACK_ARGS} --output-jack src.jack $(maybe_dir src) src-multidex $(maybe_dir src-art)
         jack_extra_args="${jack_extra_args} -D jack.dex.output.policy=minimal-multidex"
         jack_extra_args="${jack_extra_args} -D jack.preprocessor=true"
         jack_extra_args="${jack_extra_args} -D jack.preprocessor.file=multidex.jpp"
       else
-        ${JACK} ${JACK_ARGS} --output-jack src.jack src
+        ${JACK} ${JACK_ARGS} --output-jack src.jack $(maybe_dir src) $(maybe_dir src-art)
       fi
       jack_extra_args="${jack_extra_args} --import src.jack"
     fi
@@ -240,7 +332,7 @@ else
     fi
 
     # Compile jack files into a DEX file.
-    if [ "${HAS_SRC}" = "true" ] || [ "${HAS_SRC2}" = "true" ]; then
+    if [ "${HAS_SRC}" = "true" ] || [ "${HAS_SRC2}" = "true" ] || [ "${HAS_SRC_ART}" ]; then
       ${JACK} ${JACK_ARGS} ${jack_extra_args} --output-dex .
     fi
   else
@@ -250,12 +342,16 @@ else
       ${JAVAC} ${JAVAC_ARGS} -implicit:none -classpath src-multidex -d classes `find src -name '*.java'`
     fi
 
+    if [ "${HAS_SRC_ART}" = "true" ]; then
+      mkdir -p classes
+      javac_with_bootclasspath ${JAVAC_ARGS} -implicit:none -classpath src-multidex -d classes `find src-art -name '*.java'`
+    fi
+
     if [ "${HAS_SRC_MULTIDEX}" = "true" ]; then
       mkdir classes2
-      ${JAVAC} -implicit:none -classpath src -d classes2 `find src-multidex -name '*.java'`
+      ${JAVAC} ${JAVAC_ARGS} -implicit:none -classpath src -d classes2 `find src-multidex -name '*.java'`
       if [ ${NEED_DEX} = "true" ]; then
-        ${DX} -JXmx256m --debug --dex --dump-to=classes2.lst --output=classes2.dex \
-          --dump-width=1000 ${DX_FLAGS} classes2
+        make_dex classes2
       fi
     fi
 
@@ -264,10 +360,9 @@ else
       ${JAVAC} ${JAVAC_ARGS} -d classes `find src2 -name '*.java'`
     fi
 
-    if [ "${HAS_SRC}" = "true" ] || [ "${HAS_SRC2}" = "true" ]; then
+    if [[ "${HAS_SRC}" == "true" || "${HAS_SRC2}" == "true" || "${HAS_SRC_ART}" == "true" ]]; then
       if [ ${NEED_DEX} = "true" -a ${SKIP_DX_MERGER} = "false" ]; then
-        ${DX} -JXmx256m --debug --dex --dump-to=classes.lst --output=classes.dex \
-          --dump-width=1000 ${DX_FLAGS} classes
+        make_dex classes
       fi
     fi
   fi
@@ -275,7 +370,7 @@ fi
 
 if [ "${HAS_SMALI}" = "true" -a ${NEED_DEX} = "true" ]; then
   # Compile Smali classes
-  ${SMALI} -JXmx512m ${SMALI_ARGS} --output smali_classes.dex `find smali -name '*.smali'`
+  ${SMALI} -JXmx512m assemble ${SMALI_ARGS} --output smali_classes.dex `find smali -name '*.smali'`
 
   # Don't bother with dexmerger if we provide our own main function in a smali file.
   if [ ${SKIP_DX_MERGER} = "false" ]; then
@@ -287,7 +382,7 @@ fi
 
 if [ "${HAS_SMALI_MULTIDEX}" = "true" -a ${NEED_DEX} = "true" ]; then
   # Compile Smali classes
-  ${SMALI} -JXmx512m ${SMALI_ARGS} --output smali_classes2.dex `find smali-multidex -name '*.smali'`
+  ${SMALI} -JXmx512m assemble ${SMALI_ARGS} --output smali_classes2.dex `find smali-multidex -name '*.smali'`
 
   # Don't bother with dexmerger if we provide our own main function in a smali file.
   if [ ${HAS_SRC_MULTIDEX} = "true" ]; then
@@ -308,11 +403,22 @@ if [ ${HAS_SRC_EX} = "true" ]; then
       # Restore previous "classes.dex" so it can be zipped.
       mv classes-1.dex classes.dex
   else
+    # Build src-ex into classes-ex.
+    # Includes 'src', 'src-art' source when compiling classes-ex, but exclude their .class files.
+    if [[ "${HAS_SRC}" == "true" ]]; then
+      mkdir -p classes-tmp-for-ex
+      ${JAVAC} ${JAVAC_ARGS} -d classes-tmp-for-ex `find src -name '*.java'`
+      src_tmp_for_ex="-cp classes-tmp-for-ex"
+    fi
+    if [[ "${HAS_SRC_ART}" == "true" ]]; then
+      mkdir -p classes-tmp-for-ex
+      javac_with_bootclasspath ${JAVAC_ARGS} -d classes-tmp-for-ex `find src-art -name '*.java'`
+      src_tmp_for_ex="-cp classes-tmp-for-ex"
+    fi
     mkdir classes-ex
-    ${JAVAC} ${JAVAC_ARGS} -d classes-ex -cp classes `find src-ex -name '*.java'`
+    ${JAVAC} ${JAVAC_ARGS} -d classes-ex $src_tmp_for_ex `find src-ex -name '*.java'`
     if [ ${NEED_DEX} = "true" ]; then
-      ${DX} -JXmx256m --debug --dex --dump-to=classes-ex.lst --output=classes-ex.dex \
-        --dump-width=1000 ${DX_FLAGS} classes-ex
+      make_dex classes-ex
 
       # quick shuffle so that the stored name is "classes.dex"
       mv classes.dex classes-1.dex

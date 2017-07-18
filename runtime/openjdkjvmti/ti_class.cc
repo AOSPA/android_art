@@ -37,6 +37,7 @@
 #include <unordered_set>
 
 #include "art_jvmti.h"
+#include "base/array_ref.h"
 #include "base/macros.h"
 #include "class_table-inl.h"
 #include "class_linker.h"
@@ -63,7 +64,7 @@
 #include "runtime_callbacks.h"
 #include "ScopedLocalRef.h"
 #include "scoped_thread_state_change-inl.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 #include "thread_list.h"
 #include "ti_class_loader.h"
 #include "ti_phase.h"
@@ -83,7 +84,7 @@ static std::unique_ptr<const art::DexFile> MakeSingleDexFile(art::Thread* self,
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
   // Make the mmap
   std::string error_msg;
-  art::ArraySlice<const unsigned char> final_data(final_dex_data, final_len);
+  art::ArrayRef<const unsigned char> final_data(final_dex_data, final_len);
   std::unique_ptr<art::MemMap> map(Redefiner::MoveDataToMemMap(orig_location,
                                                                final_data,
                                                                &error_msg));
@@ -103,7 +104,8 @@ static std::unique_ptr<const art::DexFile> MakeSingleDexFile(art::Thread* self,
     return nullptr;
   }
   uint32_t checksum = reinterpret_cast<const art::DexFile::Header*>(map->Begin())->checksum_;
-  std::unique_ptr<const art::DexFile> dex_file(art::DexFile::Open(map->GetName(),
+  std::string map_name = map->GetName();
+  std::unique_ptr<const art::DexFile> dex_file(art::DexFile::Open(map_name,
                                                                   checksum,
                                                                   std::move(map),
                                                                   /*verify*/true,
@@ -128,6 +130,25 @@ static std::unique_ptr<const art::DexFile> MakeSingleDexFile(art::Thread* self,
   }
   return dex_file;
 }
+
+// A deleter that acts like the jvmtiEnv->Deallocate so that asan does not get tripped up.
+// TODO We should everything use the actual jvmtiEnv->Allocate/Deallocate functions once we can
+// figure out which env to use.
+template <typename T>
+class FakeJvmtiDeleter {
+ public:
+  FakeJvmtiDeleter() {}
+
+  FakeJvmtiDeleter(FakeJvmtiDeleter&) = default;
+  FakeJvmtiDeleter(FakeJvmtiDeleter&&) = default;
+  FakeJvmtiDeleter& operator=(const FakeJvmtiDeleter&) = default;
+
+  template <typename U> void operator()(const U* ptr) const {
+    if (ptr != nullptr) {
+      free(const_cast<U*>(ptr));
+    }
+  }
+};
 
 struct ClassCallback : public art::ClassLoadCallback {
   void ClassPreDefine(const char* descriptor,
@@ -173,7 +194,8 @@ struct ClassCallback : public art::ClassLoadCallback {
     // Call all Non-retransformable agents.
     jint post_no_redefine_len = 0;
     unsigned char* post_no_redefine_dex_data = nullptr;
-    std::unique_ptr<const unsigned char> post_no_redefine_unique_ptr(nullptr);
+    std::unique_ptr<const unsigned char, FakeJvmtiDeleter<const unsigned char>>
+        post_no_redefine_unique_ptr(nullptr, FakeJvmtiDeleter<const unsigned char>());
     event_handler->DispatchEvent<ArtJvmtiEvent::kClassFileLoadHookNonRetransformable>(
         self,
         static_cast<JNIEnv*>(env),
@@ -190,13 +212,16 @@ struct ClassCallback : public art::ClassLoadCallback {
       post_no_redefine_dex_data = const_cast<unsigned char*>(dex_file_copy->Begin());
       post_no_redefine_len = dex_file_copy->Size();
     } else {
-      post_no_redefine_unique_ptr = std::unique_ptr<const unsigned char>(post_no_redefine_dex_data);
+      post_no_redefine_unique_ptr =
+          std::unique_ptr<const unsigned char, FakeJvmtiDeleter<const unsigned char>>(
+              post_no_redefine_dex_data, FakeJvmtiDeleter<const unsigned char>());
       DCHECK_GT(post_no_redefine_len, 0);
     }
     // Call all retransformable agents.
     jint final_len = 0;
     unsigned char* final_dex_data = nullptr;
-    std::unique_ptr<const unsigned char> final_dex_unique_ptr(nullptr);
+    std::unique_ptr<const unsigned char, FakeJvmtiDeleter<const unsigned char>>
+        final_dex_unique_ptr(nullptr, FakeJvmtiDeleter<const unsigned char>());
     event_handler->DispatchEvent<ArtJvmtiEvent::kClassFileLoadHookRetransformable>(
         self,
         static_cast<JNIEnv*>(env),
@@ -213,7 +238,9 @@ struct ClassCallback : public art::ClassLoadCallback {
       final_dex_data = post_no_redefine_dex_data;
       final_len = post_no_redefine_len;
     } else {
-      final_dex_unique_ptr = std::unique_ptr<const unsigned char>(final_dex_data);
+      final_dex_unique_ptr =
+          std::unique_ptr<const unsigned char, FakeJvmtiDeleter<const unsigned char>>(
+              final_dex_data, FakeJvmtiDeleter<const unsigned char>());
       DCHECK_GT(final_len, 0);
     }
 
@@ -286,8 +313,10 @@ struct ClassCallback : public art::ClassLoadCallback {
       art::Thread* thread = art::Thread::Current();
       ScopedLocalRef<jclass> jklass(thread->GetJniEnv(),
                                     thread->GetJniEnv()->AddLocalReference<jclass>(klass.Get()));
+      art::ObjPtr<art::mirror::Object> peer(thread->GetPeer());
       ScopedLocalRef<jthread> thread_jni(
-          thread->GetJniEnv(), thread->GetJniEnv()->AddLocalReference<jthread>(thread->GetPeer()));
+          thread->GetJniEnv(),
+          peer.IsNull() ? nullptr : thread->GetJniEnv()->AddLocalReference<jthread>(peer));
       {
         art::ScopedThreadSuspension sts(thread, art::ThreadState::kNative);
         event_handler->DispatchEvent<ArtJvmtiEvent::kClassLoad>(
@@ -314,8 +343,10 @@ struct ClassCallback : public art::ClassLoadCallback {
       }
       ScopedLocalRef<jclass> jklass(thread->GetJniEnv(),
                                     thread->GetJniEnv()->AddLocalReference<jclass>(klass.Get()));
+      art::ObjPtr<art::mirror::Object> peer(thread->GetPeer());
       ScopedLocalRef<jthread> thread_jni(
-          thread->GetJniEnv(), thread->GetJniEnv()->AddLocalReference<jthread>(thread->GetPeer()));
+          thread->GetJniEnv(),
+          peer.IsNull() ? nullptr : thread->GetJniEnv()->AddLocalReference<jthread>(peer));
       art::ScopedThreadSuspension sts(thread, art::ThreadState::kNative);
       event_handler->DispatchEvent<ArtJvmtiEvent::kClassPrepare>(
           thread,
@@ -567,6 +598,13 @@ jvmtiError ClassUtil::GetClassFields(jvmtiEnv* env,
     return ERR(INVALID_CLASS);
   }
 
+  // Check if this class is a temporary class object used for loading. Since we are seeing it the
+  // class must not have been prepared yet since otherwise the fixup would have gotten the jobject
+  // to point to the final class object.
+  if (klass->IsTemp() || klass->IsRetired()) {
+    return ERR(CLASS_NOT_PREPARED);
+  }
+
   if (field_count_ptr == nullptr || fields_ptr == nullptr) {
     return ERR(NULL_POINTER);
   }
@@ -606,6 +644,13 @@ jvmtiError ClassUtil::GetClassMethods(jvmtiEnv* env,
   art::ObjPtr<art::mirror::Class> klass = soa.Decode<art::mirror::Class>(jklass);
   if (klass == nullptr) {
     return ERR(INVALID_CLASS);
+  }
+
+  // Check if this class is a temporary class object used for loading. Since we are seeing it the
+  // class must not have been prepared yet since otherwise the fixup would have gotten the jobject
+  // to point to the final class object.
+  if (klass->IsTemp() || klass->IsRetired()) {
+    return ERR(CLASS_NOT_PREPARED);
   }
 
   if (method_count_ptr == nullptr || methods_ptr == nullptr) {
@@ -984,6 +1029,63 @@ jvmtiError ClassUtil::GetClassVersionNumbers(jvmtiEnv* env ATTRIBUTE_UNUSED,
   *minor_version_ptr = 0;
 
   return ERR(NONE);
+}
+
+jvmtiError ClassUtil::GetSourceFileName(jvmtiEnv* env, jclass jklass, char** source_name_ptr) {
+  art::ScopedObjectAccess soa(art::Thread::Current());
+  if (jklass == nullptr) {
+    return ERR(INVALID_CLASS);
+  }
+  art::ObjPtr<art::mirror::Object> jklass_obj = soa.Decode<art::mirror::Object>(jklass);
+  if (!jklass_obj->IsClass()) {
+    return ERR(INVALID_CLASS);
+  }
+  art::ObjPtr<art::mirror::Class> klass = jklass_obj->AsClass();
+  if (klass->IsPrimitive() || klass->IsArrayClass()) {
+    return ERR(ABSENT_INFORMATION);
+  }
+  JvmtiUniquePtr<char[]> source_copy;
+  const char* file_name = klass->GetSourceFile();
+  if (file_name == nullptr) {
+    return ERR(ABSENT_INFORMATION);
+  }
+  jvmtiError ret;
+  source_copy = CopyString(env, file_name, &ret);
+  if (source_copy == nullptr) {
+    return ret;
+  }
+  *source_name_ptr = source_copy.release();
+  return OK;
+}
+
+jvmtiError ClassUtil::GetSourceDebugExtension(jvmtiEnv* env,
+                                              jclass jklass,
+                                              char** source_debug_extension_ptr) {
+  art::ScopedObjectAccess soa(art::Thread::Current());
+  if (jklass == nullptr) {
+    return ERR(INVALID_CLASS);
+  }
+  art::ObjPtr<art::mirror::Object> jklass_obj = soa.Decode<art::mirror::Object>(jklass);
+  if (!jklass_obj->IsClass()) {
+    return ERR(INVALID_CLASS);
+  }
+  art::StackHandleScope<1> hs(art::Thread::Current());
+  art::Handle<art::mirror::Class> klass(hs.NewHandle(jklass_obj->AsClass()));
+  if (klass->IsPrimitive() || klass->IsArrayClass()) {
+    return ERR(ABSENT_INFORMATION);
+  }
+  JvmtiUniquePtr<char[]> ext_copy;
+  const char* data = art::annotations::GetSourceDebugExtension(klass);
+  if (data == nullptr) {
+    return ERR(ABSENT_INFORMATION);
+  }
+  jvmtiError ret;
+  ext_copy = CopyString(env, data, &ret);
+  if (ext_copy == nullptr) {
+    return ret;
+  }
+  *source_debug_extension_ptr = ext_copy.release();
+  return OK;
 }
 
 }  // namespace openjdkjvmti

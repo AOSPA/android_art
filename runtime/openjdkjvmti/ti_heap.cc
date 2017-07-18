@@ -23,6 +23,7 @@
 #include "class_linker.h"
 #include "gc/heap.h"
 #include "gc_root-inl.h"
+#include "java_frame_root_info.h"
 #include "jni_env_ext.h"
 #include "jni_internal.h"
 #include "jvmti_weak_table-inl.h"
@@ -35,6 +36,7 @@
 #include "primitive.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
+#include "stack.h"
 #include "thread-inl.h"
 #include "thread_list.h"
 
@@ -1390,7 +1392,9 @@ jvmtiError HeapUtil::GetLoadedClasses(jvmtiEnv* env,
 
     bool operator()(art::ObjPtr<art::mirror::Class> klass)
         OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
-      classes_.push_back(self_->GetJniEnv()->AddLocalReference<jclass>(klass));
+      if (klass->IsLoaded() || klass->IsErroneous()) {
+        classes_.push_back(self_->GetJniEnv()->AddLocalReference<jclass>(klass));
+      }
       return true;
     }
 

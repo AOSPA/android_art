@@ -17,12 +17,13 @@
 #include "verification_results.h"
 
 #include "base/logging.h"
-#include "base/stl_util.h"
 #include "base/mutex-inl.h"
+#include "base/stl_util.h"
 #include "driver/compiler_driver.h"
 #include "driver/compiler_options.h"
+#include "runtime.h"
 #include "thread.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 #include "utils/atomic_method_ref_map-inl.h"
 #include "verified_method.h"
 #include "verifier/method_verifier-inl.h"
@@ -82,7 +83,12 @@ void VerificationResults::ProcessVerifiedMethod(verifier::MethodVerifier* method
     // TODO: Investigate why are we doing the work again for this method and try to avoid it.
     LOG(WARNING) << "Method processed more than once: " << ref.PrettyMethod();
     if (!Runtime::Current()->UseJitCompilation()) {
-      DCHECK_EQ(existing->GetSafeCastSet().size(), verified_method->GetSafeCastSet().size());
+      if (kIsDebugBuild) {
+        auto ex_set = existing->GetSafeCastSet();
+        auto ve_set = verified_method->GetSafeCastSet();
+        CHECK_EQ(ex_set == nullptr, ve_set == nullptr);
+        CHECK((ex_set == nullptr) || (ex_set->size() == ve_set->size()));
+      }
     }
     // Let the unique_ptr delete the new verified method since there was already an existing one
     // registered. It is unsafe to replace the existing one since the JIT may be using it to
@@ -104,12 +110,12 @@ void VerificationResults::CreateVerifiedMethodFor(MethodReference ref) {
   // This method should only be called for classes verified at compile time,
   // which have no verifier error, nor has methods that we know will throw
   // at runtime.
-  atomic_verified_methods_.Insert(
-      ref,
-      /*expected*/ nullptr,
-      new VerifiedMethod(/* encountered_error_types */ 0, /* has_runtime_throw */ false));
-  // We don't check the result of `Insert` as we could insert twice for the same
-  // MethodReference in the presence of duplicate methods.
+  std::unique_ptr<VerifiedMethod> verified_method = std::make_unique<VerifiedMethod>(
+      /* encountered_error_types */ 0, /* has_runtime_throw */ false);
+  if (atomic_verified_methods_.Insert(ref, /*expected*/ nullptr, verified_method.get()) ==
+          AtomicMap::InsertResult::kInsertResultSuccess) {
+    verified_method.release();
+  }
 }
 
 void VerificationResults::AddRejectedClass(ClassReference ref) {

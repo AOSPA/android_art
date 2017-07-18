@@ -20,6 +20,7 @@
 #include "art_method.h"
 
 #include "art_field.h"
+#include "base/callee_save_type.h"
 #include "base/logging.h"
 #include "class_linker-inl.h"
 #include "common_throws.h"
@@ -27,6 +28,7 @@
 #include "dex_file_annotations.h"
 #include "dex_file-inl.h"
 #include "gc_root-inl.h"
+#include "invoke_type.h"
 #include "jit/profiling_info.h"
 #include "mirror/class-inl.h"
 #include "mirror/dex_cache-inl.h"
@@ -35,11 +37,12 @@
 #include "mirror/string.h"
 #include "oat.h"
 #include "obj_ptr-inl.h"
+#include "primitive.h"
 #include "quick/quick_method_frame_info.h"
 #include "read_barrier-inl.h"
 #include "runtime-inl.h"
 #include "scoped_thread_state_change-inl.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 #include "utils.h"
 
 namespace art {
@@ -199,8 +202,8 @@ inline bool ArtMethod::IsCalleeSaveMethod() {
   }
   Runtime* runtime = Runtime::Current();
   bool result = false;
-  for (int i = 0; i < Runtime::kLastCalleeSaveType; i++) {
-    if (this == runtime->GetCalleeSaveMethod(Runtime::CalleeSaveType(i))) {
+  for (uint32_t i = 0; i < static_cast<uint32_t>(CalleeSaveType::kLastCalleeSaveType); i++) {
+    if (this == runtime->GetCalleeSaveMethod(CalleeSaveType(i))) {
       result = true;
       break;
     }
@@ -271,12 +274,14 @@ inline const char* ArtMethod::GetName() {
     return "<runtime internal resolution method>";
   } else if (this == runtime->GetImtConflictMethod()) {
     return "<runtime internal imt conflict method>";
-  } else if (this == runtime->GetCalleeSaveMethod(Runtime::kSaveAllCalleeSaves)) {
+  } else if (this == runtime->GetCalleeSaveMethod(CalleeSaveType::kSaveAllCalleeSaves)) {
     return "<runtime internal callee-save all registers method>";
-  } else if (this == runtime->GetCalleeSaveMethod(Runtime::kSaveRefsOnly)) {
+  } else if (this == runtime->GetCalleeSaveMethod(CalleeSaveType::kSaveRefsOnly)) {
     return "<runtime internal callee-save reference registers method>";
-  } else if (this == runtime->GetCalleeSaveMethod(Runtime::kSaveRefsAndArgs)) {
+  } else if (this == runtime->GetCalleeSaveMethod(CalleeSaveType::kSaveRefsAndArgs)) {
     return "<runtime internal callee-save reference and argument registers method>";
+  } else if (this == runtime->GetCalleeSaveMethod(CalleeSaveType::kSaveEverything)) {
+    return "<runtime internal save-every-register method>";
   } else {
     return "<unknown runtime internal method>";
   }
@@ -338,6 +343,10 @@ inline const char* ArtMethod::GetReturnTypeDescriptor() {
   const DexFile::MethodId& method_id = dex_file->GetMethodId(GetDexMethodIndex());
   const DexFile::ProtoId& proto_id = dex_file->GetMethodPrototype(method_id);
   return dex_file->GetTypeDescriptor(dex_file->GetTypeId(proto_id.return_type_idx_));
+}
+
+inline Primitive::Type ArtMethod::GetReturnTypePrimitive() {
+  return Primitive::GetType(GetReturnTypeDescriptor()[0]);
 }
 
 inline const char* ArtMethod::GetTypeDescriptorFromTypeIdx(dex::TypeIndex type_idx) {

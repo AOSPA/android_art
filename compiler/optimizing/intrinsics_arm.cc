@@ -28,7 +28,7 @@
 #include "mirror/reference.h"
 #include "mirror/string.h"
 #include "scoped_thread_state_change-inl.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 #include "utils/arm/assembler_arm.h"
 
 namespace art {
@@ -1010,17 +1010,14 @@ static void GenCas(HInvoke* invoke, Primitive::Type type, CodeGeneratorARM* code
     if (kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
       // Need to make sure the reference stored in the field is a to-space
       // one before attempting the CAS or the CAS could fail incorrectly.
-      codegen->GenerateReferenceLoadWithBakerReadBarrier(
+      codegen->UpdateReferenceFieldWithBakerReadBarrier(
           invoke,
           out_loc,  // Unused, used only as a "temporary" within the read barrier.
           base,
-          /* offset */ 0u,
-          /* index */ offset_loc,
-          ScaleFactor::TIMES_1,
+          /* field_offset */ offset_loc,
           tmp_ptr_loc,
           /* needs_null_check */ false,
-          /* always_update_field */ true,
-          &tmp);
+          tmp);
     }
   }
 
@@ -1648,6 +1645,8 @@ void IntrinsicLocationsBuilderARM::VisitSystemArrayCopy(HInvoke* invoke) {
     // is clobbered by ReadBarrierMarkRegX entry points). Get an extra
     // temporary register from the register allocator.
     locations->AddTemp(Location::RequiresRegister());
+    CodeGeneratorARM* arm_codegen = down_cast<CodeGeneratorARM*>(codegen_);
+    arm_codegen->MaybeAddBakerCcEntrypointTempForFields(locations);
   }
 }
 
@@ -2599,11 +2598,7 @@ void IntrinsicCodeGeneratorARM::VisitFloatIsInfinite(HInvoke* invoke) {
   // We don't care about the sign bit, so shift left.
   __ Lsl(out, out, 1);
   __ eor(out, out, ShifterOperand(infinity));
-  // If the result is 0, then it has 32 leading zeros, and less than that otherwise.
-  __ clz(out, out);
-  // Any number less than 32 logically shifted right by 5 bits results in 0;
-  // the same operation on 32 yields 1.
-  __ Lsr(out, out, 5);
+  codegen_->GenerateConditionWithZero(kCondEQ, out, out);
 }
 
 void IntrinsicLocationsBuilderARM::VisitDoubleIsInfinite(HInvoke* invoke) {
@@ -2626,63 +2621,7 @@ void IntrinsicCodeGeneratorARM::VisitDoubleIsInfinite(HInvoke* invoke) {
   __ eor(out, out, ShifterOperand(infinity_high2));
   // We don't care about the sign bit, so shift left.
   __ orr(out, IP, ShifterOperand(out, LSL, 1));
-  // If the result is 0, then it has 32 leading zeros, and less than that otherwise.
-  __ clz(out, out);
-  // Any number less than 32 logically shifted right by 5 bits results in 0;
-  // the same operation on 32 yields 1.
-  __ Lsr(out, out, 5);
-}
-
-void IntrinsicLocationsBuilderARM::VisitReferenceGetReferent(HInvoke* invoke) {
-  if (kEmitCompilerReadBarrier) {
-    // Do not intrinsify this call with the read barrier configuration.
-    return;
-  }
-  LocationSummary* locations = new (arena_) LocationSummary(invoke,
-                                                            LocationSummary::kCallOnSlowPath,
-                                                            kIntrinsified);
-  locations->SetInAt(0, Location::RequiresRegister());
-  locations->SetOut(Location::SameAsFirstInput());
-  locations->AddTemp(Location::RequiresRegister());
-}
-
-void IntrinsicCodeGeneratorARM::VisitReferenceGetReferent(HInvoke* invoke) {
-  DCHECK(!kEmitCompilerReadBarrier);
-  ArmAssembler* const assembler = GetAssembler();
-  LocationSummary* locations = invoke->GetLocations();
-
-  Register obj = locations->InAt(0).AsRegister<Register>();
-  Register out = locations->Out().AsRegister<Register>();
-
-  SlowPathCode* slow_path = new (GetAllocator()) IntrinsicSlowPathARM(invoke);
-  codegen_->AddSlowPath(slow_path);
-
-  // Load ArtMethod first.
-  HInvokeStaticOrDirect* invoke_direct = invoke->AsInvokeStaticOrDirect();
-  DCHECK(invoke_direct != nullptr);
-  Register temp = codegen_->GenerateCalleeMethodStaticOrDirectCall(
-      invoke_direct, locations->GetTemp(0)).AsRegister<Register>();
-
-  // Now get declaring class.
-  __ ldr(temp, Address(temp, ArtMethod::DeclaringClassOffset().Int32Value()));
-
-  uint32_t slow_path_flag_offset = codegen_->GetReferenceSlowFlagOffset();
-  uint32_t disable_flag_offset = codegen_->GetReferenceDisableFlagOffset();
-  DCHECK_NE(slow_path_flag_offset, 0u);
-  DCHECK_NE(disable_flag_offset, 0u);
-  DCHECK_NE(slow_path_flag_offset, disable_flag_offset);
-
-  // Check static flags that prevent using intrinsic.
-  __ ldr(IP, Address(temp, disable_flag_offset));
-  __ ldr(temp, Address(temp, slow_path_flag_offset));
-  __ orr(IP, IP, ShifterOperand(temp));
-  __ CompareAndBranchIfNonZero(IP, slow_path->GetEntryLabel());
-
-  // Fast path.
-  __ ldr(out, Address(obj, mirror::Reference::ReferentOffset().Int32Value()));
-  codegen_->MaybeRecordImplicitNullCheck(invoke);
-  __ MaybeUnpoisonHeapReference(out);
-  __ Bind(slow_path->GetExitLabel());
+  codegen_->GenerateConditionWithZero(kCondEQ, out, out);
 }
 
 void IntrinsicLocationsBuilderARM::VisitIntegerValueOf(HInvoke* invoke) {
@@ -2754,6 +2693,30 @@ void IntrinsicCodeGeneratorARM::VisitIntegerValueOf(HInvoke* invoke) {
   }
 }
 
+void IntrinsicLocationsBuilderARM::VisitThreadInterrupted(HInvoke* invoke) {
+  LocationSummary* locations = new (arena_) LocationSummary(invoke,
+                                                            LocationSummary::kNoCall,
+                                                            kIntrinsified);
+  locations->SetOut(Location::RequiresRegister());
+}
+
+void IntrinsicCodeGeneratorARM::VisitThreadInterrupted(HInvoke* invoke) {
+  ArmAssembler* assembler = GetAssembler();
+  Register out = invoke->GetLocations()->Out().AsRegister<Register>();
+  int32_t offset = Thread::InterruptedOffset<kArmPointerSize>().Int32Value();
+  __ LoadFromOffset(kLoadWord, out, TR, offset);
+  Label done;
+  Label* const final_label = codegen_->GetFinalLabel(invoke, &done);
+  __ CompareAndBranchIfZero(out, final_label);
+  __ dmb(ISH);
+  __ LoadImmediate(IP, 0);
+  __ StoreToOffset(kStoreWord, IP, TR, offset);
+  __ dmb(ISH);
+  if (done.IsLinked()) {
+    __ Bind(&done);
+  }
+}
+
 UNIMPLEMENTED_INTRINSIC(ARM, MathMinDoubleDouble)
 UNIMPLEMENTED_INTRINSIC(ARM, MathMinFloatFloat)
 UNIMPLEMENTED_INTRINSIC(ARM, MathMaxDoubleDouble)
@@ -2767,6 +2730,7 @@ UNIMPLEMENTED_INTRINSIC(ARM, MathRoundDouble)   // Could be done by changing rou
 UNIMPLEMENTED_INTRINSIC(ARM, MathRoundFloat)    // Could be done by changing rounding mode, maybe?
 UNIMPLEMENTED_INTRINSIC(ARM, UnsafeCASLong)     // High register pressure.
 UNIMPLEMENTED_INTRINSIC(ARM, SystemArrayCopyChar)
+UNIMPLEMENTED_INTRINSIC(ARM, ReferenceGetReferent)
 UNIMPLEMENTED_INTRINSIC(ARM, IntegerHighestOneBit)
 UNIMPLEMENTED_INTRINSIC(ARM, LongHighestOneBit)
 UNIMPLEMENTED_INTRINSIC(ARM, IntegerLowestOneBit)
