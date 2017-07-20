@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "key": {
+        "uuid": "84a27968_bea058ca",
+        "filename": "runtime/arch/arm64/instruction_set_features_arm64.cc",
+        "patchSetId": 1
+      },
+      "lineNbr": 33,
+      "author": {
+        "id": 1000012
+      },
+      "writtenOn": "2017-07-20T04:58:53Z",
+      "side": 1,
+      "message": "We may want to instead put cortex-a73 in this list.  Alex, what do you think?",
+      "revId": "7c3e9255153c26a75f56387d6f2e115c8c462591",
+      "serverId": "3162e3d8-d894-470e-abd9-724f7b0effad",
+      "unresolved": false
+    }
+  ]
+}
