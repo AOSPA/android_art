@@ -21,6 +21,7 @@ art_global_defaults {
 
     name: "art_defaults",
     clang: true,
+    sdclang: false,
     cflags: [
         // Base set of cflags used by all things ART.
         "-fno-rtti",
