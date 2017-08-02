@@ -23,10 +23,10 @@
 #include "method_reference.h"
 #include "mirror/class-inl.h"
 #include "mirror/executable.h"
+#include "nativehelper/ScopedUtfChars.h"
 #include "oat_file_assistant.h"
 #include "oat_file_manager.h"
 #include "scoped_thread_state_change-inl.h"
-#include "ScopedUtfChars.h"
 #include "thread.h"
 
 namespace art {
@@ -38,7 +38,10 @@ extern "C" JNIEXPORT void JNICALL Java_Main_ensureProfilingInfo(JNIEnv* env,
   CHECK(method != nullptr);
   ScopedObjectAccess soa(env);
   ObjPtr<mirror::Executable> exec = soa.Decode<mirror::Executable>(method);
-  ProfilingInfo::Create(soa.Self(), exec->GetArtMethod(), /* retry_allocation */ true);
+  ArtMethod* art_method = exec->GetArtMethod();
+  if (!ProfilingInfo::Create(soa.Self(), art_method, /* retry_allocation */ true)) {
+    LOG(ERROR) << "Failed to create profiling info for method " << art_method->PrettyMethod();
+  }
 }
 
 extern "C" JNIEXPORT void JNICALL Java_Main_ensureProfileProcessing(JNIEnv*, jclass) {
@@ -55,8 +58,9 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_presentInProfile(JNIEnv* env,
   ObjPtr<mirror::Executable> exec = soa.Decode<mirror::Executable>(method);
   ArtMethod* art_method = exec->GetArtMethod();
   return ProfileSaver::HasSeenMethod(std::string(filename_chars.c_str()),
-                                     art_method->GetDexFile(),
-                                     art_method->GetDexMethodIndex());
+                                     /*hot*/ true,
+                                     MethodReference(art_method->GetDexFile(),
+                                                     art_method->GetDexMethodIndex()));
 }
 
 }  // namespace

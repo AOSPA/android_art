@@ -57,6 +57,7 @@ namespace mirror {
   class StackTraceElement;
 }  // namespace mirror
 
+class ClassHierarchyAnalysis;
 class ClassTable;
 template<class T> class Handle;
 class ImtConflictTable;
@@ -137,7 +138,7 @@ class ClassLinker {
   };
 
   explicit ClassLinker(InternTable* intern_table);
-  ~ClassLinker();
+  virtual ~ClassLinker();
 
   // Initialize class linker by bootstraping from dex files.
   bool InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> boot_class_path,
@@ -616,11 +617,6 @@ class ClassLinker {
   std::set<DexCacheResolvedClasses> GetResolvedClasses(bool ignore_boot_classes)
       REQUIRES(!Locks::dex_lock_);
 
-  // Returns the class descriptors for loaded dex files.
-  std::unordered_set<std::string> GetClassDescriptorsForResolvedClasses(
-      const std::set<DexCacheResolvedClasses>& classes)
-      REQUIRES(!Locks::dex_lock_);
-
   static bool IsBootClassLoader(ScopedObjectAccessAlreadyRunnable& soa,
                                 ObjPtr<mirror::ClassLoader> class_loader)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -671,6 +667,18 @@ class ClassLinker {
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_);
 
+  // Visit all of the class loaders in the class linker.
+  void VisitClassLoaders(ClassLoaderVisitor* visitor) const
+      REQUIRES_SHARED(Locks::classlinker_classes_lock_, Locks::mutator_lock_);
+
+  // Checks that a class and its superclass from another class loader have the same virtual methods.
+  bool ValidateSuperClassDescriptors(Handle<mirror::Class> klass)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  ClassHierarchyAnalysis* GetClassHierarchyAnalysis() {
+    return cha_.get();
+  }
+
   struct DexCacheData {
     // Construct an invalid data object.
     DexCacheData()
@@ -699,6 +707,14 @@ class ClassLinker {
     ClassTable* class_table;
   };
 
+ protected:
+  virtual bool InitializeClass(Thread* self,
+                               Handle<mirror::Class> klass,
+                               bool can_run_clinit,
+                               bool can_init_parents)
+      REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(!Locks::dex_lock_);
+
  private:
   class LinkInterfaceMethodsHelper;
 
@@ -717,11 +733,8 @@ class ClassLinker {
       REQUIRES(!Locks::dex_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static void DeleteClassLoader(Thread* self, const ClassLoaderData& data)
+  void DeleteClassLoader(Thread* self, const ClassLoaderData& data)
       REQUIRES_SHARED(Locks::mutator_lock_);
-
-  void VisitClassLoaders(ClassLoaderVisitor* visitor) const
-      REQUIRES_SHARED(Locks::classlinker_classes_lock_, Locks::mutator_lock_);
 
   void VisitClassesInternal(ClassVisitor* visitor)
       REQUIRES_SHARED(Locks::classlinker_classes_lock_, Locks::mutator_lock_);
@@ -891,12 +904,6 @@ class ClassLinker {
       REQUIRES(!Locks::dex_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  bool InitializeClass(Thread* self,
-                       Handle<mirror::Class> klass,
-                       bool can_run_clinit,
-                       bool can_init_parents)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!Locks::dex_lock_);
   bool InitializeDefaultInterfaceRecursive(Thread* self,
                                            Handle<mirror::Class> klass,
                                            bool can_run_clinit,
@@ -906,8 +913,6 @@ class ClassLinker {
   bool WaitForInitializeClass(Handle<mirror::Class> klass,
                               Thread* self,
                               ObjectLock<mirror::Class>& lock);
-  bool ValidateSuperClassDescriptors(Handle<mirror::Class> klass)
-      REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool IsSameDescriptorInDifferentClassContexts(Thread* self,
                                                 const char* descriptor,
@@ -941,6 +946,17 @@ class ClassLinker {
                    Handle<mirror::ObjectArray<mirror::Class>> interfaces,
                    bool* out_new_conflict,
                    ArtMethod** out_imt)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  mirror::MethodHandle* ResolveMethodHandleForField(Thread* self,
+                                                    const DexFile::MethodHandleItem& method_handle,
+                                                    ArtMethod* referrer)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  mirror::MethodHandle* ResolveMethodHandleForMethod(Thread* self,
+                                                     const DexFile* const dex_file,
+                                                     const DexFile::MethodHandleItem& method_handle,
+                                                     ArtMethod* referrer)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // A wrapper class representing the result of a method translation used for linking methods and
@@ -1243,6 +1259,8 @@ class ClassLinker {
 
   // Image pointer size.
   PointerSize image_pointer_size_;
+
+  std::unique_ptr<ClassHierarchyAnalysis> cha_;
 
   class FindVirtualMethodHolderVisitor;
 

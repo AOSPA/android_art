@@ -76,13 +76,13 @@
 #include "mirror/class_loader.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
+#include "nativehelper/ScopedLocalRef.h"
 #include "oat_file.h"
 #include "oat_file_assistant.h"
 #include "oat_writer.h"
 #include "os.h"
 #include "runtime.h"
 #include "runtime_options.h"
-#include "ScopedLocalRef.h"
 #include "scoped_thread_state_change-inl.h"
 #include "utils.h"
 #include "vdex_file.h"
@@ -97,6 +97,9 @@ using android::base::StringPrintf;
 
 static constexpr size_t kDefaultMinDexFilesForSwap = 2;
 static constexpr size_t kDefaultMinDexFileCumulativeSizeForSwap = 20 * MB;
+
+// Compiler filter override for very large apps.
+static constexpr CompilerFilter::Filter kLargeAppFilter = CompilerFilter::kVerify;
 
 static int original_argc;
 static char** original_argv;
@@ -377,7 +380,7 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      Default: %zu", kDefaultMinDexFilesForSwap);
   UsageError("");
   UsageError("  --very-large-app-threshold=<size>: specifies the minimum total dex file size in");
-  UsageError("      bytes to consider the input \"very large\" and punt on the compilation.");
+  UsageError("      bytes to consider the input \"very large\" and reduce compilation done.");
   UsageError("      Example: --very-large-app-threshold=100000000");
   UsageError("");
   UsageError("  --app-image-fd=<file-descriptor>: specify output file descriptor for app image.");
@@ -411,16 +414,20 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      ");
   UsageError("      The chain is interpreted in the natural 'parent order', meaning that class");
   UsageError("      loader 'i+1' will be the parent of class loader 'i'.");
-  UsageError("      The compilation sources will be added to the classpath of the last class");
-  UsageError("      loader. This allows the compiled dex files to be loaded at runtime in");
-  UsageError("      a class loader that contains other dex files as well (e.g. shared libraries).");
+  UsageError("      The compilation sources will be appended to the classpath of the first class");
+  UsageError("      loader.");
+  UsageError("      ");
+  UsageError("      E.g. if the context is 'PCL[lib1.dex];DLC[lib2.dex]' and ");
+  UsageError("      --dex-file=src.dex then dex2oat will setup a PathClassLoader with classpath ");
+  UsageError("      'lib1.dex:src.dex' and set its parent to a DelegateLastClassLoader with ");
+  UsageError("      classpath 'lib2.dex'.");
   UsageError("      ");
   UsageError("      Note that the compiler will be tolerant if the source dex files specified");
   UsageError("      with --dex-file are found in the classpath. The source dex files will be");
   UsageError("      removed from any class loader's classpath possibly resulting in empty");
   UsageError("      class loaders.");
   UsageError("      ");
-  UsageError("      Example: --classloader-spec=PCL[lib1.dex:lib2.dex];DLC[lib3.dex]");
+  UsageError("      Example: --class-loader-context=PCL[lib1.dex:lib2.dex];DLC[lib3.dex]");
   UsageError("");
   std::cerr << "See log for usage error information\n";
   exit(EXIT_FAILURE);
@@ -1490,10 +1497,9 @@ class Dex2Oat FINAL {
       Runtime* runtime = Runtime::Current();
       CHECK(runtime != nullptr);
       // Filter out class path classes since we don't want to include these in the image.
-      std::set<DexCacheResolvedClasses> resolved_classes(
-          profile_compilation_info_->GetResolvedClasses(dex_files_));
-      image_classes_.reset(new std::unordered_set<std::string>(
-          runtime->GetClassLinker()->GetClassDescriptorsForResolvedClasses(resolved_classes)));
+      image_classes_.reset(
+          new std::unordered_set<std::string>(
+              profile_compilation_info_->GetClassDescriptors(dex_files_)));
       VLOG(compiler) << "Loaded " << image_classes_->size()
                      << " image class descriptors from profile";
       if (VLOG_IS_ON(compiler)) {
@@ -1513,9 +1519,11 @@ class Dex2Oat FINAL {
       return dex2oat::ReturnCode::kOther;
     }
 
-    verification_results_.reset(new VerificationResults(compiler_options_.get()));
+    // Verification results are null since we don't know if we will need them yet as the compler
+    // filter may change.
+    // This needs to be done before PrepareRuntimeOptions since the callbacks are passed to the
+    // runtime.
     callbacks_.reset(new QuickCompilerCallbacks(
-        verification_results_.get(),
         IsBootImage() ?
             CompilerCallbacks::CallbackMode::kCompileBootImage :
             CompilerCallbacks::CallbackMode::kCompileApp));
@@ -1652,6 +1660,28 @@ class Dex2Oat FINAL {
 
     dex_files_ = MakeNonOwningPointerVector(opened_dex_files_);
 
+    // If we need to downgrade the compiler-filter for size reasons.
+    if (!IsBootImage() && IsVeryLarge(dex_files_)) {
+      if (!CompilerFilter::IsAsGoodAs(kLargeAppFilter, compiler_options_->GetCompilerFilter())) {
+        LOG(INFO) << "Very large app, downgrading to verify.";
+        // Note: this change won't be reflected in the key-value store, as that had to be
+        //       finalized before loading the dex files. This setup is currently required
+        //       to get the size from the DexFile objects.
+        // TODO: refactor. b/29790079
+        compiler_options_->SetCompilerFilter(kLargeAppFilter);
+      }
+    }
+
+    if (CompilerFilter::IsAnyCompilationEnabled(compiler_options_->GetCompilerFilter())) {
+      // Only modes with compilation require verification results, do this here instead of when we
+      // create the compilation callbacks since the compilation mode may have been changed by the
+      // very large app logic.
+      // Avoiding setting the verification results saves RAM by not adding the dex files later in
+      // the function.
+      verification_results_.reset(new VerificationResults(compiler_options_.get()));
+      callbacks_->SetVerificationResults(verification_results_.get());
+    }
+
     // We had to postpone the swap decision till now, as this is the point when we actually
     // know about the dex files we're going to use.
 
@@ -1668,20 +1698,6 @@ class Dex2Oat FINAL {
       }
     }
     // Note that dex2oat won't close the swap_fd_. The compiler driver's swap space will do that.
-
-    // If we need to downgrade the compiler-filter for size reasons, do that check now.
-    if (!IsBootImage() && IsVeryLarge(dex_files_)) {
-      if (!CompilerFilter::IsAsGoodAs(CompilerFilter::kExtract,
-                                      compiler_options_->GetCompilerFilter())) {
-        LOG(INFO) << "Very large app, downgrading to extract.";
-        // Note: this change won't be reflected in the key-value store, as that had to be
-        //       finalized before loading the dex files. This setup is currently required
-        //       to get the size from the DexFile objects.
-        // TODO: refactor. b/29790079
-        compiler_options_->SetCompilerFilter(CompilerFilter::kExtract);
-      }
-    }
-
     if (IsBootImage()) {
       // For boot image, pass opened dex files to the Runtime::Create().
       // Note: Runtime acquires ownership of these dex files.
@@ -1730,7 +1746,11 @@ class Dex2Oat FINAL {
       }
       // Pre-register dex files so that we can access verification results without locks during
       // compilation and verification.
-      verification_results_->AddDexFile(dex_file);
+      if (verification_results_ != nullptr) {
+        // Verification results are only required for modes that have any compilation. Avoid
+        // adding the dex files if possible to prevent allocating large arrays.
+        verification_results_->AddDexFile(dex_file);
+      }
     }
 
     return dex2oat::ReturnCode::kNoFailure;
@@ -1774,7 +1794,7 @@ class Dex2Oat FINAL {
         for (const DexFile* dex_file : *dex_file_vector) {
           for (const std::string& filter : no_inline_filters) {
             // Use dex_file->GetLocation() rather than dex_file->GetBaseLocation(). This
-            // allows tests to specify <test-dexfile>:classes2.dex if needed but if the
+            // allows tests to specify <test-dexfile>!classes2.dex if needed but if the
             // base location passes the StartsWith() test, so do all extra locations.
             std::string dex_location = dex_file->GetLocation();
             if (filter.find('/') == std::string::npos) {

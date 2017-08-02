@@ -47,9 +47,13 @@ namespace jit {
 static constexpr int kProtAll = PROT_READ | PROT_WRITE | PROT_EXEC;
 static constexpr int kProtData = PROT_READ | PROT_WRITE;
 static constexpr int kProtCode = PROT_READ | PROT_EXEC;
+static constexpr int kProtReadOnly = PROT_READ;
+static constexpr int kProtNone = PROT_NONE;
 
 static constexpr size_t kCodeSizeLogThreshold = 50 * KB;
 static constexpr size_t kStackMapSizeLogThreshold = 50 * KB;
+static constexpr size_t kMinMapSpacingPages = 1;
+static constexpr size_t kMaxMapSpacingPages = 128;
 
 #define CHECKED_MPROTECT(memory, size, prot)                \
   do {                                                      \
@@ -60,18 +64,51 @@ static constexpr size_t kStackMapSizeLogThreshold = 50 * KB;
     }                                                       \
   } while (false)                                           \
 
+static MemMap* SplitMemMap(MemMap* existing_map,
+                           const char* name,
+                           size_t split_offset,
+                           int split_prot,
+                           std::string* error_msg,
+                           bool use_ashmem,
+                           unique_fd* shmem_fd = nullptr) {
+  std::string error_str;
+  uint8_t* divider = existing_map->Begin() + split_offset;
+  MemMap* new_map = existing_map->RemapAtEnd(divider,
+                                             name,
+                                             split_prot,
+                                             MAP_SHARED,
+                                             &error_str,
+                                             use_ashmem,
+                                             shmem_fd);
+  if (new_map == nullptr) {
+    std::ostringstream oss;
+    oss << "Failed to create spacing for " << name << ": "
+        << error_str << " offset=" << split_offset;
+    *error_msg = oss.str();
+    return nullptr;
+  }
+  return new_map;
+}
+
 JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
                                    size_t max_capacity,
                                    bool generate_debug_info,
                                    std::string* error_msg) {
   ScopedTrace trace(__PRETTY_FUNCTION__);
-  CHECK_GE(max_capacity, initial_capacity);
+  CHECK_GT(max_capacity, initial_capacity);
+  CHECK_GE(max_capacity - kMaxMapSpacingPages * kPageSize, initial_capacity);
 
-  // Generating debug information is mostly for using the 'perf' tool, which does
-  // not work with ashmem.
-  bool use_ashmem = !generate_debug_info;
+  // Generating debug information is for using the Linux perf tool on
+  // host which does not work with ashmem.
+  // Also, target linux does not support ashmem.
+  bool use_ashmem = !generate_debug_info && !kIsTargetLinux;
+
   // With 'perf', we want a 1-1 mapping between an address and a method.
   bool garbage_collect_code = !generate_debug_info;
+
+  // We only use two mappings (separating rw from rx) if we are able to use ashmem.
+  // See the above comment for debug information and not using ashmem.
+  bool use_two_mappings = use_ashmem;
 
   // We need to have 32 bit offsets from method headers in code cache which point to things
   // in the data cache. If the maps are more than 4G apart, having multiple maps wouldn't work.
@@ -83,6 +120,10 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
     *error_msg = oss.str();
     return nullptr;
   }
+
+  // Align both capacities to page size, as that's the unit mspaces use.
+  initial_capacity = RoundDown(initial_capacity, 2 * kPageSize);
+  max_capacity = RoundDown(max_capacity, 2 * kPageSize);
 
   std::string error_str;
   // Map name specific for android_os_Debug.cpp accounting.
@@ -105,35 +146,138 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
     return nullptr;
   }
 
-  // Align both capacities to page size, as that's the unit mspaces use.
-  initial_capacity = RoundDown(initial_capacity, 2 * kPageSize);
-  max_capacity = RoundDown(max_capacity, 2 * kPageSize);
+  // Create a region for JIT data and executable code. This will be
+  // laid out as:
+  //
+  //          +----------------+ --------------------
+  //          | code_sync_map_ | ^ code_sync_size   ^
+  //          |                | v                  |
+  //          +----------------+ --                 |
+  //          :                : ^                  |
+  //          :  post_code_map : | post_code_size   |
+  //          :   [padding]    : v                  |
+  //          +----------------+ -                  |
+  //          |                | ^                  |
+  //          |   code_map     | | code_size        | total_mapping_size
+  //          |   [JIT Code]   | v                  |
+  //          +----------------+ -                  |
+  //          :                : ^                  |
+  //          :  pre_code_map  : | pre_code_size    |
+  //          :   [padding]    : v                  |
+  //          +----------------+ -                  |
+  //          |                | ^                  |
+  //          |    data_map    | | data_size        |
+  //          |   [Jit Data]   | v                  v
+  //          +----------------+ --------------------
+  //
+  // The code_sync_map_ contains a page that we use flush CPU instruction
+  // pipelines (see FlushInstructionPipelines()).
+  //
+  // The padding regions - pre_code_map and post_code_map - exist to
+  // put some random distance between the writable JIT code mapping
+  // and the executable mapping. The padding is discarded at the end
+  // of this function.
+  //
+  size_t data_size = (max_capacity - kMaxMapSpacingPages * kPageSize) / 2;
+  size_t pre_code_size =
+      GetRandomNumber(kMinMapSpacingPages, kMaxMapSpacingPages - 1) * kPageSize;
+  size_t code_size = max_capacity - data_size - kMaxMapSpacingPages * kPageSize;
+  size_t code_sync_size = kPageSize;
+  size_t post_code_size = kMaxMapSpacingPages * kPageSize - pre_code_size - code_sync_size;
+  DCHECK_EQ(data_size, code_size);
+  DCHECK_EQ(pre_code_size + post_code_size + code_sync_size, kMaxMapSpacingPages * kPageSize);
+  DCHECK_EQ(data_size + pre_code_size + code_size + post_code_size + code_sync_size, max_capacity);
 
-  // Data cache is 1 / 2 of the map.
-  // TODO: Make this variable?
-  size_t data_size = max_capacity / 2;
-  size_t code_size = max_capacity - data_size;
-  DCHECK_EQ(code_size + data_size, max_capacity);
-  uint8_t* divider = data_map->Begin() + data_size;
-
-  MemMap* code_map =
-      data_map->RemapAtEnd(divider, "jit-code-cache", kProtAll, &error_str, use_ashmem);
-  if (code_map == nullptr) {
-    std::ostringstream oss;
-    oss << "Failed to create read write execute cache: " << error_str << " size=" << max_capacity;
-    *error_msg = oss.str();
+  // Create pre-code padding region after data region, discarded after
+  // code and data regions are set-up.
+  std::unique_ptr<MemMap> pre_code_map(SplitMemMap(data_map.get(),
+                                                   "jit-code-cache-padding",
+                                                   data_size,
+                                                   kProtNone,
+                                                   error_msg,
+                                                   use_ashmem));
+  if (pre_code_map == nullptr) {
     return nullptr;
   }
-  DCHECK_EQ(code_map->Begin(), divider);
+  DCHECK_EQ(data_map->Size(), data_size);
+  DCHECK_EQ(pre_code_map->Size(), pre_code_size + code_size + post_code_size + code_sync_size);
+
+  // Create code region.
+  unique_fd writable_code_fd;
+  std::unique_ptr<MemMap> code_map(SplitMemMap(pre_code_map.get(),
+                                               "jit-code-cache",
+                                               pre_code_size,
+                                               use_two_mappings ? kProtCode : kProtAll,
+                                               error_msg,
+                                               use_ashmem,
+                                               &writable_code_fd));
+  if (code_map == nullptr) {
+    return nullptr;
+  }
+  DCHECK_EQ(pre_code_map->Size(), pre_code_size);
+  DCHECK_EQ(code_map->Size(), code_size + post_code_size + code_sync_size);
+
+  // Padding after code region, discarded after code and data regions
+  // are set-up.
+  std::unique_ptr<MemMap> post_code_map(SplitMemMap(code_map.get(),
+                                                    "jit-code-cache-padding",
+                                                    code_size,
+                                                    kProtNone,
+                                                    error_msg,
+                                                    use_ashmem));
+  if (post_code_map == nullptr) {
+    return nullptr;
+  }
+  DCHECK_EQ(code_map->Size(), code_size);
+  DCHECK_EQ(post_code_map->Size(), post_code_size + code_sync_size);
+
+  std::unique_ptr<MemMap> code_sync_map(SplitMemMap(post_code_map.get(),
+                                                    "jit-code-sync",
+                                                    post_code_size,
+                                                    kProtCode,
+                                                    error_msg,
+                                                    use_ashmem));
+  if (code_sync_map == nullptr) {
+    return nullptr;
+  }
+  DCHECK_EQ(post_code_map->Size(), post_code_size);
+  DCHECK_EQ(code_sync_map->Size(), code_sync_size);
+
+  std::unique_ptr<MemMap> writable_code_map;
+  if (use_two_mappings) {
+    // Allocate the R/W view.
+    writable_code_map.reset(MemMap::MapFile(code_size,
+                                            kProtData,
+                                            MAP_SHARED,
+                                            writable_code_fd.get(),
+                                            /* start */ 0,
+                                            /* low_4gb */ true,
+                                            "jit-writable-code",
+                                            &error_str));
+    if (writable_code_map == nullptr) {
+      std::ostringstream oss;
+      oss << "Failed to create writable code cache: " << error_str << " size=" << code_size;
+      *error_msg = oss.str();
+      return nullptr;
+    }
+  }
   data_size = initial_capacity / 2;
   code_size = initial_capacity - data_size;
   DCHECK_EQ(code_size + data_size, initial_capacity);
-  return new JitCodeCache(
-      code_map, data_map.release(), code_size, data_size, max_capacity, garbage_collect_code);
+  return new JitCodeCache(writable_code_map.release(),
+                          code_map.release(),
+                          data_map.release(),
+                          code_sync_map.release(),
+                          code_size,
+                          data_size,
+                          max_capacity,
+                          garbage_collect_code);
 }
 
-JitCodeCache::JitCodeCache(MemMap* code_map,
+JitCodeCache::JitCodeCache(MemMap* writable_code_map,
+                           MemMap* executable_code_map,
                            MemMap* data_map,
+                           MemMap* code_sync_map,
                            size_t initial_code_capacity,
                            size_t initial_data_capacity,
                            size_t max_capacity,
@@ -141,8 +285,10 @@ JitCodeCache::JitCodeCache(MemMap* code_map,
     : lock_("Jit code cache", kJitCodeCacheLock),
       lock_cond_("Jit code cache condition variable", lock_),
       collection_in_progress_(false),
-      code_map_(code_map),
       data_map_(data_map),
+      executable_code_map_(executable_code_map),
+      writable_code_map_(writable_code_map),
+      code_sync_map_(code_sync_map),
       max_capacity_(max_capacity),
       current_capacity_(initial_code_capacity + initial_data_capacity),
       code_end_(initial_code_capacity),
@@ -162,7 +308,8 @@ JitCodeCache::JitCodeCache(MemMap* code_map,
       inline_cache_cond_("Jit inline cache condition variable", lock_) {
 
   DCHECK_GE(max_capacity, initial_code_capacity + initial_data_capacity);
-  code_mspace_ = create_mspace_with_base(code_map_->Begin(), code_end_, false /*locked*/);
+  MemMap* writable_map = GetWritableMemMap();
+  code_mspace_ = create_mspace_with_base(writable_map->Begin(), code_end_, false /*locked*/);
   data_mspace_ = create_mspace_with_base(data_map_->Begin(), data_end_, false /*locked*/);
 
   if (code_mspace_ == nullptr || data_mspace_ == nullptr) {
@@ -171,7 +318,10 @@ JitCodeCache::JitCodeCache(MemMap* code_map,
 
   SetFootprintLimit(current_capacity_);
 
-  CHECKED_MPROTECT(code_map_->Begin(), code_map_->Size(), kProtCode);
+  if (writable_code_map_ != nullptr) {
+    CHECKED_MPROTECT(writable_code_map_->Begin(), writable_code_map_->Size(), kProtReadOnly);
+  }
+  CHECKED_MPROTECT(executable_code_map_->Begin(), executable_code_map_->Size(), kProtCode);
   CHECKED_MPROTECT(data_map_->Begin(), data_map_->Size(), kProtData);
 
   VLOG(jit) << "Created jit code cache: initial data size="
@@ -181,7 +331,7 @@ JitCodeCache::JitCodeCache(MemMap* code_map,
 }
 
 bool JitCodeCache::ContainsPc(const void* ptr) const {
-  return code_map_->Begin() <= ptr && ptr < code_map_->End();
+  return executable_code_map_->Begin() <= ptr && ptr < executable_code_map_->End();
 }
 
 bool JitCodeCache::ContainsMethod(ArtMethod* method) {
@@ -194,27 +344,96 @@ bool JitCodeCache::ContainsMethod(ArtMethod* method) {
   return false;
 }
 
+/* This method is only for CHECK/DCHECK that pointers are within to a region. */
+static bool IsAddressInMap(const void* addr,
+                           const MemMap* mem_map,
+                           const char* check_name) {
+  if (addr == nullptr || mem_map->HasAddress(addr)) {
+    return true;
+  }
+  LOG(ERROR) << "Is" << check_name << "Address " << addr
+             << " not in [" << reinterpret_cast<void*>(mem_map->Begin())
+             << ", " << reinterpret_cast<void*>(mem_map->Begin() + mem_map->Size()) << ")";
+  return false;
+}
+
+bool JitCodeCache::IsDataAddress(const void* raw_addr) const {
+  return IsAddressInMap(raw_addr, data_map_.get(), "Data");
+}
+
+bool JitCodeCache::IsExecutableAddress(const void* raw_addr) const {
+  return IsAddressInMap(raw_addr, executable_code_map_.get(), "Executable");
+}
+
+bool JitCodeCache::IsWritableAddress(const void* raw_addr) const {
+  return IsAddressInMap(raw_addr, GetWritableMemMap(), "Writable");
+}
+
+// Convert one address within the source map to the same offset within the destination map.
+static void* ConvertAddress(const void* source_address,
+                            const MemMap* source_map,
+                            const MemMap* destination_map) {
+  DCHECK(source_map->HasAddress(source_address)) << source_address;
+  ptrdiff_t offset = reinterpret_cast<const uint8_t*>(source_address) - source_map->Begin();
+  uintptr_t address = reinterpret_cast<uintptr_t>(destination_map->Begin()) + offset;
+  return reinterpret_cast<void*>(address);
+}
+
+template <typename T>
+T* JitCodeCache::ToExecutableAddress(T* writable_address) const {
+  CHECK(IsWritableAddress(writable_address));
+  if (writable_address == nullptr) {
+    return nullptr;
+  }
+  void* executable_address = ConvertAddress(writable_address,
+                                            GetWritableMemMap(),
+                                            executable_code_map_.get());
+  CHECK(IsExecutableAddress(executable_address));
+  return reinterpret_cast<T*>(executable_address);
+}
+
+void* JitCodeCache::ToWritableAddress(const void* executable_address) const {
+  CHECK(IsExecutableAddress(executable_address));
+  if (executable_address == nullptr) {
+    return nullptr;
+  }
+  void* writable_address = ConvertAddress(executable_address,
+                                          executable_code_map_.get(),
+                                          GetWritableMemMap());
+  CHECK(IsWritableAddress(writable_address));
+  return writable_address;
+}
+
 class ScopedCodeCacheWrite : ScopedTrace {
  public:
-  explicit ScopedCodeCacheWrite(MemMap* code_map, bool only_for_tlb_shootdown = false)
-      : ScopedTrace("ScopedCodeCacheWrite"),
-        code_map_(code_map),
-        only_for_tlb_shootdown_(only_for_tlb_shootdown) {
+  explicit ScopedCodeCacheWrite(JitCodeCache* code_cache)
+      : ScopedTrace("ScopedCodeCacheWrite") {
     ScopedTrace trace("mprotect all");
-    CHECKED_MPROTECT(
-        code_map_->Begin(), only_for_tlb_shootdown_ ? kPageSize : code_map_->Size(), kProtAll);
+    int prot_to_start_writing = kProtAll;
+    if (code_cache->writable_code_map_ == nullptr) {
+      // If there is only one mapping, use the executable mapping and toggle between rwx and rx.
+      prot_to_start_writing = kProtAll;
+      prot_to_stop_writing_ = kProtCode;
+    } else {
+      // If there are two mappings, use the writable mapping and toggle between rw and r.
+      prot_to_start_writing = kProtData;
+      prot_to_stop_writing_ = kProtReadOnly;
+    }
+    writable_map_ = code_cache->GetWritableMemMap();
+    // If we're using ScopedCacheWrite only for TLB shootdown, we limit the scope of mprotect to
+    // one page.
+    size_ = writable_map_->Size();
+    CHECKED_MPROTECT(writable_map_->Begin(), size_, prot_to_start_writing);
   }
   ~ScopedCodeCacheWrite() {
     ScopedTrace trace("mprotect code");
-    CHECKED_MPROTECT(
-        code_map_->Begin(), only_for_tlb_shootdown_ ? kPageSize : code_map_->Size(), kProtCode);
+    CHECKED_MPROTECT(writable_map_->Begin(), size_, prot_to_stop_writing_);
   }
- private:
-  MemMap* const code_map_;
 
-  // If we're using ScopedCacheWrite only for TLB shootdown, we limit the scope of mprotect to
-  // one page.
-  const bool only_for_tlb_shootdown_;
+ private:
+  int prot_to_stop_writing_;
+  MemMap* writable_map_;
+  size_t size_;
 
   DISALLOW_COPY_AND_ASSIGN(ScopedCodeCacheWrite);
 };
@@ -229,7 +448,6 @@ uint8_t* JitCodeCache::CommitCode(Thread* self,
                                   size_t fp_spill_mask,
                                   const uint8_t* code,
                                   size_t code_size,
-                                  size_t data_size,
                                   bool osr,
                                   Handle<mirror::ObjectArray<mirror::Object>> roots,
                                   bool has_should_deoptimize_flag,
@@ -244,7 +462,6 @@ uint8_t* JitCodeCache::CommitCode(Thread* self,
                                        fp_spill_mask,
                                        code,
                                        code_size,
-                                       data_size,
                                        osr,
                                        roots,
                                        has_should_deoptimize_flag,
@@ -262,7 +479,6 @@ uint8_t* JitCodeCache::CommitCode(Thread* self,
                                 fp_spill_mask,
                                 code,
                                 code_size,
-                                data_size,
                                 osr,
                                 roots,
                                 has_should_deoptimize_flag,
@@ -324,8 +540,10 @@ static void FillRootTable(uint8_t* roots_data, Handle<mirror::ObjectArray<mirror
   }
 }
 
-static uint8_t* GetRootTable(const void* code_ptr, uint32_t* number_of_roots = nullptr) {
+uint8_t* JitCodeCache::GetRootTable(const void* code_ptr, uint32_t* number_of_roots) {
+  CHECK(IsExecutableAddress(code_ptr));
   OatQuickMethodHeader* method_header = OatQuickMethodHeader::FromCodePointer(code_ptr);
+  // GetOptimizedCodeInfoPtr uses offsets relative to the EXECUTABLE address.
   uint8_t* data = method_header->GetOptimizedCodeInfoPtr();
   uint32_t roots = GetNumberOfRoots(data);
   if (number_of_roots != nullptr) {
@@ -370,6 +588,8 @@ static inline void ProcessWeakClass(GcRoot<mirror::Class>* root_ptr,
 void JitCodeCache::SweepRootTables(IsMarkedVisitor* visitor) {
   MutexLock mu(Thread::Current(), lock_);
   for (const auto& entry : method_code_map_) {
+    // GetRootTable takes an EXECUTABLE address.
+    CHECK(IsExecutableAddress(entry.first));
     uint32_t number_of_roots = 0;
     uint8_t* roots_data = GetRootTable(entry.first, &number_of_roots);
     GcRoot<mirror::Object>* roots = reinterpret_cast<GcRoot<mirror::Object>*>(roots_data);
@@ -407,20 +627,22 @@ void JitCodeCache::SweepRootTables(IsMarkedVisitor* visitor) {
   }
 }
 
-void JitCodeCache::FreeCode(const void* code_ptr) {
-  uintptr_t allocation = FromCodeToAllocation(code_ptr);
+void JitCodeCache::FreeCodeAndData(const void* code_ptr) {
+  CHECK(IsExecutableAddress(code_ptr));
   // Notify native debugger that we are about to remove the code.
   // It does nothing if we are not using native debugger.
   DeleteJITCodeEntryForAddress(reinterpret_cast<uintptr_t>(code_ptr));
+  // GetRootTable takes an EXECUTABLE address.
   FreeData(GetRootTable(code_ptr));
-  FreeCode(reinterpret_cast<uint8_t*>(allocation));
+  FreeRawCode(reinterpret_cast<uint8_t*>(FromCodeToAllocation(code_ptr)));
 }
 
 void JitCodeCache::FreeAllMethodHeaders(
     const std::unordered_set<OatQuickMethodHeader*>& method_headers) {
+  // method_headers are expected to be in the executable region.
   {
     MutexLock mu(Thread::Current(), *Locks::cha_lock_);
-    Runtime::Current()->GetClassHierarchyAnalysis()
+    Runtime::Current()->GetClassLinker()->GetClassHierarchyAnalysis()
         ->RemoveDependentsWithMethodHeaders(method_headers);
   }
 
@@ -429,9 +651,9 @@ void JitCodeCache::FreeAllMethodHeaders(
   // so it's possible for the same method_header to start representing
   // different compile code.
   MutexLock mu(Thread::Current(), lock_);
-  ScopedCodeCacheWrite scc(code_map_.get());
+  ScopedCodeCacheWrite scc(this);
   for (const OatQuickMethodHeader* method_header : method_headers) {
-    FreeCode(method_header->GetCode());
+    FreeCodeAndData(method_header->GetCode());
   }
 }
 
@@ -448,9 +670,10 @@ void JitCodeCache::RemoveMethodsIn(Thread* self, const LinearAlloc& alloc) {
     // with the classlinker_classes_lock_ held, and suspending ourselves could
     // lead to a deadlock.
     {
-      ScopedCodeCacheWrite scc(code_map_.get());
+      ScopedCodeCacheWrite scc(this);
       for (auto it = method_code_map_.begin(); it != method_code_map_.end();) {
         if (alloc.ContainsUnsafe(it->second)) {
+          CHECK(IsExecutableAddress(OatQuickMethodHeader::FromCodePointer(it->first)));
           method_headers.insert(OatQuickMethodHeader::FromCodePointer(it->first));
           it = method_code_map_.erase(it);
         } else {
@@ -542,6 +765,129 @@ static void ClearMethodCounter(ArtMethod* method, bool was_warm) {
   method->SetCounter(std::min(jit_warmup_threshold - 1, 1));
 }
 
+static void FlushInstructionPiplines(uint8_t* sync_page) {
+  // After updating the JIT code cache we need to force all CPUs to
+  // flush their instruction pipelines. In the absence of system call
+  // to do this explicitly, we can achieve this indirectly by toggling
+  // permissions on an executable page. This should send an IPI to
+  // each core to update the TLB entry with the interrupt raised on
+  // each core causing the instruction pipeline to be flushed.
+  CHECKED_MPROTECT(sync_page, kPageSize, kProtAll);
+  // Ensure the sync_page is present otherwise a TLB update may not be
+  // necessary.
+  sync_page[0] = 0;
+  CHECKED_MPROTECT(sync_page, kPageSize, kProtCode);
+}
+
+#ifdef __aarch64__
+
+static void FlushJitCodeCacheRange(uint8_t* code_ptr,
+                                   uint8_t* writable_ptr,
+                                   size_t code_size) {
+  // Cache maintenance instructions can cause permission faults when a
+  // page is not present (e.g. swapped out or not backed). These
+  // faults should be handled by the kernel, but a bug in some Linux
+  // kernels may surface these permission faults to user-land which
+  // does not currently deal with them (b/63885946). To work around
+  // this, we read a value from each page to fault it in before
+  // attempting to perform cache maintenance operations.
+  //
+  // For reference, this behavior is caused by this commit:
+  // https://android.googlesource.com/kernel/msm/+/3fbe6bc28a6b9939d0650f2f17eb5216c719950c
+
+  // The cache-line size could be probed for from the CPU, but
+  // assuming a safe lower bound is safe for CPUs that have different
+  // cache-line sizes for big and little cores.
+  static const uintptr_t kSafeCacheLineSize = 32;
+
+  // Ensure stores are present in L1 data cache.
+  __asm __volatile("dsb ish" ::: "memory");
+
+  volatile uint8_t mutant;
+
+  // Push dirty cache-lines out to the point of unification (PoU). The
+  // point of unification is the first point in the cache/memory
+  // hierarchy where the instruction cache and data cache have the
+  // same view of memory. The PoU is where an instruction fetch will
+  // fetch the new code generated by the JIT.
+  //
+  // See: http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.den0024a/ch11s04.html
+  uintptr_t writable_addr = RoundDown(reinterpret_cast<uintptr_t>(writable_ptr),
+                                      kSafeCacheLineSize);
+  uintptr_t writable_end  = RoundUp(reinterpret_cast<uintptr_t>(writable_ptr) + code_size,
+                                    kSafeCacheLineSize);
+  while (writable_addr < writable_end) {
+    // Read from the cache-line to minimize the chance that a cache
+    // maintenance instruction causes a fault (see kernel bug comment
+    // above).
+    mutant = *reinterpret_cast<const uint8_t*>(writable_addr);
+
+    // Flush cache-line
+    __asm volatile("dc cvau, %0" :: "r"(writable_addr) : "memory");
+    writable_addr += kSafeCacheLineSize;
+  }
+
+  __asm __volatile("dsb ish" ::: "memory");
+
+  uintptr_t code_addr = RoundDown(reinterpret_cast<uintptr_t>(code_ptr), kSafeCacheLineSize);
+  const uintptr_t code_end = RoundUp(reinterpret_cast<uintptr_t>(code_ptr) + code_size,
+                                     kSafeCacheLineSize);
+  while (code_addr < code_end) {
+    // Read from the cache-line to minimize the chance that a cache
+    // maintenance instruction causes a fault (see kernel bug comment
+    // above).
+    mutant = *reinterpret_cast<const uint8_t*>(code_addr);
+
+    // Invalidating the data cache line is only strictly necessary
+    // when the JIT code cache has two mappings (the default). We know
+    // this cache line is clean so this is just invalidating it (using
+    // "dc ivac" would be preferable, but counts as a write and this
+    // memory may not be mapped write permission).
+    __asm volatile("dc cvau, %0" :: "r"(code_addr) : "memory");
+
+    // Invalidate the instruction cache line to force instructions in
+    // range to be re-fetched following update.
+    __asm volatile("ic ivau, %0" :: "r"(code_addr) : "memory");
+
+    code_addr += kSafeCacheLineSize;
+  }
+
+  // Wait for code cache invalidations to complete.
+  __asm __volatile("dsb ish" ::: "memory");
+
+  // Reset fetched instruction stream.
+  __asm __volatile("isb");
+}
+
+#else  // __aarch64
+
+static void FlushJitCodeCacheRange(uint8_t* code_ptr,
+                                   uint8_t* writable_ptr,
+                                   size_t code_size) {
+  if (writable_ptr != code_ptr) {
+    // When there are two mappings of the JIT code cache, RX and
+    // RW, flush the RW version first as we've just dirtied the
+    // cache lines with new code. Flushing the RX version first
+    // can cause a permission fault as the those addresses are not
+    // writable, but can appear dirty in the cache. There is a lot
+    // of potential subtlety here depending on how the cache is
+    // indexed and tagged.
+    //
+    // Flushing the RX version after the RW version is just
+    // invalidating cachelines in the instruction cache. This is
+    // necessary as the instruction cache will often have a
+    // different set of cache lines present and because the JIT
+    // code cache can start a new function at any boundary within
+    // a cache-line.
+    FlushDataCache(reinterpret_cast<char*>(writable_ptr),
+                   reinterpret_cast<char*>(writable_ptr + code_size));
+  }
+  FlushInstructionCache(reinterpret_cast<char*>(code_ptr),
+                        reinterpret_cast<char*>(code_ptr + code_size));
+}
+
+#endif  // __aarch64
+
 uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
                                           ArtMethod* method,
                                           uint8_t* stack_map,
@@ -552,7 +898,6 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
                                           size_t fp_spill_mask,
                                           const uint8_t* code,
                                           size_t code_size,
-                                          size_t data_size,
                                           bool osr,
                                           Handle<mirror::ObjectArray<mirror::Object>> roots,
                                           bool has_should_deoptimize_flag,
@@ -572,35 +917,37 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
     MutexLock mu(self, lock_);
     WaitForPotentialCollectionToComplete(self);
     {
-      ScopedCodeCacheWrite scc(code_map_.get());
+      ScopedCodeCacheWrite scc(this);
       memory = AllocateCode(total_size);
       if (memory == nullptr) {
         return nullptr;
       }
-      code_ptr = memory + header_size;
+      uint8_t* writable_ptr = memory + header_size;
+      code_ptr = ToExecutableAddress(writable_ptr);
 
-      std::copy(code, code + code_size, code_ptr);
-      method_header = OatQuickMethodHeader::FromCodePointer(code_ptr);
-      new (method_header) OatQuickMethodHeader(
+      std::copy(code, code + code_size, writable_ptr);
+      OatQuickMethodHeader* writable_method_header =
+          OatQuickMethodHeader::FromCodePointer(writable_ptr);
+      // We need to be able to write the OatQuickMethodHeader, so we use writable_method_header.
+      // Otherwise, the offsets encoded in OatQuickMethodHeader are used relative to an executable
+      // address, so we use code_ptr.
+      new (writable_method_header) OatQuickMethodHeader(
           code_ptr - stack_map,
           code_ptr - method_info,
           frame_size_in_bytes,
           core_spill_mask,
           fp_spill_mask,
           code_size);
-      // Flush caches before we remove write permission because some ARMv8 Qualcomm kernels may
-      // trigger a segfault if a page fault occurs when requesting a cache maintenance operation.
-      // This is a kernel bug that we need to work around until affected devices (e.g. Nexus 5X and
-      // 6P) stop being supported or their kernels are fixed.
-      //
-      // For reference, this behavior is caused by this commit:
-      // https://android.googlesource.com/kernel/msm/+/3fbe6bc28a6b9939d0650f2f17eb5216c719950c
-      FlushInstructionCache(reinterpret_cast<char*>(code_ptr),
-                            reinterpret_cast<char*>(code_ptr + code_size));
+
+      FlushJitCodeCacheRange(code_ptr, writable_ptr, code_size);
+      FlushInstructionPiplines(code_sync_map_->Begin());
+
       DCHECK(!Runtime::Current()->IsAotCompiler());
       if (has_should_deoptimize_flag) {
-        method_header->SetHasShouldDeoptimizeFlag();
+        writable_method_header->SetHasShouldDeoptimizeFlag();
       }
+      // All the pointers exported from the cache are executable addresses.
+      method_header = ToExecutableAddress(writable_method_header);
     }
 
     number_of_compilations_++;
@@ -630,7 +977,7 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
         << "Should not be using cha on debuggable apps/runs!";
 
     for (ArtMethod* single_impl : cha_single_implementation_list) {
-      Runtime::Current()->GetClassHierarchyAnalysis()->AddDependency(
+      Runtime::Current()->GetClassLinker()->GetClassHierarchyAnalysis()->AddDependency(
           single_impl, method, method_header);
     }
 
@@ -639,16 +986,14 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
     // but below we still make the compiled code valid for the method.
     MutexLock mu(self, lock_);
     // Fill the root table before updating the entry point.
+    CHECK(IsDataAddress(roots_data));
     DCHECK_EQ(FromStackMapToRoots(stack_map), roots_data);
     DCHECK_LE(roots_data, stack_map);
     FillRootTable(roots_data, roots);
-    {
-      // Flush data cache, as compiled code references literals in it.
-      // We also need a TLB shootdown to act as memory barrier across cores.
-      ScopedCodeCacheWrite ccw(code_map_.get(), /* only_for_tlb_shootdown */ true);
-      FlushDataCache(reinterpret_cast<char*>(roots_data),
-                     reinterpret_cast<char*>(roots_data + data_size));
-    }
+
+    // Ensure the updates to the root table are visible with a store fence.
+    QuasiAtomic::ThreadFenceSequentiallyConsistent();
+
     method_code_map_.Put(code_ptr, method);
     if (osr) {
       number_of_osr_compilations_++;
@@ -696,11 +1041,11 @@ bool JitCodeCache::RemoveMethod(ArtMethod* method, bool release_memory) {
 
   bool in_cache = false;
   {
-    ScopedCodeCacheWrite ccw(code_map_.get());
+    ScopedCodeCacheWrite ccw(this);
     for (auto code_iter = method_code_map_.begin(); code_iter != method_code_map_.end();) {
       if (code_iter->second == method) {
         if (release_memory) {
-          FreeCode(code_iter->first);
+          FreeCodeAndData(code_iter->first);
         }
         code_iter = method_code_map_.erase(code_iter);
         in_cache = true;
@@ -754,10 +1099,10 @@ void JitCodeCache::NotifyMethodRedefined(ArtMethod* method) {
     profiling_infos_.erase(profile);
   }
   method->SetProfilingInfo(nullptr);
-  ScopedCodeCacheWrite ccw(code_map_.get());
+  ScopedCodeCacheWrite ccw(this);
   for (auto code_iter = method_code_map_.begin(); code_iter != method_code_map_.end();) {
     if (code_iter->second == method) {
-      FreeCode(code_iter->first);
+      FreeCodeAndData(code_iter->first);
       code_iter = method_code_map_.erase(code_iter);
       continue;
     }
@@ -823,6 +1168,7 @@ void JitCodeCache::ClearData(Thread* self,
                              uint8_t* stack_map_data,
                              uint8_t* roots_data) {
   DCHECK_EQ(FromStackMapToRoots(stack_map_data), roots_data);
+  CHECK(IsDataAddress(roots_data));
   MutexLock mu(self, lock_);
   FreeData(reinterpret_cast<uint8_t*>(roots_data));
 }
@@ -944,11 +1290,11 @@ void JitCodeCache::NotifyCollectionDone(Thread* self) {
 
 void JitCodeCache::SetFootprintLimit(size_t new_footprint) {
   size_t per_space_footprint = new_footprint / 2;
-  DCHECK(IsAlignedParam(per_space_footprint, kPageSize));
+  CHECK(IsAlignedParam(per_space_footprint, kPageSize));
   DCHECK_EQ(per_space_footprint * 2, new_footprint);
   mspace_set_footprint_limit(data_mspace_, per_space_footprint);
   {
-    ScopedCodeCacheWrite scc(code_map_.get());
+    ScopedCodeCacheWrite scc(this);
     mspace_set_footprint_limit(code_mspace_, per_space_footprint);
   }
 }
@@ -1026,8 +1372,8 @@ void JitCodeCache::GarbageCollectCache(Thread* self) {
       number_of_collections_++;
       live_bitmap_.reset(CodeCacheBitmap::Create(
           "code-cache-bitmap",
-          reinterpret_cast<uintptr_t>(code_map_->Begin()),
-          reinterpret_cast<uintptr_t>(code_map_->Begin() + current_capacity_ / 2)));
+          reinterpret_cast<uintptr_t>(executable_code_map_->Begin()),
+          reinterpret_cast<uintptr_t>(executable_code_map_->Begin() + current_capacity_ / 2)));
       collection_in_progress_ = true;
     }
   }
@@ -1103,14 +1449,16 @@ void JitCodeCache::RemoveUnmarkedCode(Thread* self) {
   std::unordered_set<OatQuickMethodHeader*> method_headers;
   {
     MutexLock mu(self, lock_);
-    ScopedCodeCacheWrite scc(code_map_.get());
+    ScopedCodeCacheWrite scc(this);
     // Iterate over all compiled code and remove entries that are not marked.
     for (auto it = method_code_map_.begin(); it != method_code_map_.end();) {
       const void* code_ptr = it->first;
+      CHECK(IsExecutableAddress(code_ptr));
       uintptr_t allocation = FromCodeToAllocation(code_ptr);
       if (GetLiveBitmap()->Test(allocation)) {
         ++it;
       } else {
+        CHECK(IsExecutableAddress(it->first));
         method_headers.insert(OatQuickMethodHeader::FromCodePointer(it->first));
         it = method_code_map_.erase(it);
       }
@@ -1153,6 +1501,7 @@ void JitCodeCache::DoCollection(Thread* self, bool collect_profiling_info) {
     for (const auto& it : method_code_map_) {
       ArtMethod* method = it.second;
       const void* code_ptr = it.first;
+      CHECK(IsExecutableAddress(code_ptr));
       const OatQuickMethodHeader* method_header = OatQuickMethodHeader::FromCodePointer(code_ptr);
       if (method_header->GetEntryPoint() == method->GetEntryPointFromQuickCompiledCode()) {
         GetLiveBitmap()->AtomicTestAndSet(FromCodeToAllocation(code_ptr));
@@ -1178,6 +1527,7 @@ void JitCodeCache::DoCollection(Thread* self, bool collect_profiling_info) {
     // Free all profiling infos of methods not compiled nor being compiled.
     auto profiling_kept_end = std::remove_if(profiling_infos_.begin(), profiling_infos_.end(),
       [this] (ProfilingInfo* info) NO_THREAD_SAFETY_ANALYSIS {
+        CHECK(IsDataAddress(info));
         const void* ptr = info->GetMethod()->GetEntryPointFromQuickCompiledCode();
         // We have previously cleared the ProfilingInfo pointer in the ArtMethod in the hope
         // that the compiled code would not get revived. As mutator threads run concurrently,
@@ -1238,6 +1588,7 @@ OatQuickMethodHeader* JitCodeCache::LookupMethodHeader(uintptr_t pc, ArtMethod* 
   --it;
 
   const void* code_ptr = it->first;
+  CHECK(IsExecutableAddress(code_ptr));
   OatQuickMethodHeader* method_header = OatQuickMethodHeader::FromCodePointer(code_ptr);
   if (!method_header->Contains(pc)) {
     return nullptr;
@@ -1320,6 +1671,7 @@ ProfilingInfo* JitCodeCache::AddProfilingInfoInternal(Thread* self ATTRIBUTE_UNU
   // store in the ArtMethod's ProfilingInfo pointer.
   QuasiAtomic::ThreadFenceRelease();
 
+  CHECK(IsDataAddress(info));
   method->SetProfilingInfo(info);
   profiling_infos_.push_back(info);
   histogram_profiling_info_memory_use_.AddValue(profile_info_size);
@@ -1332,7 +1684,8 @@ void* JitCodeCache::MoreCore(const void* mspace, intptr_t increment) NO_THREAD_S
   if (code_mspace_ == mspace) {
     size_t result = code_end_;
     code_end_ += increment;
-    return reinterpret_cast<void*>(result + code_map_->Begin());
+    MemMap* writable_map = GetWritableMemMap();
+    return reinterpret_cast<void*>(result + writable_map->Begin());
   } else {
     DCHECK_EQ(data_mspace_, mspace);
     size_t result = data_end_;
@@ -1484,6 +1837,7 @@ void JitCodeCache::DoneCompiling(ArtMethod* method, Thread* self ATTRIBUTE_UNUSE
 
 size_t JitCodeCache::GetMemorySizeOfCodePointer(const void* ptr) {
   MutexLock mu(Thread::Current(), lock_);
+  CHECK(IsExecutableAddress(ptr));
   return mspace_usable_size(reinterpret_cast<const void*>(FromCodeToAllocation(ptr)));
 }
 
@@ -1519,22 +1873,27 @@ uint8_t* JitCodeCache::AllocateCode(size_t code_size) {
   size_t header_size = RoundUp(sizeof(OatQuickMethodHeader), alignment);
   // Ensure the header ends up at expected instruction alignment.
   DCHECK_ALIGNED_PARAM(reinterpret_cast<uintptr_t>(result + header_size), alignment);
+  CHECK(IsWritableAddress(result));
   used_memory_for_code_ += mspace_usable_size(result);
   return result;
 }
 
-void JitCodeCache::FreeCode(uint8_t* code) {
-  used_memory_for_code_ -= mspace_usable_size(code);
-  mspace_free(code_mspace_, code);
+void JitCodeCache::FreeRawCode(void* code) {
+  CHECK(IsExecutableAddress(code));
+  void* writable_code = ToWritableAddress(code);
+  used_memory_for_code_ -= mspace_usable_size(writable_code);
+  mspace_free(code_mspace_, writable_code);
 }
 
 uint8_t* JitCodeCache::AllocateData(size_t data_size) {
   void* result = mspace_malloc(data_mspace_, data_size);
+  CHECK(IsDataAddress(reinterpret_cast<uint8_t*>(result)));
   used_memory_for_data_ += mspace_usable_size(result);
   return reinterpret_cast<uint8_t*>(result);
 }
 
 void JitCodeCache::FreeData(uint8_t* data) {
+  CHECK(IsDataAddress(data));
   used_memory_for_data_ -= mspace_usable_size(data);
   mspace_free(data_mspace_, data);
 }

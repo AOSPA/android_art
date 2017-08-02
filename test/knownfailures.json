@@ -100,6 +100,11 @@
         "bug": "http://b/35800768"
     },
     {
+        "tests": "163-app-image-methods",
+        "variant": "gcstress",
+        "description": ["This test sometimes runs out of memory initializing the boot classpath."]
+    },
+    {
         "tests": ["908-gc-start-finish",
                   "913-heaps"],
         "variant": "gcstress",
@@ -640,6 +645,36 @@
         "env_vars": {"SANITIZE_TARGET": "address"}
     },
     {
+        "tests": [
+            "059-finalizer-throw",
+            "074-gc-thrash",
+            "911-get-stack-trace",
+            "913-heaps",
+            "980-redefine-object"
+        ],
+        "description": [
+            "Interpreter with access checks stack frames are too large and result in",
+            "StackOverFlow errors being thrown."
+        ],
+        "variant": "interp-ac & host",
+        "env_vars": {"SANITIZE_HOST": "address"}
+    },
+    {
+        "tests": [
+            "059-finalizer-throw",
+            "074-gc-thrash",
+            "911-get-stack-trace",
+            "913-heaps",
+            "980-redefine-object"
+        ],
+        "description": [
+            "Interpreter with access checks stack frames are too large and result in",
+            "StackOverFlow errors being thrown."
+        ],
+        "variant": "interp-ac & target",
+        "env_vars": {"SANITIZE_TARGET": "address"}
+    },
+    {
         "tests": "071-dexfile-map-clean",
         "description": [ "We use prebuilt zipalign on master-art-host to avoid pulling in a lot",
                          "of the framework. But a non-sanitized zipalign binary does not work with",
@@ -679,6 +714,19 @@
         "description": [ "Flake on gcstress" ],
         "bug": "b/62562923",
         "variant": "gcstress & jit & target"
+    },
+    {
+        "tests": [
+            "1902-suspend",
+            "1903-suspend-self",
+            "1904-double-suspend",
+            "1905-suspend-native",
+            "1906-suspend-list-me-first",
+            "1907-suspend-list-self-twice",
+            "1908-suspend-native-resume-self"
+        ],
+        "description": [ "Disable the jvmti can_suspend cap and associated tests" ],
+        "bug": "b/63579748"
     },
     {
         "tests": ["004-JniTest"],

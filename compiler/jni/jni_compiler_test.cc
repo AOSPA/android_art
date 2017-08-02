@@ -32,12 +32,12 @@
 #include "mem_map.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
-#include "mirror/object_array-inl.h"
 #include "mirror/object-inl.h"
+#include "mirror/object_array-inl.h"
 #include "mirror/stack_trace_element.h"
+#include "nativehelper/ScopedLocalRef.h"
 #include "nativeloader/native_loader.h"
 #include "runtime.h"
-#include "ScopedLocalRef.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread.h"
 
@@ -48,6 +48,9 @@ extern "C" JNIEXPORT jint JNICALL Java_MyClassNatives_bar(JNIEnv*, jobject, jint
 extern "C" JNIEXPORT jint JNICALL Java_MyClassNatives_sbar(JNIEnv*, jclass, jint count) {
   return count + 1;
 }
+
+// TODO: In the Baker read barrier configuration, add checks to ensure
+// the Marking Register's value is correct.
 
 namespace art {
 

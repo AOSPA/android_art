@@ -30,8 +30,8 @@
 #include "base/enums.h"
 #include "base/strlcpy.h"
 #include "base/time_utils.h"
-#include "class_linker.h"
 #include "class_linker-inl.h"
+#include "class_linker.h"
 #include "dex_file-inl.h"
 #include "dex_file_annotations.h"
 #include "dex_instruction.h"
@@ -39,6 +39,7 @@
 #include "gc/accounting/card_table-inl.h"
 #include "gc/allocation_record.h"
 #include "gc/scoped_gc_critical_section.h"
+#include "gc/space/bump_pointer_space-walk-inl.h"
 #include "gc/space/large_object_space.h"
 #include "gc/space/space-inl.h"
 #include "handle_scope-inl.h"
@@ -46,19 +47,19 @@
 #include "jdwp/object_registry.h"
 #include "jni_internal.h"
 #include "jvalue-inl.h"
-#include "mirror/class.h"
 #include "mirror/class-inl.h"
+#include "mirror/class.h"
 #include "mirror/class_loader.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/string-inl.h"
 #include "mirror/throwable.h"
+#include "nativehelper/ScopedLocalRef.h"
+#include "nativehelper/ScopedPrimitiveArray.h"
 #include "obj_ptr-inl.h"
 #include "reflection.h"
 #include "safe_map.h"
 #include "scoped_thread_state_change-inl.h"
-#include "ScopedLocalRef.h"
-#include "ScopedPrimitiveArray.h"
 #include "stack.h"
 #include "thread_list.h"
 #include "utf.h"
@@ -2480,7 +2481,8 @@ void Dbg::ResumeThread(JDWP::ObjectId thread_id) {
     needs_resume = thread->GetDebugSuspendCount() > 0;
   }
   if (needs_resume) {
-    Runtime::Current()->GetThreadList()->Resume(thread, SuspendReason::kForDebugger);
+    bool resumed = Runtime::Current()->GetThreadList()->Resume(thread, SuspendReason::kForDebugger);
+    DCHECK(resumed);
   }
 }
 
@@ -3721,7 +3723,9 @@ class ScopedDebuggerThreadSuspension {
 
   ~ScopedDebuggerThreadSuspension() {
     if (other_suspend_) {
-      Runtime::Current()->GetThreadList()->Resume(thread_, SuspendReason::kForDebugger);
+      bool resumed = Runtime::Current()->GetThreadList()->Resume(thread_,
+                                                                 SuspendReason::kForDebugger);
+      DCHECK(resumed);
     }
   }
 
@@ -4043,7 +4047,8 @@ JDWP::JdwpError Dbg::PrepareInvokeMethod(uint32_t request_id, JDWP::ObjectId thr
     thread_list->UndoDebuggerSuspensions();
   } else {
     VLOG(jdwp) << "      Resuming event thread only";
-    thread_list->Resume(targetThread, SuspendReason::kForDebugger);
+    bool resumed = thread_list->Resume(targetThread, SuspendReason::kForDebugger);
+    DCHECK(resumed);
   }
 
   return JDWP::ERR_NONE;
@@ -4809,13 +4814,6 @@ class HeapChunkContext {
   DISALLOW_COPY_AND_ASSIGN(HeapChunkContext);
 };
 
-static void BumpPointerSpaceCallback(mirror::Object* obj, void* arg)
-    REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(Locks::heap_bitmap_lock_) {
-  const size_t size = RoundUp(obj->SizeOf(), kObjectAlignment);
-  HeapChunkContext::HeapChunkJavaCallback(
-      obj, reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(obj) + size), size, arg);
-}
-
 void Dbg::DdmSendHeapSegments(bool native) {
   Dbg::HpsgWhen when = native ? gDdmNhsgWhen : gDdmHpsgWhen;
   Dbg::HpsgWhat what = native ? gDdmNhsgWhat : gDdmHpsgWhat;
@@ -4835,6 +4833,12 @@ void Dbg::DdmSendHeapSegments(bool native) {
 
   // Send a series of heap segment chunks.
   HeapChunkContext context(what == HPSG_WHAT_MERGED_OBJECTS, native);
+  auto bump_pointer_space_visitor = [&](mirror::Object* obj)
+      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(Locks::heap_bitmap_lock_) {
+    const size_t size = RoundUp(obj->SizeOf(), kObjectAlignment);
+    HeapChunkContext::HeapChunkJavaCallback(
+        obj, reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(obj) + size), size, &context);
+  };
   if (native) {
     UNIMPLEMENTED(WARNING) << "Native heap inspection is not supported";
   } else {
@@ -4857,7 +4861,7 @@ void Dbg::DdmSendHeapSegments(bool native) {
       } else if (space->IsBumpPointerSpace()) {
         ReaderMutexLock mu(self, *Locks::heap_bitmap_lock_);
         context.SetChunkOverhead(0);
-        space->AsBumpPointerSpace()->Walk(BumpPointerSpaceCallback, &context);
+        space->AsBumpPointerSpace()->Walk(bump_pointer_space_visitor);
         HeapChunkContext::HeapChunkJavaCallback(nullptr, nullptr, 0, &context);
       } else if (space->IsRegionSpace()) {
         heap->IncrementDisableMovingGC(self);
@@ -4866,7 +4870,7 @@ void Dbg::DdmSendHeapSegments(bool native) {
           ScopedSuspendAll ssa(__FUNCTION__);
           ReaderMutexLock mu(self, *Locks::heap_bitmap_lock_);
           context.SetChunkOverhead(0);
-          space->AsRegionSpace()->Walk(BumpPointerSpaceCallback, &context);
+          space->AsRegionSpace()->Walk(bump_pointer_space_visitor);
           HeapChunkContext::HeapChunkJavaCallback(nullptr, nullptr, 0, &context);
         }
         heap->DecrementDisableMovingGC(self);

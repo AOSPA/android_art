@@ -228,6 +228,11 @@ class Thread {
     return tls32_.suspend_count;
   }
 
+  int GetUserCodeSuspendCount() const REQUIRES(Locks::thread_suspend_count_lock_,
+                                               Locks::user_code_suspension_lock_) {
+    return tls32_.user_code_suspend_count;
+  }
+
   int GetDebugSuspendCount() const REQUIRES(Locks::thread_suspend_count_lock_) {
     return tls32_.debug_suspend_count;
   }
@@ -654,6 +659,17 @@ class Thread {
   static ThreadOffset<pointer_size> JniEntryPointOffset(size_t jni_entrypoint_offset) {
     return ThreadOffsetFromTlsPtr<pointer_size>(
         OFFSETOF_MEMBER(tls_ptr_sized_values, jni_entrypoints) + jni_entrypoint_offset);
+  }
+
+  // Return the entry point offset integer value for ReadBarrierMarkRegX, where X is `reg`.
+  template <PointerSize pointer_size>
+  static int32_t ReadBarrierMarkEntryPointsOffset(size_t reg) {
+    // The entry point list defines 30 ReadBarrierMarkRegX entry points.
+    DCHECK_LT(reg, 30u);
+    // The ReadBarrierMarkRegX entry points are ordered by increasing
+    // register number in Thread::tls_Ptr_.quick_entrypoints.
+    return QUICK_ENTRYPOINT_OFFSET(pointer_size, pReadBarrierMarkReg00).Int32Value()
+        + static_cast<size_t>(pointer_size) * reg;
   }
 
   template<PointerSize pointer_size>
@@ -1166,11 +1182,11 @@ class Thread {
     return debug_disallow_read_barrier_;
   }
 
-  const void* GetCustomTLS() const {
+  void* GetCustomTLS() const REQUIRES(Locks::thread_list_lock_) {
     return custom_tls_;
   }
 
-  void SetCustomTLS(const void* data) {
+  void SetCustomTLS(void* data) REQUIRES(Locks::thread_list_lock_) {
     custom_tls_ = data;
   }
 
@@ -1381,7 +1397,7 @@ class Thread {
       thread_exit_check_count(0), handling_signal_(false),
       is_transitioning_to_runnable(false), ready_for_debug_invoke(false),
       debug_method_entry_(false), is_gc_marking(false), weak_ref_access_enabled(true),
-      disable_thread_flip_count(0) {
+      disable_thread_flip_count(0), user_code_suspend_count(0) {
     }
 
     union StateAndFlags state_and_flags;
@@ -1456,6 +1472,12 @@ class Thread {
     // levels of (nested) JNI critical sections the thread is in and is used to detect a nested JNI
     // critical section enter.
     uint32_t disable_thread_flip_count;
+
+    // How much of 'suspend_count_' is by request of user code, used to distinguish threads
+    // suspended by the runtime from those suspended by user code.
+    // This should have GUARDED_BY(Locks::user_code_suspension_lock_) but auto analysis cannot be
+    // told that AssertHeld should be good enough.
+    int user_code_suspend_count GUARDED_BY(Locks::thread_suspend_count_lock_);
   } tls32_;
 
   struct PACKED(8) tls_64bit_sized_values {
@@ -1661,7 +1683,7 @@ class Thread {
 
   // Custom TLS field that can be used by plugins.
   // TODO: Generalize once we have more plugins.
-  const void* custom_tls_;
+  void* custom_tls_;
 
   // True if the thread is allowed to call back into java (for e.g. during class resolution).
   // By default this is true.

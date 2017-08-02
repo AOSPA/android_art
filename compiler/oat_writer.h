@@ -239,12 +239,13 @@ class OatWriter {
     return ArrayRef<const debug::MethodDebugInfo>(method_info_);
   }
 
-  const CompilerDriver* GetCompilerDriver() {
+  const CompilerDriver* GetCompilerDriver() const {
     return compiler_driver_;
   }
 
  private:
   class DexFileSource;
+  class OatClassHeader;
   class OatClass;
   class OatDexFile;
 
@@ -265,6 +266,7 @@ class OatWriter {
   class WriteMapMethodVisitor;
   class WriteMethodInfoVisitor;
   class WriteQuickeningInfoMethodVisitor;
+  class WriteQuickeningIndicesMethodVisitor;
 
   // Visit all the methods in all the compiled dex files in their definition order
   // with a given DexMethodVisitor.
@@ -326,6 +328,8 @@ class OatWriter {
   bool WriteUpTo16BytesAlignment(OutputStream* out, uint32_t size, uint32_t* stat);
   void SetMultiOatRelativePatcherAdjustment();
   void CloseSources();
+
+  bool MayHaveCompiledMethods() const;
 
   enum class WriteState {
     kAddingDexFileSources,
@@ -410,6 +414,7 @@ class OatWriter {
   // data to write
   std::unique_ptr<OatHeader> oat_header_;
   dchecked_vector<OatDexFile> oat_dex_files_;
+  dchecked_vector<OatClassHeader> oat_class_headers_;
   dchecked_vector<OatClass> oat_classes_;
   std::unique_ptr<const std::vector<uint8_t>> jni_dlsym_lookup_;
   std::unique_ptr<const std::vector<uint8_t>> quick_generic_jni_trampoline_;

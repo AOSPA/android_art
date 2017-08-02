@@ -39,8 +39,7 @@
 
 #include "android-base/strings.h"
 
-#include "JniConstants.h"
-#include "ScopedLocalRef.h"
+#include "aot_class_linker.h"
 #include "arch/arm/quick_method_frame_info_arm.h"
 #include "arch/arm/registers_arm.h"
 #include "arch/arm64/quick_method_frame_info_arm64.h"
@@ -65,7 +64,6 @@
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "base/unix_file/fd_file.h"
-#include "cha.h"
 #include "class_linker-inl.h"
 #include "compiler_callbacks.h"
 #include "debugger.h"
@@ -87,6 +85,7 @@
 #include "java_vm_ext.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
+#include "jit/profile_saver.h"
 #include "jni_internal.h"
 #include "linear_alloc.h"
 #include "mirror/array.h"
@@ -133,17 +132,17 @@
 #include "native/sun_misc_Unsafe.h"
 #include "native_bridge_art_interface.h"
 #include "native_stack_dump.h"
+#include "nativehelper/JniConstants.h"
+#include "nativehelper/ScopedLocalRef.h"
 #include "oat_file.h"
 #include "oat_file_manager.h"
 #include "object_callbacks.h"
 #include "os.h"
 #include "parsed_options.h"
-#include "jit/profile_saver.h"
 #include "quick/quick_method_frame_info.h"
 #include "reflection.h"
 #include "runtime_callbacks.h"
 #include "runtime_options.h"
-#include "ScopedLocalRef.h"
 #include "scoped_thread_state_change-inl.h"
 #include "sigchain.h"
 #include "signal_catcher.h"
@@ -259,8 +258,7 @@ Runtime::Runtime()
       pruned_dalvik_cache_(false),
       // Initially assume we perceive jank in case the process state is never updated.
       process_state_(kProcessStateJankPerceptible),
-      zygote_no_threads_(false),
-      cha_(nullptr) {
+      zygote_no_threads_(false) {
   static_assert(Runtime::kCalleeSaveSize ==
                     static_cast<uint32_t>(CalleeSaveType::kLastCalleeSaveType), "Unexpected size");
 
@@ -382,7 +380,6 @@ Runtime::~Runtime() {
   delete monitor_list_;
   delete monitor_pool_;
   delete class_linker_;
-  delete cha_;
   delete heap_;
   delete intern_table_;
   delete oat_file_manager_;
@@ -1289,8 +1286,11 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   GetHeap()->EnableObjectValidation();
 
   CHECK_GE(GetHeap()->GetContinuousSpaces().size(), 1U);
-  class_linker_ = new ClassLinker(intern_table_);
-  cha_ = new ClassHierarchyAnalysis;
+  if (UNLIKELY(IsAotCompiler())) {
+    class_linker_ = new AotClassLinker(intern_table_);
+  } else {
+    class_linker_ = new ClassLinker(intern_table_);
+  }
   if (GetHeap()->HasBootImageSpace()) {
     bool result = class_linker_->InitFromBootImage(&error_msg);
     if (!result) {

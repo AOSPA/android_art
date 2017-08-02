@@ -226,7 +226,7 @@ class ReadBarrierSystemArrayCopySlowPathARMVIXL : public SlowPathCodeARMVIXL {
     // TODO: Load the entrypoint once before the loop, instead of
     // loading it at every iteration.
     int32_t entry_point_offset =
-        CodeGenerator::GetReadBarrierMarkEntryPointsOffset<kArmPointerSize>(tmp.GetCode());
+        Thread::ReadBarrierMarkEntryPointsOffset<kArmPointerSize>(tmp.GetCode());
     // This runtime call does not require a stack map.
     arm_codegen->InvokeRuntimeWithoutRecordingPcInfo(entry_point_offset, instruction_, this);
     assembler->MaybePoisonHeapReference(tmp);
@@ -1058,7 +1058,7 @@ static void CreateIntIntIntToIntLocations(ArenaAllocator* arena,
                     (can_call ? Location::kOutputOverlap : Location::kNoOutputOverlap));
   if (type == Primitive::kPrimNot && kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
     // We need a temporary register for the read barrier marking slow
-    // path in InstructionCodeGeneratorARM::GenerateReferenceLoadWithBakerReadBarrier.
+    // path in CodeGeneratorARMVIXL::GenerateReferenceLoadWithBakerReadBarrier.
     locations->AddTemp(Location::RequiresRegister());
   }
 }
@@ -2377,7 +2377,7 @@ void IntrinsicCodeGeneratorARMVIXL::VisitSystemArrayCopy(HInvoke* invoke) {
       // TODO: Also convert this intrinsic to the IsGcMarking strategy?
 
       // SystemArrayCopy implementation for Baker read barriers (see
-      // also CodeGeneratorARM::GenerateReferenceLoadWithBakerReadBarrier):
+      // also CodeGeneratorARMVIXL::GenerateReferenceLoadWithBakerReadBarrier):
       //
       //   uint32_t rb_state = Lockword(src->monitor_).ReadBarrierState();
       //   lfence;  // Load fence or artificial data dependency to prevent load-load reordering

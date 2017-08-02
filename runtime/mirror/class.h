@@ -138,9 +138,10 @@ class MANAGED Class FINAL : public Object {
     kStatusRetryVerificationAtRuntime = 6,  // Compile time verification failed, retry at runtime.
     kStatusVerifyingAtRuntime = 7,  // Retrying verification at runtime.
     kStatusVerified = 8,  // Logically part of linking; done pre-init.
-    kStatusInitializing = 9,  // Class init in progress.
-    kStatusInitialized = 10,  // Ready to go.
-    kStatusMax = 11,
+    kStatusSuperclassValidated = 9,  // Superclass validation part of init done.
+    kStatusInitializing = 10,  // Class init in progress.
+    kStatusInitialized = 11,  // Ready to go.
+    kStatusMax = 12,
   };
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
@@ -408,7 +409,7 @@ class MANAGED Class FINAL : public Object {
     DCHECK_EQ(v32 & kPrimitiveTypeMask, v32) << "upper 16 bits aren't zero";
     // Store the component size shift in the upper 16 bits.
     v32 |= Primitive::ComponentSizeShift(new_type) << kPrimitiveTypeSizeShiftShift;
-    SetField32<false>(OFFSET_OF_OBJECT_MEMBER(Class, primitive_type_), v32);
+    SetField32Transaction(OFFSET_OF_OBJECT_MEMBER(Class, primitive_type_), v32);
   }
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
@@ -1169,8 +1170,7 @@ class MANAGED Class FINAL : public Object {
   }
 
   void SetDexClassDefIndex(uint16_t class_def_idx) REQUIRES_SHARED(Locks::mutator_lock_) {
-    // Not called within a transaction.
-    SetField32<false>(OFFSET_OF_OBJECT_MEMBER(Class, dex_class_def_idx_), class_def_idx);
+    SetField32Transaction(OFFSET_OF_OBJECT_MEMBER(Class, dex_class_def_idx_), class_def_idx);
   }
 
   dex::TypeIndex GetDexTypeIndex() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -1179,8 +1179,7 @@ class MANAGED Class FINAL : public Object {
   }
 
   void SetDexTypeIndex(dex::TypeIndex type_idx) REQUIRES_SHARED(Locks::mutator_lock_) {
-    // Not called within a transaction.
-    SetField32<false>(OFFSET_OF_OBJECT_MEMBER(Class, dex_type_idx_), type_idx.index_);
+    SetField32Transaction(OFFSET_OF_OBJECT_MEMBER(Class, dex_type_idx_), type_idx.index_);
   }
 
   dex::TypeIndex FindTypeIndexInOtherDexFile(const DexFile& dex_file)

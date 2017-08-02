@@ -47,9 +47,8 @@
 namespace art {
 
 const uint8_t ProfileCompilationInfo::kProfileMagic[] = { 'p', 'r', 'o', '\0' };
-// Last profile version: Move startup methods to use a bitmap. Also add support for post-startup
-// methods.
-const uint8_t ProfileCompilationInfo::kProfileVersion[] = { '0', '0', '8', '\0' };
+// Last profile version: update the multidex separator.
+const uint8_t ProfileCompilationInfo::kProfileVersion[] = { '0', '0', '9', '\0' };
 
 static constexpr uint16_t kMaxDexFileKeyLength = PATH_MAX;
 
@@ -336,7 +335,9 @@ bool ProfileCompilationInfo::Save(int fd) {
         methods_region_size +
         dex_data.bitmap_storage.size();
   }
-  if (required_capacity > kProfileSizeErrorThresholdInBytes) {
+  // Allow large profiles for non target builds for the case where we are merging many profiles
+  // to generate a boot image profile.
+  if (kIsTargetBuild && required_capacity > kProfileSizeErrorThresholdInBytes) {
     LOG(ERROR) << "Profile data size exceeds "
                << std::to_string(kProfileSizeErrorThresholdInBytes)
                << " bytes. Profile will not be written to disk.";
@@ -1030,8 +1031,9 @@ ProfileCompilationInfo::ProfileLoadSatus ProfileCompilationInfo::LoadInternal(
   if (status != kProfileLoadSuccess) {
     return status;
   }
-
-  if (uncompressed_data_size > kProfileSizeErrorThresholdInBytes) {
+  // Allow large profiles for non target builds for the case where we are merging many profiles
+  // to generate a boot image profile.
+  if (kIsTargetBuild && uncompressed_data_size > kProfileSizeErrorThresholdInBytes) {
     LOG(ERROR) << "Profile data size exceeds "
                << std::to_string(kProfileSizeErrorThresholdInBytes)
                << " bytes";
@@ -1338,7 +1340,7 @@ std::string ProfileCompilationInfo::DumpInfo(const std::vector<const DexFile*>* 
 
   os << "ProfileInfo:";
 
-  const std::string kFirstDexFileKeySubstitute = ":classes.dex";
+  const std::string kFirstDexFileKeySubstitute = "!classes.dex";
 
   for (const DexFileData* dex_data : info_) {
     os << "\n";
@@ -1648,6 +1650,29 @@ ProfileCompilationInfo::MethodHotness ProfileCompilationInfo::DexFileData::GetHo
 ProfileCompilationInfo::DexPcData*
 ProfileCompilationInfo::FindOrAddDexPc(InlineCacheMap* inline_cache, uint32_t dex_pc) {
   return &(inline_cache->FindOrAdd(dex_pc, DexPcData(&arena_))->second);
+}
+
+std::unordered_set<std::string> ProfileCompilationInfo::GetClassDescriptors(
+    const std::vector<const DexFile*>& dex_files) {
+  std::unordered_set<std::string> ret;
+  for (const DexFile* dex_file : dex_files) {
+    const DexFileData* data = FindDexData(dex_file);
+    if (data != nullptr) {
+      for (dex::TypeIndex type_idx : data->class_set) {
+        if (!dex_file->IsTypeIndexValid(type_idx)) {
+          // Something went bad. The profile is probably corrupted. Abort and return an emtpy set.
+          LOG(WARNING) << "Corrupted profile: invalid type index "
+              << type_idx.index_ << " in dex " << dex_file->GetLocation();
+          return std::unordered_set<std::string>();
+        }
+        const DexFile::TypeId& type_id = dex_file->GetTypeId(type_idx);
+        ret.insert(dex_file->GetTypeDescriptor(type_id));
+      }
+    } else {
+      VLOG(compiler) << "Failed to find profile data for " << dex_file->GetLocation();
+    }
+  }
+  return ret;
 }
 
 }  // namespace art

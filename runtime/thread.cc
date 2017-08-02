@@ -34,16 +34,16 @@
 
 #include "android-base/stringprintf.h"
 
-#include "arch/context.h"
 #include "arch/context-inl.h"
+#include "arch/context.h"
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "base/bit_utils.h"
 #include "base/memory_tool.h"
 #include "base/mutex.h"
+#include "base/systrace.h"
 #include "base/timing_logger.h"
 #include "base/to_str.h"
-#include "base/systrace.h"
 #include "class_linker-inl.h"
 #include "debugger.h"
 #include "dex_file-inl.h"
@@ -58,38 +58,38 @@
 #include "gc_root.h"
 #include "handle_scope-inl.h"
 #include "indirect_reference_table-inl.h"
+#include "interpreter/interpreter.h"
 #include "interpreter/shadow_frame.h"
 #include "java_frame_root_info.h"
 #include "java_vm_ext.h"
 #include "jni_internal.h"
-#include "mirror/class_loader.h"
 #include "mirror/class-inl.h"
+#include "mirror/class_loader.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/stack_trace_element.h"
 #include "monitor.h"
 #include "native_stack_dump.h"
+#include "nativehelper/ScopedLocalRef.h"
+#include "nativehelper/ScopedUtfChars.h"
 #include "nth_caller_visitor.h"
 #include "oat_quick_method_header.h"
 #include "obj_ptr-inl.h"
 #include "object_lock.h"
-#include "quick_exception_handler.h"
 #include "quick/quick_method_frame_info.h"
+#include "quick_exception_handler.h"
 #include "read_barrier-inl.h"
 #include "reflection.h"
 #include "runtime.h"
 #include "runtime_callbacks.h"
 #include "scoped_thread_state_change-inl.h"
-#include "ScopedLocalRef.h"
-#include "ScopedUtfChars.h"
 #include "stack.h"
 #include "stack_map.h"
-#include "thread_list.h"
 #include "thread-inl.h"
+#include "thread_list.h"
 #include "utils.h"
 #include "verifier/method_verifier.h"
 #include "verify_object.h"
 #include "well_known_classes.h"
-#include "interpreter/interpreter.h"
 
 #if ART_USE_FUTEXES
 #include "linux/futex.h"
@@ -1208,6 +1208,15 @@ bool Thread::ModifySuspendCountInternal(Thread* self,
       Locks::thread_list_lock_->AssertHeld(self);
     }
   }
+  // User code suspensions need to be checked more closely since they originate from code outside of
+  // the runtime's control.
+  if (UNLIKELY(reason == SuspendReason::kForUserCode)) {
+    Locks::user_code_suspension_lock_->AssertHeld(self);
+    if (UNLIKELY(delta + tls32_.user_code_suspend_count < 0)) {
+      LOG(ERROR) << "attempting to modify suspend count in an illegal way.";
+      return false;
+    }
+  }
   if (UNLIKELY(delta < 0 && tls32_.suspend_count <= 0)) {
     UnsafeLogFatalForSuspendCount(self, this);
     return false;
@@ -1240,6 +1249,9 @@ bool Thread::ModifySuspendCountInternal(Thread* self,
   switch (reason) {
     case SuspendReason::kForDebugger:
       tls32_.debug_suspend_count += delta;
+      break;
+    case SuspendReason::kForUserCode:
+      tls32_.user_code_suspend_count += delta;
       break;
     case SuspendReason::kInternal:
       break;
@@ -2861,6 +2873,7 @@ void Thread::DumpThreadOffset(std::ostream& os, uint32_t offset) {
   DO_THREAD_OFFSET(SelfOffset<ptr_size>(), "self")
   DO_THREAD_OFFSET(StackEndOffset<ptr_size>(), "stack_end")
   DO_THREAD_OFFSET(ThinLockIdOffset<ptr_size>(), "thin_lock_thread_id")
+  DO_THREAD_OFFSET(IsGcMarkingOffset<ptr_size>(), "is_gc_marking")
   DO_THREAD_OFFSET(TopOfManagedStackOffset<ptr_size>(), "top_quick_frame_method")
   DO_THREAD_OFFSET(TopShadowFrameOffset<ptr_size>(), "top_shadow_frame")
   DO_THREAD_OFFSET(TopHandleScopeOffset<ptr_size>(), "top_handle_scope")

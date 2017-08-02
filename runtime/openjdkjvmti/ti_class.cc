@@ -39,12 +39,13 @@
 #include "art_jvmti.h"
 #include "base/array_ref.h"
 #include "base/macros.h"
-#include "class_table-inl.h"
 #include "class_linker.h"
+#include "class_table-inl.h"
 #include "common_throws.h"
 #include "dex_file_annotations.h"
 #include "events-inl.h"
 #include "fixed_up_dex_file.h"
+#include "gc/heap-visit-objects-inl.h"
 #include "gc/heap.h"
 #include "gc_root.h"
 #include "handle.h"
@@ -53,16 +54,16 @@
 #include "mirror/array-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_ext.h"
-#include "mirror/object_array-inl.h"
-#include "mirror/object_reference.h"
 #include "mirror/object-inl.h"
 #include "mirror/object-refvisitor-inl.h"
+#include "mirror/object_array-inl.h"
+#include "mirror/object_reference.h"
 #include "mirror/reference.h"
+#include "nativehelper/ScopedLocalRef.h"
 #include "primitive.h"
 #include "reflection.h"
 #include "runtime.h"
 #include "runtime_callbacks.h"
-#include "ScopedLocalRef.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread-current-inl.h"
 #include "thread_list.h"
@@ -544,21 +545,15 @@ struct ClassCallback : public art::ClassLoadCallback {
         LOG(FATAL) << "Unreachable";
       }
 
-      static void AllObjectsCallback(art::mirror::Object* obj, void* arg)
-          REQUIRES_SHARED(art::Locks::mutator_lock_) {
-        HeapFixupVisitor* hfv = reinterpret_cast<HeapFixupVisitor*>(arg);
-
-        // Visit references, not native roots.
-        obj->VisitReferences<false>(*hfv, *hfv);
-      }
-
      private:
       const art::mirror::Class* input_;
       art::mirror::Class* output_;
     };
     HeapFixupVisitor hfv(input, output);
-    art::Runtime::Current()->GetHeap()->VisitObjectsPaused(HeapFixupVisitor::AllObjectsCallback,
-                                                           &hfv);
+    auto object_visitor = [&](art::mirror::Object* obj) {
+      obj->VisitReferences<false>(hfv, hfv);  // Visit references, not native roots.
+    };
+    art::Runtime::Current()->GetHeap()->VisitObjectsPaused(object_visitor);
   }
 
   // A set of all the temp classes we have handed out. We have to fix up references to these.

@@ -656,7 +656,7 @@ class ReadBarrierMarkSlowPathMIPS : public SlowPathCodeMIPS {
       __ NopIfNoReordering();
     } else {
       int32_t entry_point_offset =
-          CodeGenerator::GetReadBarrierMarkEntryPointsOffset<kMipsPointerSize>(ref_reg - 1);
+          Thread::ReadBarrierMarkEntryPointsOffset<kMipsPointerSize>(ref_reg - 1);
       // This runtime call does not require a stack map.
       mips_codegen->InvokeRuntimeWithoutRecordingPcInfo(entry_point_offset,
                                                         instruction_,
@@ -750,7 +750,7 @@ class ReadBarrierMarkAndUpdateFieldSlowPathMIPS : public SlowPathCodeMIPS {
     //   rX <- ReadBarrierMarkRegX(rX)
     //
     int32_t entry_point_offset =
-        CodeGenerator::GetReadBarrierMarkEntryPointsOffset<kMipsPointerSize>(ref_reg - 1);
+        Thread::ReadBarrierMarkEntryPointsOffset<kMipsPointerSize>(ref_reg - 1);
     // This runtime call does not require a stack map.
     mips_codegen->InvokeRuntimeWithoutRecordingPcInfo(entry_point_offset,
                                                       instruction_,
@@ -6497,7 +6497,7 @@ void InstructionCodeGeneratorMIPS::GenerateGcRootFieldLoad(HInstruction* instruc
 
       // temp = Thread::Current()->pReadBarrierMarkReg ## root.reg()
       const int32_t entry_point_offset =
-          CodeGenerator::GetReadBarrierMarkEntryPointsOffset<kMipsPointerSize>(root.reg() - 1);
+          Thread::ReadBarrierMarkEntryPointsOffset<kMipsPointerSize>(root.reg() - 1);
       // Loading the entrypoint does not require a load acquire since it is only changed when
       // threads are suspended or running a checkpoint.
       __ LoadFromOffset(kLoadWord, temp.AsRegister<Register>(), TR, entry_point_offset);
@@ -7859,8 +7859,11 @@ void LocationsBuilderMIPS::VisitNewArray(HNewArray* instruction) {
 void InstructionCodeGeneratorMIPS::VisitNewArray(HNewArray* instruction) {
   // Note: if heap poisoning is enabled, the entry point takes care
   // of poisoning the reference.
-  codegen_->InvokeRuntime(kQuickAllocArrayResolved, instruction, instruction->GetDexPc());
+  QuickEntrypointEnum entrypoint =
+      CodeGenerator::GetArrayAllocationEntrypoint(instruction->GetLoadClass()->GetClass());
+  codegen_->InvokeRuntime(entrypoint, instruction, instruction->GetDexPc());
   CheckEntrypointTypes<kQuickAllocArrayResolved, void*, mirror::Class*, int32_t>();
+  DCHECK(!codegen_->IsLeafMethod());
 }
 
 void LocationsBuilderMIPS::VisitNewInstance(HNewInstance* instruction) {

@@ -76,6 +76,7 @@
 #include "jit/debugger_interface.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
+#include "jit/jit_logger.h"
 #include "jni/quick/jni_compiler.h"
 #include "licm.h"
 #include "load_store_analysis.h"
@@ -334,7 +335,11 @@ class OptimizingCompiler FINAL : public Compiler {
     }
   }
 
-  bool JitCompile(Thread* self, jit::JitCodeCache* code_cache, ArtMethod* method, bool osr)
+  bool JitCompile(Thread* self,
+                  jit::JitCodeCache* code_cache,
+                  ArtMethod* method,
+                  bool osr,
+                  jit::JitLogger* jit_logger)
       OVERRIDE
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -1136,7 +1141,8 @@ bool CanEncodeInlinedMethodInStackMap(const DexFile& caller_dex_file, ArtMethod*
 bool OptimizingCompiler::JitCompile(Thread* self,
                                     jit::JitCodeCache* code_cache,
                                     ArtMethod* method,
-                                    bool osr) {
+                                    bool osr,
+                                    jit::JitLogger* jit_logger) {
   StackHandleScope<3> hs(self);
   Handle<mirror::ClassLoader> class_loader(hs.NewHandle(
       method->GetDeclaringClass()->GetClassLoader()));
@@ -1204,14 +1210,14 @@ bool OptimizingCompiler::JitCompile(Thread* self,
   uint8_t* stack_map_data = nullptr;
   uint8_t* method_info_data = nullptr;
   uint8_t* roots_data = nullptr;
-  uint32_t data_size = code_cache->ReserveData(self,
-                                               stack_map_size,
-                                               method_info_size,
-                                               number_of_roots,
-                                               method,
-                                               &stack_map_data,
-                                               &method_info_data,
-                                               &roots_data);
+  code_cache->ReserveData(self,
+                          stack_map_size,
+                          method_info_size,
+                          number_of_roots,
+                          method,
+                          &stack_map_data,
+                          &method_info_data,
+                          &roots_data);
   if (stack_map_data == nullptr || roots_data == nullptr) {
     return false;
   }
@@ -1232,7 +1238,6 @@ bool OptimizingCompiler::JitCompile(Thread* self,
       codegen->GetFpuSpillMask(),
       code_allocator.GetMemory().data(),
       code_allocator.GetSize(),
-      data_size,
       osr,
       roots,
       codegen->GetGraph()->HasShouldDeoptimizeFlag(),
@@ -1272,6 +1277,9 @@ bool OptimizingCompiler::JitCompile(Thread* self,
   }
 
   Runtime::Current()->GetJit()->AddMemoryUsage(method, arena.BytesUsed());
+  if (jit_logger != nullptr) {
+    jit_logger->WriteLog(code, code_allocator.GetSize(), method);
+  }
 
   return true;
 }
