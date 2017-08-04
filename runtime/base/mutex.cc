@@ -476,7 +476,7 @@ void Mutex::ExclusiveUnlock(Thread* self) {
         done =  state_.CompareExchangeWeakSequentiallyConsistent(cur_state, 0 /* new state */);
         if (LIKELY(done)) {  // Spurious fail?
           // Wake a contender.
-          if (UNLIKELY(num_contenders_.LoadRelaxed() > 0)) {
+          if (UNLIKELY(num_contenders_.LoadAcquire() > 0)) {
             futex(state_.Address(), FUTEX_WAKE, 1, nullptr, nullptr, 0);
           }
         }
