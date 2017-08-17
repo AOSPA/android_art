@@ -41,6 +41,7 @@
 namespace art {
 
 static constexpr size_t kMaxMethodIds = 65535;
+static constexpr bool kDebugArgs = false;
 
 using android::base::StringPrintf;
 
@@ -55,7 +56,7 @@ class Dex2oatTest : public Dex2oatEnvironmentTest {
   }
 
  protected:
-  int GenerateOdexForTestWithStatus(const std::string& dex_location,
+  int GenerateOdexForTestWithStatus(const std::vector<std::string>& dex_locations,
                                     const std::string& odex_location,
                                     CompilerFilter::Filter filter,
                                     std::string* error_msg,
@@ -63,7 +64,10 @@ class Dex2oatTest : public Dex2oatEnvironmentTest {
                                     bool use_fd = false) {
     std::unique_ptr<File> oat_file;
     std::vector<std::string> args;
-    args.push_back("--dex-file=" + dex_location);
+    // Add dex file args.
+    for (const std::string& dex_location : dex_locations) {
+      args.push_back("--dex-file=" + dex_location);
+    }
     if (use_fd) {
       oat_file.reset(OS::CreateEmptyFile(odex_location.c_str()));
       CHECK(oat_file != nullptr) << odex_location;
@@ -93,7 +97,7 @@ class Dex2oatTest : public Dex2oatEnvironmentTest {
                            bool use_fd = false,
                            std::function<void(const OatFile&)> check_oat = [](const OatFile&) {}) {
     std::string error_msg;
-    int status = GenerateOdexForTestWithStatus(dex_location,
+    int status = GenerateOdexForTestWithStatus({dex_location},
                                                odex_location,
                                                filter,
                                                &error_msg,
@@ -134,7 +138,7 @@ class Dex2oatTest : public Dex2oatEnvironmentTest {
     }
   }
 
-  // Check the input compiler filter against the generated oat file's filter. Mayb be overridden
+  // Check the input compiler filter against the generated oat file's filter. May be overridden
   // in subclasses when equality is not expected.
   virtual void CheckFilter(CompilerFilter::Filter expected, CompilerFilter::Filter actual) {
     EXPECT_EQ(expected, actual);
@@ -153,14 +157,7 @@ class Dex2oatTest : public Dex2oatEnvironmentTest {
 
     std::vector<std::string> argv;
     argv.push_back(runtime->GetCompilerExecutable());
-    argv.push_back("--runtime-arg");
-    argv.push_back("-classpath");
-    argv.push_back("--runtime-arg");
-    std::string class_path = runtime->GetClassPathString();
-    if (class_path == "") {
-      class_path = OatFile::kSpecialSharedLibrary;
-    }
-    argv.push_back(class_path);
+
     if (runtime->IsJavaDebuggable()) {
       argv.push_back("--debuggable");
     }
@@ -193,6 +190,14 @@ class Dex2oatTest : public Dex2oatEnvironmentTest {
     const char* android_root = getenv("ANDROID_ROOT");
     CHECK(android_root != nullptr);
     argv.push_back("--android-root=" + std::string(android_root));
+
+    if (kDebugArgs) {
+      std::string all_args;
+      for (const std::string& arg : argv) {
+        all_args += arg + " ";
+      }
+      LOG(ERROR) << all_args;
+    }
 
     int link[2];
 
@@ -958,7 +963,7 @@ class Dex2oatReturnCodeTest : public Dex2oatTest {
     Copy(GetTestDexFileName(), dex_location);
 
     std::string error_msg;
-    return GenerateOdexForTestWithStatus(dex_location,
+    return GenerateOdexForTestWithStatus({dex_location},
                                          odex_location,
                                          CompilerFilter::kSpeed,
                                          &error_msg,
@@ -1112,6 +1117,234 @@ TEST_F(Dex2oatClassLoaderContextTest, ChainContext) {
       "DLC[" + CreateClassPathWithChecksums(dex_files2) + "]";
 
   RunTest(context.c_str(), expected_classpath_key.c_str(), true);
+}
+
+class Dex2oatDeterminism : public Dex2oatTest {};
+
+TEST_F(Dex2oatDeterminism, UnloadCompile) {
+  if (!kUseReadBarrier &&
+      gc::kCollectorTypeDefault != gc::kCollectorTypeCMS &&
+      gc::kCollectorTypeDefault != gc::kCollectorTypeMS) {
+    LOG(INFO) << "Test requires determinism support.";
+    return;
+  }
+  Runtime* const runtime = Runtime::Current();
+  std::string out_dir = GetScratchDir();
+  const std::string base_oat_name = out_dir + "/base.oat";
+  const std::string base_vdex_name = out_dir + "/base.vdex";
+  const std::string unload_oat_name = out_dir + "/unload.oat";
+  const std::string unload_vdex_name = out_dir + "/unload.vdex";
+  const std::string no_unload_oat_name = out_dir + "/nounload.oat";
+  const std::string no_unload_vdex_name = out_dir + "/nounload.vdex";
+  const std::string app_image_name = out_dir + "/unload.art";
+  std::string error_msg;
+  const std::vector<gc::space::ImageSpace*>& spaces = runtime->GetHeap()->GetBootImageSpaces();
+  ASSERT_GT(spaces.size(), 0u);
+  const std::string image_location = spaces[0]->GetImageLocation();
+  // Without passing in an app image, it will unload in between compilations.
+  const int res = GenerateOdexForTestWithStatus(
+      GetLibCoreDexFileNames(),
+      base_oat_name,
+      CompilerFilter::Filter::kQuicken,
+      &error_msg,
+      {"--force-determinism", "--avoid-storing-invocation"});
+  EXPECT_EQ(res, 0);
+  Copy(base_oat_name, unload_oat_name);
+  Copy(base_vdex_name, unload_vdex_name);
+  std::unique_ptr<File> unload_oat(OS::OpenFileForReading(unload_oat_name.c_str()));
+  std::unique_ptr<File> unload_vdex(OS::OpenFileForReading(unload_vdex_name.c_str()));
+  ASSERT_TRUE(unload_oat != nullptr);
+  ASSERT_TRUE(unload_vdex != nullptr);
+  EXPECT_GT(unload_oat->GetLength(), 0u);
+  EXPECT_GT(unload_vdex->GetLength(), 0u);
+  // Regenerate with an app image to disable the dex2oat unloading and verify that the output is
+  // the same.
+  const int res2 = GenerateOdexForTestWithStatus(
+      GetLibCoreDexFileNames(),
+      base_oat_name,
+      CompilerFilter::Filter::kQuicken,
+      &error_msg,
+      {"--force-determinism", "--avoid-storing-invocation", "--app-image-file=" + app_image_name});
+  EXPECT_EQ(res2, 0);
+  Copy(base_oat_name, no_unload_oat_name);
+  Copy(base_vdex_name, no_unload_vdex_name);
+  std::unique_ptr<File> no_unload_oat(OS::OpenFileForReading(no_unload_oat_name.c_str()));
+  std::unique_ptr<File> no_unload_vdex(OS::OpenFileForReading(no_unload_vdex_name.c_str()));
+  ASSERT_TRUE(no_unload_oat != nullptr);
+  ASSERT_TRUE(no_unload_vdex != nullptr);
+  EXPECT_GT(no_unload_oat->GetLength(), 0u);
+  EXPECT_GT(no_unload_vdex->GetLength(), 0u);
+  // Verify that both of the files are the same (odex and vdex).
+  EXPECT_EQ(unload_oat->GetLength(), no_unload_oat->GetLength());
+  EXPECT_EQ(unload_vdex->GetLength(), no_unload_vdex->GetLength());
+  EXPECT_EQ(unload_oat->Compare(no_unload_oat.get()), 0)
+      << unload_oat_name << " " << no_unload_oat_name;
+  EXPECT_EQ(unload_vdex->Compare(no_unload_vdex.get()), 0)
+      << unload_vdex_name << " " << no_unload_vdex_name;
+  // App image file.
+  std::unique_ptr<File> app_image_file(OS::OpenFileForReading(app_image_name.c_str()));
+  ASSERT_TRUE(app_image_file != nullptr);
+  EXPECT_GT(app_image_file->GetLength(), 0u);
+}
+
+// Test that dexlayout section info is correctly written to the oat file for profile based
+// compilation.
+TEST_F(Dex2oatTest, LayoutSections) {
+  using Hotness = ProfileCompilationInfo::MethodHotness;
+  std::unique_ptr<const DexFile> dex(OpenTestDexFile("ManyMethods"));
+  ScratchFile profile_file;
+  // We can only layout method indices with code items, figure out which ones have this property
+  // first.
+  std::vector<uint16_t> methods;
+  {
+    const DexFile::TypeId* type_id = dex->FindTypeId("LManyMethods;");
+    dex::TypeIndex type_idx = dex->GetIndexForTypeId(*type_id);
+    const DexFile::ClassDef* class_def = dex->FindClassDef(type_idx);
+    ClassDataItemIterator it(*dex, dex->GetClassData(*class_def));
+    it.SkipAllFields();
+    std::set<size_t> code_item_offsets;
+    for (; it.HasNextDirectMethod() || it.HasNextVirtualMethod(); it.Next()) {
+      const uint16_t method_idx = it.GetMemberIndex();
+      const size_t code_item_offset = it.GetMethodCodeItemOffset();
+      if (code_item_offsets.insert(code_item_offset).second) {
+        // Unique code item, add the method index.
+        methods.push_back(method_idx);
+      }
+    }
+    DCHECK(!it.HasNext());
+  }
+  ASSERT_GE(methods.size(), 8u);
+  std::vector<uint16_t> hot_methods = {methods[1], methods[3], methods[5]};
+  std::vector<uint16_t> startup_methods = {methods[1], methods[2], methods[7]};
+  std::vector<uint16_t> post_methods = {methods[0], methods[2], methods[6]};
+  // Here, we build the profile from the method lists.
+  ProfileCompilationInfo info;
+  info.AddMethodsForDex(
+      static_cast<Hotness::Flag>(Hotness::kFlagHot | Hotness::kFlagStartup),
+      dex.get(),
+      hot_methods.begin(),
+      hot_methods.end());
+  info.AddMethodsForDex(
+      Hotness::kFlagStartup,
+      dex.get(),
+      startup_methods.begin(),
+      startup_methods.end());
+  info.AddMethodsForDex(
+      Hotness::kFlagPostStartup,
+      dex.get(),
+      post_methods.begin(),
+      post_methods.end());
+  for (uint16_t id : hot_methods) {
+    EXPECT_TRUE(info.GetMethodHotness(MethodReference(dex.get(), id)).IsHot());
+    EXPECT_TRUE(info.GetMethodHotness(MethodReference(dex.get(), id)).IsStartup());
+  }
+  for (uint16_t id : startup_methods) {
+    EXPECT_TRUE(info.GetMethodHotness(MethodReference(dex.get(), id)).IsStartup());
+  }
+  for (uint16_t id : post_methods) {
+    EXPECT_TRUE(info.GetMethodHotness(MethodReference(dex.get(), id)).IsPostStartup());
+  }
+  // Save the profile since we want to use it with dex2oat to produce an oat file.
+  ASSERT_TRUE(info.Save(profile_file.GetFd()));
+  // Generate a profile based odex.
+  const std::string dir = GetScratchDir();
+  const std::string oat_filename = dir + "/base.oat";
+  const std::string vdex_filename = dir + "/base.vdex";
+  std::string error_msg;
+  const int res = GenerateOdexForTestWithStatus(
+      {dex->GetLocation()},
+      oat_filename,
+      CompilerFilter::Filter::kQuicken,
+      &error_msg,
+      {"--profile-file=" + profile_file.GetFilename()});
+  EXPECT_EQ(res, 0);
+
+  // Open our generated oat file.
+  std::unique_ptr<OatFile> odex_file(OatFile::Open(oat_filename.c_str(),
+                                                   oat_filename.c_str(),
+                                                   nullptr,
+                                                   nullptr,
+                                                   false,
+                                                   /*low_4gb*/false,
+                                                   dex->GetLocation().c_str(),
+                                                   &error_msg));
+  ASSERT_TRUE(odex_file != nullptr);
+  std::vector<const OatDexFile*> oat_dex_files = odex_file->GetOatDexFiles();
+  ASSERT_EQ(oat_dex_files.size(), 1u);
+  // Check that the code sections match what we expect.
+  for (const OatDexFile* oat_dex : oat_dex_files) {
+    const DexLayoutSections* const sections = oat_dex->GetDexLayoutSections();
+    // Testing of logging the sections.
+    ASSERT_TRUE(sections != nullptr);
+    LOG(INFO) << *sections;
+
+    // Load the sections into temporary variables for convenience.
+    const DexLayoutSection& code_section =
+        sections->sections_[static_cast<size_t>(DexLayoutSections::SectionType::kSectionTypeCode)];
+    const DexLayoutSection::Subsection& section_hot_code =
+        code_section.parts_[static_cast<size_t>(LayoutType::kLayoutTypeHot)];
+    const DexLayoutSection::Subsection& section_sometimes_used =
+        code_section.parts_[static_cast<size_t>(LayoutType::kLayoutTypeSometimesUsed)];
+    const DexLayoutSection::Subsection& section_startup_only =
+        code_section.parts_[static_cast<size_t>(LayoutType::kLayoutTypeStartupOnly)];
+    const DexLayoutSection::Subsection& section_unused =
+        code_section.parts_[static_cast<size_t>(LayoutType::kLayoutTypeUnused)];
+
+    // All the sections should be non-empty.
+    EXPECT_GT(section_hot_code.size_, 0u);
+    EXPECT_GT(section_sometimes_used.size_, 0u);
+    EXPECT_GT(section_startup_only.size_, 0u);
+    EXPECT_GT(section_unused.size_, 0u);
+
+    // Open the dex file since we need to peek at the code items to verify the layout matches what
+    // we expect.
+    std::unique_ptr<const DexFile> dex_file(oat_dex->OpenDexFile(&error_msg));
+    ASSERT_TRUE(dex_file != nullptr) << error_msg;
+    const DexFile::TypeId* type_id = dex_file->FindTypeId("LManyMethods;");
+    ASSERT_TRUE(type_id != nullptr);
+    dex::TypeIndex type_idx = dex_file->GetIndexForTypeId(*type_id);
+    const DexFile::ClassDef* class_def = dex_file->FindClassDef(type_idx);
+    ASSERT_TRUE(class_def != nullptr);
+
+    // Count how many code items are for each category, there should be at least one per category.
+    size_t hot_count = 0;
+    size_t post_startup_count = 0;
+    size_t startup_count = 0;
+    size_t unused_count = 0;
+    // Visit all of the methdos of the main class and cross reference the method indices to their
+    // corresponding code item offsets to verify the layout.
+    ClassDataItemIterator it(*dex_file, dex_file->GetClassData(*class_def));
+    it.SkipAllFields();
+    for (; it.HasNextDirectMethod() || it.HasNextVirtualMethod(); it.Next()) {
+      const size_t method_idx = it.GetMemberIndex();
+      const size_t code_item_offset = it.GetMethodCodeItemOffset();
+      const bool is_hot = ContainsElement(hot_methods, method_idx);
+      const bool is_startup = ContainsElement(startup_methods, method_idx);
+      const bool is_post_startup = ContainsElement(post_methods, method_idx);
+      if (is_hot) {
+        // Hot is highest precedence, check that the hot methods are in the hot section.
+        EXPECT_LT(code_item_offset - section_hot_code.offset_, section_hot_code.size_);
+        ++hot_count;
+      } else if (is_post_startup) {
+        // Post startup is sometimes used section.
+        EXPECT_LT(code_item_offset - section_sometimes_used.offset_, section_sometimes_used.size_);
+        ++post_startup_count;
+      } else if (is_startup) {
+        // Startup at this point means not hot or post startup, these must be startup only then.
+        EXPECT_LT(code_item_offset - section_startup_only.offset_, section_startup_only.size_);
+        ++startup_count;
+      } else {
+        // If no flags are set, the method should be unused.
+        EXPECT_LT(code_item_offset - section_unused.offset_, section_unused.size_);
+        ++unused_count;
+      }
+    }
+    DCHECK(!it.HasNext());
+    EXPECT_GT(hot_count, 0u);
+    EXPECT_GT(post_startup_count, 0u);
+    EXPECT_GT(startup_count, 0u);
+    EXPECT_GT(unused_count, 0u);
+  }
 }
 
 }  // namespace art

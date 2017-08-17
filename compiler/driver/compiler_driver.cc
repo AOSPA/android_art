@@ -303,7 +303,6 @@ CompilerDriver::CompilerDriver(
       timings_logger_(timer),
       compiler_context_(nullptr),
       support_boot_image_fixup_(true),
-      dex_files_for_oat_file_(nullptr),
       compiled_method_storage_(swap_fd),
       profile_compilation_info_(profile_compilation_info),
       max_arena_alloc_(0),
@@ -373,14 +372,12 @@ static void SetupIntrinsic(Thread* self,
       REQUIRES_SHARED(Locks::mutator_lock_) {
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   PointerSize image_size = class_linker->GetImagePointerSize();
-  mirror::Class* cls = class_linker->FindSystemClass(self, class_name);
+  ObjPtr<mirror::Class> cls = class_linker->FindSystemClass(self, class_name);
   if (cls == nullptr) {
     LOG(FATAL) << "Could not find class of intrinsic " << class_name;
   }
-  ArtMethod* method = (invoke_type == kStatic || invoke_type == kDirect)
-      ? cls->FindDeclaredDirectMethod(method_name, signature, image_size)
-      : cls->FindDeclaredVirtualMethod(method_name, signature, image_size);
-  if (method == nullptr) {
+  ArtMethod* method = cls->FindClassMethod(method_name, signature, image_size);
+  if (method == nullptr || method->GetDeclaringClass() != cls) {
     LOG(FATAL) << "Could not find method of intrinsic "
                << class_name << " " << method_name << " " << signature;
   }
@@ -543,7 +540,7 @@ static void CompileMethod(Thread* self,
 
       // TODO: Lookup annotation from DexFile directly without resolving method.
       ArtMethod* method =
-          Runtime::Current()->GetClassLinker()->ResolveMethod<ClassLinker::kNoICCECheckForCache>(
+          Runtime::Current()->GetClassLinker()->ResolveMethod<ClassLinker::ResolveMode::kNoChecks>(
               dex_file,
               method_idx,
               dex_cache,
@@ -1755,7 +1752,7 @@ class ResolveClassFieldsAndMethodsVisitor : public CompilationVisitor {
       }
       if (resolve_fields_and_methods) {
         while (it.HasNextDirectMethod()) {
-          ArtMethod* method = class_linker->ResolveMethod<ClassLinker::kNoICCECheckForCache>(
+          ArtMethod* method = class_linker->ResolveMethod<ClassLinker::ResolveMode::kNoChecks>(
               dex_file, it.GetMemberIndex(), dex_cache, class_loader, nullptr,
               it.GetMethodInvokeType(class_def));
           if (method == nullptr) {
@@ -1764,7 +1761,7 @@ class ResolveClassFieldsAndMethodsVisitor : public CompilationVisitor {
           it.Next();
         }
         while (it.HasNextVirtualMethod()) {
-          ArtMethod* method = class_linker->ResolveMethod<ClassLinker::kNoICCECheckForCache>(
+          ArtMethod* method = class_linker->ResolveMethod<ClassLinker::ResolveMode::kNoChecks>(
               dex_file, it.GetMemberIndex(), dex_cache, class_loader, nullptr,
               it.GetMethodInvokeType(class_def));
           if (method == nullptr) {
@@ -1914,8 +1911,8 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
                                 TimingLogger* timings) {
   verifier::VerifierDeps* verifier_deps =
       Runtime::Current()->GetCompilerCallbacks()->GetVerifierDeps();
-  // If there is an existing `VerifierDeps`, try to use it for fast verification.
-  if (verifier_deps == nullptr) {
+  // If there exist VerifierDeps that aren't the ones we just created to output, use them to verify.
+  if (verifier_deps == nullptr || verifier_deps->OutputOnly()) {
     return false;
   }
   TimingLogger::ScopedTiming t("Fast Verify", timings);
@@ -1935,14 +1932,12 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
   // time. So instead we assume these classes still need to be verified at
   // runtime.
   for (const DexFile* dex_file : dex_files) {
-    // Fetch the list of unverified classes and turn it into a set for faster
-    // lookups.
-    const std::vector<dex::TypeIndex>& unverified_classes =
+    // Fetch the list of unverified classes.
+    const std::set<dex::TypeIndex>& unverified_classes =
         verifier_deps->GetUnverifiedClasses(*dex_file);
-    std::set<dex::TypeIndex> set(unverified_classes.begin(), unverified_classes.end());
     for (uint32_t i = 0; i < dex_file->NumClassDefs(); ++i) {
       const DexFile::ClassDef& class_def = dex_file->GetClassDef(i);
-      if (set.find(class_def.class_idx_) == set.end()) {
+      if (unverified_classes.find(class_def.class_idx_) == unverified_classes.end()) {
         if (compiler_only_verifies) {
           // Just update the compiled_classes_ map. The compiler doesn't need to resolve
           // the type.
@@ -1982,13 +1977,6 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
 void CompilerDriver::Verify(jobject jclass_loader,
                             const std::vector<const DexFile*>& dex_files,
                             TimingLogger* timings) {
-  // Always add the dex files to compiled_classes_. This happens for all compiler filters.
-  for (const DexFile* dex_file : dex_files) {
-    if (!compiled_classes_.HaveDexFile(dex_file)) {
-      compiled_classes_.AddDexFile(dex_file, dex_file->NumClassDefs());
-    }
-  }
-
   if (FastVerify(jclass_loader, dex_files, timings)) {
     return;
   }
@@ -1998,14 +1986,16 @@ void CompilerDriver::Verify(jobject jclass_loader,
   // non boot image compilation. The verifier will need it to record the new dependencies.
   // Then dex2oat can update the vdex file with these new dependencies.
   if (!GetCompilerOptions().IsBootImage()) {
+    // Dex2oat creates the verifier deps.
     // Create the main VerifierDeps, and set it to this thread.
-    verifier::VerifierDeps* verifier_deps = new verifier::VerifierDeps(dex_files);
-    Runtime::Current()->GetCompilerCallbacks()->SetVerifierDeps(verifier_deps);
+    verifier::VerifierDeps* verifier_deps =
+        Runtime::Current()->GetCompilerCallbacks()->GetVerifierDeps();
+    CHECK(verifier_deps != nullptr);
     Thread::Current()->SetVerifierDeps(verifier_deps);
     // Create per-thread VerifierDeps to avoid contention on the main one.
     // We will merge them after verification.
     for (ThreadPoolWorker* worker : parallel_thread_pool_->GetWorkers()) {
-      worker->GetThread()->SetVerifierDeps(new verifier::VerifierDeps(dex_files));
+      worker->GetThread()->SetVerifierDeps(new verifier::VerifierDeps(dex_files_for_oat_file_));
     }
   }
 
@@ -2030,7 +2020,7 @@ void CompilerDriver::Verify(jobject jclass_loader,
     for (ThreadPoolWorker* worker : parallel_thread_pool_->GetWorkers()) {
       verifier::VerifierDeps* thread_deps = worker->GetThread()->GetVerifierDeps();
       worker->GetThread()->SetVerifierDeps(nullptr);
-      verifier_deps->MergeWith(*thread_deps, dex_files);;
+      verifier_deps->MergeWith(*thread_deps, dex_files_for_oat_file_);
       delete thread_deps;
     }
     Thread::Current()->SetVerifierDeps(nullptr);
@@ -2698,7 +2688,14 @@ void CompilerDriver::Compile(jobject class_loader,
             : profile_compilation_info_->DumpInfo(&dex_files));
   }
 
-  DCHECK(current_dex_to_dex_methods_ == nullptr);
+  current_dex_to_dex_methods_ = nullptr;
+  Thread* const self = Thread::Current();
+  {
+    // Clear in case we aren't the first call to Compile.
+    MutexLock mu(self, dex_to_dex_references_lock_);
+    dex_to_dex_references_.clear();
+  }
+
   for (const DexFile* dex_file : dex_files) {
     CHECK(dex_file != nullptr);
     CompileDexFile(class_loader,
@@ -2717,7 +2714,7 @@ void CompilerDriver::Compile(jobject class_loader,
   {
     // From this point on, we shall not modify dex_to_dex_references_, so
     // just grab a reference to it that we use without holding the mutex.
-    MutexLock lock(Thread::Current(), dex_to_dex_references_lock_);
+    MutexLock lock(self, dex_to_dex_references_lock_);
     dex_to_dex_references = ArrayRef<DexFileMethodSet>(dex_to_dex_references_);
   }
   for (const auto& method_set : dex_to_dex_references) {
@@ -2876,9 +2873,9 @@ void CompilerDriver::AddCompiledMethod(const MethodReference& method_ref,
 bool CompilerDriver::GetCompiledClass(ClassReference ref, mirror::Class::Status* status) const {
   DCHECK(status != nullptr);
   // The table doesn't know if something wasn't inserted. For this case it will return
-  // kStatusNotReady. To handle this, just assume anything not verified is not compiled.
+  // kStatusNotReady. To handle this, just assume anything we didn't try to verify is not compiled.
   if (!compiled_classes_.Get(DexFileReference(ref.first, ref.second), status) ||
-      *status < mirror::Class::kStatusVerified) {
+      *status < mirror::Class::kStatusRetryVerificationAtRuntime) {
     return false;
   }
   return true;
@@ -2910,7 +2907,7 @@ void CompilerDriver::RecordClassStatus(ClassReference ref, mirror::Class::Status
       if (kIsDebugBuild) {
         // Check to make sure it's not a dex file for an oat file we are compiling since these
         // should always succeed. These do not include classes in for used libraries.
-        for (const DexFile* dex_file : *dex_files_for_oat_file_) {
+        for (const DexFile* dex_file : GetDexFilesForOatFile()) {
           CHECK_NE(dex_ref.dex_file, dex_file) << dex_ref.dex_file->GetLocation();
         }
       }
@@ -3026,6 +3023,21 @@ void CompilerDriver::InitializeThreadPools() {
 void CompilerDriver::FreeThreadPools() {
   parallel_thread_pool_.reset();
   single_thread_pool_.reset();
+}
+
+void CompilerDriver::SetDexFilesForOatFile(const std::vector<const DexFile*>& dex_files) {
+  dex_files_for_oat_file_ = dex_files;
+  for (const DexFile* dex_file : dex_files) {
+    if (!compiled_classes_.HaveDexFile(dex_file)) {
+      compiled_classes_.AddDexFile(dex_file, dex_file->NumClassDefs());
+    }
+  }
+}
+
+bool CompilerDriver::CanAssumeVerified(ClassReference ref) const {
+  mirror::Class::Status existing = mirror::Class::kStatusNotReady;
+  compiled_classes_.Get(DexFileReference(ref.first, ref.second), &existing);
+  return existing >= mirror::Class::kStatusVerified;
 }
 
 }  // namespace art

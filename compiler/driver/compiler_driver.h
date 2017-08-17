@@ -103,15 +103,11 @@ class CompilerDriver {
   ~CompilerDriver();
 
   // Set dex files that will be stored in the oat file after being compiled.
-  void SetDexFilesForOatFile(const std::vector<const DexFile*>& dex_files) {
-    dex_files_for_oat_file_ = &dex_files;
-  }
+  void SetDexFilesForOatFile(const std::vector<const DexFile*>& dex_files);
 
   // Get dex file that will be stored in the oat file after being compiled.
   ArrayRef<const DexFile* const> GetDexFilesForOatFile() const {
-    return (dex_files_for_oat_file_ != nullptr)
-        ? ArrayRef<const DexFile* const>(*dex_files_for_oat_file_)
-        : ArrayRef<const DexFile* const>();
+    return ArrayRef<const DexFile* const>(dex_files_for_oat_file_);
   }
 
   void CompileAll(jobject class_loader,
@@ -381,6 +377,8 @@ class CompilerDriver {
     return profile_compilation_info_;
   }
 
+  bool CanAssumeVerified(ClassReference ref) const;
+
  private:
   void PreCompile(jobject class_loader,
                   const std::vector<const DexFile*>& dex_files,
@@ -532,7 +530,7 @@ class CompilerDriver {
   bool support_boot_image_fixup_;
 
   // List of dex files that will be stored in the oat file.
-  const std::vector<const DexFile*>* dex_files_for_oat_file_;
+  std::vector<const DexFile*> dex_files_for_oat_file_;
 
   CompiledMethodStorage compiled_method_storage_;
 

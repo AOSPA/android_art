@@ -579,7 +579,12 @@ void ImageWriter::AssignImageBinSlot(mirror::Object* object, size_t oat_index) {
         }
       }
 
-      if (klass->GetStatus() == Class::kStatusInitialized) {
+      // Move known dirty objects into their own sections. This includes:
+      //   - classes with dirty static fields.
+      if (dirty_image_objects_ != nullptr &&
+          dirty_image_objects_->find(klass->PrettyDescriptor()) != dirty_image_objects_->end()) {
+        bin = kBinKnownDirty;
+      } else if (klass->GetStatus() == Class::kStatusInitialized) {
         bin = kBinClassInitialized;
 
         // If the class's static fields are all final, put it into a separate bin
@@ -894,7 +899,7 @@ bool ImageWriter::PruneAppImageClassInternal(
                                                 &my_early_exit,
                                                 visited);
   // Remove the class if the dex file is not in the set of dex files. This happens for classes that
-  // are from uses library if there is no profile. b/30688277
+  // are from uses-library if there is no profile. b/30688277
   mirror::DexCache* dex_cache = klass->GetDexCache();
   if (dex_cache != nullptr) {
     result = result ||
@@ -1023,41 +1028,58 @@ void ImageWriter::PruneAndPreloadDexCache(ObjPtr<mirror::DexCache> dex_cache,
 
   Runtime* runtime = Runtime::Current();
   ClassLinker* class_linker = runtime->GetClassLinker();
-  ArtMethod* resolution_method = runtime->GetResolutionMethod();
   const DexFile& dex_file = *dex_cache->GetDexFile();
   // Prune methods.
-  ArtMethod** resolved_methods = dex_cache->GetResolvedMethods();
-  for (size_t i = 0, num = dex_cache->NumResolvedMethods(); i != num; ++i) {
-    ArtMethod* method =
-        mirror::DexCache::GetElementPtrSize(resolved_methods, i, target_ptr_size_);
-    DCHECK(method != nullptr) << "Expected resolution method instead of null method";
+  mirror::MethodDexCacheType* resolved_methods = dex_cache->GetResolvedMethods();
+  dex::TypeIndex last_class_idx;  // Initialized to invalid index.
+  ObjPtr<mirror::Class> last_class = nullptr;
+  for (size_t i = 0, num = dex_cache->GetDexFile()->NumMethodIds(); i != num; ++i) {
+    uint32_t slot_idx = dex_cache->MethodSlotIndex(i);
+    auto pair =
+        mirror::DexCache::GetNativePairPtrSize(resolved_methods, slot_idx, target_ptr_size_);
+    uint32_t stored_index = pair.index;
+    ArtMethod* method = pair.object;
+    if (method != nullptr && i > stored_index) {
+      continue;  // Already checked.
+    }
     // Check if the referenced class is in the image. Note that we want to check the referenced
     // class rather than the declaring class to preserve the semantics, i.e. using a MethodId
     // results in resolving the referenced class and that can for example throw OOME.
-    ObjPtr<mirror::Class> referencing_class = class_linker->LookupResolvedType(
-        dex_file,
-        dex_file.GetMethodId(i).class_idx_,
-        dex_cache,
-        class_loader);
-    // Copied methods may be held live by a class which was not an image class but have a
-    // declaring class which is an image class. Set it to the resolution method to be safe and
-    // prevent dangling pointers.
-    if (method->IsCopied() || !KeepClass(referencing_class)) {
-      mirror::DexCache::SetElementPtrSize(resolved_methods,
-                                          i,
-                                          resolution_method,
-                                          target_ptr_size_);
-    } else if (kIsDebugBuild) {
-      // Check that the class is still in the classes table.
-      ReaderMutexLock mu(Thread::Current(), *Locks::classlinker_classes_lock_);
-      CHECK(class_linker->ClassInClassTable(referencing_class)) << "Class "
-          << Class::PrettyClass(referencing_class) << " not in class linker table";
+    const DexFile::MethodId& method_id = dex_file.GetMethodId(i);
+    if (method_id.class_idx_ != last_class_idx) {
+      last_class_idx = method_id.class_idx_;
+      last_class = class_linker->LookupResolvedType(
+          dex_file, last_class_idx, dex_cache, class_loader);
+      if (last_class != nullptr && !KeepClass(last_class)) {
+        last_class = nullptr;
+      }
+    }
+    if (method == nullptr || i < stored_index) {
+      if (last_class != nullptr) {
+        const char* name = dex_file.StringDataByIdx(method_id.name_idx_);
+        Signature signature = dex_file.GetMethodSignature(method_id);
+        if (last_class->IsInterface()) {
+          method = last_class->FindInterfaceMethod(name, signature, target_ptr_size_);
+        } else {
+          method = last_class->FindClassMethod(name, signature, target_ptr_size_);
+        }
+        if (method != nullptr) {
+          // If the referenced class is in the image, the defining class must also be there.
+          DCHECK(KeepClass(method->GetDeclaringClass()));
+          dex_cache->SetResolvedMethod(i, method, target_ptr_size_);
+        }
+      }
+    } else {
+      DCHECK_EQ(i, stored_index);
+      if (last_class == nullptr) {
+        dex_cache->ClearResolvedMethod(stored_index, target_ptr_size_);
+      }
     }
   }
   // Prune fields and make the contents of the field array deterministic.
   mirror::FieldDexCacheType* resolved_fields = dex_cache->GetResolvedFields();
-  dex::TypeIndex last_class_idx;  // Initialized to invalid index.
-  ObjPtr<mirror::Class> last_class = nullptr;
+  last_class_idx = dex::TypeIndex();  // Initialized to invalid index.
+  last_class = nullptr;
   for (size_t i = 0, end = dex_file.NumFieldIds(); i < end; ++i) {
     uint32_t slot_idx = dex_cache->FieldSlotIndex(i);
     auto pair = mirror::DexCache::GetNativePairPtrSize(resolved_fields, slot_idx, target_ptr_size_);
@@ -1136,9 +1158,22 @@ void ImageWriter::PruneNonImageClasses() {
   Thread* self = Thread::Current();
   ScopedAssertNoThreadSuspension sa(__FUNCTION__);
 
-  // Clear class table strong roots so that dex caches can get pruned. We require pruning the class
-  // path dex caches.
-  class_linker->ClearClassTableStrongRoots();
+  // Prune uses-library dex caches. Only prune the uses-library dex caches since we want to make
+  // sure the other ones don't get unloaded before the OatWriter runs.
+  class_linker->VisitClassTables(
+      [&](ClassTable* table) REQUIRES_SHARED(Locks::mutator_lock_) {
+    table->RemoveStrongRoots(
+        [&](GcRoot<mirror::Object> root) REQUIRES_SHARED(Locks::mutator_lock_) {
+      ObjPtr<mirror::Object> obj = root.Read();
+      if (obj->IsDexCache()) {
+        // Return true if the dex file is not one of the ones in the map.
+        return dex_file_oat_index_map_.find(obj->AsDexCache()->GetDexFile()) ==
+            dex_file_oat_index_map_.end();
+      }
+      // Return false to avoid removing.
+      return false;
+    });
+  });
 
   // Remove the undesired classes from the class roots.
   ObjPtr<mirror::ClassLoader> class_loader;
@@ -2401,17 +2436,19 @@ void ImageWriter::FixupDexCache(mirror::DexCache* orig_dex_cache,
     orig_dex_cache->FixupResolvedTypes(NativeCopyLocation(orig_types, orig_dex_cache),
                                        fixup_visitor);
   }
-  ArtMethod** orig_methods = orig_dex_cache->GetResolvedMethods();
+  mirror::MethodDexCacheType* orig_methods = orig_dex_cache->GetResolvedMethods();
   if (orig_methods != nullptr) {
     copy_dex_cache->SetFieldPtrWithSize<false>(mirror::DexCache::ResolvedMethodsOffset(),
                                                NativeLocationInImage(orig_methods),
                                                PointerSize::k64);
-    ArtMethod** copy_methods = NativeCopyLocation(orig_methods, orig_dex_cache);
+    mirror::MethodDexCacheType* copy_methods = NativeCopyLocation(orig_methods, orig_dex_cache);
     for (size_t i = 0, num = orig_dex_cache->NumResolvedMethods(); i != num; ++i) {
-      ArtMethod* orig = mirror::DexCache::GetElementPtrSize(orig_methods, i, target_ptr_size_);
+      mirror::MethodDexCachePair orig_pair =
+          mirror::DexCache::GetNativePairPtrSize(orig_methods, i, target_ptr_size_);
       // NativeLocationInImage also handles runtime methods since these have relocation info.
-      ArtMethod* copy = NativeLocationInImage(orig);
-      mirror::DexCache::SetElementPtrSize(copy_methods, i, copy, target_ptr_size_);
+      mirror::MethodDexCachePair copy_pair(NativeLocationInImage(orig_pair.object),
+                                           orig_pair.index);
+      mirror::DexCache::SetNativePairPtrSize(copy_methods, i, copy_pair, target_ptr_size_);
     }
   }
   mirror::FieldDexCacheType* orig_fields = orig_dex_cache->GetResolvedFields();
@@ -2552,7 +2589,8 @@ void ImageWriter::CopyAndFixupMethod(ArtMethod* orig,
 
   CopyReference(copy->GetDeclaringClassAddressWithoutBarrier(), orig->GetDeclaringClassUnchecked());
 
-  ArtMethod** orig_resolved_methods = orig->GetDexCacheResolvedMethods(target_ptr_size_);
+  mirror::MethodDexCacheType* orig_resolved_methods =
+      orig->GetDexCacheResolvedMethods(target_ptr_size_);
   copy->SetDexCacheResolvedMethods(NativeLocationInImage(orig_resolved_methods), target_ptr_size_);
 
   // OatWriter replaces the code_ with an offset value. Here we re-adjust to a pointer relative to
@@ -2741,7 +2779,8 @@ ImageWriter::ImageWriter(
     bool compile_app_image,
     ImageHeader::StorageMode image_storage_mode,
     const std::vector<const char*>& oat_filenames,
-    const std::unordered_map<const DexFile*, size_t>& dex_file_oat_index_map)
+    const std::unordered_map<const DexFile*, size_t>& dex_file_oat_index_map,
+    const std::unordered_set<std::string>* dirty_image_objects)
     : compiler_driver_(compiler_driver),
       global_image_begin_(reinterpret_cast<uint8_t*>(image_begin)),
       image_objects_offset_begin_(0),
@@ -2753,7 +2792,8 @@ ImageWriter::ImageWriter(
       clean_methods_(0u),
       image_storage_mode_(image_storage_mode),
       oat_filenames_(oat_filenames),
-      dex_file_oat_index_map_(dex_file_oat_index_map) {
+      dex_file_oat_index_map_(dex_file_oat_index_map),
+      dirty_image_objects_(dirty_image_objects) {
   CHECK_NE(image_begin, 0U);
   std::fill_n(image_methods_, arraysize(image_methods_), nullptr);
   CHECK_EQ(compile_app_image, !Runtime::Current()->GetHeap()->GetBootImageSpaces().empty())

@@ -162,6 +162,19 @@ class ClassLoaderContextTest : public CommonRuntimeTest {
   }
 };
 
+TEST_F(ClassLoaderContextTest, ParseValidEmptyContext) {
+  std::unique_ptr<ClassLoaderContext> context = ClassLoaderContext::Create("");
+  // An empty context should create a single empty PathClassLoader.
+  VerifyContextSize(context.get(), 1);
+  VerifyClassLoaderPCL(context.get(), 0, "");
+}
+
+TEST_F(ClassLoaderContextTest, ParseValidSharedLibraryContext) {
+  std::unique_ptr<ClassLoaderContext> context = ClassLoaderContext::Create("&");
+  // An shared library context should have no class loader in the chain.
+  VerifyContextSize(context.get(), 0);
+}
+
 TEST_F(ClassLoaderContextTest, ParseValidContextPCL) {
   std::unique_ptr<ClassLoaderContext> context =
       ClassLoaderContext::Create("PCL[a.dex]");
@@ -313,6 +326,34 @@ TEST_F(ClassLoaderContextTest, CreateClassLoaderWithEmptyContext) {
       soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
 }
 
+TEST_F(ClassLoaderContextTest, CreateClassLoaderWithSharedLibraryContext) {
+  std::unique_ptr<ClassLoaderContext> context = ClassLoaderContext::Create("&");
+
+  ASSERT_TRUE(context->OpenDexFiles(InstructionSet::kArm, ""));
+
+  std::vector<std::unique_ptr<const DexFile>> compilation_sources = OpenTestDexFiles("MultiDex");
+
+  std::vector<const DexFile*> compilation_sources_raw =
+      MakeNonOwningPointerVector(compilation_sources);
+  jobject jclass_loader = context->CreateClassLoader(compilation_sources_raw);
+  ASSERT_TRUE(jclass_loader != nullptr);
+
+  ScopedObjectAccess soa(Thread::Current());
+
+  StackHandleScope<1> hs(soa.Self());
+  Handle<mirror::ClassLoader> class_loader = hs.NewHandle(
+      soa.Decode<mirror::ClassLoader>(jclass_loader));
+
+  // A shared library context should create a single PathClassLoader with only the compilation
+  // sources.
+  VerifyClassLoaderDexFiles(soa,
+      class_loader,
+      WellKnownClasses::dalvik_system_PathClassLoader,
+      compilation_sources_raw);
+  ASSERT_TRUE(class_loader->GetParent()->GetClass() ==
+  soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
+}
+
 TEST_F(ClassLoaderContextTest, CreateClassLoaderWithComplexChain) {
   // Setup the context.
   std::vector<std::unique_ptr<const DexFile>> classpath_dex_a = OpenTestDexFiles("ForClassLoaderA");
@@ -413,6 +454,20 @@ TEST_F(ClassLoaderContextTest, EncodeInOatFile) {
   std::string expected_encoding = "PCL[" + CreateClassPathWithChecksums(dex1) + ":" +
       CreateClassPathWithChecksums(dex2) + "]";
   ASSERT_EQ(expected_encoding, context->EncodeContextForOatFile(""));
+}
+
+TEST_F(ClassLoaderContextTest, EncodeForDex2oat) {
+  std::string dex1_name = GetTestDexFileName("Main");
+  std::string dex2_name = GetTestDexFileName("MultiDex");
+  std::unique_ptr<ClassLoaderContext> context =
+      ClassLoaderContext::Create("PCL[" + dex1_name + ":" + dex2_name + "]");
+  ASSERT_TRUE(context->OpenDexFiles(InstructionSet::kArm, ""));
+
+  std::vector<std::unique_ptr<const DexFile>> dex1 = OpenTestDexFiles("Main");
+  std::vector<std::unique_ptr<const DexFile>> dex2 = OpenTestDexFiles("MultiDex");
+  std::string encoding = context->EncodeContextForDex2oat("");
+  std::string expected_encoding = "PCL[" + dex1_name + ":" + dex2_name + "]";
+  ASSERT_EQ(expected_encoding, context->EncodeContextForDex2oat(""));
 }
 
 // TODO(calin) add a test which creates the context for a class loader together with dex_elements.
