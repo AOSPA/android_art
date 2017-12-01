@@ -91,11 +91,6 @@ NO_RETURN static void Usage(const char* fmt, ...) {
 
 JitCompiler::JitCompiler() {
   compiler_options_.reset(new CompilerOptions());
-
-  // Special case max code units for inlining, whose default is "unset" (implictly
-  // meaning no limit). Do this before parsing the actuall passed options.
-  compiler_options_->SetInlineMaxCodeUnits(CompilerOptions::kDefaultInlineMaxCodeUnits);
-
   for (const std::string& argument : Runtime::Current()->GetCompilerOptions()) {
     compiler_options_->ParseCompilerOption(argument, Usage);
   }
@@ -104,6 +99,10 @@ JitCompiler::JitCompiler() {
 
   // Set debuggability based on the runtime value.
   compiler_options_->SetDebuggable(Runtime::Current()->IsJavaDebuggable());
+
+  // Special case max code units for inlining, whose default is "unset" (implictly
+  // meaning no limit).
+  compiler_options_->SetInlineMaxCodeUnits(CompilerOptions::kDefaultInlineMaxCodeUnits);
 
   const InstructionSet instruction_set = kRuntimeISA;
   for (const StringPiece option : Runtime::Current()->GetCompilerOptions()) {
