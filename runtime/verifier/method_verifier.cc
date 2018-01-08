@@ -2214,7 +2214,7 @@ bool MethodVerifier::CodeFlowVerifyInstruction(uint32_t* start_guess) {
           Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "return-object not expected";
         } else {
           /* return_type is the *expected* return type, not register value */
-          DCHECK(!return_type.IsZero());
+          DCHECK(!return_type.IsZeroOrNull());
           DCHECK(!return_type.IsUninitializedReference());
           const uint32_t vregA = inst->VRegA_11x();
           const RegType& reg_type = work_line_->GetRegisterType(this, vregA);
@@ -2450,7 +2450,8 @@ bool MethodVerifier::CodeFlowVerifyInstruction(uint32_t* start_guess) {
     case Instruction::ARRAY_LENGTH: {
       const RegType& res_type = work_line_->GetRegisterType(this, inst->VRegB_12x());
       if (res_type.IsReferenceTypes()) {
-        if (!res_type.IsArrayTypes() && !res_type.IsZero()) {  // ie not an array or null
+        if (!res_type.IsArrayTypes() && !res_type.IsZeroOrNull()) {
+          // ie not an array or null
           Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "array-length on non-array " << res_type;
         } else {
           work_line_->SetRegisterType<LockOp::kClear>(this,
@@ -2557,7 +2558,7 @@ bool MethodVerifier::CodeFlowVerifyInstruction(uint32_t* start_guess) {
       /* Similar to the verification done for APUT */
       const RegType& array_type = work_line_->GetRegisterType(this, inst->VRegA_31t());
       /* array_type can be null if the reg type is Zero */
-      if (!array_type.IsZero()) {
+      if (!array_type.IsZeroOrNull()) {
         if (!array_type.IsArrayTypes()) {
           Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "invalid fill-array-data with array type "
                                             << array_type;
@@ -2597,7 +2598,7 @@ bool MethodVerifier::CodeFlowVerifyInstruction(uint32_t* start_guess) {
       const RegType& reg_type1 = work_line_->GetRegisterType(this, inst->VRegA_22t());
       const RegType& reg_type2 = work_line_->GetRegisterType(this, inst->VRegB_22t());
       bool mismatch = false;
-      if (reg_type1.IsZero()) {  // zero then integral or reference expected
+      if (reg_type1.IsZeroOrNull()) {  // zero then integral or reference expected
         mismatch = !reg_type2.IsReferenceTypes() && !reg_type2.IsIntegralTypes();
       } else if (reg_type1.IsReferenceTypes()) {  // both references?
         mismatch = !reg_type2.IsReferenceTypes();
@@ -2682,7 +2683,7 @@ bool MethodVerifier::CodeFlowVerifyInstruction(uint32_t* start_guess) {
             !cast_type.IsUnresolvedTypes() && !orig_type.IsUnresolvedTypes() &&
             cast_type.HasClass() &&             // Could be conflict type, make sure it has a class.
             !cast_type.GetClass()->IsInterface() &&
-            (orig_type.IsZero() ||
+            (orig_type.IsZeroOrNull() ||
                 orig_type.IsStrictlyAssignableFrom(
                     cast_type.Merge(orig_type, &reg_types_, this), this))) {
           RegisterLine* update_line = RegisterLine::Create(code_item_->registers_size_, this);
@@ -2965,7 +2966,7 @@ bool MethodVerifier::CodeFlowVerifyInstruction(uint32_t* start_guess) {
           break;
 
         /* no null refs allowed (?) */
-        if (this_type.IsZero()) {
+        if (this_type.IsZeroOrNull()) {
           Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "unable to initialize null ref";
           break;
         }
@@ -3042,7 +3043,7 @@ bool MethodVerifier::CodeFlowVerifyInstruction(uint32_t* start_guess) {
        * interface or Object (see comments in RegType::JoinClass).
        */
       const RegType& this_type = work_line_->GetInvocationThis(this, inst);
-      if (this_type.IsZero()) {
+      if (this_type.IsZeroOrNull()) {
         /* null pointer always passes (and always fails at runtime) */
       } else {
         if (this_type.IsUninitializedTypes()) {
@@ -4030,7 +4031,7 @@ ArtMethod* MethodVerifier::VerifyInvocationArgsFromIterator(
     const RegType& adjusted_type = is_init
                                        ? GetRegTypeCache()->FromUninitialized(actual_arg_type)
                                        : actual_arg_type;
-    if (method_type != METHOD_INTERFACE && !adjusted_type.IsZero()) {
+    if (method_type != METHOD_INTERFACE && !adjusted_type.IsZeroOrNull()) {
       const RegType* res_method_class;
       // Miranda methods have the declaring interface as their declaring class, not the abstract
       // class. It would be wrong to use this for the type check (interface type checks are
@@ -4403,7 +4404,7 @@ bool MethodVerifier::CheckSignaturePolymorphicMethod(ArtMethod* method) {
 
 bool MethodVerifier::CheckSignaturePolymorphicReceiver(const Instruction* inst) {
   const RegType& this_type = work_line_->GetInvocationThis(this, inst);
-  if (this_type.IsZero()) {
+  if (this_type.IsZeroOrNull()) {
     /* null pointer always passes (and always fails at run time) */
     return true;
   } else if (!this_type.IsNonZeroReferenceTypes()) {
@@ -4522,7 +4523,7 @@ ArtMethod* MethodVerifier::VerifyInvokeVirtualQuickArgs(const Instruction* inst,
     Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "'this' arg must be initialized";
     return nullptr;
   }
-  if (!actual_arg_type.IsZero()) {
+  if (!actual_arg_type.IsZeroOrNull()) {
     mirror::Class* klass = res_method->GetDeclaringClass();
     std::string temp;
     const RegType& res_method_class =
@@ -4638,13 +4639,20 @@ void MethodVerifier::VerifyAGet(const Instruction* inst,
     Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "Invalid reg type for array index (" << index_type << ")";
   } else {
     const RegType& array_type = work_line_->GetRegisterType(this, inst->VRegB_23x());
-    if (array_type.IsZero()) {
-      have_pending_runtime_throw_failure_ = true;
+    if (array_type.IsZeroOrNull()) {
       // Null array class; this code path will fail at runtime. Infer a merge-able type from the
-      // instruction type. TODO: have a proper notion of bottom here.
-      if (!is_primitive || insn_type.IsCategory1Types()) {
-        // Reference or category 1
-        work_line_->SetRegisterType<LockOp::kClear>(this, inst->VRegA_23x(), reg_types_.Zero());
+      // instruction type.
+      if (!is_primitive) {
+        work_line_->SetRegisterType<LockOp::kClear>(this, inst->VRegA_23x(), reg_types_.Null());
+      } else if (insn_type.IsInteger()) {
+        // Pick a non-zero constant (to distinguish with null) that can fit in any primitive.
+        // We cannot use 'insn_type' as it could be a float array or an int array.
+        work_line_->SetRegisterType<LockOp::kClear>(
+            this, inst->VRegA_23x(), DetermineCat1Constant(1, need_precise_constants_));
+      } else if (insn_type.IsCategory1Types()) {
+        // Category 1
+        // The 'insn_type' is exactly the type we need.
+        work_line_->SetRegisterType<LockOp::kClear>(this, inst->VRegA_23x(), insn_type);
       } else {
         // Category 2
         work_line_->SetRegisterTypeWide(this, inst->VRegA_23x(),
@@ -4753,7 +4761,7 @@ void MethodVerifier::VerifyAPut(const Instruction* inst,
     Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "Invalid reg type for array index (" << index_type << ")";
   } else {
     const RegType& array_type = work_line_->GetRegisterType(this, inst->VRegB_23x());
-    if (array_type.IsZero()) {
+    if (array_type.IsZeroOrNull()) {
       // Null array type; this code path will fail at runtime.
       // Still check that the given value matches the instruction's type.
       // Note: this is, as usual, complicated by the fact the the instruction isn't fully typed
@@ -4869,7 +4877,7 @@ ArtField* MethodVerifier::GetInstanceField(const RegType& obj_type, int field_id
     DCHECK(self_->IsExceptionPending());
     self_->ClearException();
     return nullptr;
-  } else if (obj_type.IsZero()) {
+  } else if (obj_type.IsZeroOrNull()) {
     // Cannot infer and check type, however, access will cause null pointer exception.
     // Fall through into a few last soft failure checks below.
   } else if (!obj_type.IsReferenceTypes()) {
