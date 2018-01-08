@@ -26,13 +26,14 @@
 #include <iostream>
 #include <sstream>
 
-#include "android-base/stringprintf.h"
+#include <android-base/logging.h>
+#include <android-base/stringprintf.h>
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "base/enums.h"
-#include "base/logging.h"
 #include "base/macros.h"
+#include "base/mutex.h"
 #include "class_linker-inl.h"
 #include "common_dex_operations.h"
 #include "common_throws.h"
@@ -206,17 +207,17 @@ static inline bool DoInvoke(Thread* self,
   }
 }
 
-static inline mirror::MethodHandle* ResolveMethodHandle(Thread* self,
-                                                        uint32_t method_handle_index,
-                                                        ArtMethod* referrer)
+static inline ObjPtr<mirror::MethodHandle> ResolveMethodHandle(Thread* self,
+                                                               uint32_t method_handle_index,
+                                                               ArtMethod* referrer)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   return class_linker->ResolveMethodHandle(self, method_handle_index, referrer);
 }
 
-static inline mirror::MethodType* ResolveMethodType(Thread* self,
-                                                    uint32_t method_type_index,
-                                                    ArtMethod* referrer)
+static inline ObjPtr<mirror::MethodType> ResolveMethodType(Thread* self,
+                                                           uint32_t method_type_index,
+                                                           ArtMethod* referrer)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   return class_linker->ResolveMethodType(self, method_type_index, referrer);
@@ -348,9 +349,7 @@ static inline ObjPtr<mirror::String> ResolveString(Thread* self,
   if (UNLIKELY(string_ptr == nullptr)) {
     StackHandleScope<1> hs(self);
     Handle<mirror::DexCache> dex_cache(hs.NewHandle(method->GetDexCache()));
-    string_ptr = Runtime::Current()->GetClassLinker()->ResolveString(*dex_cache->GetDexFile(),
-                                                                     string_idx,
-                                                                     dex_cache);
+    string_ptr = Runtime::Current()->GetClassLinker()->ResolveString(string_idx, dex_cache);
   }
   return string_ptr;
 }

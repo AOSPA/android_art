@@ -205,7 +205,7 @@ class ArtField FINAL {
 
   bool IsPrimitiveType() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  ObjPtr<mirror::Class> LookupType() REQUIRES_SHARED(Locks::mutator_lock_);
+  ObjPtr<mirror::Class> LookupResolvedType() REQUIRES_SHARED(Locks::mutator_lock_);
   ObjPtr<mirror::Class> ResolveType() REQUIRES_SHARED(Locks::mutator_lock_);
 
   size_t FieldSize() REQUIRES_SHARED(Locks::mutator_lock_);
@@ -234,7 +234,6 @@ class ArtField FINAL {
   ObjPtr<mirror::Class> ProxyFindSystemClass(const char* descriptor)
       REQUIRES_SHARED(Locks::mutator_lock_);
   ObjPtr<mirror::String> ResolveGetStringName(Thread* self,
-                                              const DexFile& dex_file,
                                               dex::StringIndex string_idx,
                                               ObjPtr<mirror::DexCache> dex_cache)
       REQUIRES_SHARED(Locks::mutator_lock_);

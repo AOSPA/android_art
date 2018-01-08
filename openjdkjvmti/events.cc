@@ -36,7 +36,6 @@
 #include "art_field-inl.h"
 #include "art_jvmti.h"
 #include "art_method-inl.h"
-#include "base/logging.h"
 #include "deopt_manager.h"
 #include "dex_file_types.h"
 #include "gc/allocation_listener.h"
@@ -59,6 +58,45 @@
 #include "ti_phase.h"
 
 namespace openjdkjvmti {
+
+void ArtJvmtiEventCallbacks::CopyExtensionsFrom(const ArtJvmtiEventCallbacks* cb) {
+  if (art::kIsDebugBuild) {
+    ArtJvmtiEventCallbacks clean;
+    DCHECK_EQ(memcmp(&clean, this, sizeof(clean)), 0)
+        << "CopyExtensionsFrom called with initialized eventsCallbacks!";
+  }
+  if (cb != nullptr) {
+    memcpy(this, cb, sizeof(*this));
+  } else {
+    memset(this, 0, sizeof(*this));
+  }
+}
+
+jvmtiError ArtJvmtiEventCallbacks::Set(jint index, jvmtiExtensionEvent cb) {
+  switch (index) {
+    case static_cast<jint>(ArtJvmtiEvent::kDdmPublishChunk):
+      DdmPublishChunk = reinterpret_cast<ArtJvmtiEventDdmPublishChunk>(cb);
+      return OK;
+    default:
+      return ERR(ILLEGAL_ARGUMENT);
+  }
+}
+
+
+bool IsExtensionEvent(jint e) {
+  return e >= static_cast<jint>(ArtJvmtiEvent::kMinEventTypeVal) &&
+      e <= static_cast<jint>(ArtJvmtiEvent::kMaxEventTypeVal) &&
+      IsExtensionEvent(static_cast<ArtJvmtiEvent>(e));
+}
+
+bool IsExtensionEvent(ArtJvmtiEvent e) {
+  switch (e) {
+    case ArtJvmtiEvent::kDdmPublishChunk:
+      return true;
+    default:
+      return false;
+  }
+}
 
 bool EventMasks::IsEnabledAnywhere(ArtJvmtiEvent event) {
   return global_event_mask.Test(event) || unioned_thread_event_mask.Test(event);
@@ -100,7 +138,9 @@ EventMask* EventMasks::GetEventMaskOrNull(art::Thread* thread) {
 }
 
 
-void EventMasks::EnableEvent(art::Thread* thread, ArtJvmtiEvent event) {
+void EventMasks::EnableEvent(ArtJvmTiEnv* env, art::Thread* thread, ArtJvmtiEvent event) {
+  DCHECK_EQ(&env->event_masks, this);
+  env->event_info_mutex_.AssertExclusiveHeld(art::Thread::Current());
   DCHECK(EventMask::EventIsInRange(event));
   GetEventMask(thread).Set(event);
   if (thread != nullptr) {
@@ -108,7 +148,9 @@ void EventMasks::EnableEvent(art::Thread* thread, ArtJvmtiEvent event) {
   }
 }
 
-void EventMasks::DisableEvent(art::Thread* thread, ArtJvmtiEvent event) {
+void EventMasks::DisableEvent(ArtJvmTiEnv* env, art::Thread* thread, ArtJvmtiEvent event) {
+  DCHECK_EQ(&env->event_masks, this);
+  env->event_info_mutex_.AssertExclusiveHeld(art::Thread::Current());
   DCHECK(EventMask::EventIsInRange(event));
   GetEventMask(thread).Set(event, false);
   if (thread != nullptr) {
@@ -154,25 +196,21 @@ void EventMasks::HandleChangedCapabilities(const jvmtiCapabilities& caps, bool c
 }
 
 void EventHandler::RegisterArtJvmTiEnv(ArtJvmTiEnv* env) {
-  // Since we never shrink this array we might as well try to fill gaps.
-  auto it = std::find(envs.begin(), envs.end(), nullptr);
-  if (it != envs.end()) {
-    *it = env;
-  } else {
-    envs.push_back(env);
-  }
+  art::MutexLock mu(art::Thread::Current(), envs_lock_);
+  envs.push_back(env);
 }
 
 void EventHandler::RemoveArtJvmTiEnv(ArtJvmTiEnv* env) {
+  art::MutexLock mu(art::Thread::Current(), envs_lock_);
   // Since we might be currently iterating over the envs list we cannot actually erase elements.
   // Instead we will simply replace them with 'nullptr' and skip them manually.
   auto it = std::find(envs.begin(), envs.end(), env);
   if (it != envs.end()) {
-    *it = nullptr;
+    envs.erase(it);
     for (size_t i = static_cast<size_t>(ArtJvmtiEvent::kMinEventTypeVal);
          i <= static_cast<size_t>(ArtJvmtiEvent::kMaxEventTypeVal);
          ++i) {
-      RecalculateGlobalEventMask(static_cast<ArtJvmtiEvent>(i));
+      RecalculateGlobalEventMaskLocked(static_cast<ArtJvmtiEvent>(i));
     }
   }
 }
@@ -212,6 +250,38 @@ static void RunEventCallback(EventHandler* handler,
                                  thread_jni.get(),
                                  args...);
 }
+
+static void SetupDdmTracking(art::DdmCallback* listener, bool enable) {
+  art::ScopedObjectAccess soa(art::Thread::Current());
+  if (enable) {
+    art::Runtime::Current()->GetRuntimeCallbacks()->AddDdmCallback(listener);
+  } else {
+    art::Runtime::Current()->GetRuntimeCallbacks()->RemoveDdmCallback(listener);
+  }
+}
+
+class JvmtiDdmChunkListener : public art::DdmCallback {
+ public:
+  explicit JvmtiDdmChunkListener(EventHandler* handler) : handler_(handler) {}
+
+  void DdmPublishChunk(uint32_t type, const art::ArrayRef<const uint8_t>& data)
+      OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    if (handler_->IsEventEnabledAnywhere(ArtJvmtiEvent::kDdmPublishChunk)) {
+      art::Thread* self = art::Thread::Current();
+      handler_->DispatchEvent<ArtJvmtiEvent::kDdmPublishChunk>(
+          self,
+          static_cast<JNIEnv*>(self->GetJniEnv()),
+          static_cast<jint>(type),
+          static_cast<jint>(data.size()),
+          reinterpret_cast<const jbyte*>(data.data()));
+    }
+  }
+
+ private:
+  EventHandler* handler_;
+
+  DISALLOW_COPY_AND_ASSIGN(JvmtiDdmChunkListener);
+};
 
 class JvmtiAllocationListener : public art::gc::AllocationListener {
  public:
@@ -360,11 +430,11 @@ class JvmtiGcPauseListener : public art::gc::GcPauseListener {
         finish_enabled_(false) {}
 
   void StartPause() OVERRIDE {
-    handler_->DispatchEvent<ArtJvmtiEvent::kGarbageCollectionStart>(nullptr);
+    handler_->DispatchEvent<ArtJvmtiEvent::kGarbageCollectionStart>(art::Thread::Current());
   }
 
   void EndPause() OVERRIDE {
-    handler_->DispatchEvent<ArtJvmtiEvent::kGarbageCollectionFinish>(nullptr);
+    handler_->DispatchEvent<ArtJvmtiEvent::kGarbageCollectionFinish>(art::Thread::Current());
   }
 
   bool IsEnabled() {
@@ -832,9 +902,9 @@ static bool EventNeedsFullDeopt(ArtJvmtiEvent event) {
   }
 }
 
-static void SetupTraceListener(JvmtiMethodTraceListener* listener,
-                               ArtJvmtiEvent event,
-                               bool enable) {
+void EventHandler::SetupTraceListener(JvmtiMethodTraceListener* listener,
+                                      ArtJvmtiEvent event,
+                                      bool enable) {
   bool needs_full_deopt = EventNeedsFullDeopt(event);
   // Make sure we can deopt.
   {
@@ -854,8 +924,21 @@ static void SetupTraceListener(JvmtiMethodTraceListener* listener,
   }
 
   // Add the actual listeners.
-  art::ScopedThreadStateChange stsc(art::Thread::Current(), art::ThreadState::kNative);
   uint32_t new_events = GetInstrumentationEventsFor(event);
+  if (new_events == art::instrumentation::Instrumentation::kDexPcMoved) {
+    // Need to skip adding the listeners if the event is breakpoint/single-step since those events
+    // share the same art-instrumentation underlying event. We need to give them their own deopt
+    // request though so the test waits until here.
+    DCHECK(event == ArtJvmtiEvent::kBreakpoint || event == ArtJvmtiEvent::kSingleStep);
+    ArtJvmtiEvent other = event == ArtJvmtiEvent::kBreakpoint ? ArtJvmtiEvent::kSingleStep
+                                                              : ArtJvmtiEvent::kBreakpoint;
+    if (IsEventEnabledAnywhere(other)) {
+      // The event needs to be kept around/is already enabled by the other jvmti event that uses the
+      // same instrumentation event.
+      return;
+    }
+  }
+  art::ScopedThreadStateChange stsc(art::Thread::Current(), art::ThreadState::kNative);
   art::instrumentation::Instrumentation* instr = art::Runtime::Current()->GetInstrumentation();
   art::gc::ScopedGCCriticalSection gcs(art::Thread::Current(),
                                        art::gc::kGcCauseInstrumentation,
@@ -924,6 +1007,9 @@ bool EventHandler::OtherMonitorEventsEnabledAnywhere(ArtJvmtiEvent event) {
 // Handle special work for the given event type, if necessary.
 void EventHandler::HandleEventType(ArtJvmtiEvent event, bool enable) {
   switch (event) {
+    case ArtJvmtiEvent::kDdmPublishChunk:
+      SetupDdmTracking(ddm_listener_.get(), enable);
+      return;
     case ArtJvmtiEvent::kVmObjectAlloc:
       SetupObjectAllocationTracking(alloc_listener_.get(), enable);
       return;
@@ -932,18 +1018,6 @@ void EventHandler::HandleEventType(ArtJvmtiEvent event, bool enable) {
     case ArtJvmtiEvent::kGarbageCollectionFinish:
       SetupGcPauseTracking(gc_pause_listener_.get(), event, enable);
       return;
-
-    case ArtJvmtiEvent::kBreakpoint:
-    case ArtJvmtiEvent::kSingleStep: {
-      ArtJvmtiEvent other = (event == ArtJvmtiEvent::kBreakpoint) ? ArtJvmtiEvent::kSingleStep
-                                                                  : ArtJvmtiEvent::kBreakpoint;
-      // We only need to do anything if there isn't already a listener installed/held-on by the
-      // other jvmti event that uses DexPcMoved.
-      if (!IsEventEnabledAnywhere(other)) {
-        SetupTraceListener(method_trace_listener_.get(), event, enable);
-      }
-      return;
-    }
     // FramePop can never be disabled once it's been turned on since we would either need to deal
     // with dangling pointers or have missed events.
     // TODO We really need to make this not the case anymore.
@@ -960,6 +1034,8 @@ void EventHandler::HandleEventType(ArtJvmtiEvent event, bool enable) {
     case ArtJvmtiEvent::kFieldModification:
     case ArtJvmtiEvent::kException:
     case ArtJvmtiEvent::kExceptionCatch:
+    case ArtJvmtiEvent::kBreakpoint:
+    case ArtJvmtiEvent::kSingleStep:
       SetupTraceListener(method_trace_listener_.get(), event, enable);
       return;
     case ArtJvmtiEvent::kMonitorContendedEnter:
@@ -1061,19 +1137,27 @@ jvmtiError EventHandler::SetEvent(ArtJvmTiEnv* env,
     return ERR(MUST_POSSESS_CAPABILITY);
   }
 
-  bool old_state = global_mask.Test(event);
+  bool old_state;
+  bool new_state;
 
-  if (mode == JVMTI_ENABLE) {
-    env->event_masks.EnableEvent(thread, event);
-    global_mask.Set(event);
-  } else {
-    DCHECK_EQ(mode, JVMTI_DISABLE);
+  {
+    // Change the event masks atomically.
+    art::Thread* self = art::Thread::Current();
+    art::MutexLock mu(self, envs_lock_);
+    art::WriterMutexLock mu_env_info(self, env->event_info_mutex_);
+    old_state = global_mask.Test(event);
+    if (mode == JVMTI_ENABLE) {
+      env->event_masks.EnableEvent(env, thread, event);
+      global_mask.Set(event);
+      new_state = true;
+    } else {
+      DCHECK_EQ(mode, JVMTI_DISABLE);
 
-    env->event_masks.DisableEvent(thread, event);
-    RecalculateGlobalEventMask(event);
+      env->event_masks.DisableEvent(env, thread, event);
+      RecalculateGlobalEventMaskLocked(event);
+      new_state = global_mask.Test(event);
+    }
   }
-
-  bool new_state = global_mask.Test(event);
 
   // Handle any special work required for the event type.
   if (new_state != old_state) {
@@ -1102,8 +1186,10 @@ void EventHandler::Shutdown() {
   art::Runtime::Current()->GetInstrumentation()->RemoveListener(method_trace_listener_.get(), ~0);
 }
 
-EventHandler::EventHandler() {
+EventHandler::EventHandler() : envs_lock_("JVMTI Environment List Lock",
+                                          art::LockLevel::kTopLockLevel) {
   alloc_listener_.reset(new JvmtiAllocationListener(this));
+  ddm_listener_.reset(new JvmtiDdmChunkListener(this));
   gc_pause_listener_.reset(new JvmtiGcPauseListener(this));
   method_trace_listener_.reset(new JvmtiMethodTraceListener(this));
   monitor_listener_.reset(new JvmtiMonitorListener(this));

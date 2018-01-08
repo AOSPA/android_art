@@ -25,6 +25,7 @@
 #include "base/macros.h"
 #include "base/scoped_arena_containers.h"
 #include "base/value_object.h"
+#include "code_item_accessors.h"
 #include "dex_file.h"
 #include "dex_file_types.h"
 #include "handle.h"
@@ -148,10 +149,21 @@ class MethodVerifier {
   void Dump(std::ostream& os) REQUIRES_SHARED(Locks::mutator_lock_);
   void Dump(VariableIndentationOutputStream* vios) REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Information structure for a lock held at a certain point in time.
+  struct DexLockInfo {
+    // The registers aliasing the lock.
+    std::set<uint32_t> dex_registers;
+    // The dex PC of the monitor-enter instruction.
+    uint32_t dex_pc;
+
+    explicit DexLockInfo(uint32_t dex_pc_in) {
+      dex_pc = dex_pc_in;
+    }
+  };
   // Fills 'monitor_enter_dex_pcs' with the dex pcs of the monitor-enter instructions corresponding
   // to the locks held at 'dex_pc' in method 'm'.
   static void FindLocksAtDexPc(ArtMethod* m, uint32_t dex_pc,
-                               std::vector<uint32_t>* monitor_enter_dex_pcs)
+                               std::vector<DexLockInfo>* monitor_enter_dex_pcs)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Returns the accessed field corresponding to the quick instruction's field
@@ -186,7 +198,9 @@ class MethodVerifier {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Accessors used by the compiler via CompilerCallback
-  const DexFile::CodeItem* CodeItem() const;
+  const CodeItemDataAccessor& CodeItem() const {
+    return code_item_accessor_;
+  }
   RegisterLine* GetRegLine(uint32_t dex_pc);
   ALWAYS_INLINE const InstructionFlags& GetInstructionFlags(size_t index) const;
   ALWAYS_INLINE InstructionFlags& GetInstructionFlags(size_t index);
@@ -243,7 +257,8 @@ class MethodVerifier {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void UninstantiableError(const char* descriptor);
-  static bool IsInstantiableOrPrimitive(mirror::Class* klass) REQUIRES_SHARED(Locks::mutator_lock_);
+  static bool IsInstantiableOrPrimitive(ObjPtr<mirror::Class> klass)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Is the method being verified a constructor? See the comment on the field.
   bool IsConstructor() const {
@@ -738,7 +753,7 @@ class MethodVerifier {
   // The class loader for the declaring class of the method.
   Handle<mirror::ClassLoader> class_loader_ GUARDED_BY(Locks::mutator_lock_);
   const DexFile::ClassDef& class_def_;  // The class def of the declaring class of the method.
-  const DexFile::CodeItem* const code_item_;  // The code item containing the code for the method.
+  const CodeItemDataAccessor code_item_accessor_;
   const RegType* declaring_class_;  // Lazily computed reg type of the method's declaring class.
   // Instruction widths and flags, one entry per code unit.
   // Owned, but not unique_ptr since insn_flags_ are allocated in arenas.
@@ -747,7 +762,7 @@ class MethodVerifier {
   uint32_t interesting_dex_pc_;
   // The container into which FindLocksAtDexPc should write the registers containing held locks,
   // null if we're not doing FindLocksAtDexPc.
-  std::vector<uint32_t>* monitor_enter_dex_pcs_;
+  std::vector<DexLockInfo>* monitor_enter_dex_pcs_;
 
   // The types of any error that occurs.
   std::vector<VerifyError> failures_;

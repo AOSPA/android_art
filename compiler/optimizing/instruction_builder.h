@@ -19,6 +19,7 @@
 
 #include "base/scoped_arena_allocator.h"
 #include "base/scoped_arena_containers.h"
+#include "code_item_accessors.h"
 #include "data_type.h"
 #include "dex_file.h"
 #include "dex_file_types.h"
@@ -50,7 +51,7 @@ class HInstructionBuilder : public ValueObject {
                       HBasicBlockBuilder* block_builder,
                       SsaBuilder* ssa_builder,
                       const DexFile* dex_file,
-                      const DexFile::CodeItem& code_item,
+                      const CodeItemDebugInfoAccessor& accessor,
                       DataType::Type return_type,
                       const DexCompilationUnit* dex_compilation_unit,
                       const DexCompilationUnit* outer_compilation_unit,
@@ -59,32 +60,10 @@ class HInstructionBuilder : public ValueObject {
                       const uint8_t* interpreter_metadata,
                       OptimizingCompilerStats* compiler_stats,
                       VariableSizedHandleScope* handles,
-                      ScopedArenaAllocator* local_allocator)
-      : allocator_(graph->GetAllocator()),
-        graph_(graph),
-        handles_(handles),
-        dex_file_(dex_file),
-        code_item_(code_item),
-        return_type_(return_type),
-        block_builder_(block_builder),
-        ssa_builder_(ssa_builder),
-        compiler_driver_(compiler_driver),
-        code_generator_(code_generator),
-        dex_compilation_unit_(dex_compilation_unit),
-        outer_compilation_unit_(outer_compilation_unit),
-        quicken_info_(interpreter_metadata),
-        compilation_stats_(compiler_stats),
-        local_allocator_(local_allocator),
-        locals_for_(local_allocator->Adapter(kArenaAllocGraphBuilder)),
-        current_block_(nullptr),
-        current_locals_(nullptr),
-        latest_result_(nullptr),
-        current_this_parameter_(nullptr),
-        loop_headers_(local_allocator->Adapter(kArenaAllocGraphBuilder)) {
-    loop_headers_.reserve(kDefaultNumberOfLoops);
-  }
+                      ScopedArenaAllocator* local_allocator);
 
   bool Build();
+  void BuildIntrinsic(ArtMethod* method);
 
  private:
   void InitializeBlockLocals();
@@ -174,8 +153,8 @@ class HInstructionBuilder : public ValueObject {
                                         uint32_t dex_pc,
                                         bool is_put,
                                         DataType::Type field_type);
-  // Builds a static field access node and returns whether the instruction is supported.
-  bool BuildStaticFieldAccess(const Instruction& instruction, uint32_t dex_pc, bool is_put);
+  // Builds a static field access node.
+  void BuildStaticFieldAccess(const Instruction& instruction, uint32_t dex_pc, bool is_put);
 
   void BuildArrayAccess(const Instruction& instruction,
                         uint32_t dex_pc,
@@ -239,9 +218,10 @@ class HInstructionBuilder : public ValueObject {
   // Builds an instruction sequence for a switch statement.
   void BuildSwitch(const Instruction& instruction, uint32_t dex_pc);
 
-  // Builds a `HLoadClass` loading the given `type_index`. If `outer` is true,
-  // this method will use the outer class's dex file to lookup the type at
-  // `type_index`.
+  // Builds a `HLoadString` loading the given `string_index`.
+  void BuildLoadString(dex::StringIndex string_index, uint32_t dex_pc);
+
+  // Builds a `HLoadClass` loading the given `type_index`.
   HLoadClass* BuildLoadClass(dex::TypeIndex type_index, uint32_t dex_pc);
 
   HLoadClass* BuildLoadClass(dex::TypeIndex type_index,
@@ -252,10 +232,10 @@ class HInstructionBuilder : public ValueObject {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Returns the outer-most compiling method's class.
-  mirror::Class* GetOutermostCompilingClass() const;
+  ObjPtr<mirror::Class> GetOutermostCompilingClass() const;
 
   // Returns the class whose method is being compiled.
-  mirror::Class* GetCompilingClass() const;
+  ObjPtr<mirror::Class> GetCompilingClass() const;
 
   // Returns whether `type_index` points to the outer-most compiling method's class.
   bool IsOutermostCompilingClass(dex::TypeIndex type_index) const;
@@ -327,7 +307,7 @@ class HInstructionBuilder : public ValueObject {
 
   // The dex file where the method being compiled is, and the bytecode data.
   const DexFile* const dex_file_;
-  const DexFile::CodeItem& code_item_;
+  const CodeItemDebugInfoAccessor code_item_accessor_;  // null for intrinsic graph.
 
   // The return type of the method being compiled.
   const DataType::Type return_type_;

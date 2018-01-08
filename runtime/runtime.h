@@ -35,6 +35,7 @@
 #include "experimental_flags.h"
 #include "gc_root.h"
 #include "instrumentation.h"
+#include "jdwp_provider.h"
 #include "obj_ptr.h"
 #include "offsets.h"
 #include "process_state.h"
@@ -586,6 +587,14 @@ class Runtime {
     is_native_debuggable_ = value;
   }
 
+  bool AreAsyncExceptionsThrown() const {
+    return async_exceptions_thrown_;
+  }
+
+  void SetAsyncExceptionsThrown() {
+    async_exceptions_thrown_ = true;
+  }
+
   // Returns the build fingerprint, if set. Otherwise an empty string is returned.
   std::string GetFingerprint() {
     return fingerprint_;
@@ -686,6 +695,14 @@ class Runtime {
   // This is beneficial for low RAM devices since it reduces page cache thrashing.
   bool MAdviseRandomAccess() const {
     return madvise_random_access_;
+  }
+
+  const std::string& GetJdwpOptions() {
+    return jdwp_options_;
+  }
+
+  JdwpProvider GetJdwpProvider() const {
+    return jdwp_provider_;
   }
 
  private:
@@ -899,6 +916,10 @@ class Runtime {
   // Whether we are running under native debugger.
   bool is_native_debuggable_;
 
+  // whether or not any async exceptions have ever been thrown. This is used to speed up the
+  // MterpShouldSwitchInterpreters function.
+  bool async_exceptions_thrown_;
+
   // Whether Java code needs to be debuggable.
   bool is_java_debuggable_;
 
@@ -940,6 +961,12 @@ class Runtime {
 
   // Whether zygote code is in a section that should not start threads.
   bool zygote_no_threads_;
+
+  // The string containing requested jdwp options
+  std::string jdwp_options_;
+
+  // The jdwp provider we were configured with.
+  JdwpProvider jdwp_provider_;
 
   // Saved environment.
   class EnvSnapshot {

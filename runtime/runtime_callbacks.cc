@@ -35,6 +35,49 @@ static inline void Remove(T* cb, std::vector<T*>* data) {
   }
 }
 
+void RuntimeCallbacks::AddDdmCallback(DdmCallback* cb) {
+  ddm_callbacks_.push_back(cb);
+}
+
+void RuntimeCallbacks::RemoveDdmCallback(DdmCallback* cb) {
+  Remove(cb, &ddm_callbacks_);
+}
+
+void RuntimeCallbacks::DdmPublishChunk(uint32_t type, const ArrayRef<const uint8_t>& data) {
+  for (DdmCallback* cb : ddm_callbacks_) {
+    cb->DdmPublishChunk(type, data);
+  }
+}
+
+void RuntimeCallbacks::AddDebuggerControlCallback(DebuggerControlCallback* cb) {
+  debugger_control_callbacks_.push_back(cb);
+}
+
+void RuntimeCallbacks::RemoveDebuggerControlCallback(DebuggerControlCallback* cb) {
+  Remove(cb, &debugger_control_callbacks_);
+}
+
+bool RuntimeCallbacks::IsDebuggerConfigured() {
+  for (DebuggerControlCallback* cb : debugger_control_callbacks_) {
+    if (cb->IsDebuggerConfigured()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void RuntimeCallbacks::StartDebugger() {
+  for (DebuggerControlCallback* cb : debugger_control_callbacks_) {
+    cb->StartDebugger();
+  }
+}
+
+void RuntimeCallbacks::StopDebugger() {
+  for (DebuggerControlCallback* cb : debugger_control_callbacks_) {
+    cb->StopDebugger();
+  }
+}
+
 void RuntimeCallbacks::AddMethodInspectionCallback(MethodInspectionCallback* cb) {
   method_inspection_callbacks_.push_back(cb);
 }

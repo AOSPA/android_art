@@ -57,6 +57,7 @@
 #include "asm_support.h"
 #include "asm_support_check.h"
 #include "atomic.h"
+#include "base/aborting.h"
 #include "base/arena_allocator.h"
 #include "base/dumpable.h"
 #include "base/enums.h"
@@ -256,6 +257,7 @@ Runtime::Runtime()
       force_native_bridge_(false),
       is_native_bridge_loaded_(false),
       is_native_debuggable_(false),
+      async_exceptions_thrown_(false),
       is_java_debuggable_(false),
       zygote_max_failed_boots_(0),
       experimental_flags_(ExperimentalFlags::kNone),
@@ -295,6 +297,7 @@ Runtime::~Runtime() {
   }
 
   if (dump_gc_performance_on_shutdown_) {
+    ScopedLogSeverity sls(LogSeverity::INFO);
     // This can't be called from the Heap destructor below because it
     // could call RosAlloc::InspectAll() which needs the thread_list
     // to be still alive.
@@ -352,7 +355,7 @@ Runtime::~Runtime() {
   }
 
   // Make sure our internal threads are dead before we start tearing down things they're using.
-  Dbg::StopJdwp();
+  GetRuntimeCallbacks()->StopDebugger();
   delete signal_catcher_;
 
   // Make sure all other non-daemon threads have terminated, and all daemon threads are suspended.
@@ -804,7 +807,7 @@ bool Runtime::Start() {
 
   {
     ScopedObjectAccess soa(self);
-    self->GetJniEnv()->locals.AssertEmpty();
+    self->GetJniEnv()->AssertLocalsEmpty();
   }
 
   VLOG(startup) << "Runtime::Start exiting";
@@ -868,8 +871,10 @@ void Runtime::InitNonZygoteOrPostFork(
   StartSignalCatcher();
 
   // Start the JDWP thread. If the command-line debugger flags specified "suspend=y",
-  // this will pause the runtime, so we probably want this to come last.
-  Dbg::StartJdwp();
+  // this will pause the runtime (in the internal debugger implementation), so we probably want
+  // this to come last.
+  ScopedObjectAccess soa(Thread::Current());
+  GetRuntimeCallbacks()->StartDebugger();
 }
 
 void Runtime::StartSignalCatcher() {
@@ -1218,8 +1223,29 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   dump_gc_performance_on_shutdown_ = runtime_options.Exists(Opt::DumpGCPerformanceOnShutdown);
 
-  if (runtime_options.Exists(Opt::JdwpOptions)) {
-    Dbg::ConfigureJdwp(runtime_options.GetOrDefault(Opt::JdwpOptions));
+  jdwp_options_ = runtime_options.GetOrDefault(Opt::JdwpOptions);
+  jdwp_provider_ = runtime_options.GetOrDefault(Opt::JdwpProvider);
+  switch (jdwp_provider_) {
+    case JdwpProvider::kNone: {
+      LOG(WARNING) << "Disabling all JDWP support.";
+      break;
+    }
+    case JdwpProvider::kInternal: {
+      if (runtime_options.Exists(Opt::JdwpOptions)) {
+        JDWP::JdwpOptions ops;
+        if (!JDWP::ParseJdwpOptions(runtime_options.GetOrDefault(Opt::JdwpOptions), &ops)) {
+          LOG(ERROR) << "failed to parse jdwp options!";
+          return false;
+        }
+        Dbg::ConfigureJdwp(ops);
+      }
+      break;
+    }
+    case JdwpProvider::kAdbConnection: {
+      constexpr const char* plugin_name = kIsDebugBuild ? "libadbconnectiond.so"
+                                                        : "libadbconnection.so";
+      plugins_.push_back(Plugin::Create(plugin_name));
+    }
   }
   callbacks_->AddThreadLifecycleCallback(Dbg::GetThreadLifecycleCallback());
   callbacks_->AddClassLoadCallback(Dbg::GetClassLoadCallback());
@@ -1506,6 +1532,7 @@ static bool EnsureJvmtiPlugin(Runtime* runtime,
   }
 
   // Is the process debuggable? Otherwise, do not attempt to load the plugin.
+  // TODO Support a crimped jvmti for non-debuggable runtimes.
   if (!runtime->IsJavaDebuggable()) {
     *error_msg = "Process is not debuggable.";
     return false;

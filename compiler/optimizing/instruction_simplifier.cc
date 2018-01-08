@@ -27,6 +27,10 @@
 
 namespace art {
 
+// Whether to run an exhaustive test of individual HInstructions cloning when each instruction
+// is replaced with its copy if it is clonable.
+static constexpr bool kTestInstructionClonerExhaustively = false;
+
 class InstructionSimplifierVisitor : public HGraphDelegateVisitor {
  public:
   InstructionSimplifierVisitor(HGraph* graph,
@@ -44,7 +48,7 @@ class InstructionSimplifierVisitor : public HGraphDelegateVisitor {
   void RecordSimplification() {
     simplification_occurred_ = true;
     simplifications_at_current_position_++;
-    MaybeRecordStat(stats_, kInstructionSimplifications);
+    MaybeRecordStat(stats_, MethodCompilationStat::kInstructionSimplifications);
   }
 
   bool ReplaceRotateWithRor(HBinaryOperation* op, HUShr* ushr, HShl* shl);
@@ -130,6 +134,11 @@ class InstructionSimplifierVisitor : public HGraphDelegateVisitor {
 };
 
 void InstructionSimplifier::Run() {
+  if (kTestInstructionClonerExhaustively) {
+    CloneAndReplaceInstructionVisitor visitor(graph_);
+    visitor.VisitReversePostOrder();
+  }
+
   InstructionSimplifierVisitor visitor(graph_, codegen_, compiler_driver_, stats_);
   visitor.Run();
 }
@@ -654,7 +663,7 @@ void InstructionSimplifierVisitor::VisitInstanceOf(HInstanceOf* instruction) {
 
   HGraph* graph = GetGraph();
   if (object->IsNullConstant()) {
-    MaybeRecordStat(stats_, kRemovedInstanceOf);
+    MaybeRecordStat(stats_, MethodCompilationStat::kRemovedInstanceOf);
     instruction->ReplaceWith(graph->GetIntConstant(0));
     instruction->GetBlock()->RemoveInstruction(instruction);
     RecordSimplification();
@@ -665,7 +674,7 @@ void InstructionSimplifierVisitor::VisitInstanceOf(HInstanceOf* instruction) {
   // the return value check with the `outcome` check, b/27651442 .
   bool outcome = false;
   if (TypeCheckHasKnownOutcome(load_class, object, &outcome)) {
-    MaybeRecordStat(stats_, kRemovedInstanceOf);
+    MaybeRecordStat(stats_, MethodCompilationStat::kRemovedInstanceOf);
     if (outcome && can_be_null) {
       // Type test will succeed, we just need a null test.
       HNotEqual* test = new (graph->GetAllocator()) HNotEqual(graph->GetNullConstant(), object);
@@ -1072,6 +1081,58 @@ static inline bool TryReplaceFieldOrArrayGetType(HInstruction* maybe_get, DataTy
   }
 }
 
+// The type conversion is only used for storing into a field/element of the
+// same/narrower size.
+static bool IsTypeConversionForStoringIntoNoWiderFieldOnly(HTypeConversion* type_conversion) {
+  if (type_conversion->HasEnvironmentUses()) {
+    return false;
+  }
+  DataType::Type input_type = type_conversion->GetInputType();
+  DataType::Type result_type = type_conversion->GetResultType();
+  if (!DataType::IsIntegralType(input_type) ||
+      !DataType::IsIntegralType(result_type) ||
+      input_type == DataType::Type::kInt64 ||
+      result_type == DataType::Type::kInt64) {
+    // Type conversion is needed if non-integer types are involved, or 64-bit
+    // types are involved, which may use different number of registers.
+    return false;
+  }
+  if (DataType::Size(input_type) >= DataType::Size(result_type)) {
+    // Type conversion is not necessary when storing to a field/element of the
+    // same/smaller size.
+  } else {
+    // We do not handle this case here.
+    return false;
+  }
+
+  // Check if the converted value is only used for storing into heap.
+  for (const HUseListNode<HInstruction*>& use : type_conversion->GetUses()) {
+    HInstruction* instruction = use.GetUser();
+    if (instruction->IsInstanceFieldSet() &&
+        instruction->AsInstanceFieldSet()->GetFieldType() == result_type) {
+      DCHECK_EQ(instruction->AsInstanceFieldSet()->GetValue(), type_conversion);
+      continue;
+    }
+    if (instruction->IsStaticFieldSet() &&
+        instruction->AsStaticFieldSet()->GetFieldType() == result_type) {
+      DCHECK_EQ(instruction->AsStaticFieldSet()->GetValue(), type_conversion);
+      continue;
+    }
+    if (instruction->IsArraySet() &&
+        instruction->AsArraySet()->GetComponentType() == result_type &&
+        // not index use.
+        instruction->AsArraySet()->GetIndex() != type_conversion) {
+      DCHECK_EQ(instruction->AsArraySet()->GetValue(), type_conversion);
+      continue;
+    }
+    // The use is not as a store value, or the field/element type is not the
+    // same as the result_type, keep the type conversion.
+    return false;
+  }
+  // Codegen automatically handles the type conversion during the store.
+  return true;
+}
+
 void InstructionSimplifierVisitor::VisitTypeConversion(HTypeConversion* instruction) {
   HInstruction* input = instruction->GetInput();
   DataType::Type input_type = input->GetType();
@@ -1159,6 +1220,13 @@ void InstructionSimplifierVisitor::VisitTypeConversion(HTypeConversion* instruct
       RecordSimplification();
       return;
     }
+  }
+
+  if (IsTypeConversionForStoringIntoNoWiderFieldOnly(instruction)) {
+    instruction->ReplaceWith(input);
+    instruction->GetBlock()->RemoveInstruction(instruction);
+    RecordSimplification();
+    return;
   }
 }
 
@@ -2024,6 +2092,22 @@ void InstructionSimplifierVisitor::SimplifyStringEquals(HInvoke* instruction) {
     ReferenceTypeInfo argument_rti = argument->GetReferenceTypeInfo();
     if (argument_rti.IsValid() && argument_rti.IsStringClass()) {
       optimizations.SetArgumentIsString();
+    } else if (kUseReadBarrier) {
+      DCHECK(instruction->GetResolvedMethod() != nullptr);
+      DCHECK(instruction->GetResolvedMethod()->GetDeclaringClass()->IsStringClass() ||
+             // Object.equals() can be devirtualized to String.equals().
+             instruction->GetResolvedMethod()->GetDeclaringClass()->IsObjectClass());
+      Runtime* runtime = Runtime::Current();
+      // For AOT, we always assume that the boot image shall contain the String.class and
+      // we do not need a read barrier for boot image classes as they are non-moveable.
+      // For JIT, check if we actually have a boot image; if we do, the String.class
+      // should also be non-moveable.
+      if (runtime->IsAotCompiler() || runtime->GetHeap()->HasBootImageSpace()) {
+        DCHECK(runtime->IsAotCompiler() ||
+               !runtime->GetHeap()->IsMovableObject(
+                   instruction->GetResolvedMethod()->GetDeclaringClass()));
+        optimizations.SetNoReadBarrierForStringClass();
+      }
     }
   }
 }
@@ -2243,7 +2327,7 @@ void InstructionSimplifierVisitor::SimplifyStringCharAt(HInvoke* invoke) {
   HArrayLength* length = new (allocator) HArrayLength(str, dex_pc, /* is_string_length */ true);
   invoke->GetBlock()->InsertInstructionBefore(length, invoke);
   HBoundsCheck* bounds_check = new (allocator) HBoundsCheck(
-      index, length, dex_pc, invoke->GetDexMethodIndex());
+      index, length, dex_pc, /* is_string_char_at */ true);
   invoke->GetBlock()->InsertInstructionBefore(bounds_check, invoke);
   HArrayGet* array_get = new (allocator) HArrayGet(str,
                                                    bounds_check,

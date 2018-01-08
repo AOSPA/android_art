@@ -21,8 +21,8 @@
 
 #include "art_field.h"
 #include "base/callee_save_type.h"
-#include "base/logging.h"
 #include "class_linker-inl.h"
+#include "code_item_accessors-inl.h"
 #include "common_throws.h"
 #include "dex_file-inl.h"
 #include "dex_file_annotations.h"
@@ -94,33 +94,28 @@ inline uint16_t ArtMethod::GetMethodIndexDuringLinking() {
   return method_index_;
 }
 
+template <ReadBarrierOption kReadBarrierOption>
 inline uint32_t ArtMethod::GetDexMethodIndex() {
   if (kCheckDeclaringClassState) {
-    CHECK(IsRuntimeMethod() || GetDeclaringClass()->IsIdxLoaded() ||
-          GetDeclaringClass()->IsErroneous());
+    CHECK(IsRuntimeMethod() ||
+          GetDeclaringClass<kReadBarrierOption>()->IsIdxLoaded() ||
+          GetDeclaringClass<kReadBarrierOption>()->IsErroneous());
   }
   return GetDexMethodIndexUnchecked();
 }
 
 inline ObjPtr<mirror::Class> ArtMethod::LookupResolvedClassFromTypeIndex(dex::TypeIndex type_idx) {
   ScopedAssertNoThreadSuspension ants(__FUNCTION__);
-  ObjPtr<mirror::DexCache> dex_cache = GetDexCache();
-  ObjPtr<mirror::Class> type = dex_cache->GetResolvedType(type_idx);
-  if (UNLIKELY(type == nullptr)) {
-    type = Runtime::Current()->GetClassLinker()->LookupResolvedType(
-        *dex_cache->GetDexFile(), type_idx, dex_cache, GetClassLoader());
-  }
-  return type.Ptr();
+  ObjPtr<mirror::Class> type =
+      Runtime::Current()->GetClassLinker()->LookupResolvedType(type_idx, this);
+  DCHECK(!Thread::Current()->IsExceptionPending());
+  return type;
 }
 
 inline ObjPtr<mirror::Class> ArtMethod::ResolveClassFromTypeIndex(dex::TypeIndex type_idx) {
-  ObjPtr<mirror::DexCache> dex_cache = GetDexCache();
-  ObjPtr<mirror::Class> type = dex_cache->GetResolvedType(type_idx);
-  if (UNLIKELY(type == nullptr)) {
-    type = Runtime::Current()->GetClassLinker()->ResolveType(type_idx, this);
-    CHECK(type != nullptr || Thread::Current()->IsExceptionPending());
-  }
-  return type.Ptr();
+  ObjPtr<mirror::Class> type = Runtime::Current()->GetClassLinker()->ResolveType(type_idx, this);
+  DCHECK_EQ(type == nullptr, Thread::Current()->IsExceptionPending());
+  return type;
 }
 
 inline bool ArtMethod::CheckIncompatibleClassChange(InvokeType type) {
@@ -201,7 +196,14 @@ inline const char* ArtMethod::GetShorty() {
 inline const char* ArtMethod::GetShorty(uint32_t* out_length) {
   DCHECK(!IsProxyMethod());
   const DexFile* dex_file = GetDexFile();
-  return dex_file->GetMethodShorty(dex_file->GetMethodId(GetDexMethodIndex()), out_length);
+  // Don't do a read barrier in the DCHECK() inside GetDexMethodIndex() as GetShorty()
+  // can be called when the declaring class is about to be unloaded and cannot be added
+  // to the mark stack (subsequent GC assertion would fail).
+  // It is safe to avoid the read barrier as the ArtMethod is constructed with a declaring
+  // Class already satisfying the DCHECK() inside GetDexMethodIndex(), so even if that copy
+  // of declaring class becomes a from-space object, it shall satisfy the DCHECK().
+  return dex_file->GetMethodShorty(dex_file->GetMethodId(GetDexMethodIndex<kWithoutReadBarrier>()),
+                                   out_length);
 }
 
 inline const Signature ArtMethod::GetSignature() {
@@ -296,9 +298,7 @@ inline const DexFile::ClassDef& ArtMethod::GetClassDef() {
 inline const char* ArtMethod::GetReturnTypeDescriptor() {
   DCHECK(!IsProxyMethod());
   const DexFile* dex_file = GetDexFile();
-  const DexFile::MethodId& method_id = dex_file->GetMethodId(GetDexMethodIndex());
-  const DexFile::ProtoId& proto_id = dex_file->GetMethodPrototype(method_id);
-  return dex_file->GetTypeDescriptor(dex_file->GetTypeId(proto_id.return_type_idx_));
+  return dex_file->GetTypeDescriptor(dex_file->GetTypeId(GetReturnTypeIndex()));
 }
 
 inline Primitive::Type ArtMethod::GetReturnTypePrimitive() {
@@ -318,7 +318,7 @@ inline mirror::ClassLoader* ArtMethod::GetClassLoader() {
 
 template <ReadBarrierOption kReadBarrierOption>
 inline mirror::DexCache* ArtMethod::GetDexCache() {
-  if (LIKELY(!IsObsolete())) {
+  if (LIKELY(!IsObsolete<kReadBarrierOption>())) {
     mirror::Class* klass = GetDeclaringClass<kReadBarrierOption>();
     return klass->GetDexCache<kDefaultVerifyFlags, kReadBarrierOption>();
   } else {
@@ -392,6 +392,7 @@ inline void ArtMethod::SetIntrinsic(uint32_t intrinsic) {
     bool is_synchronized = IsSynchronized();
     bool skip_access_checks = SkipAccessChecks();
     bool is_fast_native = IsFastNative();
+    bool is_critical_native = IsCriticalNative();
     bool is_copied = IsCopied();
     bool is_miranda = IsMiranda();
     bool is_default = IsDefault();
@@ -404,6 +405,7 @@ inline void ArtMethod::SetIntrinsic(uint32_t intrinsic) {
     DCHECK_EQ(is_synchronized, IsSynchronized());
     DCHECK_EQ(skip_access_checks, SkipAccessChecks());
     DCHECK_EQ(is_fast_native, IsFastNative());
+    DCHECK_EQ(is_critical_native, IsCriticalNative());
     DCHECK_EQ(is_copied, IsCopied());
     DCHECK_EQ(is_miranda, IsMiranda());
     DCHECK_EQ(is_default, IsDefault());
@@ -455,6 +457,10 @@ inline void ArtMethod::UpdateEntrypoints(const Visitor& visitor, PointerSize poi
   if (old_code != new_code) {
     SetEntryPointFromQuickCompiledCodePtrSize(new_code, pointer_size);
   }
+}
+
+inline CodeItemInstructionAccessor ArtMethod::DexInstructions() {
+  return CodeItemInstructionAccessor(this);
 }
 
 }  // namespace art

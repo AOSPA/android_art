@@ -104,7 +104,8 @@ static inline IntrinsicExceptions GetExceptions(Intrinsics i) {
   return kCanThrow;
 }
 
-static bool CheckInvokeType(Intrinsics intrinsic, HInvoke* invoke) {
+static bool CheckInvokeType(Intrinsics intrinsic, HInvoke* invoke)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
   // Whenever the intrinsic is marked as static, report an error if we find an InvokeVirtual.
   //
   // Whenever the intrinsic is marked as direct and we find an InvokeVirtual, a devirtualization
@@ -130,18 +131,51 @@ static bool CheckInvokeType(Intrinsics intrinsic, HInvoke* invoke) {
       }
       if (invoke_type == kVirtual) {
         ArtMethod* art_method = invoke->GetResolvedMethod();
-        ScopedObjectAccess soa(Thread::Current());
         return (art_method->IsFinal() || art_method->GetDeclaringClass()->IsFinal());
       }
       return false;
 
     case kVirtual:
       // Call might be devirtualized.
-      return (invoke_type == kVirtual || invoke_type == kDirect);
+      return (invoke_type == kVirtual || invoke_type == kDirect || invoke_type == kInterface);
 
-    default:
+    case kSuper:
+    case kInterface:
+    case kPolymorphic:
       return false;
   }
+  LOG(FATAL) << "Unknown intrinsic invoke type: " << intrinsic_type;
+  UNREACHABLE();
+}
+
+bool IntrinsicsRecognizer::Recognize(HInvoke* invoke,
+                                     ArtMethod* art_method,
+                                     /*out*/ bool* wrong_invoke_type) {
+  if (art_method == nullptr) {
+    art_method = invoke->GetResolvedMethod();
+  }
+  *wrong_invoke_type = false;
+  if (art_method == nullptr || !art_method->IsIntrinsic()) {
+    return false;
+  }
+
+  // TODO: b/65872996 The intent is that polymorphic signature methods should
+  // be compiler intrinsics. At present, they are only interpreter intrinsics.
+  if (art_method->IsPolymorphicSignature()) {
+    return false;
+  }
+
+  Intrinsics intrinsic = static_cast<Intrinsics>(art_method->GetIntrinsic());
+  if (CheckInvokeType(intrinsic, invoke) == false) {
+    *wrong_invoke_type = true;
+    return false;
+  }
+
+  invoke->SetIntrinsic(intrinsic,
+                       NeedsEnvironmentOrCache(intrinsic),
+                       GetSideEffects(intrinsic),
+                       GetExceptions(intrinsic));
+  return true;
 }
 
 void IntrinsicsRecognizer::Run() {
@@ -151,23 +185,14 @@ void IntrinsicsRecognizer::Run() {
          inst_it.Advance()) {
       HInstruction* inst = inst_it.Current();
       if (inst->IsInvoke()) {
-        HInvoke* invoke = inst->AsInvoke();
-        ArtMethod* art_method = invoke->GetResolvedMethod();
-        if (art_method != nullptr && art_method->IsIntrinsic()) {
-          Intrinsics intrinsic = static_cast<Intrinsics>(art_method->GetIntrinsic());
-          if (!CheckInvokeType(intrinsic, invoke)) {
-            LOG(WARNING) << "Found an intrinsic with unexpected invoke type: "
-                << static_cast<uint32_t>(intrinsic) << " for "
-                << art_method->PrettyMethod()
-                << invoke->DebugName();
-          } else {
-            invoke->SetIntrinsic(intrinsic,
-                                 NeedsEnvironmentOrCache(intrinsic),
-                                 GetSideEffects(intrinsic),
-                                 GetExceptions(intrinsic));
-            MaybeRecordStat(stats_,
-                            MethodCompilationStat::kIntrinsicRecognized);
-          }
+        bool wrong_invoke_type = false;
+        if (Recognize(inst->AsInvoke(), /* art_method */ nullptr, &wrong_invoke_type)) {
+          MaybeRecordStat(stats_, MethodCompilationStat::kIntrinsicRecognized);
+        } else if (wrong_invoke_type) {
+          LOG(WARNING)
+              << "Found an intrinsic with unexpected invoke type: "
+              << inst->AsInvoke()->GetResolvedMethod()->PrettyMethod() << " "
+              << inst->DebugName();
         }
       }
     }

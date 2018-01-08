@@ -19,18 +19,18 @@
 
 #include "dex_file.h"
 
+#include "handle.h"
+#include "mirror/dex_cache.h"
 #include "mirror/object_array.h"
 
 namespace art {
 
 namespace mirror {
 class ClassLoader;
-class DexCache;
 }  // namespace mirror
 class ArtField;
 class ArtMethod;
 class ClassLinker;
-template<class T> class MutableHandle;
 
 namespace annotations {
 
@@ -72,9 +72,15 @@ mirror::ObjectArray<mirror::String>* GetSignatureAnnotationForMethod(ArtMethod* 
 // side effect.
 bool IsMethodAnnotationPresent(ArtMethod* method,
                                Handle<mirror::Class> annotation_class,
-                               uint32_t visibility = DexFile::kDexVisibilityRuntime,
-                               bool lookup_in_resolved_boot_classes = false)
+                               uint32_t visibility = DexFile::kDexVisibilityRuntime)
     REQUIRES_SHARED(Locks::mutator_lock_);
+// Check whether a method from the `dex_file` with the given `method_index`
+// is annotated with @dalvik.annotation.optimization.FastNative or
+// @dalvik.annotation.optimization.CriticalNative with build visibility.
+// If yes, return the associated access flags, i.e. kAccFastNative or kAccCriticalNative.
+uint32_t GetNativeMethodAnnotationAccessFlags(const DexFile& dex_file,
+                                              const DexFile::ClassDef& class_def,
+                                              uint32_t method_index);
 
 // Class annotations.
 mirror::Object* GetAnnotationForClass(Handle<mirror::Class> klass,
@@ -110,13 +116,12 @@ int32_t GetLineNumFromPC(const DexFile* dex_file, ArtMethod* method, uint32_t re
 class RuntimeEncodedStaticFieldValueIterator : public EncodedStaticFieldValueIterator {
  public:
   // A constructor meant to be called from runtime code.
-  RuntimeEncodedStaticFieldValueIterator(const DexFile& dex_file,
-                                         Handle<mirror::DexCache>* dex_cache,
-                                         Handle<mirror::ClassLoader>* class_loader,
+  RuntimeEncodedStaticFieldValueIterator(Handle<mirror::DexCache> dex_cache,
+                                         Handle<mirror::ClassLoader> class_loader,
                                          ClassLinker* linker,
                                          const DexFile::ClassDef& class_def)
       REQUIRES_SHARED(Locks::mutator_lock_)
-      : EncodedStaticFieldValueIterator(dex_file, class_def),
+      : EncodedStaticFieldValueIterator(*dex_cache->GetDexFile(), class_def),
         dex_cache_(dex_cache),
         class_loader_(class_loader),
         linker_(linker) {
@@ -126,9 +131,9 @@ class RuntimeEncodedStaticFieldValueIterator : public EncodedStaticFieldValueIte
   void ReadValueToField(ArtField* field) const REQUIRES_SHARED(Locks::mutator_lock_);
 
  private:
-  Handle<mirror::DexCache>* const dex_cache_;  // Dex cache to resolve literal objects.
-  Handle<mirror::ClassLoader>* const class_loader_;  // ClassLoader to resolve types.
-  ClassLinker* linker_;  // Linker to resolve literal objects.
+  const Handle<mirror::DexCache> dex_cache_;  // Dex cache to resolve literal objects.
+  const Handle<mirror::ClassLoader> class_loader_;  // ClassLoader to resolve types.
+  ClassLinker* const linker_;  // Linker to resolve literal objects.
   DISALLOW_IMPLICIT_CONSTRUCTORS(RuntimeEncodedStaticFieldValueIterator);
 };
 

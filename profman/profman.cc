@@ -32,6 +32,7 @@
 #include "android-base/strings.h"
 
 #include "base/dumpable.h"
+#include "base/logging.h"  // For InitLogging.
 #include "base/scoped_flock.h"
 #include "base/stringpiece.h"
 #include "base/time_utils.h"
@@ -786,7 +787,7 @@ class ProfMan FINAL {
       method_str = line.substr(method_sep_index + kMethodSep.size());
     }
 
-    TypeReference class_ref;
+    TypeReference class_ref(/* dex_file */ nullptr, dex::TypeIndex());
     if (!FindClass(dex_files, klass, &class_ref)) {
       LOG(WARNING) << "Could not find class: " << klass;
       return false;
@@ -810,7 +811,7 @@ class ProfMan FINAL {
         if (class_data != nullptr) {
           ClassDataItemIterator it(*dex_file, class_data);
           it.SkipAllFields();
-          while (it.HasNextDirectMethod() || it.HasNextVirtualMethod()) {
+          while (it.HasNextMethod()) {
             if (it.GetMethodCodeItemOffset() != 0) {
               // Add all of the methods that have code to the profile.
               const uint32_t method_idx = it.GetMemberIndex();
@@ -860,7 +861,8 @@ class ProfMan FINAL {
       if (!HasSingleInvoke(class_ref, method_index, &dex_pc)) {
         return false;
       }
-      std::vector<TypeReference> classes(inline_cache_elems.size());
+      std::vector<TypeReference> classes(inline_cache_elems.size(),
+                                         TypeReference(/* dex_file */ nullptr, dex::TypeIndex()));
       size_t class_it = 0;
       for (const std::string& ic_class : inline_cache_elems) {
         if (!FindClass(dex_files, ic_class, &(classes[class_it++]))) {

@@ -151,8 +151,14 @@ extern "C" size_t MterpShouldSwitchInterpreters()
       Dbg::IsDebuggerActive() ||
       // An async exception has been thrown. We need to go to the switch interpreter. MTerp doesn't
       // know how to deal with these so we could end up never dealing with it if we are in an
-      // infinite loop.
-      UNLIKELY(Thread::Current()->IsAsyncExceptionPending());
+      // infinite loop. Since this can be called in a tight loop and getting the current thread
+      // requires a TLS read we instead first check a short-circuit runtime flag that will only be
+      // set if something tries to set an async exception. This will make this function faster in
+      // the common case where no async exception has ever been sent. We don't need to worry about
+      // synchronization on the runtime flag since it is only set in a checkpoint which will either
+      // take place on the current thread or act as a synchronization point.
+      (UNLIKELY(runtime->AreAsyncExceptionsThrown()) &&
+       Thread::Current()->IsAsyncExceptionPending());
 }
 
 
@@ -370,15 +376,15 @@ extern "C" size_t MterpConstClass(uint32_t index,
                                   ShadowFrame* shadow_frame,
                                   Thread* self)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  mirror::Class* c = ResolveVerifyAndClinit(dex::TypeIndex(index),
-                                            shadow_frame->GetMethod(),
-                                            self,
-                                            false,
-                                            false);
+  ObjPtr<mirror::Class> c = ResolveVerifyAndClinit(dex::TypeIndex(index),
+                                                   shadow_frame->GetMethod(),
+                                                   self,
+                                                   /* can_run_clinit */ false,
+                                                   /* verify_access */ false);
   if (UNLIKELY(c == nullptr)) {
     return true;
   }
-  shadow_frame->SetVRegReference(tgt_vreg, c);
+  shadow_frame->SetVRegReference(tgt_vreg, c.Ptr());
   return false;
 }
 
@@ -457,17 +463,17 @@ extern "C" size_t MterpNewInstance(ShadowFrame* shadow_frame, Thread* self, uint
     REQUIRES_SHARED(Locks::mutator_lock_) {
   const Instruction* inst = Instruction::At(shadow_frame->GetDexPCPtr());
   mirror::Object* obj = nullptr;
-  mirror::Class* c = ResolveVerifyAndClinit(dex::TypeIndex(inst->VRegB_21c()),
-                                            shadow_frame->GetMethod(),
-                                            self,
-                                            false,
-                                            false);
+  ObjPtr<mirror::Class> c = ResolveVerifyAndClinit(dex::TypeIndex(inst->VRegB_21c()),
+                                                   shadow_frame->GetMethod(),
+                                                   self,
+                                                   /* can_run_clinit */ false,
+                                                   /* verify_access */ false);
   if (LIKELY(c != nullptr)) {
     if (UNLIKELY(c->IsStringClass())) {
       gc::AllocatorType allocator_type = Runtime::Current()->GetHeap()->GetCurrentAllocator();
       obj = mirror::String::AllocEmptyString<true>(self, allocator_type);
     } else {
-      obj = AllocObjectFromCode<true>(c,
+      obj = AllocObjectFromCode<true>(c.Ptr(),
                                       self,
                                       Runtime::Current()->GetHeap()->GetCurrentAllocator());
     }

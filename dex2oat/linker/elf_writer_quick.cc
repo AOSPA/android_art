@@ -20,8 +20,9 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include <android-base/logging.h>
+
 #include "base/casts.h"
-#include "base/logging.h"
 #include "compiled_method.h"
 #include "debug/elf_debug_writer.h"
 #include "debug/method_debug_info.h"
@@ -66,7 +67,7 @@ class DebugInfoTask : public Task {
   void Run(Thread*) {
     result_ = debug::MakeMiniDebugInfo(isa_,
                                        instruction_set_features_,
-                                       rodata_section_size_,
+                                       kPageSize + rodata_section_size_,  // .text address.
                                        text_section_size_,
                                        method_infos_);
   }
@@ -172,6 +173,7 @@ template <typename ElfTypes>
 void ElfWriterQuick<ElfTypes>::Start() {
   builder_->Start();
   if (compiler_options_->GetGenerateBuildId()) {
+    builder_->GetBuildId()->AllocateVirtualMemory(builder_->GetBuildId()->GetSize());
     builder_->WriteBuildIdSection();
   }
 }
@@ -224,9 +226,6 @@ void ElfWriterQuick<ElfTypes>::EndText(OutputStream* text) {
 
 template <typename ElfTypes>
 void ElfWriterQuick<ElfTypes>::WriteDynamicSection() {
-  if (bss_size_ != 0u) {
-    builder_->GetBss()->WriteNoBitsSection(bss_size_);
-  }
   if (builder_->GetIsa() == InstructionSet::kMips ||
       builder_->GetIsa() == InstructionSet::kMips64) {
     builder_->WriteMIPSabiflagsSection();

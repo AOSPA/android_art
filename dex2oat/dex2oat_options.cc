@@ -43,7 +43,7 @@ struct CmdlineType<InstructionSet> : CmdlineTypeParser<InstructionSet> {
 // Specify storage for the Dex2oatOptions keys.
 
 #define DEX2OAT_OPTIONS_KEY(Type, Name, ...) \
-  const Dex2oatArgumentMap::Key<Type> Dex2oatArgumentMap::Name {__VA_ARGS__};  // NOLINT [readability/braces] [4]
+  const Dex2oatArgumentMap::Key<Type> Dex2oatArgumentMap::Name {__VA_ARGS__};
 #include "dex2oat_options.def"
 
 #pragma GCC diagnostic push
@@ -220,12 +220,6 @@ static Parser CreateArgumentParser() {
           .IntoKey(M::Backend)
       .Define("--host")
           .IntoKey(M::Host)
-      .Define("--dump-timing")
-          .IntoKey(M::DumpTiming)
-      .Define("--dump-passes")
-          .IntoKey(M::DumpPasses)
-      .Define("--dump-stats")
-          .IntoKey(M::DumpStats)
       .Define("--avoid-storing-invocation")
           .IntoKey(M::AvoidStoringInvocation)
       .Define("--very-large-app-threshold=_")

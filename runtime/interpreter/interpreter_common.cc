@@ -644,52 +644,47 @@ static bool DoMethodHandleInvokeCommon(Thread* self,
   // arguments either from a range or an array of arguments depending
   // on whether the DEX instruction is invoke-polymorphic/range or
   // invoke-polymorphic. The array here is for the latter.
-  uint32_t args[Instruction::kMaxVarArgRegs] = {};
   if (UNLIKELY(is_range)) {
     // VRegC is the register holding the method handle. Arguments passed
     // to the method handle's target do not include the method handle.
-    uint32_t first_arg = inst->VRegC_4rcc() + 1;
-    static const bool kIsRange = true;
+    RangeInstructionOperands operands(inst->VRegC_4rcc() + 1, inst->VRegA_4rcc() - 1);
     if (invoke_exact) {
-      return art::MethodHandleInvokeExact<kIsRange>(self,
-                                                    shadow_frame,
-                                                    method_handle,
-                                                    callsite_type,
-                                                    args /* unused */,
-                                                    first_arg,
-                                                    result);
+      return MethodHandleInvokeExact(self,
+                                     shadow_frame,
+                                     method_handle,
+                                     callsite_type,
+                                     &operands,
+                                     result);
     } else {
-      return art::MethodHandleInvoke<kIsRange>(self,
-                                               shadow_frame,
-                                               method_handle,
-                                               callsite_type,
-                                               args /* unused */,
-                                               first_arg,
-                                               result);
+      return MethodHandleInvoke(self,
+                                shadow_frame,
+                                method_handle,
+                                callsite_type,
+                                &operands,
+                                result);
     }
   } else {
     // Get the register arguments for the invoke.
+    uint32_t args[Instruction::kMaxVarArgRegs] = {};
     inst->GetVarArgs(args, inst_data);
     // Drop the first register which is the method handle performing the invoke.
     memmove(args, args + 1, sizeof(args[0]) * (Instruction::kMaxVarArgRegs - 1));
     args[Instruction::kMaxVarArgRegs - 1] = 0;
-    static const bool kIsRange = false;
+    VarArgsInstructionOperands operands(args, inst->VRegA_45cc() - 1);
     if (invoke_exact) {
-      return art::MethodHandleInvokeExact<kIsRange>(self,
-                                                    shadow_frame,
-                                                    method_handle,
-                                                    callsite_type,
-                                                    args,
-                                                    args[0],
-                                                    result);
+      return MethodHandleInvokeExact(self,
+                                     shadow_frame,
+                                     method_handle,
+                                     callsite_type,
+                                     &operands,
+                                     result);
     } else {
-      return art::MethodHandleInvoke<kIsRange>(self,
-                                               shadow_frame,
-                                               method_handle,
-                                               callsite_type,
-                                               args,
-                                               args[0],
-                                               result);
+      return MethodHandleInvoke(self,
+                                shadow_frame,
+                                method_handle,
+                                callsite_type,
+                                &operands,
+                                result);
     }
   }
 }
@@ -1067,7 +1062,7 @@ static ObjPtr<mirror::CallSite> InvokeBootstrapMethod(Thread* self,
   // The second parameter is the name to lookup.
   {
     dex::StringIndex name_idx(static_cast<uint32_t>(it.GetJavaValue().i));
-    ObjPtr<mirror::String> name = class_linker->ResolveString(*dex_file, name_idx, dex_cache);
+    ObjPtr<mirror::String> name = class_linker->ResolveString(name_idx, dex_cache);
     if (name.IsNull()) {
       DCHECK(self->IsExceptionPending());
       return nullptr;
@@ -1078,12 +1073,8 @@ static ObjPtr<mirror::CallSite> InvokeBootstrapMethod(Thread* self,
 
   // The third parameter is the method type associated with the name.
   uint32_t method_type_idx = static_cast<uint32_t>(it.GetJavaValue().i);
-  Handle<mirror::MethodType>
-      method_type(hs.NewHandle(class_linker->ResolveMethodType(self,
-                                                               *dex_file,
-                                                               method_type_idx,
-                                                               dex_cache,
-                                                               class_loader)));
+  Handle<mirror::MethodType> method_type(hs.NewHandle(
+      class_linker->ResolveMethodType(self, method_type_idx, dex_cache, class_loader)));
   if (method_type.IsNull()) {
     DCHECK(self->IsExceptionPending());
     return nullptr;
@@ -1118,7 +1109,7 @@ static ObjPtr<mirror::CallSite> InvokeBootstrapMethod(Thread* self,
       case EncodedArrayValueIterator::ValueType::kMethodType: {
         uint32_t idx = static_cast<uint32_t>(jvalue.i);
         ObjPtr<mirror::MethodType> ref =
-            class_linker->ResolveMethodType(self, *dex_file, idx, dex_cache, class_loader);
+            class_linker->ResolveMethodType(self, idx, dex_cache, class_loader);
         if (ref.IsNull()) {
           DCHECK(self->IsExceptionPending());
           return nullptr;
@@ -1141,7 +1132,7 @@ static ObjPtr<mirror::CallSite> InvokeBootstrapMethod(Thread* self,
       }
       case EncodedArrayValueIterator::ValueType::kString: {
         dex::StringIndex idx(static_cast<uint32_t>(jvalue.i));
-        ObjPtr<mirror::String> ref = class_linker->ResolveString(*dex_file, idx, dex_cache);
+        ObjPtr<mirror::String> ref = class_linker->ResolveString(idx, dex_cache);
         if (ref.IsNull()) {
           DCHECK(self->IsExceptionPending());
           return nullptr;
@@ -1152,8 +1143,7 @@ static ObjPtr<mirror::CallSite> InvokeBootstrapMethod(Thread* self,
       }
       case EncodedArrayValueIterator::ValueType::kType: {
         dex::TypeIndex idx(static_cast<uint32_t>(jvalue.i));
-        ObjPtr<mirror::Class> ref =
-            class_linker->ResolveType(*dex_file, idx, dex_cache, class_loader);
+        ObjPtr<mirror::Class> ref = class_linker->ResolveType(idx, dex_cache, class_loader);
         if (ref.IsNull()) {
           DCHECK(self->IsExceptionPending());
           return nullptr;
@@ -1180,17 +1170,13 @@ static ObjPtr<mirror::CallSite> InvokeBootstrapMethod(Thread* self,
 
   // Invoke the bootstrap method handle.
   JValue result;
-
-  // This array of arguments is unused. DoMethodHandleInvokeExact() operates on either a
-  // an argument array or a range, but always takes an array argument.
-  uint32_t args_unused[Instruction::kMaxVarArgRegs];
-  bool invoke_success = art::MethodHandleInvokeExact<true /* is_range */>(self,
-                                                                          *bootstrap_frame,
-                                                                          bootstrap,
-                                                                          bootstrap_method_type,
-                                                                          args_unused,
-                                                                          0,
-                                                                          &result);
+  RangeInstructionOperands operands(0, vreg);
+  bool invoke_success = MethodHandleInvokeExact(self,
+                                                *bootstrap_frame,
+                                                bootstrap,
+                                                bootstrap_method_type,
+                                                &operands,
+                                                &result);
   if (!invoke_success) {
     DCHECK(self->IsExceptionPending());
     return nullptr;
@@ -1273,21 +1259,25 @@ bool DoInvokeCustom(Thread* self,
   Handle<mirror::MethodHandle> target = hs.NewHandle(call_site->GetTarget());
   Handle<mirror::MethodType> target_method_type = hs.NewHandle(target->GetMethodType());
   DCHECK_EQ(static_cast<size_t>(inst->VRegA()), target_method_type->NumberOfVRegs());
-
-  uint32_t args[Instruction::kMaxVarArgRegs];
   if (is_range) {
-    args[0] = inst->VRegC_3rc();
+    RangeInstructionOperands operands(inst->VRegC_3rc(), inst->VRegA_3rc());
+    return MethodHandleInvokeExact(self,
+                                   shadow_frame,
+                                   target,
+                                   target_method_type,
+                                   &operands,
+                                   result);
   } else {
+    uint32_t args[Instruction::kMaxVarArgRegs];
     inst->GetVarArgs(args, inst_data);
+    VarArgsInstructionOperands operands(args, inst->VRegA_35c());
+    return MethodHandleInvokeExact(self,
+                                   shadow_frame,
+                                   target,
+                                   target_method_type,
+                                   &operands,
+                                   result);
   }
-
-  return art::MethodHandleInvokeExact<is_range>(self,
-                                                shadow_frame,
-                                                target,
-                                                target_method_type,
-                                                args,
-                                                args[0],
-                                                result);
 }
 
 template <bool is_range>
@@ -1330,7 +1320,7 @@ static inline bool DoCallCommon(ArtMethod* called_method,
   }
 
   // Compute method information.
-  const DexFile::CodeItem* code_item = called_method->GetCodeItem();
+  CodeItemDataAccessor accessor(called_method);
   // Number of registers for the callee's call frame.
   uint16_t num_regs;
   // Test whether to use the interpreter or compiler entrypoint, and save that result to pass to
@@ -1344,7 +1334,7 @@ static inline bool DoCallCommon(ArtMethod* called_method,
       ClassLinker::ShouldUseInterpreterEntrypoint(
           called_method,
           called_method->GetEntryPointFromQuickCompiledCode());
-  if (LIKELY(code_item != nullptr)) {
+  if (LIKELY(accessor.HasCodeItem())) {
     // When transitioning to compiled code, space only needs to be reserved for the input registers.
     // The rest of the frame gets discarded. This also prevents accessing the called method's code
     // item, saving memory by keeping code items of compiled code untouched.
@@ -1352,8 +1342,8 @@ static inline bool DoCallCommon(ArtMethod* called_method,
       DCHECK(!Runtime::Current()->IsAotCompiler()) << "Compiler should use interpreter entrypoint";
       num_regs = number_of_inputs;
     } else {
-      num_regs = code_item->registers_size_;
-      DCHECK_EQ(string_init ? number_of_inputs - 1 : number_of_inputs, code_item->ins_size_);
+      num_regs = accessor.RegistersSize();
+      DCHECK_EQ(string_init ? number_of_inputs - 1 : number_of_inputs, accessor.InsSize());
     }
   } else {
     DCHECK(called_method->IsNative() || called_method->IsProxyMethod());
@@ -1377,7 +1367,7 @@ static inline bool DoCallCommon(ArtMethod* called_method,
     DCHECK_GT(num_regs, 0u);  // As the method is an instance method, there should be at least 1.
 
     // The new StringFactory call is static and has one fewer argument.
-    if (code_item == nullptr) {
+    if (!accessor.HasCodeItem()) {
       DCHECK(called_method->IsNative() || called_method->IsProxyMethod());
       num_regs--;
     }  // else ... don't need to change num_regs since it comes up from the string_init's code item
@@ -1509,7 +1499,7 @@ static inline bool DoCallCommon(ArtMethod* called_method,
   }
 
   PerformCall(self,
-              code_item,
+              accessor,
               shadow_frame.GetMethod(),
               first_dest_reg,
               new_shadow_frame,

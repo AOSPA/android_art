@@ -19,7 +19,8 @@
 
 #include "art_field.h"
 
-#include "base/logging.h"
+#include <android-base/logging.h>
+
 #include "class_linker.h"
 #include "dex_file-inl.h"
 #include "gc/accounting/card_table-inl.h"
@@ -299,23 +300,17 @@ inline bool ArtField::IsPrimitiveType() REQUIRES_SHARED(Locks::mutator_lock_) {
   return GetTypeAsPrimitiveType() != Primitive::kPrimNot;
 }
 
-inline ObjPtr<mirror::Class> ArtField::LookupType() {
+inline ObjPtr<mirror::Class> ArtField::LookupResolvedType() {
   ScopedAssertNoThreadSuspension ants(__FUNCTION__);
   const uint32_t field_index = GetDexFieldIndex();
   ObjPtr<mirror::Class> declaring_class = GetDeclaringClass();
   if (UNLIKELY(declaring_class->IsProxyClass())) {
     return ProxyFindSystemClass(GetTypeDescriptor());
   }
-  ObjPtr<mirror::DexCache>  dex_cache = declaring_class->GetDexCache();
-  const DexFile* const dex_file = dex_cache->GetDexFile();
-  dex::TypeIndex type_idx = dex_file->GetFieldId(field_index).type_idx_;
-  ObjPtr<mirror::Class> type = dex_cache->GetResolvedType(type_idx);
-  if (UNLIKELY(type == nullptr)) {
-    type = Runtime::Current()->GetClassLinker()->LookupResolvedType(
-        *dex_file, type_idx, dex_cache, declaring_class->GetClassLoader());
-    DCHECK(!Thread::Current()->IsExceptionPending());
-  }
-  return type.Ptr();
+  ObjPtr<mirror::Class> type = Runtime::Current()->GetClassLinker()->LookupResolvedType(
+      declaring_class->GetDexFile().GetFieldId(field_index).type_idx_, declaring_class);
+  DCHECK(!Thread::Current()->IsExceptionPending());
+  return type;
 }
 
 inline ObjPtr<mirror::Class> ArtField::ResolveType() {
@@ -324,15 +319,9 @@ inline ObjPtr<mirror::Class> ArtField::ResolveType() {
   if (UNLIKELY(declaring_class->IsProxyClass())) {
     return ProxyFindSystemClass(GetTypeDescriptor());
   }
-  auto* dex_cache = declaring_class->GetDexCache();
-  const DexFile* const dex_file = dex_cache->GetDexFile();
-  dex::TypeIndex type_idx = dex_file->GetFieldId(field_index).type_idx_;
-  ObjPtr<mirror::Class> type = dex_cache->GetResolvedType(type_idx);
-  if (UNLIKELY(type == nullptr)) {
-    ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-    type = class_linker->ResolveType(*dex_file, type_idx, declaring_class);
-    DCHECK_EQ(type == nullptr, Thread::Current()->IsExceptionPending());
-  }
+  ObjPtr<mirror::Class> type = Runtime::Current()->GetClassLinker()->ResolveType(
+      declaring_class->GetDexFile().GetFieldId(field_index).type_idx_, declaring_class);
+  DCHECK_EQ(type == nullptr, Thread::Current()->IsExceptionPending());
   return type;
 }
 
@@ -352,11 +341,10 @@ inline ObjPtr<mirror::String> ArtField::GetStringName(Thread* self, bool resolve
   auto dex_field_index = GetDexFieldIndex();
   CHECK_NE(dex_field_index, dex::kDexNoIndex);
   ObjPtr<mirror::DexCache> dex_cache = GetDexCache();
-  const auto* dex_file = dex_cache->GetDexFile();
-  const auto& field_id = dex_file->GetFieldId(dex_field_index);
+  const DexFile::FieldId& field_id = dex_cache->GetDexFile()->GetFieldId(dex_field_index);
   ObjPtr<mirror::String> name = dex_cache->GetResolvedString(field_id.name_idx_);
   if (resolve && name == nullptr) {
-    name = ResolveGetStringName(self, *dex_file, field_id.name_idx_, dex_cache);
+    name = ResolveGetStringName(self, field_id.name_idx_, dex_cache);
   }
   return name;
 }

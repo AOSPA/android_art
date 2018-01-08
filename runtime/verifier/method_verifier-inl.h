@@ -19,17 +19,14 @@
 
 #include "method_verifier.h"
 
-#include "base/logging.h"
+#include <android-base/logging.h>
+
 #include "handle_scope-inl.h"
 #include "mirror/class_loader.h"
 #include "mirror/dex_cache.h"
 
 namespace art {
 namespace verifier {
-
-inline const DexFile::CodeItem* MethodVerifier::CodeItem() const {
-  return code_item_;
-}
 
 inline RegisterLine* MethodVerifier::GetRegLine(uint32_t dex_pc) {
   return reg_table_.GetLine(dex_pc);

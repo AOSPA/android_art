@@ -37,6 +37,8 @@
 
 namespace openjdkjvmti {
 
+class EventHandler;
+
 class ExtensionUtil {
  public:
   static jvmtiError GetExtensionFunctions(jvmtiEnv* env,
@@ -49,7 +51,8 @@ class ExtensionUtil {
 
   static jvmtiError SetExtensionEventCallback(jvmtiEnv* env,
                                               jint extension_event_index,
-                                              jvmtiExtensionEvent callback);
+                                              jvmtiExtensionEvent callback,
+                                              EventHandler* event_handler);
 };
 
 }  // namespace openjdkjvmti

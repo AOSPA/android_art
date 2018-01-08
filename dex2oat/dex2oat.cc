@@ -58,6 +58,7 @@
 #include "compiler_callbacks.h"
 #include "debug/elf_debug_writer.h"
 #include "debug/method_debug_info.h"
+#include "dexlayout.h"
 #include "dex/quick_compiler_callbacks.h"
 #include "dex/verification_results.h"
 #include "dex2oat_options.h"
@@ -345,7 +346,7 @@ NO_RETURN static void Usage(const char* fmt, ...) {
              CompilerOptions::kDefaultInlineMaxCodeUnits);
   UsageError("      Default: %d", CompilerOptions::kDefaultInlineMaxCodeUnits);
   UsageError("");
-  UsageError("  --dump-timing: display a breakdown of where time was spent");
+  UsageError("  --dump-timings: display a breakdown of where time was spent");
   UsageError("");
   UsageError("  -g");
   UsageError("  --generate-debug-info: Generate debug information for native debugging,");
@@ -537,11 +538,8 @@ class WatchDog {
     //       it's rather easy to hang in unwinding.
     //       LogLine also avoids ART logging lock issues, as it's really only a wrapper around
     //       logcat logging or stderr output.
-    android::base::LogMessage::LogLine(__FILE__,
-                                       __LINE__,
-                                       android::base::LogId::DEFAULT,
-                                       LogSeverity::FATAL,
-                                       message.c_str());
+    LogHelper::LogLineLowStack(__FILE__, __LINE__, LogSeverity::FATAL, message.c_str());
+
     // If we're on the host, try to dump all threads to get a sense of what's going on. This is
     // restricted to the host as the dump may itself go bad.
     // TODO: Use a double watchdog timeout, so we can enable this on-device.
@@ -628,10 +626,6 @@ class Dex2Oat FINAL {
       opened_dex_files_maps_(),
       opened_dex_files_(),
       no_inline_from_dex_files_(),
-      dump_stats_(false),
-      dump_passes_(false),
-      dump_timing_(false),
-      dump_slow_timing_(kIsDebugBuild),
       avoid_storing_invocation_(false),
       swap_fd_(kInvalidFd),
       app_image_fd_(kInvalidFd),
@@ -1221,9 +1215,6 @@ class Dex2Oat FINAL {
     }
 
     AssignTrueIfExists(args, M::Host, &is_host_);
-    AssignTrueIfExists(args, M::DumpTiming, &dump_timing_);
-    AssignTrueIfExists(args, M::DumpPasses, &dump_passes_);
-    AssignTrueIfExists(args, M::DumpStats, &dump_stats_);
     AssignTrueIfExists(args, M::AvoidStoringInvocation, &avoid_storing_invocation_);
     AssignTrueIfExists(args, M::MultiImage, &multi_image_);
 
@@ -1565,7 +1556,7 @@ class Dex2Oat FINAL {
         // 2) when we have a vdex file, which means it was already verified.
         const bool verify = !DoDexLayoutOptimizations() && (input_vdex_file_ == nullptr);
         if (!oat_writers_[i]->WriteAndOpenDexFiles(
-            kIsVdexEnabled ? vdex_files_[i].get() : oat_files_[i].get(),
+            vdex_files_[i].get(),
             rodata_.back(),
             instruction_set_,
             instruction_set_features_.get(),
@@ -1693,10 +1684,10 @@ class Dex2Oat FINAL {
       CHECK(class_loader != nullptr);
       ScopedObjectAccess soa(Thread::Current());
       // Unload class loader to free RAM.
-      jweak weak_class_loader = soa.Env()->vm->AddWeakGlobalRef(
+      jweak weak_class_loader = soa.Env()->GetVm()->AddWeakGlobalRef(
           soa.Self(),
           soa.Decode<mirror::ClassLoader>(class_loader));
-      soa.Env()->vm->DeleteGlobalRef(soa.Self(), class_loader);
+      soa.Env()->GetVm()->DeleteGlobalRef(soa.Self(), class_loader);
       runtime_->GetHeap()->CollectGarbage(/*clear_soft_references*/ true);
       ObjPtr<mirror::ClassLoader> decoded_weak = soa.Decode<mirror::ClassLoader>(weak_class_loader);
       if (decoded_weak != nullptr) {
@@ -1726,7 +1717,6 @@ class Dex2Oat FINAL {
     ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
 
     TimingLogger::ScopedTiming t("dex2oat Compile", timings_);
-    compiler_phases_timings_.reset(new CumulativeLogger("compilation times"));
 
     // Find the dex files we should not inline from.
     std::vector<std::string> no_inline_filters;
@@ -1787,9 +1777,6 @@ class Dex2Oat FINAL {
                                      compiled_classes_.release(),
                                      compiled_methods_.release(),
                                      thread_count_,
-                                     dump_stats_,
-                                     dump_passes_,
-                                     compiler_phases_timings_.get(),
                                      swap_fd_,
                                      profile_compilation_info_.get()));
     driver_->SetDexFilesForOatFile(dex_files_);
@@ -2202,11 +2189,9 @@ class Dex2Oat FINAL {
   }
 
   void DumpTiming() {
-    if (dump_timing_ || (dump_slow_timing_ && timings_->GetTotalNs() > MsToNs(1000))) {
+    if (compiler_options_->GetDumpTimings() ||
+        (kIsDebugBuild && timings_->GetTotalNs() > MsToNs(1000))) {
       LOG(INFO) << Dumpable<TimingLogger>(*timings_);
-    }
-    if (dump_passes_) {
-      LOG(INFO) << Dumpable<CumulativeLogger>(*driver_->GetTimingsLogger());
     }
   }
 
@@ -2246,10 +2231,14 @@ class Dex2Oat FINAL {
     return DoProfileGuidedOptimizations();
   }
 
-  bool DoEagerUnquickeningOfVdex() const {
-    // DexLayout can invalidate the vdex metadata, so we need to unquicken
-    // the vdex file eagerly, before passing it to dexlayout.
+  bool MayInvalidateVdexMetadata() const {
+    // DexLayout can invalidate the vdex metadata if changing the class def order is enabled, so
+    // we need to unquicken the vdex file eagerly, before passing it to dexlayout.
     return DoDexLayoutOptimizations();
+  }
+
+  bool DoEagerUnquickeningOfVdex() const {
+    return MayInvalidateVdexMetadata();
   }
 
   bool LoadProfile() {
@@ -2827,7 +2816,7 @@ class Dex2Oat FINAL {
   // Dex files we are compiling, does not include the class path dex files.
   std::vector<const DexFile*> dex_files_;
   std::string no_inline_from_string_;
-  CompactDexLevel compact_dex_level_ = CompactDexLevel::kCompactDexLevelNone;
+  CompactDexLevel compact_dex_level_ = kDefaultCompactDexLevel;
 
   std::vector<std::unique_ptr<linker::ElfWriter>> elf_writers_;
   std::vector<std::unique_ptr<linker::OatWriter>> oat_writers_;
@@ -2842,10 +2831,6 @@ class Dex2Oat FINAL {
   // Note that this might contain pointers owned by class_loader_context_.
   std::vector<const DexFile*> no_inline_from_dex_files_;
 
-  bool dump_stats_;
-  bool dump_passes_;
-  bool dump_timing_;
-  bool dump_slow_timing_;
   bool avoid_storing_invocation_;
   std::string swap_file_name_;
   int swap_fd_;
@@ -2858,7 +2843,6 @@ class Dex2Oat FINAL {
   int profile_file_fd_;
   std::unique_ptr<ProfileCompilationInfo> profile_compilation_info_;
   TimingLogger* timings_;
-  std::unique_ptr<CumulativeLogger> compiler_phases_timings_;
   std::vector<std::vector<const DexFile*>> dex_files_per_oat_file_;
   std::unordered_map<const DexFile*, size_t> dex_file_oat_index_map_;
 
@@ -2903,7 +2887,7 @@ class ScopedGlobalRef {
   ~ScopedGlobalRef() {
     if (obj_ != nullptr) {
       ScopedObjectAccess soa(Thread::Current());
-      soa.Env()->vm->DeleteGlobalRef(soa.Self(), obj_);
+      soa.Env()->GetVm()->DeleteGlobalRef(soa.Self(), obj_);
     }
   }
 

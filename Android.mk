@@ -370,6 +370,7 @@ LOCAL_REQUIRED_MODULES := \
     libopenjdkjvmti \
     patchoat \
     profman \
+    libadbconnection \
 
 # For nosy apps, we provide a fake library that avoids namespace issues and gives some warnings.
 LOCAL_REQUIRED_MODULES += libart_fake
@@ -395,6 +396,7 @@ LOCAL_REQUIRED_MODULES += \
     libopenjdkjvmtid \
     patchoatd \
     profmand \
+    libadbconnectiond \
 
 endif
 endif
@@ -484,7 +486,7 @@ build-art-host-golem: build-art-host \
 ########################################################################
 # Phony target for building what go/lem requires for syncing /system to target.
 .PHONY: build-art-unbundled-golem
-build-art-unbundled-golem: art-runtime linker oatdump $(TARGET_CORE_JARS)
+build-art-unbundled-golem: art-runtime linker oatdump $(TARGET_CORE_JARS) crash_dump
 
 ########################################################################
 # Rules for building all dependencies for tests.

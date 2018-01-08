@@ -1150,10 +1150,10 @@ class ImgDiagDumper {
 
     bool found_boot_map = false;
     // Find the memory map only for boot.art
-    for (const backtrace_map_t& map : *tmp_proc_maps) {
-      if (EndsWith(map.name, GetImageLocationBaseName())) {
-        if ((map.flags & PROT_WRITE) != 0) {
-          boot_map_ = map;
+    for (const backtrace_map_t* map : *tmp_proc_maps) {
+      if (EndsWith(map->name, GetImageLocationBaseName())) {
+        if ((map->flags & PROT_WRITE) != 0) {
+          boot_map_ = *map;
           found_boot_map = true;
           break;
         }
@@ -1610,7 +1610,7 @@ class ImgDiagDumper {
   // BacktraceMap used for finding the memory mapping of the image file.
   std::unique_ptr<BacktraceMap> proc_maps_;
   // Boot image mapping.
-  backtrace_map_t boot_map_{};  // NOLINT
+  backtrace_map_t boot_map_{};
   // The size of the boot image mapping.
   size_t boot_map_size_;
   // The contents of /proc/<image_diff_pid_>/maps.

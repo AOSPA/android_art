@@ -141,6 +141,7 @@ def gather_test_info():
   VARIANT_TYPE_DICT['debuggable'] = {'ndebuggable', 'debuggable'}
   VARIANT_TYPE_DICT['gc'] = {'gcstress', 'gcverify', 'cms'}
   VARIANT_TYPE_DICT['prebuild'] = {'no-prebuild', 'no-dex2oat', 'prebuild'}
+  VARIANT_TYPE_DICT['cdex_level'] = {'cdex-none', 'cdex-fast'}
   VARIANT_TYPE_DICT['relocate'] = {'relocate-npatchoat', 'relocate', 'no-relocate'}
   VARIANT_TYPE_DICT['jni'] = {'jni', 'forcecopy', 'checkjni'}
   VARIANT_TYPE_DICT['address_sizes'] = {'64', '32'}
@@ -182,6 +183,9 @@ def setup_test_env():
 
   if not _user_input_variants['prebuild']: # Default
     _user_input_variants['prebuild'].add('prebuild')
+
+  if not _user_input_variants['cdex_level']: # Default
+    _user_input_variants['cdex_level'].add('cdex-none')
 
   # By default only run without jvmti
   if not _user_input_variants['jvmti']:
@@ -339,10 +343,11 @@ def run_tests(tests):
                              _user_input_variants['relocate'], _user_input_variants['trace'],
                              _user_input_variants['gc'], _user_input_variants['jni'],
                              _user_input_variants['image'], _user_input_variants['pictest'],
-                             _user_input_variants['debuggable'], _user_input_variants['jvmti'])
+                             _user_input_variants['debuggable'], _user_input_variants['jvmti'],
+                             _user_input_variants['cdex_level'])
 
   for test, target, run, prebuild, compiler, relocate, trace, gc, \
-      jni, image, pictest, debuggable, jvmti in config:
+      jni, image, pictest, debuggable, jvmti, cdex_level in config:
     for address_size in _user_input_variants['address_sizes_target'][target]:
       if stop_testrunner:
         # When ART_TEST_KEEP_GOING is set to false, then as soon as a test
@@ -356,6 +361,7 @@ def run_tests(tests):
       test_name += target + '-run-test-'
       test_name += run + '-'
       test_name += prebuild + '-'
+      test_name += cdex_level + '-'
       test_name += compiler + '-'
       test_name += relocate + '-'
       test_name += trace + '-'
@@ -369,7 +375,7 @@ def run_tests(tests):
       test_name += address_size
 
       variant_set = {target, run, prebuild, compiler, relocate, trace, gc, jni,
-                     image, pictest, debuggable, jvmti, address_size}
+                     image, pictest, debuggable, jvmti, cdex_level, address_size}
 
       options_test = options_all
 
@@ -385,6 +391,9 @@ def run_tests(tests):
         options_test += ' --no-prebuild'
       elif prebuild == 'no-dex2oat':
         options_test += ' --no-prebuild --no-dex2oat'
+
+      # Add option and remove the cdex- prefix.
+      options_test += ' --compact-dex-level ' + cdex_level.replace('cdex-','')
 
       if compiler == 'optimizing':
         options_test += ' --optimizing'
@@ -806,6 +815,7 @@ def parse_test_name(test_name):
   regex += '(' + '|'.join(VARIANT_TYPE_DICT['pictest']) + ')-'
   regex += '(' + '|'.join(VARIANT_TYPE_DICT['debuggable']) + ')-'
   regex += '(' + '|'.join(VARIANT_TYPE_DICT['jvmti']) + ')-'
+  regex += '(' + '|'.join(VARIANT_TYPE_DICT['cdex_level']) + ')-'
   regex += '(' + '|'.join(RUN_TEST_SET) + ')'
   regex += '(' + '|'.join(VARIANT_TYPE_DICT['address_sizes']) + ')$'
   match = re.match(regex, test_name)
@@ -822,8 +832,9 @@ def parse_test_name(test_name):
     _user_input_variants['pictest'].add(match.group(10))
     _user_input_variants['debuggable'].add(match.group(11))
     _user_input_variants['jvmti'].add(match.group(12))
-    _user_input_variants['address_sizes'].add(match.group(14))
-    return {match.group(13)}
+    _user_input_variants['cdex_level'].add(match.group(13))
+    _user_input_variants['address_sizes'].add(match.group(15))
+    return {match.group(14)}
   raise ValueError(test_name + " is not a valid test")
 
 
@@ -874,7 +885,7 @@ def parse_option():
   global run_all_configs
 
   parser = argparse.ArgumentParser(description="Runs all or a subset of the ART test suite.")
-  parser.add_argument('-t', '--test', dest='test', help='name of the test')
+  parser.add_argument('-t', '--test', action='append', dest='tests', help='name(s) of the test(s)')
   parser.add_argument('-j', type=int, dest='n_thread')
   parser.add_argument('--timeout', default=timeout, type=int, dest='timeout')
   for variant in TOTAL_VARIANTS_SET:
@@ -906,10 +917,12 @@ def parse_option():
     options = setup_env_for_build_target(target_config[options['build_target']],
                                          parser, options)
 
-  test = ''
+  tests = None
   env.EXTRA_DISABLED_TESTS.update(set(options['skips']))
-  if options['test']:
-    test = parse_test_name(options['test'])
+  if options['tests']:
+    tests = set()
+    for test_name in options['tests']:
+      tests |= parse_test_name(test_name)
 
   for variant_type in VARIANT_TYPE_DICT:
     for variant in VARIANT_TYPE_DICT[variant_type]:
@@ -935,11 +948,11 @@ def parse_option():
   if options['run_all']:
     run_all_configs = True
 
-  return test
+  return tests
 
 def main():
   gather_test_info()
-  user_requested_test = parse_option()
+  user_requested_tests = parse_option()
   setup_test_env()
   if build:
     build_targets = ''
@@ -956,8 +969,8 @@ def main():
     build_command += ' dist'
     if subprocess.call(build_command.split()):
       sys.exit(1)
-  if user_requested_test:
-    test_runner_thread = threading.Thread(target=run_tests, args=(user_requested_test,))
+  if user_requested_tests:
+    test_runner_thread = threading.Thread(target=run_tests, args=(user_requested_tests,))
   else:
     test_runner_thread = threading.Thread(target=run_tests, args=(RUN_TEST_SET,))
   test_runner_thread.daemon = True

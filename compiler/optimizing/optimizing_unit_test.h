@@ -19,9 +19,11 @@
 
 #include "base/scoped_arena_allocator.h"
 #include "builder.h"
+#include "code_item_accessors-inl.h"
 #include "common_compiler_test.h"
 #include "dex_file.h"
 #include "dex_instruction.h"
+#include "driver/dex_compilation_unit.h"
 #include "handle_scope-inl.h"
 #include "mirror/class_loader.h"
 #include "mirror/dex_cache.h"
@@ -133,19 +135,19 @@ class OptimizingUnitTest : public CommonCompilerTest {
       if (handles_ == nullptr) {
         handles_.reset(new VariableSizedHandleScope(soa.Self()));
       }
-      const DexFile* dex_file = graph->GetAllocator()->Alloc<DexFile>();
       const DexCompilationUnit* dex_compilation_unit =
           new (graph->GetAllocator()) DexCompilationUnit(
               handles_->NewHandle<mirror::ClassLoader>(nullptr),
               /* class_linker */ nullptr,
-              *dex_file,
+              graph->GetDexFile(),
               code_item,
               /* class_def_index */ DexFile::kDexNoIndex16,
               /* method_idx */ dex::kDexNoIndex,
               /* access_flags */ 0u,
               /* verified_method */ nullptr,
               handles_->NewHandle<mirror::DexCache>(nullptr));
-      HGraphBuilder builder(graph, dex_compilation_unit, *code_item, handles_.get(), return_type);
+      CodeItemDebugInfoAccessor accessor(&graph->GetDexFile(), code_item);
+      HGraphBuilder builder(graph, dex_compilation_unit, accessor, handles_.get(), return_type);
       bool graph_built = (builder.BuildGraph() == kAnalysisSuccess);
       return graph_built ? graph : nullptr;
     }

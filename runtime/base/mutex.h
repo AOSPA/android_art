@@ -24,8 +24,10 @@
 #include <iosfwd>
 #include <string>
 
+#include <android-base/logging.h>
+
 #include "atomic.h"
-#include "base/logging.h"
+#include "base/aborting.h"
 #include "base/macros.h"
 #include "globals.h"
 
@@ -121,6 +123,16 @@ enum LockLevel {
   kUserCodeSuspensionLock,
   kInstrumentEntrypointsLock,
   kZygoteCreationLock,
+
+  // The highest valid lock level. Use this if there is code that should only be called with no
+  // other locks held. Since this is the highest lock level we also allow it to be held even if the
+  // runtime or current thread is not fully set-up yet (for example during thread attach). Note that
+  // this lock also has special behavior around the mutator_lock_. Since the mutator_lock_ is not
+  // really a 'real' lock we allow this to be locked when the mutator_lock_ is held exclusive.
+  // Furthermore, the mutator_lock_ may not be acquired in any form when a lock of this level is
+  // held. Since the mutator_lock_ being held strong means that all other threads are suspended this
+  // will prevent deadlocks while still allowing this lock level to function as a "highest" level.
+  kTopLockLevel,
 
   kLockLevelCount  // Must come last.
 };

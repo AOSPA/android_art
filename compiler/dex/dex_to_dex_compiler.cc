@@ -16,11 +16,13 @@
 
 #include "dex_to_dex_compiler.h"
 
-#include "android-base/stringprintf.h"
+#include <android-base/logging.h>
+#include <android-base/stringprintf.h>
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
-#include "base/logging.h"
+#include "base/logging.h"  // For VLOG
+#include "base/macros.h"
 #include "base/mutex.h"
 #include "bytecode_utils.h"
 #include "compiled_method.h"
@@ -294,7 +296,6 @@ void DexCompiler::CompileInvokeVirtual(Instruction* inst, uint32_t dex_pc,
   ClassLinker* class_linker = unit_.GetClassLinker();
   ArtMethod* resolved_method =
       class_linker->ResolveMethod<ClassLinker::ResolveMode::kCheckICCEAndIAE>(
-          GetDexFile(),
           method_idx,
           unit_.GetDexCache(),
           unit_.GetClassLoader(),

@@ -20,7 +20,8 @@
 #include <ostream>
 #include <streambuf>
 
-#include "base/logging.h"
+#include <android-base/logging.h>
+
 #include "base/macros.h"
 
 namespace art {
@@ -32,7 +33,7 @@ class Indenter : public std::streambuf {
  public:
   Indenter(std::streambuf* out, char text, size_t count)
       : indent_next_(true), out_sbuf_(out),
-        text_{text, text, text, text, text, text, text, text},  // NOLINT(whitespace/braces)
+        text_{text, text, text, text, text, text, text, text},
         count_(count) {}
 
  private:

@@ -25,6 +25,7 @@
 
 #include "art_method-inl.h"
 #include "base/enums.h"
+#include "base/logging.h"  // For VLOG.
 #include "base/scoped_arena_containers.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
@@ -357,8 +358,8 @@ static void SampleClassesAndExecutedMethods(pthread_t profiler_pthread,
             sampled_methods->AddReference(method.GetDexFile(), method.GetDexMethodIndex());
           }
         } else {
-          CHECK_EQ(method.GetCounter(), 0u) << method.PrettyMethod()
-              << " access_flags=" << method.GetAccessFlags();
+          // We do not record native methods. Once we AOT-compile the app, all native
+          // methods shall have their thunks compiled.
         }
       }
     }

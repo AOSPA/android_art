@@ -22,6 +22,7 @@
 
 #include "base/stl_util.h"
 #include "base/unix_file/fd_file.h"
+#include "code_item_accessors-inl.h"
 #include "common_runtime_test.h"
 #include "dex_file-inl.h"
 #include "dex_file_loader.h"
@@ -487,52 +488,52 @@ TEST_F(DexFileTest, GetMethodSignature) {
           "(IDJLjava/lang/Object;)Ljava/lang/Float;",
           "java.lang.Float GetMethodSignature.m1(int, double, long, java.lang.Object)"
       },
-      {  // NOLINT [whitespace/braces] [4]
+      {
           "m2",
           "(ZSC)LGetMethodSignature;",
           "GetMethodSignature GetMethodSignature.m2(boolean, short, char)"
       },
-      {  // NOLINT [whitespace/braces] [4]
+      {
           "m3",
           "()V",
           "void GetMethodSignature.m3()"
       },
-      {  // NOLINT [whitespace/braces] [4]
+      {
           "m4",
           "(I)V",
           "void GetMethodSignature.m4(int)"
       },
-      {  // NOLINT [whitespace/braces] [4]
+      {
           "m5",
           "(II)V",
           "void GetMethodSignature.m5(int, int)"
       },
-      {  // NOLINT [whitespace/braces] [4]
+      {
           "m6",
           "(II[[I)V",
           "void GetMethodSignature.m6(int, int, int[][])"
       },
-      {  // NOLINT [whitespace/braces] [4]
+      {
           "m7",
           "(II[[ILjava/lang/Object;)V",
           "void GetMethodSignature.m7(int, int, int[][], java.lang.Object)"
       },
-      {  // NOLINT [whitespace/braces] [4]
+      {
           "m8",
           "(II[[ILjava/lang/Object;[[Ljava/lang/Object;)V",
           "void GetMethodSignature.m8(int, int, int[][], java.lang.Object, java.lang.Object[][])"
       },
-      {  // NOLINT [whitespace/braces] [4]
+      {
           "m9",
           "()I",
           "int GetMethodSignature.m9()"
       },
-      {  // NOLINT [whitespace/braces] [4]
+      {
           "mA",
           "()[[I",
           "int[][] GetMethodSignature.mA()"
       },
-      {  // NOLINT [whitespace/braces] [4]
+      {
           "mB",
           "()[[Ljava/lang/Object;",
           "java.lang.Object[][] GetMethodSignature.mB()"
@@ -730,7 +731,8 @@ TEST_F(DexFileTest, OpenDexDebugInfoLocalNullType) {
       kRawDexDebugInfoLocalNullType, tmp.GetFilename().c_str(), 0xf25f2b38U, true);
   const DexFile::ClassDef& class_def = raw->GetClassDef(0);
   const DexFile::CodeItem* code_item = raw->GetCodeItem(raw->FindCodeItemOffset(class_def, 1));
-  ASSERT_TRUE(raw->DecodeDebugLocalInfo(code_item, true, 1, Callback, nullptr));
+  CodeItemDebugInfoAccessor accessor(raw.get(), code_item);
+  ASSERT_TRUE(accessor.DecodeDebugLocalInfo(true, 1, Callback, nullptr));
 }
 
 }  // namespace art

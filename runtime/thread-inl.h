@@ -19,6 +19,7 @@
 
 #include "thread.h"
 
+#include "base/aborting.h"
 #include "base/casts.h"
 #include "base/mutex-inl.h"
 #include "base/time_utils.h"
@@ -33,7 +34,7 @@ namespace art {
 // Quickly access the current thread from a JNIEnv.
 static inline Thread* ThreadForEnv(JNIEnv* env) {
   JNIEnvExt* full_env(down_cast<JNIEnvExt*>(env));
-  return full_env->self;
+  return full_env->GetSelf();
 }
 
 inline void Thread::AllowThreadSuspension() {

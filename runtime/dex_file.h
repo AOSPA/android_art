@@ -21,8 +21,10 @@
 #include <string>
 #include <vector>
 
+#include <android-base/logging.h>
+
 #include "base/iteration_range.h"
-#include "base/logging.h"
+#include "base/macros.h"
 #include "base/value_object.h"
 #include "dex_file_types.h"
 #include "dex_instruction_iterator.h"
@@ -32,10 +34,12 @@
 
 namespace art {
 
+class CompactDexFile;
 enum InvokeType : uint32_t;
 class MemMap;
 class OatDexFile;
 class Signature;
+class StandardDexFile;
 class StringPiece;
 class ZipArchive;
 
@@ -311,6 +315,12 @@ class DexFile {
       return *Instruction::At(insns_ + dex_pc);
     }
 
+    // Used when quickening / unquickening.
+    void SetDebugInfoOffset(uint32_t new_offset) {
+      debug_info_off_ = new_offset;
+    }
+
+   private:
     uint16_t registers_size_;            // the number of registers used by this code
                                          //   (locals + parameters)
     uint16_t ins_size_;                  // the number of words of incoming arguments to the method
@@ -320,11 +330,25 @@ class DexFile {
     uint16_t tries_size_;                // the number of try_items for this instance. If non-zero,
                                          //   then these appear as the tries array just after the
                                          //   insns in this instance.
-    uint32_t debug_info_off_;            // file offset to debug info stream
+    // Normally holds file offset to debug info stream. In case the method has been quickened
+    // holds an offset in the Vdex file containing both the actual debug_info_off and the
+    // quickening info offset.
+    // Don't use this field directly, use OatFile::GetDebugInfoOffset in general ART code,
+    // or DexFile::GetDebugInfoOffset in code that are not using a Runtime.
+    uint32_t debug_info_off_;
+
     uint32_t insns_size_in_code_units_;  // size of the insns array, in 2 byte code units
     uint16_t insns_[1];                  // actual array of bytecode.
 
    private:
+    ART_FRIEND_TEST(CodeItemAccessorsTest, TestDexInstructionsAccessor);
+    friend class CatchHandlerIterator;
+    friend class CodeItemDataAccessor;
+    friend class CodeItemDebugInfoAccessor;
+    friend class CodeItemInstructionAccessor;
+    friend class DexFile;  // TODO: Remove this one when it's cleaned up.
+    friend class DexFileVerifier;
+    friend class VdexFile;  // TODO: Remove this one when it's cleaned up.
     DISALLOW_COPY_AND_ASSIGN(CodeItem);
   };
 
@@ -696,6 +720,15 @@ class DexFile {
     return reinterpret_cast<const CodeItem*>(addr);
   }
 
+  uint32_t GetDebugInfoOffset(const CodeItem* code_item) const {
+    if (code_item == nullptr) {
+      return 0;
+    }
+    CHECK(oat_dex_file_ == nullptr)
+        << "Should only use GetDebugInfoOffset in a non runtime setup";
+    return code_item->debug_info_off_;
+  }
+
   const char* GetReturnTypeDescriptor(const ProtoId& proto_id) const;
 
   // Returns the number of prototype identifiers in the .dex file.
@@ -751,27 +784,32 @@ class DexFile {
     return begin_ + call_site_id.data_off_;
   }
 
+  static const TryItem* GetTryItems(const DexInstructionIterator& code_item_end, uint32_t offset);
   static const TryItem* GetTryItems(const CodeItem& code_item, uint32_t offset);
 
   // Get the base of the encoded data for the given DexCode.
-  static const uint8_t* GetCatchHandlerData(const CodeItem& code_item, uint32_t offset) {
+  static const uint8_t* GetCatchHandlerData(const DexInstructionIterator& code_item_end,
+                                            uint32_t tries_size,
+                                            uint32_t offset) {
     const uint8_t* handler_data =
-        reinterpret_cast<const uint8_t*>(GetTryItems(code_item, code_item.tries_size_));
+        reinterpret_cast<const uint8_t*>(GetTryItems(code_item_end, tries_size));
     return handler_data + offset;
+  }
+  static const uint8_t* GetCatchHandlerData(const CodeItem& code_item, uint32_t offset) {
+    return GetCatchHandlerData(code_item.Instructions().end(), code_item.tries_size_, offset);
   }
 
   // Find which try region is associated with the given address (ie dex pc). Returns -1 if none.
-  static int32_t FindTryItem(const CodeItem &code_item, uint32_t address);
+  static int32_t FindTryItem(const TryItem* try_items, uint32_t tries_size, uint32_t address);
 
   // Find the handler offset associated with the given address (ie dex pc). Returns -1 if none.
   static int32_t FindCatchHandlerOffset(const CodeItem &code_item, uint32_t address);
 
   // Get the pointer to the start of the debugging data
-  const uint8_t* GetDebugInfoStream(const CodeItem* code_item) const {
+  const uint8_t* GetDebugInfoStream(uint32_t debug_info_off) const {
     // Check that the offset is in bounds.
     // Note that although the specification says that 0 should be used if there
     // is no debug information, some applications incorrectly use 0xFFFFFFFF.
-    const uint32_t debug_info_off = code_item->debug_info_off_;
     return (debug_info_off == 0 || debug_info_off >= size_) ? nullptr : begin_ + debug_info_off;
   }
 
@@ -927,7 +965,10 @@ class DexFile {
                                    NewLocalCallback new_local,
                                    void* context);
   template<typename NewLocalCallback>
-  bool DecodeDebugLocalInfo(const CodeItem* code_item,
+  bool DecodeDebugLocalInfo(uint32_t registers_size,
+                            uint32_t ins_size,
+                            uint32_t insns_size_in_code_units,
+                            uint32_t debug_info_offset,
                             bool is_static,
                             uint32_t method_idx,
                             NewLocalCallback new_local,
@@ -940,7 +981,7 @@ class DexFile {
                                       DexDebugNewPosition position_functor,
                                       void* context);
   template<typename DexDebugNewPosition>
-  bool DecodeDebugPositionInfo(const CodeItem* code_item,
+  bool DecodeDebugPositionInfo(uint32_t debug_info_offset,
                                DexDebugNewPosition position_functor,
                                void* context) const;
 
@@ -985,6 +1026,7 @@ class DexFile {
 
   // Recalculates the checksum of the dex file. Does not use the current value in the header.
   uint32_t CalculateChecksum() const;
+  static uint32_t CalculateChecksum(const uint8_t* begin, size_t size);
 
   // Returns a human-readable form of the method at an index.
   std::string PrettyMethod(uint32_t method_idx, bool with_signature = true) const;
@@ -993,13 +1035,15 @@ class DexFile {
   // Returns a human-readable form of the type at an index.
   std::string PrettyType(dex::TypeIndex type_idx) const;
 
-  // Helper functions.
-  virtual bool IsCompactDexFile() const {
-    return false;
+  // Not virtual for performance reasons.
+  ALWAYS_INLINE bool IsCompactDexFile() const {
+    return is_compact_dex_;
   }
-  virtual bool IsStandardDexFile() const {
-    return false;
+  ALWAYS_INLINE bool IsStandardDexFile() const {
+    return !is_compact_dex_;
   }
+  ALWAYS_INLINE const StandardDexFile* AsStandardDexFile() const;
+  ALWAYS_INLINE const CompactDexFile* AsCompactDexFile() const;
 
  protected:
   DexFile(const uint8_t* base,
@@ -1007,7 +1051,8 @@ class DexFile {
           const std::string& location,
           uint32_t location_checksum,
           const OatDexFile* oat_dex_file,
-          DexFileContainer* container);
+          DexFileContainer* container,
+          bool is_compact_dex);
 
   // Top-level initializer that calls other Init methods.
   bool Init(std::string* error_msg);
@@ -1072,6 +1117,9 @@ class DexFile {
 
   // Manages the underlying memory allocation.
   std::unique_ptr<DexFileContainer> container_;
+
+  // If the dex file is a compact dex file. If false then the dex file is a standard dex file.
+  const bool is_compact_dex_;
 
   friend class DexFileLoader;
   friend class DexFileVerifierTest;
@@ -1177,6 +1225,11 @@ class ClassDataItemIterator {
   }
   bool HasNextVirtualMethod() const {
     return pos_ >= EndOfDirectMethodsPos() && pos_ < EndOfVirtualMethodsPos();
+  }
+  bool HasNextMethod() const {
+    const bool result = pos_ >= EndOfInstanceFieldsPos() && pos_ < EndOfVirtualMethodsPos();
+    DCHECK_EQ(result, HasNextDirectMethod() || HasNextVirtualMethod());
+    return result;
   }
   void SkipStaticFields() {
     while (HasNextStaticField()) {

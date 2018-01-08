@@ -19,11 +19,12 @@
 
 #include "base/bit_utils.h"
 #include "base/casts.h"
-#include "base/logging.h"
 #include "base/stringpiece.h"
+#include "cdex/compact_dex_file.h"
 #include "dex_file.h"
 #include "invoke_type.h"
 #include "leb128.h"
+#include "standard_dex_file.h"
 
 namespace art {
 
@@ -133,9 +134,13 @@ inline const char* DexFile::GetShorty(uint32_t proto_idx) const {
 }
 
 inline const DexFile::TryItem* DexFile::GetTryItems(const CodeItem& code_item, uint32_t offset) {
-  const uint16_t* insns_end_ = &code_item.insns_[code_item.insns_size_in_code_units_];
+  return GetTryItems(code_item.Instructions().end(), offset);
+}
+
+inline const DexFile::TryItem* DexFile::GetTryItems(const DexInstructionIterator& code_item_end,
+                                                    uint32_t offset) {
   return reinterpret_cast<const TryItem*>
-      (RoundUp(reinterpret_cast<uintptr_t>(insns_end_), 4)) + offset;
+      (RoundUp(reinterpret_cast<uintptr_t>(&code_item_end.Inst()), 4)) + offset;
 }
 
 static inline bool DexFileStringEquals(const DexFile* df1, dex::StringIndex sidx1,
@@ -379,12 +384,16 @@ bool DexFile::DecodeDebugLocalInfo(const uint8_t* stream,
 }
 
 template<typename NewLocalCallback>
-bool DexFile::DecodeDebugLocalInfo(const CodeItem* code_item,
+bool DexFile::DecodeDebugLocalInfo(uint32_t registers_size,
+                                   uint32_t ins_size,
+                                   uint32_t insns_size_in_code_units,
+                                   uint32_t debug_info_offset,
                                    bool is_static,
                                    uint32_t method_idx,
                                    NewLocalCallback new_local_callback,
                                    void* context) const {
-  if (code_item == nullptr) {
+  const uint8_t* const stream = GetDebugInfoStream(debug_info_offset);
+  if (stream == nullptr) {
     return false;
   }
   std::vector<const char*> arg_descriptors;
@@ -392,15 +401,15 @@ bool DexFile::DecodeDebugLocalInfo(const CodeItem* code_item,
   for (; it.HasNext(); it.Next()) {
     arg_descriptors.push_back(it.GetDescriptor());
   }
-  return DecodeDebugLocalInfo(GetDebugInfoStream(code_item),
+  return DecodeDebugLocalInfo(stream,
                               GetLocation(),
                               GetMethodDeclaringClassDescriptor(GetMethodId(method_idx)),
                               arg_descriptors,
                               this->PrettyMethod(method_idx),
                               is_static,
-                              code_item->registers_size_,
-                              code_item->ins_size_,
-                              code_item->insns_size_in_code_units_,
+                              registers_size,
+                              ins_size,
+                              insns_size_in_code_units,
                               [this](uint32_t idx) {
                                 return StringDataByIdx(dex::StringIndex(idx));
                               },
@@ -481,18 +490,25 @@ bool DexFile::DecodeDebugPositionInfo(const uint8_t* stream,
 }
 
 template<typename DexDebugNewPosition>
-bool DexFile::DecodeDebugPositionInfo(const CodeItem* code_item,
+bool DexFile::DecodeDebugPositionInfo(uint32_t debug_info_offset,
                                       DexDebugNewPosition position_functor,
                                       void* context) const {
-  if (code_item == nullptr) {
-    return false;
-  }
-  return DecodeDebugPositionInfo(GetDebugInfoStream(code_item),
+  return DecodeDebugPositionInfo(GetDebugInfoStream(debug_info_offset),
                                  [this](uint32_t idx) {
                                    return StringDataByIdx(dex::StringIndex(idx));
                                  },
                                  position_functor,
                                  context);
+}
+
+inline const CompactDexFile* DexFile::AsCompactDexFile() const {
+  DCHECK(IsCompactDexFile());
+  return down_cast<const CompactDexFile*>(this);
+}
+
+inline const StandardDexFile* DexFile::AsStandardDexFile() const {
+  DCHECK(IsStandardDexFile());
+  return down_cast<const StandardDexFile*>(this);
 }
 
 }  // namespace art

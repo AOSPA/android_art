@@ -20,7 +20,10 @@
 #include <bitset>
 #include <vector>
 
-#include "base/logging.h"
+#include <android-base/logging.h>
+
+#include "base/macros.h"
+#include "base/mutex.h"
 #include "jvmti.h"
 #include "thread.h"
 
@@ -28,13 +31,14 @@ namespace openjdkjvmti {
 
 struct ArtJvmTiEnv;
 class JvmtiAllocationListener;
+class JvmtiDdmChunkListener;
 class JvmtiGcPauseListener;
 class JvmtiMethodTraceListener;
 class JvmtiMonitorListener;
 
 // an enum for ArtEvents. This differs from the JVMTI events only in that we distinguish between
 // retransformation capable and incapable loading
-enum class ArtJvmtiEvent {
+enum class ArtJvmtiEvent : jint {
     kMinEventTypeVal = JVMTI_MIN_EVENT_TYPE_VAL,
     kVmInit = JVMTI_EVENT_VM_INIT,
     kVmDeath = JVMTI_EVENT_VM_DEATH,
@@ -68,8 +72,32 @@ enum class ArtJvmtiEvent {
     kObjectFree = JVMTI_EVENT_OBJECT_FREE,
     kVmObjectAlloc = JVMTI_EVENT_VM_OBJECT_ALLOC,
     kClassFileLoadHookRetransformable = JVMTI_MAX_EVENT_TYPE_VAL + 1,
-    kMaxEventTypeVal = kClassFileLoadHookRetransformable,
+    kDdmPublishChunk = JVMTI_MAX_EVENT_TYPE_VAL + 2,
+    kMaxEventTypeVal = kDdmPublishChunk,
 };
+
+using ArtJvmtiEventDdmPublishChunk = void (*)(jvmtiEnv *jvmti_env,
+                                              JNIEnv* jni_env,
+                                              jint data_type,
+                                              jint data_len,
+                                              const jbyte* data);
+
+struct ArtJvmtiEventCallbacks : jvmtiEventCallbacks {
+  ArtJvmtiEventCallbacks() : DdmPublishChunk(nullptr) {
+    memset(this, 0, sizeof(jvmtiEventCallbacks));
+  }
+
+  // Copies extension functions from other callback struct if it exists. There must not have been
+  // any modifications to this struct when it is called.
+  void CopyExtensionsFrom(const ArtJvmtiEventCallbacks* cb);
+
+  jvmtiError Set(jint index, jvmtiExtensionEvent cb);
+
+  ArtJvmtiEventDdmPublishChunk DdmPublishChunk;
+};
+
+bool IsExtensionEvent(jint e);
+bool IsExtensionEvent(ArtJvmtiEvent e);
 
 // Convert a jvmtiEvent into a ArtJvmtiEvent
 ALWAYS_INLINE static inline ArtJvmtiEvent GetArtJvmtiEvent(ArtJvmTiEnv* env, jvmtiEvent e);
@@ -124,14 +152,26 @@ struct EventMasks {
 
   EventMask& GetEventMask(art::Thread* thread);
   EventMask* GetEventMaskOrNull(art::Thread* thread);
-  void EnableEvent(art::Thread* thread, ArtJvmtiEvent event);
-  void DisableEvent(art::Thread* thread, ArtJvmtiEvent event);
+  // Circular dependencies mean we cannot see the definition of ArtJvmTiEnv so the mutex is simply
+  // asserted in the function.
+  // Note that the 'env' passed in must be the same env this EventMasks is associated with.
+  void EnableEvent(ArtJvmTiEnv* env, art::Thread* thread, ArtJvmtiEvent event);
+      // REQUIRES(env->event_info_mutex_);
+  // Circular dependencies mean we cannot see the definition of ArtJvmTiEnv so the mutex is simply
+  // asserted in the function.
+  // Note that the 'env' passed in must be the same env this EventMasks is associated with.
+  void DisableEvent(ArtJvmTiEnv* env, art::Thread* thread, ArtJvmtiEvent event);
+      // REQUIRES(env->event_info_mutex_);
   bool IsEnabledAnywhere(ArtJvmtiEvent event);
   // Make any changes to event masks needed for the given capability changes. If caps_added is true
   // then caps is all the newly set capabilities of the jvmtiEnv. If it is false then caps is the
   // set of all capabilities that were removed from the jvmtiEnv.
   void HandleChangedCapabilities(const jvmtiCapabilities& caps, bool caps_added);
 };
+
+namespace impl {
+template <ArtJvmtiEvent kEvent> struct EventHandlerFunc { };
+}  // namespace impl
 
 // Helper class for event handling.
 class EventHandler {
@@ -144,10 +184,10 @@ class EventHandler {
 
   // Register an env. It is assumed that this happens on env creation, that is, no events are
   // enabled, yet.
-  void RegisterArtJvmTiEnv(ArtJvmTiEnv* env);
+  void RegisterArtJvmTiEnv(ArtJvmTiEnv* env) REQUIRES(!envs_lock_);
 
   // Remove an env.
-  void RemoveArtJvmTiEnv(ArtJvmTiEnv* env);
+  void RemoveArtJvmTiEnv(ArtJvmTiEnv* env) REQUIRES(!envs_lock_);
 
   bool IsEventEnabledAnywhere(ArtJvmtiEvent event) const {
     if (!EventMask::EventIsInRange(event)) {
@@ -159,13 +199,15 @@ class EventHandler {
   jvmtiError SetEvent(ArtJvmTiEnv* env,
                       art::Thread* thread,
                       ArtJvmtiEvent event,
-                      jvmtiEventMode mode);
+                      jvmtiEventMode mode)
+      REQUIRES(!envs_lock_);
 
   // Dispatch event to all registered environments. Since this one doesn't have a JNIEnv* it doesn't
   // matter if it has the mutator_lock.
   template <ArtJvmtiEvent kEvent, typename ...Args>
   ALWAYS_INLINE
-  inline void DispatchEvent(art::Thread* thread, Args... args) const;
+  inline void DispatchEvent(art::Thread* thread, Args... args) const
+      REQUIRES(!envs_lock_);
 
   // Dispatch event to all registered environments stashing exceptions as needed. This works since
   // JNIEnv* is always the second argument if it is passed to an event. Needed since C++ does not
@@ -175,7 +217,8 @@ class EventHandler {
   // the event to allocate local references.
   template <ArtJvmtiEvent kEvent, typename ...Args>
   ALWAYS_INLINE
-  inline void DispatchEvent(art::Thread* thread, JNIEnv* jnienv, Args... args) const;
+  inline void DispatchEvent(art::Thread* thread, JNIEnv* jnienv, Args... args) const
+      REQUIRES(!envs_lock_);
 
   // Tell the event handler capabilities were added/lost so it can adjust the sent events.If
   // caps_added is true then caps is all the newly set capabilities of the jvmtiEnv. If it is false
@@ -183,28 +226,50 @@ class EventHandler {
   ALWAYS_INLINE
   inline void HandleChangedCapabilities(ArtJvmTiEnv* env,
                                         const jvmtiCapabilities& caps,
-                                        bool added);
+                                        bool added)
+      REQUIRES(!envs_lock_);
 
   // Dispatch event to the given environment, only.
   template <ArtJvmtiEvent kEvent, typename ...Args>
   ALWAYS_INLINE
-  inline void DispatchEventOnEnv(
-      ArtJvmTiEnv* env, art::Thread* thread, JNIEnv* jnienv, Args... args) const;
+  inline void DispatchEventOnEnv(ArtJvmTiEnv* env,
+                                 art::Thread* thread,
+                                 JNIEnv* jnienv,
+                                 Args... args) const
+      REQUIRES(!envs_lock_);
 
   // Dispatch event to the given environment, only.
   template <ArtJvmtiEvent kEvent, typename ...Args>
   ALWAYS_INLINE
-  inline void DispatchEventOnEnv(ArtJvmTiEnv* env, art::Thread* thread, Args... args) const;
+  inline void DispatchEventOnEnv(ArtJvmTiEnv* env, art::Thread* thread, Args... args) const
+      REQUIRES(!envs_lock_);
 
  private:
-  template <ArtJvmtiEvent kEvent>
-  ALWAYS_INLINE
-  static inline bool ShouldDispatchOnThread(ArtJvmTiEnv* env, art::Thread* thread);
+  void SetupTraceListener(JvmtiMethodTraceListener* listener, ArtJvmtiEvent event, bool enable);
 
   template <ArtJvmtiEvent kEvent, typename ...Args>
   ALWAYS_INLINE
-  static inline void ExecuteCallback(ArtJvmTiEnv* env, Args... args);
+  inline std::vector<impl::EventHandlerFunc<kEvent>> CollectEvents(art::Thread* thread,
+                                                                   Args... args) const
+      REQUIRES(!envs_lock_);
 
+  template <ArtJvmtiEvent kEvent>
+  ALWAYS_INLINE
+  inline bool ShouldDispatchOnThread(ArtJvmTiEnv* env, art::Thread* thread) const;
+
+  template <ArtJvmtiEvent kEvent, typename ...Args>
+  ALWAYS_INLINE
+  static inline void ExecuteCallback(impl::EventHandlerFunc<kEvent> handler,
+                                     JNIEnv* env,
+                                     Args... args)
+      REQUIRES(!envs_lock_);
+
+  template <ArtJvmtiEvent kEvent, typename ...Args>
+  ALWAYS_INLINE
+  static inline void ExecuteCallback(impl::EventHandlerFunc<kEvent> handler, Args... args)
+      REQUIRES(!envs_lock_);
+
+  // Public for use to collect dispatches
   template <ArtJvmtiEvent kEvent, typename ...Args>
   ALWAYS_INLINE
   inline bool ShouldDispatch(ArtJvmTiEnv* env, art::Thread* thread, Args... args) const;
@@ -216,7 +281,9 @@ class EventHandler {
 
   // Recalculates the event mask for the given event.
   ALWAYS_INLINE
-  inline void RecalculateGlobalEventMask(ArtJvmtiEvent event);
+  inline void RecalculateGlobalEventMask(ArtJvmtiEvent event) REQUIRES(!envs_lock_);
+  ALWAYS_INLINE
+  inline void RecalculateGlobalEventMaskLocked(ArtJvmtiEvent event) REQUIRES(envs_lock_);
 
   template <ArtJvmtiEvent kEvent>
   ALWAYS_INLINE inline void DispatchClassFileLoadHookEvent(art::Thread* thread,
@@ -228,7 +295,8 @@ class EventHandler {
                                                            jint class_data_len,
                                                            const unsigned char* class_data,
                                                            jint* new_class_data_len,
-                                                           unsigned char** new_class_data) const;
+                                                           unsigned char** new_class_data) const
+      REQUIRES(!envs_lock_);
 
   void HandleEventType(ArtJvmtiEvent event, bool enable);
   void HandleLocalAccessCapabilityAdded();
@@ -236,15 +304,19 @@ class EventHandler {
 
   bool OtherMonitorEventsEnabledAnywhere(ArtJvmtiEvent event);
 
-  // List of all JvmTiEnv objects that have been created, in their creation order.
-  // NB Some elements might be null representing envs that have been deleted. They should be skipped
-  // anytime this list is used.
-  std::vector<ArtJvmTiEnv*> envs;
+  // List of all JvmTiEnv objects that have been created, in their creation order. It is a std::list
+  // since we mostly access it by iterating over the entire thing, only ever append to the end, and
+  // need to be able to remove arbitrary elements from it.
+  std::list<ArtJvmTiEnv*> envs GUARDED_BY(envs_lock_);
+
+  // Top level lock. Nothing at all should be held when we lock this.
+  mutable art::Mutex envs_lock_ ACQUIRED_BEFORE(art::Locks::instrument_entrypoints_lock_);
 
   // A union of all enabled events, anywhere.
   EventMask global_mask;
 
   std::unique_ptr<JvmtiAllocationListener> alloc_listener_;
+  std::unique_ptr<JvmtiDdmChunkListener> ddm_listener_;
   std::unique_ptr<JvmtiGcPauseListener> gc_pause_listener_;
   std::unique_ptr<JvmtiMethodTraceListener> method_trace_listener_;
   std::unique_ptr<JvmtiMonitorListener> monitor_listener_;

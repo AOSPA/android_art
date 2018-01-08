@@ -19,7 +19,8 @@
 
 #include <stdint.h>
 
-#include "base/logging.h"
+#include <android-base/logging.h>
+
 #include "dex_file_types.h"
 #include "string_reference.h"
 
@@ -30,7 +31,7 @@ class DexFile;
 // A type is located by its DexFile and the string_ids_ table index into that DexFile.
 class TypeReference : public DexFileReference {
  public:
-  explicit TypeReference(const DexFile* file = nullptr, dex::TypeIndex index = dex::TypeIndex())
+  TypeReference(const DexFile* file, dex::TypeIndex index)
       : DexFileReference(file, index.index_) {}
 
   dex::TypeIndex TypeIndex() const {

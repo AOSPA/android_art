@@ -96,6 +96,14 @@ while true; do
     # We don't care about jit with the RI
     use_jit=false
     shift
+  elif [[ $1 == --test-timeout-ms ]]; then
+    # Remove the --test-timeout-ms from the arguments.
+    args=${args/$1}
+    shift
+    jdwp_test_timeout=$1
+    # Remove the argument
+    args=${args/$1}
+    shift
   elif [[ $1 == --agent-wrapper ]]; then
     # Remove the --agent-wrapper from the arguments.
     args=${args/$1}
@@ -284,8 +292,10 @@ fi
 
 if [[ $using_jack == "true" ]]; then
   toolchain_args="--toolchain jack --language JN --jack-arg -g"
-else
+elif [[ $mode != "ri" ]]; then
   toolchain_args="--toolchain dx --language CUR"
+else
+  toolchain_args="--toolchain javac --language CUR"
 fi
 
 # Run the tests using vogar.

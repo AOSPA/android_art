@@ -26,12 +26,12 @@
 #include <locale>
 #include <unordered_map>
 
-#include "android-base/stringprintf.h"
+#include <android-base/logging.h>
+#include <android-base/stringprintf.h>
 
 #include "art_method-inl.h"
 #include "base/casts.h"
 #include "base/enums.h"
-#include "base/logging.h"
 #include "base/macros.h"
 #include "class_linker.h"
 #include "common_throws.h"
@@ -1910,7 +1910,7 @@ void UnstartedRuntime::Initialize() {
   tables_initialized_ = true;
 }
 
-void UnstartedRuntime::Invoke(Thread* self, const DexFile::CodeItem* code_item,
+void UnstartedRuntime::Invoke(Thread* self, const CodeItemDataAccessor& accessor,
                               ShadowFrame* shadow_frame, JValue* result, size_t arg_offset) {
   // In a runtime that's not started we intercept certain methods to avoid complicated dependency
   // problems in core libraries.
@@ -1930,7 +1930,7 @@ void UnstartedRuntime::Invoke(Thread* self, const DexFile::CodeItem* code_item,
     self->PopShadowFrame();
   } else {
     // Not special, continue with regular interpreter execution.
-    ArtInterpreterToInterpreterBridge(self, code_item, shadow_frame, result);
+    ArtInterpreterToInterpreterBridge(self, accessor, shadow_frame, result);
   }
 }
 

@@ -19,6 +19,7 @@
 
 #include <vector>
 
+#include "base/array_ref.h"
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "dex_file.h"
@@ -53,6 +54,26 @@ class ThreadLifecycleCallback;
 //       The simplest way to satisfy these restrictions is to never remove a listener, and to do
 //       any state checking (is the listener enabled) in the listener itself. For an example, see
 //       Dbg.
+
+class DdmCallback {
+ public:
+  virtual ~DdmCallback() {}
+  virtual void DdmPublishChunk(uint32_t type, const ArrayRef<const uint8_t>& data)
+      REQUIRES_SHARED(Locks::mutator_lock_) = 0;
+};
+
+class DebuggerControlCallback {
+ public:
+  virtual ~DebuggerControlCallback() {}
+
+  // Begin running the debugger.
+  virtual void StartDebugger() = 0;
+  // The debugger should begin shutting down since the runtime is ending. This is just advisory
+  virtual void StopDebugger() = 0;
+
+  // This allows the debugger to tell the runtime if it is configured.
+  virtual bool IsDebuggerConfigured() = 0;
+};
 
 class RuntimeSigQuitCallback {
  public:
@@ -182,6 +203,24 @@ class RuntimeCallbacks {
   void RemoveMethodInspectionCallback(MethodInspectionCallback* cb)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // DDMS callbacks
+  void DdmPublishChunk(uint32_t type, const ArrayRef<const uint8_t>& data)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void AddDdmCallback(DdmCallback* cb) REQUIRES_SHARED(Locks::mutator_lock_);
+  void RemoveDdmCallback(DdmCallback* cb) REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void StartDebugger() REQUIRES_SHARED(Locks::mutator_lock_);
+  // NO_THREAD_SAFETY_ANALYSIS since this is only called when we are in the middle of shutting down
+  // and the mutator_lock_ is no longer acquirable.
+  void StopDebugger() NO_THREAD_SAFETY_ANALYSIS;
+  bool IsDebuggerConfigured() REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void AddDebuggerControlCallback(DebuggerControlCallback* cb)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  void RemoveDebuggerControlCallback(DebuggerControlCallback* cb)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
  private:
   std::vector<ThreadLifecycleCallback*> thread_callbacks_
       GUARDED_BY(Locks::mutator_lock_);
@@ -196,6 +235,10 @@ class RuntimeCallbacks {
   std::vector<MonitorCallback*> monitor_callbacks_
       GUARDED_BY(Locks::mutator_lock_);
   std::vector<MethodInspectionCallback*> method_inspection_callbacks_
+      GUARDED_BY(Locks::mutator_lock_);
+  std::vector<DdmCallback*> ddm_callbacks_
+      GUARDED_BY(Locks::mutator_lock_);
+  std::vector<DebuggerControlCallback*> debugger_control_callbacks_
       GUARDED_BY(Locks::mutator_lock_);
 };
 

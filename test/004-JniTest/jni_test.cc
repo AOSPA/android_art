@@ -20,8 +20,10 @@
 #include <iostream>
 #include <vector>
 
+#include <android-base/logging.h>
+
 #include "art_method-inl.h"
-#include "base/logging.h"
+#include "base/runtime_debug.h"
 #include "jni.h"
 
 namespace art {
@@ -86,6 +88,14 @@ static void testFindClassOnAttachedNativeThread(JNIEnv* env) {
   jobjectArray array = env->NewObjectArray(0, clazz, nullptr);
   CHECK(array != nullptr);
   CHECK(!env->ExceptionCheck());
+}
+
+extern "C" JNIEXPORT jint JNICALL Java_Main_getFieldSubclass(JNIEnv* env,
+                                                             jclass,
+                                                             jobject f_obj,
+                                                             jclass sub) {
+  jfieldID f = env->FromReflectedField(f_obj);
+  return env->GetStaticIntField(sub, f);
 }
 
 // http://b/10994325

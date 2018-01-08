@@ -149,11 +149,12 @@ static std::vector<VariableLocation> GetVariableLocations(
     DCHECK_LT(stack_map_index, dex_register_maps.size());
     DexRegisterMap dex_register_map = dex_register_maps[stack_map_index];
     DCHECK(dex_register_map.IsValid());
+    CodeItemDataAccessor accessor(method_info->dex_file, method_info->code_item);
     reg_lo = dex_register_map.GetDexRegisterLocation(
-        vreg, method_info->code_item->registers_size_, code_info, encoding);
+        vreg, accessor.RegistersSize(), code_info, encoding);
     if (is64bitValue) {
       reg_hi = dex_register_map.GetDexRegisterLocation(
-          vreg + 1, method_info->code_item->registers_size_, code_info, encoding);
+          vreg + 1, accessor.RegistersSize(), code_info, encoding);
     }
 
     // Add location entry for this address range.
@@ -251,7 +252,10 @@ static void WriteDebugLocEntry(const MethodDebugInfo* method_info,
         // kInStackLargeOffset and kConstantLargeValue are hidden by GetKind().
         // kInRegisterHigh and kInFpuRegisterHigh should be handled by
         // the special cases above and they should not occur alone.
-        LOG(ERROR) << "Unexpected register location kind: " << kind;
+        LOG(WARNING) << "Unexpected register location: " << kind
+                     << " (This can indicate either a bug in the dexer when generating"
+                     << " local variable information, or a bug in ART compiler."
+                     << " Please file a bug at go/art-bug)";
         break;
       }
       if (is64bitValue) {

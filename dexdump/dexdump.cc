@@ -44,6 +44,7 @@
 
 #include "android-base/stringprintf.h"
 
+#include "code_item_accessors-no_art-inl.h"
 #include "dex_file-inl.h"
 #include "dex_file_loader.h"
 #include "dex_file_types.h"
@@ -734,7 +735,7 @@ static void dumpInterface(const DexFile* pDexFile, const DexFile::TypeItem& pTyp
  * Dumps the catches table associated with the code.
  */
 static void dumpCatches(const DexFile* pDexFile, const DexFile::CodeItem* pCode) {
-  const u4 triesSize = pCode->tries_size_;
+  const u4 triesSize = CodeItemDataAccessor(pDexFile, pCode).TriesSize();
 
   // No catch table.
   if (triesSize == 0) {
@@ -949,14 +950,14 @@ static void dumpInstruction(const DexFile* pDexFile,
   fprintf(gOutFile, "%06x:", codeOffset + 0x10 + insnIdx * 2);
 
   // Dump (part of) raw bytes.
-  const u2* insns = pCode->insns_;
+  CodeItemInstructionAccessor accessor(pDexFile, pCode);
   for (u4 i = 0; i < 8; i++) {
     if (i < insnWidth) {
       if (i == 7) {
         fprintf(gOutFile, " ... ");
       } else {
         // Print 16-bit value in little-endian order.
-        const u1* bytePtr = (const u1*) &insns[insnIdx + i];
+        const u1* bytePtr = (const u1*) &accessor.Insns()[insnIdx + i];
         fprintf(gOutFile, " %02x%02x", bytePtr[0], bytePtr[1]);
       }
     } else {
@@ -966,7 +967,7 @@ static void dumpInstruction(const DexFile* pDexFile,
 
   // Dump pseudo-instruction or opcode.
   if (pDecInsn->Opcode() == Instruction::NOP) {
-    const u2 instr = get2LE((const u1*) &insns[insnIdx]);
+    const u2 instr = get2LE((const u1*) &accessor.Insns()[insnIdx]);
     if (instr == Instruction::kPackedSwitchSignature) {
       fprintf(gOutFile, "|%04x: packed-switch-data (%d units)", insnIdx, insnWidth);
     } else if (instr == Instruction::kSparseSwitchSignature) {
@@ -1167,16 +1168,15 @@ static void dumpBytecodes(const DexFile* pDexFile, u4 idx,
           codeOffset, codeOffset, dot.get(), name, signature.ToString().c_str());
 
   // Iterate over all instructions.
-  const u2* insns = pCode->insns_;
-  for (u4 insnIdx = 0; insnIdx < pCode->insns_size_in_code_units_;) {
-    const Instruction* instruction = Instruction::At(&insns[insnIdx]);
+  CodeItemDataAccessor accessor(pDexFile, pCode);
+  for (const DexInstructionPcPair& pair : accessor) {
+    const Instruction* instruction = &pair.Inst();
     const u4 insnWidth = instruction->SizeInCodeUnits();
     if (insnWidth == 0) {
-      fprintf(stderr, "GLITCH: zero-width instruction at idx=0x%04x\n", insnIdx);
+      fprintf(stderr, "GLITCH: zero-width instruction at idx=0x%04x\n", pair.DexPc());
       break;
     }
-    dumpInstruction(pDexFile, pCode, codeOffset, insnIdx, insnWidth, instruction);
-    insnIdx += insnWidth;
+    dumpInstruction(pDexFile, pCode, codeOffset, pair.DexPc(), insnWidth, instruction);
   }  // for
 }
 
@@ -1185,11 +1185,13 @@ static void dumpBytecodes(const DexFile* pDexFile, u4 idx,
  */
 static void dumpCode(const DexFile* pDexFile, u4 idx, u4 flags,
                      const DexFile::CodeItem* pCode, u4 codeOffset) {
-  fprintf(gOutFile, "      registers     : %d\n", pCode->registers_size_);
-  fprintf(gOutFile, "      ins           : %d\n", pCode->ins_size_);
-  fprintf(gOutFile, "      outs          : %d\n", pCode->outs_size_);
+  CodeItemDebugInfoAccessor accessor(pDexFile, pCode, pDexFile->GetDebugInfoOffset(pCode));
+
+  fprintf(gOutFile, "      registers     : %d\n", accessor.RegistersSize());
+  fprintf(gOutFile, "      ins           : %d\n", accessor.InsSize());
+  fprintf(gOutFile, "      outs          : %d\n", accessor.OutsSize());
   fprintf(gOutFile, "      insns size    : %d 16-bit code units\n",
-          pCode->insns_size_in_code_units_);
+          accessor.InsnsSizeInCodeUnits());
 
   // Bytecode disassembly, if requested.
   if (gOptions.disassemble) {
@@ -1202,9 +1204,9 @@ static void dumpCode(const DexFile* pDexFile, u4 idx, u4 flags,
   // Positions and locals table in the debug info.
   bool is_static = (flags & kAccStatic) != 0;
   fprintf(gOutFile, "      positions     : \n");
-  pDexFile->DecodeDebugPositionInfo(pCode, dumpPositionsCb, nullptr);
+  pDexFile->DecodeDebugPositionInfo(accessor.DebugInfoOffset(), dumpPositionsCb, nullptr);
   fprintf(gOutFile, "      locals        : \n");
-  pDexFile->DecodeDebugLocalInfo(pCode, is_static, idx, dumpLocalsCb, nullptr);
+  accessor.DecodeDebugLocalInfo(is_static, idx, dumpLocalsCb, nullptr);
 }
 
 /*
@@ -1391,16 +1393,10 @@ static void dumpCfg(const DexFile* dex_file, int idx) {
   }
   ClassDataItemIterator it(*dex_file, class_data);
   it.SkipAllFields();
-  while (it.HasNextDirectMethod()) {
+  while (it.HasNextMethod()) {
     dumpCfg(dex_file,
             it.GetMemberIndex(),
             it.GetMethodCodeItem());
-    it.Next();
-  }
-  while (it.HasNextVirtualMethod()) {
-    dumpCfg(dex_file,
-                it.GetMemberIndex(),
-                it.GetMethodCodeItem());
     it.Next();
   }
 }

@@ -39,9 +39,10 @@
 
 #include <jni.h>
 
+#include <android-base/logging.h>
+
 #include "deopt_manager.h"
 #include "base/casts.h"
-#include "base/logging.h"
 #include "base/macros.h"
 #include "base/strlcpy.h"
 #include "base/mutex.h"
@@ -68,7 +69,7 @@ struct ArtJvmTiEnv : public jvmtiEnv {
   jvmtiCapabilities capabilities;
 
   EventMasks event_masks;
-  std::unique_ptr<jvmtiEventCallbacks> event_callbacks;
+  std::unique_ptr<ArtJvmtiEventCallbacks> event_callbacks;
 
   // Tagging is specific to the jvmtiEnv.
   std::unique_ptr<ObjectTagTable> object_tag_table;
@@ -94,6 +95,10 @@ struct ArtJvmTiEnv : public jvmtiEnv {
   static ArtJvmTiEnv* AsArtJvmTiEnv(jvmtiEnv* env) {
     return art::down_cast<ArtJvmTiEnv*>(env);
   }
+
+  // Top level lock. Nothing can be held when we get this except for mutator lock for full
+  // thread-suspension.
+  static art::Mutex *gEnvMutex ACQUIRED_AFTER(art::Locks::mutator_lock_);
 };
 
 // Macro and constexpr to make error values less annoying to write.

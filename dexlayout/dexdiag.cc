@@ -26,6 +26,7 @@
 
 #include "android-base/stringprintf.h"
 
+#include "base/logging.h"  // For InitLogging.
 #include "base/stringpiece.h"
 
 #include "dex_file.h"
@@ -289,7 +290,8 @@ static void ProcessOneDexMapping(uint64_t* pagemap,
   // Build a list of the dex file section types, sorted from highest offset to lowest.
   std::vector<dex_ir::DexFileSection> sections;
   {
-    std::unique_ptr<dex_ir::Header> header(dex_ir::DexIrBuilder(*dex_file));
+    std::unique_ptr<dex_ir::Header> header(dex_ir::DexIrBuilder(*dex_file,
+                                                                /*eagerly_assign_offsets*/ true));
     sections = dex_ir::GetSortedDexFileSections(header.get(),
                                                 dex_ir::SortDirection::kSortDescending);
   }

@@ -45,6 +45,7 @@
 #include "oat_writer.h"
 #include "scoped_thread_state_change-inl.h"
 #include "utils/test_dex_file_builder.h"
+#include "vdex_file.h"
 
 namespace art {
 namespace linker {
@@ -102,7 +103,6 @@ class OatTest : public CommonCompilerTest {
     callbacks_.reset(new QuickCompilerCallbacks(CompilerCallbacks::CallbackMode::kCompileApp));
     callbacks_->SetVerificationResults(verification_results_.get());
     Runtime::Current()->SetCompilerCallbacks(callbacks_.get());
-    timer_.reset(new CumulativeLogger("Compilation times"));
     compiler_driver_.reset(new CompilerDriver(compiler_options_.get(),
                                               verification_results_.get(),
                                               compiler_kind,
@@ -112,9 +112,6 @@ class OatTest : public CommonCompilerTest {
                                               /* compiled_classes */ nullptr,
                                               /* compiled_methods */ nullptr,
                                               /* thread_count */ 2,
-                                              /* dump_stats */ true,
-                                              /* dump_passes */ true,
-                                              timer_.get(),
                                               /* swap_fd */ -1,
                                               /* profile_compilation_info */ nullptr));
   }
@@ -192,7 +189,7 @@ class OatTest : public CommonCompilerTest {
     OutputStream* oat_rodata = elf_writer->StartRoData();
     std::unique_ptr<MemMap> opened_dex_files_map;
     std::vector<std::unique_ptr<const DexFile>> opened_dex_files;
-    if (!oat_writer.WriteAndOpenDexFiles(kIsVdexEnabled ? vdex_file : oat_file,
+    if (!oat_writer.WriteAndOpenDexFiles(vdex_file,
                                          oat_rodata,
                                          compiler_driver_->GetInstructionSet(),
                                          compiler_driver_->GetInstructionSetFeatures(),
@@ -224,15 +221,16 @@ class OatTest : public CommonCompilerTest {
                                       oat_writer.GetBssMethodsOffset(),
                                       oat_writer.GetBssRootsOffset());
 
-    if (kIsVdexEnabled) {
-      std::unique_ptr<BufferedOutputStream> vdex_out =
-            std::make_unique<BufferedOutputStream>(std::make_unique<FileOutputStream>(vdex_file));
-      if (!oat_writer.WriteVerifierDeps(vdex_out.get(), nullptr)) {
-        return false;
-      }
-      if (!oat_writer.WriteChecksumsAndVdexHeader(vdex_out.get())) {
-        return false;
-      }
+    std::unique_ptr<BufferedOutputStream> vdex_out =
+        std::make_unique<BufferedOutputStream>(std::make_unique<FileOutputStream>(vdex_file));
+    if (!oat_writer.WriteVerifierDeps(vdex_out.get(), nullptr)) {
+      return false;
+    }
+    if (!oat_writer.WriteQuickeningInfo(vdex_out.get())) {
+      return false;
+    }
+    if (!oat_writer.WriteChecksumsAndVdexHeader(vdex_out.get())) {
+      return false;
     }
 
     if (!oat_writer.WriteRodata(oat_rodata)) {
@@ -642,6 +640,11 @@ void OatTest::TestDexFileInput(bool verify, bool low_4gb, bool use_profile) {
   std::unique_ptr<const DexFile> opened_dex_file2 =
       opened_oat_file->GetOatDexFiles()[1]->OpenDexFile(&error_msg);
 
+  ASSERT_EQ(opened_oat_file->GetOatDexFiles()[0]->GetDexFileLocationChecksum(),
+            dex_file1_data->GetHeader().checksum_);
+  ASSERT_EQ(opened_oat_file->GetOatDexFiles()[1]->GetDexFileLocationChecksum(),
+            dex_file2_data->GetHeader().checksum_);
+
   ASSERT_EQ(dex_file1_data->GetHeader().file_size_, opened_dex_file1->GetHeader().file_size_);
   ASSERT_EQ(0, memcmp(&dex_file1_data->GetHeader(),
                       &opened_dex_file1->GetHeader(),
@@ -653,6 +656,13 @@ void OatTest::TestDexFileInput(bool verify, bool low_4gb, bool use_profile) {
                       &opened_dex_file2->GetHeader(),
                       dex_file2_data->GetHeader().file_size_));
   ASSERT_EQ(dex_file2_data->GetLocation(), opened_dex_file2->GetLocation());
+
+  const VdexFile::Header &vdex_header = opened_oat_file->GetVdexFile()->GetHeader();
+  ASSERT_EQ(vdex_header.GetQuickeningInfoSize(), 0u);
+
+  int64_t actual_vdex_size = vdex_file.GetFile()->GetLength();
+  ASSERT_GE(actual_vdex_size, 0);
+  ASSERT_EQ((uint64_t) actual_vdex_size, vdex_header.GetComputedFileSize());
 }
 
 TEST_F(OatTest, DexFileInputCheckOutput) {
@@ -720,7 +730,7 @@ void OatTest::TestZipFileInput(bool verify) {
   key_value_store.Put(OatHeader::kImageLocationKey, "test.art");
   {
     // Test using the AddDexFileSource() interface with the zip file.
-    std::vector<const char*> input_filenames { zip_file.GetFilename().c_str() };  // NOLINT [readability/braces] [4]
+    std::vector<const char*> input_filenames = { zip_file.GetFilename().c_str() };
 
     ScratchFile oat_file, vdex_file(oat_file, ".vdex");
     success = WriteElf(vdex_file.GetFile(), oat_file.GetFile(), input_filenames,
@@ -831,7 +841,7 @@ void OatTest::TestZipFileInputWithEmptyDex() {
 
   SafeMap<std::string, std::string> key_value_store;
   key_value_store.Put(OatHeader::kImageLocationKey, "test.art");
-  std::vector<const char*> input_filenames { zip_file.GetFilename().c_str() };  // NOLINT [readability/braces] [4]
+  std::vector<const char*> input_filenames = { zip_file.GetFilename().c_str() };
   ScratchFile oat_file, vdex_file(oat_file, ".vdex");
   std::unique_ptr<ProfileCompilationInfo> profile_compilation_info(new ProfileCompilationInfo());
   success = WriteElf(vdex_file.GetFile(), oat_file.GetFile(), input_filenames,

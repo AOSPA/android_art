@@ -33,7 +33,7 @@
 
 #include "android-base/stringprintf.h"
 
-#include <mutex>  // NOLINT [build/c++11] [5]
+#include <mutex>
 #include <unordered_set>
 
 #include "art_jvmti.h"
@@ -490,7 +490,7 @@ struct ClassCallback : public art::ClassLoadCallback {
 
         // Fix up the local table with a root visitor.
         RootUpdater local_update(local->input_, local->output_);
-        t->GetJniEnv()->locals.VisitRoots(
+        t->GetJniEnv()->VisitJniLocalRoots(
             &local_update, art::RootInfo(art::kRootJNILocal, t->GetThreadId()));
       }
 

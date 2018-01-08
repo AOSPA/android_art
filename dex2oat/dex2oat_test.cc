@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include <regex>  // NOLINT [build/c++11] [5]
+#include <regex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -22,11 +22,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "android-base/stringprintf.h"
+#include <android-base/logging.h>
+#include <android-base/stringprintf.h>
 
 #include "common_runtime_test.h"
 
-#include "base/logging.h"
 #include "base/macros.h"
 #include "base/mutex-inl.h"
 #include "bytecode_utils.h"
@@ -875,6 +875,8 @@ TEST_F(Dex2oatLayoutTest, TestLayoutAppImage) {
 }
 
 TEST_F(Dex2oatLayoutTest, TestVdexLayout) {
+  // Disabled until figure out running compact dex + DexLayout causes quickening errors.
+  TEST_DISABLED_FOR_COMPACT_DEX();
   RunTestVDex();
 }
 
@@ -941,7 +943,7 @@ class Dex2oatUnquickenTest : public Dex2oatTest {
                class_it.Next()) {
             if (class_it.IsAtMethod() && class_it.GetMethodCodeItem() != nullptr) {
               for (const DexInstructionPcPair& inst :
-                  class_it.GetMethodCodeItem()->Instructions()) {
+                       class_it.GetMethodCodeItem()->Instructions()) {
                 ASSERT_FALSE(inst->IsQuickened());
               }
             }
@@ -953,6 +955,8 @@ class Dex2oatUnquickenTest : public Dex2oatTest {
 };
 
 TEST_F(Dex2oatUnquickenTest, UnquickenMultiDex) {
+  // Disabled until figure out running compact dex + DexLayout causes quickening errors.
+  TEST_DISABLED_FOR_COMPACT_DEX();
   RunUnquickenMultiDex();
 }
 
@@ -991,6 +995,7 @@ TEST_F(Dex2oatWatchdogTest, TestWatchdogOK) {
 
 TEST_F(Dex2oatWatchdogTest, TestWatchdogTrigger) {
   TEST_DISABLED_FOR_MEMORY_TOOL_VALGRIND();  // b/63052624
+  TEST_DISABLED_WITHOUT_BAKER_READ_BARRIERS();  // b/63052624
   // Check with ten milliseconds.
   RunTest(false, { "--watchdog-timeout=10" });
 }
@@ -1244,7 +1249,7 @@ TEST_F(Dex2oatTest, LayoutSections) {
     ClassDataItemIterator it(*dex, dex->GetClassData(*class_def));
     it.SkipAllFields();
     std::set<size_t> code_item_offsets;
-    for (; it.HasNextDirectMethod() || it.HasNextVirtualMethod(); it.Next()) {
+    for (; it.HasNextMethod(); it.Next()) {
       const uint16_t method_idx = it.GetMemberIndex();
       const size_t code_item_offset = it.GetMethodCodeItemOffset();
       if (code_item_offsets.insert(code_item_offset).second) {
@@ -1332,10 +1337,10 @@ TEST_F(Dex2oatTest, LayoutSections) {
         code_section.parts_[static_cast<size_t>(LayoutType::kLayoutTypeUnused)];
 
     // All the sections should be non-empty.
-    EXPECT_GT(section_hot_code.size_, 0u);
-    EXPECT_GT(section_sometimes_used.size_, 0u);
-    EXPECT_GT(section_startup_only.size_, 0u);
-    EXPECT_GT(section_unused.size_, 0u);
+    EXPECT_GT(section_hot_code.Size(), 0u);
+    EXPECT_GT(section_sometimes_used.Size(), 0u);
+    EXPECT_GT(section_startup_only.Size(), 0u);
+    EXPECT_GT(section_unused.Size(), 0u);
 
     // Open the dex file since we need to peek at the code items to verify the layout matches what
     // we expect.
@@ -1356,7 +1361,7 @@ TEST_F(Dex2oatTest, LayoutSections) {
     // corresponding code item offsets to verify the layout.
     ClassDataItemIterator it(*dex_file, dex_file->GetClassData(*class_def));
     it.SkipAllFields();
-    for (; it.HasNextDirectMethod() || it.HasNextVirtualMethod(); it.Next()) {
+    for (; it.HasNextMethod(); it.Next()) {
       const size_t method_idx = it.GetMemberIndex();
       const size_t code_item_offset = it.GetMethodCodeItemOffset();
       const bool is_hot = ContainsElement(hot_methods, method_idx);
@@ -1364,25 +1369,25 @@ TEST_F(Dex2oatTest, LayoutSections) {
       const bool is_post_startup = ContainsElement(post_methods, method_idx);
       if (is_hot) {
         // Hot is highest precedence, check that the hot methods are in the hot section.
-        EXPECT_LT(code_item_offset - section_hot_code.offset_, section_hot_code.size_);
+        EXPECT_TRUE(section_hot_code.Contains(code_item_offset));
         ++hot_count;
       } else if (is_post_startup) {
         // Post startup is sometimes used section.
-        EXPECT_LT(code_item_offset - section_sometimes_used.offset_, section_sometimes_used.size_);
+        EXPECT_TRUE(section_sometimes_used.Contains(code_item_offset));
         ++post_startup_count;
       } else if (is_startup) {
         // Startup at this point means not hot or post startup, these must be startup only then.
-        EXPECT_LT(code_item_offset - section_startup_only.offset_, section_startup_only.size_);
+        EXPECT_TRUE(section_startup_only.Contains(code_item_offset));
         ++startup_count;
       } else {
-        if (code_item_offset - section_unused.offset_ < section_unused.size_) {
+        if (section_unused.Contains(code_item_offset)) {
           // If no flags are set, the method should be unused ...
           ++unused_count;
         } else {
           // or this method is part of the last code item and the end is 4 byte aligned.
           ClassDataItemIterator it2(*dex_file, dex_file->GetClassData(*class_def));
           it2.SkipAllFields();
-          for (; it2.HasNextDirectMethod() || it2.HasNextVirtualMethod(); it2.Next()) {
+          for (; it2.HasNextMethod(); it2.Next()) {
               EXPECT_LE(it2.GetMethodCodeItemOffset(), code_item_offset);
           }
           uint32_t code_item_size = dex_file->FindCodeItemOffset(*class_def, method_idx);

@@ -90,10 +90,13 @@ namespace art {
  *
  *   Uninitialized <=> StrLen(PathToRoot) == 0
  *                     Next == 0
+ *                     OF == False
  *   Initialized   <=> StrLen(PathToRoot) < Depth
- *                     Next == 0
+ *                     Next == 1
+ *                     OF == False
  *   Assigned      <=> StrLen(PathToRoot) == Depth
- *                     Next > 1
+ *                     Next >= 1
+ *                     OF == False
  *   Overflowed    <=> OF == True
  *
  * Tree Invariants:
@@ -188,7 +191,7 @@ struct SubtypeCheckInfo {
   // Returns a new root SubtypeCheckInfo with a blank PathToRoot.
   // Post-condition: The return valued has an Assigned state.
   static SubtypeCheckInfo CreateRoot() {
-    SubtypeCheckInfo io{};  // NOLINT
+    SubtypeCheckInfo io{};
     io.depth_ = 0u;
     io.SetNext(io.GetNext() + 1u);
 
@@ -219,8 +222,8 @@ struct SubtypeCheckInfo {
     // Next must be non-0 to disambiguate it from Uninitialized.
     child.MaybeInitNext();
 
-    // Always clear the inherited Parent's next Value on the child.
-    OverwriteNextValueFromParent(/*inout*/&child, BitStringChar{});  // NOLINT
+    // Always clear the inherited Parent's next Value, i.e. the child's last path entry.
+    OverwriteNextValueFromParent(/*inout*/&child, BitStringChar{});
 
     // The state is now Initialized | Overflowed.
     DCHECK_NE(kAssigned, child.GetState()) << child.GetBitString();
@@ -235,7 +238,6 @@ struct SubtypeCheckInfo {
 
     // Assign attempt.
     if (HasNext() && !bitstring_and_of_.overflow_) {
-      // Do not bother assigning if parent had overflowed.
       BitStringChar next = GetNext();
       if (next != next.MaximumValue()) {
         // The parent's "next" value is now the child's latest path element.
@@ -260,15 +262,14 @@ struct SubtypeCheckInfo {
   // Get the current state (Uninitialized, Initialized, Assigned, or Overflowed).
   // See the "SubtypeCheckInfo" documentation above which explains how a state is determined.
   State GetState() const {
-    if (GetBitString().IsEmpty()) {
-      // Empty bitstring (all 0s) -> uninitialized.
-      DCHECK(!bitstring_and_of_.overflow_);
-      return kUninitialized;
-    }
-
     if (bitstring_and_of_.overflow_) {
       // Overflowed if and only if the OF bit was set.
       return kOverflowed;
+    }
+
+    if (GetBitString().IsEmpty()) {
+      // Empty bitstring (all 0s) -> uninitialized.
+      return kUninitialized;
     }
 
     // Either Assigned or Initialized.
@@ -387,12 +388,13 @@ struct SubtypeCheckInfo {
     SetBitStringUnchecked(bs);
   }
 
+  // If there is a next field, set it to 1.
   void MaybeInitNext() {
     if (HasNext()) {
       // Clearing out the "Next" value like this
       // is often an intermediate operation which temporarily
       // violates the invariants. Do not do the extra dchecks.
-      SetNextUnchecked(BitStringChar{});  // NOLINT
+      SetNextUnchecked(BitStringChar{});
       SetNextUnchecked(GetNext()+1u);
     }
   }

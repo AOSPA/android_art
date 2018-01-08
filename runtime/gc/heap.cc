@@ -30,6 +30,7 @@
 #include "base/dumpable.h"
 #include "base/file_utils.h"
 #include "base/histogram-inl.h"
+#include "base/logging.h"  // For VLOG.
 #include "base/memory_tool.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
@@ -799,12 +800,11 @@ void Heap::IncrementDisableThreadFlip(Thread* self) {
   bool has_waited = false;
   uint64_t wait_start = NanoTime();
   if (thread_flip_running_) {
-    ATRACE_BEGIN("IncrementDisableThreadFlip");
+    ScopedTrace trace("IncrementDisableThreadFlip");
     while (thread_flip_running_) {
       has_waited = true;
       thread_flip_cond_->Wait(self);
     }
-    ATRACE_END();
   }
   ++disable_thread_flip_count_;
   if (has_waited) {
@@ -1299,7 +1299,7 @@ class TrimIndirectReferenceTableClosure : public Closure {
   explicit TrimIndirectReferenceTableClosure(Barrier* barrier) : barrier_(barrier) {
   }
   virtual void Run(Thread* thread) OVERRIDE NO_THREAD_SAFETY_ANALYSIS {
-    thread->GetJniEnv()->locals.Trim();
+    thread->GetJniEnv()->TrimLocals();
     // If thread is a running mutator, then act on behalf of the trim thread.
     // See the code in ThreadList::RunCheckpoint.
     barrier_->Pass(Thread::Current());
@@ -1796,19 +1796,25 @@ uint64_t Heap::GetBytesAllocatedEver() const {
   return GetBytesFreedEver() + GetBytesAllocated();
 }
 
+// Check whether the given object is an instance of the given class.
+static bool MatchesClass(mirror::Object* obj,
+                         Handle<mirror::Class> h_class,
+                         bool use_is_assignable_from) REQUIRES_SHARED(Locks::mutator_lock_) {
+  mirror::Class* instance_class = obj->GetClass();
+  CHECK(instance_class != nullptr);
+  ObjPtr<mirror::Class> klass = h_class.Get();
+  if (use_is_assignable_from) {
+    return klass != nullptr && klass->IsAssignableFrom(instance_class);
+  }
+  return instance_class == klass;
+}
+
 void Heap::CountInstances(const std::vector<Handle<mirror::Class>>& classes,
                           bool use_is_assignable_from,
                           uint64_t* counts) {
   auto instance_counter = [&](mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_) {
-    mirror::Class* instance_class = obj->GetClass();
-    CHECK(instance_class != nullptr);
     for (size_t i = 0; i < classes.size(); ++i) {
-      ObjPtr<mirror::Class> klass = classes[i].Get();
-      if (use_is_assignable_from) {
-        if (klass != nullptr && klass->IsAssignableFrom(instance_class)) {
-          ++counts[i];
-        }
-      } else if (instance_class == klass) {
+      if (MatchesClass(obj, classes[i], use_is_assignable_from)) {
         ++counts[i];
       }
     }
@@ -1818,11 +1824,12 @@ void Heap::CountInstances(const std::vector<Handle<mirror::Class>>& classes,
 
 void Heap::GetInstances(VariableSizedHandleScope& scope,
                         Handle<mirror::Class> h_class,
+                        bool use_is_assignable_from,
                         int32_t max_count,
                         std::vector<Handle<mirror::Object>>& instances) {
   DCHECK_GE(max_count, 0);
   auto instance_collector = [&](mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (obj->GetClass() == h_class.Get()) {
+    if (MatchesClass(obj, h_class, use_is_assignable_from)) {
       if (max_count == 0 || instances.size() < static_cast<size_t>(max_count)) {
         instances.push_back(scope.NewHandle(obj));
       }
@@ -1876,10 +1883,10 @@ void Heap::GetReferringObjects(VariableSizedHandleScope& scope,
   VisitObjects(referring_objects_finder);
 }
 
-void Heap::CollectGarbage(bool clear_soft_references) {
+void Heap::CollectGarbage(bool clear_soft_references, GcCause cause) {
   // Even if we waited for a GC we still need to do another GC since weaks allocated during the
   // last GC will not have necessarily been cleared.
-  CollectGarbageInternal(gc_plan_.back(), kGcCauseExplicit, clear_soft_references);
+  CollectGarbageInternal(gc_plan_.back(), cause, clear_soft_references);
 }
 
 bool Heap::SupportHomogeneousSpaceCompactAndCollectorTransitions() const {
@@ -4147,6 +4154,11 @@ mirror::Object* Heap::AllocWithNewTLAB(Thread* self,
 
 const Verification* Heap::GetVerification() const {
   return verification_.get();
+}
+
+void Heap::VlogHeapGrowth(size_t max_allowed_footprint, size_t new_footprint, size_t alloc_size) {
+  VLOG(heap) << "Growing heap from " << PrettySize(max_allowed_footprint) << " to "
+             << PrettySize(new_footprint) << " for a " << PrettySize(alloc_size) << " allocation";
 }
 
 }  // namespace gc

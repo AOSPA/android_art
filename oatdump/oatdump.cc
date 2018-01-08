@@ -32,10 +32,12 @@
 #include "arch/instruction_set_features.h"
 #include "art_field-inl.h"
 #include "art_method-inl.h"
+#include "base/bit_utils_iterator.h"
 #include "base/stl_util.h"
 #include "base/unix_file/fd_file.h"
 #include "class_linker-inl.h"
 #include "class_linker.h"
+#include "code_item_accessors-inl.h"
 #include "compiled_method.h"
 #include "debug/elf_debug_writer.h"
 #include "debug/method_debug_info.h"
@@ -50,6 +52,7 @@
 #include "imtable-inl.h"
 #include "indenter.h"
 #include "subtype_check.h"
+#include "index_bss_mapping.h"
 #include "interpreter/unstarted_runtime.h"
 #include "linker/buffered_output_stream.h"
 #include "linker/elf_builder.h"
@@ -143,13 +146,10 @@ class OatSymbolizer FINAL {
 
     auto* rodata = builder_->GetRoData();
     auto* text = builder_->GetText();
-    auto* bss = builder_->GetBss();
 
     const uint8_t* rodata_begin = oat_file_->Begin();
     const size_t rodata_size = oat_file_->GetOatHeader().GetExecutableOffset();
-    if (no_bits_) {
-      rodata->WriteNoBitsSection(rodata_size);
-    } else {
+    if (!no_bits_) {
       rodata->Start();
       rodata->WriteFully(rodata_begin, rodata_size);
       rodata->End();
@@ -157,16 +157,10 @@ class OatSymbolizer FINAL {
 
     const uint8_t* text_begin = oat_file_->Begin() + rodata_size;
     const size_t text_size = oat_file_->End() - text_begin;
-    if (no_bits_) {
-      text->WriteNoBitsSection(text_size);
-    } else {
+    if (!no_bits_) {
       text->Start();
       text->WriteFully(text_begin, text_size);
       text->End();
-    }
-
-    if (oat_file_->BssSize() != 0) {
-      bss->WriteNoBitsSection(oat_file_->BssSize());
     }
 
     if (isa == InstructionSet::kMips || isa == InstructionSet::kMips64) {
@@ -274,7 +268,7 @@ class OatSymbolizer FINAL {
     ClassDataItemIterator it(dex_file, class_data);
     uint32_t class_method_idx = 0;
     it.SkipAllFields();
-    for (; it.HasNextDirectMethod() || it.HasNextVirtualMethod(); it.Next()) {
+    for (; it.HasNextMethod(); it.Next()) {
       WalkOatMethod(oat_class.GetOatMethod(class_method_idx++),
                     dex_file,
                     class_def_index,
@@ -534,6 +528,29 @@ class OatDumper {
       }
 
       cumulative.Add(data);
+
+      // Dump .bss entries.
+      DumpBssEntries(
+          os,
+          "ArtMethod",
+          oat_dex_file->GetMethodBssMapping(),
+          dex_file->NumMethodIds(),
+          static_cast<size_t>(GetInstructionSetPointerSize(instruction_set_)),
+          [=](uint32_t index) { return dex_file->PrettyMethod(index); });
+      DumpBssEntries(
+          os,
+          "Class",
+          oat_dex_file->GetTypeBssMapping(),
+          dex_file->NumTypeIds(),
+          sizeof(GcRoot<mirror::Class>),
+          [=](uint32_t index) { return dex_file->PrettyType(dex::TypeIndex(index)); });
+      DumpBssEntries(
+          os,
+          "String",
+          oat_dex_file->GetStringBssMapping(),
+          dex_file->NumStringIds(),
+          sizeof(GcRoot<mirror::Class>),
+          [=](uint32_t index) { return dex_file->StringDataByIdx(dex::StringIndex(index)); });
     }
     os << "Cumulative dex file data\n";
     cumulative.Dump(os);
@@ -572,46 +589,36 @@ class OatDumper {
     }
 
     if (options_.export_dex_location_) {
-      if (kIsVdexEnabled) {
-        std::string error_msg;
-        std::string vdex_filename = GetVdexFilename(oat_file_.GetLocation());
-        if (!OS::FileExists(vdex_filename.c_str())) {
-          os << "File " << vdex_filename.c_str() << " does not exist\n";
-          return false;
-        }
+      std::string error_msg;
+      std::string vdex_filename = GetVdexFilename(oat_file_.GetLocation());
+      if (!OS::FileExists(vdex_filename.c_str())) {
+        os << "File " << vdex_filename.c_str() << " does not exist\n";
+        return false;
+      }
 
-        DexFileUniqV vdex_dex_files;
-        std::unique_ptr<const VdexFile> vdex_file = OpenVdexUnquicken(vdex_filename,
-                                                                      &vdex_dex_files,
-                                                                      &error_msg);
-        if (vdex_file.get() == nullptr) {
-          os << "Failed to open vdex file: " << error_msg << "\n";
-          return false;
-        }
-        if (oat_dex_files_.size() != vdex_dex_files.size()) {
-          os << "Dex files number in Vdex file does not match Dex files number in Oat file: "
-             << vdex_dex_files.size() << " vs " << oat_dex_files_.size() << '\n';
-          return false;
-        }
+      DexFileUniqV vdex_dex_files;
+      std::unique_ptr<const VdexFile> vdex_file = OpenVdexUnquicken(vdex_filename,
+                                                                    &vdex_dex_files,
+                                                                    &error_msg);
+      if (vdex_file.get() == nullptr) {
+        os << "Failed to open vdex file: " << error_msg << "\n";
+        return false;
+      }
+      if (oat_dex_files_.size() != vdex_dex_files.size()) {
+        os << "Dex files number in Vdex file does not match Dex files number in Oat file: "
+           << vdex_dex_files.size() << " vs " << oat_dex_files_.size() << '\n';
+        return false;
+      }
 
-        size_t i = 0;
-        for (const auto& vdex_dex_file : vdex_dex_files) {
-          const OatFile::OatDexFile* oat_dex_file = oat_dex_files_[i];
-          CHECK(oat_dex_file != nullptr);
-          CHECK(vdex_dex_file != nullptr);
-          if (!ExportDexFile(os, *oat_dex_file, vdex_dex_file.get())) {
-            success = false;
-          }
-          i++;
+      size_t i = 0;
+      for (const auto& vdex_dex_file : vdex_dex_files) {
+        const OatFile::OatDexFile* oat_dex_file = oat_dex_files_[i];
+        CHECK(oat_dex_file != nullptr);
+        CHECK(vdex_dex_file != nullptr);
+        if (!ExportDexFile(os, *oat_dex_file, vdex_dex_file.get())) {
+          success = false;
         }
-      } else {
-        for (size_t i = 0; i < oat_dex_files_.size(); i++) {
-          const OatFile::OatDexFile* oat_dex_file = oat_dex_files_[i];
-          CHECK(oat_dex_file != nullptr);
-          if (!ExportDexFile(os, *oat_dex_file, /* vdex_dex_file */ nullptr)) {
-            success = false;
-          }
-        }
+        i++;
       }
     }
 
@@ -893,11 +900,7 @@ class OatDumper {
           ClassDataItemIterator it(*dex_file, class_data);
           it.SkipAllFields();
           uint32_t class_method_index = 0;
-          while (it.HasNextDirectMethod()) {
-            AddOffsets(oat_class.GetOatMethod(class_method_index++));
-            it.Next();
-          }
-          while (it.HasNextVirtualMethod()) {
+          while (it.HasNextMethod()) {
             AddOffsets(oat_class.GetOatMethod(class_method_index++));
             it.Next();
           }
@@ -979,11 +982,7 @@ class OatDumper {
       }
       ClassDataItemIterator it(dex_file, class_data);
       it.SkipAllFields();
-      while (it.HasNextDirectMethod()) {
-        WalkCodeItem(dex_file, it.GetMethodCodeItem());
-        it.Next();
-      }
-      while (it.HasNextVirtualMethod()) {
+      while (it.HasNextMethod()) {
         WalkCodeItem(dex_file, it.GetMethodCodeItem());
         it.Next();
       }
@@ -994,14 +993,15 @@ class OatDumper {
       if (code_item == nullptr) {
         return;
       }
+      CodeItemInstructionAccessor instructions(&dex_file, code_item);
 
-      const uint16_t* code_ptr = code_item->insns_;
       // If we inserted a new dex code item pointer, add to total code bytes.
+      const uint16_t* code_ptr = instructions.Insns();
       if (dex_code_item_ptrs_.insert(code_ptr).second) {
-        dex_code_bytes_ += code_item->insns_size_in_code_units_ * sizeof(code_ptr[0]);
+        dex_code_bytes_ += instructions.InsnsSizeInCodeUnits() * sizeof(code_ptr[0]);
       }
 
-      for (const DexInstructionPcPair& inst : code_item->Instructions()) {
+      for (const DexInstructionPcPair& inst : instructions) {
         switch (inst->Opcode()) {
           case Instruction::CONST_STRING: {
             const dex::StringIndex string_index(inst->VRegB_21c());
@@ -1227,20 +1227,7 @@ class OatDumper {
     ClassDataItemIterator it(dex_file, class_data);
     it.SkipAllFields();
     uint32_t class_method_index = 0;
-    while (it.HasNextDirectMethod()) {
-      if (!DumpOatMethod(vios, class_def, class_method_index, oat_class, dex_file,
-                         it.GetMemberIndex(), it.GetMethodCodeItem(),
-                         it.GetRawMemberAccessFlags(), &addr_found)) {
-        success = false;
-      }
-      if (addr_found) {
-        *stop_analysis = true;
-        return success;
-      }
-      class_method_index++;
-      it.Next();
-    }
-    while (it.HasNextVirtualMethod()) {
+    while (it.HasNextMethod()) {
       if (!DumpOatMethod(vios, class_def, class_method_index, oat_class, dex_file,
                          it.GetMemberIndex(), it.GetMethodCodeItem(),
                          it.GetRawMemberAccessFlags(), &addr_found)) {
@@ -1266,10 +1253,15 @@ class OatDumper {
   bool DumpOatMethod(VariableIndentationOutputStream* vios,
                      const DexFile::ClassDef& class_def,
                      uint32_t class_method_index,
-                     const OatFile::OatClass& oat_class, const DexFile& dex_file,
-                     uint32_t dex_method_idx, const DexFile::CodeItem* code_item,
-                     uint32_t method_access_flags, bool* addr_found) {
+                     const OatFile::OatClass& oat_class,
+                     const DexFile& dex_file,
+                     uint32_t dex_method_idx,
+                     const DexFile::CodeItem* code_item,
+                     uint32_t method_access_flags,
+                     bool* addr_found) {
     bool success = true;
+
+    CodeItemDataAccessor code_item_accessor(&dex_file, code_item);
 
     // TODO: Support regex
     std::string method_name = dex_file.GetMethodName(dex_file.GetMethodId(dex_method_idx));
@@ -1281,7 +1273,9 @@ class OatDumper {
     vios->Stream() << StringPrintf("%d: %s (dex_method_idx=%d)\n",
                                    class_method_index, pretty_method.c_str(),
                                    dex_method_idx);
-    if (options_.list_methods_) return success;
+    if (options_.list_methods_) {
+      return success;
+    }
 
     uint32_t oat_method_offsets_offset = oat_class.GetOatMethodOffsetsOffset(class_method_index);
     const OatMethodOffsets* oat_method_offsets = oat_class.GetOatMethodOffsets(class_method_index);
@@ -1302,7 +1296,12 @@ class OatDumper {
     {
       vios->Stream() << "DEX CODE:\n";
       ScopedIndentation indent2(vios);
-      DumpDexCode(vios->Stream(), dex_file, code_item);
+      if (code_item_accessor.HasCodeItem()) {
+        for (const DexInstructionPcPair& inst : code_item_accessor) {
+          vios->Stream() << StringPrintf("0x%04x: ", inst.DexPc()) << inst->DumpHexLE(5)
+                         << StringPrintf("\t| %s\n", inst->DumpString(&dex_file).c_str());
+        }
+      }
     }
 
     std::unique_ptr<StackHandleScope<1>> hs;
@@ -1373,7 +1372,7 @@ class OatDumper {
       vios->Stream() << StringPrintf("(offset=0x%08x)\n", vmap_table_offset);
 
       size_t vmap_table_offset_limit =
-          (kIsVdexEnabled && IsMethodGeneratedByDexToDexCompiler(oat_method, code_item))
+          IsMethodGeneratedByDexToDexCompiler(oat_method, code_item_accessor)
               ? oat_file_.GetVdexFile()->Size()
               : method_header->GetCode() - oat_file_.Begin();
       if (vmap_table_offset >= vmap_table_offset_limit) {
@@ -1385,7 +1384,7 @@ class OatDumper {
                                        oat_method.GetVmapTableOffsetOffset());
         success = false;
       } else if (options_.dump_vmap_) {
-        DumpVmapData(vios, oat_method, code_item);
+        DumpVmapData(vios, oat_method, code_item_accessor);
       }
     }
     {
@@ -1406,7 +1405,7 @@ class OatDumper {
       // after it is dumped, but useful for understanding quick
       // code, so dumped here.
       ScopedIndentation indent2(vios);
-      DumpVregLocations(vios->Stream(), oat_method, code_item);
+      DumpVregLocations(vios->Stream(), oat_method, code_item_accessor);
     }
     {
       vios->Stream() << "CODE: ";
@@ -1448,7 +1447,7 @@ class OatDumper {
           success = false;
           if (options_.disassemble_code_) {
             if (code_size_offset + kPrologueBytes <= oat_file_.Size()) {
-              DumpCode(vios, oat_method, code_item, true, kPrologueBytes);
+              DumpCode(vios, oat_method, code_item_accessor, true, kPrologueBytes);
             }
           }
         } else if (code_size > kMaxCodeSize) {
@@ -1461,11 +1460,11 @@ class OatDumper {
           success = false;
           if (options_.disassemble_code_) {
             if (code_size_offset + kPrologueBytes <= oat_file_.Size()) {
-              DumpCode(vios, oat_method, code_item, true, kPrologueBytes);
+              DumpCode(vios, oat_method, code_item_accessor, true, kPrologueBytes);
             }
           }
         } else if (options_.disassemble_code_) {
-          DumpCode(vios, oat_method, code_item, !success, 0);
+          DumpCode(vios, oat_method, code_item_accessor, !success, 0);
         }
       }
     }
@@ -1499,18 +1498,18 @@ class OatDumper {
   // Display data stored at the the vmap offset of an oat method.
   void DumpVmapData(VariableIndentationOutputStream* vios,
                     const OatFile::OatMethod& oat_method,
-                    const DexFile::CodeItem* code_item) {
-    if (IsMethodGeneratedByOptimizingCompiler(oat_method, code_item)) {
+                    const CodeItemDataAccessor& code_item_accessor) {
+    if (IsMethodGeneratedByOptimizingCompiler(oat_method, code_item_accessor)) {
       // The optimizing compiler outputs its CodeInfo data in the vmap table.
       const void* raw_code_info = oat_method.GetVmapTable();
       if (raw_code_info != nullptr) {
         CodeInfo code_info(raw_code_info);
-        DCHECK(code_item != nullptr);
+        DCHECK(code_item_accessor.HasCodeItem());
         ScopedIndentation indent1(vios);
         MethodInfo method_info = oat_method.GetOatQuickMethodHeader()->GetOptimizedMethodInfo();
-        DumpCodeInfo(vios, code_info, oat_method, *code_item, method_info);
+        DumpCodeInfo(vios, code_info, oat_method, code_item_accessor, method_info);
       }
-    } else if (IsMethodGeneratedByDexToDexCompiler(oat_method, code_item)) {
+    } else if (IsMethodGeneratedByDexToDexCompiler(oat_method, code_item_accessor)) {
       // We don't encode the size in the table, so just emit that we have quickened
       // information.
       ScopedIndentation indent(vios);
@@ -1524,11 +1523,11 @@ class OatDumper {
   void DumpCodeInfo(VariableIndentationOutputStream* vios,
                     const CodeInfo& code_info,
                     const OatFile::OatMethod& oat_method,
-                    const DexFile::CodeItem& code_item,
+                    const CodeItemDataAccessor& code_item_accessor,
                     const MethodInfo& method_info) {
     code_info.Dump(vios,
                    oat_method.GetCodeOffset(),
-                   code_item.registers_size_,
+                   code_item_accessor.RegistersSize(),
                    options_.dump_code_info_stack_maps_,
                    instruction_set_,
                    method_info);
@@ -1539,7 +1538,7 @@ class OatDumper {
     return static_cast<size_t>(InstructionSetPointerSize(isa)) + out_num * sizeof(uint32_t);
   }
 
-  static uint32_t GetVRegOffsetFromQuickCode(const DexFile::CodeItem* code_item,
+  static uint32_t GetVRegOffsetFromQuickCode(const CodeItemDataAccessor& code_item_accessor,
                                              uint32_t core_spills,
                                              uint32_t fp_spills,
                                              size_t frame_size,
@@ -1557,8 +1556,8 @@ class OatDumper {
     int spill_size = POPCOUNT(core_spills) * GetBytesPerGprSpillLocation(isa)
         + POPCOUNT(fp_spills) * GetBytesPerFprSpillLocation(isa)
         + sizeof(uint32_t);  // Filler.
-    int num_regs = code_item->registers_size_ - code_item->ins_size_;
-    int temp_threshold = code_item->registers_size_;
+    int num_regs = code_item_accessor.RegistersSize() - code_item_accessor.InsSize();
+    int temp_threshold = code_item_accessor.RegistersSize();
     const int max_num_special_temps = 1;
     if (reg == temp_threshold) {
       // The current method pointer corresponds to special location on stack.
@@ -1568,7 +1567,7 @@ class OatDumper {
        * Special temporaries may have custom locations and the logic above deals with that.
        * However, non-special temporaries are placed relative to the outs.
        */
-      int temps_start = code_item->outs_size_ * sizeof(uint32_t)
+      int temps_start = code_item_accessor.OutsSize() * sizeof(uint32_t)
           + static_cast<size_t>(pointer_size) /* art method */;
       int relative_offset = (reg - (temp_threshold + max_num_special_temps)) * sizeof(uint32_t);
       return temps_start + relative_offset;
@@ -1583,12 +1582,12 @@ class OatDumper {
   }
 
   void DumpVregLocations(std::ostream& os, const OatFile::OatMethod& oat_method,
-                         const DexFile::CodeItem* code_item) {
-    if (code_item != nullptr) {
-      size_t num_locals_ins = code_item->registers_size_;
-      size_t num_ins = code_item->ins_size_;
+                         const CodeItemDataAccessor& code_item_accessor) {
+    if (code_item_accessor.HasCodeItem()) {
+      size_t num_locals_ins = code_item_accessor.RegistersSize();
+      size_t num_ins = code_item_accessor.InsSize();
       size_t num_locals = num_locals_ins - num_ins;
-      size_t num_outs = code_item->outs_size_;
+      size_t num_outs = code_item_accessor.OutsSize();
 
       os << "vr_stack_locations:";
       for (size_t reg = 0; reg <= num_locals_ins; reg++) {
@@ -1601,7 +1600,7 @@ class OatDumper {
           os << "\n\tlocals:";
         }
 
-        uint32_t offset = GetVRegOffsetFromQuickCode(code_item,
+        uint32_t offset = GetVRegOffsetFromQuickCode(code_item_accessor,
                                                      oat_method.GetCoreSpillMask(),
                                                      oat_method.GetFpSpillMask(),
                                                      oat_method.GetFrameSizeInBytes(),
@@ -1623,37 +1622,30 @@ class OatDumper {
     }
   }
 
-  void DumpDexCode(std::ostream& os, const DexFile& dex_file, const DexFile::CodeItem* code_item) {
-    if (code_item != nullptr) {
-      for (const DexInstructionPcPair& inst : code_item->Instructions()) {
-        os << StringPrintf("0x%04x: ", inst.DexPc()) << inst->DumpHexLE(5)
-           << StringPrintf("\t| %s\n", inst->DumpString(&dex_file).c_str());
-      }
-    }
-  }
-
   // Has `oat_method` -- corresponding to the Dex `code_item` -- been compiled by
   // the optimizing compiler?
-  static bool IsMethodGeneratedByOptimizingCompiler(const OatFile::OatMethod& oat_method,
-                                                    const DexFile::CodeItem* code_item) {
+  static bool IsMethodGeneratedByOptimizingCompiler(
+      const OatFile::OatMethod& oat_method,
+      const CodeItemDataAccessor& code_item_accessor) {
     // If the native GC map is null and the Dex `code_item` is not
     // null, then this method has been compiled with the optimizing
     // compiler.
     return oat_method.GetQuickCode() != nullptr &&
            oat_method.GetVmapTable() != nullptr &&
-           code_item != nullptr;
+           code_item_accessor.HasCodeItem();
   }
 
   // Has `oat_method` -- corresponding to the Dex `code_item` -- been compiled by
   // the dextodex compiler?
-  static bool IsMethodGeneratedByDexToDexCompiler(const OatFile::OatMethod& oat_method,
-                                                  const DexFile::CodeItem* code_item) {
+  static bool IsMethodGeneratedByDexToDexCompiler(
+      const OatFile::OatMethod& oat_method,
+      const CodeItemDataAccessor& code_item_accessor) {
     // If the quick code is null, the Dex `code_item` is not
     // null, and the vmap table is not null, then this method has been compiled
     // with the dextodex compiler.
     return oat_method.GetQuickCode() == nullptr &&
            oat_method.GetVmapTable() != nullptr &&
-           code_item != nullptr;
+           code_item_accessor.HasCodeItem();
   }
 
   verifier::MethodVerifier* DumpVerifier(VariableIndentationOutputStream* vios,
@@ -1770,7 +1762,8 @@ class OatDumper {
   };
 
   void DumpCode(VariableIndentationOutputStream* vios,
-                const OatFile::OatMethod& oat_method, const DexFile::CodeItem* code_item,
+                const OatFile::OatMethod& oat_method,
+                const CodeItemDataAccessor& code_item_accessor,
                 bool bad_input, size_t code_size) {
     const void* quick_code = oat_method.GetQuickCode();
 
@@ -1780,7 +1773,8 @@ class OatDumper {
     if (code_size == 0 || quick_code == nullptr) {
       vios->Stream() << "NO CODE!\n";
       return;
-    } else if (!bad_input && IsMethodGeneratedByOptimizingCompiler(oat_method, code_item)) {
+    } else if (!bad_input && IsMethodGeneratedByOptimizingCompiler(oat_method,
+                                                                   code_item_accessor)) {
       // The optimizing compiler outputs its CodeInfo data in the vmap table.
       StackMapsHelper helper(oat_method.GetVmapTable(), instruction_set_);
       MethodInfo method_info(oat_method.GetOatQuickMethodHeader()->GetOptimizedMethodInfo());
@@ -1835,7 +1829,8 @@ class OatDumper {
                          kBitsPerByte * location_catalog_bytes);
           // Dex register bytes.
           const size_t dex_register_bytes =
-              helper.GetCodeInfo().GetDexRegisterMapsSize(encoding, code_item->registers_size_);
+              helper.GetCodeInfo().GetDexRegisterMapsSize(encoding,
+                                                          code_item_accessor.RegistersSize());
           stats_.AddBits(
               Stats::kByteKindCodeInfoDexRegisterMap,
               kBitsPerByte * dex_register_bytes);
@@ -1874,7 +1869,7 @@ class OatDumper {
                          helper.GetEncoding(),
                          method_info,
                          oat_method.GetCodeOffset(),
-                         code_item->registers_size_,
+                         code_item_accessor.RegistersSize(),
                          instruction_set_);
           do {
             helper.Next();
@@ -1890,6 +1885,40 @@ class OatDumper {
         offset += disassembler_->Dump(vios->Stream(), quick_native_pc + offset);
       }
     }
+  }
+
+  template <typename NameGetter>
+  void DumpBssEntries(std::ostream& os,
+                      const char* slot_type,
+                      const IndexBssMapping* mapping,
+                      uint32_t number_of_indexes,
+                      size_t slot_size,
+                      NameGetter name) {
+    os << ".bss mapping for " << slot_type << ": ";
+    if (mapping == nullptr) {
+      os << "empty.\n";
+      return;
+    }
+    size_t index_bits = IndexBssMappingEntry::IndexBits(number_of_indexes);
+    size_t num_valid_indexes = 0u;
+    for (const IndexBssMappingEntry& entry : *mapping) {
+      num_valid_indexes += 1u + POPCOUNT(entry.GetMask(index_bits));
+    }
+    os << mapping->size() << " entries for " << num_valid_indexes << " valid indexes.\n";
+    os << std::hex;
+    for (const IndexBssMappingEntry& entry : *mapping) {
+      uint32_t index = entry.GetIndex(index_bits);
+      uint32_t mask = entry.GetMask(index_bits);
+      size_t bss_offset = entry.bss_offset - POPCOUNT(mask) * slot_size;
+      for (uint32_t n : LowToHighBits(mask)) {
+        size_t current_index = index - (32u - index_bits) + n;
+        os << "  0x" << bss_offset << ": " << slot_type << ": " << name(current_index) << "\n";
+        bss_offset += slot_size;
+      }
+      DCHECK_EQ(bss_offset, entry.bss_offset);
+      os << "  0x" << bss_offset << ": " << slot_type << ": " << name(index) << "\n";
+    }
+    os << std::dec;
   }
 
   const OatFile& oat_file_;
@@ -2230,7 +2259,7 @@ class ImageDumper {
           os << StringPrintf("null   %s\n", PrettyDescriptor(field->GetTypeDescriptor()).c_str());
         } else {
           // Grab the field type without causing resolution.
-          ObjPtr<mirror::Class> field_type = field->LookupType();
+          ObjPtr<mirror::Class> field_type = field->LookupResolvedType();
           if (field_type != nullptr) {
             PrettyObjectValue(os, field_type, value);
           } else {
@@ -2502,8 +2531,8 @@ class ImageDumper {
         }
       }
     } else {
-      const DexFile::CodeItem* code_item = method->GetCodeItem();
-      size_t dex_instruction_bytes = code_item->insns_size_in_code_units_ * 2;
+      CodeItemDataAccessor code_item_accessor(method);
+      size_t dex_instruction_bytes = code_item_accessor.InsnsSizeInCodeUnits() * 2;
       stats_.dex_instruction_bytes += dex_instruction_bytes;
 
       bool first_occurrence;

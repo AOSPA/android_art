@@ -124,6 +124,7 @@ ART_GTEST_image_space_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX
 ART_GTEST_oat_file_test_DEX_DEPS := Main MultiDex
 ART_GTEST_oat_test_DEX_DEPS := Main
 ART_GTEST_object_test_DEX_DEPS := ProtoCompare ProtoCompare2 StaticsFromCode XandY
+ART_GTEST_patchoat_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS)
 ART_GTEST_proxy_test_DEX_DEPS := Interfaces
 ART_GTEST_reflection_test_DEX_DEPS := Main NonStaticLeafMethods StaticLeafMethods
 ART_GTEST_profile_assistant_test_DEX_DEPS := ProfileTestMultiDex
@@ -146,13 +147,13 @@ ART_GTEST_dex2oat_environment_tests_HOST_DEPS := \
   $(HOST_CORE_IMAGE_optimizing_32) \
   $(HOST_CORE_IMAGE_interpreter_64) \
   $(HOST_CORE_IMAGE_interpreter_32) \
-  $(HOST_OUT_EXECUTABLES)/patchoatd
+  patchoatd-host
 ART_GTEST_dex2oat_environment_tests_TARGET_DEPS := \
   $(TARGET_CORE_IMAGE_optimizing_64) \
   $(TARGET_CORE_IMAGE_optimizing_32) \
   $(TARGET_CORE_IMAGE_interpreter_64) \
   $(TARGET_CORE_IMAGE_interpreter_32) \
-  $(TARGET_OUT_EXECUTABLES)/patchoatd
+  patchoatd-target
 
 ART_GTEST_oat_file_assistant_test_HOST_DEPS := \
   $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS)
@@ -161,10 +162,10 @@ ART_GTEST_oat_file_assistant_test_TARGET_DEPS := \
 
 ART_GTEST_dexoptanalyzer_test_HOST_DEPS := \
   $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS) \
-  $(HOST_OUT_EXECUTABLES)/dexoptanalyzerd
+  dexoptanalyzerd-host
 ART_GTEST_dexoptanalyzer_test_TARGET_DEPS := \
   $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS) \
-  dexoptanalyzerd
+  dexoptanalyzerd-target
 
 ART_GTEST_image_space_test_HOST_DEPS := \
   $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS)
@@ -172,57 +173,59 @@ ART_GTEST_image_space_test_TARGET_DEPS := \
   $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS)
 
 ART_GTEST_dex2oat_test_HOST_DEPS := \
-  $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS)
+  $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS) \
+  dex2oatd-host
 ART_GTEST_dex2oat_test_TARGET_DEPS := \
-  $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS)
+  $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS) \
+  dex2oatd-target
 
 ART_GTEST_dex2oat_image_test_HOST_DEPS := \
-  $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS)
+  $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS) \
+  dex2oatd-host
 ART_GTEST_dex2oat_image_test_TARGET_DEPS := \
-  $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS)
+  $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS) \
+  dex2oatd-target
 
 # TODO: document why this is needed.
 ART_GTEST_proxy_test_HOST_DEPS := $(HOST_CORE_IMAGE_DEFAULT_64) $(HOST_CORE_IMAGE_DEFAULT_32)
 
 # The dexdiag test requires the dexdiag utility.
-ART_GTEST_dexdiag_test_HOST_DEPS := \
-  $(HOST_OUT_EXECUTABLES)/dexdiag
-ART_GTEST_dexdiag_test_TARGET_DEPS := \
-  dexdiag
+ART_GTEST_dexdiag_test_HOST_DEPS := dexdiag-host
+ART_GTEST_dexdiag_test_TARGET_DEPS := dexdiag-target
 
 # The dexdump test requires an image and the dexdump utility.
 # TODO: rename into dexdump when migration completes
 ART_GTEST_dexdump_test_HOST_DEPS := \
   $(HOST_CORE_IMAGE_DEFAULT_64) \
   $(HOST_CORE_IMAGE_DEFAULT_32) \
-  $(HOST_OUT_EXECUTABLES)/dexdump2
+  dexdump2-host
 ART_GTEST_dexdump_test_TARGET_DEPS := \
   $(TARGET_CORE_IMAGE_DEFAULT_64) \
   $(TARGET_CORE_IMAGE_DEFAULT_32) \
-  dexdump2
+  dexdump2-target
 
 # The dexlayout test requires an image and the dexlayout utility.
 # TODO: rename into dexdump when migration completes
 ART_GTEST_dexlayout_test_HOST_DEPS := \
   $(HOST_CORE_IMAGE_DEFAULT_64) \
   $(HOST_CORE_IMAGE_DEFAULT_32) \
-  $(HOST_OUT_EXECUTABLES)/dexlayout \
-  $(HOST_OUT_EXECUTABLES)/dexdump2
+  dexlayoutd-host \
+  dexdump2-host
 ART_GTEST_dexlayout_test_TARGET_DEPS := \
   $(TARGET_CORE_IMAGE_DEFAULT_64) \
   $(TARGET_CORE_IMAGE_DEFAULT_32) \
-  dexlayout \
-  dexdump2
+  dexlayoutd-target \
+  dexdump2-target
 
 # The dexlist test requires an image and the dexlist utility.
 ART_GTEST_dexlist_test_HOST_DEPS := \
   $(HOST_CORE_IMAGE_DEFAULT_64) \
   $(HOST_CORE_IMAGE_DEFAULT_32) \
-  $(HOST_OUT_EXECUTABLES)/dexlist
+  dexlist-host
 ART_GTEST_dexlist_test_TARGET_DEPS := \
   $(TARGET_CORE_IMAGE_DEFAULT_64) \
   $(TARGET_CORE_IMAGE_DEFAULT_32) \
-  dexlist
+  dexlist-target
 
 # The imgdiag test has dependencies on core.oat since it needs to load it during the test.
 # For the host, also add the installed tool (in the base size, that should suffice). For the
@@ -230,30 +233,33 @@ ART_GTEST_dexlist_test_TARGET_DEPS := \
 ART_GTEST_imgdiag_test_HOST_DEPS := \
   $(HOST_CORE_IMAGE_DEFAULT_64) \
   $(HOST_CORE_IMAGE_DEFAULT_32) \
-  $(HOST_OUT_EXECUTABLES)/imgdiagd
+  imgdiagd-host
 ART_GTEST_imgdiag_test_TARGET_DEPS := \
   $(TARGET_CORE_IMAGE_DEFAULT_64) \
   $(TARGET_CORE_IMAGE_DEFAULT_32) \
-  imgdiagd
+  imgdiagd-target
 
 # Oatdump test requires an image and oatfile to dump.
 ART_GTEST_oatdump_test_HOST_DEPS := \
   $(HOST_CORE_IMAGE_DEFAULT_64) \
   $(HOST_CORE_IMAGE_DEFAULT_32) \
-  $(HOST_OUT_EXECUTABLES)/oatdumpd \
-  $(HOST_OUT_EXECUTABLES)/oatdumpds
+  oatdumpd-host \
+  oatdumpds-host
 ART_GTEST_oatdump_test_TARGET_DEPS := \
   $(TARGET_CORE_IMAGE_DEFAULT_64) \
   $(TARGET_CORE_IMAGE_DEFAULT_32) \
-  oatdump
+  oatdumpd-target
 ART_GTEST_oatdump_image_test_HOST_DEPS := $(ART_GTEST_oatdump_test_HOST_DEPS)
 ART_GTEST_oatdump_image_test_TARGET_DEPS := $(ART_GTEST_oatdump_test_TARGET_DEPS)
 
+ART_GTEST_patchoat_test_HOST_DEPS := \
+  $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS)
+ART_GTEST_patchoat_test_TARGET_DEPS := \
+  $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS)
+
 # Profile assistant tests requires profman utility.
-ART_GTEST_profile_assistant_test_HOST_DEPS := \
-  $(HOST_OUT_EXECUTABLES)/profmand
-ART_GTEST_profile_assistant_test_TARGET_DEPS := \
-  profman
+ART_GTEST_profile_assistant_test_HOST_DEPS := profmand-host
+ART_GTEST_profile_assistant_test_TARGET_DEPS := profmand-target
 
 # The path for which all the source files are relative, not actually the current directory.
 LOCAL_PATH := art
@@ -270,6 +276,7 @@ ART_TEST_MODULES := \
     art_dexoptanalyzer_tests \
     art_imgdiag_tests \
     art_oatdump_tests \
+    art_patchoat_tests \
     art_profman_tests \
     art_runtime_tests \
     art_runtime_compiler_tests \
@@ -608,7 +615,7 @@ define define-test-art-gtest-combination
   endif
 
 .PHONY: $$(rule_name)
-$$(rule_name): $$(dependencies) dx d8
+$$(rule_name): $$(dependencies) dx d8-compat-dx
 	$(hide) $$(call ART_TEST_PREREQ_FINISHED,$$@)
 
   # Clear locally defined variables.
@@ -683,6 +690,9 @@ ART_GTEST_dex2oat_image_test_DEX_DEPS :=
 ART_GTEST_dex2oat_image_test_HOST_DEPS :=
 ART_GTEST_dex2oat_image_test_TARGET_DEPS :=
 ART_GTEST_object_test_DEX_DEPS :=
+ART_GTEST_patchoat_test_DEX_DEPS :=
+ART_GTEST_patchoat_test_HOST_DEPS :=
+ART_GTEST_patchoat_test_TARGET_DEPS :=
 ART_GTEST_proxy_test_DEX_DEPS :=
 ART_GTEST_reflection_test_DEX_DEPS :=
 ART_GTEST_stub_test_DEX_DEPS :=

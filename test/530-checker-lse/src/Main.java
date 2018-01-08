@@ -814,6 +814,23 @@ public class Main {
     return arr[0] + arr[1] + arr[2] + arr[3];
   }
 
+  /// CHECK-START: int Main.testNoSideEffects(int[]) load_store_elimination (before)
+  /// CHECK: ArraySet
+  /// CHECK: ArraySet
+  /// CHECK: ArrayGet
+
+  /// CHECK-START: int Main.testNoSideEffects(int[]) load_store_elimination (after)
+  /// CHECK: ArraySet
+  /// CHECK: ArraySet
+  /// CHECK-NOT: ArrayGet
+
+  private static int testNoSideEffects(int[] array) {
+    array[0] = 101;
+    int bitCount = Integer.bitCount(0x3456);
+    array[1] = array[0] + 1;
+    return array[0] + bitCount;
+  }
+
   /// CHECK-START: double Main.getCircleArea(double, boolean) load_store_elimination (before)
   /// CHECK: NewInstance
 
@@ -932,6 +949,74 @@ public class Main {
     return array[1] + array[i];
   }
 
+  /// CHECK-START: int Main.testExitMerge(boolean) load_store_elimination (before)
+  /// CHECK: NewInstance
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldGet
+  /// CHECK: Return
+  /// CHECK: InstanceFieldSet
+  /// CHECK: Throw
+
+  /// CHECK-START: int Main.testExitMerge(boolean) load_store_elimination (after)
+  /// CHECK-NOT: NewInstance
+  /// CHECK-NOT: InstanceFieldSet
+  /// CHECK-NOT: InstanceFieldGet
+  /// CHECK: Return
+  /// CHECK-NOT: InstanceFieldSet
+  /// CHECK: Throw
+  private static int testExitMerge(boolean cond) {
+    TestClass obj = new TestClass();
+    if (cond) {
+      obj.i = 1;
+      return obj.i + 1;
+    } else {
+      obj.i = 2;
+      throw new Error();
+    }
+  }
+
+  /// CHECK-START: int Main.testExitMerge2(boolean) load_store_elimination (before)
+  /// CHECK: NewInstance
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldGet
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldGet
+
+  /// CHECK-START: int Main.testExitMerge2(boolean) load_store_elimination (after)
+  /// CHECK-NOT: NewInstance
+  /// CHECK-NOT: InstanceFieldSet
+  /// CHECK-NOT: InstanceFieldGet
+  private static int testExitMerge2(boolean cond) {
+    TestClass obj = new TestClass();
+    int res;
+    if (cond) {
+      obj.i = 1;
+      res = obj.i + 1;
+    } else {
+      obj.i = 2;
+      res = obj.j + 2;
+    }
+    return res;
+  }
+
+  /// CHECK-START: void Main.testStoreSameValue() load_store_elimination (before)
+  /// CHECK: NewArray
+  /// CHECK: ArrayGet
+  /// CHECK: ArraySet
+
+  /// CHECK-START: void Main.testStoreSameValue() load_store_elimination (after)
+  /// CHECK: NewArray
+  /// CHECK-NOT: ArrayGet
+  /// CHECK-NOT: ArraySet
+  private static void testStoreSameValue() {
+    Object[] array = new Object[2];
+    sArray = array;
+    Object obj = array[0];
+    array[1] = obj;    // store the same value as the defaut value.
+  }
+
+  static Object[] sArray;
+
   static void assertIntEquals(int result, int expected) {
     if (expected != result) {
       throw new Error("Expected: " + expected + ", found: " + result);
@@ -1021,6 +1106,15 @@ public class Main {
     assertIntEquals(testStoreStore().i, 41);
     assertIntEquals(testStoreStore().j, 43);
     assertIntEquals(testStoreStoreWithDeoptimize(new int[4]), 4);
+
+    assertIntEquals(testExitMerge(true), 2);
+    assertIntEquals(testExitMerge2(true), 2);
+    assertIntEquals(testExitMerge2(false), 2);
+
+    int ret = testNoSideEffects(iarray);
+    assertIntEquals(iarray[0], 101);
+    assertIntEquals(iarray[1], 102);
+    assertIntEquals(ret, 108);
   }
 
   static boolean sFlag;

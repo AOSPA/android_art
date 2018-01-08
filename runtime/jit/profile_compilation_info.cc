@@ -35,6 +35,7 @@
 #include "base/arena_allocator.h"
 #include "base/dumpable.h"
 #include "base/file_utils.h"
+#include "base/logging.h"  // For VLOG.
 #include "base/mutex.h"
 #include "base/scoped_flock.h"
 #include "base/stl_util.h"
@@ -1034,7 +1035,7 @@ ProfileCompilationInfo::ProfileLoadSatus ProfileCompilationInfo::ReadProfileLine
     return kProfileLoadBadData;
   }
   const uint8_t* base_ptr = buffer.GetCurrentPtr();
-  std::copy_n(base_ptr, bytes, &data->bitmap_storage[0]);
+  std::copy_n(base_ptr, bytes, data->bitmap_storage.data());
   buffer.Advance(bytes);
   // Read method bitmap.
   return kProfileLoadSuccess;
@@ -1582,7 +1583,11 @@ std::string ProfileCompilationInfo::DumpInfo(const std::vector<const DexFile*>* 
       for (uint32_t method_idx = 0; method_idx < dex_data->num_method_ids; ++method_idx) {
         MethodHotness hotness_info(dex_data->GetHotnessInfo(method_idx));
         if (startup ? hotness_info.IsStartup() : hotness_info.IsPostStartup()) {
-          os << method_idx << ", ";
+          if (dex_file != nullptr) {
+            os << "\n\t\t" << dex_file->PrettyMethod(method_idx, true);
+          } else {
+            os << method_idx << ", ";
+          }
         }
       }
       if (startup == false) {

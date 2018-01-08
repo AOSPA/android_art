@@ -20,8 +20,9 @@
 
 #include "art_method-inl.h"
 #include "base/enums.h"
-#include "base/logging.h"
+#include "base/logging.h"  // For VLOG.
 #include "base/memory_tool.h"
+#include "base/runtime_debug.h"
 #include "debugger.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "interpreter/interpreter.h"
@@ -466,7 +467,8 @@ bool Jit::MaybeDoOnStackReplacement(Thread* thread,
   // Fetch some data before looking up for an OSR method. We don't want thread
   // suspension once we hold an OSR method, as the JIT code cache could delete the OSR
   // method while we are being suspended.
-  const size_t number_of_vregs = method->GetCodeItem()->registers_size_;
+  CodeItemDataAccessor accessor(method);
+  const size_t number_of_vregs = accessor.RegistersSize();
   const char* shorty = method->GetShorty();
   std::string method_name(VLOG_IS_ON(jit) ? method->PrettyMethod() : "");
   void** memory = nullptr;
@@ -643,8 +645,12 @@ void Jit::AddSamples(Thread* self, ArtMethod* method, uint16_t count, bool with_
     return;
   }
 
-  if (method->IsClassInitializer() || method->IsNative() || !method->IsCompilable()) {
+  if (method->IsClassInitializer() || !method->IsCompilable()) {
     // We do not want to compile such methods.
+    return;
+  }
+  if (hot_method_threshold_ == 0) {
+    // Tests might request JIT on first use (compiled synchronously in the interpreter).
     return;
   }
   DCHECK(thread_pool_ != nullptr);
@@ -659,7 +665,8 @@ void Jit::AddSamples(Thread* self, ArtMethod* method, uint16_t count, bool with_
     count *= priority_thread_weight_;
   }
   int32_t new_count = starting_count + count;   // int32 here to avoid wrap-around;
-  if (starting_count < warm_method_threshold_) {
+  // Note: Native method have no "warm" state or profiling info.
+  if (LIKELY(!method->IsNative()) && starting_count < warm_method_threshold_) {
     if ((new_count >= warm_method_threshold_) &&
         (method->GetProfilingInfo(kRuntimePointerSize) == nullptr)) {
       bool success = ProfilingInfo::Create(self, method, /* retry_allocation */ false);
@@ -696,6 +703,7 @@ void Jit::AddSamples(Thread* self, ArtMethod* method, uint16_t count, bool with_
         // If the samples don't contain any back edge, we don't increment the hotness.
         return;
       }
+      DCHECK(!method->IsNative());  // No back edges reported for native methods.
       if ((new_count >= osr_method_threshold_) &&  !code_cache_->IsOsrCompiled(method)) {
         DCHECK(thread_pool_ != nullptr);
         thread_pool_->AddTask(self, new JitCompileTask(method, JitCompileTask::kCompileOsr));

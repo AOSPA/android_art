@@ -18,8 +18,10 @@
 
 #include <sstream>
 
+#include <android-base/logging.h>
+
 #include "base/file_utils.h"
-#include "base/logging.h"
+#include "base/macros.h"
 #include "base/stringpiece.h"
 #include "debugger.h"
 #include "gc/heap.h"
@@ -90,8 +92,11 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .IntoKey(M::CheckJni)
       .Define("-Xjniopts:forcecopy")
           .IntoKey(M::JniOptsForceCopy)
-      .Define({"-Xrunjdwp:_", "-agentlib:jdwp=_"})
-          .WithType<JDWP::JdwpOptions>()
+      .Define("-XjdwpProvider:_")
+          .WithType<JdwpProvider>()
+          .IntoKey(M::JdwpProvider)
+      .Define({"-Xrunjdwp:_", "-agentlib:jdwp=_", "-XjdwpOptions:_"})
+          .WithType<std::string>()
           .IntoKey(M::JdwpOptions)
       // TODO Re-enable -agentlib: once I have a good way to transform the values.
       // .Define("-agentlib:_")
@@ -548,7 +553,7 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
     // If not low memory mode, semispace otherwise.
 
     gc::CollectorType background_collector_type_;
-    gc::CollectorType collector_type_ = (XGcOption{}).collector_type_;  // NOLINT [whitespace/braces] [5]
+    gc::CollectorType collector_type_ = (XGcOption{}).collector_type_;
     bool low_memory_mode_ = args.Exists(M::LowMemoryMode);
 
     background_collector_type_ = args.GetOrDefault(M::BackgroundGc);

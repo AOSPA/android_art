@@ -295,15 +295,6 @@ void CodeGenerator::EmitJitRootPatches(uint8_t* code ATTRIBUTE_UNUSED,
   DCHECK_EQ(code_generation_data_->GetNumberOfJitClassRoots(), 0u);
 }
 
-size_t CodeGenerator::GetCacheOffset(uint32_t index) {
-  return sizeof(GcRoot<mirror::Object>) * index;
-}
-
-size_t CodeGenerator::GetCachePointerOffset(uint32_t index) {
-  PointerSize pointer_size = InstructionSetPointerSize(GetInstructionSet());
-  return static_cast<size_t>(pointer_size) * index;
-}
-
 uint32_t CodeGenerator::GetArrayLengthOffset(HArrayLength* array_length) {
   return array_length->IsStringLength()
       ? mirror::String::CountOffset().Uint32Value()
@@ -946,12 +937,12 @@ static void CheckLoopEntriesCanBeUsedForOsr(const HGraph& graph,
 
 void CodeGenerator::BuildStackMaps(MemoryRegion stack_map_region,
                                    MemoryRegion method_info_region,
-                                   const DexFile::CodeItem& code_item) {
+                                   const DexFile::CodeItem* code_item_for_osr_check) {
   StackMapStream* stack_map_stream = GetStackMapStream();
   stack_map_stream->FillInCodeInfo(stack_map_region);
   stack_map_stream->FillInMethodInfo(method_info_region);
-  if (kIsDebugBuild) {
-    CheckLoopEntriesCanBeUsedForOsr(*graph_, CodeInfo(stack_map_region), code_item);
+  if (kIsDebugBuild && code_item_for_osr_check != nullptr) {
+    CheckLoopEntriesCanBeUsedForOsr(*graph_, CodeInfo(stack_map_region), *code_item_for_osr_check);
   }
 }
 
@@ -981,21 +972,6 @@ void CodeGenerator::RecordPcInfo(HInstruction* instruction,
     }
   }
 
-  uint32_t outer_dex_pc = dex_pc;
-  uint32_t outer_environment_size = 0;
-  uint32_t inlining_depth = 0;
-  if (instruction != nullptr) {
-    for (HEnvironment* environment = instruction->GetEnvironment();
-         environment != nullptr;
-         environment = environment->GetParent()) {
-      outer_dex_pc = environment->GetDexPc();
-      outer_environment_size = environment->Size();
-      if (environment != instruction->GetEnvironment()) {
-        inlining_depth++;
-      }
-    }
-  }
-
   // Collect PC infos for the mapping table.
   uint32_t native_pc = GetAssembler()->CodePosition();
 
@@ -1003,12 +979,12 @@ void CodeGenerator::RecordPcInfo(HInstruction* instruction,
   if (instruction == nullptr) {
     // For stack overflow checks and native-debug-info entries without dex register
     // mapping (i.e. start of basic block or start of slow path).
-    stack_map_stream->BeginStackMapEntry(outer_dex_pc, native_pc, 0, 0, 0, 0);
+    stack_map_stream->BeginStackMapEntry(dex_pc, native_pc, 0, 0, 0, 0);
     stack_map_stream->EndStackMapEntry();
     return;
   }
-  LocationSummary* locations = instruction->GetLocations();
 
+  LocationSummary* locations = instruction->GetLocations();
   uint32_t register_mask = locations->GetRegisterMask();
   DCHECK_EQ(register_mask & ~locations->GetLiveRegisters()->GetCoreRegisters(), 0u);
   if (locations->OnlyCallsOnSlowPath()) {
@@ -1023,22 +999,33 @@ void CodeGenerator::RecordPcInfo(HInstruction* instruction,
     // The register mask must be a subset of callee-save registers.
     DCHECK_EQ(register_mask & core_callee_save_mask_, register_mask);
   }
+
+  uint32_t outer_dex_pc = dex_pc;
+  uint32_t outer_environment_size = 0u;
+  uint32_t inlining_depth = 0;
+  HEnvironment* const environment = instruction->GetEnvironment();
+  if (environment != nullptr) {
+    HEnvironment* outer_environment = environment;
+    while (outer_environment->GetParent() != nullptr) {
+      outer_environment = outer_environment->GetParent();
+      ++inlining_depth;
+    }
+    outer_dex_pc = outer_environment->GetDexPc();
+    outer_environment_size = outer_environment->Size();
+  }
   stack_map_stream->BeginStackMapEntry(outer_dex_pc,
                                        native_pc,
                                        register_mask,
                                        locations->GetStackMask(),
                                        outer_environment_size,
                                        inlining_depth);
-
-  HEnvironment* const environment = instruction->GetEnvironment();
   EmitEnvironment(environment, slow_path);
   // Record invoke info, the common case for the trampoline is super and static invokes. Only
   // record these to reduce oat file size.
   if (kEnableDexLayoutOptimizations) {
-    if (environment != nullptr &&
-        instruction->IsInvoke() &&
-        instruction->IsInvokeStaticOrDirect()) {
-      HInvoke* const invoke = instruction->AsInvoke();
+    if (instruction->IsInvokeStaticOrDirect()) {
+      HInvoke* const invoke = instruction->AsInvokeStaticOrDirect();
+      DCHECK(environment != nullptr);
       stack_map_stream->AddInvoke(invoke->GetInvokeType(), invoke->GetDexMethodIndex());
     }
   }
@@ -1411,10 +1398,10 @@ LocationSummary* CodeGenerator::CreateThrowingSlowPathLocations(HInstruction* in
 
 void CodeGenerator::GenerateNullCheck(HNullCheck* instruction) {
   if (compiler_options_.GetImplicitNullChecks()) {
-    MaybeRecordStat(stats_, kImplicitNullCheckGenerated);
+    MaybeRecordStat(stats_, MethodCompilationStat::kImplicitNullCheckGenerated);
     GenerateImplicitNullCheck(instruction);
   } else {
-    MaybeRecordStat(stats_, kExplicitNullCheckGenerated);
+    MaybeRecordStat(stats_, MethodCompilationStat::kExplicitNullCheckGenerated);
     GenerateExplicitNullCheck(instruction);
   }
 }
