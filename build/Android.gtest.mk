@@ -155,6 +155,11 @@ ART_GTEST_dex2oat_environment_tests_TARGET_DEPS := \
   $(TARGET_CORE_IMAGE_interpreter_32) \
   patchoatd-target
 
+ART_GTEST_oat_file_test_HOST_DEPS := \
+  $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS)
+ART_GTEST_oat_file_test_TARGET_DEPS := \
+  $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS)
+
 ART_GTEST_oat_file_assistant_test_HOST_DEPS := \
   $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS)
 ART_GTEST_oat_file_assistant_test_TARGET_DEPS := \
@@ -615,7 +620,7 @@ define define-test-art-gtest-combination
   endif
 
 .PHONY: $$(rule_name)
-$$(rule_name): $$(dependencies) dx d8-compat-dx
+$$(rule_name): $$(dependencies) dx d8-compat-dx desugar
 	$(hide) $$(call ART_TEST_PREREQ_FINISHED,$$@)
 
   # Clear locally defined variables.

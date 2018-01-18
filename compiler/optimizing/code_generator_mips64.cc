@@ -1761,9 +1761,15 @@ void CodeGeneratorMIPS64::GenerateInvokeRuntime(int32_t entry_point_offset) {
 
 void InstructionCodeGeneratorMIPS64::GenerateClassInitializationCheck(SlowPathCodeMIPS64* slow_path,
                                                                       GpuRegister class_reg) {
-  __ LoadFromOffset(kLoadSignedByte, TMP, class_reg, mirror::Class::StatusOffset().Int32Value());
-  __ LoadConst32(AT, mirror::Class::kStatusInitialized);
-  __ Bltc(TMP, AT, slow_path->GetEntryLabel());
+  constexpr size_t status_lsb_position = SubtypeCheckBits::BitStructSizeOf();
+  const size_t status_byte_offset =
+      mirror::Class::StatusOffset().SizeValue() + (status_lsb_position / kBitsPerByte);
+  constexpr uint32_t shifted_initialized_value =
+      enum_cast<uint32_t>(ClassStatus::kInitialized) << (status_lsb_position % kBitsPerByte);
+
+  __ LoadFromOffset(kLoadUnsignedByte, TMP, class_reg, status_byte_offset);
+  __ LoadConst32(AT, shifted_initialized_value);
+  __ Bltuc(TMP, AT, slow_path->GetEntryLabel());
   // Even if the initialized flag is set, we need to ensure consistent memory ordering.
   __ Sync(0);
   __ Bind(slow_path->GetExitLabel());
@@ -3311,12 +3317,7 @@ void InstructionCodeGeneratorMIPS64::DivRemByPowerOfTwo(HBinaryOperation* instru
         __ Sra(TMP, dividend, 31);
         __ Srl(TMP, TMP, 32 - ctz_imm);
         __ Addu(out, dividend, TMP);
-        if (IsUint<16>(abs_imm - 1)) {
-          __ Andi(out, out, abs_imm - 1);
-        } else {
-          __ Sll(out, out, 32 - ctz_imm);
-          __ Srl(out, out, 32 - ctz_imm);
-        }
+        __ Ins(out, ZERO, ctz_imm, 32 - ctz_imm);
         __ Subu(out, out, TMP);
       }
     } else {
@@ -3335,17 +3336,7 @@ void InstructionCodeGeneratorMIPS64::DivRemByPowerOfTwo(HBinaryOperation* instru
           __ Dsrl32(TMP, TMP, 32 - ctz_imm);
         }
         __ Daddu(out, dividend, TMP);
-        if (IsUint<16>(abs_imm - 1)) {
-          __ Andi(out, out, abs_imm - 1);
-        } else {
-          if (ctz_imm > 32) {
-            __ Dsll(out, out, 64 - ctz_imm);
-            __ Dsrl(out, out, 64 - ctz_imm);
-          } else {
-            __ Dsll32(out, out, 32 - ctz_imm);
-            __ Dsrl32(out, out, 32 - ctz_imm);
-          }
-        }
+        __ DblIns(out, ZERO, ctz_imm, 64 - ctz_imm);
         __ Dsubu(out, out, TMP);
       }
     }

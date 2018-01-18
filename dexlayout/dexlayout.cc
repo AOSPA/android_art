@@ -34,12 +34,13 @@
 #include "android-base/stringprintf.h"
 
 #include "base/logging.h"  // For VLOG_IS_ON.
-#include "dex_file-inl.h"
-#include "dex_file_layout.h"
-#include "dex_file_loader.h"
-#include "dex_file_types.h"
-#include "dex_file_verifier.h"
-#include "dex_instruction-inl.h"
+#include "dex/art_dex_file_loader.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file_layout.h"
+#include "dex/dex_file_loader.h"
+#include "dex/dex_file_types.h"
+#include "dex/dex_file_verifier.h"
+#include "dex/dex_instruction-inl.h"
 #include "dex_ir_builder.h"
 #include "dex_verify.h"
 #include "dex_visualize.h"
@@ -1912,7 +1913,8 @@ void DexLayout::ProcessDexFile(const char* file_name,
     if (do_layout) {
       LayoutOutputFile(dex_file);
     }
-    OutputDexFile(dex_file, do_layout);
+    // If we didn't set the offsets eagerly, we definitely need to compute them here.
+    OutputDexFile(dex_file, do_layout || !eagerly_assign_offsets);
 
     // Clear header before verifying to reduce peak RAM usage.
     const size_t file_size = header_->FileSize();
@@ -1922,14 +1924,16 @@ void DexLayout::ProcessDexFile(const char* file_name,
     if (options_.verify_output_) {
       std::string error_msg;
       std::string location = "memory mapped file for " + std::string(file_name);
-      std::unique_ptr<const DexFile> output_dex_file(DexFileLoader::Open(mem_map_->Begin(),
-                                                                         file_size,
-                                                                         location,
-                                                                         /* checksum */ 0,
-                                                                         /*oat_dex_file*/ nullptr,
-                                                                         /*verify*/ true,
-                                                                         /*verify_checksum*/ false,
-                                                                         &error_msg));
+      const ArtDexFileLoader dex_file_loader;
+      std::unique_ptr<const DexFile> output_dex_file(
+          dex_file_loader.Open(mem_map_->Begin(),
+                               file_size,
+                               location,
+                               /* checksum */ 0,
+                               /*oat_dex_file*/ nullptr,
+                               /*verify*/ true,
+                               /*verify_checksum*/ false,
+                               &error_msg));
       CHECK(output_dex_file != nullptr) << "Failed to re-open output file:" << error_msg;
 
       // Do IR-level comparison between input and output. This check ignores potential differences
@@ -1960,8 +1964,9 @@ int DexLayout::ProcessFile(const char* file_name) {
   // all of which are Zip archives with "classes.dex" inside.
   const bool verify_checksum = !options_.ignore_bad_checksum_;
   std::string error_msg;
+  const ArtDexFileLoader dex_file_loader;
   std::vector<std::unique_ptr<const DexFile>> dex_files;
-  if (!DexFileLoader::Open(
+  if (!dex_file_loader.Open(
         file_name, file_name, /* verify */ true, verify_checksum, &error_msg, &dex_files)) {
     // Display returned error message to user. Note that this error behavior
     // differs from the error messages shown by the original Dalvik dexdump.

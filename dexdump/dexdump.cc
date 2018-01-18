@@ -44,11 +44,13 @@
 
 #include "android-base/stringprintf.h"
 
-#include "code_item_accessors-no_art-inl.h"
-#include "dex_file-inl.h"
-#include "dex_file_loader.h"
-#include "dex_file_types.h"
-#include "dex_instruction-inl.h"
+#include "dex/art_dex_file_loader.h"
+#include "dex/code_item_accessors-no_art-inl.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file_exception_helpers.h"
+#include "dex/dex_file_loader.h"
+#include "dex/dex_file_types.h"
+#include "dex/dex_instruction-inl.h"
 #include "dexdump_cfg.h"
 
 namespace art {
@@ -735,7 +737,8 @@ static void dumpInterface(const DexFile* pDexFile, const DexFile::TypeItem& pTyp
  * Dumps the catches table associated with the code.
  */
 static void dumpCatches(const DexFile* pDexFile, const DexFile::CodeItem* pCode) {
-  const u4 triesSize = CodeItemDataAccessor(pDexFile, pCode).TriesSize();
+  CodeItemDataAccessor accessor(*pDexFile, pCode);
+  const u4 triesSize = accessor.TriesSize();
 
   // No catch table.
   if (triesSize == 0) {
@@ -745,12 +748,11 @@ static void dumpCatches(const DexFile* pDexFile, const DexFile::CodeItem* pCode)
 
   // Dump all table entries.
   fprintf(gOutFile, "      catches       : %d\n", triesSize);
-  for (u4 i = 0; i < triesSize; i++) {
-    const DexFile::TryItem* pTry = pDexFile->GetTryItems(*pCode, i);
-    const u4 start = pTry->start_addr_;
-    const u4 end = start + pTry->insn_count_;
+  for (const DexFile::TryItem& try_item : accessor.TryItems()) {
+    const u4 start = try_item.start_addr_;
+    const u4 end = start + try_item.insn_count_;
     fprintf(gOutFile, "        0x%04x - 0x%04x\n", start, end);
-    for (CatchHandlerIterator it(*pCode, *pTry); it.HasNext(); it.Next()) {
+    for (CatchHandlerIterator it(accessor, try_item); it.HasNext(); it.Next()) {
       const dex::TypeIndex tidx = it.GetHandlerTypeIndex();
       const char* descriptor = (!tidx.IsValid()) ? "<any>" : pDexFile->StringByTypeIdx(tidx);
       fprintf(gOutFile, "          %s -> 0x%04x\n", descriptor, it.GetHandlerAddress());
@@ -950,7 +952,7 @@ static void dumpInstruction(const DexFile* pDexFile,
   fprintf(gOutFile, "%06x:", codeOffset + 0x10 + insnIdx * 2);
 
   // Dump (part of) raw bytes.
-  CodeItemInstructionAccessor accessor(pDexFile, pCode);
+  CodeItemInstructionAccessor accessor(*pDexFile, pCode);
   for (u4 i = 0; i < 8; i++) {
     if (i < insnWidth) {
       if (i == 7) {
@@ -1168,7 +1170,7 @@ static void dumpBytecodes(const DexFile* pDexFile, u4 idx,
           codeOffset, codeOffset, dot.get(), name, signature.ToString().c_str());
 
   // Iterate over all instructions.
-  CodeItemDataAccessor accessor(pDexFile, pCode);
+  CodeItemDataAccessor accessor(*pDexFile, pCode);
   for (const DexInstructionPcPair& pair : accessor) {
     const Instruction* instruction = &pair.Inst();
     const u4 insnWidth = instruction->SizeInCodeUnits();
@@ -1185,7 +1187,7 @@ static void dumpBytecodes(const DexFile* pDexFile, u4 idx,
  */
 static void dumpCode(const DexFile* pDexFile, u4 idx, u4 flags,
                      const DexFile::CodeItem* pCode, u4 codeOffset) {
-  CodeItemDebugInfoAccessor accessor(pDexFile, pCode, pDexFile->GetDebugInfoOffset(pCode));
+  CodeItemDebugInfoAccessor accessor(*pDexFile, pCode, idx);
 
   fprintf(gOutFile, "      registers     : %d\n", accessor.RegistersSize());
   fprintf(gOutFile, "      ins           : %d\n", accessor.InsSize());
@@ -1878,8 +1880,10 @@ int processFile(const char* fileName) {
   // all of which are Zip archives with "classes.dex" inside.
   const bool kVerifyChecksum = !gOptions.ignoreBadChecksum;
   std::string error_msg;
+  // TODO: Use DexFileLoader when that is implemented.
+  const ArtDexFileLoader dex_file_loader;
   std::vector<std::unique_ptr<const DexFile>> dex_files;
-  if (!DexFileLoader::Open(
+  if (!dex_file_loader.Open(
         fileName, fileName, /* verify */ true, kVerifyChecksum, &error_msg, &dex_files)) {
     // Display returned error message to user. Note that this error behavior
     // differs from the error messages shown by the original Dalvik dexdump.

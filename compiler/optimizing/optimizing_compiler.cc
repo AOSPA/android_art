@@ -36,9 +36,9 @@
 #include "compiler.h"
 #include "debug/elf_debug_writer.h"
 #include "debug/method_debug_info.h"
+#include "dex/dex_file_types.h"
 #include "dex/verification_results.h"
 #include "dex/verified_method.h"
-#include "dex_file_types.h"
 #include "driver/compiler_driver-inl.h"
 #include "driver/compiler_options.h"
 #include "driver/dex_compilation_unit.h"
@@ -766,13 +766,13 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* allocator,
   static constexpr size_t kSpaceFilterOptimizingThreshold = 128;
   const CompilerOptions& compiler_options = compiler_driver->GetCompilerOptions();
   if ((compiler_options.GetCompilerFilter() == CompilerFilter::kSpace)
-      && (CodeItemInstructionAccessor(&dex_file, code_item).InsnsSizeInCodeUnits() >
+      && (CodeItemInstructionAccessor(dex_file, code_item).InsnsSizeInCodeUnits() >
           kSpaceFilterOptimizingThreshold)) {
     MaybeRecordStat(compilation_stats_.get(), MethodCompilationStat::kNotCompiledSpaceFilter);
     return nullptr;
   }
 
-  CodeItemDebugInfoAccessor code_item_accessor(&dex_file, code_item);
+  CodeItemDebugInfoAccessor code_item_accessor(dex_file, code_item, method_idx);
   HGraph* graph = new (allocator) HGraph(
       allocator,
       arena_stack,
@@ -783,7 +783,7 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* allocator,
       compiler_driver->GetCompilerOptions().GetDebuggable(),
       osr);
 
-  const uint8_t* interpreter_metadata = nullptr;
+  ArrayRef<const uint8_t> interpreter_metadata;
   // For AOT compilation, we may not get a method, for example if its class is erroneous.
   // JIT should always have a method.
   DCHECK(Runtime::Current()->IsAotCompiler() || method != nullptr);
@@ -940,7 +940,7 @@ CodeGenerator* OptimizingCompiler::TryCompileIntrinsic(
                           compiler_driver,
                           codegen.get(),
                           compilation_stats_.get(),
-                          /* interpreter_metadata */ nullptr,
+                          /* interpreter_metadata */ ArrayRef<const uint8_t>(),
                           handles);
     builder.BuildIntrinsicGraph(method);
   }

@@ -31,7 +31,7 @@
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "deoptimization_kind.h"
-#include "dex_file_types.h"
+#include "dex/dex_file_types.h"
 #include "experimental_flags.h"
 #include "gc_root.h"
 #include "instrumentation.h"
@@ -66,6 +66,7 @@ class Throwable;
 }  // namespace mirror
 namespace ti {
 class Agent;
+class AgentSpec;
 }  // namespace ti
 namespace verifier {
 class MethodVerifier;
@@ -660,9 +661,12 @@ class Runtime {
   void AddSystemWeakHolder(gc::AbstractSystemWeakHolder* holder);
   void RemoveSystemWeakHolder(gc::AbstractSystemWeakHolder* holder);
 
-  void AttachAgent(const std::string& agent_arg);
+  void AttachAgent(JNIEnv* env,
+                   const std::string& agent_arg,
+                   jobject class_loader,
+                   bool allow_non_debuggable_tooling = false);
 
-  const std::list<ti::Agent>& GetAgents() const {
+  const std::list<std::unique_ptr<ti::Agent>>& GetAgents() const {
     return agents_;
   }
 
@@ -779,7 +783,8 @@ class Runtime {
   std::string class_path_string_;
   std::vector<std::string> properties_;
 
-  std::list<ti::Agent> agents_;
+  std::list<ti::AgentSpec> agent_specs_;
+  std::list<std::unique_ptr<ti::Agent>> agents_;
   std::vector<Plugin> plugins_;
 
   // The default stack size for managed threads created by the runtime.

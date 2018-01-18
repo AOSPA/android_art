@@ -69,7 +69,8 @@
 #include "class_linker-inl.h"
 #include "compiler_callbacks.h"
 #include "debugger.h"
-#include "dex_file_loader.h"
+#include "dex/art_dex_file_loader.h"
+#include "dex/dex_file_loader.h"
 #include "elf_file.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "experimental_flags.h"
@@ -290,7 +291,22 @@ Runtime::~Runtime() {
   Thread* self = Thread::Current();
   const bool attach_shutdown_thread = self == nullptr;
   if (attach_shutdown_thread) {
-    CHECK(AttachCurrentThread("Shutdown thread", false, nullptr, false));
+    // We can only create a peer if the runtime is actually started. This is only not true during
+    // some tests. If there is extreme memory pressure the allocation of the thread peer can fail.
+    // In this case we will just try again without allocating a peer so that shutdown can continue.
+    // Very few things are actually capable of distinguishing between the peer & peerless states so
+    // this should be fine.
+    bool thread_attached = AttachCurrentThread("Shutdown thread",
+                                               /* as_daemon */ false,
+                                               GetSystemThreadGroup(),
+                                               /* Create peer */ IsStarted());
+    if (UNLIKELY(!thread_attached)) {
+      LOG(WARNING) << "Failed to attach shutdown thread. Trying again without a peer.";
+      CHECK(AttachCurrentThread("Shutdown thread (no java peer)",
+                                /* as_daemon */   false,
+                                /* thread_group*/ nullptr,
+                                /* Create peer */ false));
+    }
     self = Thread::Current();
   } else {
     LOG(WARNING) << "Current thread not detached in Runtime shutdown";
@@ -366,7 +382,7 @@ Runtime::~Runtime() {
 
   // TODO Maybe do some locking.
   for (auto& agent : agents_) {
-    agent.Unload();
+    agent->Unload();
   }
 
   // TODO Maybe do some locking
@@ -1026,6 +1042,7 @@ static size_t OpenDexFiles(const std::vector<std::string>& dex_filenames,
   if (!image_location.empty() && OpenDexFilesFromImage(image_location, dex_files, &failure_count)) {
     return failure_count;
   }
+  const ArtDexFileLoader dex_file_loader;
   failure_count = 0;
   for (size_t i = 0; i < dex_filenames.size(); i++) {
     const char* dex_filename = dex_filenames[i].c_str();
@@ -1036,12 +1053,12 @@ static size_t OpenDexFiles(const std::vector<std::string>& dex_filenames,
       LOG(WARNING) << "Skipping non-existent dex file '" << dex_filename << "'";
       continue;
     }
-    if (!DexFileLoader::Open(dex_filename,
-                             dex_location,
-                             Runtime::Current()->IsVerificationEnabled(),
-                             kVerifyChecksum,
-                             &error_msg,
-                             dex_files)) {
+    if (!dex_file_loader.Open(dex_filename,
+                              dex_location,
+                              Runtime::Current()->IsVerificationEnabled(),
+                              kVerifyChecksum,
+                              &error_msg,
+                              dex_files)) {
       LOG(WARNING) << "Failed to open .dex from file '" << dex_filename << "': " << error_msg;
       ++failure_count;
     }
@@ -1166,7 +1183,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   madvise_random_access_ = runtime_options.GetOrDefault(Opt::MadviseRandomAccess);
 
   plugins_ = runtime_options.ReleaseOrDefault(Opt::Plugins);
-  agents_ = runtime_options.ReleaseOrDefault(Opt::AgentPath);
+  agent_specs_ = runtime_options.ReleaseOrDefault(Opt::AgentPath);
   // TODO Add back in -agentlib
   // for (auto lib : runtime_options.ReleaseOrDefault(Opt::AgentLib)) {
   //   agents_.push_back(lib);
@@ -1498,16 +1515,32 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   // Startup agents
   // TODO Maybe we should start a new thread to run these on. Investigate RI behavior more.
-  for (auto& agent : agents_) {
+  for (auto& agent_spec : agent_specs_) {
     // TODO Check err
     int res = 0;
     std::string err = "";
-    ti::Agent::LoadError result = agent.Load(&res, &err);
-    if (result == ti::Agent::kInitializationError) {
-      LOG(FATAL) << "Unable to initialize agent!";
-    } else if (result != ti::Agent::kNoError) {
-      LOG(ERROR) << "Unable to load an agent: " << err;
+    ti::LoadError error;
+    std::unique_ptr<ti::Agent> agent = agent_spec.Load(&res, &error, &err);
+
+    if (agent != nullptr) {
+      agents_.push_back(std::move(agent));
+      continue;
     }
+
+    switch (error) {
+      case ti::LoadError::kInitializationError:
+        LOG(FATAL) << "Unable to initialize agent!";
+        UNREACHABLE();
+
+      case ti::LoadError::kLoadingError:
+        LOG(ERROR) << "Unable to load an agent: " << err;
+        continue;
+
+      case ti::LoadError::kNoError:
+        break;
+    }
+    LOG(FATAL) << "Unreachable";
+    UNREACHABLE();
   }
   {
     ScopedObjectAccess soa(self);
@@ -1520,6 +1553,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 }
 
 static bool EnsureJvmtiPlugin(Runtime* runtime,
+                              bool allow_non_debuggable_tooling,
                               std::vector<Plugin>* plugins,
                               std::string* error_msg) {
   constexpr const char* plugin_name = kIsDebugBuild ? "libopenjdkjvmtid.so" : "libopenjdkjvmti.so";
@@ -1531,9 +1565,9 @@ static bool EnsureJvmtiPlugin(Runtime* runtime,
     }
   }
 
-  // Is the process debuggable? Otherwise, do not attempt to load the plugin.
-  // TODO Support a crimped jvmti for non-debuggable runtimes.
-  if (!runtime->IsJavaDebuggable()) {
+  // Is the process debuggable? Otherwise, do not attempt to load the plugin unless we are
+  // specifically allowed.
+  if (!allow_non_debuggable_tooling && !runtime->IsJavaDebuggable()) {
     *error_msg = "Process is not debuggable.";
     return false;
   }
@@ -1554,24 +1588,28 @@ static bool EnsureJvmtiPlugin(Runtime* runtime,
 //   revisit this and make sure we're doing this on the right thread
 //   (and we synchronize access to any shared data structures like "agents_")
 //
-void Runtime::AttachAgent(const std::string& agent_arg) {
+void Runtime::AttachAgent(JNIEnv* env,
+                          const std::string& agent_arg,
+                          jobject class_loader,
+                          bool allow_non_debuggable_tooling) {
   std::string error_msg;
-  if (!EnsureJvmtiPlugin(this, &plugins_, &error_msg)) {
+  if (!EnsureJvmtiPlugin(this, allow_non_debuggable_tooling, &plugins_, &error_msg)) {
     LOG(WARNING) << "Could not load plugin: " << error_msg;
     ScopedObjectAccess soa(Thread::Current());
     ThrowIOException("%s", error_msg.c_str());
     return;
   }
 
-  ti::Agent agent(agent_arg);
+  ti::AgentSpec agent_spec(agent_arg);
 
   int res = 0;
-  ti::Agent::LoadError result = agent.Attach(&res, &error_msg);
+  ti::LoadError error;
+  std::unique_ptr<ti::Agent> agent = agent_spec.Attach(env, class_loader, &res, &error, &error_msg);
 
-  if (result == ti::Agent::kNoError) {
+  if (agent != nullptr) {
     agents_.push_back(std::move(agent));
   } else {
-    LOG(WARNING) << "Agent attach failed (result=" << result << ") : " << error_msg;
+    LOG(WARNING) << "Agent attach failed (result=" << error << ") : " << error_msg;
     ScopedObjectAccess soa(Thread::Current());
     ThrowIOException("%s", error_msg.c_str());
   }
@@ -1597,7 +1635,7 @@ void Runtime::InitNativeMethods() {
   // libcore can't because it's the library that implements System.loadLibrary!
   {
     std::string error_msg;
-    if (!java_vm_->LoadNativeLibrary(env, "libjavacore.so", nullptr, nullptr, &error_msg)) {
+    if (!java_vm_->LoadNativeLibrary(env, "libjavacore.so", nullptr, &error_msg)) {
       LOG(FATAL) << "LoadNativeLibrary failed for \"libjavacore.so\": " << error_msg;
     }
   }
@@ -1606,7 +1644,7 @@ void Runtime::InitNativeMethods() {
                                                 ? "libopenjdkd.so"
                                                 : "libopenjdk.so";
     std::string error_msg;
-    if (!java_vm_->LoadNativeLibrary(env, kOpenJdkLibrary, nullptr, nullptr, &error_msg)) {
+    if (!java_vm_->LoadNativeLibrary(env, kOpenJdkLibrary, nullptr, &error_msg)) {
       LOG(FATAL) << "LoadNativeLibrary failed for \"" << kOpenJdkLibrary << "\": " << error_msg;
     }
   }

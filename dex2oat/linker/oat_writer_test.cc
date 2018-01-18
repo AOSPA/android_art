@@ -26,7 +26,7 @@
 #include "compiled_method-inl.h"
 #include "compiler.h"
 #include "debug/method_debug_info.h"
-#include "dex_file_loader.h"
+#include "dex/dex_file_loader.h"
 #include "dex/quick_compiler_callbacks.h"
 #include "dex/verification_results.h"
 #include "driver/compiler_driver.h"
@@ -219,7 +219,8 @@ class OatTest : public CommonCompilerTest {
                                       text_size,
                                       oat_writer.GetBssSize(),
                                       oat_writer.GetBssMethodsOffset(),
-                                      oat_writer.GetBssRootsOffset());
+                                      oat_writer.GetBssRootsOffset(),
+                                      oat_writer.GetVdexSize());
 
     std::unique_ptr<BufferedOutputStream> vdex_out =
         std::make_unique<BufferedOutputStream>(std::make_unique<FileOutputStream>(vdex_file));
@@ -455,7 +456,7 @@ TEST_F(OatTest, WriteRead) {
                                                    ScopedNullHandle<mirror::ClassLoader>());
 
     const OatFile::OatClass oat_class = oat_dex_file->GetOatClass(i);
-    CHECK_EQ(mirror::Class::Status::kStatusNotReady, oat_class.GetStatus()) << descriptor;
+    CHECK_EQ(ClassStatus::kNotReady, oat_class.GetStatus()) << descriptor;
     CHECK_EQ(kCompile ? OatClassType::kOatClassAllCompiled : OatClassType::kOatClassNoneCompiled,
              oat_class.GetType()) << descriptor;
 
@@ -658,7 +659,11 @@ void OatTest::TestDexFileInput(bool verify, bool low_4gb, bool use_profile) {
   ASSERT_EQ(dex_file2_data->GetLocation(), opened_dex_file2->GetLocation());
 
   const VdexFile::Header &vdex_header = opened_oat_file->GetVdexFile()->GetHeader();
-  ASSERT_EQ(vdex_header.GetQuickeningInfoSize(), 0u);
+  if (!compiler_driver_->GetCompilerOptions().IsQuickeningCompilationEnabled()) {
+    // If quickening is enabled we will always write the table since there is no special logic that
+    // checks for all methods not being quickened (not worth the complexity).
+    ASSERT_EQ(vdex_header.GetQuickeningInfoSize(), 0u);
+  }
 
   int64_t actual_vdex_size = vdex_file.GetFile()->GetLength();
   ASSERT_GE(actual_vdex_size, 0);

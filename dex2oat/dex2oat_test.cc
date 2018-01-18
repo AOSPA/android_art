@@ -30,10 +30,12 @@
 #include "base/macros.h"
 #include "base/mutex-inl.h"
 #include "bytecode_utils.h"
+#include "dex/art_dex_file_loader.h"
+#include "dex/code_item_accessors-inl.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file_loader.h"
 #include "dex2oat_environment_test.h"
 #include "dex2oat_return_codes.h"
-#include "dex_file-inl.h"
-#include "dex_file_loader.h"
 #include "jit/profile_compilation_info.h"
 #include "oat.h"
 #include "oat_file.h"
@@ -43,6 +45,7 @@ namespace art {
 
 static constexpr size_t kMaxMethodIds = 65535;
 static constexpr bool kDebugArgs = false;
+static const char* kDisableCompactDex = "--compact-dex-level=none";
 
 using android::base::StringPrintf;
 
@@ -106,6 +109,8 @@ class Dex2oatTest : public Dex2oatEnvironmentTest {
                         [](const OatFile&) {});
   }
 
+  bool test_accepts_odex_file_on_failure = false;
+
   template <typename T>
   void GenerateOdexForTest(
       const std::string& dex_location,
@@ -122,7 +127,7 @@ class Dex2oatTest : public Dex2oatEnvironmentTest {
                                                &error_msg,
                                                extra_args,
                                                use_fd);
-    bool success = (status == 0);
+    bool success = (WIFEXITED(status) && WEXITSTATUS(status) == 0);
     if (expect_success) {
       ASSERT_TRUE(success) << error_msg << std::endl << output_;
 
@@ -144,16 +149,18 @@ class Dex2oatTest : public Dex2oatEnvironmentTest {
 
       error_msg_ = error_msg;
 
-      // Verify there's no loadable odex file.
-      std::unique_ptr<OatFile> odex_file(OatFile::Open(odex_location.c_str(),
-                                                       odex_location.c_str(),
-                                                       nullptr,
-                                                       nullptr,
-                                                       false,
-                                                       /*low_4gb*/false,
-                                                       dex_location.c_str(),
-                                                       &error_msg));
-      ASSERT_TRUE(odex_file.get() == nullptr);
+      if (!test_accepts_odex_file_on_failure) {
+        // Verify there's no loadable odex file.
+        std::unique_ptr<OatFile> odex_file(OatFile::Open(odex_location.c_str(),
+                                                         odex_location.c_str(),
+                                                         nullptr,
+                                                         nullptr,
+                                                         false,
+                                                         /*low_4gb*/false,
+                                                         dex_location.c_str(),
+                                                         &error_msg));
+        ASSERT_TRUE(odex_file.get() == nullptr);
+      }
     }
   }
 
@@ -678,7 +685,8 @@ class Dex2oatLayoutTest : public Dex2oatTest {
     const char* location = dex_location.c_str();
     std::string error_msg;
     std::vector<std::unique_ptr<const DexFile>> dex_files;
-    ASSERT_TRUE(DexFileLoader::Open(
+    const ArtDexFileLoader dex_file_loader;
+    ASSERT_TRUE(dex_file_loader.Open(
         location, location, /* verify */ true, /* verify_checksum */ true, &error_msg, &dex_files));
     EXPECT_EQ(dex_files.size(), 1U);
     std::unique_ptr<const DexFile>& dex_file = dex_files[0];
@@ -775,7 +783,7 @@ class Dex2oatLayoutTest : public Dex2oatTest {
                          app_image_file_name,
                          /* use_fd */ true,
                          /* num_profile_classes */ 1,
-                         { input_vdex, output_vdex });
+                         { input_vdex, output_vdex, kDisableCompactDex });
       EXPECT_GT(vdex_file1->GetLength(), 0u);
     }
     {
@@ -787,7 +795,7 @@ class Dex2oatLayoutTest : public Dex2oatTest {
                          app_image_file_name,
                          /* use_fd */ true,
                          /* num_profile_classes */ 1,
-                         { input_vdex, output_vdex },
+                         { input_vdex, output_vdex, kDisableCompactDex },
                          /* expect_success */ true);
       EXPECT_GT(vdex_file2.GetFile()->GetLength(), 0u);
     }
@@ -813,7 +821,8 @@ class Dex2oatLayoutTest : public Dex2oatTest {
 
     const char* location = dex_location.c_str();
     std::vector<std::unique_ptr<const DexFile>> dex_files;
-    ASSERT_TRUE(DexFileLoader::Open(
+    const ArtDexFileLoader dex_file_loader;
+    ASSERT_TRUE(dex_file_loader.Open(
         location, location, /* verify */ true, /* verify_checksum */ true, &error_msg, &dex_files));
     EXPECT_EQ(dex_files.size(), 1U);
     std::unique_ptr<const DexFile>& old_dex_file = dex_files[0];
@@ -875,8 +884,6 @@ TEST_F(Dex2oatLayoutTest, TestLayoutAppImage) {
 }
 
 TEST_F(Dex2oatLayoutTest, TestVdexLayout) {
-  // Disabled until figure out running compact dex + DexLayout causes quickening errors.
-  TEST_DISABLED_FOR_COMPACT_DEX();
   RunTestVDex();
 }
 
@@ -897,7 +904,7 @@ class Dex2oatUnquickenTest : public Dex2oatTest {
       GenerateOdexForTest(dex_location,
                           odex_location,
                           CompilerFilter::kQuicken,
-                          { input_vdex, output_vdex },
+                          { input_vdex, output_vdex, kDisableCompactDex },
                           /* expect_success */ true,
                           /* use_fd */ true);
       EXPECT_GT(vdex_file1->GetLength(), 0u);
@@ -909,7 +916,7 @@ class Dex2oatUnquickenTest : public Dex2oatTest {
       GenerateOdexForTest(dex_location,
                           odex_location,
                           CompilerFilter::kVerify,
-                          { input_vdex, output_vdex },
+                          { input_vdex, output_vdex, kDisableCompactDex },
                           /* expect_success */ true,
                           /* use_fd */ true);
     }
@@ -943,8 +950,8 @@ class Dex2oatUnquickenTest : public Dex2oatTest {
                class_it.Next()) {
             if (class_it.IsAtMethod() && class_it.GetMethodCodeItem() != nullptr) {
               for (const DexInstructionPcPair& inst :
-                       class_it.GetMethodCodeItem()->Instructions()) {
-                ASSERT_FALSE(inst->IsQuickened());
+                       CodeItemInstructionAccessor(*dex_file, class_it.GetMethodCodeItem())) {
+                ASSERT_FALSE(inst->IsQuickened()) << output_;
               }
             }
           }
@@ -955,8 +962,6 @@ class Dex2oatUnquickenTest : public Dex2oatTest {
 };
 
 TEST_F(Dex2oatUnquickenTest, UnquickenMultiDex) {
-  // Disabled until figure out running compact dex + DexLayout causes quickening errors.
-  TEST_DISABLED_FOR_COMPACT_DEX();
   RunUnquickenMultiDex();
 }
 
@@ -995,7 +1000,12 @@ TEST_F(Dex2oatWatchdogTest, TestWatchdogOK) {
 
 TEST_F(Dex2oatWatchdogTest, TestWatchdogTrigger) {
   TEST_DISABLED_FOR_MEMORY_TOOL_VALGRIND();  // b/63052624
-  TEST_DISABLED_WITHOUT_BAKER_READ_BARRIERS();  // b/63052624
+
+  // The watchdog is independent of dex2oat and will not delete intermediates. It is possible
+  // that the compilation succeeds and the file is completely written by the time the watchdog
+  // kills dex2oat (but the dex2oat threads must have been scheduled pretty badly).
+  test_accepts_odex_file_on_failure = true;
+
   // Check with ten milliseconds.
   RunTest(false, { "--watchdog-timeout=10" });
 }

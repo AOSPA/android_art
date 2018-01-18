@@ -25,8 +25,8 @@
 #include <vector>
 
 #include "base/stl_util.h"
-#include "dex_file-inl.h"
-#include "dex_file_types.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file_types.h"
 #include "leb128.h"
 #include "utf.h"
 
@@ -133,6 +133,7 @@ template<class T> class CollectionVector : public CollectionBase<T> {
 
   uint32_t Size() const { return collection_.size(); }
   Vector& Collection() { return collection_; }
+  const Vector& Collection() const { return collection_; }
 
  protected:
   Vector collection_;
@@ -230,6 +231,8 @@ class Collections {
   CollectionVector<CodeItem>::Vector& CodeItems() { return code_items_.Collection(); }
   CollectionVector<ClassData>::Vector& ClassDatas() { return class_datas_.Collection(); }
 
+  const CollectionVector<ClassDef>::Vector& ClassDefs() const { return class_defs_.Collection(); }
+
   void CreateStringId(const DexFile& dex_file, uint32_t i);
   void CreateTypeId(const DexFile& dex_file, uint32_t i);
   void CreateProtoId(const DexFile& dex_file, uint32_t i);
@@ -251,8 +254,10 @@ class Collections {
       const DexFile::AnnotationSetItem* disk_annotations_item, uint32_t offset);
   AnnotationsDirectoryItem* CreateAnnotationsDirectoryItem(const DexFile& dex_file,
       const DexFile::AnnotationsDirectoryItem* disk_annotations_item, uint32_t offset);
-  CodeItem* CreateCodeItem(
-      const DexFile& dex_file, const DexFile::CodeItem& disk_code_item, uint32_t offset);
+  CodeItem* CreateCodeItem(const DexFile& dex_file,
+                           const DexFile::CodeItem& disk_code_item,
+                           uint32_t offset,
+                           uint32_t dex_method_index);
   ClassData* CreateClassData(const DexFile& dex_file, const uint8_t* encoded_data, uint32_t offset);
   void AddAnnotationsFromMapListSection(const DexFile& dex_file,
                                         uint32_t start_offset,
@@ -524,7 +529,8 @@ class Header : public Item {
          uint32_t link_size,
          uint32_t link_offset,
          uint32_t data_size,
-         uint32_t data_offset)
+         uint32_t data_offset,
+         bool support_default_methods)
       : Item(0, kHeaderItemSize),
         checksum_(checksum),
         endian_tag_(endian_tag),
@@ -533,7 +539,8 @@ class Header : public Item {
         link_size_(link_size),
         link_offset_(link_offset),
         data_size_(data_size),
-        data_offset_(data_offset) {
+        data_offset_(data_offset),
+        support_default_methods_(support_default_methods) {
     memcpy(magic_, magic, sizeof(magic_));
     memcpy(signature_, signature, sizeof(signature_));
   }
@@ -567,6 +574,10 @@ class Header : public Item {
 
   void Accept(AbstractDispatcher* dispatch) { dispatch->Dispatch(this); }
 
+  bool SupportDefaultMethods() const {
+    return support_default_methods_;
+  }
+
  private:
   uint8_t magic_[8];
   uint32_t checksum_;
@@ -578,6 +589,7 @@ class Header : public Item {
   uint32_t link_offset_;
   uint32_t data_size_;
   uint32_t data_offset_;
+  const bool support_default_methods_;
 
   Collections collections_;
 

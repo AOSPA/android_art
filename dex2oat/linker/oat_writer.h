@@ -24,7 +24,7 @@
 
 #include "base/array_ref.h"
 #include "base/dchecked_vector.h"
-#include "cdex/compact_dex_level.h"
+#include "dex/compact_dex_level.h"
 #include "linker/relative_patcher.h"  // For RelativePatcherTargetProvider.
 #include "mem_map.h"
 #include "method_reference.h"
@@ -230,6 +230,10 @@ class OatWriter {
     return bss_roots_offset_;
   }
 
+  size_t GetVdexSize() const {
+    return vdex_size_;
+  }
+
   size_t GetOatDataOffset() const {
     return oat_data_offset_;
   }
@@ -271,7 +275,7 @@ class OatWriter {
   class WriteMapMethodVisitor;
   class WriteMethodInfoVisitor;
   class WriteQuickeningInfoMethodVisitor;
-  class WriteQuickeningIndicesMethodVisitor;
+  class WriteQuickeningInfoOffsetsMethodVisitor;
 
   // Visit all the methods in all the compiled dex files in their definition order
   // with a given DexMethodVisitor.

@@ -31,9 +31,10 @@
 #include "base/time_utils.h"
 #include "class_linker.h"
 #include "compiler_callbacks.h"
-#include "dex_file-inl.h"
-#include "dex_instruction-inl.h"
-#include "dex_instruction_utils.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file_exception_helpers.h"
+#include "dex/dex_instruction-inl.h"
+#include "dex/dex_instruction_utils.h"
 #include "experimental_flags.h"
 #include "gc/accounting/card_table-inl.h"
 #include "handle_scope-inl.h"
@@ -47,6 +48,7 @@
 #include "mirror/method_type.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
+#include "mirror/var_handle.h"
 #include "reg_type-inl.h"
 #include "register_line-inl.h"
 #include "runtime.h"
@@ -567,7 +569,7 @@ MethodVerifier::MethodVerifier(Thread* self,
       dex_cache_(dex_cache),
       class_loader_(class_loader),
       class_def_(class_def),
-      code_item_accessor_(dex_file, code_item),
+      code_item_accessor_(*dex_file, code_item),
       declaring_class_(nullptr),
       interesting_dex_pc_(-1),
       monitor_enter_dex_pcs_(nullptr),
@@ -835,7 +837,7 @@ bool MethodVerifier::Verify() {
           return false;
         } else {
           uint32_t access_flag_options = kAccPublic;
-          if (dex_file_->GetVersion() >= DexFile::kDefaultMethodsVersion) {
+          if (dex_file_->SupportsDefaultMethods()) {
             access_flag_options |= kAccPrivate;
           }
           if (!(method_access_flags_ & access_flag_options)) {
@@ -3140,6 +3142,7 @@ bool MethodVerifier::CodeFlowVerifyInstruction(uint32_t* start_guess) {
       }
       if (!CheckSignaturePolymorphicMethod(called_method) ||
           !CheckSignaturePolymorphicReceiver(inst)) {
+        DCHECK(HasFailures());
         break;
       }
       const uint32_t proto_idx = (is_range) ? inst->VRegH_4rcc() : inst->VRegH_45cc();
@@ -3630,7 +3633,7 @@ bool MethodVerifier::CodeFlowVerifyInstruction(uint32_t* start_guess) {
     bool has_catch_all_handler = false;
     const DexFile::TryItem* try_item = code_item_accessor_.FindTryItem(work_insn_idx_);
     CHECK(try_item != nullptr);
-    CatchHandlerIterator iterator(code_item_accessor_.GetCatchHandlerData(try_item->handler_off_));
+    CatchHandlerIterator iterator(code_item_accessor_, *try_item);
 
     // Need the linker to try and resolve the handled class to check if it's Throwable.
     ClassLinker* linker = Runtime::Current()->GetClassLinker();
@@ -3964,10 +3967,10 @@ ArtMethod* MethodVerifier::ResolveMethodAndCheckAccess(
   //       while this check implies an IncompatibleClassChangeError.
   if (klass->IsInterface()) {
     // methods called on interfaces should be invoke-interface, invoke-super, invoke-direct (if
-    // dex file version is 37 or greater), or invoke-static.
+    // default methods are supported for the dex file), or invoke-static.
     if (method_type != METHOD_INTERFACE &&
         method_type != METHOD_STATIC &&
-        ((dex_file_->GetVersion() < DexFile::kDefaultMethodsVersion) ||
+        (!dex_file_->SupportsDefaultMethods() ||
          method_type != METHOD_DIRECT) &&
         method_type != METHOD_SUPER) {
       Fail(VERIFY_ERROR_CLASS_CHANGE)
@@ -4417,14 +4420,20 @@ ArtMethod* MethodVerifier::VerifyInvocationArgs(
 
 bool MethodVerifier::CheckSignaturePolymorphicMethod(ArtMethod* method) {
   mirror::Class* klass = method->GetDeclaringClass();
-  if (klass != mirror::MethodHandle::StaticClass()) {
+  const char* method_name = method->GetName();
+
+  const char* expected_return_descriptor;
+  if (klass == mirror::MethodHandle::StaticClass()) {
+    expected_return_descriptor = mirror::MethodHandle::GetReturnTypeDescriptor(method_name);
+  } else if (klass == mirror::VarHandle::StaticClass()) {
+    expected_return_descriptor = mirror::VarHandle::GetReturnTypeDescriptor(method_name);
+  } else {
     Fail(VERIFY_ERROR_BAD_CLASS_HARD)
-        << "Signature polymorphic method must be declared in java.lang.invoke.MethodClass";
+        << "Signature polymorphic method in unsuppported class: " << klass->PrettyDescriptor();
     return false;
   }
 
-  const char* method_name = method->GetName();
-  if (strcmp(method_name, "invoke") != 0 && strcmp(method_name, "invokeExact") != 0) {
+  if (expected_return_descriptor == nullptr) {
     Fail(VERIFY_ERROR_BAD_CLASS_HARD)
         << "Signature polymorphic method name invalid: " << method_name;
     return false;
@@ -4446,9 +4455,10 @@ bool MethodVerifier::CheckSignaturePolymorphicMethod(ArtMethod* method) {
   }
 
   const char* return_descriptor = method->GetReturnTypeDescriptor();
-  if (strcmp(return_descriptor, "Ljava/lang/Object;") != 0) {
+  if (strcmp(return_descriptor, expected_return_descriptor) != 0) {
     Fail(VERIFY_ERROR_BAD_CLASS_HARD)
-        << "Signature polymorphic method has unexpected return type: " << return_descriptor;
+        << "Signature polymorphic method has unexpected return type: " << return_descriptor
+        << " != " << expected_return_descriptor;
     return false;
   }
 
@@ -4475,9 +4485,10 @@ bool MethodVerifier::CheckSignaturePolymorphicReceiver(const Instruction* inst) 
         << "invoke-polymorphic receiver has no class: "
         << this_type;
     return false;
-  } else if (!this_type.GetClass()->IsSubClass(mirror::MethodHandle::StaticClass())) {
+  } else if (!this_type.GetClass()->IsSubClass(mirror::MethodHandle::StaticClass()) &&
+             !this_type.GetClass()->IsSubClass(mirror::VarHandle::StaticClass())) {
     Fail(VERIFY_ERROR_BAD_CLASS_HARD)
-        << "invoke-polymorphic receiver is not a subclass of MethodHandle: "
+        << "invoke-polymorphic receiver is not a subclass of MethodHandle or VarHandle: "
         << this_type;
     return false;
   }

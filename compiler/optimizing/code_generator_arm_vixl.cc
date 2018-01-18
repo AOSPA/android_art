@@ -1128,7 +1128,7 @@ class LoadReferenceWithBakerReadBarrierAndUpdateFieldSlowPathARMVIXL
     //
     // Note that this field could also hold a different object, if
     // another thread had concurrently changed it. In that case, the
-    // LDREX/SUBS/ITNE sequence of instructions in the compare-and-set
+    // LDREX/CMP/BNE sequence of instructions in the compare-and-set
     // (CAS) operation below would abort the CAS, leaving the field
     // as-is.
     __ Cmp(temp1_, ref_reg);
@@ -1168,28 +1168,16 @@ class LoadReferenceWithBakerReadBarrierAndUpdateFieldSlowPathARMVIXL
     //   tmp = [r_ptr] - expected;
     // } while (tmp == 0 && failure([r_ptr] <- r_new_value));
 
-    vixl32::Label loop_head, exit_loop;
+    vixl32::Label loop_head, comparison_failed, exit_loop;
     __ Bind(&loop_head);
-
     __ Ldrex(tmp, MemOperand(tmp_ptr));
-
-    __ Subs(tmp, tmp, expected);
-
-    {
-      ExactAssemblyScope aas(arm_codegen->GetVIXLAssembler(),
-                             2 * kMaxInstructionSizeInBytes,
-                             CodeBufferCheckScope::kMaximumSize);
-
-      __ it(ne);
-      __ clrex(ne);
-    }
-
-    __ B(ne, &exit_loop, /* far_target */ false);
-
+    __ Cmp(tmp, expected);
+    __ B(ne, &comparison_failed, /* far_target */ false);
     __ Strex(tmp, value, MemOperand(tmp_ptr));
-    __ Cmp(tmp, 1);
-    __ B(eq, &loop_head, /* far_target */ false);
-
+    __ CompareAndBranchIfZero(tmp, &exit_loop, /* far_target */ false);
+    __ B(&loop_head);
+    __ Bind(&comparison_failed);
+    __ Clrex();
     __ Bind(&exit_loop);
 
     if (kPoisonHeapReferences) {
@@ -5609,42 +5597,13 @@ Location LocationsBuilderARMVIXL::ArmEncodableConstantOrRegister(HInstruction* c
   return Location::RequiresRegister();
 }
 
-bool LocationsBuilderARMVIXL::CanEncodeConstantAsImmediate(HConstant* input_cst,
-                                                           Opcode opcode) {
-  uint64_t value = static_cast<uint64_t>(Int64FromConstant(input_cst));
-  if (DataType::Is64BitType(input_cst->GetType())) {
-    Opcode high_opcode = opcode;
-    SetCc low_set_cc = kCcDontCare;
-    switch (opcode) {
-      case SUB:
-        // Flip the operation to an ADD.
-        value = -value;
-        opcode = ADD;
-        FALLTHROUGH_INTENDED;
-      case ADD:
-        if (Low32Bits(value) == 0u) {
-          return CanEncodeConstantAsImmediate(High32Bits(value), opcode, kCcDontCare);
-        }
-        high_opcode = ADC;
-        low_set_cc = kCcSet;
-        break;
-      default:
-        break;
-    }
-    return CanEncodeConstantAsImmediate(Low32Bits(value), opcode, low_set_cc) &&
-        CanEncodeConstantAsImmediate(High32Bits(value), high_opcode, kCcDontCare);
-  } else {
-    return CanEncodeConstantAsImmediate(Low32Bits(value), opcode);
-  }
-}
-
-// TODO(VIXL): Replace art::arm::SetCc` with `vixl32::FlagsUpdate after flags set optimization
-// enabled.
-bool LocationsBuilderARMVIXL::CanEncodeConstantAsImmediate(uint32_t value,
-                                                           Opcode opcode,
-                                                           SetCc set_cc) {
-  ArmVIXLAssembler* assembler = codegen_->GetAssembler();
-  if (assembler->ShifterOperandCanHold(opcode, value, set_cc)) {
+static bool CanEncode32BitConstantAsImmediate(
+    CodeGeneratorARMVIXL* codegen,
+    uint32_t value,
+    Opcode opcode,
+    vixl32::FlagsUpdate flags_update = vixl32::FlagsUpdate::DontCare) {
+  ArmVIXLAssembler* assembler = codegen->GetAssembler();
+  if (assembler->ShifterOperandCanHold(opcode, value, flags_update)) {
     return true;
   }
   Opcode neg_opcode = kNoOperand;
@@ -5661,11 +5620,39 @@ bool LocationsBuilderARMVIXL::CanEncodeConstantAsImmediate(uint32_t value,
       return false;
   }
 
-  if (assembler->ShifterOperandCanHold(neg_opcode, neg_value, set_cc)) {
+  if (assembler->ShifterOperandCanHold(neg_opcode, neg_value, flags_update)) {
     return true;
   }
 
   return opcode == AND && IsPowerOfTwo(value + 1);
+}
+
+bool LocationsBuilderARMVIXL::CanEncodeConstantAsImmediate(HConstant* input_cst, Opcode opcode) {
+  uint64_t value = static_cast<uint64_t>(Int64FromConstant(input_cst));
+  if (DataType::Is64BitType(input_cst->GetType())) {
+    Opcode high_opcode = opcode;
+    vixl32::FlagsUpdate low_flags_update = vixl32::FlagsUpdate::DontCare;
+    switch (opcode) {
+      case SUB:
+        // Flip the operation to an ADD.
+        value = -value;
+        opcode = ADD;
+        FALLTHROUGH_INTENDED;
+      case ADD:
+        if (Low32Bits(value) == 0u) {
+          return CanEncode32BitConstantAsImmediate(codegen_, High32Bits(value), opcode);
+        }
+        high_opcode = ADC;
+        low_flags_update = vixl32::FlagsUpdate::SetFlags;
+        break;
+      default:
+        break;
+    }
+    return CanEncode32BitConstantAsImmediate(codegen_, High32Bits(value), high_opcode) &&
+           CanEncode32BitConstantAsImmediate(codegen_, Low32Bits(value), opcode, low_flags_update);
+  } else {
+    return CanEncode32BitConstantAsImmediate(codegen_, Low32Bits(value), opcode);
+  }
 }
 
 void InstructionCodeGeneratorARMVIXL::HandleFieldGet(HInstruction* instruction,
@@ -7185,12 +7172,15 @@ void InstructionCodeGeneratorARMVIXL::GenerateClassInitializationCheck(
     LoadClassSlowPathARMVIXL* slow_path, vixl32::Register class_reg) {
   UseScratchRegisterScope temps(GetVIXLAssembler());
   vixl32::Register temp = temps.Acquire();
-  GetAssembler()->LoadFromOffset(kLoadSignedByte,
-                                 temp,
-                                 class_reg,
-                                 mirror::Class::StatusOffset().Int32Value());
-  __ Cmp(temp, mirror::Class::kStatusInitialized);
-  __ B(lt, slow_path->GetEntryLabel());
+  constexpr size_t status_lsb_position = SubtypeCheckBits::BitStructSizeOf();
+  const size_t status_byte_offset =
+      mirror::Class::StatusOffset().SizeValue() + (status_lsb_position / kBitsPerByte);
+  constexpr uint32_t shifted_initialized_value =
+      enum_cast<uint32_t>(ClassStatus::kInitialized) << (status_lsb_position % kBitsPerByte);
+
+  GetAssembler()->LoadFromOffset(kLoadUnsignedByte, temp, class_reg, status_byte_offset);
+  __ Cmp(temp, shifted_initialized_value);
+  __ B(lo, slow_path->GetEntryLabel());
   // Even if the initialized flag is set, we may be in a situation where caches are not synced
   // properly. Therefore, we do a memory fence.
   __ Dmb(ISH);
@@ -8143,13 +8133,11 @@ void InstructionCodeGeneratorARMVIXL::GenerateAddLongConst(Location out,
     return;
   }
   __ Adds(out_low, first_low, value_low);
-  if (GetAssembler()->ShifterOperandCanHold(ADC, value_high, kCcDontCare)) {
+  if (GetAssembler()->ShifterOperandCanHold(ADC, value_high)) {
     __ Adc(out_high, first_high, value_high);
-  } else if (GetAssembler()->ShifterOperandCanHold(SBC, ~value_high, kCcDontCare)) {
-    __ Sbc(out_high, first_high, ~value_high);
   } else {
-    LOG(FATAL) << "Unexpected constant " << value_high;
-    UNREACHABLE();
+    DCHECK(GetAssembler()->ShifterOperandCanHold(SBC, ~value_high));
+    __ Sbc(out_high, first_high, ~value_high);
   }
 }
 

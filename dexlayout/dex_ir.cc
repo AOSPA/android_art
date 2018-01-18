@@ -22,8 +22,9 @@
 
 #include "dex_ir.h"
 
-#include "code_item_accessors-inl.h"
-#include "dex_instruction-inl.h"
+#include "dex/code_item_accessors-inl.h"
+#include "dex/dex_file_exception_helpers.h"
+#include "dex/dex_instruction-inl.h"
 #include "dex_ir_builder.h"
 
 namespace art {
@@ -565,8 +566,10 @@ ParameterAnnotation* Collections::GenerateParameterAnnotation(
 }
 
 CodeItem* Collections::CreateCodeItem(const DexFile& dex_file,
-                                      const DexFile::CodeItem& disk_code_item, uint32_t offset) {
-  CodeItemDebugInfoAccessor accessor(&dex_file, &disk_code_item);
+                                      const DexFile::CodeItem& disk_code_item,
+                                      uint32_t offset,
+                                      uint32_t dex_method_index) {
+  CodeItemDebugInfoAccessor accessor(dex_file, &disk_code_item, dex_method_index);
   const uint16_t registers_size = accessor.RegistersSize();
   const uint16_t ins_size = accessor.InsSize();
   const uint16_t outs_size = accessor.OutsSize();
@@ -610,7 +613,7 @@ CodeItem* Collections::CreateCodeItem(const DexFile& dex_file,
       if (handlers == nullptr) {
         bool catch_all = false;
         TypeAddrPairVector* addr_pairs = new TypeAddrPairVector();
-        for (CatchHandlerIterator it(disk_code_item, disk_try_item); it.HasNext(); it.Next()) {
+        for (CatchHandlerIterator it(accessor, disk_try_item); it.HasNext(); it.Next()) {
           const dex::TypeIndex type_index = it.GetHandlerTypeIndex();
           const TypeId* type_id = GetTypeIdOrNullPtr(type_index.index_);
           catch_all |= type_id == nullptr;
@@ -668,7 +671,7 @@ CodeItem* Collections::CreateCodeItem(const DexFile& dex_file,
     }
   }
 
-  uint32_t size = DexFile::GetCodeItemSize(disk_code_item);
+  uint32_t size = dex_file.GetCodeItemSize(disk_code_item);
   CodeItem* code_item = new CodeItem(
       registers_size, ins_size, outs_size, debug_info, insns_size, insns, tries, handler_list);
   code_item->SetSize(size);
@@ -704,7 +707,10 @@ MethodItem* Collections::GenerateMethodItem(const DexFile& dex_file, ClassDataIt
   DebugInfoItem* debug_info = nullptr;
   if (disk_code_item != nullptr) {
     if (code_item == nullptr) {
-      code_item = CreateCodeItem(dex_file, *disk_code_item, cdii.GetMethodCodeItemOffset());
+      code_item = CreateCodeItem(dex_file,
+                                 *disk_code_item,
+                                 cdii.GetMethodCodeItemOffset(),
+                                 cdii.GetMemberIndex());
     }
     debug_info = code_item->DebugInfo();
   }

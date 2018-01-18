@@ -25,9 +25,9 @@
 #include "base/macros.h"
 #include "base/scoped_arena_containers.h"
 #include "base/value_object.h"
-#include "code_item_accessors.h"
-#include "dex_file.h"
-#include "dex_file_types.h"
+#include "dex/code_item_accessors.h"
+#include "dex/dex_file.h"
+#include "dex/dex_file_types.h"
 #include "handle.h"
 #include "instruction_flags.h"
 #include "method_reference.h"
@@ -125,10 +125,6 @@ class MethodVerifier {
   const DexFile& GetDexFile() const {
     DCHECK(dex_file_ != nullptr);
     return *dex_file_;
-  }
-
-  uint32_t DexFileVersion() const {
-    return dex_file_->GetVersion();
   }
 
   RegTypeCache* GetRegTypeCache() {

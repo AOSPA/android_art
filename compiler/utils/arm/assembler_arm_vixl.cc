@@ -112,12 +112,14 @@ bool ArmVIXLAssembler::ShifterOperandCanAlwaysHold(uint32_t immediate) {
   return vixl_masm_.IsModifiedImmediate(immediate);
 }
 
-bool ArmVIXLAssembler::ShifterOperandCanHold(Opcode opcode, uint32_t immediate, SetCc set_cc) {
+bool ArmVIXLAssembler::ShifterOperandCanHold(Opcode opcode,
+                                             uint32_t immediate,
+                                             vixl::aarch32::FlagsUpdate update_flags) {
   switch (opcode) {
     case ADD:
     case SUB:
       // Less than (or equal to) 12 bits can be done if we don't need to set condition codes.
-      if (IsUint<12>(immediate) && set_cc != kCcSet) {
+      if (IsUint<12>(immediate) && update_flags != vixl::aarch32::SetFlags) {
         return true;
       }
       return ShifterOperandCanAlwaysHold(immediate);
@@ -483,13 +485,9 @@ void ArmVIXLMacroAssembler::CompareAndBranchIfNonZero(vixl32::Register rn,
 
 void ArmVIXLMacroAssembler::B(vixl32::Label* label) {
   if (!label->IsBound()) {
-    // Try to use 16-bit T2 encoding of B instruction.
+    // Try to use a 16-bit encoding of the B instruction.
     DCHECK(OutsideITBlock());
-    ExactAssemblyScope guard(this,
-                             k16BitT32InstructionSizeInBytes,
-                             CodeBufferCheckScope::kMaximumSize);
-    b(al, Narrow, label);
-    AddBranchLabel(label);
+    BPreferNear(label);
     return;
   }
   MacroAssembler::B(label);
@@ -497,18 +495,11 @@ void ArmVIXLMacroAssembler::B(vixl32::Label* label) {
 
 void ArmVIXLMacroAssembler::B(vixl32::Condition cond, vixl32::Label* label, bool is_far_target) {
   if (!label->IsBound() && !is_far_target) {
-    // Try to use 16-bit T2 encoding of B instruction.
+    // Try to use a 16-bit encoding of the B instruction.
     DCHECK(OutsideITBlock());
-    ExactAssemblyScope guard(this,
-                             k16BitT32InstructionSizeInBytes,
-                             CodeBufferCheckScope::kMaximumSize);
-    b(cond, Narrow, label);
-    AddBranchLabel(label);
+    BPreferNear(cond, label);
     return;
   }
-  // To further reduce the Bcc encoding size and use 16-bit T1 encoding,
-  // we can provide a hint to this function: i.e. far_target=false.
-  // By default this function uses 'EncodingSizeType::Best' which generates 32-bit T3 encoding.
   MacroAssembler::B(cond, label);
 }
 

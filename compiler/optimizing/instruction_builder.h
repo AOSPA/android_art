@@ -17,12 +17,13 @@
 #ifndef ART_COMPILER_OPTIMIZING_INSTRUCTION_BUILDER_H_
 #define ART_COMPILER_OPTIMIZING_INSTRUCTION_BUILDER_H_
 
+#include "base/array_ref.h"
 #include "base/scoped_arena_allocator.h"
 #include "base/scoped_arena_containers.h"
-#include "code_item_accessors.h"
 #include "data_type.h"
-#include "dex_file.h"
-#include "dex_file_types.h"
+#include "dex/code_item_accessors.h"
+#include "dex/dex_file.h"
+#include "dex/dex_file_types.h"
 #include "handle.h"
 #include "nodes.h"
 #include "quicken_info.h"
@@ -57,7 +58,7 @@ class HInstructionBuilder : public ValueObject {
                       const DexCompilationUnit* outer_compilation_unit,
                       CompilerDriver* compiler_driver,
                       CodeGenerator* code_generator,
-                      const uint8_t* interpreter_metadata,
+                      ArrayRef<const uint8_t> interpreter_metadata,
                       OptimizingCompilerStats* compiler_stats,
                       VariableSizedHandleScope* handles,
                       ScopedArenaAllocator* local_allocator);

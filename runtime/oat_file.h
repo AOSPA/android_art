@@ -24,11 +24,12 @@
 #include "base/array_ref.h"
 #include "base/mutex.h"
 #include "base/stringpiece.h"
+#include "class_status.h"
 #include "compiler_filter.h"
-#include "dex_file.h"
-#include "dex_file_layout.h"
+#include "dex/dex_file.h"
+#include "dex/dex_file_layout.h"
 #include "index_bss_mapping.h"
-#include "mirror/class.h"
+#include "mirror/object.h"
 #include "oat.h"
 #include "os.h"
 #include "type_lookup_table.h"
@@ -114,10 +115,6 @@ class OatFile {
                                const char* abs_dex_location,
                                std::string* error_msg);
 
-  // Return the actual debug info offset for an offset that might be actually pointing to
-  // dequickening info. The returned debug info offset is the one originally in the the dex file.
-  static uint32_t GetDebugInfoOffset(const DexFile& dex_file, uint32_t debug_info_off);
-
   virtual ~OatFile();
 
   bool IsExecutable() const {
@@ -196,7 +193,7 @@ class OatFile {
 
   class OatClass FINAL {
    public:
-    mirror::Class::Status GetStatus() const {
+    ClassStatus GetStatus() const {
       return status_;
     }
 
@@ -224,7 +221,7 @@ class OatFile {
     // See FindOatClass().
     static OatClass Invalid() {
       return OatClass(/* oat_file */ nullptr,
-                      mirror::Class::kStatusErrorUnresolved,
+                      ClassStatus::kErrorUnresolved,
                       kOatClassNoneCompiled,
                       /* bitmap_size */ 0,
                       /* bitmap_pointer */ nullptr,
@@ -233,7 +230,7 @@ class OatFile {
 
    private:
     OatClass(const OatFile* oat_file,
-             mirror::Class::Status status,
+             ClassStatus status,
              OatClassType type,
              uint32_t bitmap_size,
              const uint32_t* bitmap_pointer,
@@ -241,7 +238,7 @@ class OatFile {
 
     const OatFile* const oat_file_;
 
-    const mirror::Class::Status status_;
+    const ClassStatus status_;
 
     const OatClassType type_;
 
@@ -278,6 +275,10 @@ class OatFile {
     return BssEnd() - BssBegin();
   }
 
+  size_t VdexSize() const {
+    return VdexEnd() - VdexBegin();
+  }
+
   size_t BssMethodsOffset() const {
     // Note: This is used only for symbolizer and needs to return a valid .bss offset.
     return (bss_methods_ != nullptr) ? bss_methods_ - BssBegin() : BssRootsOffset();
@@ -297,6 +298,9 @@ class OatFile {
 
   const uint8_t* BssBegin() const;
   const uint8_t* BssEnd() const;
+
+  const uint8_t* VdexBegin() const;
+  const uint8_t* VdexEnd() const;
 
   const uint8_t* DexBegin() const;
   const uint8_t* DexEnd() const;
@@ -356,6 +360,12 @@ class OatFile {
 
   // Was this oat_file loaded executable?
   const bool is_executable_;
+
+  // Pointer to the .vdex section, if present, otherwise null.
+  uint8_t* vdex_begin_;
+
+  // Pointer to the end of the .vdex section, if present, otherwise null.
+  uint8_t* vdex_end_;
 
   // Owning storage for the OatDexFile objects.
   std::vector<const OatDexFile*> oat_dex_files_storage_;

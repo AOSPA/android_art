@@ -21,6 +21,71 @@
 JIT_DEBUG_REGISTER_CODE_LDFLAGS = ["-Wl,--keep-unique,__jit_debug_register_code"]
 
 cc_defaults {
+    name: "libdexfile_defaults",
+    defaults: ["art_defaults"],
+    host_supported: true,
+    srcs: [
+        "dex/compact_dex_debug_info.cc",
+        "dex/compact_dex_file.cc",
+        "dex/dex_file.cc",
+        "dex/dex_file_exception_helpers.cc",
+        "dex/dex_file_loader.cc",
+        "dex/dex_file_tracking_registrar.cc",
+        "dex/dex_file_verifier.cc",
+        "dex/dex_instruction.cc",
+        "dex/standard_dex_file.cc",
+        "utf.cc",
+        "utils.cc",
+    ],
+
+    target: {
+        android: {
+            shared_libs: [
+                "libutils",
+            ],
+            static_libs: [
+                "libz",
+                "libbase",
+            ],
+        },
+        host: {
+            shared_libs: [
+                "libz",
+            ],
+        },
+    },
+    generated_sources: ["art_operator_srcs"],
+    // asm_support_gen.h (used by asm_support.h) is generated with cpp-define-generator
+    generated_headers: ["cpp-define-generator-asm-support"],
+    // export our headers so the libart-gtest targets can use it as well.
+    export_generated_headers: ["cpp-define-generator-asm-support"],
+    include_dirs: [
+        "external/icu/icu4c/source/common",
+        "external/zlib",
+    ],
+    shared_libs: [
+        "liblog",
+        // For common macros.
+        "libbase",
+    ],
+    export_include_dirs: ["."],
+    // ART's macros.h depends on libbase's macros.h.
+    // Note: runtime_options.h depends on cmdline. But we don't really want to export this
+    //       generically. dex2oat takes care of it itself.
+    export_shared_lib_headers: ["libbase"],
+}
+
+art_cc_library {
+    name: "libdexfile",
+    defaults: ["libdexfile_defaults"],
+    // Leave the symbols in the shared library so that stack unwinders can
+    // produce meaningful name resolution.
+    strip: {
+        keep_symbols: true,
+    },
+}
+
+cc_defaults {
     name: "libart_defaults",
     defaults: ["art_defaults"],
     host_supported: true,
@@ -48,7 +113,6 @@ cc_defaults {
         "base/timing_logger.cc",
         "base/unix_file/fd_file.cc",
         "base/unix_file/random_access_file_utils.cc",
-        "cdex/compact_dex_file.cc",
         "cha.cc",
         "check_jni.cc",
         "class_linker.cc",
@@ -57,13 +121,18 @@ cc_defaults {
         "common_throws.cc",
         "compiler_filter.cc",
         "debugger.cc",
-        "dex_file.cc",
-        "dex_file_loader.cc",
-        "dex_file_annotations.cc",
-        "dex_file_layout.cc",
-        "dex_file_tracking_registrar.cc",
-        "dex_file_verifier.cc",
-        "dex_instruction.cc",
+        "dex/compact_dex_debug_info.cc",
+        "dex/compact_dex_file.cc",
+        "dex/dex_file.cc",
+        "dex/dex_file_annotations.cc",
+        "dex/dex_file_exception_helpers.cc",
+        "dex/dex_file_layout.cc",
+        "dex/dex_file_loader.cc",
+        "dex/art_dex_file_loader.cc",
+        "dex/dex_file_tracking_registrar.cc",
+        "dex/dex_file_verifier.cc",
+        "dex/dex_instruction.cc",
+        "dex/standard_dex_file.cc",
         "dex_to_dex_decompiler.cc",
         "elf_file.cc",
         "exec_utils.cc",
@@ -213,7 +282,6 @@ cc_defaults {
         "signal_catcher.cc",
         "stack.cc",
         "stack_map.cc",
-        "standard_dex_file.cc",
         "thread.cc",
         "thread_list.cc",
         "thread_pool.cc",
@@ -453,10 +521,10 @@ gensrcs {
         "debugger.h",
         "base/unix_file/fd_file.h",
         "class_status.h",
-        "dex_file.h",
-        "dex_file_layout.h",
-        "dex_instruction.h",
-        "dex_instruction_utils.h",
+        "dex/dex_file.h",
+        "dex/dex_file_layout.h",
+        "dex/dex_instruction.h",
+        "dex/dex_instruction_utils.h",
         "gc_root.h",
         "gc/allocator_type.h",
         "gc/allocator/rosalloc.h",
@@ -565,16 +633,17 @@ art_cc_test {
         "base/transform_iterator_test.cc",
         "base/variant_map_test.cc",
         "base/unix_file/fd_file_test.cc",
-        "cdex/compact_dex_file_test.cc",
         "cha_test.cc",
         "class_linker_test.cc",
         "class_loader_context_test.cc",
         "class_table_test.cc",
-        "code_item_accessors_test.cc",
         "compiler_filter_test.cc",
-        "dex_file_test.cc",
-        "dex_file_verifier_test.cc",
-        "dex_instruction_test.cc",
+        "dex/code_item_accessors_test.cc",
+        "dex/compact_dex_debug_info_test.cc",
+        "dex/compact_dex_file_test.cc",
+        "dex/dex_file_test.cc",
+        "dex/dex_file_verifier_test.cc",
+        "dex/dex_instruction_test.cc",
         "entrypoints/math_entrypoints_test.cc",
         "entrypoints/quick/quick_trampoline_entrypoints_test.cc",
         "entrypoints_order_test.cc",

@@ -21,15 +21,16 @@
 
 #include <android-base/logging.h>
 
+#include "base/array_ref.h"
 #include "base/bit_utils.h"
 #include "base/casts.h"
 #include "base/enums.h"
 #include "base/iteration_range.h"
 #include "base/macros.h"
 #include "base/runtime_debug.h"
-#include "code_item_accessors.h"
-#include "dex_file.h"
-#include "dex_instruction_iterator.h"
+#include "dex/code_item_accessors.h"
+#include "dex/dex_file.h"
+#include "dex/dex_instruction_iterator.h"
 #include "gc_root.h"
 #include "modifiers.h"
 #include "obj_ptr.h"
@@ -662,7 +663,7 @@ class ArtMethod FINAL {
     return hotness_count_;
   }
 
-  const uint8_t* GetQuickenedInfo() REQUIRES_SHARED(Locks::mutator_lock_);
+  ArrayRef<const uint8_t> GetQuickenedInfo() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Returns the method header for the compiled code containing 'pc'. Note that runtime
   // methods will return null for this method, as they are not oat based.

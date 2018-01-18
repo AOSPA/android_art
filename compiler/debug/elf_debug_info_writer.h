@@ -22,14 +22,14 @@
 #include <vector>
 
 #include "art_field-inl.h"
-#include "code_item_accessors-inl.h"
 #include "debug/dwarf/debug_abbrev_writer.h"
 #include "debug/dwarf/debug_info_entry_writer.h"
 #include "debug/elf_compilation_unit.h"
 #include "debug/elf_debug_loc_writer.h"
 #include "debug/method_debug_info.h"
-#include "dex_file-inl.h"
-#include "dex_file.h"
+#include "dex/code_item_accessors-inl.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file.h"
 #include "heap_poisoning.h"
 #include "linear_alloc.h"
 #include "linker/elf_builder.h"
@@ -49,7 +49,7 @@ static void LocalInfoCallback(void* ctx, const DexFile::LocalInfo& entry) {
 
 static std::vector<const char*> GetParamNames(const MethodDebugInfo* mi) {
   std::vector<const char*> names;
-  CodeItemDebugInfoAccessor accessor(mi->dex_file, mi->code_item);
+  CodeItemDebugInfoAccessor accessor(*mi->dex_file, mi->code_item, mi->dex_method_index);
   if (accessor.HasCodeItem()) {
     DCHECK(mi->dex_file != nullptr);
     const uint8_t* stream = mi->dex_file->GetDebugInfoStream(accessor.DebugInfoOffset());
@@ -163,7 +163,7 @@ class ElfCompilationUnitWriter {
     for (auto mi : compilation_unit.methods) {
       DCHECK(mi->dex_file != nullptr);
       const DexFile* dex = mi->dex_file;
-      CodeItemDebugInfoAccessor accessor(dex, mi->code_item);
+      CodeItemDebugInfoAccessor accessor(*dex, mi->code_item, mi->dex_method_index);
       const DexFile::MethodId& dex_method = dex->GetMethodId(mi->dex_method_index);
       const DexFile::ProtoId& dex_proto = dex->GetMethodPrototype(dex_method);
       const DexFile::TypeList* dex_params = dex->GetProtoParameters(dex_proto);

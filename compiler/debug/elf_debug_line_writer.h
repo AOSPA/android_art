@@ -24,7 +24,7 @@
 #include "debug/dwarf/headers.h"
 #include "debug/elf_compilation_unit.h"
 #include "debug/src_map_elem.h"
-#include "dex_file-inl.h"
+#include "dex/dex_file-inl.h"
 #include "linker/elf_builder.h"
 #include "oat_file.h"
 #include "stack_map.h"
@@ -159,7 +159,7 @@ class ElfDebugLineWriter {
       PositionInfos dex2line_map;
       DCHECK(mi->dex_file != nullptr);
       const DexFile* dex = mi->dex_file;
-      CodeItemDebugInfoAccessor accessor(dex, mi->code_item);
+      CodeItemDebugInfoAccessor accessor(*dex, mi->code_item, mi->dex_method_index);
       const uint32_t debug_info_offset = accessor.DebugInfoOffset();
       if (!dex->DecodeDebugPositionInfo(debug_info_offset, PositionInfoCallback, &dex2line_map)) {
         continue;

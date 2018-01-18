@@ -21,9 +21,9 @@
 #include "builder.h"
 #include "code_generator.h"
 #include "code_generator_x86.h"
-#include "dex_file.h"
-#include "dex_file_types.h"
-#include "dex_instruction.h"
+#include "dex/dex_file.h"
+#include "dex/dex_file_types.h"
+#include "dex/dex_instruction.h"
 #include "driver/compiler_options.h"
 #include "nodes.h"
 #include "optimizing_unit_test.h"
@@ -46,7 +46,7 @@ class RegisterAllocatorTest : public OptimizingUnitTest {
   void ExpectedInRegisterHint(Strategy strategy);
 
   // Helper functions that make use of the OptimizingUnitTest's members.
-  bool Check(const uint16_t* data, Strategy strategy);
+  bool Check(const std::vector<uint16_t>& data, Strategy strategy);
   void CFG1(Strategy strategy);
   void Loop1(Strategy strategy);
   void Loop2(Strategy strategy);
@@ -79,7 +79,7 @@ TEST_F(RegisterAllocatorTest, test_name##_GraphColor) {\
   test_name(Strategy::kRegisterAllocatorGraphColor);\
 }
 
-bool RegisterAllocatorTest::Check(const uint16_t* data, Strategy strategy) {
+bool RegisterAllocatorTest::Check(const std::vector<uint16_t>& data, Strategy strategy) {
   HGraph* graph = CreateCFG(data);
   std::unique_ptr<const X86InstructionSetFeatures> features_x86(
       X86InstructionSetFeatures::FromCppDefines());
@@ -185,7 +185,7 @@ void RegisterAllocatorTest::CFG1(Strategy strategy) {
    *        |
    *       exit
    */
-  const uint16_t data[] = ONE_REGISTER_CODE_ITEM(
+  const std::vector<uint16_t> data = ONE_REGISTER_CODE_ITEM(
     Instruction::CONST_4 | 0 | 0,
     Instruction::RETURN);
 
@@ -222,7 +222,7 @@ void RegisterAllocatorTest::Loop1(Strategy strategy) {
    *       exit
    */
 
-  const uint16_t data[] = TWO_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = TWO_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 0 | 0,
     Instruction::IF_EQ, 4,
     Instruction::CONST_4 | 4 << 12 | 0,
@@ -268,7 +268,7 @@ void RegisterAllocatorTest::Loop2(Strategy strategy) {
    *       exit
    */
 
-  const uint16_t data[] = TWO_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = TWO_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 0 | 0,
     Instruction::CONST_4 | 8 << 12 | 1 << 8,
     Instruction::IF_EQ | 1 << 8, 7,
@@ -314,7 +314,7 @@ void RegisterAllocatorTest::Loop3(Strategy strategy) {
    *       exit
    */
 
-  const uint16_t data[] = THREE_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = THREE_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 0 | 0,
     Instruction::ADD_INT_LIT8 | 1 << 8, 1 << 8,
     Instruction::CONST_4 | 5 << 12 | 2 << 8,
@@ -351,7 +351,7 @@ void RegisterAllocatorTest::Loop3(Strategy strategy) {
 TEST_ALL_STRATEGIES(Loop3);
 
 TEST_F(RegisterAllocatorTest, FirstRegisterUse) {
-  const uint16_t data[] = THREE_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = THREE_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 0 | 0,
     Instruction::XOR_INT_LIT8 | 1 << 8, 1 << 8,
     Instruction::XOR_INT_LIT8 | 0 << 8, 1 << 8,
@@ -402,7 +402,7 @@ void RegisterAllocatorTest::DeadPhi(Strategy strategy) {
    *  } while (true);
    */
 
-  const uint16_t data[] = TWO_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = TWO_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 0 | 0,
     Instruction::CONST_4 | 1 << 8 | 0,
     Instruction::IF_NE | 1 << 8 | 1 << 12, 3,
@@ -432,7 +432,7 @@ TEST_ALL_STRATEGIES(DeadPhi);
  * This test only applies to the linear scan allocator.
  */
 TEST_F(RegisterAllocatorTest, FreeUntil) {
-  const uint16_t data[] = TWO_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = TWO_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 0 | 0,
     Instruction::RETURN);
 

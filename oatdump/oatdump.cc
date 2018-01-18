@@ -37,12 +37,12 @@
 #include "base/unix_file/fd_file.h"
 #include "class_linker-inl.h"
 #include "class_linker.h"
-#include "code_item_accessors-inl.h"
 #include "compiled_method.h"
 #include "debug/elf_debug_writer.h"
 #include "debug/method_debug_info.h"
-#include "dex_file-inl.h"
-#include "dex_instruction-inl.h"
+#include "dex/code_item_accessors-inl.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_instruction-inl.h"
 #include "disassembler.h"
 #include "gc/accounting/space_bitmap-inl.h"
 #include "gc/space/image_space.h"
@@ -171,7 +171,8 @@ class OatSymbolizer FINAL {
                                     text_size,
                                     oat_file_->BssSize(),
                                     oat_file_->BssMethodsOffset(),
-                                    oat_file_->BssRootsOffset());
+                                    oat_file_->BssRootsOffset(),
+                                    oat_file_->VdexSize());
     builder_->WriteDynamicSection();
 
     const OatHeader& oat_header = oat_file_->GetOatHeader();
@@ -717,7 +718,6 @@ class OatDumper {
     }
 
     vdex_file->Unquicken(MakeNonOwningPointerVector(tmp_dex_files),
-                         vdex_file->GetQuickeningInfo(),
                          /* decompile_return_instruction */ true);
 
     *dex_files = std::move(tmp_dex_files);
@@ -993,7 +993,7 @@ class OatDumper {
       if (code_item == nullptr) {
         return;
       }
-      CodeItemInstructionAccessor instructions(&dex_file, code_item);
+      CodeItemInstructionAccessor instructions(dex_file, code_item);
 
       // If we inserted a new dex code item pointer, add to total code bytes.
       const uint16_t* code_ptr = instructions.Insns();
@@ -1261,7 +1261,7 @@ class OatDumper {
                      bool* addr_found) {
     bool success = true;
 
-    CodeItemDataAccessor code_item_accessor(&dex_file, code_item);
+    CodeItemDataAccessor code_item_accessor(dex_file, code_item);
 
     // TODO: Support regex
     std::string method_name = dex_file.GetMethodName(dex_file.GetMethodId(dex_method_idx));
@@ -2375,10 +2375,10 @@ class ImageDumper {
         PrettyObjectValue(os, value_class, value);
       }
     } else if (obj->IsClass()) {
-      mirror::Class* klass = obj->AsClass();
+      ObjPtr<mirror::Class> klass = obj->AsClass();
 
       os << "SUBTYPE_CHECK_BITS: ";
-      SubtypeCheck<mirror::Class*>::Dump(klass, os);
+      SubtypeCheck<ObjPtr<mirror::Class>>::Dump(klass, os);
       os << "\n";
 
       if (klass->NumStaticFields() != 0) {
