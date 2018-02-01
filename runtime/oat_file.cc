@@ -620,14 +620,6 @@ bool OatFileBase::Setup(const char* abs_dex_location, std::string* error_msg) {
                                 dex_file_location.c_str());
       return false;
     }
-    if (UNLIKELY(dex_file_offset == 0U)) {
-      *error_msg = StringPrintf("In oat file '%s' found OatDexFile #%zu for '%s' with zero dex "
-                                    "file offset",
-                                GetLocation().c_str(),
-                                i,
-                                dex_file_location.c_str());
-      return false;
-    }
     if (UNLIKELY(dex_file_offset > DexSize())) {
       *error_msg = StringPrintf("In oat file '%s' found OatDexFile #%zu for '%s' with dex file "
                                     "offset %u > %zu",
@@ -638,19 +630,44 @@ bool OatFileBase::Setup(const char* abs_dex_location, std::string* error_msg) {
                                 DexSize());
       return false;
     }
-    if (UNLIKELY(DexSize() - dex_file_offset < sizeof(DexFile::Header))) {
-      *error_msg = StringPrintf("In oat file '%s' found OatDexFile #%zu for '%s' with dex file "
-                                    "offset %u of %zu but the size of dex file header is %zu",
-                                GetLocation().c_str(),
-                                i,
-                                dex_file_location.c_str(),
-                                dex_file_offset,
-                                DexSize(),
-                                sizeof(DexFile::Header));
-      return false;
+    const uint8_t* dex_file_pointer = nullptr;
+    if (UNLIKELY(dex_file_offset == 0U)) {
+      if (uncompressed_dex_files_ == nullptr) {
+        uncompressed_dex_files_.reset(new std::vector<std::unique_ptr<const DexFile>>());
+        // No dex files, load it from location.
+        const ArtDexFileLoader dex_file_loader;
+        if (!dex_file_loader.Open(dex_file_location.c_str(),
+                                  dex_file_location,
+                                  /* verify */ false,
+                                  /* verify_checksum */ false,
+                                  error_msg,
+                                  uncompressed_dex_files_.get())) {
+          if (Runtime::Current() == nullptr) {
+            // If there's no runtime, we're running oatdump, so return
+            // a half constructed oat file that oatdump knows how to deal with.
+            LOG(WARNING) << "Could not find associated dex files of oat file. "
+                         << "Oatdump will only dump the header.";
+            return true;
+          } else {
+            return false;
+          }
+        }
+      }
+      dex_file_pointer = uncompressed_dex_files_.get()->at(i)->Begin();
+    } else {
+      if (UNLIKELY(DexSize() - dex_file_offset < sizeof(DexFile::Header))) {
+        *error_msg = StringPrintf("In oat file '%s' found OatDexFile #%zu for '%s' with dex file "
+                                      "offset %u of %zu but the size of dex file header is %zu",
+                                  GetLocation().c_str(),
+                                  i,
+                                  dex_file_location.c_str(),
+                                  dex_file_offset,
+                                  DexSize(),
+                                  sizeof(DexFile::Header));
+        return false;
+      }
+      dex_file_pointer = DexBegin() + dex_file_offset;
     }
-
-    const uint8_t* dex_file_pointer = DexBegin() + dex_file_offset;
 
     const bool valid_magic = DexFileLoader::IsMagicValid(dex_file_pointer);
     if (UNLIKELY(!valid_magic)) {
@@ -672,7 +689,7 @@ bool OatFileBase::Setup(const char* abs_dex_location, std::string* error_msg) {
       return false;
     }
     const DexFile::Header* header = reinterpret_cast<const DexFile::Header*>(dex_file_pointer);
-    if (DexSize() - dex_file_offset < header->file_size_) {
+    if (dex_file_offset != 0 && (DexSize() - dex_file_offset < header->file_size_)) {
       *error_msg = StringPrintf("In oat file '%s' found OatDexFile #%zu for '%s' with dex file "
                                     "offset %u and size %u truncated at %zu",
                                 GetLocation().c_str(),
@@ -1297,13 +1314,15 @@ bool ElfOatFile::ElfFileOpen(File* file,
 
 std::string OatFile::ResolveRelativeEncodedDexLocation(
       const char* abs_dex_location, const std::string& rel_dex_location) {
-  if (abs_dex_location != nullptr && rel_dex_location[0] != '/') {
+  // For host, we still do resolution as the rel_dex_location might be absolute
+  // for a target dex (for example /system/foo/foo.apk).
+  if (abs_dex_location != nullptr && (rel_dex_location[0] != '/' || !kIsTargetBuild)) {
     // Strip :classes<N>.dex used for secondary multidex files.
     std::string base = DexFileLoader::GetBaseLocation(rel_dex_location);
     std::string multidex_suffix = DexFileLoader::GetMultiDexSuffix(rel_dex_location);
 
     // Check if the base is a suffix of the provided abs_dex_location.
-    std::string target_suffix = "/" + base;
+    std::string target_suffix = ((rel_dex_location[0] != '/') ? "/" : "") + base;
     std::string abs_location(abs_dex_location);
     if (abs_location.size() > target_suffix.size()) {
       size_t pos = abs_location.size() - target_suffix.size();
@@ -1634,7 +1653,12 @@ OatFile::OatDexFile::OatDexFile(const OatFile* oat_file,
     if (lookup_table_data_ + TypeLookupTable::RawDataLength(num_class_defs) > GetOatFile()->End()) {
       LOG(WARNING) << "found truncated lookup table in " << dex_file_location_;
     } else {
-      lookup_table_ = TypeLookupTable::Open(dex_file_pointer_, lookup_table_data_, num_class_defs);
+      const uint8_t* dex_data = dex_file_pointer_;
+      // TODO: Clean this up to create the type lookup table after the dex file has been created?
+      if (CompactDexFile::IsMagicValid(dex_header->magic_)) {
+        dex_data += dex_header->data_off_;
+      }
+      lookup_table_ = TypeLookupTable::Open(dex_data, lookup_table_data_, num_class_defs);
     }
   }
 }
@@ -1714,9 +1738,17 @@ const DexFile::ClassDef* OatFile::OatDexFile::FindClassDef(const DexFile& dex_fi
                                                            size_t hash) {
   const OatFile::OatDexFile* oat_dex_file = dex_file.GetOatDexFile();
   DCHECK_EQ(ComputeModifiedUtf8Hash(descriptor), hash);
+  bool used_lookup_table = false;
+  const DexFile::ClassDef* lookup_table_classdef = nullptr;
   if (LIKELY((oat_dex_file != nullptr) && (oat_dex_file->GetTypeLookupTable() != nullptr))) {
+    used_lookup_table = true;
     const uint32_t class_def_idx = oat_dex_file->GetTypeLookupTable()->Lookup(descriptor, hash);
-    return (class_def_idx != dex::kDexNoIndex) ? &dex_file.GetClassDef(class_def_idx) : nullptr;
+    lookup_table_classdef = (class_def_idx != dex::kDexNoIndex)
+        ? &dex_file.GetClassDef(class_def_idx)
+        : nullptr;
+    if (!kIsDebugBuild) {
+      return lookup_table_classdef;
+    }
   }
   // Fast path for rare no class defs case.
   const uint32_t num_class_defs = dex_file.NumClassDefs();
@@ -1726,7 +1758,11 @@ const DexFile::ClassDef* OatFile::OatDexFile::FindClassDef(const DexFile& dex_fi
   const DexFile::TypeId* type_id = dex_file.FindTypeId(descriptor);
   if (type_id != nullptr) {
     dex::TypeIndex type_idx = dex_file.GetIndexForTypeId(*type_id);
-    return dex_file.FindClassDef(type_idx);
+    const DexFile::ClassDef* found_class_def = dex_file.FindClassDef(type_idx);
+    if (kIsDebugBuild && used_lookup_table) {
+      DCHECK_EQ(found_class_def, lookup_table_classdef);
+    }
+    return found_class_def;
   }
   return nullptr;
 }

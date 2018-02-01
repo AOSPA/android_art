@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-#ifndef ART_RUNTIME_MODIFIERS_H_
-#define ART_RUNTIME_MODIFIERS_H_
+#ifndef ART_RUNTIME_DEX_MODIFIERS_H_
+#define ART_RUNTIME_DEX_MODIFIERS_H_
 
 #include <stdint.h>
 
@@ -41,6 +41,12 @@ static constexpr uint32_t kAccAnnotation =   0x2000;  // class, ic (1.5)
 static constexpr uint32_t kAccEnum =         0x4000;  // class, field, ic (1.5)
 
 static constexpr uint32_t kAccJavaFlagsMask = 0xffff;  // bits set from Java sources (low 16)
+
+// The following flags are used to insert hidden API access flags into boot
+// class path dex files. They are decoded by DexFile::ClassDataItemIterator and
+// removed from the access flags before used by the runtime.
+static constexpr uint32_t kAccDexHiddenBit =          0x00000020;  // field, method (not native)
+static constexpr uint32_t kAccDexHiddenBitNative =    0x00000200;  // method (native)
 
 static constexpr uint32_t kAccConstructor =           0x00010000;  // method (dex only) <(cl)init>
 static constexpr uint32_t kAccDeclaredSynchronized =  0x00020000;  // method (dex only)
@@ -83,9 +89,11 @@ static constexpr uint32_t kAccMustCountLocks =        0x04000000;  // method (ru
 // virtual call.
 static constexpr uint32_t kAccSingleImplementation =  0x08000000;  // method (runtime)
 
+static constexpr uint32_t kAccHiddenApiBits =         0x30000000;  // field, method
+
 // Not currently used, except for intrinsic methods where these bits
 // are part of the intrinsic ordinal.
-static constexpr uint32_t kAccMayBeUnusedBits =       0x70000000;
+static constexpr uint32_t kAccMayBeUnusedBits =       0x40000000;
 
 // Set by the compiler driver when compiling boot classes with instrinsic methods.
 static constexpr uint32_t kAccIntrinsic  =            0x80000000;  // method (runtime)
@@ -100,8 +108,9 @@ static constexpr uint32_t kAccClassIsFinalizable        = 0x80000000;
 
 // Continuous sequence of bits used to hold the ordinal of an intrinsic method. Flags
 // which overlap are not valid when kAccIntrinsic is set.
-static constexpr uint32_t kAccIntrinsicBits = kAccMayBeUnusedBits | kAccSingleImplementation |
-    kAccMustCountLocks | kAccCompileDontBother | kAccDefaultConflict | kAccPreviouslyWarm;
+static constexpr uint32_t kAccIntrinsicBits = kAccMayBeUnusedBits | kAccHiddenApiBits |
+    kAccSingleImplementation | kAccMustCountLocks | kAccCompileDontBother | kAccDefaultConflict |
+    kAccPreviouslyWarm;
 
 // Valid (meaningful) bits for a field.
 static constexpr uint32_t kAccValidFieldFlags = kAccPublic | kAccPrivate | kAccProtected |
@@ -127,7 +136,13 @@ static constexpr uint32_t kAccValidClassFlags = kAccPublic | kAccFinal | kAccSup
 static constexpr uint32_t kAccValidInterfaceFlags = kAccPublic | kAccInterface |
     kAccAbstract | kAccSynthetic | kAccAnnotation;
 
+static constexpr uint32_t kAccVisibilityFlags = kAccPublic | kAccPrivate | kAccProtected;
+
+// Returns a human-readable version of the Java part of the access flags, e.g., "private static "
+// (note the trailing whitespace).
+std::string PrettyJavaAccessFlags(uint32_t access_flags);
+
 }  // namespace art
 
-#endif  // ART_RUNTIME_MODIFIERS_H_
+#endif  // ART_RUNTIME_DEX_MODIFIERS_H_
 

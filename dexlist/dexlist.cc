@@ -23,16 +23,20 @@
  * List all methods in all concrete classes in one or more DEX files.
  */
 
+#include <fcntl.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
-#include "base/logging.h"  // For InitLogging.
-#include "dex/art_dex_file_loader.h"
+#include <android-base/logging.h>
+
 #include "dex/code_item_accessors-no_art-inl.h"
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_loader.h"
-#include "mem_map.h"
-#include "runtime.h"
 
 namespace art {
 
@@ -166,6 +170,34 @@ void dumpClass(const DexFile* pDexFile, u4 idx) {
   }
 }
 
+static bool openAndMapFile(const char* fileName,
+                           const uint8_t** base,
+                           size_t* size,
+                           std::string* error_msg) {
+  int fd = open(fileName, O_RDONLY);
+  if (fd < 0) {
+    *error_msg = "open failed";
+    return false;
+  }
+  struct stat st;
+  if (fstat(fd, &st) < 0) {
+    *error_msg = "stat failed";
+    return false;
+  }
+  *size = st.st_size;
+  if (*size == 0) {
+    *error_msg = "size == 0";
+    return false;
+  }
+  void* addr = mmap(nullptr /*addr*/, *size, PROT_READ, MAP_PRIVATE, fd, 0 /*offset*/);
+  if (addr == MAP_FAILED) {
+    *error_msg = "mmap failed";
+    return false;
+  }
+  *base = reinterpret_cast<const uint8_t*>(addr);
+  return true;
+}
+
 /*
  * Processes a single file (either direct .dex or indirect .zip/.jar/.apk).
  */
@@ -173,13 +205,18 @@ static int processFile(const char* fileName) {
   // If the file is not a .dex file, the function tries .zip/.jar/.apk files,
   // all of which are Zip archives with "classes.dex" inside.
   static constexpr bool kVerifyChecksum = true;
+  const uint8_t* base = nullptr;
+  size_t size = 0;
   std::string error_msg;
+  if (!openAndMapFile(fileName, &base, &size, &error_msg)) {
+    LOG(ERROR) << error_msg;
+    return -1;
+  }
   std::vector<std::unique_ptr<const DexFile>> dex_files;
-  const ArtDexFileLoader dex_file_loader;
-  if (!dex_file_loader.Open(
-        fileName, fileName, /* verify */ true, kVerifyChecksum, &error_msg, &dex_files)) {
-    fputs(error_msg.c_str(), stderr);
-    fputc('\n', stderr);
+  const DexFileLoader dex_file_loader;
+  if (!dex_file_loader.OpenAll(
+        base, size, fileName, /*verify*/ true, kVerifyChecksum, &error_msg, &dex_files)) {
+    LOG(ERROR) << error_msg;
     return -1;
   }
 
@@ -200,19 +237,15 @@ static int processFile(const char* fileName) {
  * Shows usage.
  */
 static void usage(void) {
-  fprintf(stderr, "Copyright (C) 2007 The Android Open Source Project\n\n");
-  fprintf(stderr, "%s: [-m p.c.m] [-o outfile] dexfile...\n", gProgName);
-  fprintf(stderr, "\n");
+  LOG(ERROR) << "Copyright (C) 2007 The Android Open Source Project\n";
+  LOG(ERROR) << gProgName << ": [-m p.c.m] [-o outfile] dexfile...";
+  LOG(ERROR) << "";
 }
 
 /*
  * Main driver of the dexlist utility.
  */
 int dexlistDriver(int argc, char** argv) {
-  // Art specific set up.
-  InitLogging(argv, Runtime::Abort);
-  MemMap::Init();
-
   // Reset options.
   bool wantUsage = false;
   memset(&gOptions, 0, sizeof(gOptions));
@@ -235,7 +268,7 @@ int dexlistDriver(int argc, char** argv) {
           gOptions.argCopy = strdup(optarg);
           char* meth = strrchr(gOptions.argCopy, '.');
           if (meth == nullptr) {
-            fprintf(stderr, "Expected: package.Class.method\n");
+            LOG(ERROR) << "Expected: package.Class.method";
             wantUsage = true;
           } else {
             *meth = '\0';
@@ -252,7 +285,7 @@ int dexlistDriver(int argc, char** argv) {
 
   // Detect early problems.
   if (optind == argc) {
-    fprintf(stderr, "%s: no file specified\n", gProgName);
+    LOG(ERROR) << "No file specified";
     wantUsage = true;
   }
   if (wantUsage) {
@@ -265,7 +298,7 @@ int dexlistDriver(int argc, char** argv) {
   if (gOptions.outputFileName) {
     gOutFile = fopen(gOptions.outputFileName, "w");
     if (!gOutFile) {
-      fprintf(stderr, "Can't open %s\n", gOptions.outputFileName);
+      PLOG(ERROR) << "Can't open " << gOptions.outputFileName;
       free(gOptions.argCopy);
       return 1;
     }
@@ -285,6 +318,9 @@ int dexlistDriver(int argc, char** argv) {
 }  // namespace art
 
 int main(int argc, char** argv) {
+  // Output all logging to stderr.
+  android::base::SetLogger(android::base::StderrLogger);
+
   return art::dexlistDriver(argc, argv);
 }
 

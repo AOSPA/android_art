@@ -28,6 +28,7 @@
 #include "dex/dex_file.h"
 #include "dex/dex_file_types.h"
 #include "method_reference.h"
+#include "mem_map.h"
 #include "safe_map.h"
 #include "type_reference.h"
 
@@ -70,6 +71,8 @@ class ProfileCompilationInfo {
  public:
   static const uint8_t kProfileMagic[];
   static const uint8_t kProfileVersion[];
+
+  static const char* kDexMetadataProfileEntry;
 
   // Data structures for encoding the offline representation of inline caches.
   // This is exposed as public in order to make it available to dex2oat compilations
@@ -303,7 +306,19 @@ class ProfileCompilationInfo {
   // Load or Merge profile information from the given file descriptor.
   // If the current profile is non-empty the load will fail.
   // If merge_classes is set to false, classes will not be merged/loaded.
-  bool Load(int fd, bool merge_classes = true);
+  // If filter_fn is present, it will be used to filter out profile data belonging
+  // to dex file which do not comply with the filter
+  // (i.e. for which filter_fn(dex_location, dex_checksum) is false).
+  using ProfileLoadFilterFn = std::function<bool(const std::string&, uint32_t)>;
+  // Profile filter method which accepts all dex locations.
+  // This is convenient to use when we need to accept all locations without repeating the same
+  // lambda.
+  static bool ProfileFilterFnAcceptAll(const std::string& dex_location, uint32_t checksum);
+
+  bool Load(
+      int fd,
+      bool merge_classes = true,
+      const ProfileLoadFilterFn& filter_fn = ProfileFilterFnAcceptAll);
 
   // Verify integrity of the profile file with the provided dex files.
   // If there exists a DexData object which maps to a dex_file, then it verifies that:
@@ -410,8 +425,22 @@ class ProfileCompilationInfo {
   // Return all of the class descriptors in the profile for a set of dex files.
   std::unordered_set<std::string> GetClassDescriptors(const std::vector<const DexFile*>& dex_files);
 
+  // Return true if the fd points to a profile file.
+  bool IsProfileFile(int fd);
+
+  // Update the profile keys corresponding to the given dex files based on their current paths.
+  // This method allows fix-ups in the profile for dex files that might have been renamed.
+  // The new profile key will be constructed based on the current dex location.
+  //
+  // The matching [profile key <-> dex_file] is done based on the dex checksum and the number of
+  // methods ids. If neither is a match then the profile key is not updated.
+  //
+  // If the new profile key would collide with an existing key (for a different dex)
+  // the method returns false. Otherwise it returns true.
+  bool UpdateProfileKeys(const std::vector<std::unique_ptr<const DexFile>>& dex_files);
+
  private:
-  enum ProfileLoadSatus {
+  enum ProfileLoadStatus {
     kProfileLoadWouldOverwiteData,
     kProfileLoadIOError,
     kProfileLoadVersionMismatch,
@@ -442,12 +471,19 @@ class ProfileCompilationInfo {
           class_set(std::less<dex::TypeIndex>(), allocator->Adapter(kArenaAllocProfile)),
           num_method_ids(num_methods),
           bitmap_storage(allocator->Adapter(kArenaAllocProfile)) {
-      const size_t num_bits = num_method_ids * kBitmapIndexCount;
-      bitmap_storage.resize(RoundUp(num_bits, kBitsPerByte) / kBitsPerByte);
+      bitmap_storage.resize(ComputeBitmapStorage(num_method_ids));
       if (!bitmap_storage.empty()) {
         method_bitmap =
-            BitMemoryRegion(MemoryRegion(&bitmap_storage[0], bitmap_storage.size()), 0, num_bits);
+            BitMemoryRegion(MemoryRegion(
+                &bitmap_storage[0], bitmap_storage.size()), 0, ComputeBitmapBits(num_method_ids));
       }
+    }
+
+    static size_t ComputeBitmapBits(uint32_t num_method_ids) {
+      return num_method_ids * kBitmapIndexCount;
+    }
+    static size_t ComputeBitmapStorage(uint32_t num_method_ids) {
+      return RoundUp(ComputeBitmapBits(num_method_ids), kBitsPerByte) / kBitsPerByte;
     }
 
     bool operator==(const DexFileData& other) const {
@@ -577,6 +613,58 @@ class ProfileCompilationInfo {
     uint32_t num_method_ids;
   };
 
+  /**
+   * Encapsulate the source of profile data for loading.
+   * The source can be either a plain file or a zip file.
+   * For zip files, the profile entry will be extracted to
+   * the memory map.
+   */
+  class ProfileSource {
+   public:
+    /**
+     * Create a profile source for the given fd. The ownership of the fd
+     * remains to the caller; as this class will not attempt to close it at any
+     * point.
+     */
+    static ProfileSource* Create(int32_t fd) {
+      DCHECK_GT(fd, -1);
+      return new ProfileSource(fd, /*map*/ nullptr);
+    }
+
+    /**
+     * Create a profile source backed by a memory map. The map can be null in
+     * which case it will the treated as an empty source.
+     */
+    static ProfileSource* Create(std::unique_ptr<MemMap>&& mem_map) {
+      return new ProfileSource(/*fd*/ -1, std::move(mem_map));
+    }
+
+    /**
+     * Read bytes from this source.
+     * Reading will advance the current source position so subsequent
+     * invocations will read from the las position.
+     */
+    ProfileLoadStatus Read(uint8_t* buffer,
+                           size_t byte_count,
+                           const std::string& debug_stage,
+                           std::string* error);
+
+    /** Return true if the source has 0 data. */
+    bool HasEmptyContent() const;
+    /** Return true if all the information from this source has been read. */
+    bool HasConsumedAllData() const;
+
+   private:
+    ProfileSource(int32_t fd, std::unique_ptr<MemMap>&& mem_map)
+        : fd_(fd), mem_map_(std::move(mem_map)), mem_map_cur_(0) {}
+
+    bool IsMemMap() const { return fd_ == -1; }
+
+    int32_t fd_;  // The fd is not owned by this class.
+    std::unique_ptr<MemMap> mem_map_;
+    size_t mem_map_cur_;  // Current position in the map to read from.
+  };
+
   // A helper structure to make sure we don't read past our buffers in the loops.
   struct SafeBuffer {
    public:
@@ -586,13 +674,9 @@ class ProfileCompilationInfo {
     }
 
     // Reads the content of the descriptor at the current position.
-    ProfileLoadSatus FillFromFd(int fd,
-                                const std::string& source,
-                                /*out*/std::string* error);
-
-    ProfileLoadSatus FillFromBuffer(uint8_t* buffer_ptr,
-                                    const std::string& source,
-                                    /*out*/std::string* error);
+    ProfileLoadStatus Fill(ProfileSource& source,
+                           const std::string& debug_stage,
+                           /*out*/std::string* error);
 
     // Reads an uint value (high bits to low bits) and advances the current pointer
     // with the number of bits read.
@@ -620,21 +704,29 @@ class ProfileCompilationInfo {
     uint8_t* ptr_current_;
   };
 
-  // Entry point for profile loding functionality.
-  ProfileLoadSatus LoadInternal(int fd, std::string* error, bool merge_classes = true);
+  ProfileLoadStatus OpenSource(int32_t fd,
+                               /*out*/ std::unique_ptr<ProfileSource>* source,
+                               /*out*/ std::string* error);
+
+  // Entry point for profile loading functionality.
+  ProfileLoadStatus LoadInternal(
+      int32_t fd,
+      std::string* error,
+      bool merge_classes = true,
+      const ProfileLoadFilterFn& filter_fn = ProfileFilterFnAcceptAll);
 
   // Read the profile header from the given fd and store the number of profile
   // lines into number_of_dex_files.
-  ProfileLoadSatus ReadProfileHeader(int fd,
-                                     /*out*/uint8_t* number_of_dex_files,
-                                     /*out*/uint32_t* size_uncompressed_data,
-                                     /*out*/uint32_t* size_compressed_data,
-                                     /*out*/std::string* error);
+  ProfileLoadStatus ReadProfileHeader(ProfileSource& source,
+                                      /*out*/uint8_t* number_of_dex_files,
+                                      /*out*/uint32_t* size_uncompressed_data,
+                                      /*out*/uint32_t* size_compressed_data,
+                                      /*out*/std::string* error);
 
   // Read the header of a profile line from the given fd.
-  ProfileLoadSatus ReadProfileLineHeader(SafeBuffer& buffer,
-                                         /*out*/ProfileLineHeader* line_header,
-                                         /*out*/std::string* error);
+  ProfileLoadStatus ReadProfileLineHeader(SafeBuffer& buffer,
+                                          /*out*/ProfileLineHeader* line_header,
+                                          /*out*/std::string* error);
 
   // Read individual elements from the profile line header.
   bool ReadProfileLineHeaderElements(SafeBuffer& buffer,
@@ -643,12 +735,12 @@ class ProfileCompilationInfo {
                                      /*out*/std::string* error);
 
   // Read a single profile line from the given fd.
-  ProfileLoadSatus ReadProfileLine(SafeBuffer& buffer,
-                                   uint8_t number_of_dex_files,
-                                   const ProfileLineHeader& line_header,
-                                   const SafeMap<uint8_t, uint8_t>& dex_profile_index_remap,
-                                   bool merge_classes,
-                                   /*out*/std::string* error);
+  ProfileLoadStatus ReadProfileLine(SafeBuffer& buffer,
+                                    uint8_t number_of_dex_files,
+                                    const ProfileLineHeader& line_header,
+                                    const SafeMap<uint8_t, uint8_t>& dex_profile_index_remap,
+                                    bool merge_classes,
+                                    /*out*/std::string* error);
 
   // Read all the classes from the buffer into the profile `info_` structure.
   bool ReadClasses(SafeBuffer& buffer,
@@ -665,6 +757,7 @@ class ProfileCompilationInfo {
   // The method generates mapping of profile indices while merging a new profile
   // data into current data. It returns true, if the mapping was successful.
   bool RemapProfileIndex(const std::vector<ProfileLineHeader>& profile_line_headers,
+                         const ProfileLoadFilterFn& filter_fn,
                          /*out*/SafeMap<uint8_t, uint8_t>* dex_profile_index_remap);
 
   // Read the inline cache encoding from line_bufer into inline_cache.

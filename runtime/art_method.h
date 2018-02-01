@@ -31,8 +31,8 @@
 #include "dex/code_item_accessors.h"
 #include "dex/dex_file.h"
 #include "dex/dex_instruction_iterator.h"
+#include "dex/modifiers.h"
 #include "gc_root.h"
-#include "modifiers.h"
 #include "obj_ptr.h"
 #include "offsets.h"
 #include "primitive.h"
@@ -334,6 +334,10 @@ class ArtMethod FINAL {
 
   void SetMustCountLocks() {
     AddAccessFlags(kAccMustCountLocks);
+  }
+
+  HiddenApiAccessFlags::ApiList GetHiddenApiAccessFlags() {
+    return HiddenApiAccessFlags::DecodeFromRuntime(GetAccessFlags());
   }
 
   // Returns true if this method could be overridden by a default method.

@@ -19,6 +19,7 @@
 #include <sys/mman.h>  // For the PROT_* and MAP_* constants.
 
 #include <memory>
+#include <unordered_set>
 
 #include <android-base/logging.h>
 
@@ -29,6 +30,8 @@
 #include "dex/dex_file.h"
 #include "dex/dex_file_loader.h"
 #include "dex_to_dex_decompiler.h"
+#include "hidden_api_access_flags.h"
+#include "leb128.h"
 #include "quicken_info.h"
 
 namespace art {
@@ -47,10 +50,12 @@ bool VdexFile::Header::IsVersionValid() const {
 
 VdexFile::Header::Header(uint32_t number_of_dex_files,
                          uint32_t dex_size,
+                         uint32_t dex_shared_data_size,
                          uint32_t verifier_deps_size,
                          uint32_t quickening_info_size)
     : number_of_dex_files_(number_of_dex_files),
       dex_size_(dex_size),
+      dex_shared_data_size_(dex_shared_data_size),
       verifier_deps_size_(verifier_deps_size),
       quickening_info_size_(quickening_info_size) {
   memcpy(magic_, kVdexMagic, sizeof(kVdexMagic));
@@ -182,14 +187,17 @@ bool VdexFile::OpenAllDexFiles(std::vector<std::unique_ptr<const DexFile>>* dex_
     // TODO: Supply the location information for a vdex file.
     static constexpr char kVdexLocation[] = "";
     std::string location = DexFileLoader::GetMultiDexLocation(i, kVdexLocation);
-    std::unique_ptr<const DexFile> dex(dex_file_loader.Open(dex_file_start,
-                                                            size,
-                                                            location,
-                                                            GetLocationChecksum(i),
-                                                            nullptr /*oat_dex_file*/,
-                                                            false /*verify*/,
-                                                            false /*verify_checksum*/,
-                                                            error_msg));
+    std::unique_ptr<const DexFile> dex(dex_file_loader.OpenWithDataSection(
+        dex_file_start,
+        size,
+        /*data_base*/ nullptr,
+        /*data_size*/ 0u,
+        location,
+        GetLocationChecksum(i),
+        nullptr /*oat_dex_file*/,
+        false /*verify*/,
+        false /*verify_checksum*/,
+        error_msg));
     if (dex == nullptr) {
       return false;
     }
@@ -256,6 +264,18 @@ void VdexFile::UnquickenDexFile(const DexFile& target_dex_file,
   UnquickenDexFile(target_dex_file, source_dex_file.Begin(), decompile_return_instruction);
 }
 
+static void UpdateAccessFlags(uint8_t* data, uint32_t new_flag, bool is_method) {
+  // Go back 1 uleb to start.
+  data = ReverseSearchUnsignedLeb128(data);
+  if (is_method) {
+    // Methods have another uleb field before the access flags
+    data = ReverseSearchUnsignedLeb128(data);
+  }
+  DCHECK_EQ(HiddenApiAccessFlags::RemoveFromDex(DecodeUnsignedLeb128WithoutMovingCursor(data)),
+            new_flag);
+  UpdateUnsignedLeb128(data, new_flag);
+}
+
 void VdexFile::UnquickenDexFile(const DexFile& target_dex_file,
                                 const uint8_t* source_dex_begin,
                                 bool decompile_return_instruction) const {
@@ -265,6 +285,8 @@ void VdexFile::UnquickenDexFile(const DexFile& target_dex_file,
     // RETURN_VOID_NO_BARRIER instructions to RETURN_VOID instructions.
     return;
   }
+  // Make sure to not unquicken the same code item multiple times.
+  std::unordered_set<const DexFile::CodeItem*> unquickened_code_item;
   for (uint32_t i = 0; i < target_dex_file.NumClassDefs(); ++i) {
     const DexFile::ClassDef& class_def = target_dex_file.GetClassDef(i);
     const uint8_t* class_data = target_dex_file.GetClassData(class_def);
@@ -272,23 +294,32 @@ void VdexFile::UnquickenDexFile(const DexFile& target_dex_file,
       for (ClassDataItemIterator class_it(target_dex_file, class_data);
            class_it.HasNext();
            class_it.Next()) {
-        if (class_it.IsAtMethod() && class_it.GetMethodCodeItem() != nullptr) {
+        if (class_it.IsAtMethod()) {
           const DexFile::CodeItem* code_item = class_it.GetMethodCodeItem();
-          ArrayRef<const uint8_t> quicken_data;
-          if (!quickening_info.empty()) {
-            const uint32_t quickening_offset = GetQuickeningInfoOffset(
-                GetQuickenInfoOffsetTable(source_dex_begin,
-                                          target_dex_file.NumMethodIds(),
-                                          quickening_info),
-                class_it.GetMemberIndex(),
-                quickening_info);
-            quicken_data = GetQuickeningInfoAt(quickening_info, quickening_offset);
+          if (code_item != nullptr && unquickened_code_item.emplace(code_item).second) {
+            ArrayRef<const uint8_t> quicken_data;
+            if (!quickening_info.empty()) {
+              const uint32_t quickening_offset = GetQuickeningInfoOffset(
+                  GetQuickenInfoOffsetTable(source_dex_begin,
+                                            target_dex_file.NumMethodIds(),
+                                            quickening_info),
+                  class_it.GetMemberIndex(),
+                  quickening_info);
+              quicken_data = GetQuickeningInfoAt(quickening_info, quickening_offset);
+            }
+            optimizer::ArtDecompileDEX(
+                target_dex_file,
+                *code_item,
+                quicken_data,
+                decompile_return_instruction);
           }
-          optimizer::ArtDecompileDEX(
-              target_dex_file,
-              *code_item,
-              quicken_data,
-              decompile_return_instruction);
+          UpdateAccessFlags(const_cast<uint8_t*>(class_it.DataPointer()),
+                            class_it.GetMemberAccessFlags(),
+                            /*is_method*/ true);
+        } else {
+          UpdateAccessFlags(const_cast<uint8_t*>(class_it.DataPointer()),
+                            class_it.GetMemberAccessFlags(),
+                            /*is_method*/ false);
         }
       }
     }

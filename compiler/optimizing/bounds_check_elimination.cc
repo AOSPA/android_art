@@ -302,7 +302,7 @@ class ValueRange : public ArenaObject<kArenaAllocBoundsCheckElimination> {
   ValueBound GetLower() const { return lower_; }
   ValueBound GetUpper() const { return upper_; }
 
-  bool IsConstantValueRange() { return lower_.IsConstant() && upper_.IsConstant(); }
+  bool IsConstantValueRange() const { return lower_.IsConstant() && upper_.IsConstant(); }
 
   // If it's certain that this value range fits in other_range.
   virtual bool FitsIn(ValueRange* other_range) const {
@@ -789,24 +789,33 @@ class BCEVisitor : public HGraphVisitor {
         ApplyRangeFromComparison(left, block, false_successor, new_range);
       }
     } else if (cond == kCondNE || cond == kCondEQ) {
-      if (left->IsArrayLength() && lower.IsConstant() && upper.IsConstant()) {
-        // Special case:
-        //   length == [c,d] yields [c, d] along true
-        //   length != [c,d] yields [c, d] along false
-        if (!lower.Equals(ValueBound::Min()) || !upper.Equals(ValueBound::Max())) {
-          ValueRange* new_range = new (&allocator_) ValueRange(&allocator_, lower, upper);
-          ApplyRangeFromComparison(
-              left, block, cond == kCondEQ ? true_successor : false_successor, new_range);
+      if (left->IsArrayLength()) {
+        if (lower.IsConstant() && upper.IsConstant()) {
+          // Special case:
+          //   length == [c,d] yields [c, d] along true
+          //   length != [c,d] yields [c, d] along false
+          if (!lower.Equals(ValueBound::Min()) || !upper.Equals(ValueBound::Max())) {
+            ValueRange* new_range = new (&allocator_) ValueRange(&allocator_, lower, upper);
+            ApplyRangeFromComparison(
+                left, block, cond == kCondEQ ? true_successor : false_successor, new_range);
+          }
+          // In addition:
+          //   length == 0 yields [1, max] along false
+          //   length != 0 yields [1, max] along true
+          if (lower.GetConstant() == 0 && upper.GetConstant() == 0) {
+            ValueRange* new_range = new (&allocator_) ValueRange(
+                &allocator_, ValueBound(nullptr, 1), ValueBound::Max());
+            ApplyRangeFromComparison(
+                left, block, cond == kCondEQ ? false_successor : true_successor, new_range);
+          }
         }
-        // In addition:
-        //   length == 0 yields [1, max] along false
-        //   length != 0 yields [1, max] along true
-        if (lower.GetConstant() == 0 && upper.GetConstant() == 0) {
-          ValueRange* new_range = new (&allocator_) ValueRange(
-              &allocator_, ValueBound(nullptr, 1), ValueBound::Max());
-          ApplyRangeFromComparison(
-              left, block, cond == kCondEQ ? false_successor : true_successor, new_range);
-        }
+      } else if (lower.IsRelatedToArrayLength() && lower.Equals(upper)) {
+        // Special aliasing case, with x not array length itself:
+        //   x == [length,length] yields x == length along true
+        //   x != [length,length] yields x == length along false
+        ValueRange* new_range = new (&allocator_) ValueRange(&allocator_, lower, upper);
+        ApplyRangeFromComparison(
+            left, block, cond == kCondEQ ? true_successor : false_successor, new_range);
       }
     }
   }
@@ -827,9 +836,23 @@ class BCEVisitor : public HGraphVisitor {
       ValueRange array_range(&allocator_, lower, upper);
       // Try index range obtained by dominator-based analysis.
       ValueRange* index_range = LookupValueRange(index, block);
-      if (index_range != nullptr && index_range->FitsIn(&array_range)) {
-        ReplaceInstruction(bounds_check, index);
-        return;
+      if (index_range != nullptr) {
+        if (index_range->FitsIn(&array_range)) {
+          ReplaceInstruction(bounds_check, index);
+          return;
+        } else if (index_range->IsConstantValueRange()) {
+          // If the non-constant index turns out to have a constant range,
+          // make one more attempt to get a constant in the array range.
+          ValueRange* existing_range = LookupValueRange(array_length, block);
+          if (existing_range != nullptr &&
+              existing_range->IsConstantValueRange()) {
+            ValueRange constant_array_range(&allocator_, lower, existing_range->GetLower());
+            if (index_range->FitsIn(&constant_array_range)) {
+              ReplaceInstruction(bounds_check, index);
+              return;
+            }
+          }
+        }
       }
       // Try index range obtained by induction variable analysis.
       // Disables dynamic bce if OOB is certain.

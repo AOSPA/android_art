@@ -36,6 +36,7 @@ GTEST_DEX_DIRECTORIES := \
   ForClassLoaderD \
   ExceptionHandle \
   GetMethodSignature \
+  HiddenApi \
   ImageLayoutA \
   ImageLayoutB \
   IMTA \
@@ -72,6 +73,11 @@ $(foreach dir,$(GTEST_DEX_DIRECTORIES), $(eval $(call build-art-test-dex,art-gte
 ART_TEST_HOST_GTEST_MainStripped_DEX := $(basename $(ART_TEST_HOST_GTEST_Main_DEX))Stripped$(suffix $(ART_TEST_HOST_GTEST_Main_DEX))
 ART_TEST_TARGET_GTEST_MainStripped_DEX := $(basename $(ART_TEST_TARGET_GTEST_Main_DEX))Stripped$(suffix $(ART_TEST_TARGET_GTEST_Main_DEX))
 
+# Create rules for MainUncompressed, a copy of Main with the classes.dex uncompressed
+# for the dex2oat tests.
+ART_TEST_HOST_GTEST_MainUncompressed_DEX := $(basename $(ART_TEST_HOST_GTEST_Main_DEX))Uncompressed$(suffix $(ART_TEST_HOST_GTEST_Main_DEX))
+ART_TEST_TARGET_GTEST_MainUncompressed_DEX := $(basename $(ART_TEST_TARGET_GTEST_Main_DEX))Uncompressed$(suffix $(ART_TEST_TARGET_GTEST_Main_DEX))
+
 $(ART_TEST_HOST_GTEST_MainStripped_DEX): $(ART_TEST_HOST_GTEST_Main_DEX)
 	cp $< $@
 	$(call dexpreopt-remove-classes.dex,$@)
@@ -79,6 +85,16 @@ $(ART_TEST_HOST_GTEST_MainStripped_DEX): $(ART_TEST_HOST_GTEST_Main_DEX)
 $(ART_TEST_TARGET_GTEST_MainStripped_DEX): $(ART_TEST_TARGET_GTEST_Main_DEX)
 	cp $< $@
 	$(call dexpreopt-remove-classes.dex,$@)
+
+$(ART_TEST_HOST_GTEST_MainUncompressed_DEX): $(ART_TEST_HOST_GTEST_Main_DEX) $(ZIPALIGN)
+	cp $< $@
+	$(call uncompress-dexs, $@)
+	$(call align-package, $@)
+
+$(ART_TEST_TARGET_GTEST_MainUncompressed_DEX): $(ART_TEST_TARGET_GTEST_Main_DEX) $(ZIPALIGN)
+	cp $< $@
+	$(call uncompress-dexs, $@)
+	$(call align-package, $@)
 
 ART_TEST_GTEST_VerifierDeps_SRC := $(abspath $(wildcard $(LOCAL_PATH)/VerifierDeps/*.smali))
 ART_TEST_GTEST_VerifierDepsMulti_SRC := $(abspath $(wildcard $(LOCAL_PATH)/VerifierDepsMulti/*.smali))
@@ -110,9 +126,10 @@ ART_GTEST_compiler_driver_test_DEX_DEPS := AbstractMethod StaticLeafMethods Prof
 ART_GTEST_dex_cache_test_DEX_DEPS := Main Packages MethodTypes
 ART_GTEST_dex_file_test_DEX_DEPS := GetMethodSignature Main Nested MultiDex
 ART_GTEST_dexlayout_test_DEX_DEPS := ManyMethods
-ART_GTEST_dex2oat_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) ManyMethods Statics VerifierDeps
+ART_GTEST_dex2oat_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) ManyMethods Statics VerifierDeps MainUncompressed
 ART_GTEST_dex2oat_image_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) Statics VerifierDeps
 ART_GTEST_exception_test_DEX_DEPS := ExceptionHandle
+ART_GTEST_hiddenapi_test_DEX_DEPS := HiddenApi
 ART_GTEST_image_test_DEX_DEPS := ImageLayoutA ImageLayoutB DefaultMethods
 ART_GTEST_imtable_test_DEX_DEPS := IMTA IMTB
 ART_GTEST_instrumentation_test_DEX_DEPS := Instrumentation
@@ -266,6 +283,11 @@ ART_GTEST_patchoat_test_TARGET_DEPS := \
 ART_GTEST_profile_assistant_test_HOST_DEPS := profmand-host
 ART_GTEST_profile_assistant_test_TARGET_DEPS := profmand-target
 
+ART_GTEST_hiddenapi_test_HOST_DEPS := \
+  $(HOST_CORE_IMAGE_DEFAULT_64) \
+  $(HOST_CORE_IMAGE_DEFAULT_32) \
+  hiddenapid-host
+
 # The path for which all the source files are relative, not actually the current directory.
 LOCAL_PATH := art
 
@@ -279,6 +301,7 @@ ART_TEST_MODULES := \
     art_dexlayout_tests \
     art_dexlist_tests \
     art_dexoptanalyzer_tests \
+    art_hiddenapi_tests \
     art_imgdiag_tests \
     art_oatdump_tests \
     art_patchoat_tests \
@@ -443,13 +466,27 @@ define define-art-gtest-rule-host
 
   ART_TEST_HOST_GTEST_DEPENDENCIES += $$(gtest_deps)
 
+.PHONY: $$(gtest_rule)
+ifeq (,$(SANITIZE_HOST))
+$$(gtest_rule): $$(gtest_exe) $$(gtest_deps)
+	$(hide) ($$(call ART_TEST_SKIP,$$@) && $$< && \
+		$$(call ART_TEST_PASSED,$$@)) || $$(call ART_TEST_FAILED,$$@)
+else
 # Note: envsetup currently exports ASAN_OPTIONS=detect_leaks=0 to suppress leak detection, as some
 #       build tools (e.g., ninja) intentionally leak. We want leak checks when we run our tests, so
 #       override ASAN_OPTIONS. b/37751350
-.PHONY: $$(gtest_rule)
+# Note 2: Under sanitization, also capture the output, and run it through the stack tool on failure
+# (with the x86-64 ABI, as this allows symbolization of both x86 and x86-64). We don't do this in
+# general as it loses all the color output, and we have our own symbolization step when not running
+# under ASAN.
 $$(gtest_rule): $$(gtest_exe) $$(gtest_deps)
-	$(hide) ($$(call ART_TEST_SKIP,$$@) && ASAN_OPTIONS=detect_leaks=1 $$< && \
-		$$(call ART_TEST_PASSED,$$@)) || $$(call ART_TEST_FAILED,$$@)
+	$(hide) ($$(call ART_TEST_SKIP,$$@) && set -o pipefail && \
+		ASAN_OPTIONS=detect_leaks=1 $$< 2>&1 | tee $$<.tmp.out >&2 && \
+		{ $$(call ART_TEST_PASSED,$$@) ; rm $$<.tmp.out ; }) || \
+		( grep -q AddressSanitizer $$<.tmp.out && export ANDROID_BUILD_TOP=`pwd` && \
+			{ echo "ABI: 'x86_64'" | cat - $$<.tmp.out | development/scripts/stack | tail -n 3000 ; } ; \
+		rm $$<.tmp.out ; $$(call ART_TEST_FAILED,$$@))
+endif
 
   ART_TEST_HOST_GTEST$$($(3)ART_PHONY_TEST_HOST_SUFFIX)_RULES += $$(gtest_rule)
   ART_TEST_HOST_GTEST_RULES += $$(gtest_rule)
@@ -711,6 +748,8 @@ $(foreach dir,$(GTEST_DEX_DIRECTORIES), $(eval ART_TEST_TARGET_GTEST_$(dir)_DEX 
 $(foreach dir,$(GTEST_DEX_DIRECTORIES), $(eval ART_TEST_HOST_GTEST_$(dir)_DEX :=))
 ART_TEST_HOST_GTEST_MainStripped_DEX :=
 ART_TEST_TARGET_GTEST_MainStripped_DEX :=
+ART_TEST_HOST_GTEST_MainUncompressed_DEX :=
+ART_TEST_TARGET_GTEST_MainUncompressed_DEX :=
 ART_TEST_GTEST_VerifierDeps_SRC :=
 ART_TEST_HOST_GTEST_VerifierDeps_DEX :=
 ART_TEST_TARGET_GTEST_VerifierDeps_DEX :=

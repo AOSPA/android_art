@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011 The Android Open Source Project
+ * Copyright (C) 2018 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,25 +14,24 @@
  * limitations under the License.
  */
 
-#ifndef ART_RUNTIME_INVOKE_TYPE_H_
-#define ART_RUNTIME_INVOKE_TYPE_H_
+public class Main {
+  Main() {
+    // Will be quickened with RETURN_VOID_NO_BARRIER.
+  }
 
-#include <iosfwd>
+  public static void main(String[] args) {
+    Main m = new Main();
+    Object o = m;
+    // The call and field accesses will be quickened.
+    m.foo(m.a);
 
-namespace art {
+    // The checkcast will be quickened.
+    m.foo(((Main)o).a);
+  }
 
-enum InvokeType : uint32_t {
-  kStatic,       // <<static>>
-  kDirect,       // <<direct>>
-  kVirtual,      // <<virtual>>
-  kSuper,        // <<super>>
-  kInterface,    // <<interface>>
-  kPolymorphic,  // <<polymorphic>>
-  kMaxInvokeType = kPolymorphic
-};
+  int a;
+  void foo(int a) {
+    System.out.println("In foo");
+  }
+}
 
-std::ostream& operator<<(std::ostream& os, const InvokeType& rhs);
-
-}  // namespace art
-
-#endif  // ART_RUNTIME_INVOKE_TYPE_H_
