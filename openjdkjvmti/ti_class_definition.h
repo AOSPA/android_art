@@ -32,9 +32,14 @@
 #ifndef ART_OPENJDKJVMTI_TI_CLASS_DEFINITION_H_
 #define ART_OPENJDKJVMTI_TI_CLASS_DEFINITION_H_
 
+#include <stddef.h>
+#include <sys/mman.h>
+#include <sys/types.h>
+
 #include "art_jvmti.h"
 
 #include "base/array_ref.h"
+#include "mem_map.h"
 
 namespace openjdkjvmti {
 
@@ -43,46 +48,67 @@ namespace openjdkjvmti {
 // redefinition/retransformation function that created it.
 class ArtClassDefinition {
  public:
+  // If we support doing a on-demand dex-dequickening using signal handlers.
+  static constexpr bool kEnableOnDemandDexDequicken = true;
+
   ArtClassDefinition()
       : klass_(nullptr),
         loader_(nullptr),
         name_(),
         protection_domain_(nullptr),
-        dex_len_(0),
-        dex_data_(nullptr),
-        original_dex_file_memory_(nullptr),
-        original_dex_file_(),
-        redefined_(false) {}
+        dex_data_mmap_(nullptr),
+        temp_mmap_(nullptr),
+        dex_data_memory_(),
+        initial_dex_file_unquickened_(nullptr),
+        dex_data_(),
+        current_dex_memory_(),
+        current_dex_file_(),
+        redefined_(false),
+        from_class_ext_(false),
+        initialized_(false) {}
 
-  jvmtiError Init(ArtJvmTiEnv* env, jclass klass);
-  jvmtiError Init(ArtJvmTiEnv* env, const jvmtiClassDefinition& def);
+  void InitFirstLoad(const char* descriptor,
+                     art::Handle<art::mirror::ClassLoader> klass_loader,
+                     const art::DexFile& dex_file);
+  jvmtiError Init(art::Thread* self, jclass klass);
+  jvmtiError Init(art::Thread* self, const jvmtiClassDefinition& def);
 
   ArtClassDefinition(ArtClassDefinition&& o) = default;
   ArtClassDefinition& operator=(ArtClassDefinition&& o) = default;
 
-  void SetNewDexData(ArtJvmTiEnv* env, jint new_dex_len, unsigned char* new_dex_data) {
+  void SetNewDexData(jint new_dex_len, unsigned char* new_dex_data) {
     DCHECK(IsInitialized());
     if (new_dex_data == nullptr) {
       return;
-    } else if (new_dex_data != dex_data_.get() || new_dex_len != dex_len_) {
-      dex_len_ = new_dex_len;
-      dex_data_ = MakeJvmtiUniquePtr(env, new_dex_data);
+    } else {
+      art::ArrayRef<const unsigned char> new_data(new_dex_data, new_dex_len);
+      if (new_data != dex_data_) {
+        dex_data_memory_.resize(new_dex_len);
+        memcpy(dex_data_memory_.data(), new_dex_data, new_dex_len);
+        dex_data_ = art::ArrayRef<const unsigned char>(dex_data_memory_);
+      }
     }
   }
 
   art::ArrayRef<const unsigned char> GetNewOriginalDexFile() const {
     DCHECK(IsInitialized());
     if (redefined_) {
-      return original_dex_file_;
+      return current_dex_file_;
     } else {
       return art::ArrayRef<const unsigned char>();
     }
   }
 
-  bool IsModified() const;
+  bool ContainsAddress(uintptr_t ptr) const {
+    return dex_data_mmap_ != nullptr &&
+        reinterpret_cast<uintptr_t>(dex_data_mmap_->Begin()) <= ptr &&
+        reinterpret_cast<uintptr_t>(dex_data_mmap_->End()) > ptr;
+  }
+
+  bool IsModified() const REQUIRES_SHARED(art::Locks::mutator_lock_);
 
   bool IsInitialized() const {
-    return klass_ != nullptr;
+    return initialized_;
   }
 
   jclass GetClass() const {
@@ -100,6 +126,13 @@ class ArtClassDefinition {
     return name_;
   }
 
+  bool IsLazyDefinition() const {
+    DCHECK(IsInitialized());
+    return dex_data_mmap_ != nullptr &&
+        dex_data_.data() == dex_data_mmap_->Begin() &&
+        dex_data_mmap_->GetProtect() == PROT_NONE;
+  }
+
   jobject GetProtectionDomain() const {
     DCHECK(IsInitialized());
     return protection_domain_;
@@ -107,21 +140,52 @@ class ArtClassDefinition {
 
   art::ArrayRef<const unsigned char> GetDexData() const {
     DCHECK(IsInitialized());
-    return art::ArrayRef<const unsigned char>(dex_data_.get(), dex_len_);
+    return dex_data_;
   }
 
+  void InitializeMemory() const;
+
  private:
-  jvmtiError InitCommon(ArtJvmTiEnv* env, jclass klass);
+  jvmtiError InitCommon(art::Thread* self, jclass klass);
+
+  template<typename GetOriginalDexFile>
+  void InitWithDex(GetOriginalDexFile get_original, const art::DexFile* quick_dex)
+      REQUIRES_SHARED(art::Locks::mutator_lock_);
 
   jclass klass_;
   jobject loader_;
   std::string name_;
   jobject protection_domain_;
-  jint dex_len_;
-  JvmtiUniquePtr<unsigned char> dex_data_;
-  JvmtiUniquePtr<unsigned char> original_dex_file_memory_;
-  art::ArrayRef<const unsigned char> original_dex_file_;
+
+  // Mmap that will be filled with the original-dex-file lazily if it needs to be de-quickened or
+  // de-compact-dex'd
+  mutable std::unique_ptr<art::MemMap> dex_data_mmap_;
+  // This is a temporary mmap we will use to be able to fill the dex file data atomically.
+  mutable std::unique_ptr<art::MemMap> temp_mmap_;
+
+  // A unique_ptr to the current dex_data if it needs to be cleaned up.
+  std::vector<unsigned char> dex_data_memory_;
+
+  const art::DexFile* initial_dex_file_unquickened_;
+
+  // A ref to the current dex data. This is either dex_data_memory_, or current_dex_file_. This is
+  // what the dex file will be turned into.
+  art::ArrayRef<const unsigned char> dex_data_;
+
+  // This is only used if we failed to create a mmap to store the dequickened data
+  std::vector<unsigned char> current_dex_memory_;
+
+  // This is a dequickened version of what is loaded right now. It is either current_dex_memory_ (if
+  // no other redefinition has ever happened to this) or the current dex_file_ directly (if this
+  // class has been redefined, thus it cannot have any quickened stuff).
+  art::ArrayRef<const unsigned char> current_dex_file_;
+
   bool redefined_;
+
+  // If we got the initial dex_data_ from a class_ext
+  bool from_class_ext_;
+
+  bool initialized_;
 
   DISALLOW_COPY_AND_ASSIGN(ArtClassDefinition);
 };
