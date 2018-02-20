@@ -663,8 +663,8 @@ void Thread::CreateNativeThread(JNIEnv* env, jobject java_peer, size_t stack_siz
   child_thread->tlsPtr_.jpeer = env->NewGlobalRef(java_peer);
   stack_size = FixStackSize(stack_size);
 
-  // Thread.start is synchronized, so we know that nativePeer is 0, and know that we're not racing to
-  // assign it.
+  // Thread.start is synchronized, so we know that nativePeer is 0, and know that we're not racing
+  // to assign it.
   env->SetLongField(java_peer, WellKnownClasses::java_lang_Thread_nativePeer,
                     reinterpret_cast<jlong>(child_thread));
 
@@ -839,7 +839,8 @@ Thread* Thread::Attach(const char* thread_name,
     if (create_peer) {
       self->CreatePeer(thread_name, as_daemon, thread_group);
       if (self->IsExceptionPending()) {
-        // We cannot keep the exception around, as we're deleting self. Try to be helpful and log it.
+        // We cannot keep the exception around, as we're deleting self. Try to be helpful and log
+        // it.
         {
           ScopedObjectAccess soa(self);
           LOG(ERROR) << "Exception creating thread peer:";
@@ -3435,6 +3436,9 @@ bool Thread::HoldsLock(ObjPtr<mirror::Object> object) const {
   return object != nullptr && object->GetLockOwnerThreadId() == GetThreadId();
 }
 
+extern "C" StackReference<mirror::Object>* artQuickGetProxyThisObjectReference(ArtMethod** sp)
+    REQUIRES_SHARED(Locks::mutator_lock_);
+
 // RootVisitor parameters are: (const Object* obj, size_t vreg, const StackVisitor* visitor).
 template <typename RootVisitor, bool kPrecise = false>
 class ReferenceMapVisitor : public StackVisitor {
@@ -3535,7 +3539,7 @@ class ReferenceMapVisitor : public StackVisitor {
     if (!m->IsNative() && !m->IsRuntimeMethod() && (!m->IsProxyMethod() || m->IsConstructor())) {
       const OatQuickMethodHeader* method_header = GetCurrentOatQuickMethodHeader();
       DCHECK(method_header->IsOptimized());
-      auto* vreg_base = reinterpret_cast<StackReference<mirror::Object>*>(
+      StackReference<mirror::Object>* vreg_base = reinterpret_cast<StackReference<mirror::Object>*>(
           reinterpret_cast<uintptr_t>(cur_quick_frame));
       uintptr_t native_pc_offset = method_header->NativeQuickPcOffset(GetCurrentQuickFramePc());
       CodeInfo code_info = method_header->GetOptimizedCodeInfo();
@@ -3550,7 +3554,7 @@ class ReferenceMapVisitor : public StackVisitor {
       BitMemoryRegion stack_mask = code_info.GetStackMaskOf(encoding, map);
       for (size_t i = 0; i < number_of_bits; ++i) {
         if (stack_mask.LoadBit(i)) {
-          auto* ref_addr = vreg_base + i;
+          StackReference<mirror::Object>* ref_addr = vreg_base + i;
           mirror::Object* ref = ref_addr->AsMirrorPtr();
           if (ref != nullptr) {
             mirror::Object* new_ref = ref;
@@ -3577,6 +3581,19 @@ class ReferenceMapVisitor : public StackVisitor {
           if (*ref_addr != nullptr) {
             vreg_info.VisitRegister(ref_addr, i, this);
           }
+        }
+      }
+    } else if (!m->IsStatic() && !m->IsRuntimeMethod() && m->IsProxyMethod()) {
+      // If this is a non-static proxy method, visit its target (`this` object).
+      DCHECK(!m->IsNative());
+      StackReference<mirror::Object>* ref_addr =
+          artQuickGetProxyThisObjectReference(cur_quick_frame);
+      mirror::Object* ref = ref_addr->AsMirrorPtr();
+      if (ref != nullptr) {
+        mirror::Object* new_ref = ref;
+        visitor_(&new_ref, -1, this);
+        if (ref != new_ref) {
+          ref_addr->Assign(new_ref);
         }
       }
     }
@@ -3773,9 +3790,9 @@ void Thread::VisitRoots(RootVisitor* visitor) {
 
 void Thread::VisitRoots(RootVisitor* visitor, VisitRootFlags flags) {
   if ((flags & VisitRootFlags::kVisitRootFlagPrecise) != 0) {
-    VisitRoots<true>(visitor);
+    VisitRoots</* kPrecise */ true>(visitor);
   } else {
-    VisitRoots<false>(visitor);
+    VisitRoots</* kPrecise */ false>(visitor);
   }
 }
 

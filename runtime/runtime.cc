@@ -105,6 +105,7 @@
 #include "mirror/method_type.h"
 #include "mirror/stack_trace_element.h"
 #include "mirror/throwable.h"
+#include "mirror/var_handle.h"
 #include "monitor.h"
 #include "native/dalvik_system_DexFile.h"
 #include "native/dalvik_system_VMDebug.h"
@@ -119,7 +120,6 @@
 #include "native/java_lang_Thread.h"
 #include "native/java_lang_Throwable.h"
 #include "native/java_lang_VMClassLoader.h"
-#include "native/java_lang_Void.h"
 #include "native/java_lang_invoke_MethodHandleImpl.h"
 #include "native/java_lang_ref_FinalizerReference.h"
 #include "native/java_lang_ref_Reference.h"
@@ -265,8 +265,7 @@ Runtime::Runtime()
       oat_file_manager_(nullptr),
       is_low_memory_mode_(false),
       safe_mode_(false),
-      do_hidden_api_checks_(true),
-      use_hidden_api_warning_flag_(true),
+      do_hidden_api_checks_(false),
       pending_hidden_api_warning_(false),
       dedupe_hidden_api_warnings_(true),
       always_set_hidden_api_warning_flag_(false),
@@ -1083,9 +1082,15 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // Take a snapshot of the environment at the time the runtime was created, for use by Exec, etc.
   env_snapshot_.TakeSnapshot();
 
-  RuntimeArgumentMap runtime_options(std::move(runtime_options_in));
+  using Opt = RuntimeArgumentMap;
+  Opt runtime_options(std::move(runtime_options_in));
   ScopedTrace trace(__FUNCTION__);
   CHECK_EQ(sysconf(_SC_PAGE_SIZE), kPageSize);
+
+  // Early override for logging output.
+  if (runtime_options.Exists(Opt::UseStderrLogger)) {
+    android::base::SetLogger(android::base::StderrLogger);
+  }
 
   MemMap::Init();
 
@@ -1113,7 +1118,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     }
   }
 
-  using Opt = RuntimeArgumentMap;
   VLOG(startup) << "Runtime::Init -verbose:startup enabled";
 
   QuasiAtomic::Startup();
@@ -1173,11 +1177,13 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   target_sdk_version_ = runtime_options.GetOrDefault(Opt::TargetSdkVersion);
 
-  // Check whether to enforce hidden API access checks. Zygote needs to be exempt
-  // but checks may be enabled for forked processes (see dalvik_system_ZygoteHooks).
-  if (is_zygote_ || runtime_options.Exists(Opt::NoHiddenApiChecks)) {
-    do_hidden_api_checks_ = false;
-  }
+  // Check whether to enforce hidden API access checks. The checks are disabled
+  // by default and we only enable them if:
+  // (a) runtime was started with a flag that enables the checks, or
+  // (b) Zygote forked a new process that is not exempt (see ZygoteHooks).
+  do_hidden_api_checks_ = runtime_options.Exists(Opt::HiddenApiChecks);
+  DCHECK(!is_zygote_ || !do_hidden_api_checks_)
+      << "Zygote should not be started with hidden API checks";
 
   no_sig_chain_ = runtime_options.Exists(Opt::NoSigChain);
   force_native_bridge_ = runtime_options.Exists(Opt::ForceNativeBridge);
@@ -1739,7 +1745,6 @@ void Runtime::RegisterRuntimeNativeMethods(JNIEnv* env) {
   register_java_lang_Thread(env);
   register_java_lang_Throwable(env);
   register_java_lang_VMClassLoader(env);
-  register_java_lang_Void(env);
   register_java_util_concurrent_atomic_AtomicLong(env);
   register_libcore_util_CharsetUtils(env);
   register_org_apache_harmony_dalvik_ddmc_DdmServer(env);
@@ -1926,6 +1931,11 @@ void Runtime::VisitConstantRoots(RootVisitor* visitor) {
   mirror::EmulatedStackFrame::VisitRoots(visitor);
   mirror::ClassExt::VisitRoots(visitor);
   mirror::CallSite::VisitRoots(visitor);
+  mirror::VarHandle::VisitRoots(visitor);
+  mirror::FieldVarHandle::VisitRoots(visitor);
+  mirror::ArrayElementVarHandle::VisitRoots(visitor);
+  mirror::ByteArrayViewVarHandle::VisitRoots(visitor);
+  mirror::ByteBufferViewVarHandle::VisitRoots(visitor);
   // Visit all the primitive array types classes.
   mirror::PrimitiveArray<uint8_t>::VisitRoots(visitor);   // BooleanArray
   mirror::PrimitiveArray<int8_t>::VisitRoots(visitor);    // ByteArray

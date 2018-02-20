@@ -551,7 +551,7 @@ class Heap {
     return total_memory - std::min(total_memory, byte_allocated);
   }
 
-  // get the space that corresponds to an object's address. Current implementation searches all
+  // Get the space that corresponds to an object's address. Current implementation searches all
   // spaces in turn. If fail_ok is false then failing to find a space will cause an abort.
   // TODO: consider using faster data structure like binary tree.
   space::ContinuousSpace* FindContinuousSpaceFromObject(ObjPtr<mirror::Object>, bool fail_ok) const
@@ -1293,8 +1293,9 @@ class Heap {
   // Parallel GC data structures.
   std::unique_ptr<ThreadPool> thread_pool_;
 
-  // For a GC cycle, a bitmap that is set corresponding to the
+  // A bitmap that is set corresponding to the known live objects since the last GC cycle.
   std::unique_ptr<accounting::HeapBitmap> live_bitmap_ GUARDED_BY(Locks::heap_bitmap_lock_);
+  // A bitmap that is set corresponding to the marked objects in the current GC cycle.
   std::unique_ptr<accounting::HeapBitmap> mark_bitmap_ GUARDED_BY(Locks::heap_bitmap_lock_);
 
   // Mark stack that we reuse to avoid re-allocating the mark stack.
@@ -1312,7 +1313,7 @@ class Heap {
   AllocatorType current_allocator_;
   const AllocatorType current_non_moving_allocator_;
 
-  // Which GCs we run in order when we an allocation fails.
+  // Which GCs we run in order when an allocation fails.
   std::vector<collector::GcType> gc_plan_;
 
   // Bump pointer spaces.
@@ -1320,6 +1321,7 @@ class Heap {
   // Temp space is the space which the semispace collector copies to.
   space::BumpPointerSpace* temp_space_;
 
+  // Region space, used by the concurrent collector.
   space::RegionSpace* region_space_;
 
   // Minimum free guarantees that you always have at least min_free_ free bytes after growing for

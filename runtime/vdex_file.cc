@@ -228,8 +228,7 @@ QuickenInfoOffsetTableAccessor VdexFile::GetQuickenInfoOffsetTable(
     const ArrayRef<const uint8_t>& quickening_info) const {
   // The offset a is in preheader right before the dex file.
   const uint32_t offset = GetQuickeningInfoTableOffset(source_dex_begin);
-  const uint8_t* data_ptr = quickening_info.data() + offset;
-  return QuickenInfoOffsetTableAccessor(data_ptr, num_method_ids);
+  return QuickenInfoOffsetTableAccessor(quickening_info.SubArray(offset), num_method_ids);
 }
 
 QuickenInfoOffsetTableAccessor VdexFile::GetQuickenInfoOffsetTable(
@@ -262,18 +261,6 @@ void VdexFile::UnquickenDexFile(const DexFile& target_dex_file,
                                 const DexFile& source_dex_file,
                                 bool decompile_return_instruction) const {
   UnquickenDexFile(target_dex_file, source_dex_file.Begin(), decompile_return_instruction);
-}
-
-static void UpdateAccessFlags(uint8_t* data, uint32_t new_flag, bool is_method) {
-  // Go back 1 uleb to start.
-  data = ReverseSearchUnsignedLeb128(data);
-  if (is_method) {
-    // Methods have another uleb field before the access flags
-    data = ReverseSearchUnsignedLeb128(data);
-  }
-  DCHECK_EQ(HiddenApiAccessFlags::RemoveFromDex(DecodeUnsignedLeb128WithoutMovingCursor(data)),
-            new_flag);
-  UpdateUnsignedLeb128(data, new_flag);
 }
 
 void VdexFile::UnquickenDexFile(const DexFile& target_dex_file,
@@ -313,14 +300,8 @@ void VdexFile::UnquickenDexFile(const DexFile& target_dex_file,
                 quicken_data,
                 decompile_return_instruction);
           }
-          UpdateAccessFlags(const_cast<uint8_t*>(class_it.DataPointer()),
-                            class_it.GetMemberAccessFlags(),
-                            /*is_method*/ true);
-        } else {
-          UpdateAccessFlags(const_cast<uint8_t*>(class_it.DataPointer()),
-                            class_it.GetMemberAccessFlags(),
-                            /*is_method*/ false);
         }
+        DexFile::UnHideAccessFlags(class_it);
       }
     }
   }
