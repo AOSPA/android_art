@@ -250,7 +250,7 @@ Runtime::Runtime()
       preinitialization_transactions_(),
       verify_(verifier::VerifyMode::kNone),
       allow_dex_file_fallback_(true),
-      target_sdk_version_(0),
+      target_sdk_version_(kUnsetSdkVersion),
       implicit_null_checks_(false),
       implicit_so_checks_(false),
       implicit_suspend_checks_(false),
@@ -265,6 +265,9 @@ Runtime::Runtime()
       oat_file_manager_(nullptr),
       is_low_memory_mode_(false),
       safe_mode_(false),
+      do_hidden_api_checks_(false),
+      pending_hidden_api_warning_(false),
+      dedupe_hidden_api_warnings_(true),
       dump_native_stack_on_sig_quit_(true),
       pruned_dalvik_cache_(false),
       // Initially assume we perceive jank in case the process state is never updated.
@@ -1165,6 +1168,12 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   verify_ = runtime_options.GetOrDefault(Opt::Verify);
   allow_dex_file_fallback_ = !runtime_options.Exists(Opt::NoDexFileFallback);
+
+  target_sdk_version_ = runtime_options.GetOrDefault(Opt::TargetSdkVersion);
+
+  if (runtime_options.Exists(Opt::NoHiddenApiChecks)) {
+    do_hidden_api_checks_ = false;
+  }
 
   no_sig_chain_ = runtime_options.Exists(Opt::NoSigChain);
   force_native_bridge_ = runtime_options.Exists(Opt::ForceNativeBridge);

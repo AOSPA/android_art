@@ -173,6 +173,7 @@ enum {
   DEBUG_JAVA_DEBUGGABLE           = 1 << 8,
   DISABLE_VERIFIER                = 1 << 9,
   ONLY_USE_SYSTEM_OAT_FILES       = 1 << 10,
+  DISABLE_HIDDEN_API_CHECKS       = 1 << 11,
 };
 
 static uint32_t EnableDebugFeatures(uint32_t runtime_flags) {
@@ -228,6 +229,8 @@ static uint32_t EnableDebugFeatures(uint32_t runtime_flags) {
   bool needs_non_debuggable_classes = false;
   if ((runtime_flags & DEBUG_JAVA_DEBUGGABLE) != 0) {
     runtime->AddCompilerOption("--debuggable");
+    // Generate native debug information to allow backtracing through JITed code.
+    runtime->AddCompilerOption("--generate-mini-debug-info");
     runtime->SetJavaDebuggable(true);
     // Deoptimize the boot image as it may be non-debuggable.
     runtime->DeoptimizeBootImage();
@@ -240,6 +243,7 @@ static uint32_t EnableDebugFeatures(uint32_t runtime_flags) {
 
   if ((runtime_flags & DEBUG_NATIVE_DEBUGGABLE) != 0) {
     runtime->AddCompilerOption("--debuggable");
+    // Generate all native debug information we can (e.g. line-numbers).
     runtime->AddCompilerOption("--generate-debug-info");
     runtime->SetNativeDebuggable(true);
     runtime_flags &= ~DEBUG_NATIVE_DEBUGGABLE;
@@ -282,6 +286,11 @@ static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
   if ((runtime_flags & ONLY_USE_SYSTEM_OAT_FILES) != 0) {
     Runtime::Current()->GetOatFileManager().SetOnlyUseSystemOatFiles();
     runtime_flags &= ~ONLY_USE_SYSTEM_OAT_FILES;
+  }
+
+  if ((runtime_flags & DISABLE_HIDDEN_API_CHECKS) != 0) {
+    Runtime::Current()->SetHiddenApiChecksEnabled(false);
+    runtime_flags &= ~DISABLE_HIDDEN_API_CHECKS;
   }
 
   if (runtime_flags != 0) {
@@ -330,6 +339,9 @@ static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
       }
     }
   }
+
+  DCHECK(!is_system_server || !Runtime::Current()->AreHiddenApiChecksEnabled())
+      << "SystemServer should be forked with DISABLE_HIDDEN_API_CHECKS";
 
   if (instruction_set != nullptr && !is_system_server) {
     ScopedUtfChars isa_string(env, instruction_set);

@@ -3286,7 +3286,15 @@ void ClassLinker::LoadField(const ClassDataItemIterator& it,
   const uint32_t field_idx = it.GetMemberIndex();
   dst->SetDexFieldIndex(field_idx);
   dst->SetDeclaringClass(klass.Get());
-  dst->SetAccessFlags(it.GetFieldAccessFlags());
+
+  // Get access flags from the DexFile. If this is a boot class path class,
+  // also set its runtime hidden API access flags.
+  uint32_t access_flags = it.GetFieldAccessFlags();
+  if (klass->IsBootStrapClassLoaded()) {
+    access_flags =
+        HiddenApiAccessFlags::EncodeForRuntime(access_flags, it.DecodeHiddenAccessFlags());
+  }
+  dst->SetAccessFlags(access_flags);
 }
 
 void ClassLinker::LoadMethod(const DexFile& dex_file,
@@ -3302,7 +3310,14 @@ void ClassLinker::LoadMethod(const DexFile& dex_file,
   dst->SetDeclaringClass(klass.Get());
   dst->SetCodeItemOffset(it.GetMethodCodeItemOffset());
 
+  // Get access flags from the DexFile. If this is a boot class path class,
+  // also set its runtime hidden API access flags.
   uint32_t access_flags = it.GetMethodAccessFlags();
+
+  if (klass->IsBootStrapClassLoaded()) {
+    access_flags =
+        HiddenApiAccessFlags::EncodeForRuntime(access_flags, it.DecodeHiddenAccessFlags());
+  }
 
   if (UNLIKELY(strcmp("finalize", method_name) == 0)) {
     // Set finalizable flag on declaring class.
@@ -4237,17 +4252,16 @@ bool ClassLinker::VerifyClassUsingOatFile(const DexFile& dex_file,
                                           ClassStatus& oat_file_class_status) {
   // If we're compiling, we can only verify the class using the oat file if
   // we are not compiling the image or if the class we're verifying is not part of
-  // the app.  In other words, we will only check for preverification of bootclasspath
-  // classes.
+  // the compilation unit (app - dependencies). We will let the compiler callback
+  // tell us about the latter.
   if (Runtime::Current()->IsAotCompiler()) {
+    CompilerCallbacks* callbacks = Runtime::Current()->GetCompilerCallbacks();
     // Are we compiling the bootclasspath?
-    if (Runtime::Current()->GetCompilerCallbacks()->IsBootImage()) {
+    if (callbacks->IsBootImage()) {
       return false;
     }
     // We are compiling an app (not the image).
-
-    // Is this an app class? (I.e. not a bootclasspath class)
-    if (klass->GetClassLoader() != nullptr) {
+    if (!callbacks->CanUseOatStatusForVerification(klass.Ptr())) {
       return false;
     }
   }

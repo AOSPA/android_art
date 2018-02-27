@@ -256,13 +256,6 @@
                         "testing deoptimizing at quick-to-interpreter bridge."]
     },
     {
-        "tests": "137-cfi",
-        "description": ["CFI unwinding expects managed frames, and the test",
-                        "does not iterate enough to even compile. JIT also",
-                        "uses Generic JNI instead of the JNI compiler."],
-        "variant": "interpreter | jit"
-    },
-    {
         "tests": "906-iterate-heap",
         "description": ["Test 906 iterates the heap filtering with different",
                         "options. No instances should be created between those",
@@ -412,7 +405,8 @@
     {
         "tests": [
             "961-default-iface-resolution-gen",
-            "964-default-iface-init-gen"
+            "964-default-iface-init-gen",
+            "968-default-partial-compile-gen"
         ],
         "description": ["Tests that just take too long with jvmti-stress"],
         "variant": "jvmti-stress | redefine-stress | trace-stress | step-stress"
@@ -645,6 +639,18 @@
         "tests": "664-aget-verifier",
         "description": ["Aget on potentially null array fails verification."],
         "bug": "b/64683522"
+    },
+    {
+        "tests": ["628-vdex",
+                  "629-vdex-speed",
+                  "634-vdex-duplicate"],
+        "variant": "cdex-fast",
+        "description": ["Tests that depend on input-vdex are not supported with compact dex"]
+    },
+    {
+        "tests": ["137-cfi"],
+        "variant": "cdex-fast",
+        "description": ["Temporarily disabled until libbacktrace works properly with shared data section"]
     },
     {
         "tests": "661-oat-writer-layout",

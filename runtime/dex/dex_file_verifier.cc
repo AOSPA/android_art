@@ -27,6 +27,7 @@
 #include "dex_file-inl.h"
 #include "experimental_flags.h"
 #include "leb128.h"
+#include "modifiers.h"
 #include "safe_map.h"
 #include "utf-inl.h"
 #include "utils.h"
@@ -453,6 +454,7 @@ bool DexFileVerifier::CheckMap() {
 
   uint32_t count = map->size_;
   uint32_t last_offset = 0;
+  uint32_t last_type = 0;
   uint32_t data_item_count = 0;
   uint32_t data_items_left = header_->data_size_;
   uint32_t used_bits = 0;
@@ -465,7 +467,11 @@ bool DexFileVerifier::CheckMap() {
   // Check the items listed in the map.
   for (uint32_t i = 0; i < count; i++) {
     if (UNLIKELY(last_offset >= item->offset_ && i != 0)) {
-      ErrorStringPrintf("Out of order map item: %x then %x", last_offset, item->offset_);
+      ErrorStringPrintf("Out of order map item: %x then %x for type %x last type was %x",
+                        last_offset,
+                        item->offset_,
+                        static_cast<uint32_t>(item->type_),
+                        last_type);
       return false;
     }
     if (UNLIKELY(item->offset_ >= header_->file_size_)) {
@@ -501,6 +507,7 @@ bool DexFileVerifier::CheckMap() {
 
     used_bits |= bit;
     last_offset = item->offset_;
+    last_type = item->type_;
     item++;
   }
 

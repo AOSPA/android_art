@@ -520,6 +520,30 @@ class Runtime {
   bool IsVerificationEnabled() const;
   bool IsVerificationSoftFail() const;
 
+  void SetHiddenApiChecksEnabled(bool value) {
+    do_hidden_api_checks_ = value;
+  }
+
+  bool AreHiddenApiChecksEnabled() const {
+    return do_hidden_api_checks_;
+  }
+
+  void SetPendingHiddenApiWarning(bool value) {
+    pending_hidden_api_warning_ = value;
+  }
+
+  bool HasPendingHiddenApiWarning() const {
+    return pending_hidden_api_warning_;
+  }
+
+  void SetDedupeHiddenApiWarnings(bool value) {
+    dedupe_hidden_api_warnings_ = value;
+  }
+
+  bool ShouldDedupeHiddenApiWarnings() {
+    return dedupe_hidden_api_warnings_;
+  }
+
   bool IsDexFileFallbackEnabled() const {
     return allow_dex_file_fallback_;
   }
@@ -708,6 +732,8 @@ class Runtime {
   JdwpProvider GetJdwpProvider() const {
     return jdwp_provider_;
   }
+
+  static constexpr int32_t kUnsetSdkVersion = 0u;
 
  private:
   static void InitPlatformSignalHandlers();
@@ -954,6 +980,17 @@ class Runtime {
 
   // Whether the application should run in safe mode, that is, interpreter only.
   bool safe_mode_;
+
+  // Whether access checks on hidden API should be performed.
+  bool do_hidden_api_checks_;
+
+  // Whether the application has used an API which is not restricted but we
+  // should issue a warning about it.
+  bool pending_hidden_api_warning_;
+
+  // Do not warn about the same hidden API access violation twice.
+  // This is only used for testing.
+  bool dedupe_hidden_api_warnings_;
 
   // Whether threads should dump their native stack on SIGQUIT.
   bool dump_native_stack_on_sig_quit_;

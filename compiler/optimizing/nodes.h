@@ -32,11 +32,11 @@
 #include "deoptimization_kind.h"
 #include "dex/dex_file.h"
 #include "dex/dex_file_types.h"
+#include "dex/invoke_type.h"
 #include "entrypoints/quick/quick_entrypoints_enum.h"
 #include "handle.h"
 #include "handle_scope.h"
 #include "intrinsics_enum.h"
-#include "invoke_type.h"
 #include "locations.h"
 #include "method_reference.h"
 #include "mirror/class.h"
@@ -826,6 +826,10 @@ class HLoopInformation : public ArenaObject<kArenaAllocLoopInfo> {
   // Finds blocks that are part of this loop.
   void Populate();
 
+  // Updates blocks population of the loop and all of its outer' ones recursively after the
+  // population of the inner loop is updated.
+  void PopulateInnerLoopUpwards(HLoopInformation* inner_loop);
+
   // Returns whether this loop information contains `block`.
   // Note that this loop information *must* be populated before entering this function.
   bool Contains(const HBasicBlock& block) const;
@@ -855,6 +859,12 @@ class HLoopInformation : public ArenaObject<kArenaAllocLoopInfo> {
   bool DominatesAllBackEdges(HBasicBlock* block);
 
   bool HasExitEdge() const;
+
+  // Resets back edge and blocks-in-loop data.
+  void ResetBasicBlockData() {
+    back_edges_.clear();
+    ClearAllBlocks();
+  }
 
  private:
   // Internal recursive implementation of `Populate`.
@@ -995,6 +1005,18 @@ class HBasicBlock : public ArenaObject<kArenaAllocBasicBlock> {
       loop_information_ = new (graph_->GetAllocator()) HLoopInformation(this, graph_);
     }
     DCHECK_EQ(loop_information_->GetHeader(), this);
+    loop_information_->AddBackEdge(back_edge);
+  }
+
+  // Registers a back edge; if the block was not a loop header before the call associates a newly
+  // created loop info with it.
+  //
+  // Used in SuperblockCloner to preserve LoopInformation object instead of reseting loop
+  // info for all blocks during back edges recalculation.
+  void AddBackEdgeWhileUpdating(HBasicBlock* back_edge) {
+    if (loop_information_ == nullptr || loop_information_->GetHeader() != this) {
+      loop_information_ = new (graph_->GetAllocator()) HLoopInformation(this, graph_);
+    }
     loop_information_->AddBackEdge(back_edge);
   }
 
@@ -2018,6 +2040,10 @@ class HInstruction : public ArenaObject<kArenaAllocInstruction> {
   // TODO: We should rename to CanVisiblyThrow, as some instructions (like HNewInstance),
   // could throw OOME, but it is still OK to remove them if they are unused.
   virtual bool CanThrow() const { return false; }
+
+  // Does the instruction always throw an exception unconditionally?
+  virtual bool AlwaysThrows() const { return false; }
+
   bool CanThrowIntoCatchBlock() const { return CanThrow() && block_->IsTryBlock(); }
 
   bool HasSideEffects() const { return side_effects_.HasSideEffects(); }
@@ -4169,6 +4195,10 @@ class HInvoke : public HVariableInputSizeInstruction {
 
   bool CanThrow() const OVERRIDE { return GetPackedFlag<kFlagCanThrow>(); }
 
+  void SetAlwaysThrows(bool always_throws) { SetPackedFlag<kFlagAlwaysThrows>(always_throws); }
+
+  bool AlwaysThrows() const OVERRIDE { return GetPackedFlag<kFlagAlwaysThrows>(); }
+
   bool CanBeMoved() const OVERRIDE { return IsIntrinsic() && !DoesAnyWrite(); }
 
   bool InstructionDataEquals(const HInstruction* other) const OVERRIDE {
@@ -4199,7 +4229,8 @@ class HInvoke : public HVariableInputSizeInstruction {
   static constexpr size_t kFieldReturnTypeSize =
       MinimumBitsToStore(static_cast<size_t>(DataType::Type::kLast));
   static constexpr size_t kFlagCanThrow = kFieldReturnType + kFieldReturnTypeSize;
-  static constexpr size_t kNumberOfInvokePackedBits = kFlagCanThrow + 1;
+  static constexpr size_t kFlagAlwaysThrows = kFlagCanThrow + 1;
+  static constexpr size_t kNumberOfInvokePackedBits = kFlagAlwaysThrows + 1;
   static_assert(kNumberOfInvokePackedBits <= kMaxNumberOfPackedBits, "Too many packed fields.");
   using InvokeTypeField = BitField<InvokeType, kFieldInvokeType, kFieldInvokeTypeSize>;
   using ReturnTypeField = BitField<DataType::Type, kFieldReturnType, kFieldReturnTypeSize>;
@@ -6575,6 +6606,8 @@ class HThrow FINAL : public HTemplateInstruction<1> {
 
   bool CanThrow() const OVERRIDE { return true; }
 
+  bool AlwaysThrows() const OVERRIDE { return true; }
+
   DECLARE_INSTRUCTION(Throw);
 
  protected:
@@ -7298,19 +7331,19 @@ HInstruction* ReplaceInstrOrPhiByClone(HInstruction* instr);
 class CloneAndReplaceInstructionVisitor : public HGraphDelegateVisitor {
  public:
   explicit CloneAndReplaceInstructionVisitor(HGraph* graph)
-      : HGraphDelegateVisitor(graph), instr_replaced_by_clones_count(0) {}
+      : HGraphDelegateVisitor(graph), instr_replaced_by_clones_count_(0) {}
 
   void VisitInstruction(HInstruction* instruction) OVERRIDE {
     if (instruction->IsClonable()) {
       ReplaceInstrOrPhiByClone(instruction);
-      instr_replaced_by_clones_count++;
+      instr_replaced_by_clones_count_++;
     }
   }
 
-  size_t GetInstrReplacedByClonesCount() const { return instr_replaced_by_clones_count; }
+  size_t GetInstrReplacedByClonesCount() const { return instr_replaced_by_clones_count_; }
 
  private:
-  size_t instr_replaced_by_clones_count;
+  size_t instr_replaced_by_clones_count_;
 
   DISALLOW_COPY_AND_ASSIGN(CloneAndReplaceInstructionVisitor);
 };

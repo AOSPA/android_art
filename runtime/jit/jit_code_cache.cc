@@ -549,7 +549,11 @@ void JitCodeCache::FreeCode(const void* code_ptr) {
   uintptr_t allocation = FromCodeToAllocation(code_ptr);
   // Notify native debugger that we are about to remove the code.
   // It does nothing if we are not using native debugger.
-  DeleteJITCodeEntryForAddress(reinterpret_cast<uintptr_t>(code_ptr));
+  MutexLock mu(Thread::Current(), g_jit_debug_mutex);
+  JITCodeEntry* entry = GetJITCodeEntry(reinterpret_cast<uintptr_t>(code_ptr));
+  if (entry != nullptr) {
+    DecrementJITCodeEntryRefcount(entry, reinterpret_cast<uintptr_t>(code_ptr));
+  }
   if (OatQuickMethodHeader::FromCodePointer(code_ptr)->IsOptimized()) {
     FreeData(GetRootTable(code_ptr));
   }  // else this is a JNI stub without any data.
@@ -1695,7 +1699,9 @@ bool JitCodeCache::NotifyCompilationOf(ArtMethod* method, Thread* self, bool osr
       // can avoid a few expensive GenericJNI calls.
       instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
       for (ArtMethod* m : data->GetMethods()) {
-        instrumentation->UpdateMethodsCode(m, entrypoint);
+        // Call the dedicated method instead of the more generic UpdateMethodsCode, because
+        // `m` might be in the process of being deleted.
+        instrumentation->UpdateNativeMethodsCodeToJitCode(m, entrypoint);
       }
       if (collection_in_progress_) {
         GetLiveBitmap()->AtomicTestAndSet(FromCodeToAllocation(data->GetCode()));
@@ -1819,8 +1825,10 @@ void JitCodeCache::FreeData(uint8_t* data) {
 
 void JitCodeCache::Dump(std::ostream& os) {
   MutexLock mu(Thread::Current(), lock_);
+  MutexLock mu2(Thread::Current(), g_jit_debug_mutex);
   os << "Current JIT code cache size: " << PrettySize(used_memory_for_code_) << "\n"
      << "Current JIT data cache size: " << PrettySize(used_memory_for_data_) << "\n"
+     << "Current JIT mini-debug-info size: " << PrettySize(GetJITCodeEntryMemUsage()) << "\n"
      << "Current JIT capacity: " << PrettySize(current_capacity_) << "\n"
      << "Current number of JIT JNI stub entries: " << jni_stubs_map_.size() << "\n"
      << "Current number of JIT code cache entries: " << method_code_map_.size() << "\n"

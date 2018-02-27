@@ -26,11 +26,12 @@
 #include "class_linker.h"
 #include "class_loader.h"
 #include "common_throws.h"
-#include "dex_cache.h"
 #include "dex/dex_file-inl.h"
+#include "dex/invoke_type.h"
+#include "dex_cache.h"
 #include "gc/heap-inl.h"
+#include "hidden_api.h"
 #include "iftable.h"
-#include "invoke_type.h"
 #include "subtype_check.h"
 #include "object-inl.h"
 #include "object_array.h"
@@ -1142,6 +1143,10 @@ inline bool Class::CanAccessMember(ObjPtr<Class> access_to, uint32_t member_flag
   // Classes can access all of their own members
   if (this == access_to) {
     return true;
+  }
+  // Do not allow non-boot class path classes access hidden APIs.
+  if (hiddenapi::ShouldBlockAccessToMember(member_flags, this)) {
+    return false;
   }
   // Public members are trivially accessible
   if (member_flags & kAccPublic) {

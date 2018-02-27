@@ -33,8 +33,10 @@
 #include "dex/art_dex_file_loader.h"
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_loader.h"
+#include "dex/dex_file_verifier.h"
 
 // Runtime includes.
+#include "dex_container.h"
 #include "dex/compact_dex_level.h"
 #include "dex_to_dex_decompiler.h"
 #include "dexlayout.h"
@@ -66,14 +68,57 @@ static void DoDexUnquicken(const art::DexFile& new_dex_file, const art::DexFile&
   vdex->UnquickenDexFile(new_dex_file, original_dex_file, /* decompile_return_instruction */true);
 }
 
-std::unique_ptr<FixedUpDexFile> FixedUpDexFile::Create(const art::DexFile& original) {
+static void DCheckVerifyDexFile(const art::DexFile& dex) {
+  if (art::kIsDebugBuild) {
+    std::string error;
+    if (!art::DexFileVerifier::Verify(&dex,
+                                      dex.Begin(),
+                                      dex.Size(),
+                                      "FixedUpDexFile_Verification.dex",
+                                      /*verify_checksum*/ true,
+                                      &error)) {
+      LOG(FATAL) << "Failed to verify de-quickened dex file: " << error;
+    }
+  }
+}
+
+std::unique_ptr<FixedUpDexFile> FixedUpDexFile::Create(const art::DexFile& original,
+                                                       const char* descriptor) {
   // Copy the data into mutable memory.
   std::vector<unsigned char> data;
-  data.resize(original.Size());
-  memcpy(data.data(), original.Begin(), original.Size());
+  std::unique_ptr<const art::DexFile> new_dex_file;
   std::string error;
   const art::ArtDexFileLoader dex_file_loader;
-  std::unique_ptr<const art::DexFile> new_dex_file(dex_file_loader.Open(
+
+  if (original.IsCompactDexFile()) {
+    // Since we are supposed to return a standard dex, convert back using dexlayout. It's OK to do
+    // this before unquickening.
+    art::Options options;
+    options.compact_dex_level_ = art::CompactDexLevel::kCompactDexLevelNone;
+    // Add a filter to only include the class that has the matching descriptor.
+    static constexpr bool kFilterByDescriptor = true;
+    if (kFilterByDescriptor) {
+      options.class_filter_.insert(descriptor);
+    }
+    art::DexLayout dex_layout(options,
+                              /*info*/ nullptr,
+                              /*out_file*/ nullptr,
+                              /*header*/ nullptr);
+    std::unique_ptr<art::DexContainer> dex_container;
+    dex_layout.ProcessDexFile(original.GetLocation().c_str(),
+                              &original,
+                              0,
+                              &dex_container);
+    art::DexContainer::Section* main_section = dex_container->GetMainSection();
+    CHECK_EQ(dex_container->GetDataSection()->Size(), 0u);
+    data.insert(data.end(), main_section->Begin(), main_section->End());
+  } else {
+    data.resize(original.Size());
+    memcpy(data.data(), original.Begin(), original.Size());
+  }
+
+  // Open the dex file in the buffer.
+  new_dex_file = dex_file_loader.Open(
       data.data(),
       data.size(),
       /*location*/"Unquickening_dexfile.dex",
@@ -81,41 +126,17 @@ std::unique_ptr<FixedUpDexFile> FixedUpDexFile::Create(const art::DexFile& origi
       /*oat_dex_file*/nullptr,
       /*verify*/false,
       /*verify_checksum*/false,
-      &error));
-  if (new_dex_file.get() == nullptr) {
+      &error);
+
+  if (new_dex_file  == nullptr) {
     LOG(ERROR) << "Unable to open dex file from memory for unquickening! error: " << error;
     return nullptr;
   }
 
   DoDexUnquicken(*new_dex_file, original);
 
-  if (original.IsCompactDexFile()) {
-    // Since we are supposed to return a standard dex, convert back using dexlayout.
-    art::Options options;
-    options.output_to_memmap_ = true;
-    options.compact_dex_level_ = art::CompactDexLevel::kCompactDexLevelNone;
-    options.update_checksum_ = true;
-    art::DexLayout dex_layout(options, nullptr, nullptr);
-    dex_layout.ProcessDexFile(new_dex_file->GetLocation().c_str(), new_dex_file.get(), 0);
-    std::unique_ptr<art::MemMap> mem_map(dex_layout.GetAndReleaseMemMap());
-
-    const uint32_t dex_file_size =
-        reinterpret_cast<const art::DexFile::Header*>(mem_map->Begin())->file_size_;
-    // Overwrite the dex file stored in data with the new result.
-    data.clear();
-    data.insert(data.end(), mem_map->Begin(), mem_map->Begin() + dex_file_size);
-    new_dex_file = dex_file_loader.Open(
-        data.data(),
-        data.size(),
-        /*location*/"Unquickening_dexfile.dex",
-        /*location_checksum*/0,
-        /*oat_dex_file*/nullptr,
-        /*verify*/false,
-        /*verify_checksum*/false,
-        &error);
-  }
-
   RecomputeDexChecksum(const_cast<art::DexFile*>(new_dex_file.get()));
+  DCheckVerifyDexFile(*new_dex_file);
   std::unique_ptr<FixedUpDexFile> ret(new FixedUpDexFile(std::move(new_dex_file), std::move(data)));
   return ret;
 }

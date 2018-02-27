@@ -32,6 +32,7 @@
 #include "driver/compiler_driver.h"
 #include "driver/compiler_options.h"
 #include "entrypoints/quick/quick_entrypoints.h"
+#include "jit/profile_compilation_info.h"
 #include "linker/buffered_output_stream.h"
 #include "linker/elf_writer.h"
 #include "linker/elf_writer_quick.h"
@@ -187,7 +188,7 @@ class OatTest : public CommonCompilerTest {
         oat_file);
     elf_writer->Start();
     OutputStream* oat_rodata = elf_writer->StartRoData();
-    std::unique_ptr<MemMap> opened_dex_files_map;
+    std::vector<std::unique_ptr<MemMap>> opened_dex_files_maps;
     std::vector<std::unique_ptr<const DexFile>> opened_dex_files;
     if (!oat_writer.WriteAndOpenDexFiles(vdex_file,
                                          oat_rodata,
@@ -196,7 +197,7 @@ class OatTest : public CommonCompilerTest {
                                          &key_value_store,
                                          verify,
                                          /* update_input_vdex */ false,
-                                         &opened_dex_files_map,
+                                         &opened_dex_files_maps,
                                          &opened_dex_files)) {
       return false;
     }
@@ -250,13 +251,15 @@ class OatTest : public CommonCompilerTest {
     }
 
     elf_writer->WriteDynamicSection();
-    elf_writer->WriteDebugInfo(oat_writer.GetMethodDebugInfo());
+    elf_writer->WriteDebugInfo(oat_writer.GetDebugInfo());
 
     if (!elf_writer->End()) {
       return false;
     }
 
-    opened_dex_files_maps_.emplace_back(std::move(opened_dex_files_map));
+    for (std::unique_ptr<MemMap>& map : opened_dex_files_maps) {
+      opened_dex_files_maps_.emplace_back(std::move(map));
+    }
     for (std::unique_ptr<const DexFile>& dex_file : opened_dex_files) {
       opened_dex_files_.emplace_back(dex_file.release());
     }
@@ -485,7 +488,7 @@ TEST_F(OatTest, OatHeaderSizeCheck) {
   EXPECT_EQ(76U, sizeof(OatHeader));
   EXPECT_EQ(4U, sizeof(OatMethodOffsets));
   EXPECT_EQ(24U, sizeof(OatQuickMethodHeader));
-  EXPECT_EQ(161 * static_cast<size_t>(GetInstructionSetPointerSize(kRuntimeISA)),
+  EXPECT_EQ(162 * static_cast<size_t>(GetInstructionSetPointerSize(kRuntimeISA)),
             sizeof(QuickEntryPoints));
 }
 

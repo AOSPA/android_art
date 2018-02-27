@@ -89,6 +89,7 @@ art_cc_defaults {
         "optimizing/ssa_liveness_analysis.cc",
         "optimizing/ssa_phi_elimination.cc",
         "optimizing/stack_map_stream.cc",
+        "optimizing/superblock_cloner.cc",
         "trampolines/trampoline_compiler.cc",
         "utils/assembler.cc",
         "utils/jni_macro_assembler.cc",
@@ -252,9 +253,8 @@ art_cc_library {
 
     pgo: {
         instrumentation: true,
-        profile_file: "dex2oat.profdata",
+        profile_file: "art/dex2oat.profdata",
         benchmarks: ["dex2oat"],
-        enable_profile_use: false,
     }
 }
 

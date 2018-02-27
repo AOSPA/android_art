@@ -15,12 +15,14 @@
  */
 
 #include <gtest/gtest.h>
+#include <stdio.h>
 
 #include "art_method-inl.h"
 #include "base/unix_file/fd_file.h"
 #include "class_linker-inl.h"
 #include "common_runtime_test.h"
 #include "dex/dex_file.h"
+#include "dex/dex_file_loader.h"
 #include "handle_scope-inl.h"
 #include "jit/profile_compilation_info.h"
 #include "linear_alloc.h"
@@ -29,6 +31,7 @@
 #include "mirror/class_loader.h"
 #include "scoped_thread_state_change-inl.h"
 #include "type_reference.h"
+#include "ziparchive/zip_writer.h"
 
 namespace art {
 
@@ -266,6 +269,53 @@ class ProfileCompilationInfoTest : public CommonRuntimeTest {
     for (auto it : *ic_map) {
       it.second.SetIsMissingTypes();
     }
+  }
+
+  void TestProfileLoadFromZip(const char* zip_entry,
+                              size_t zip_flags,
+                              bool should_succeed,
+                              bool should_succeed_with_empty_profile = false) {
+    // Create a valid profile.
+    ScratchFile profile;
+    ProfileCompilationInfo saved_info;
+    for (uint16_t i = 0; i < 10; i++) {
+      ASSERT_TRUE(AddMethod("dex_location1", /* checksum */ 1, /* method_idx */ i, &saved_info));
+      ASSERT_TRUE(AddMethod("dex_location2", /* checksum */ 2, /* method_idx */ i, &saved_info));
+    }
+    ASSERT_TRUE(saved_info.Save(GetFd(profile)));
+    ASSERT_EQ(0, profile.GetFile()->Flush());
+
+    // Prepare the profile content for zipping.
+    ASSERT_TRUE(profile.GetFile()->ResetOffset());
+    std::vector<uint8_t> data(profile.GetFile()->GetLength());
+    ASSERT_TRUE(profile.GetFile()->ReadFully(data.data(), data.size()));
+
+    // Zip the profile content.
+    ScratchFile zip;
+    FILE* file = fopen(zip.GetFile()->GetPath().c_str(), "wb");
+    ZipWriter writer(file);
+    writer.StartEntry(zip_entry, zip_flags);
+    writer.WriteBytes(data.data(), data.size());
+    writer.FinishEntry();
+    writer.Finish();
+    fflush(file);
+    fclose(file);
+
+    // Verify loading from the zip archive.
+    ProfileCompilationInfo loaded_info;
+    ASSERT_TRUE(zip.GetFile()->ResetOffset());
+    ASSERT_EQ(should_succeed, loaded_info.Load(zip.GetFile()->GetPath(), false));
+    if (should_succeed) {
+      if (should_succeed_with_empty_profile) {
+        ASSERT_TRUE(loaded_info.IsEmpty());
+      } else {
+        ASSERT_TRUE(loaded_info.Equals(saved_info));
+      }
+    }
+  }
+
+  bool IsEmpty(const ProfileCompilationInfo& info) {
+    return info.IsEmpty();
   }
 
   // Cannot sizeof the actual arrays so hard code the values here.
@@ -931,6 +981,315 @@ TEST_F(ProfileCompilationInfoTest, SampledMethodsTest) {
     EXPECT_FALSE(info.GetMethodHotness(MethodReference(dex.get(), 1)).IsPostStartup());
     EXPECT_FALSE(info.GetMethodHotness(MethodReference(dex.get(), 4)).IsStartup());
     EXPECT_FALSE(info.GetMethodHotness(MethodReference(dex.get(), 6)).IsStartup());
+  }
+}
+
+TEST_F(ProfileCompilationInfoTest, LoadFromZipCompress) {
+  TestProfileLoadFromZip("primary.prof",
+                         ZipWriter::kCompress | ZipWriter::kAlign32,
+                         /*should_succeed*/true);
+}
+
+TEST_F(ProfileCompilationInfoTest, LoadFromZipUnCompress) {
+  TestProfileLoadFromZip("primary.prof",
+                         ZipWriter::kAlign32,
+                         /*should_succeed*/true);
+}
+
+TEST_F(ProfileCompilationInfoTest, LoadFromZipUnAligned) {
+  TestProfileLoadFromZip("primary.prof",
+                         0,
+                         /*should_succeed*/true);
+}
+
+TEST_F(ProfileCompilationInfoTest, LoadFromZipFailBadZipEntry) {
+  TestProfileLoadFromZip("invalid.profile.entry",
+                         0,
+                         /*should_succeed*/true,
+                         /*should_succeed_with_empty_profile*/true);
+}
+
+TEST_F(ProfileCompilationInfoTest, LoadFromZipFailBadProfile) {
+  // Create a bad profile.
+  ScratchFile profile;
+  ASSERT_TRUE(profile.GetFile()->WriteFully(
+      ProfileCompilationInfo::kProfileMagic, kProfileMagicSize));
+  ASSERT_TRUE(profile.GetFile()->WriteFully(
+      ProfileCompilationInfo::kProfileVersion, kProfileVersionSize));
+  // Write that we have at least one line.
+  uint8_t line_number[] = { 0, 1 };
+  ASSERT_TRUE(profile.GetFile()->WriteFully(line_number, sizeof(line_number)));
+  ASSERT_EQ(0, profile.GetFile()->Flush());
+
+  // Prepare the profile content for zipping.
+  ASSERT_TRUE(profile.GetFile()->ResetOffset());
+  std::vector<uint8_t> data(profile.GetFile()->GetLength());
+  ASSERT_TRUE(profile.GetFile()->ReadFully(data.data(), data.size()));
+
+  // Zip the profile content.
+  ScratchFile zip;
+  FILE* file = fopen(zip.GetFile()->GetPath().c_str(), "wb");
+  ZipWriter writer(file);
+  writer.StartEntry("primary.prof", ZipWriter::kAlign32);
+  writer.WriteBytes(data.data(), data.size());
+  writer.FinishEntry();
+  writer.Finish();
+  fflush(file);
+  fclose(file);
+
+  // Check that we failed to load.
+  ProfileCompilationInfo loaded_info;
+  ASSERT_TRUE(zip.GetFile()->ResetOffset());
+  ASSERT_FALSE(loaded_info.Load(GetFd(zip)));
+}
+
+TEST_F(ProfileCompilationInfoTest, UpdateProfileKeyOk) {
+  std::vector<std::unique_ptr<const DexFile>> dex_files = OpenTestDexFiles("MultiDex");
+
+  ProfileCompilationInfo info;
+  for (const std::unique_ptr<const DexFile>& dex : dex_files) {
+    // Create the profile with a different location so that we can update it to the
+    // real dex location later.
+    std::string base_location = DexFileLoader::GetBaseLocation(dex->GetLocation());
+    std::string multidex_suffix = DexFileLoader::GetMultiDexSuffix(dex->GetLocation());
+    std::string old_name = base_location + "-old" + multidex_suffix;
+    info.AddMethodIndex(Hotness::kFlagHot,
+                        old_name,
+                        dex->GetLocationChecksum(),
+                        /* method_idx */ 0,
+                        dex->NumMethodIds());
+  }
+
+  // Update the profile keys based on the original dex files
+  ASSERT_TRUE(info.UpdateProfileKeys(dex_files));
+
+  // Verify that we find the methods when searched with the original dex files.
+  for (const std::unique_ptr<const DexFile>& dex : dex_files) {
+    std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> loaded_pmi =
+        info.GetMethod(dex->GetLocation(), dex->GetLocationChecksum(), /* method_idx */ 0);
+    ASSERT_TRUE(loaded_pmi != nullptr);
+  }
+}
+
+TEST_F(ProfileCompilationInfoTest, UpdateProfileKeyOkButNoUpdate) {
+  std::vector<std::unique_ptr<const DexFile>> dex_files = OpenTestDexFiles("MultiDex");
+
+  ProfileCompilationInfo info;
+  info.AddMethodIndex(Hotness::kFlagHot,
+                      "my.app",
+                      /* checksum */ 123,
+                      /* method_idx */ 0,
+                      /* num_method_ids */ 10);
+
+  // Update the profile keys based on the original dex files
+  ASSERT_TRUE(info.UpdateProfileKeys(dex_files));
+
+  // Verify that we did not perform any update and that we cannot find anything with the new
+  // location.
+  for (const std::unique_ptr<const DexFile>& dex : dex_files) {
+    std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> loaded_pmi =
+        info.GetMethod(dex->GetLocation(), dex->GetLocationChecksum(), /* method_idx */ 0);
+    ASSERT_TRUE(loaded_pmi == nullptr);
+  }
+
+  // Verify that we can find the original entry.
+  std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> loaded_pmi =
+        info.GetMethod("my.app", /* checksum */ 123, /* method_idx */ 0);
+  ASSERT_TRUE(loaded_pmi != nullptr);
+}
+
+TEST_F(ProfileCompilationInfoTest, UpdateProfileKeyFail) {
+  std::vector<std::unique_ptr<const DexFile>> dex_files = OpenTestDexFiles("MultiDex");
+
+
+  ProfileCompilationInfo info;
+  // Add all dex
+  for (const std::unique_ptr<const DexFile>& dex : dex_files) {
+    // Create the profile with a different location so that we can update it to the
+    // real dex location later.
+    std::string base_location = DexFileLoader::GetBaseLocation(dex->GetLocation());
+    std::string multidex_suffix = DexFileLoader::GetMultiDexSuffix(dex->GetLocation());
+    std::string old_name = base_location + "-old" + multidex_suffix;
+    info.AddMethodIndex(Hotness::kFlagHot,
+                        old_name,
+                        dex->GetLocationChecksum(),
+                        /* method_idx */ 0,
+                        dex->NumMethodIds());
+  }
+
+  // Add a method index using the location we want to rename to.
+  // This will cause the rename to fail because an existing entry would already have that name.
+  info.AddMethodIndex(Hotness::kFlagHot,
+                      dex_files[0]->GetLocation(),
+                      /* checksum */ 123,
+                      /* method_idx */ 0,
+                      dex_files[0]->NumMethodIds());
+
+  ASSERT_FALSE(info.UpdateProfileKeys(dex_files));
+}
+
+TEST_F(ProfileCompilationInfoTest, FilteredLoading) {
+  ScratchFile profile;
+
+  ProfileCompilationInfo saved_info;
+  ProfileCompilationInfo::OfflineProfileMethodInfo pmi = GetOfflineProfileMethodInfo();
+
+  // Add methods with inline caches.
+  for (uint16_t method_idx = 0; method_idx < 10; method_idx++) {
+    // Add a method which is part of the same dex file as one of the class from the inline caches.
+    ASSERT_TRUE(AddMethod("dex_location1", /* checksum */ 1, method_idx, pmi, &saved_info));
+    ASSERT_TRUE(AddMethod("dex_location2", /* checksum */ 2, method_idx, pmi, &saved_info));
+    // Add a method which is outside the set of dex files.
+    ASSERT_TRUE(AddMethod("dex_location4", /* checksum */ 4, method_idx, pmi, &saved_info));
+  }
+
+  ASSERT_TRUE(saved_info.Save(GetFd(profile)));
+  ASSERT_EQ(0, profile.GetFile()->Flush());
+
+  // Check that we get back what we saved.
+  ProfileCompilationInfo loaded_info;
+  ASSERT_TRUE(profile.GetFile()->ResetOffset());
+
+  // Filter out dex locations. Keep only dex_location1 and dex_location2.
+  ProfileCompilationInfo::ProfileLoadFilterFn filter_fn =
+      [](const std::string& dex_location, uint32_t checksum) -> bool {
+          return (dex_location == "dex_location1" && checksum == 1)
+              || (dex_location == "dex_location3" && checksum == 3);
+        };
+  ASSERT_TRUE(loaded_info.Load(GetFd(profile), true, filter_fn));
+
+  // Verify that we filtered out locations during load.
+
+  // Dex location 2 and 4 should have been filtered out
+  for (uint16_t method_idx = 0; method_idx < 10; method_idx++) {
+    ASSERT_TRUE(nullptr == loaded_info.GetMethod("dex_location2", /* checksum */ 2, method_idx));
+    ASSERT_TRUE(nullptr == loaded_info.GetMethod("dex_location4", /* checksum */ 4, method_idx));
+  }
+
+  // Dex location 1 should have all all the inline caches referencing dex location 2 set to
+  // missing types.
+  for (uint16_t method_idx = 0; method_idx < 10; method_idx++) {
+    // The methods for dex location 1 should be in the profile data.
+    std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> loaded_pmi1 =
+      loaded_info.GetMethod("dex_location1", /* checksum */ 1, /* method_idx */ method_idx);
+    ASSERT_TRUE(loaded_pmi1 != nullptr);
+
+    // Verify the inline cache.
+    // Everything should be as constructed by GetOfflineProfileMethodInfo with the exception
+    // of the inline caches referring types from dex_location2.
+    // These should be set to IsMissingType.
+    ProfileCompilationInfo::InlineCacheMap* ic_map = CreateInlineCacheMap();
+
+    // Monomorphic types should remain the same as dex_location1 was kept.
+    for (uint16_t dex_pc = 0; dex_pc < 11; dex_pc++) {
+      ProfileCompilationInfo::DexPcData dex_pc_data(allocator_.get());
+      dex_pc_data.AddClass(0, dex::TypeIndex(0));
+      ic_map->Put(dex_pc, dex_pc_data);
+    }
+    // Polymorphic inline cache should have been transformed to IsMissingType due to
+    // the removal of dex_location2.
+    for (uint16_t dex_pc = 11; dex_pc < 22; dex_pc++) {
+      ProfileCompilationInfo::DexPcData dex_pc_data(allocator_.get());
+      dex_pc_data.SetIsMissingTypes();
+      ic_map->Put(dex_pc, dex_pc_data);
+    }
+
+    // Megamorphic are not affected by removal of dex files.
+    for (uint16_t dex_pc = 22; dex_pc < 33; dex_pc++) {
+      ProfileCompilationInfo::DexPcData dex_pc_data(allocator_.get());
+      dex_pc_data.SetIsMegamorphic();
+      ic_map->Put(dex_pc, dex_pc_data);
+    }
+    // Missing types are not affected be removal of dex files.
+    for (uint16_t dex_pc = 33; dex_pc < 44; dex_pc++) {
+      ProfileCompilationInfo::DexPcData dex_pc_data(allocator_.get());
+      dex_pc_data.SetIsMissingTypes();
+      ic_map->Put(dex_pc, dex_pc_data);
+    }
+
+    ProfileCompilationInfo::OfflineProfileMethodInfo expected_pmi(ic_map);
+
+    // The dex references should not have  dex_location2 in the list.
+    expected_pmi.dex_references.emplace_back("dex_location1", /* checksum */1, kMaxMethodIds);
+    expected_pmi.dex_references.emplace_back("dex_location3", /* checksum */3, kMaxMethodIds);
+
+    // Now check that we get back what we expect.
+    ASSERT_TRUE(*loaded_pmi1 == expected_pmi);
+  }
+}
+
+TEST_F(ProfileCompilationInfoTest, FilteredLoadingRemoveAll) {
+  ScratchFile profile;
+
+  ProfileCompilationInfo saved_info;
+  ProfileCompilationInfo::OfflineProfileMethodInfo pmi = GetOfflineProfileMethodInfo();
+
+  // Add methods with inline caches.
+  for (uint16_t method_idx = 0; method_idx < 10; method_idx++) {
+    // Add a method which is part of the same dex file as one of the class from the inline caches.
+    ASSERT_TRUE(AddMethod("dex_location1", /* checksum */ 1, method_idx, pmi, &saved_info));
+    ASSERT_TRUE(AddMethod("dex_location2", /* checksum */ 2, method_idx, pmi, &saved_info));
+    // Add a method which is outside the set of dex files.
+    ASSERT_TRUE(AddMethod("dex_location4", /* checksum */ 4, method_idx, pmi, &saved_info));
+  }
+
+  ASSERT_TRUE(saved_info.Save(GetFd(profile)));
+  ASSERT_EQ(0, profile.GetFile()->Flush());
+
+  // Check that we get back what we saved.
+  ProfileCompilationInfo loaded_info;
+  ASSERT_TRUE(profile.GetFile()->ResetOffset());
+
+  // Remove all elements.
+  ProfileCompilationInfo::ProfileLoadFilterFn filter_fn =
+      [](const std::string&, uint32_t) -> bool { return false; };
+  ASSERT_TRUE(loaded_info.Load(GetFd(profile), true, filter_fn));
+
+  // Verify that we filtered out everything.
+  ASSERT_TRUE(IsEmpty(loaded_info));
+}
+
+TEST_F(ProfileCompilationInfoTest, FilteredLoadingKeepAll) {
+  ScratchFile profile;
+
+  ProfileCompilationInfo saved_info;
+  ProfileCompilationInfo::OfflineProfileMethodInfo pmi = GetOfflineProfileMethodInfo();
+
+  // Add methods with inline caches.
+  for (uint16_t method_idx = 0; method_idx < 10; method_idx++) {
+    // Add a method which is part of the same dex file as one of the
+    // class from the inline caches.
+    ASSERT_TRUE(AddMethod("dex_location1", /* checksum */ 1, method_idx, pmi, &saved_info));
+    // Add a method which is outside the set of dex files.
+    ASSERT_TRUE(AddMethod("dex_location4", /* checksum */ 4, method_idx, pmi, &saved_info));
+  }
+
+  ASSERT_TRUE(saved_info.Save(GetFd(profile)));
+  ASSERT_EQ(0, profile.GetFile()->Flush());
+
+  // Check that we get back what we saved.
+  ProfileCompilationInfo loaded_info;
+  ASSERT_TRUE(profile.GetFile()->ResetOffset());
+
+  // Keep all elements.
+  ProfileCompilationInfo::ProfileLoadFilterFn filter_fn =
+      [](const std::string&, uint32_t) -> bool { return true; };
+  ASSERT_TRUE(loaded_info.Load(GetFd(profile), true, filter_fn));
+
+
+  ASSERT_TRUE(loaded_info.Equals(saved_info));
+
+  for (uint16_t method_idx = 0; method_idx < 10; method_idx++) {
+    std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> loaded_pmi1 =
+        loaded_info.GetMethod("dex_location1", /* checksum */ 1, method_idx);
+    ASSERT_TRUE(loaded_pmi1 != nullptr);
+    ASSERT_TRUE(*loaded_pmi1 == pmi);
+  }
+  for (uint16_t method_idx = 0; method_idx < 10; method_idx++) {
+    std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> loaded_pmi2 =
+        loaded_info.GetMethod("dex_location4", /* checksum */ 4, method_idx);
+    ASSERT_TRUE(loaded_pmi2 != nullptr);
+    ASSERT_TRUE(*loaded_pmi2 == pmi);
   }
 }
 

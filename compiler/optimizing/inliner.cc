@@ -392,6 +392,34 @@ ArtMethod* HInliner::TryCHADevirtualization(ArtMethod* resolved_method) {
   return single_impl;
 }
 
+static bool AlwaysThrows(ArtMethod* method) {
+  CodeItemDataAccessor accessor(method);
+  // Skip native methods, methods with try blocks, and methods that are too large.
+  if (!accessor.HasCodeItem() ||
+      accessor.TriesSize() != 0 ||
+      accessor.InsnsSizeInCodeUnits() > kMaximumNumberOfTotalInstructions) {
+    return false;
+  }
+  // Scan for exits.
+  bool throw_seen = false;
+  for (const DexInstructionPcPair& pair : accessor) {
+    switch (pair.Inst().Opcode()) {
+      case Instruction::RETURN:
+      case Instruction::RETURN_VOID:
+      case Instruction::RETURN_WIDE:
+      case Instruction::RETURN_OBJECT:
+      case Instruction::RETURN_VOID_NO_BARRIER:
+        return false;  // found regular control flow back
+      case Instruction::THROW:
+        throw_seen = true;
+        break;
+      default:
+        break;
+    }
+  }
+  return throw_seen;
+}
+
 bool HInliner::TryInline(HInvoke* invoke_instruction) {
   if (invoke_instruction->IsInvokeUnresolved() ||
       invoke_instruction->IsInvokePolymorphic()) {
@@ -431,20 +459,29 @@ bool HInliner::TryInline(HInvoke* invoke_instruction) {
   }
 
   if (actual_method != nullptr) {
+    // Single target.
     bool result = TryInlineAndReplace(invoke_instruction,
                                       actual_method,
                                       ReferenceTypeInfo::CreateInvalid(),
                                       /* do_rtp */ true,
                                       cha_devirtualize);
-    if (result && !invoke_instruction->IsInvokeStaticOrDirect()) {
-      if (cha_devirtualize) {
-        // Add dependency due to devirtulization. We've assumed resolved_method
-        // has single implementation.
-        outermost_graph_->AddCHASingleImplementationDependency(resolved_method);
-        MaybeRecordStat(stats_, MethodCompilationStat::kCHAInline);
-      } else {
-        MaybeRecordStat(stats_, MethodCompilationStat::kInlinedInvokeVirtualOrInterface);
+    if (result) {
+      // Successfully inlined.
+      if (!invoke_instruction->IsInvokeStaticOrDirect()) {
+        if (cha_devirtualize) {
+          // Add dependency due to devirtualization. We've assumed resolved_method
+          // has single implementation.
+          outermost_graph_->AddCHASingleImplementationDependency(resolved_method);
+          MaybeRecordStat(stats_, MethodCompilationStat::kCHAInline);
+        } else {
+          MaybeRecordStat(stats_, MethodCompilationStat::kInlinedInvokeVirtualOrInterface);
+        }
       }
+    } else if (!cha_devirtualize && AlwaysThrows(actual_method)) {
+      // Set always throws property for non-inlined method call with single target
+      // (unless it was obtained through CHA, because that would imply we have
+      // to add the CHA dependency, which seems not worth it).
+      invoke_instruction->SetAlwaysThrows(true);
     }
     return result;
   }
