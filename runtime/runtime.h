@@ -528,6 +528,14 @@ class Runtime {
     return do_hidden_api_checks_;
   }
 
+  void SetUseHiddenApiWarningFlag(bool value) {
+    use_hidden_api_warning_flag_ = value;
+  }
+
+  bool ShouldSetHiddenApiWarningFlag() const {
+    return use_hidden_api_warning_flag_;
+  }
+
   void SetPendingHiddenApiWarning(bool value) {
     pending_hidden_api_warning_ = value;
   }
@@ -542,6 +550,14 @@ class Runtime {
 
   bool ShouldDedupeHiddenApiWarnings() {
     return dedupe_hidden_api_warnings_;
+  }
+
+  void AlwaysSetHiddenApiWarningFlag() {
+    always_set_hidden_api_warning_flag_ = true;
+  }
+
+  bool ShouldAlwaysSetHiddenApiWarningFlag() const {
+    return always_set_hidden_api_warning_flag_;
   }
 
   bool IsDexFileFallbackEnabled() const {
@@ -984,6 +1000,9 @@ class Runtime {
   // Whether access checks on hidden API should be performed.
   bool do_hidden_api_checks_;
 
+  // Whether hidden API UI warning flag should be set or not.
+  bool use_hidden_api_warning_flag_;
+
   // Whether the application has used an API which is not restricted but we
   // should issue a warning about it.
   bool pending_hidden_api_warning_;
@@ -991,6 +1010,11 @@ class Runtime {
   // Do not warn about the same hidden API access violation twice.
   // This is only used for testing.
   bool dedupe_hidden_api_warnings_;
+
+  // Hidden API can print warnings into the log and/or set a flag read by the
+  // framework to show a UI warning. If this flag is set, always set the flag
+  // when there is a warning. This is only used for testing.
+  bool always_set_hidden_api_warning_flag_;
 
   // Whether threads should dump their native stack on SIGQUIT.
   bool dump_native_stack_on_sig_quit_;

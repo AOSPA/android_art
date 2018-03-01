@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 
+#include "android-base/strings.h"
 #include "art_method-inl.h"
 #include "base/unix_file/fd_file.h"
 #include "common_runtime_test.h"
@@ -51,6 +52,28 @@ class ProfileAssistantTest : public CommonRuntimeTest {
     uint32_t dex_location_checksum1 = checksum;
     std::string dex_location2 = "location2" + id;
     uint32_t dex_location_checksum2 = 10 * checksum;
+    SetupProfile(dex_location1,
+                 dex_location_checksum1,
+                 dex_location2,
+                 dex_location_checksum2,
+                 number_of_methods,
+                 number_of_classes,
+                 profile,
+                 info,
+                 start_method_index,
+                 reverse_dex_write_order);
+  }
+
+  void SetupProfile(const std::string& dex_location1,
+                    uint32_t dex_location_checksum1,
+                    const std::string& dex_location2,
+                    uint32_t dex_location_checksum2,
+                    uint16_t number_of_methods,
+                    uint16_t number_of_classes,
+                    const ScratchFile& profile,
+                    ProfileCompilationInfo* info,
+                    uint16_t start_method_index = 0,
+                    bool reverse_dex_write_order = false) {
     for (uint16_t i = start_method_index; i < start_method_index + number_of_methods; i++) {
       // reverse_dex_write_order controls the order in which the dex files will be added to
       // the profile and thus written to disk.
@@ -209,7 +232,8 @@ class ProfileAssistantTest : public CommonRuntimeTest {
 
   bool CreateProfile(const std::string& profile_file_contents,
                      const std::string& filename,
-                     const std::string& dex_location) {
+                     const std::string& dex_location,
+                     bool skip_verification) {
     ScratchFile class_names_file;
     File* file = class_names_file.GetFile();
     EXPECT_TRUE(file->WriteFully(profile_file_contents.c_str(), profile_file_contents.length()));
@@ -222,6 +246,9 @@ class ProfileAssistantTest : public CommonRuntimeTest {
     argv_str.push_back("--reference-profile-file=" + filename);
     argv_str.push_back("--apk=" + dex_location);
     argv_str.push_back("--dex-location=" + dex_location);
+    if (skip_verification) {
+      argv_str.push_back("--skip-apk-verification");
+    }
     std::string error;
     EXPECT_EQ(ExecAndReturnCode(argv_str, &error), 0);
     return true;
@@ -238,6 +265,7 @@ class ProfileAssistantTest : public CommonRuntimeTest {
     argv_str.push_back("--profile-file=" + filename);
     argv_str.push_back("--apk=" + GetLibCoreDexFileNames()[0]);
     argv_str.push_back("--dex-location=" + GetLibCoreDexFileNames()[0]);
+    argv_str.push_back("--skip-apk-verification");
     argv_str.push_back("--dump-output-to-fd=" + std::to_string(GetFd(output_file)));
     std::string error;
     EXPECT_EQ(ExecAndReturnCode(argv_str, &error), 0);
@@ -268,7 +296,8 @@ class ProfileAssistantTest : public CommonRuntimeTest {
     ScratchFile profile_file;
     EXPECT_TRUE(CreateProfile(input_file_contents,
                               profile_file.GetFilename(),
-                              GetLibCoreDexFileNames()[0]));
+                              GetLibCoreDexFileNames()[0],
+                              /* skip_verification */ true));
     profile_file.GetFile()->ResetOffset();
     EXPECT_TRUE(DumpClassesAndMethods(profile_file.GetFilename(), output_file_contents));
     return true;
@@ -675,7 +704,8 @@ TEST_F(ProfileAssistantTest, TestProfileCreationGenerateMethods) {
   ScratchFile profile_file;
   EXPECT_TRUE(CreateProfile(input_file_contents,
                             profile_file.GetFilename(),
-                            GetLibCoreDexFileNames()[0]));
+                            GetLibCoreDexFileNames()[0],
+                            /* skip_verification */ true));
   ProfileCompilationInfo info;
   profile_file.GetFile()->ResetOffset();
   ASSERT_TRUE(info.Load(GetFd(profile_file)));
@@ -731,7 +761,8 @@ TEST_F(ProfileAssistantTest, TestBootImageProfile) {
       "H" + kHotMethod + "\n" +
       kUncommonDirtyClass;
   profiles.emplace_back(ScratchFile());
-  EXPECT_TRUE(CreateProfile(dex1, profiles.back().GetFilename(), core_dex));
+  EXPECT_TRUE(CreateProfile(
+      dex1, profiles.back().GetFilename(), core_dex, /* skip_verification */ true));
 
   // Create a bunch of boot profiles.
   std::string dex2 =
@@ -741,7 +772,8 @@ TEST_F(ProfileAssistantTest, TestBootImageProfile) {
       "P" + kMultiMethod + "\n" +
       kUncommonDirtyClass;
   profiles.emplace_back(ScratchFile());
-  EXPECT_TRUE(CreateProfile(dex2, profiles.back().GetFilename(), core_dex));
+  EXPECT_TRUE(CreateProfile(
+      dex2, profiles.back().GetFilename(), core_dex, /* skip_verification */ true));
 
   // Create a bunch of boot profiles.
   std::string dex3 =
@@ -750,7 +782,8 @@ TEST_F(ProfileAssistantTest, TestBootImageProfile) {
       "P" + kMultiMethod + "\n" +
       kDirtyClass + "\n";
   profiles.emplace_back(ScratchFile());
-  EXPECT_TRUE(CreateProfile(dex3, profiles.back().GetFilename(), core_dex));
+  EXPECT_TRUE(CreateProfile(
+      dex3, profiles.back().GetFilename(), core_dex, /* skip_verification */ true));
 
   // Generate the boot profile.
   ScratchFile out_profile;
@@ -763,6 +796,7 @@ TEST_F(ProfileAssistantTest, TestBootImageProfile) {
   args.push_back("--reference-profile-file=" + out_profile.GetFilename());
   args.push_back("--apk=" + core_dex);
   args.push_back("--dex-location=" + core_dex);
+  args.push_back("--skip-apk-verification");
   for (const ScratchFile& profile : profiles) {
     args.push_back("--profile-file=" + profile.GetFilename());
   }
@@ -858,7 +892,8 @@ TEST_F(ProfileAssistantTest, TestProfileCreateInlineCache) {
   ScratchFile profile_file;
   ASSERT_TRUE(CreateProfile(input_file_contents,
                             profile_file.GetFilename(),
-                            GetTestDexFileName("ProfileTestMultiDex")));
+                            GetTestDexFileName("ProfileTestMultiDex"),
+                            /* skip_verification */ false));
 
   // Load the profile from disk.
   ProfileCompilationInfo info;
@@ -1008,7 +1043,8 @@ TEST_F(ProfileAssistantTest, TestProfileCreateWithInvalidData) {
   std::string dex_filename = GetTestDexFileName("ProfileTestMultiDex");
   ASSERT_TRUE(CreateProfile(input_file_contents,
                             profile_file.GetFilename(),
-                            dex_filename));
+                            dex_filename,
+                            /* skip_verification */ false));
 
   // Load the profile from disk.
   ProfileCompilationInfo info;
@@ -1113,6 +1149,91 @@ TEST_F(ProfileAssistantTest, DumpOnly) {
     ASSERT_NE(pos, std::string::npos);
     EXPECT_LT(pos, classes_offset);
   }
+}
+
+TEST_F(ProfileAssistantTest, MergeProfilesWithFilter) {
+  ScratchFile profile1;
+  ScratchFile profile2;
+  ScratchFile reference_profile;
+
+  std::vector<int> profile_fds({
+      GetFd(profile1),
+      GetFd(profile2)});
+  int reference_profile_fd = GetFd(reference_profile);
+
+  // Use a real dex file to generate profile test data.
+  // The file will be used during merging to filter unwanted data.
+  std::vector<std::unique_ptr<const DexFile>> dex_files = OpenTestDexFiles("ProfileTestMultiDex");
+  const DexFile& d1 = *dex_files[0];
+  const DexFile& d2 = *dex_files[1];
+  // The new profile info will contain the methods with indices 0-100.
+  const uint16_t kNumberOfMethodsToEnableCompilation = 100;
+  ProfileCompilationInfo info1;
+  SetupProfile(d1.GetLocation(), d1.GetLocationChecksum(), "p1", 1,
+      kNumberOfMethodsToEnableCompilation, 0, profile1, &info1);
+  ProfileCompilationInfo info2;
+  SetupProfile(d2.GetLocation(), d2.GetLocationChecksum(), "p2", 2,
+      kNumberOfMethodsToEnableCompilation, 0, profile2, &info2);
+
+
+  // The reference profile info will contain the methods with indices 50-150.
+  const uint16_t kNumberOfMethodsAlreadyCompiled = 100;
+  ProfileCompilationInfo reference_info;
+  SetupProfile(d1.GetLocation(), d1.GetLocationChecksum(), "p1", 1,
+      kNumberOfMethodsAlreadyCompiled, 0, reference_profile,
+      &reference_info, kNumberOfMethodsToEnableCompilation / 2);
+
+  // Run profman and pass the dex file with --apk-fd.
+  android::base::unique_fd apk_fd(
+      open(GetTestDexFileName("ProfileTestMultiDex").c_str(), O_RDONLY));
+  ASSERT_GE(apk_fd.get(), 0);
+
+  std::string profman_cmd = GetProfmanCmd();
+  std::vector<std::string> argv_str;
+  argv_str.push_back(profman_cmd);
+  argv_str.push_back("--profile-file-fd=" + std::to_string(profile1.GetFd()));
+  argv_str.push_back("--profile-file-fd=" + std::to_string(profile2.GetFd()));
+  argv_str.push_back("--reference-profile-file-fd=" + std::to_string(reference_profile.GetFd()));
+  argv_str.push_back("--apk-fd=" + std::to_string(apk_fd.get()));
+  std::string error;
+
+  EXPECT_EQ(ExecAndReturnCode(argv_str, &error), 0) << error;
+
+  // Verify that we can load the result.
+
+  ProfileCompilationInfo result;
+  ASSERT_TRUE(reference_profile.GetFile()->ResetOffset());
+  ASSERT_TRUE(result.Load(reference_profile_fd));
+
+
+  ASSERT_TRUE(profile1.GetFile()->ResetOffset());
+  ASSERT_TRUE(profile2.GetFile()->ResetOffset());
+  ASSERT_TRUE(reference_profile.GetFile()->ResetOffset());
+
+  // Verify that the result filtered out data not belonging to the dex file.
+  // This is equivalent to checking that the result is equal to the merging of
+  // all profiles while filtering out data not belonging to the dex file.
+
+  ProfileCompilationInfo::ProfileLoadFilterFn filter_fn =
+      [&d1, &d2](const std::string& dex_location, uint32_t checksum) -> bool {
+          return (dex_location == ProfileCompilationInfo::GetProfileDexFileKey(d1.GetLocation())
+              && checksum == d1.GetLocationChecksum())
+              || (dex_location == ProfileCompilationInfo::GetProfileDexFileKey(d2.GetLocation())
+              && checksum == d2.GetLocationChecksum());
+        };
+
+  ProfileCompilationInfo info1_filter;
+  ProfileCompilationInfo info2_filter;
+  ProfileCompilationInfo expected;
+
+  info2_filter.Load(profile1.GetFd(), /*merge_classes*/ true, filter_fn);
+  info2_filter.Load(profile2.GetFd(), /*merge_classes*/ true, filter_fn);
+  expected.Load(reference_profile.GetFd(), /*merge_classes*/ true, filter_fn);
+
+  ASSERT_TRUE(expected.MergeWith(info1_filter));
+  ASSERT_TRUE(expected.MergeWith(info2_filter));
+
+  ASSERT_TRUE(expected.Equals(result));
 }
 
 }  // namespace art
