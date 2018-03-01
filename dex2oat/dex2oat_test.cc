@@ -41,6 +41,8 @@
 #include "oat.h"
 #include "oat_file.h"
 #include "utils.h"
+#include "vdex_file.h"
+#include "ziparchive/zip_writer.h"
 
 namespace art {
 
@@ -995,7 +997,7 @@ class Dex2oatUnquickenTest : public Dex2oatTest {
             if (class_it.IsAtMethod() && class_it.GetMethodCodeItem() != nullptr) {
               for (const DexInstructionPcPair& inst :
                        CodeItemInstructionAccessor(*dex_file, class_it.GetMethodCodeItem())) {
-                ASSERT_FALSE(inst->IsQuickened()) << output_;
+                ASSERT_FALSE(inst->IsQuickened()) << inst->Opcode() << " " << output_;
               }
             }
           }
@@ -1779,6 +1781,181 @@ TEST_F(Dex2oatTest, VerifyNoCompilationReason) {
                                                    &error_msg));
   ASSERT_TRUE(odex_file != nullptr);
   ASSERT_EQ(nullptr, odex_file->GetCompilationReason());
+}
+
+TEST_F(Dex2oatTest, DontExtract) {
+  std::unique_ptr<const DexFile> dex(OpenTestDexFile("ManyMethods"));
+  std::string error_msg;
+  const std::string out_dir = GetScratchDir();
+  const std::string dex_location = dex->GetLocation();
+  const std::string odex_location = out_dir + "/base.oat";
+  const std::string vdex_location = out_dir + "/base.vdex";
+  GenerateOdexForTest(dex_location,
+                      odex_location,
+                      CompilerFilter::Filter::kVerify,
+                      { "--copy-dex-files=false" },
+                      true,  // expect_success
+                      false,  // use_fd
+                      [](const OatFile&) {
+                      });
+  {
+    // Check the vdex doesn't have dex.
+    std::unique_ptr<VdexFile> vdex(VdexFile::Open(vdex_location.c_str(),
+                                                  /*writable*/ false,
+                                                  /*low_4gb*/ false,
+                                                  /*unquicken*/ false,
+                                                  &error_msg));
+    ASSERT_TRUE(vdex != nullptr);
+    EXPECT_EQ(vdex->GetHeader().GetDexSize(), 0u) << output_;
+  }
+  std::unique_ptr<OatFile> odex_file(OatFile::Open(odex_location.c_str(),
+                                                   odex_location.c_str(),
+                                                   nullptr,
+                                                   nullptr,
+                                                   false,
+                                                   /*low_4gb*/ false,
+                                                   dex_location.c_str(),
+                                                   &error_msg));
+  ASSERT_TRUE(odex_file != nullptr) << dex_location;
+  std::vector<const OatDexFile*> oat_dex_files = odex_file->GetOatDexFiles();
+  ASSERT_EQ(oat_dex_files.size(), 1u);
+  // Verify that the oat file can still open the dex files.
+  for (const OatDexFile* oat_dex : oat_dex_files) {
+    std::unique_ptr<const DexFile> dex_file(oat_dex->OpenDexFile(&error_msg));
+    ASSERT_TRUE(dex_file != nullptr) << error_msg;
+  }
+  // Create a dm file and use it to verify.
+  // Add produced artifacts to a zip file that doesn't contain the classes.dex.
+  ScratchFile dm_file;
+  {
+    std::unique_ptr<File> vdex_file(OS::OpenFileForReading(vdex_location.c_str()));
+    ASSERT_TRUE(vdex_file != nullptr);
+    ASSERT_GT(vdex_file->GetLength(), 0u);
+    FILE* file = fdopen(dm_file.GetFd(), "w+b");
+    ZipWriter writer(file);
+    auto write_all_bytes = [&](File* file) {
+      std::unique_ptr<uint8_t[]> bytes(new uint8_t[file->GetLength()]);
+      ASSERT_TRUE(file->ReadFully(&bytes[0], file->GetLength()));
+      ASSERT_GE(writer.WriteBytes(&bytes[0], file->GetLength()), 0);
+    };
+    // Add vdex to zip.
+    writer.StartEntry(VdexFile::kVdexNameInDmFile, ZipWriter::kCompress);
+    write_all_bytes(vdex_file.get());
+    writer.FinishEntry();
+    writer.Finish();
+    ASSERT_EQ(dm_file.GetFile()->Flush(), 0);
+  }
+
+  // Generate a quickened dex by using the input dm file to verify.
+  GenerateOdexForTest(dex_location,
+                      odex_location,
+                      CompilerFilter::Filter::kQuicken,
+                      { "--dump-timings",
+                        "--dm-file=" + dm_file.GetFilename(),
+                        // Pass -Xuse-stderr-logger have dex2oat output in output_ on target.
+                        "--runtime-arg",
+                        "-Xuse-stderr-logger" },
+                      true,  // expect_success
+                      false,  // use_fd
+                      [](const OatFile& o) {
+                        CHECK(o.ContainsDexCode());
+                      });
+  // Check the output for "Fast verify", this is printed from --dump-timings.
+  std::istringstream iss(output_);
+  std::string line;
+  bool found_fast_verify = false;
+  const std::string kFastVerifyString = "Fast Verify";
+  while (std::getline(iss, line) && !found_fast_verify) {
+    found_fast_verify = found_fast_verify || line.find(kFastVerifyString) != std::string::npos;
+  }
+  EXPECT_TRUE(found_fast_verify) << "Expected to find " << kFastVerifyString << "\n" << output_;
+}
+
+// Test that dex files with quickened opcodes aren't dequickened.
+TEST_F(Dex2oatTest, QuickenedInput) {
+  std::string error_msg;
+  ScratchFile temp_dex;
+  MutateDexFile(temp_dex.GetFile(), GetTestDexFileName("ManyMethods"), [] (DexFile* dex) {
+    bool mutated_successfully = false;
+    // Change the dex instructions to make an opcode that spans past the end of the code item.
+    for (size_t i = 0; i < dex->NumClassDefs(); ++i) {
+      const DexFile::ClassDef& def = dex->GetClassDef(i);
+      const uint8_t* data = dex->GetClassData(def);
+      if (data == nullptr) {
+        continue;
+      }
+      ClassDataItemIterator it(*dex, data);
+      it.SkipAllFields();
+      while (it.HasNextMethod()) {
+        DexFile::CodeItem* item = const_cast<DexFile::CodeItem*>(it.GetMethodCodeItem());
+        if (item != nullptr) {
+          CodeItemInstructionAccessor instructions(*dex, item);
+          // Make a quickened instruction that doesn't run past the end of the code item.
+          if (instructions.InsnsSizeInCodeUnits() > 2) {
+            const_cast<Instruction&>(instructions.InstructionAt(0)).SetOpcode(
+                Instruction::IGET_BYTE_QUICK);
+            mutated_successfully = true;
+          }
+        }
+        it.Next();
+      }
+    }
+    CHECK(mutated_successfully)
+        << "Failed to find candidate code item with only one code unit in last instruction.";
+  });
+
+  std::string dex_location = temp_dex.GetFilename();
+  std::string odex_location = GetOdexDir() + "/quickened.odex";
+  std::string vdex_location = GetOdexDir() + "/quickened.vdex";
+  std::unique_ptr<File> vdex_output(OS::CreateEmptyFile(vdex_location.c_str()));
+  // Quicken the dex
+  {
+    std::string input_vdex = "--input-vdex-fd=-1";
+    std::string output_vdex = StringPrintf("--output-vdex-fd=%d", vdex_output->Fd());
+    GenerateOdexForTest(dex_location,
+                        odex_location,
+                        CompilerFilter::kQuicken,
+                        // Disable cdex since we want to compare against the original dex file
+                        // after unquickening.
+                        { input_vdex, output_vdex, kDisableCompactDex },
+                        /* expect_success */ true,
+                        /* use_fd */ true);
+  }
+  // Unquicken by running the verify compiler filter on the vdex file and verify it matches.
+  std::string odex_location2 = GetOdexDir() + "/unquickened.odex";
+  std::string vdex_location2 = GetOdexDir() + "/unquickened.vdex";
+  std::unique_ptr<File> vdex_unquickened(OS::CreateEmptyFile(vdex_location2.c_str()));
+  {
+    std::string input_vdex = StringPrintf("--input-vdex-fd=%d", vdex_output->Fd());
+    std::string output_vdex = StringPrintf("--output-vdex-fd=%d", vdex_unquickened->Fd());
+    GenerateOdexForTest(dex_location,
+                        odex_location2,
+                        CompilerFilter::kVerify,
+                        // Disable cdex to avoid needing to write out the shared section.
+                        { input_vdex, output_vdex, kDisableCompactDex },
+                        /* expect_success */ true,
+                        /* use_fd */ true);
+  }
+  ASSERT_EQ(vdex_unquickened->Flush(), 0) << "Could not flush and close vdex file";
+  ASSERT_TRUE(success_);
+  {
+    // Check that hte vdex has one dex and compare it to the original one.
+    std::unique_ptr<VdexFile> vdex(VdexFile::Open(vdex_location2.c_str(),
+                                                  /*writable*/ false,
+                                                  /*low_4gb*/ false,
+                                                  /*unquicken*/ false,
+                                                  &error_msg));
+    std::vector<std::unique_ptr<const DexFile>> dex_files;
+    bool result = vdex->OpenAllDexFiles(&dex_files, &error_msg);
+    ASSERT_TRUE(result) << error_msg;
+    ASSERT_EQ(dex_files.size(), 1u) << error_msg;
+    ScratchFile temp;
+    ASSERT_TRUE(temp.GetFile()->WriteFully(dex_files[0]->Begin(), dex_files[0]->Size()));
+    ASSERT_EQ(temp.GetFile()->Flush(), 0) << "Could not flush extracted dex";
+    EXPECT_EQ(temp.GetFile()->Compare(temp_dex.GetFile()), 0);
+  }
+  ASSERT_EQ(vdex_output->FlushCloseOrErase(), 0) << "Could not flush and close";
+  ASSERT_EQ(vdex_unquickened->FlushCloseOrErase(), 0) << "Could not flush and close";
 }
 
 }  // namespace art

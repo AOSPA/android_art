@@ -54,8 +54,8 @@ art_cc_defaults {
 
 gensrcs {
     name: "art_dex2oat_operator_srcs",
-    cmd: "$(location generate-operator-out.py) art/dex2oat $(in) > $(out)",
-    tool_files: ["generate-operator-out.py"],
+    cmd: "$(location generate_operator_out) art/dex2oat $(in) > $(out)",
+    tools: ["generate_operator_out"],
     srcs: [
         "linker/image_writer.h",
     ],
@@ -248,6 +248,7 @@ art_cc_test {
         "libbase",
         "liblz4",
         "libsigchain",
+        "libziparchive",
     ],
     static_libs: [
         "libartd-dex2oat",
