@@ -233,6 +233,11 @@ static Parser CreateArgumentParser() {
           .IntoKey(M::VeryLargeAppThreshold)
       .Define("--force-determinism")
           .IntoKey(M::ForceDeterminism)
+      .Define("--copy-dex-files=_")
+          .WithType<bool>()
+          .WithValueMap({{"true", false},
+                         {"false", false}})
+          .IntoKey(M::CopyDexFiles)
       .Define("--classpath-dir=_")
           .WithType<std::string>()
           .IntoKey(M::ClasspathDir)
@@ -246,7 +251,10 @@ static Parser CreateArgumentParser() {
           .IntoKey(M::CompactDexLevel)
       .Define("--runtime-arg _")
           .WithType<std::vector<std::string>>().AppendValues()
-          .IntoKey(M::RuntimeOptions);
+          .IntoKey(M::RuntimeOptions)
+      .Define("--compilation-reason=_")
+          .WithType<std::string>()
+          .IntoKey(M::CompilationReason);
 
   AddCompilerOptionsArgumentParserOptions<Dex2oatArgumentMap>(*parser_builder);
 

@@ -78,6 +78,16 @@ ART_TEST_TARGET_GTEST_MainStripped_DEX := $(basename $(ART_TEST_TARGET_GTEST_Mai
 ART_TEST_HOST_GTEST_MainUncompressed_DEX := $(basename $(ART_TEST_HOST_GTEST_Main_DEX))Uncompressed$(suffix $(ART_TEST_HOST_GTEST_Main_DEX))
 ART_TEST_TARGET_GTEST_MainUncompressed_DEX := $(basename $(ART_TEST_TARGET_GTEST_Main_DEX))Uncompressed$(suffix $(ART_TEST_TARGET_GTEST_Main_DEX))
 
+# Create rules for UncompressedEmpty, a classes.dex that is empty and uncompressed
+# for the dex2oat tests.
+ART_TEST_HOST_GTEST_EmptyUncompressed_DEX := $(basename $(ART_TEST_HOST_GTEST_Main_DEX))EmptyUncompressed$(suffix $(ART_TEST_HOST_GTEST_Main_DEX))
+ART_TEST_TARGET_GTEST_EmptyUncompressed_DEX := $(basename $(ART_TEST_TARGET_GTEST_Main_DEX))EmptyUncompressed$(suffix $(ART_TEST_TARGET_GTEST_Main_DEX))
+
+# Create rules for MultiDexUncompressed, a copy of MultiDex with the classes.dex uncompressed
+# for the OatFile tests.
+ART_TEST_HOST_GTEST_MultiDexUncompressed_DEX := $(basename $(ART_TEST_HOST_GTEST_MultiDex_DEX))Uncompressed$(suffix $(ART_TEST_HOST_GTEST_MultiDex_DEX))
+ART_TEST_TARGET_GTEST_MultiDexUncompressed_DEX := $(basename $(ART_TEST_TARGET_GTEST_MultiDex_DEX))Uncompressed$(suffix $(ART_TEST_TARGET_GTEST_MultiDex_DEX))
+
 $(ART_TEST_HOST_GTEST_MainStripped_DEX): $(ART_TEST_HOST_GTEST_Main_DEX)
 	cp $< $@
 	$(call dexpreopt-remove-classes.dex,$@)
@@ -92,6 +102,26 @@ $(ART_TEST_HOST_GTEST_MainUncompressed_DEX): $(ART_TEST_HOST_GTEST_Main_DEX) $(Z
 	$(call align-package, $@)
 
 $(ART_TEST_TARGET_GTEST_MainUncompressed_DEX): $(ART_TEST_TARGET_GTEST_Main_DEX) $(ZIPALIGN)
+	cp $< $@
+	$(call uncompress-dexs, $@)
+	$(call align-package, $@)
+
+$(ART_TEST_HOST_GTEST_EmptyUncompressed_DEX): $(ZIPALIGN)
+	touch $(dir $@)classes.dex
+	zip -j -qD -X -0 $@ $(dir $@)classes.dex
+	rm $(dir $@)classes.dex
+
+$(ART_TEST_TARGET_GTEST_EmptyUncompressed_DEX): $(ZIPALIGN)
+	touch $(dir $@)classes.dex
+	zip -j -qD -X -0 $@ $(dir $@)classes.dex
+	rm $(dir $@)classes.dex
+
+$(ART_TEST_HOST_GTEST_MultiDexUncompressed_DEX): $(ART_TEST_HOST_GTEST_MultiDex_DEX) $(ZIPALIGN)
+	cp $< $@
+	$(call uncompress-dexs, $@)
+	$(call align-package, $@)
+
+$(ART_TEST_TARGET_GTEST_MultiDexUncompressed_DEX): $(ART_TEST_TARGET_GTEST_MultiDex_DEX) $(ZIPALIGN)
 	cp $< $@
 	$(call uncompress-dexs, $@)
 	$(call align-package, $@)
@@ -116,6 +146,7 @@ $(ART_TEST_TARGET_GTEST_VerifierDepsMulti_DEX): $(ART_TEST_GTEST_VerifierDepsMul
 	 $(HOST_OUT_EXECUTABLES)/smali assemble --output $@ $(filter %.smali,$^)
 
 # Dex file dependencies for each gtest.
+ART_GTEST_art_dex_file_loader_test_DEX_DEPS := GetMethodSignature Main Nested MultiDex
 ART_GTEST_dex2oat_environment_tests_DEX_DEPS := Main MainStripped MultiDex MultiDexModifiedSecondary MyClassNatives Nested VerifierDeps VerifierDepsMulti
 
 ART_GTEST_atomic_dex_ref_map_test_DEX_DEPS := Interfaces
@@ -124,9 +155,8 @@ ART_GTEST_class_loader_context_test_DEX_DEPS := Main MultiDex MyClass ForClassLo
 ART_GTEST_class_table_test_DEX_DEPS := XandY
 ART_GTEST_compiler_driver_test_DEX_DEPS := AbstractMethod StaticLeafMethods ProfileTestMultiDex
 ART_GTEST_dex_cache_test_DEX_DEPS := Main Packages MethodTypes
-ART_GTEST_dex_file_test_DEX_DEPS := GetMethodSignature Main Nested MultiDex
 ART_GTEST_dexlayout_test_DEX_DEPS := ManyMethods
-ART_GTEST_dex2oat_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) ManyMethods Statics VerifierDeps MainUncompressed
+ART_GTEST_dex2oat_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) ManyMethods Statics VerifierDeps MainUncompressed EmptyUncompressed
 ART_GTEST_dex2oat_image_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) Statics VerifierDeps
 ART_GTEST_exception_test_DEX_DEPS := ExceptionHandle
 ART_GTEST_hiddenapi_test_DEX_DEPS := HiddenApi
@@ -138,7 +168,7 @@ ART_GTEST_jni_internal_test_DEX_DEPS := AllFields StaticLeafMethods
 ART_GTEST_oat_file_assistant_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS)
 ART_GTEST_dexoptanalyzer_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS)
 ART_GTEST_image_space_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS)
-ART_GTEST_oat_file_test_DEX_DEPS := Main MultiDex
+ART_GTEST_oat_file_test_DEX_DEPS := Main MultiDex MainUncompressed MultiDexUncompressed
 ART_GTEST_oat_test_DEX_DEPS := Main
 ART_GTEST_object_test_DEX_DEPS := ProtoCompare ProtoCompare2 StaticsFromCode XandY
 ART_GTEST_patchoat_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS)
@@ -303,6 +333,7 @@ ART_TEST_MODULES := \
     art_dexoptanalyzer_tests \
     art_hiddenapi_tests \
     art_imgdiag_tests \
+    art_libdexfile_tests \
     art_oatdump_tests \
     art_patchoat_tests \
     art_profman_tests \
@@ -345,18 +376,30 @@ ifneq ($(ART_TEST_ANDROID_ROOT),)
   ART_GTEST_TARGET_ANDROID_ROOT := $(ART_TEST_ANDROID_ROOT)
 endif
 
-ART_VALGRIND_TARGET_DEPENDENCIES := \
+ART_VALGRIND_TARGET_DEPENDENCIES :=
+
+# Has to match list in external/valgrind/Android.build_one.mk
+ART_VALGRIND_SUPPORTED_ARCH := arm arm64 x86_64
+
+# Valgrind is not supported for x86
+ifneq (,$(filter $(ART_VALGRIND_SUPPORTED_ARCH),$(TARGET_ARCH)))
+art_vg_arch := $(if $(filter x86_64,$(TARGET_ARCH)),amd64,$(TARGET_ARCH))
+ART_VALGRIND_TARGET_DEPENDENCIES += \
   $(TARGET_OUT_EXECUTABLES)/valgrind \
-  $(TARGET_OUT_SHARED_LIBRARIES)/valgrind/memcheck-$(TARGET_ARCH)-linux \
-  $(TARGET_OUT_SHARED_LIBRARIES)/valgrind/vgpreload_core-$(TARGET_ARCH)-linux.so \
-  $(TARGET_OUT_SHARED_LIBRARIES)/valgrind/vgpreload_memcheck-$(TARGET_ARCH)-linux.so \
+  $(TARGET_OUT_SHARED_LIBRARIES)/valgrind/memcheck-$(art_vg_arch)-linux \
+  $(TARGET_OUT_SHARED_LIBRARIES)/valgrind/vgpreload_core-$(art_vg_arch)-linux.so \
+  $(TARGET_OUT_SHARED_LIBRARIES)/valgrind/vgpreload_memcheck-$(art_vg_arch)-linux.so \
   $(TARGET_OUT_SHARED_LIBRARIES)/valgrind/default.supp
+art_vg_arch :=
+endif
 
 ifdef TARGET_2ND_ARCH
+ifneq (,$(filter $(ART_VALGRIND_SUPPORTED_ARCH),$(TARGET_2ND_ARCH)))
 ART_VALGRIND_TARGET_DEPENDENCIES += \
   $(TARGET_OUT_SHARED_LIBRARIES)/valgrind/memcheck-$(TARGET_2ND_ARCH)-linux \
   $(TARGET_OUT_SHARED_LIBRARIES)/valgrind/vgpreload_core-$(TARGET_2ND_ARCH)-linux.so \
   $(TARGET_OUT_SHARED_LIBRARIES)/valgrind/vgpreload_memcheck-$(TARGET_2ND_ARCH)-linux.so
+endif
 endif
 
 include $(CLEAR_VARS)
@@ -750,6 +793,8 @@ ART_TEST_HOST_GTEST_MainStripped_DEX :=
 ART_TEST_TARGET_GTEST_MainStripped_DEX :=
 ART_TEST_HOST_GTEST_MainUncompressed_DEX :=
 ART_TEST_TARGET_GTEST_MainUncompressed_DEX :=
+ART_TEST_HOST_GTEST_EmptyUncompressed_DEX :=
+ART_TEST_TARGET_GTEST_EmptyUncompressed_DEX :=
 ART_TEST_GTEST_VerifierDeps_SRC :=
 ART_TEST_HOST_GTEST_VerifierDeps_DEX :=
 ART_TEST_TARGET_GTEST_VerifierDeps_DEX :=

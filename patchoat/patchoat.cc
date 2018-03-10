@@ -357,6 +357,65 @@ static bool CheckImageIdenticalToOriginalExceptForRelocation(
   return true;
 }
 
+static bool VerifySymlink(const std::string& intended_target, const std::string& link_name) {
+  std::string actual_target;
+  if (!android::base::Readlink(link_name, &actual_target)) {
+    PLOG(ERROR) << "Readlink on " << link_name << " failed.";
+    return false;
+  }
+  return actual_target == intended_target;
+}
+
+static bool VerifyVdexAndOatSymlinks(const std::string& input_image_filename,
+                                     const std::string& output_image_filename) {
+  return VerifySymlink(ImageHeader::GetVdexLocationFromImageLocation(input_image_filename),
+                       ImageHeader::GetVdexLocationFromImageLocation(output_image_filename))
+      && VerifySymlink(ImageHeader::GetOatLocationFromImageLocation(input_image_filename),
+                       ImageHeader::GetOatLocationFromImageLocation(output_image_filename));
+}
+
+bool PatchOat::CreateVdexAndOatSymlinks(const std::string& input_image_filename,
+                                        const std::string& output_image_filename) {
+  std::string input_vdex_filename =
+      ImageHeader::GetVdexLocationFromImageLocation(input_image_filename);
+  std::string input_oat_filename =
+      ImageHeader::GetOatLocationFromImageLocation(input_image_filename);
+
+  std::unique_ptr<File> input_oat_file(OS::OpenFileForReading(input_oat_filename.c_str()));
+  if (input_oat_file.get() == nullptr) {
+    LOG(ERROR) << "Unable to open input oat file at " << input_oat_filename;
+    return false;
+  }
+  std::string error_msg;
+  std::unique_ptr<ElfFile> elf(ElfFile::Open(input_oat_file.get(),
+                                             PROT_READ | PROT_WRITE,
+                                             MAP_PRIVATE,
+                                             &error_msg));
+  if (elf.get() == nullptr) {
+    LOG(ERROR) << "Unable to open oat file " << input_oat_filename << " : " << error_msg;
+    return false;
+  }
+
+  MaybePic is_oat_pic = IsOatPic(elf.get());
+  if (is_oat_pic >= ERROR_FIRST) {
+    // Error logged by IsOatPic
+    return false;
+  } else if (is_oat_pic == NOT_PIC) {
+    LOG(ERROR) << "patchoat cannot be used on non-PIC oat file: " << input_oat_filename;
+    return false;
+  }
+
+  CHECK(is_oat_pic == PIC);
+
+  std::string output_vdex_filename =
+      ImageHeader::GetVdexLocationFromImageLocation(output_image_filename);
+  std::string output_oat_filename =
+      ImageHeader::GetOatLocationFromImageLocation(output_image_filename);
+
+  return SymlinkFile(input_oat_filename, output_oat_filename) &&
+         SymlinkFile(input_vdex_filename, output_vdex_filename);
+}
+
 bool PatchOat::Patch(const std::string& image_location,
                      off_t delta,
                      const std::string& output_image_directory,
@@ -401,13 +460,11 @@ bool PatchOat::Patch(const std::string& image_location,
   Thread::Current()->TransitionFromRunnableToSuspended(kNative);
   ScopedObjectAccess soa(Thread::Current());
 
-  t.NewTiming("Image Patching setup");
   std::vector<gc::space::ImageSpace*> spaces = Runtime::Current()->GetHeap()->GetBootImageSpaces();
-  std::map<gc::space::ImageSpace*, std::unique_ptr<File>> space_to_file_map;
   std::map<gc::space::ImageSpace*, std::unique_ptr<MemMap>> space_to_memmap_map;
-  std::map<gc::space::ImageSpace*, PatchOat> space_to_patchoat_map;
 
   for (size_t i = 0; i < spaces.size(); ++i) {
+    t.NewTiming("Image Patching setup");
     gc::space::ImageSpace* space = spaces[i];
     std::string input_image_filename = space->GetImageFilename();
     std::unique_ptr<File> input_image(OS::OpenFileForReading(input_image_filename.c_str()));
@@ -445,98 +502,43 @@ bool PatchOat::Patch(const std::string& image_location,
       LOG(ERROR) << "Unable to map image file " << input_image->GetPath() << " : " << error_msg;
       return false;
     }
-    space_to_file_map.emplace(space, std::move(input_image));
+
+
     space_to_memmap_map.emplace(space, std::move(image));
-  }
-
-  // Symlink PIC oat and vdex files and patch the image spaces in memory.
-  for (size_t i = 0; i < spaces.size(); ++i) {
-    gc::space::ImageSpace* space = spaces[i];
-    std::string input_image_filename = space->GetImageFilename();
-    std::string input_vdex_filename =
-        ImageHeader::GetVdexLocationFromImageLocation(input_image_filename);
-    std::string input_oat_filename =
-        ImageHeader::GetOatLocationFromImageLocation(input_image_filename);
-    std::unique_ptr<File> input_oat_file(OS::OpenFileForReading(input_oat_filename.c_str()));
-    if (input_oat_file.get() == nullptr) {
-      LOG(ERROR) << "Unable to open input oat file at " << input_oat_filename;
-      return false;
-    }
-    std::string error_msg;
-    std::unique_ptr<ElfFile> elf(ElfFile::Open(input_oat_file.get(),
-                                               PROT_READ | PROT_WRITE, MAP_PRIVATE, &error_msg));
-    if (elf.get() == nullptr) {
-      LOG(ERROR) << "Unable to open oat file " << input_oat_file->GetPath() << " : " << error_msg;
-      return false;
-    }
-
-    if (output_image) {
-      MaybePic is_oat_pic = IsOatPic(elf.get());
-      if (is_oat_pic >= ERROR_FIRST) {
-        // Error logged by IsOatPic
-        return false;
-      } else if (is_oat_pic == NOT_PIC) {
-        LOG(ERROR) << "patchoat cannot be used on non-PIC oat file: " << input_oat_file->GetPath();
-        return false;
-      } else {
-        CHECK(is_oat_pic == PIC);
-
-        // Create a symlink.
-        std::string converted_image_filename = space->GetImageLocation();
-        std::replace(
-            converted_image_filename.begin() + 1, converted_image_filename.end(), '/', '@');
-        std::string output_image_filename = output_image_directory +
-            (android::base::StartsWith(converted_image_filename, "/") ? "" : "/") +
-            converted_image_filename;
-        std::string output_vdex_filename =
-            ImageHeader::GetVdexLocationFromImageLocation(output_image_filename);
-        std::string output_oat_filename =
-            ImageHeader::GetOatLocationFromImageLocation(output_image_filename);
-
-        if (!ReplaceOatFileWithSymlink(input_oat_file->GetPath(),
-                                       output_oat_filename) ||
-            !SymlinkFile(input_vdex_filename, output_vdex_filename)) {
-          // Errors already logged by above call.
-          return false;
-        }
-      }
-    }
-
-    PatchOat& p = space_to_patchoat_map.emplace(space,
-                                                PatchOat(
-                                                    isa,
-                                                    space_to_memmap_map.find(space)->second.get(),
-                                                    space->GetLiveBitmap(),
-                                                    space->GetMemMap(),
-                                                    delta,
-                                                    &space_to_memmap_map,
-                                                    timings)).first->second;
+    PatchOat p = PatchOat(isa,
+                          space_to_memmap_map.at(space).get(),
+                          space->GetLiveBitmap(),
+                          space->GetMemMap(),
+                          delta,
+                          &space_to_memmap_map,
+                          timings);
 
     t.NewTiming("Patching image");
     if (!p.PatchImage(i == 0)) {
       LOG(ERROR) << "Failed to patch image file " << input_image_filename;
       return false;
     }
-  }
 
-  if (output_image) {
     // Write the patched image spaces.
-    for (size_t i = 0; i < spaces.size(); ++i) {
-      gc::space::ImageSpace* space = spaces[i];
+    if (output_image) {
+      std::string output_image_filename;
+      if (!GetDalvikCacheFilename(space->GetImageLocation().c_str(),
+                                  output_image_directory.c_str(),
+                                  &output_image_filename,
+                                  &error_msg)) {
+        LOG(ERROR) << "Failed to find relocated image file name: " << error_msg;
+        return false;
+      }
+
+      if (!CreateVdexAndOatSymlinks(input_image_filename, output_image_filename))
+        return false;
 
       t.NewTiming("Writing image");
-      std::string converted_image_filename = space->GetImageLocation();
-      std::replace(converted_image_filename.begin() + 1, converted_image_filename.end(), '/', '@');
-      std::string output_image_filename = output_image_directory +
-          (android::base::StartsWith(converted_image_filename, "/") ? "" : "/") +
-          converted_image_filename;
       std::unique_ptr<File> output_image_file(CreateOrOpen(output_image_filename.c_str()));
       if (output_image_file.get() == nullptr) {
         LOG(ERROR) << "Failed to open output image file at " << output_image_filename;
         return false;
       }
-
-      PatchOat& p = space_to_patchoat_map.find(space)->second;
 
       bool success = p.WriteImage(output_image_file.get());
       success = FinishFile(output_image_file.get(), success);
@@ -544,40 +546,32 @@ bool PatchOat::Patch(const std::string& image_location,
         return false;
       }
     }
-  }
 
-  if (output_image_relocation) {
-    // Write the image relocation information for each space.
-    for (size_t i = 0; i < spaces.size(); ++i) {
-      gc::space::ImageSpace* space = spaces[i];
-
+    if (output_image_relocation) {
       t.NewTiming("Writing image relocation");
       std::string original_image_filename(space->GetImageLocation() + ".rel");
       std::string image_relocation_filename =
           output_image_relocation_directory
               + (android::base::StartsWith(original_image_filename, "/") ? "" : "/")
               + original_image_filename.substr(original_image_filename.find_last_of("/"));
-      File& input_image = *space_to_file_map.find(space)->second;
-      int64_t input_image_size = input_image.GetLength();
+      int64_t input_image_size = input_image->GetLength();
       if (input_image_size < 0) {
         LOG(ERROR) << "Error while getting input image size";
         return false;
       }
-      std::string error_msg;
       std::unique_ptr<MemMap> original(MemMap::MapFile(input_image_size,
                                                        PROT_READ,
                                                        MAP_PRIVATE,
-                                                       input_image.Fd(),
+                                                       input_image->Fd(),
                                                        0,
                                                        /*low_4gb*/false,
-                                                       input_image.GetPath().c_str(),
+                                                       input_image->GetPath().c_str(),
                                                        &error_msg));
       if (original.get() == nullptr) {
-        LOG(ERROR) << "Unable to map image file " << input_image.GetPath() << " : " << error_msg;
+        LOG(ERROR) << "Unable to map image file " << input_image->GetPath() << " : " << error_msg;
         return false;
       }
 
-      PatchOat& p = space_to_patchoat_map.find(space)->second;
       const MemMap* relocated = p.image_;
 
       if (!WriteRelFile(*original, *relocated, image_relocation_filename, &error_msg)) {
@@ -643,11 +637,10 @@ bool PatchOat::Verify(const std::string& image_location,
   std::string image_location_dir = android::base::Dirname(image_location);
   for (size_t i = 0; i < spaces.size(); ++i) {
     gc::space::ImageSpace* space = spaces[i];
-    std::string image_filename = space->GetImageLocation();
 
     std::string relocated_image_filename;
     std::string error_msg;
-    if (!GetDalvikCacheFilename(image_filename.c_str(),
+    if (!GetDalvikCacheFilename(space->GetImageLocation().c_str(),
             output_image_directory.c_str(), &relocated_image_filename, &error_msg)) {
       LOG(ERROR) << "Failed to find relocated image file name: " << error_msg;
       success = false;
@@ -658,11 +651,19 @@ bool PatchOat::Verify(const std::string& image_location,
     // basename:     boot.art
     // original:     /system/framework/arm64/boot.art
     // relocation:   /system/framework/arm64/boot.art.rel
-    std::string original_image_filename = GetSystemImageFilename(image_filename.c_str(), isa);
+    std::string original_image_filename =
+        GetSystemImageFilename(space->GetImageLocation().c_str(), isa);
 
     if (!CheckImageIdenticalToOriginalExceptForRelocation(
             relocated_image_filename, original_image_filename, &error_msg)) {
       LOG(ERROR) << error_msg;
+      success = false;
+      break;
+    }
+
+    if (!VerifyVdexAndOatSymlinks(original_image_filename, relocated_image_filename)) {
+      LOG(ERROR) << "Verification of vdex and oat symlinks for "
+                 << space->GetImageLocation() << " failed.";
       success = false;
       break;
     }
@@ -738,26 +739,6 @@ PatchOat::MaybePic PatchOat::IsOatPic(const ElfFile* oat_in) {
   }
 
   return is_pic ? PIC : NOT_PIC;
-}
-
-bool PatchOat::ReplaceOatFileWithSymlink(const std::string& input_oat_filename,
-                                         const std::string& output_oat_filename) {
-  // Delete the original file, since we won't need it.
-  unlink(output_oat_filename.c_str());
-
-  // Create a symlink from the old oat to the new oat
-  if (symlink(input_oat_filename.c_str(), output_oat_filename.c_str()) < 0) {
-    int err = errno;
-    LOG(ERROR) << "Failed to create symlink at " << output_oat_filename
-               << " error(" << err << "): " << strerror(err);
-    return false;
-  }
-
-  if (kIsDebugBuild) {
-    LOG(INFO) << "Created symlink " << output_oat_filename << " -> " << input_oat_filename;
-  }
-
-  return true;
 }
 
 class PatchOat::PatchOatArtFieldVisitor : public ArtFieldVisitor {
@@ -1112,10 +1093,10 @@ NO_RETURN static void Usage(const char *fmt, ...) {
   UsageError("  --input-image-location=<file.art>: Specifies the 'location' of the image file to");
   UsageError("      be patched.");
   UsageError("");
-  UsageError("  --output-image-file=<file.art>: Specifies the exact file to write the patched");
-  UsageError("      image file to.");
+  UsageError("  --output-image-directory=<dir>: Specifies the directory to write the patched");
+  UsageError("      image file(s) to.");
   UsageError("");
-  UsageError("  --output-image-relocation-file=<file.art.rel>: Specifies the exact file to write");
+  UsageError("  --output-image-relocation-directory=<dir>: Specifies the directory to write");
   UsageError("      the image relocation information to.");
   UsageError("");
   UsageError("  --base-offset-delta=<delta>: Specify the amount to change the old base-offset by.");
@@ -1135,13 +1116,13 @@ static int patchoat_patch_image(TimingLogger& timings,
                                 InstructionSet isa,
                                 const std::string& input_image_location,
                                 const std::string& output_image_directory,
-                                const std::string& output_image_relocation_filename,
+                                const std::string& output_image_relocation_directory,
                                 off_t base_delta,
                                 bool base_delta_set,
                                 bool debug) {
   CHECK(!input_image_location.empty());
-  if ((output_image_directory.empty()) && (output_image_relocation_filename.empty())) {
-    Usage("Image patching requires --output-image-file or --output-image-relocation-file");
+  if ((output_image_directory.empty()) && (output_image_relocation_directory.empty())) {
+    Usage("Image patching requires --output-image-directory or --output-image-relocation-directory");
   }
 
   if (!base_delta_set) {
@@ -1160,9 +1141,6 @@ static int patchoat_patch_image(TimingLogger& timings,
 
   TimingLogger::ScopedTiming pt("patch image and oat", &timings);
 
-  std::string output_image_relocation_directory =
-      output_image_relocation_filename.substr(
-          0, output_image_relocation_filename.find_last_of('/'));
   bool ret =
       PatchOat::Patch(
           input_image_location,
@@ -1220,8 +1198,8 @@ static int patchoat(int argc, char **argv) {
   bool isa_set = false;
   InstructionSet isa = InstructionSet::kNone;
   std::string input_image_location;
-  std::string output_image_filename;
-  std::string output_image_relocation_filename;
+  std::string output_image_directory;
+  std::string output_image_relocation_directory;
   off_t base_delta = 0;
   bool base_delta_set = false;
   bool dump_timings = kIsDebugBuild;
@@ -1242,11 +1220,11 @@ static int patchoat(int argc, char **argv) {
       }
     } else if (option.starts_with("--input-image-location=")) {
       input_image_location = option.substr(strlen("--input-image-location=")).data();
-    } else if (option.starts_with("--output-image-file=")) {
-      output_image_filename = option.substr(strlen("--output-image-file=")).data();
-    } else if (option.starts_with("--output-image-relocation-file=")) {
-      output_image_relocation_filename =
-          option.substr(strlen("--output-image-relocation-file=")).data();
+    } else if (option.starts_with("--output-image-directory=")) {
+      output_image_directory = option.substr(strlen("--output-image-directory=")).data();
+    } else if (option.starts_with("--output-image-relocation-directory=")) {
+      output_image_relocation_directory =
+          option.substr(strlen("--output-image-relocation-directory=")).data();
     } else if (option.starts_with("--base-offset-delta=")) {
       const char* base_delta_str = option.substr(strlen("--base-offset-delta=")).data();
       base_delta_set = true;
@@ -1264,12 +1242,6 @@ static int patchoat(int argc, char **argv) {
     }
   }
 
-  // TODO: Have calls to patchoat pass in the output_image directory instead of
-  // the output_image_filename.
-  std::string output_image_directory;
-  if (!output_image_filename.empty())
-    output_image_directory = android::base::Dirname(output_image_filename);
-
   // The instruction set is mandatory. This simplifies things...
   if (!isa_set) {
     Usage("Instruction set must be set.");
@@ -1286,7 +1258,7 @@ static int patchoat(int argc, char **argv) {
                                isa,
                                input_image_location,
                                output_image_directory,
-                               output_image_relocation_filename,
+                               output_image_relocation_directory,
                                base_delta,
                                base_delta_set,
                                debug);

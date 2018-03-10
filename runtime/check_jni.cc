@@ -31,6 +31,7 @@
 #include "base/time_utils.h"
 #include "class_linker-inl.h"
 #include "class_linker.h"
+#include "dex/descriptors_names.h"
 #include "dex/dex_file-inl.h"
 #include "gc/space/space.h"
 #include "java_vm_ext.h"
@@ -46,6 +47,7 @@
 #include "well_known_classes.h"
 
 namespace art {
+namespace {
 
 using android::base::StringAppendF;
 using android::base::StringPrintf;
@@ -59,6 +61,10 @@ using android::base::StringPrintf;
 // Warn if a JNI critical is held for longer than 16ms.
 static constexpr uint64_t kCriticalWarnTimeUs = MsToUs(16);
 static_assert(kCriticalWarnTimeUs > 0, "No JNI critical warn time set");
+
+// True if primitives within specific ranges cause a fatal error,
+// otherwise just warn.
+static constexpr bool kBrokenPrimitivesAreFatal = kIsDebugBuild;
 
 // Flags passed into ScopedCheck.
 static constexpr uint16_t kFlag_Default = 0x0000;
@@ -205,10 +211,12 @@ class VarArgs {
     JniValueType o;
     if (type_ == kTypeVaList) {
       switch (fmt) {
-        case 'Z': o.Z = static_cast<jboolean>(va_arg(vargs_, jint)); break;
-        case 'B': o.B = static_cast<jbyte>(va_arg(vargs_, jint)); break;
-        case 'C': o.C = static_cast<jchar>(va_arg(vargs_, jint)); break;
-        case 'S': o.S = static_cast<jshort>(va_arg(vargs_, jint)); break;
+        // Assign a full int for va_list values as this is what is done in reflection.cc.
+        // TODO(b/73656264): avoid undefined behavior.
+        case 'Z': FALLTHROUGH_INTENDED;
+        case 'B': FALLTHROUGH_INTENDED;
+        case 'C': FALLTHROUGH_INTENDED;
+        case 'S': FALLTHROUGH_INTENDED;
         case 'I': o.I = va_arg(vargs_, jint); break;
         case 'J': o.J = va_arg(vargs_, jlong); break;
         case 'F': o.F = static_cast<jfloat>(va_arg(vargs_, jdouble)); break;
@@ -223,10 +231,14 @@ class VarArgs {
       jvalue v = ptr_[cnt_];
       cnt_++;
       switch (fmt) {
-        case 'Z': o.Z = v.z; break;
-        case 'B': o.B = v.b; break;
-        case 'C': o.C = v.c; break;
-        case 'S': o.S = v.s; break;
+        // Copy just the amount of the jvalue necessary, as done in
+        // reflection.cc, but extend to an int to be consistent with
+        // var args in CheckNonHeapValue.
+        // TODO(b/73656264): avoid undefined behavior.
+        case 'Z': o.I = v.z; break;
+        case 'B': o.I = v.b; break;
+        case 'C': o.I = v.c; break;
+        case 'S': o.I = v.s; break;
         case 'I': o.I = v.i; break;
         case 'J': o.J = v.j; break;
         case 'F': o.F = v.f; break;
@@ -910,17 +922,20 @@ class ScopedCheck {
     switch (fmt) {
       case 'p':  // TODO: pointer - null or readable?
       case 'v':  // JavaVM*
-      case 'B':  // jbyte
-      case 'C':  // jchar
       case 'D':  // jdouble
       case 'F':  // jfloat
-      case 'I':  // jint
       case 'J':  // jlong
-      case 'S':  // jshort
+      case 'I':  // jint
         break;  // Ignored.
       case 'b':  // jboolean, why two? Fall-through.
       case 'Z':
-        return CheckBoolean(arg.Z);
+        return CheckBoolean(arg.I);
+      case 'B':  // jbyte
+        return CheckByte(arg.I);
+      case 'C':  // jchar
+        return CheckChar(arg.I);
+      case 'S':  // jshort
+        return CheckShort(arg.I);
       case 'u':  // utf8
         if ((flags_ & kFlag_Release) != 0) {
           return CheckNonNull(arg.u);
@@ -1151,10 +1166,50 @@ class ScopedCheck {
     return true;
   }
 
-  bool CheckBoolean(jboolean z) {
+  bool CheckBoolean(jint z) {
     if (z != JNI_TRUE && z != JNI_FALSE) {
+      // Note, broken booleans are always fatal.
       AbortF("unexpected jboolean value: %d", z);
       return false;
+    }
+    return true;
+  }
+
+  bool CheckByte(jint b) {
+    if (b < std::numeric_limits<jbyte>::min() ||
+        b > std::numeric_limits<jbyte>::max()) {
+      if (kBrokenPrimitivesAreFatal) {
+        AbortF("unexpected jbyte value: %d", b);
+        return false;
+      } else {
+        LOG(WARNING) << "Unexpected jbyte value: " << b;
+      }
+    }
+    return true;
+  }
+
+  bool CheckShort(jint s) {
+    if (s < std::numeric_limits<jshort>::min() ||
+        s > std::numeric_limits<jshort>::max()) {
+      if (kBrokenPrimitivesAreFatal) {
+        AbortF("unexpected jshort value: %d", s);
+        return false;
+      } else {
+        LOG(WARNING) << "Unexpected jshort value: " << s;
+      }
+    }
+    return true;
+  }
+
+  bool CheckChar(jint c) {
+    if (c < std::numeric_limits<jchar>::min() ||
+        c > std::numeric_limits<jchar>::max()) {
+      if (kBrokenPrimitivesAreFatal) {
+        AbortF("unexpected jchar value: %d", c);
+        return false;
+      } else {
+        LOG(WARNING) << "Unexpected jchar value: " << c;
+      }
     }
     return true;
   }
@@ -1211,7 +1266,7 @@ class ScopedCheck {
     // this particular instance of JNIEnv.
     if (env != threadEnv) {
       // Get the thread owning the JNIEnv that's being used.
-      Thread* envThread = reinterpret_cast<JNIEnvExt*>(env)->self_;
+      Thread* envThread = reinterpret_cast<JNIEnvExt*>(env)->GetSelf();
       AbortF("thread %s using JNIEnv* from thread %s",
              ToStr<Thread>(*self).c_str(), ToStr<Thread>(*envThread).c_str());
       return false;
@@ -1223,7 +1278,7 @@ class ScopedCheck {
     case kFlag_CritOkay:    // okay to call this method
       break;
     case kFlag_CritBad:     // not okay to call
-      if (threadEnv->critical_ > 0) {
+      if (threadEnv->GetCritical() > 0) {
         AbortF("thread %s using JNI after critical get",
                ToStr<Thread>(*self).c_str());
         return false;
@@ -1231,25 +1286,25 @@ class ScopedCheck {
       break;
     case kFlag_CritGet:     // this is a "get" call
       // Don't check here; we allow nested gets.
-      if (threadEnv->critical_ == 0) {
-        threadEnv->critical_start_us_ = self->GetCpuMicroTime();
+      if (threadEnv->GetCritical() == 0) {
+        threadEnv->SetCriticalStartUs(self->GetCpuMicroTime());
       }
-      threadEnv->critical_++;
+      threadEnv->SetCritical(threadEnv->GetCritical() + 1);
       break;
     case kFlag_CritRelease:  // this is a "release" call
-      if (threadEnv->critical_ == 0) {
+      if (threadEnv->GetCritical() == 0) {
         AbortF("thread %s called too many critical releases",
                ToStr<Thread>(*self).c_str());
         return false;
-      } else if (threadEnv->critical_ == 1) {
+      } else if (threadEnv->GetCritical() == 1) {
         // Leaving the critical region, possibly warn about long critical regions.
-        uint64_t critical_duration_us = self->GetCpuMicroTime() - threadEnv->critical_start_us_;
+        uint64_t critical_duration_us = self->GetCpuMicroTime() - threadEnv->GetCriticalStartUs();
         if (critical_duration_us > kCriticalWarnTimeUs) {
           LOG(WARNING) << "JNI critical lock held for "
                        << PrettyDuration(UsToNs(critical_duration_us)) << " on " << *self;
         }
       }
-      threadEnv->critical_--;
+      threadEnv->SetCritical(threadEnv->GetCritical() - 1);
       break;
     default:
       LOG(FATAL) << "Bad flags (internal error): " << flags_;
@@ -1812,7 +1867,7 @@ class CheckJNI {
   static jobject ToReflectedMethod(JNIEnv* env, jclass cls, jmethodID mid, jboolean isStatic) {
     ScopedObjectAccess soa(env);
     ScopedCheck sc(kFlag_Default, __FUNCTION__);
-    JniValueType args[4] = {{.E = env}, {.c = cls}, {.m = mid}, {.b = isStatic}};
+    JniValueType args[4] = {{.E = env}, {.c = cls}, {.m = mid}, {.I = isStatic}};
     if (sc.Check(soa, true, "Ecmb", args)) {
       JniValueType result;
       result.L = baseEnv(env)->ToReflectedMethod(env, cls, mid, isStatic);
@@ -1827,7 +1882,7 @@ class CheckJNI {
   static jobject ToReflectedField(JNIEnv* env, jclass cls, jfieldID fid, jboolean isStatic) {
     ScopedObjectAccess soa(env);
     ScopedCheck sc(kFlag_Default, __FUNCTION__);
-    JniValueType args[4] = {{.E = env}, {.c = cls}, {.f = fid}, {.b = isStatic}};
+    JniValueType args[4] = {{.E = env}, {.c = cls}, {.f = fid}, {.I = isStatic}};
     if (sc.Check(soa, true, "Ecfb", args)) {
       JniValueType result;
       result.L = baseEnv(env)->ToReflectedField(env, cls, fid, isStatic);
@@ -2112,7 +2167,7 @@ class CheckJNI {
     return GetFieldIDInternal(__FUNCTION__, env, c, name, sig, true);
   }
 
-#define FIELD_ACCESSORS(jtype, name, ptype, shorty) \
+#define FIELD_ACCESSORS(jtype, name, ptype, shorty, slot_sized_shorty)  \
   static jtype GetStatic##name##Field(JNIEnv* env, jclass c, jfieldID fid) { \
     return GetField(__FUNCTION__, env, c, fid, true, ptype).shorty; \
   } \
@@ -2123,25 +2178,25 @@ class CheckJNI {
   \
   static void SetStatic##name##Field(JNIEnv* env, jclass c, jfieldID fid, jtype v) { \
     JniValueType value; \
-    value.shorty = v; \
+    value.slot_sized_shorty = v; \
     SetField(__FUNCTION__, env, c, fid, true, ptype, value); \
   } \
   \
   static void Set##name##Field(JNIEnv* env, jobject obj, jfieldID fid, jtype v) { \
     JniValueType value; \
-    value.shorty = v; \
+    value.slot_sized_shorty = v; \
     SetField(__FUNCTION__, env, obj, fid, false, ptype, value); \
   }
 
-  FIELD_ACCESSORS(jobject, Object, Primitive::kPrimNot, L)
-  FIELD_ACCESSORS(jboolean, Boolean, Primitive::kPrimBoolean, Z)
-  FIELD_ACCESSORS(jbyte, Byte, Primitive::kPrimByte, B)
-  FIELD_ACCESSORS(jchar, Char, Primitive::kPrimChar, C)
-  FIELD_ACCESSORS(jshort, Short, Primitive::kPrimShort, S)
-  FIELD_ACCESSORS(jint, Int, Primitive::kPrimInt, I)
-  FIELD_ACCESSORS(jlong, Long, Primitive::kPrimLong, J)
-  FIELD_ACCESSORS(jfloat, Float, Primitive::kPrimFloat, F)
-  FIELD_ACCESSORS(jdouble, Double, Primitive::kPrimDouble, D)
+  FIELD_ACCESSORS(jobject, Object, Primitive::kPrimNot, L, L)
+  FIELD_ACCESSORS(jboolean, Boolean, Primitive::kPrimBoolean, Z, I)
+  FIELD_ACCESSORS(jbyte, Byte, Primitive::kPrimByte, B, I)
+  FIELD_ACCESSORS(jchar, Char, Primitive::kPrimChar, C, I)
+  FIELD_ACCESSORS(jshort, Short, Primitive::kPrimShort, S, I)
+  FIELD_ACCESSORS(jint, Int, Primitive::kPrimInt, I, I)
+  FIELD_ACCESSORS(jlong, Long, Primitive::kPrimLong, J, J)
+  FIELD_ACCESSORS(jfloat, Float, Primitive::kPrimFloat, F, F)
+  FIELD_ACCESSORS(jdouble, Double, Primitive::kPrimDouble, D, D)
 #undef FIELD_ACCESSORS
 
   static void CallVoidMethodA(JNIEnv* env, jobject obj, jmethodID mid, jvalue* vargs) {
@@ -2621,7 +2676,7 @@ class CheckJNI {
   }
 
   static const JNINativeInterface* baseEnv(JNIEnv* env) {
-    return reinterpret_cast<JNIEnvExt*>(env)->unchecked_functions_;
+    return reinterpret_cast<JNIEnvExt*>(env)->GetUncheckedFunctions();
   }
 
   static jobject NewRef(const char* function_name, JNIEnv* env, jobject obj, IndirectRefKind kind) {
@@ -3847,10 +3902,6 @@ const JNINativeInterface gCheckNativeInterface = {
   CheckJNI::GetObjectRefType,
 };
 
-const JNINativeInterface* GetCheckJniNativeInterface() {
-  return &gCheckNativeInterface;
-}
-
 class CheckJII {
  public:
   static jint DestroyJavaVM(JavaVM* vm) {
@@ -3921,6 +3972,12 @@ const JNIInvokeInterface gCheckInvokeInterface = {
   CheckJII::GetEnv,
   CheckJII::AttachCurrentThreadAsDaemon
 };
+
+}  // anonymous namespace
+
+const JNINativeInterface* GetCheckJniNativeInterface() {
+  return &gCheckNativeInterface;
+}
 
 const JNIInvokeInterface* GetCheckJniInvokeInterface() {
   return &gCheckInvokeInterface;

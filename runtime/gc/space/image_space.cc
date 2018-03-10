@@ -240,7 +240,7 @@ static bool ReadSpecificImageHeader(const char* filename, ImageHeader* image_hea
 
 // Relocate the image at image_location to dest_filename and relocate it by a random amount.
 static bool RelocateImage(const char* image_location,
-                          const char* dest_filename,
+                          const char* dest_directory,
                           InstructionSet isa,
                           std::string* error_msg) {
   // We should clean up so we are more likely to have room for the image.
@@ -254,8 +254,8 @@ static bool RelocateImage(const char* image_location,
   std::string input_image_location_arg("--input-image-location=");
   input_image_location_arg += image_location;
 
-  std::string output_image_filename_arg("--output-image-file=");
-  output_image_filename_arg += dest_filename;
+  std::string output_image_directory_arg("--output-image-directory=");
+  output_image_directory_arg += dest_directory;
 
   std::string instruction_set_arg("--instruction-set=");
   instruction_set_arg += GetInstructionSetString(isa);
@@ -267,13 +267,43 @@ static bool RelocateImage(const char* image_location,
   argv.push_back(patchoat);
 
   argv.push_back(input_image_location_arg);
-  argv.push_back(output_image_filename_arg);
+  argv.push_back(output_image_directory_arg);
 
   argv.push_back(instruction_set_arg);
   argv.push_back(base_offset_arg);
 
   std::string command_line(android::base::Join(argv, ' '));
   LOG(INFO) << "RelocateImage: " << command_line;
+  return Exec(argv, error_msg);
+}
+
+static bool VerifyImage(const char* image_location,
+                        const char* dest_directory,
+                        InstructionSet isa,
+                        std::string* error_msg) {
+  std::string patchoat(Runtime::Current()->GetPatchoatExecutable());
+
+  std::string input_image_location_arg("--input-image-location=");
+  input_image_location_arg += image_location;
+
+  std::string output_image_directory_arg("--output-image-directory=");
+  output_image_directory_arg += dest_directory;
+
+  std::string instruction_set_arg("--instruction-set=");
+  instruction_set_arg += GetInstructionSetString(isa);
+
+  std::vector<std::string> argv;
+  argv.push_back(patchoat);
+
+  argv.push_back(input_image_location_arg);
+  argv.push_back(output_image_directory_arg);
+
+  argv.push_back(instruction_set_arg);
+
+  argv.push_back("--verify");
+
+  std::string command_line(android::base::Join(argv, ' '));
+  LOG(INFO) << "VerifyImage: " << command_line;
   return Exec(argv, error_msg);
 }
 
@@ -1504,7 +1534,12 @@ std::unique_ptr<ImageSpace> ImageSpace::CreateBootImage(const char* image_locati
   if (is_zygote && dalvik_cache_exists) {
     DCHECK(!dalvik_cache.empty());
     std::string local_error_msg;
-    if (!CheckSpace(dalvik_cache, &local_error_msg)) {
+    // All secondary images are verified when the primary image is verified.
+    bool verified = secondary_image || VerifyImage(image_location,
+                                                   dalvik_cache.c_str(),
+                                                   image_isa,
+                                                   &local_error_msg);
+    if (!(verified && CheckSpace(dalvik_cache, &local_error_msg))) {
       LOG(WARNING) << local_error_msg << " Preemptively pruning the dalvik cache.";
       PruneDalvikCache(image_isa);
 
@@ -1593,7 +1628,7 @@ std::unique_ptr<ImageSpace> ImageSpace::CreateBootImage(const char* image_locati
       _exit(1);
     } else if (ImageCreationAllowed(is_global_cache, image_isa, &local_error_msg)) {
       bool patch_success =
-          RelocateImage(image_location, cache_filename.c_str(), image_isa, &local_error_msg);
+          RelocateImage(image_location, dalvik_cache.c_str(), image_isa, &local_error_msg);
       if (patch_success) {
         std::unique_ptr<ImageSpace> patched_space =
             ImageSpaceLoader::Load(image_location,

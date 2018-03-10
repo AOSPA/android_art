@@ -277,7 +277,7 @@ void DeoptManager::AddDeoptimizeAllMethodsLocked(art::Thread* self) {
 }
 
 void DeoptManager::RemoveDeoptimizeAllMethodsLocked(art::Thread* self) {
-  DCHECK_GT(global_deopt_count_, 0u) << "Request to remove non-existant global deoptimization!";
+  DCHECK_GT(global_deopt_count_, 0u) << "Request to remove non-existent global deoptimization!";
   global_deopt_count_--;
   if (global_deopt_count_ == 0) {
     PerformGlobalUndeoptimization(self);
@@ -343,9 +343,9 @@ void DeoptManager::DeoptimizeThread(art::Thread* target) {
   art::Runtime::Current()->GetInstrumentation()->InstrumentThreadStack(target);
 }
 
-extern DeoptManager gDeoptManager;
+extern DeoptManager* gDeoptManager;
 DeoptManager* DeoptManager::Get() {
-  return &gDeoptManager;
+  return gDeoptManager;
 }
 
 }  // namespace openjdkjvmti

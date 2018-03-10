@@ -76,7 +76,7 @@ static bool IsCurrentJniNormal() {
   return gCurrentJni == static_cast<uint32_t>(JniKind::kNormal);
 }
 
-// Signifify that a different kind of JNI is about to be tested.
+// Signify that a different kind of JNI is about to be tested.
 static void UpdateCurrentJni(JniKind kind) {
   gCurrentJni = static_cast<uint32_t>(kind);
 }
@@ -523,7 +523,8 @@ struct ScopedDisableCheckNumStackReferences {
 
 bool ScopedDisableCheckNumStackReferences::sCheckNumStackReferences = true;
 
-// Check that the handle scope at the start of this block is the same as the handle scope at the end of the block.
+// Check that the handle scope at the start of this block is the same
+// as the handle scope at the end of the block.
 struct ScopedCheckHandleScope {
   ScopedCheckHandleScope() : handle_scope_(Thread::Current()->GetTopHandleScope()) {
   }

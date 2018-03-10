@@ -23,6 +23,7 @@
 #include "base/enums.h"
 #include "class_linker-inl.h"
 #include "common_throws.h"
+#include "dex/descriptors_names.h"
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_annotations.h"
 #include "dex/utf.h"
@@ -97,7 +98,8 @@ ALWAYS_INLINE static bool ShouldEnforceHiddenApi(Thread* self)
 template<typename T>
 ALWAYS_INLINE static bool ShouldBlockAccessToMember(T* member, Thread* self)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  return hiddenapi::ShouldBlockAccessToMember(member, self, IsCallerInBootClassPath);
+  return hiddenapi::ShouldBlockAccessToMember(
+      member, self, IsCallerInBootClassPath, hiddenapi::kReflection);
 }
 
 // Returns true if a class member should be discoverable with reflection given
@@ -173,6 +175,12 @@ static jclass Class_classForName(JNIEnv* env, jclass, jstring javaName, jboolean
     class_linker->EnsureInitialized(soa.Self(), c, true, true);
   }
   return soa.AddLocalReference<jclass>(c.Get());
+}
+
+static jclass Class_getPrimitiveClass(JNIEnv* env, jclass, jstring name) {
+  ScopedFastNativeObjectAccess soa(env);
+  ObjPtr<mirror::Class> klass = mirror::Class::GetPrimitiveClass(soa.Decode<mirror::String>(name));
+  return soa.AddLocalReference<jclass>(klass);
 }
 
 static jstring Class_getNameNative(JNIEnv* env, jobject javaThis) {
@@ -525,7 +533,7 @@ static jobjectArray Class_getDeclaredConstructorsInternal(
 }
 
 static jobject Class_getDeclaredMethodInternal(JNIEnv* env, jobject javaThis,
-                                               jobject name, jobjectArray args) {
+                                               jstring name, jobjectArray args) {
   ScopedFastNativeObjectAccess soa(env);
   DCHECK_EQ(Runtime::Current()->GetClassLinker()->GetImagePointerSize(), kRuntimePointerSize);
   DCHECK(!Runtime::Current()->IsActiveTransaction());
@@ -868,6 +876,7 @@ static JNINativeMethod gMethods[] = {
   FAST_NATIVE_METHOD(Class, getInnerClassFlags, "(I)I"),
   FAST_NATIVE_METHOD(Class, getInnerClassName, "()Ljava/lang/String;"),
   FAST_NATIVE_METHOD(Class, getInterfacesInternal, "()[Ljava/lang/Class;"),
+  FAST_NATIVE_METHOD(Class, getPrimitiveClass, "(Ljava/lang/String;)Ljava/lang/Class;"),
   FAST_NATIVE_METHOD(Class, getNameNative, "()Ljava/lang/String;"),
   FAST_NATIVE_METHOD(Class, getPublicDeclaredFields, "()[Ljava/lang/reflect/Field;"),
   FAST_NATIVE_METHOD(Class, getSignatureAnnotation, "()[Ljava/lang/String;"),
