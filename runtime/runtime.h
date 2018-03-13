@@ -325,7 +325,7 @@ class Runtime {
   // instead.
   void VisitImageRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Visit all of the roots we can do safely do concurrently.
+  // Visit all of the roots we can safely visit concurrently.
   void VisitConcurrentRoots(RootVisitor* visitor,
                             VisitRootFlags flags = kVisitRootFlagAllRoots)
       REQUIRES(!Locks::classlinker_classes_lock_, !Locks::trace_lock_)
@@ -526,14 +526,6 @@ class Runtime {
 
   bool AreHiddenApiChecksEnabled() const {
     return do_hidden_api_checks_;
-  }
-
-  void SetUseHiddenApiWarningFlag(bool value) {
-    use_hidden_api_warning_flag_ = value;
-  }
-
-  bool ShouldSetHiddenApiWarningFlag() const {
-    return use_hidden_api_warning_flag_;
   }
 
   void SetPendingHiddenApiWarning(bool value) {
@@ -999,9 +991,6 @@ class Runtime {
 
   // Whether access checks on hidden API should be performed.
   bool do_hidden_api_checks_;
-
-  // Whether hidden API UI warning flag should be set or not.
-  bool use_hidden_api_warning_flag_;
 
   // Whether the application has used an API which is not restricted but we
   // should issue a warning about it.

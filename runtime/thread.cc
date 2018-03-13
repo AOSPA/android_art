@@ -47,6 +47,7 @@
 #include "base/to_str.h"
 #include "class_linker-inl.h"
 #include "debugger.h"
+#include "dex/descriptors_names.h"
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_annotations.h"
 #include "dex/dex_file_types.h"
@@ -663,8 +664,8 @@ void Thread::CreateNativeThread(JNIEnv* env, jobject java_peer, size_t stack_siz
   child_thread->tlsPtr_.jpeer = env->NewGlobalRef(java_peer);
   stack_size = FixStackSize(stack_size);
 
-  // Thread.start is synchronized, so we know that nativePeer is 0, and know that we're not racing to
-  // assign it.
+  // Thread.start is synchronized, so we know that nativePeer is 0, and know that we're not racing
+  // to assign it.
   env->SetLongField(java_peer, WellKnownClasses::java_lang_Thread_nativePeer,
                     reinterpret_cast<jlong>(child_thread));
 
@@ -839,7 +840,8 @@ Thread* Thread::Attach(const char* thread_name,
     if (create_peer) {
       self->CreatePeer(thread_name, as_daemon, thread_group);
       if (self->IsExceptionPending()) {
-        // We cannot keep the exception around, as we're deleting self. Try to be helpful and log it.
+        // We cannot keep the exception around, as we're deleting self. Try to be helpful and log
+        // it.
         {
           ScopedObjectAccess soa(self);
           LOG(ERROR) << "Exception creating thread peer:";
@@ -3435,6 +3437,9 @@ bool Thread::HoldsLock(ObjPtr<mirror::Object> object) const {
   return object != nullptr && object->GetLockOwnerThreadId() == GetThreadId();
 }
 
+extern std::vector<StackReference<mirror::Object>*> GetProxyReferenceArguments(ArtMethod** sp)
+    REQUIRES_SHARED(Locks::mutator_lock_);
+
 // RootVisitor parameters are: (const Object* obj, size_t vreg, const StackVisitor* visitor).
 template <typename RootVisitor, bool kPrecise = false>
 class ReferenceMapVisitor : public StackVisitor {
@@ -3478,7 +3483,7 @@ class ReferenceMapVisitor : public StackVisitor {
       }
     }
     // Mark lock count map required for structured locking checks.
-    shadow_frame->GetLockCountData().VisitMonitors(visitor_, -1, this);
+    shadow_frame->GetLockCountData().VisitMonitors(visitor_, /* vreg */ -1, this);
   }
 
  private:
@@ -3516,7 +3521,7 @@ class ReferenceMapVisitor : public StackVisitor {
         }
       }
       mirror::Object* new_ref = klass.Ptr();
-      visitor_(&new_ref, -1, this);
+      visitor_(&new_ref, /* vreg */ -1, this);
       if (new_ref != klass) {
         method->CASDeclaringClass(klass.Ptr(), new_ref->AsClass());
       }
@@ -3535,7 +3540,7 @@ class ReferenceMapVisitor : public StackVisitor {
     if (!m->IsNative() && !m->IsRuntimeMethod() && (!m->IsProxyMethod() || m->IsConstructor())) {
       const OatQuickMethodHeader* method_header = GetCurrentOatQuickMethodHeader();
       DCHECK(method_header->IsOptimized());
-      auto* vreg_base = reinterpret_cast<StackReference<mirror::Object>*>(
+      StackReference<mirror::Object>* vreg_base = reinterpret_cast<StackReference<mirror::Object>*>(
           reinterpret_cast<uintptr_t>(cur_quick_frame));
       uintptr_t native_pc_offset = method_header->NativeQuickPcOffset(GetCurrentQuickFramePc());
       CodeInfo code_info = method_header->GetOptimizedCodeInfo();
@@ -3550,7 +3555,7 @@ class ReferenceMapVisitor : public StackVisitor {
       BitMemoryRegion stack_mask = code_info.GetStackMaskOf(encoding, map);
       for (size_t i = 0; i < number_of_bits; ++i) {
         if (stack_mask.LoadBit(i)) {
-          auto* ref_addr = vreg_base + i;
+          StackReference<mirror::Object>* ref_addr = vreg_base + i;
           mirror::Object* ref = ref_addr->AsMirrorPtr();
           if (ref != nullptr) {
             mirror::Object* new_ref = ref;
@@ -3576,6 +3581,22 @@ class ReferenceMapVisitor : public StackVisitor {
           }
           if (*ref_addr != nullptr) {
             vreg_info.VisitRegister(ref_addr, i, this);
+          }
+        }
+      }
+    } else if (!m->IsRuntimeMethod() && m->IsProxyMethod()) {
+      // If this is a proxy method, visit its reference arguments.
+      DCHECK(!m->IsStatic());
+      DCHECK(!m->IsNative());
+      std::vector<StackReference<mirror::Object>*> ref_addrs =
+          GetProxyReferenceArguments(cur_quick_frame);
+      for (StackReference<mirror::Object>* ref_addr : ref_addrs) {
+        mirror::Object* ref = ref_addr->AsMirrorPtr();
+        if (ref != nullptr) {
+          mirror::Object* new_ref = ref;
+          visitor_(&new_ref, /* vreg */ -1, this);
+          if (ref != new_ref) {
+            ref_addr->Assign(new_ref);
           }
         }
       }
@@ -3773,9 +3794,9 @@ void Thread::VisitRoots(RootVisitor* visitor) {
 
 void Thread::VisitRoots(RootVisitor* visitor, VisitRootFlags flags) {
   if ((flags & VisitRootFlags::kVisitRootFlagPrecise) != 0) {
-    VisitRoots<true>(visitor);
+    VisitRoots</* kPrecise */ true>(visitor);
   } else {
-    VisitRoots<false>(visitor);
+    VisitRoots</* kPrecise */ false>(visitor);
   }
 }
 

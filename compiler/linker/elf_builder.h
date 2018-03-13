@@ -18,7 +18,6 @@
 #define ART_COMPILER_LINKER_ELF_BUILDER_H_
 
 #include <vector>
-#include <unordered_map>
 
 #include "arch/instruction_set.h"
 #include "arch/mips/instruction_set_features_mips.h"
@@ -202,7 +201,7 @@ class ElfBuilder FINAL {
       return section_index_ != 0;
     }
 
-   private:
+   protected:
     // Add this section to the list of generated ELF sections (if not there already).
     // It also ensures the alignment is sufficient to generate valid program headers,
     // since that depends on the previous section. It returns the required alignment.
@@ -310,24 +309,27 @@ class ElfBuilder FINAL {
                   /* info */ 0,
                   align,
                   /* entsize */ 0),
-          current_offset_(0) {
+          current_offset_(0),
+          last_offset_(0) {
     }
 
     Elf_Word Write(const std::string& name) {
       if (current_offset_ == 0) {
         DCHECK(name.empty());
+      } else if (name == last_name_) {
+        return last_offset_;  // Very simple string de-duplication.
       }
-      auto res = written_names_.emplace(name, current_offset_);
-      if (res.second) {  // Inserted.
-        this->WriteFully(name.c_str(), name.length() + 1);
-        current_offset_ += name.length() + 1;
-      }
-      return res.first->second;  // Offset.
+      last_name_ = name;
+      last_offset_ = current_offset_;
+      this->WriteFully(name.c_str(), name.length() + 1);
+      current_offset_ += name.length() + 1;
+      return last_offset_;
     }
 
    private:
     Elf_Word current_offset_;
-    std::unordered_map<std::string, Elf_Word> written_names_;  // Dedup strings.
+    std::string last_name_;
+    Elf_Word last_offset_;
   };
 
   // Writer of .dynsym and .symtab sections.
@@ -343,7 +345,7 @@ class ElfBuilder FINAL {
                   type,
                   flags,
                   strtab,
-                  /* info */ 0,
+                  /* info */ 1,
                   sizeof(Elf_Off),
                   sizeof(Elf_Sym)) {
       syms_.push_back(Elf_Sym());  // The symbol table always has to start with NULL symbol.
@@ -384,6 +386,11 @@ class ElfBuilder FINAL {
       sym.st_shndx = section_index;
       sym.st_info = (binding << 4) + (type & 0xf);
       syms_.push_back(sym);
+
+      // The sh_info file must be set to index one-past the last local symbol.
+      if (binding == STB_LOCAL) {
+        this->header_.sh_info = syms_.size();
+      }
     }
 
     Elf_Word GetCacheSize() { return syms_.size() * sizeof(Elf_Sym); }
@@ -715,8 +722,10 @@ class ElfBuilder FINAL {
     Elf_Word oatdata = dynstr_.Add("oatdata");
     dynsym_.Add(oatdata, &rodata_, rodata_.GetAddress(), rodata_size, STB_GLOBAL, STT_OBJECT);
     if (text_size != 0u) {
+      // The runtime does not care about the size of this symbol (it uses the "lastword" symbol).
+      // We use size 0 (meaning "unknown size" in ELF) to prevent overlap with the debug symbols.
       Elf_Word oatexec = dynstr_.Add("oatexec");
-      dynsym_.Add(oatexec, &text_, text_.GetAddress(), text_size, STB_GLOBAL, STT_OBJECT);
+      dynsym_.Add(oatexec, &text_, text_.GetAddress(), /* size */ 0, STB_GLOBAL, STT_OBJECT);
       Elf_Word oatlastword = dynstr_.Add("oatlastword");
       Elf_Word oatlastword_address = text_.GetAddress() + text_size - 4;
       dynsym_.Add(oatlastword, &text_, oatlastword_address, 4, STB_GLOBAL, STT_OBJECT);
@@ -754,7 +763,7 @@ class ElfBuilder FINAL {
     }
     if (dex_size != 0u) {
       Elf_Word oatdex = dynstr_.Add("oatdex");
-      dynsym_.Add(oatdex, &dex_, dex_.GetAddress(), dex_size, STB_GLOBAL, STT_OBJECT);
+      dynsym_.Add(oatdex, &dex_, dex_.GetAddress(), /* size */ 0, STB_GLOBAL, STT_OBJECT);
       Elf_Word oatdexlastword = dynstr_.Add("oatdexlastword");
       Elf_Word oatdexlastword_address = dex_.GetAddress() + dex_size - 4;
       dynsym_.Add(oatdexlastword, &dex_, oatdexlastword_address, 4, STB_GLOBAL, STT_OBJECT);

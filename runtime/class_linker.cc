@@ -50,6 +50,7 @@
 #include "class_table-inl.h"
 #include "compiler_callbacks.h"
 #include "debugger.h"
+#include "dex/descriptors_names.h"
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_exception_helpers.h"
 #include "dex/dex_file_loader.h"
@@ -266,7 +267,9 @@ static void WrapExceptionInInitializer(Handle<mirror::Class> klass)
   // cannot in general be guaranteed, but in all likelihood leads to breakage down the line.
   if (klass->GetClassLoader() == nullptr && !Runtime::Current()->IsAotCompiler()) {
     std::string tmp;
-    LOG(kIsDebugBuild ? FATAL : WARNING) << klass->GetDescriptor(&tmp) << " failed initialization";
+    LOG(kIsDebugBuild ? FATAL : WARNING) << klass->GetDescriptor(&tmp)
+                                         << " failed initialization: "
+                                         << self->GetException()->Dump();
   }
 
   env->ExceptionClear();
@@ -457,7 +460,7 @@ bool ClassLinker::InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> b
                                                          VoidFunctor()));
 
   // Initialize the SubtypeCheck bitstring for java.lang.Object and java.lang.Class.
-  {
+  if (kBitstringSubtypeCheckEnabled) {
     // It might seem the lock here is unnecessary, however all the SubtypeCheck
     // functions are annotated to require locks all the way down.
     //
@@ -1856,7 +1859,7 @@ bool ClassLinker::AddImageSpace(
       visitor(root.Read());
     }
 
-    {
+    if (kBitstringSubtypeCheckEnabled) {
       // Every class in the app image has initially SubtypeCheckInfo in the
       // Uninitialized state.
       //
@@ -3433,7 +3436,8 @@ void ClassLinker::RegisterDexFileLocked(const DexFile& dex_file,
   data.weak_root = dex_cache_jweak;
   data.dex_file = dex_cache->GetDexFile();
   data.class_table = ClassTableForClassLoader(class_loader);
-  RegisterDexFileForNative(self, data.dex_file->Begin());
+  AddNativeDebugInfoForDex(self, ArrayRef<const uint8_t>(data.dex_file->Begin(),
+                                                         data.dex_file->Size()));
   DCHECK(data.class_table != nullptr);
   // Make sure to hold the dex cache live in the class table. This case happens for the boot class
   // path dex caches without an image.
@@ -4484,6 +4488,14 @@ mirror::Class* ClassLinker::CreateProxyClass(ScopedObjectAccessAlreadyRunnable& 
 
   Runtime::Current()->GetRuntimeCallbacks()->ClassPrepare(temp_klass, klass);
 
+  // SubtypeCheckInfo::Initialized must happen-before any new-instance for that type.
+  // See also ClassLinker::EnsureInitialized().
+  if (kBitstringSubtypeCheckEnabled) {
+    MutexLock subtype_check_lock(Thread::Current(), *Locks::subtype_check_lock_);
+    SubtypeCheck<ObjPtr<mirror::Class>>::EnsureInitialized(klass.Get());
+    // TODO: Avoid taking subtype_check_lock_ if SubtypeCheck for j.l.r.Proxy is already assigned.
+  }
+
   {
     // Lock on klass is released. Lock new class object.
     ObjectLock<mirror::Class> initialization_lock(self, klass);
@@ -5231,7 +5243,7 @@ bool ClassLinker::EnsureInitialized(Thread* self,
   // can be used as a source for the IsSubClass check, and that all ancestors
   // of the class are Assigned (can be used as a target for IsSubClass check)
   // or Overflowed (can be used as a source for IsSubClass check).
-  {
+  if (kBitstringSubtypeCheckEnabled) {
     MutexLock subtype_check_lock(Thread::Current(), *Locks::subtype_check_lock_);
     SubtypeCheck<ObjPtr<mirror::Class>>::EnsureInitialized(c.Get());
     // TODO: Avoid taking subtype_check_lock_ if SubtypeCheck is already initialized.
@@ -7931,6 +7943,40 @@ std::string DescribeLoaders(ObjPtr<mirror::ClassLoader> loader, const char* clas
   return oss.str();
 }
 
+ArtMethod* ClassLinker::FindResolvedMethod(ObjPtr<mirror::Class> klass,
+                                           ObjPtr<mirror::DexCache> dex_cache,
+                                           ObjPtr<mirror::ClassLoader> class_loader,
+                                           uint32_t method_idx) {
+  // Search for the method using dex_cache and method_idx. The Class::Find*Method()
+  // functions can optimize the search if the dex_cache is the same as the DexCache
+  // of the class, with fall-back to name and signature search otherwise.
+  ArtMethod* resolved = nullptr;
+  if (klass->IsInterface()) {
+    resolved = klass->FindInterfaceMethod(dex_cache, method_idx, image_pointer_size_);
+  } else {
+    resolved = klass->FindClassMethod(dex_cache, method_idx, image_pointer_size_);
+  }
+  DCHECK(resolved == nullptr || resolved->GetDeclaringClassUnchecked() != nullptr);
+  if (resolved != nullptr) {
+    // In case of jmvti, the dex file gets verified before being registered, so first
+    // check if it's registered before checking class tables.
+    const DexFile& dex_file = *dex_cache->GetDexFile();
+    DCHECK(!IsDexFileRegistered(Thread::Current(), dex_file) ||
+           FindClassTable(Thread::Current(), dex_cache) == ClassTableForClassLoader(class_loader))
+        << "DexFile referrer: " << dex_file.GetLocation()
+        << " ClassLoader: " << DescribeLoaders(class_loader, "");
+    // Be a good citizen and update the dex cache to speed subsequent calls.
+    dex_cache->SetResolvedMethod(method_idx, resolved, image_pointer_size_);
+    // Disable the following invariant check as the verifier breaks it. b/73760543
+    // const DexFile::MethodId& method_id = dex_file.GetMethodId(method_idx);
+    // DCHECK(LookupResolvedType(method_id.class_idx_, dex_cache, class_loader) != nullptr)
+    //    << "Method: " << resolved->PrettyMethod() << ", "
+    //    << "Class: " << klass->PrettyClass() << " (" << klass->GetStatus() << "), "
+    //    << "DexFile referrer: " << dex_file.GetLocation();
+  }
+  return resolved;
+}
+
 template <ClassLinker::ResolveMode kResolveMode>
 ArtMethod* ClassLinker::ResolveMethod(uint32_t method_idx,
                                       Handle<mirror::DexCache> dex_cache,
@@ -7958,12 +8004,9 @@ ArtMethod* ClassLinker::ResolveMethod(uint32_t method_idx,
     DCHECK(resolved->GetDeclaringClassUnchecked() != nullptr) << resolved->GetDexMethodIndex();
     klass = LookupResolvedType(method_id.class_idx_, dex_cache.Get(), class_loader.Get());
     if (UNLIKELY(klass == nullptr)) {
-      const char* descriptor = dex_file.StringByTypeIdx(method_id.class_idx_);
-      LOG(FATAL) << "Check failed: klass != nullptr Bug: 64759619 Method: "
-          << resolved->PrettyMethod() << ";" << resolved
-          << "/0x" << std::hex << resolved->GetAccessFlags()
-          << " ReferencedClass: " << descriptor
-          << " ClassLoader: " << DescribeLoaders(class_loader.Get(), descriptor);
+      // We normaly should not end up here. However the verifier currently doesn't guarantee
+      // the invariant of having the klass in the class table. b/73760543
+      klass = ResolveType(method_id.class_idx_, dex_cache, class_loader);
     }
   } else {
     // The method was not in the DexCache, resolve the declaring class.
@@ -7983,19 +8026,7 @@ ArtMethod* ClassLinker::ResolveMethod(uint32_t method_idx,
   }
 
   if (!valid_dex_cache_method) {
-    // Search for the method using dex_cache and method_idx. The Class::Find*Method()
-    // functions can optimize the search if the dex_cache is the same as the DexCache
-    // of the class, with fall-back to name and signature search otherwise.
-    if (klass->IsInterface()) {
-      resolved = klass->FindInterfaceMethod(dex_cache.Get(), method_idx, pointer_size);
-    } else {
-      resolved = klass->FindClassMethod(dex_cache.Get(), method_idx, pointer_size);
-    }
-    DCHECK(resolved == nullptr || resolved->GetDeclaringClassUnchecked() != nullptr);
-    if (resolved != nullptr) {
-      // Be a good citizen and update the dex cache to speed subsequent calls.
-      dex_cache->SetResolvedMethod(method_idx, resolved, pointer_size);
-    }
+    resolved = FindResolvedMethod(klass, dex_cache.Get(), class_loader.Get(), method_idx);
   }
 
   // Note: We can check for IllegalAccessError only if we have a referrer.

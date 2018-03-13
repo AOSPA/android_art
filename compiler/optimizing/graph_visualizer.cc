@@ -27,6 +27,7 @@
 #include "code_generator.h"
 #include "data_type-inl.h"
 #include "dead_code_elimination.h"
+#include "dex/descriptors_names.h"
 #include "disassembler.h"
 #include "inliner.h"
 #include "licm.h"
@@ -445,6 +446,9 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
         ? GetGraph()->GetDexFile().PrettyMethod(invoke->GetDexMethodIndex(), kWithSignature)
         : method->PrettyMethod(kWithSignature);
     StartAttributeStream("method_name") << method_name;
+    StartAttributeStream("always_throws") << std::boolalpha
+                                          << invoke->AlwaysThrows()
+                                          << std::noboolalpha;
   }
 
   void VisitInvokeUnresolved(HInvokeUnresolved* invoke) OVERRIDE {

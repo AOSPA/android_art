@@ -29,22 +29,19 @@
 #include "utils.h"
 
 #pragma clang diagnostic push
-// slicer defines its own CHECK. b/65422458
-#pragma push_macro("CHECK")
-#undef CHECK
 
 // Slicer's headers have code that triggers these warnings. b/65298177
 #pragma clang diagnostic ignored "-Wunused-parameter"
 #pragma clang diagnostic ignored "-Wsign-compare"
-#include "code_ir.h"
-#include "control_flow_graph.h"
-#include "dex_ir.h"
-#include "dex_ir_builder.h"
-#include "instrumentation.h"
-#include "reader.h"
-#include "writer.h"
 
-#pragma pop_macro("CHECK")
+#include "slicer/code_ir.h"
+#include "slicer/control_flow_graph.h"
+#include "slicer/dex_ir.h"
+#include "slicer/dex_ir_builder.h"
+#include "slicer/instrumentation.h"
+#include "slicer/reader.h"
+#include "slicer/writer.h"
+
 #pragma clang diagnostic pop
 
 namespace art {
@@ -809,7 +806,7 @@ extern "C" JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM* vm,
     .can_signal_thread                               = 0,
     .can_get_source_file_name                        = 1,
     .can_get_line_numbers                            = 1,
-    .can_get_source_debug_extension                  = 0,
+    .can_get_source_debug_extension                  = 1,
     .can_access_local_variables                      = 0,
     .can_maintain_original_method_order              = 0,
     .can_generate_single_step_events                 = 1,

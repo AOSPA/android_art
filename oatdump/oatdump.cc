@@ -43,6 +43,7 @@
 #include "debug/elf_debug_writer.h"
 #include "debug/method_debug_info.h"
 #include "dex/code_item_accessors-inl.h"
+#include "dex/descriptors_names.h"
 #include "dex/dex_file-inl.h"
 #include "dex/dex_instruction-inl.h"
 #include "disassembler.h"
@@ -2394,9 +2395,11 @@ class ImageDumper {
     } else if (obj->IsClass()) {
       ObjPtr<mirror::Class> klass = obj->AsClass();
 
-      os << "SUBTYPE_CHECK_BITS: ";
-      SubtypeCheck<ObjPtr<mirror::Class>>::Dump(klass, os);
-      os << "\n";
+      if (kBitstringSubtypeCheckEnabled) {
+        os << "SUBTYPE_CHECK_BITS: ";
+        SubtypeCheck<ObjPtr<mirror::Class>>::Dump(klass, os);
+        os << "\n";
+      }
 
       if (klass->NumStaticFields() != 0) {
         os << "STATICS:\n";

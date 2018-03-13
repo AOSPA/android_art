@@ -434,6 +434,7 @@ Heap::Heap(size_t initial_size,
   // Create other spaces based on whether or not we have a moving GC.
   if (foreground_collector_type_ == kCollectorTypeCC) {
     CHECK(separate_non_moving_space);
+    // Reserve twice the capacity, to allow evacuating every region for explicit GCs.
     MemMap* region_space_mem_map = space::RegionSpace::CreateMemMap(kRegionSpaceName,
                                                                     capacity_ * 2,
                                                                     request_begin);
@@ -517,7 +518,7 @@ Heap::Heap(size_t initial_size,
   // Since we don't know where in the low_4gb the app image will be located, make the card table
   // cover the whole low_4gb. TODO: Extend the card table in AddSpace.
   UNUSED(heap_capacity);
-  // Start at 64 KB, we can be sure there are no spaces mapped this low since the address range is
+  // Start at 4 KB, we can be sure there are no spaces mapped this low since the address range is
   // reserved by the kernel.
   static constexpr size_t kMinHeapAddress = 4 * KB;
   card_table_.reset(accounting::CardTable::Create(reinterpret_cast<uint8_t*>(kMinHeapAddress),
@@ -1536,7 +1537,7 @@ void Heap::RecordFree(uint64_t freed_objects, int64_t freed_bytes) {
 
 void Heap::RecordFreeRevoke() {
   // Subtract num_bytes_freed_revoke_ from num_bytes_allocated_ to cancel out the
-  // the ahead-of-time, bulk counting of bytes allocated in rosalloc thread-local buffers.
+  // ahead-of-time, bulk counting of bytes allocated in rosalloc thread-local buffers.
   // If there's a concurrent revoke, ok to not necessarily reset num_bytes_freed_revoke_
   // all the way to zero exactly as the remainder will be subtracted at the next GC.
   size_t bytes_freed = num_bytes_freed_revoke_.LoadSequentiallyConsistent();
@@ -1758,7 +1759,7 @@ void Heap::SetTargetHeapUtilization(float target) {
 size_t Heap::GetObjectsAllocated() const {
   Thread* const self = Thread::Current();
   ScopedThreadStateChange tsc(self, kWaitingForGetObjectsAllocated);
-  // Prevent GC running during GetObjectsALlocated since we may get a checkpoint request that tells
+  // Prevent GC running during GetObjectsAllocated since we may get a checkpoint request that tells
   // us to suspend while we are doing SuspendAll. b/35232978
   gc::ScopedGCCriticalSection gcs(Thread::Current(),
                                   gc::kGcCauseGetObjectsAllocated,
@@ -1890,16 +1891,19 @@ HomogeneousSpaceCompactResult Heap::PerformHomogeneousSpaceCompact() {
   count_requested_homogeneous_space_compaction_++;
   // Store performed homogeneous space compaction at a new request arrival.
   ScopedThreadStateChange tsc(self, kWaitingPerformingGc);
-  Locks::mutator_lock_->AssertNotHeld(self);
+  // TODO: Clang prebuilt for r316199 produces bogus thread safety analysis warning for holding both
+  // exclusive and shared lock in the same scope. Remove the assertion as a temporary workaround.
+  // http://b/71769596
+  // Locks::mutator_lock_->AssertNotHeld(self);
   {
     ScopedThreadStateChange tsc2(self, kWaitingForGcToComplete);
     MutexLock mu(self, *gc_complete_lock_);
     // Ensure there is only one GC at a time.
     WaitForGcToCompleteLocked(kGcCauseHomogeneousSpaceCompact, self);
-    // Homogeneous space compaction is a copying transition, can't run it if the moving GC disable count
-    // is non zero.
-    // If the collector type changed to something which doesn't benefit from homogeneous space compaction,
-    // exit.
+    // Homogeneous space compaction is a copying transition, can't run it if the moving GC disable
+    // count is non zero.
+    // If the collector type changed to something which doesn't benefit from homogeneous space
+    // compaction, exit.
     if (disable_moving_gc_count_ != 0 || IsMovingGc(collector_type_) ||
         !main_space_->CanMoveObjects()) {
       return kErrorReject;
@@ -1968,7 +1972,10 @@ void Heap::TransitionCollector(CollectorType collector_type) {
   Runtime* const runtime = Runtime::Current();
   Thread* const self = Thread::Current();
   ScopedThreadStateChange tsc(self, kWaitingPerformingGc);
-  Locks::mutator_lock_->AssertNotHeld(self);
+  // TODO: Clang prebuilt for r316199 produces bogus thread safety analysis warning for holding both
+  // exclusive and shared lock in the same scope. Remove the assertion as a temporary workaround.
+  // http://b/71769596
+  // Locks::mutator_lock_->AssertNotHeld(self);
   // Busy wait until we can GC (StartGC can fail if we have a non-zero
   // compacting_gc_disable_count_, this should rarely occurs).
   for (;;) {
@@ -2511,7 +2518,10 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
     }
   }
   ScopedThreadStateChange tsc(self, kWaitingPerformingGc);
-  Locks::mutator_lock_->AssertNotHeld(self);
+  // TODO: Clang prebuilt for r316199 produces bogus thread safety analysis warning for holding both
+  // exclusive and shared lock in the same scope. Remove the assertion as a temporary workaround.
+  // http://b/71769596
+  // Locks::mutator_lock_->AssertNotHeld(self);
   if (self->IsHandlingStackOverflow()) {
     // If we are throwing a stack overflow error we probably don't have enough remaining stack
     // space to run the GC.
@@ -3436,14 +3446,15 @@ void Heap::GrowForUtilization(collector::GarbageCollector* collector_ran,
   TraceHeapSize(bytes_allocated);
   uint64_t target_size;
   collector::GcType gc_type = collector_ran->GetGcType();
-  const double multiplier = HeapGrowthMultiplier();  // Use the multiplier to grow more for
-  // foreground.
+  // Use the multiplier to grow more for foreground.
+  const double multiplier = HeapGrowthMultiplier();
   const uint64_t adjusted_min_free = static_cast<uint64_t>(min_free_ * multiplier);
   const uint64_t adjusted_max_free = static_cast<uint64_t>(max_free_ * multiplier);
   if (gc_type != collector::kGcTypeSticky) {
     // Grow the heap for non sticky GC.
     ssize_t delta = bytes_allocated / GetTargetHeapUtilization() - bytes_allocated;
-    CHECK_GE(delta, 0);
+    CHECK_GE(delta, 0) << "bytes_allocated=" << bytes_allocated
+                       << " target_utilization_=" << target_utilization_;
     target_size = bytes_allocated + delta * multiplier;
     target_size = std::min(target_size, bytes_allocated + adjusted_max_free);
     target_size = std::max(target_size, bytes_allocated + adjusted_min_free);
@@ -3515,6 +3526,11 @@ void Heap::ClampGrowthLimit() {
       gc::space::MallocSpace* malloc_space = space->AsMallocSpace();
       malloc_space->ClampGrowthLimit();
     }
+  }
+  if (collector_type_ == kCollectorTypeCC) {
+    DCHECK(region_space_ != nullptr);
+    // Twice the capacity as CC needs extra space for evacuating objects.
+    region_space_->ClampGrowthLimit(2 * capacity_);
   }
   // This space isn't added for performance reasons.
   if (main_space_backup_.get() != nullptr) {
