@@ -20,9 +20,9 @@
 #include <android-base/logging.h>
 
 #include "arena_allocator.h"
-#include "debug_stack.h"
-#include "globals.h"
-#include "macros.h"
+#include "base/debug_stack.h"
+#include "base/globals.h"
+#include "base/macros.h"
 
 namespace art {
 

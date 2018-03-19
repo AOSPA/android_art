@@ -24,11 +24,13 @@ cc_defaults {
         "dex/descriptors_names.cc",
         "dex/dex_file.cc",
         "dex/dex_file_exception_helpers.cc",
+        "dex/dex_file_layout.cc",
         "dex/dex_file_loader.cc",
         "dex/dex_file_tracking_registrar.cc",
         "dex/dex_file_verifier.cc",
         "dex/dex_instruction.cc",
         "dex/modifiers.cc",
+        "dex/primitive.cc",
         "dex/standard_dex_file.cc",
         "dex/utf.cc",
     ],
@@ -38,7 +40,6 @@ cc_defaults {
             static_libs: [
                 "libziparchive",
                 "libz",
-                "libbase",
             ],
             shared_libs: [
                 "libutils",
@@ -53,19 +54,23 @@ cc_defaults {
     },
     generated_sources: ["dexfile_operator_srcs"],
     shared_libs: [
+        // Important note: relying on libartbase's header_lib is perfectly acceptable.
+        // However, relying on the libartbase shared library introduces further, possibly cyclic,
+	// dependencies for clients outside of ART.
         "liblog",
         // For common macros.
         "libbase",
         "libz",
     ],
     header_libs: [
-        // This is needed to resolve the base/ header file inclusions here.
-        // TODO: move those headers to art/ rather than under runtime.
-        "libart_runtime_headers",
+        "art_libartbase_headers",
     ],
     export_include_dirs: ["."],
     export_shared_lib_headers: [
         "libbase",
+    ],
+    export_header_lib_headers: [
+        "art_libartbase_headers",
     ],
 }
 
@@ -75,6 +80,7 @@ gensrcs {
     tools: ["generate_operator_out"],
     srcs: [
         "dex/dex_file.h",
+        "dex/dex_file_layout.h",
         "dex/dex_instruction.h",
         "dex/dex_instruction_utils.h",
         "dex/invoke_type.h",
@@ -82,7 +88,6 @@ gensrcs {
     output_extension: "operator_out.cc",
 }
 
-// TODO: add build support for libdexfiled, as we use DCHECK, etc.
 art_cc_library {
     name: "libdexfile",
     defaults: ["libdexfile_defaults"],
@@ -114,6 +119,7 @@ art_cc_test {
         "dex/dex_file_loader_test.cc",
         "dex/dex_file_verifier_test.cc",
         "dex/dex_instruction_test.cc",
+        "dex/primitive_test.cc",
         "dex/utf_test.cc",
     ],
     shared_libs: [

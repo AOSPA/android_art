@@ -29,6 +29,7 @@
  * questions.
  */
 
+#include "base/leb128.h"
 #include "fixed_up_dex_file.h"
 #include "dex/art_dex_file_loader.h"
 #include "dex/dex_file-inl.h"
@@ -40,7 +41,6 @@
 #include "dex/compact_dex_level.h"
 #include "dex_to_dex_decompiler.h"
 #include "dexlayout.h"
-#include "leb128.h"
 #include "oat_file.h"
 #include "vdex_file.h"
 
@@ -115,6 +115,9 @@ std::unique_ptr<FixedUpDexFile> FixedUpDexFile::Create(const art::DexFile& origi
     // this before unquickening.
     art::Options options;
     options.compact_dex_level_ = art::CompactDexLevel::kCompactDexLevelNone;
+    // Never verify the output since hidden API flags may cause the dex file verifier to fail.
+    // See b/74063493
+    options.verify_output_ = false;
     // Add a filter to only include the class that has the matching descriptor.
     static constexpr bool kFilterByDescriptor = true;
     if (kFilterByDescriptor) {

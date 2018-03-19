@@ -29,6 +29,7 @@
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "base/enums.h"
+#include "base/safe_map.h"
 #include "base/strlcpy.h"
 #include "base/time_utils.h"
 #include "class_linker-inl.h"
@@ -64,7 +65,6 @@
 #include "oat_file.h"
 #include "obj_ptr-inl.h"
 #include "reflection.h"
-#include "safe_map.h"
 #include "scoped_thread_state_change-inl.h"
 #include "stack.h"
 #include "thread_list.h"
@@ -949,7 +949,7 @@ JDWP::JdwpError Dbg::GetContendedMonitor(JDWP::ObjectId thread_id,
 JDWP::JdwpError Dbg::GetInstanceCounts(const std::vector<JDWP::RefTypeId>& class_ids,
                                        std::vector<uint64_t>* counts) {
   gc::Heap* heap = Runtime::Current()->GetHeap();
-  heap->CollectGarbage(false, gc::GcCause::kGcCauseDebugger);
+  heap->CollectGarbage(/* clear_soft_references */ false, gc::GcCause::kGcCauseDebugger);
   VariableSizedHandleScope hs(Thread::Current());
   std::vector<Handle<mirror::Class>> classes;
   counts->clear();
@@ -970,7 +970,7 @@ JDWP::JdwpError Dbg::GetInstances(JDWP::RefTypeId class_id, int32_t max_count,
                                   std::vector<JDWP::ObjectId>* instances) {
   gc::Heap* heap = Runtime::Current()->GetHeap();
   // We only want reachable instances, so do a GC.
-  heap->CollectGarbage(false, gc::GcCause::kGcCauseDebugger);
+  heap->CollectGarbage(/* clear_soft_references */ false, gc::GcCause::kGcCauseDebugger);
   JDWP::JdwpError error;
   ObjPtr<mirror::Class> c = DecodeClass(class_id, &error);
   if (c == nullptr) {
@@ -992,7 +992,7 @@ JDWP::JdwpError Dbg::GetInstances(JDWP::RefTypeId class_id, int32_t max_count,
 JDWP::JdwpError Dbg::GetReferringObjects(JDWP::ObjectId object_id, int32_t max_count,
                                          std::vector<JDWP::ObjectId>* referring_objects) {
   gc::Heap* heap = Runtime::Current()->GetHeap();
-  heap->CollectGarbage(false, gc::GcCause::kGcCauseDebugger);
+  heap->CollectGarbage(/* clear_soft_references */ false, gc::GcCause::kGcCauseDebugger);
   JDWP::JdwpError error;
   ObjPtr<mirror::Object> o = gRegistry->Get<mirror::Object*>(object_id, &error);
   if (o == nullptr) {

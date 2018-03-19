@@ -44,13 +44,17 @@
 #include "base/callee_save_type.h"
 #include "base/dumpable.h"
 #include "base/file_utils.h"
+#include "base/leb128.h"
 #include "base/macros.h"
+#include "base/mutex.h"
+#include "base/os.h"
 #include "base/scoped_flock.h"
 #include "base/stl_util.h"
 #include "base/stringpiece.h"
 #include "base/time_utils.h"
 #include "base/timing_logger.h"
 #include "base/unix_file/fd_file.h"
+#include "base/utils.h"
 #include "class_linker.h"
 #include "class_loader_context.h"
 #include "cmdline_parser.h"
@@ -75,7 +79,6 @@
 #include "interpreter/unstarted_runtime.h"
 #include "java_vm_ext.h"
 #include "jit/profile_compilation_info.h"
-#include "leb128.h"
 #include "linker/buffered_output_stream.h"
 #include "linker/elf_writer.h"
 #include "linker/elf_writer_quick.h"
@@ -89,11 +92,9 @@
 #include "mirror/object_array-inl.h"
 #include "oat_file.h"
 #include "oat_file_assistant.h"
-#include "os.h"
 #include "runtime.h"
 #include "runtime_options.h"
 #include "scoped_thread_state_change-inl.h"
-#include "utils.h"
 #include "vdex_file.h"
 #include "verifier/verifier_deps.h"
 #include "well_known_classes.h"
@@ -457,7 +458,7 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("  --deduplicate-code=true|false: enable|disable code deduplication. Deduplicated");
   UsageError("      code will have an arbitrary symbol tagged with [DEDUPED].");
   UsageError("");
-  UsageError("  --copying-dex-files=true|false: enable|disable copying the dex files into the");
+  UsageError("  --copy-dex-files=true|false: enable|disable copying the dex files into the");
   UsageError("      output vdex.");
   UsageError("");
   UsageError("  --compilation-reason=<string>: optional metadata specifying the reason for");
@@ -1164,6 +1165,7 @@ class Dex2Oat FINAL {
     original_argc = argc;
     original_argv = argv;
 
+    Locks::Init();
     InitLogging(argv, Runtime::Abort);
 
     compiler_options_.reset(new CompilerOptions());
@@ -1748,7 +1750,7 @@ class Dex2Oat FINAL {
           soa.Self(),
           soa.Decode<mirror::ClassLoader>(class_loader));
       soa.Env()->GetVm()->DeleteGlobalRef(soa.Self(), class_loader);
-      runtime_->GetHeap()->CollectGarbage(/*clear_soft_references*/ true);
+      runtime_->GetHeap()->CollectGarbage(/* clear_soft_references */ true);
       ObjPtr<mirror::ClassLoader> decoded_weak = soa.Decode<mirror::ClassLoader>(weak_class_loader);
       if (decoded_weak != nullptr) {
         LOG(FATAL) << "Failed to unload class loader, path from root set: "
@@ -2921,8 +2923,9 @@ class Dex2Oat FINAL {
   // Whether the given input vdex is also the output.
   bool update_input_vdex_ = false;
 
-  // By default, copy the dex to the vdex file.
-  bool copy_dex_files_ = true;
+  // By default, copy the dex to the vdex file only if dex files are
+  // compressed in APK.
+  CopyOption copy_dex_files_ = CopyOption::kOnlyIfCompressed;
 
   // The reason for invoking the compiler.
   std::string compilation_reason_;

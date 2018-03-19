@@ -25,7 +25,9 @@
 
 #include "base/file_utils.h"
 #include "base/logging.h"  // For VLOG.
+#include "base/os.h"
 #include "base/stl_util.h"
+#include "base/utils.h"
 #include "class_linker.h"
 #include "compiler_filter.h"
 #include "dex/art_dex_file_loader.h"
@@ -35,10 +37,8 @@
 #include "gc/space/image_space.h"
 #include "image.h"
 #include "oat.h"
-#include "os.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
-#include "utils.h"
 #include "vdex_file.h"
 #include "class_loader_context.h"
 
@@ -515,6 +515,18 @@ OatFileAssistant::OatStatus OatFileAssistant::GivenOatFileStatus(const OatFile& 
     VLOG(oat) << "Image checksum test skipped for compiler filter " << current_compiler_filter;
   }
 
+  // zip_file_only_contains_uncompressed_dex_ is only set during fetching the dex checksums.
+  DCHECK(required_dex_checksums_attempted_);
+  if (only_load_system_executable_ &&
+      !LocationIsOnSystem(file.GetLocation().c_str()) &&
+      file.ContainsDexCode() &&
+      zip_file_only_contains_uncompressed_dex_) {
+    LOG(ERROR) << "Not loading "
+               << dex_location_
+               << ": oat file has dex code, but APK has uncompressed dex code";
+    return kOatDexOutOfDate;
+  }
+
   if (CompilerFilter::IsAotCompilationEnabled(current_compiler_filter)) {
     if (!file.IsPic()) {
       const ImageInfo* image_info = GetImageInfo();
@@ -879,7 +891,8 @@ const std::vector<uint32_t>* OatFileAssistant::GetRequiredDexChecksums() {
     if (dex_file_loader.GetMultiDexChecksums(dex_location_.c_str(),
                                              &cached_required_dex_checksums_,
                                              &error_msg,
-                                             zip_fd_)) {
+                                             zip_fd_,
+                                             &zip_file_only_contains_uncompressed_dex_)) {
       required_dex_checksums_found_ = true;
       has_original_dex_files_ = true;
     } else {
@@ -1248,18 +1261,37 @@ std::unique_ptr<OatFile> OatFileAssistant::OatFileInfo::ReleaseFileForUse() {
     return ReleaseFile();
   }
 
-  if (Status() == kOatRelocationOutOfDate) {
-    // We are loading an oat file for runtime use that needs relocation.
-    // Reload the file non-executable to ensure that we interpret out of the
-    // dex code in the oat file rather than trying to execute the unrelocated
-    // compiled code.
-    oat_file_assistant_->load_executable_ = false;
-    Reset();
-    if (IsUseable()) {
-      CHECK(!IsExecutable());
-      return ReleaseFile();
-    }
+  switch (Status()) {
+    case kOatBootImageOutOfDate:
+      // OutOfDate may be either a mismatched image, or a missing image.
+      if (oat_file_assistant_->HasOriginalDexFiles()) {
+        // If there are original dex files, it is better to use them (to avoid a potential
+        // quickening mismatch because the boot image changed).
+        break;
+      }
+      // If we do not accept the oat file, we may not have access to dex bytecode at all. Grudgingly
+      // go forward.
+      FALLTHROUGH_INTENDED;
+
+    case kOatRelocationOutOfDate:
+      // We are loading an oat file for runtime use that needs relocation.
+      // Reload the file non-executable to ensure that we interpret out of the
+      // dex code in the oat file rather than trying to execute the unrelocated
+      // compiled code.
+      oat_file_assistant_->load_executable_ = false;
+      Reset();
+      if (IsUseable()) {
+        CHECK(!IsExecutable());
+        return ReleaseFile();
+      }
+      break;
+
+    case kOatUpToDate:
+    case kOatCannotOpen:
+    case kOatDexOutOfDate:
+      break;
   }
+
   return std::unique_ptr<OatFile>();
 }
 
