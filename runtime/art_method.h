@@ -32,10 +32,10 @@
 #include "dex/dex_file.h"
 #include "dex/dex_instruction_iterator.h"
 #include "dex/modifiers.h"
+#include "dex/primitive.h"
 #include "gc_root.h"
 #include "obj_ptr.h"
 #include "offsets.h"
-#include "primitive.h"
 #include "read_barrier_option.h"
 
 namespace art {
@@ -601,6 +601,8 @@ class ArtMethod FINAL {
   uint16_t GetClassDefIndex() REQUIRES_SHARED(Locks::mutator_lock_);
 
   const DexFile::ClassDef& GetClassDef() REQUIRES_SHARED(Locks::mutator_lock_);
+
+  ALWAYS_INLINE size_t GetNumberOfParameters() REQUIRES_SHARED(Locks::mutator_lock_);
 
   const char* GetReturnTypeDescriptor() REQUIRES_SHARED(Locks::mutator_lock_);
 

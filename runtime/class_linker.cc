@@ -36,13 +36,17 @@
 #include "art_method-inl.h"
 #include "base/arena_allocator.h"
 #include "base/casts.h"
+#include "base/leb128.h"
 #include "base/logging.h"
+#include "base/os.h"
+#include "base/quasi_atomic.h"
 #include "base/scoped_arena_containers.h"
 #include "base/scoped_flock.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "base/time_utils.h"
 #include "base/unix_file/fd_file.h"
+#include "base/utils.h"
 #include "base/value_object.h"
 #include "cha.h"
 #include "class_linker-inl.h"
@@ -79,7 +83,6 @@
 #include "jit/jit_code_cache.h"
 #include "jit/profile_compilation_info.h"
 #include "jni_internal.h"
-#include "leb128.h"
 #include "linear_alloc.h"
 #include "mirror/call_site.h"
 #include "mirror/class-inl.h"
@@ -111,14 +114,12 @@
 #include "oat_file_assistant.h"
 #include "oat_file_manager.h"
 #include "object_lock.h"
-#include "os.h"
 #include "runtime.h"
 #include "runtime_callbacks.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread-inl.h"
 #include "thread_list.h"
 #include "trace.h"
-#include "utils.h"
 #include "utils/dex_cache_arrays_layout-inl.h"
 #include "verifier/method_verifier.h"
 #include "well_known_classes.h"
@@ -4977,8 +4978,14 @@ bool ClassLinker::InitializeDefaultInterfaceRecursive(Thread* self,
   // interface since we can still avoid the traversal. This is purely a performance optimization.
   if (result) {
     // TODO This should be done in a better way
-    ObjectLock<mirror::Class> lock(self, iface);
-    iface->SetRecursivelyInitialized();
+    // Note: Use a try-lock to avoid blocking when someone else is holding the lock on this
+    //       interface. It is bad (Java) style, but not impossible. Marking the recursive
+    //       initialization is a performance optimization (to avoid another idempotent visit
+    //       for other implementing classes/interfaces), and can be revisited later.
+    ObjectTryLock<mirror::Class> lock(self, iface);
+    if (lock.Acquired()) {
+      iface->SetRecursivelyInitialized();
+    }
   }
   return result;
 }

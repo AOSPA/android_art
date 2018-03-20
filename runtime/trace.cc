@@ -24,10 +24,12 @@
 #include "art_method-inl.h"
 #include "base/casts.h"
 #include "base/enums.h"
+#include "base/os.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "base/time_utils.h"
 #include "base/unix_file/fd_file.h"
+#include "base/utils.h"
 #include "class_linker.h"
 #include "common_throws.h"
 #include "debugger.h"
@@ -41,12 +43,10 @@
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
 #include "nativehelper/scoped_local_ref.h"
-#include "os.h"
 #include "scoped_thread_state_change-inl.h"
 #include "stack.h"
 #include "thread.h"
 #include "thread_list.h"
-#include "utils.h"
 
 namespace art {
 
@@ -303,6 +303,12 @@ void* Trace::RunSamplingThread(void* arg) {
       }
     }
     {
+      // Avoid a deadlock between a thread doing garbage collection
+      // and the profile sampling thread, by blocking GC when sampling
+      // thread stacks (see b/73624630).
+      gc::ScopedGCCriticalSection gcs(self,
+                                      art::gc::kGcCauseInstrumentation,
+                                      art::gc::kCollectorTypeInstrumentation);
       ScopedSuspendAll ssa(__FUNCTION__);
       MutexLock mu(self, *Locks::thread_list_lock_);
       runtime->GetThreadList()->ForEach(GetSample, the_trace);

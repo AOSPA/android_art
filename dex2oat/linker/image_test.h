@@ -28,6 +28,7 @@
 #include "art_method-inl.h"
 #include "base/file_utils.h"
 #include "base/unix_file/fd_file.h"
+#include "base/utils.h"
 #include "class_linker-inl.h"
 #include "common_compiler_test.h"
 #include "compiler_callbacks.h"
@@ -46,7 +47,6 @@
 #include "oat_writer.h"
 #include "scoped_thread_state_change-inl.h"
 #include "signal_catcher.h"
-#include "utils.h"
 
 namespace art {
 namespace linker {
@@ -276,7 +276,7 @@ inline void CompilationHelper::Compile(CompilerDriver* driver,
             &key_value_store,
             /* verify */ false,           // Dex files may be dex-to-dex-ed, don't verify.
             /* update_input_vdex */ false,
-            /* extract_dex_files */ true,
+            /* copy_dex_files */ CopyOption::kOnlyIfCompressed,
             &cur_opened_dex_files_maps,
             &cur_opened_dex_files);
         ASSERT_TRUE(dex_files_ok);

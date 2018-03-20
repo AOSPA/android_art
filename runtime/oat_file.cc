@@ -40,9 +40,11 @@
 #include "base/enums.h"
 #include "base/file_utils.h"
 #include "base/logging.h"  // For VLOG_IS_ON.
+#include "base/os.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "base/unix_file/fd_file.h"
+#include "base/utils.h"
 #include "dex/art_dex_file_loader.h"
 #include "dex/dex_file_loader.h"
 #include "dex/dex_file_types.h"
@@ -58,10 +60,8 @@
 #include "oat.h"
 #include "oat_file-inl.h"
 #include "oat_file_manager.h"
-#include "os.h"
 #include "runtime.h"
 #include "type_lookup_table.h"
-#include "utils.h"
 #include "vdex_file.h"
 
 namespace art {
@@ -854,6 +854,8 @@ bool OatFileBase::Setup(const char* abs_dex_location, std::string* error_msg) {
     if (UNLIKELY(runtime == nullptr)) {
       // This must be oatdump without boot image. Make sure the .bss is inaccessible.
       CheckedCall(mprotect, "protect bss", const_cast<uint8_t*>(BssBegin()), BssSize(), PROT_NONE);
+    } else if (!IsExecutable()) {
+      // Do not try to mmap boot image tables into .bss if the oat file is not executable.
     } else {
       // Map boot image tables into the .bss. The reserved size must match size of the tables.
       size_t reserved_size = static_cast<size_t>(boot_image_tables_end - boot_image_tables);
@@ -1810,9 +1812,9 @@ void OatDexFile::MadviseDexFile(const DexFile& dex_file, MadviseState state) {
     // Default every dex file to MADV_RANDOM when its loaded by default for low ram devices.
     // Other devices have enough page cache to get performance benefits from loading more pages
     // into the page cache.
-    MadviseLargestPageAlignedRegion(dex_file.Begin(),
-                                    dex_file.Begin() + dex_file.Size(),
-                                    MADV_RANDOM);
+    DexLayoutSection::MadviseLargestPageAlignedRegion(dex_file.Begin(),
+                                                      dex_file.Begin() + dex_file.Size(),
+                                                      MADV_RANDOM);
   }
   const OatFile::OatDexFile* oat_dex_file = dex_file.GetOatDexFile();
   if (oat_dex_file != nullptr) {

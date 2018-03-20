@@ -23,13 +23,13 @@
 #include "base/file_utils.h"
 #include "base/macros.h"
 #include "base/stringpiece.h"
+#include "base/utils.h"
 #include "debugger.h"
 #include "gc/heap.h"
 #include "monitor.h"
 #include "runtime.h"
 #include "ti/agent.h"
 #include "trace.h"
-#include "utils.h"
 
 #include "cmdline_parser.h"
 #include "runtime_options.h"
@@ -334,6 +334,8 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .IntoKey(M::HiddenApiChecks)
       .Define("-Xuse-stderr-logger")
           .IntoKey(M::UseStderrLogger)
+      .Define("-Xonly-use-system-oat-files")
+          .IntoKey(M::OnlyUseSystemOatFiles)
       .Ignore({
           "-ea", "-da", "-enableassertions", "-disableassertions", "--runtime-arg", "-esa",
           "-dsa", "-enablesystemassertions", "-disablesystemassertions", "-Xrs", "-Xint:_",

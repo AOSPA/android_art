@@ -29,6 +29,7 @@
 
 #include "base/macros.h"
 #include "base/mutex-inl.h"
+#include "base/utils.h"
 #include "bytecode_utils.h"
 #include "dex/art_dex_file_loader.h"
 #include "dex/base64_test_util.h"
@@ -40,7 +41,6 @@
 #include "jit/profile_compilation_info.h"
 #include "oat.h"
 #include "oat_file.h"
-#include "utils.h"
 #include "vdex_file.h"
 #include "ziparchive/zip_writer.h"
 
@@ -1714,6 +1714,34 @@ TEST_F(Dex2oatTest, CompactDexGenerationFailure) {
     ASSERT_TRUE(dex_file != nullptr) << error_msg;
     ASSERT_TRUE(!dex_file->IsCompactDexFile());
   }
+}
+
+TEST_F(Dex2oatTest, CompactDexGenerationFailureMultiDex) {
+  // Create a multidex file with only one dex that gets rejected for cdex conversion.
+  ScratchFile apk_file;
+  {
+    FILE* file = fdopen(apk_file.GetFd(), "w+b");
+    ZipWriter writer(file);
+    // Add vdex to zip.
+    writer.StartEntry("classes.dex", ZipWriter::kCompress);
+    size_t length = 0u;
+    std::unique_ptr<uint8_t[]> bytes(DecodeBase64(kDuplicateMethodInputDex, &length));
+    ASSERT_GE(writer.WriteBytes(&bytes[0], length), 0);
+    writer.FinishEntry();
+    writer.StartEntry("classes2.dex", ZipWriter::kCompress);
+    std::unique_ptr<const DexFile> dex(OpenTestDexFile("ManyMethods"));
+    ASSERT_GE(writer.WriteBytes(dex->Begin(), dex->Size()), 0);
+    writer.FinishEntry();
+    writer.Finish();
+    ASSERT_EQ(apk_file.GetFile()->Flush(), 0);
+  }
+  const std::string dex_location = apk_file.GetFilename();
+  const std::string odex_location = GetOdexDir() + "/output.odex";
+  GenerateOdexForTest(dex_location,
+                      odex_location,
+                      CompilerFilter::kQuicken,
+                      { "--compact-dex-level=fast" },
+                      true);
 }
 
 TEST_F(Dex2oatTest, StderrLoggerOutput) {

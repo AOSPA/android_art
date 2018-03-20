@@ -18,8 +18,8 @@
 #define ART_COMPILER_COMPILER_H_
 
 #include "base/mutex.h"
+#include "base/os.h"
 #include "dex/dex_file.h"
-#include "os.h"
 
 namespace art {
 
@@ -38,6 +38,12 @@ class CompiledMethod;
 template<class T> class Handle;
 class OatWriter;
 class Thread;
+
+enum class CopyOption {
+  kNever,
+  kAlways,
+  kOnlyIfCompressed
+};
 
 class Compiler {
  public:
