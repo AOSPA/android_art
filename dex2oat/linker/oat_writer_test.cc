@@ -28,6 +28,7 @@
 #include "debug/method_debug_info.h"
 #include "dex/dex_file_loader.h"
 #include "dex/quick_compiler_callbacks.h"
+#include "dex/test_dex_file_builder.h"
 #include "dex/verification_results.h"
 #include "driver/compiler_driver.h"
 #include "driver/compiler_options.h"
@@ -45,7 +46,6 @@
 #include "oat_file-inl.h"
 #include "oat_writer.h"
 #include "scoped_thread_state_change-inl.h"
-#include "utils/test_dex_file_builder.h"
 #include "vdex_file.h"
 
 namespace art {
@@ -663,7 +663,8 @@ void OatTest::TestDexFileInput(bool verify, bool low_4gb, bool use_profile) {
                       dex_file2_data->GetHeader().file_size_));
   ASSERT_EQ(dex_file2_data->GetLocation(), opened_dex_file2->GetLocation());
 
-  const VdexFile::Header &vdex_header = opened_oat_file->GetVdexFile()->GetHeader();
+  const VdexFile::DexSectionHeader &vdex_header =
+      opened_oat_file->GetVdexFile()->GetDexSectionHeader();
   if (!compiler_driver_->GetCompilerOptions().IsQuickeningCompilationEnabled()) {
     // If quickening is enabled we will always write the table since there is no special logic that
     // checks for all methods not being quickened (not worth the complexity).
@@ -672,7 +673,7 @@ void OatTest::TestDexFileInput(bool verify, bool low_4gb, bool use_profile) {
 
   int64_t actual_vdex_size = vdex_file.GetFile()->GetLength();
   ASSERT_GE(actual_vdex_size, 0);
-  ASSERT_EQ((uint64_t) actual_vdex_size, vdex_header.GetComputedFileSize());
+  ASSERT_EQ((uint64_t) actual_vdex_size, opened_oat_file->GetVdexFile()->GetComputedFileSize());
 }
 
 TEST_F(OatTest, DexFileInputCheckOutput) {
