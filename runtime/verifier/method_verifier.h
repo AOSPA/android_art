@@ -28,9 +28,9 @@
 #include "dex/code_item_accessors.h"
 #include "dex/dex_file.h"
 #include "dex/dex_file_types.h"
+#include "dex/method_reference.h"
 #include "handle.h"
 #include "instruction_flags.h"
-#include "method_reference.h"
 #include "reg_type_cache.h"
 #include "register_line.h"
 #include "verifier_enums.h"
@@ -720,6 +720,8 @@ class MethodVerifier {
   //       actually touched.
   const RegType& FromClass(const char* descriptor, mirror::Class* klass, bool precise)
       REQUIRES_SHARED(Locks::mutator_lock_);
+
+  ALWAYS_INLINE bool FailOrAbort(bool condition, const char* error_msg, uint32_t work_insn_idx);
 
   // The thread we're verifying on.
   Thread* const self_;
