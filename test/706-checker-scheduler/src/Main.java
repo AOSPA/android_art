@@ -610,11 +610,11 @@ public class Main {
   /// CHECK:     beq
 
   /// CHECK-START-ARM64: void Main.testCrossItersDependencies() disassembly (after)
+  /// CHECK:     ldr
   /// CHECK:     sub
   /// CHECK:     add
   /// CHECK:     add
-  /// CHECK:     ldrh
-  /// CHECK:     cbz
+  /// CHECK:     b
   private static void testCrossItersDependencies() {
     int[] data = {1, 2, 3, 0};
     int sub = 0;
