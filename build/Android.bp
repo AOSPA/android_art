@@ -21,6 +21,7 @@ art_global_defaults {
     // Additional flags are computed by art.go
 
     name: "art_defaults",
+    sdclang: false,
     cflags: [
         // Base set of cflags used by all things ART.
         "-fno-rtti",
