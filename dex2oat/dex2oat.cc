@@ -454,7 +454,9 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      The image writer will group them together.");
   UsageError("");
   UsageError("  --compact-dex-level=none|fast: None avoids generating compact dex, fast");
-  UsageError("      generates compact dex with low compile time.");
+  UsageError("      generates compact dex with low compile time. If speed-profile is specified as");
+  UsageError("      the compiler filter and the profile is not empty, the default compact dex");
+  UsageError("      level is always used.");
   UsageError("");
   UsageError("  --deduplicate-code=true|false: enable|disable code deduplication. Deduplicated");
   UsageError("      code will have an arbitrary symbol tagged with [DEDUPED].");
@@ -2514,7 +2516,10 @@ class Dex2Oat FINAL {
                                                              compiler_options_.get(),
                                                              oat_file.get()));
       elf_writers_.back()->Start();
-      const bool do_oat_writer_layout = DoDexLayoutOptimizations() || DoOatLayoutOptimizations();
+      bool do_oat_writer_layout = DoDexLayoutOptimizations() || DoOatLayoutOptimizations();
+      if (profile_compilation_info_ != nullptr && profile_compilation_info_->IsEmpty()) {
+        do_oat_writer_layout = false;
+      }
       oat_writers_.emplace_back(new linker::OatWriter(
           IsBootImage(),
           timings_,

@@ -27,6 +27,7 @@
 namespace art {
 
 class HiddenApi;
+struct HiddenApiStats;
 class VeridexResolver;
 
 /**
@@ -40,11 +41,12 @@ class HiddenApiFinder {
   // hidden API uses.
   void Run(const std::vector<std::unique_ptr<VeridexResolver>>& app_resolvers);
 
+  void Dump(std::ostream& os, HiddenApiStats* stats, bool dump_reflection);
+
  private:
   void CollectAccesses(VeridexResolver* resolver);
   void CheckMethod(uint32_t method_idx, VeridexResolver* resolver, MethodReference ref);
   void CheckField(uint32_t field_idx, VeridexResolver* resolver, MethodReference ref);
-  void Dump(std::ostream& os);
 
   const HiddenApi& hidden_api_;
   std::set<std::string> classes_;

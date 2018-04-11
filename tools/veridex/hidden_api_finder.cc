@@ -58,6 +58,16 @@ void HiddenApiFinder::CheckField(uint32_t field_id,
 
 void HiddenApiFinder::CollectAccesses(VeridexResolver* resolver) {
   const DexFile& dex_file = resolver->GetDexFile();
+  // Look at all types referenced in this dex file. Any of these
+  // types can lead to being used through reflection.
+  for (uint32_t i = 0; i < dex_file.NumTypeIds(); ++i) {
+    std::string name(dex_file.StringByTypeIdx(dex::TypeIndex(i)));
+    if (hidden_api_.IsInRestrictionList(name)) {
+      classes_.insert(name);
+    }
+  }
+  // Note: we collect strings constants only referenced in code items as the string table
+  // contains other kind of strings (eg types).
   size_t class_def_count = dex_file.NumClassDefs();
   for (size_t class_def_index = 0; class_def_index < class_def_count; ++class_def_index) {
     const DexFile::ClassDef& class_def = dex_file.GetClassDef(class_def_index);
@@ -76,15 +86,6 @@ void HiddenApiFinder::CollectAccesses(VeridexResolver* resolver) {
       CodeItemDataAccessor code_item_accessor(dex_file, code_item);
       for (const DexInstructionPcPair& inst : code_item_accessor) {
         switch (inst->Opcode()) {
-          case Instruction::CONST_CLASS: {
-            dex::TypeIndex type_index(inst->VRegB_21c());
-            std::string name = dex_file.StringByTypeIdx(type_index);
-            // Only keep classes that are in a restriction list.
-            if (hidden_api_.IsInRestrictionList(name)) {
-              classes_.insert(name);
-            }
-            break;
-          }
           case Instruction::CONST_STRING: {
             dex::StringIndex string_index(inst->VRegB_21c());
             std::string name = std::string(dex_file.StringDataByIdx(string_index));
@@ -192,32 +193,26 @@ void HiddenApiFinder::CollectAccesses(VeridexResolver* resolver) {
   }
 }
 
-static std::string GetApiMethodName(MethodReference ref) {
-  return HiddenApi::GetApiMethodName(*ref.dex_file, ref.index);
-}
-
 void HiddenApiFinder::Run(const std::vector<std::unique_ptr<VeridexResolver>>& resolvers) {
   for (const std::unique_ptr<VeridexResolver>& resolver : resolvers) {
     CollectAccesses(resolver.get());
   }
-
-  Dump(std::cout);
 }
 
-void HiddenApiFinder::Dump(std::ostream& os) {
+void HiddenApiFinder::Dump(std::ostream& os,
+                           HiddenApiStats* stats,
+                           bool dump_reflection) {
   static const char* kPrefix = "       ";
-  uint32_t count = 0;
-  uint32_t linking_count = method_locations_.size() + field_locations_.size();
-  uint32_t api_counts[4] = {0, 0, 0, 0};
+  stats->linking_count = method_locations_.size() + field_locations_.size();
 
   // Dump methods from hidden APIs linked against.
   for (const std::pair<std::string, std::vector<MethodReference>>& pair : method_locations_) {
     HiddenApiAccessFlags::ApiList api_list = hidden_api_.GetApiList(pair.first);
-    api_counts[api_list]++;
-    os << "#" << ++count << ": Linking " << api_list << " " << pair.first << " use(s):";
+    stats->api_counts[api_list]++;
+    os << "#" << ++stats->count << ": Linking " << api_list << " " << pair.first << " use(s):";
     os << std::endl;
     for (const MethodReference& ref : pair.second) {
-      os << kPrefix << GetApiMethodName(ref) << std::endl;
+      os << kPrefix << HiddenApi::GetApiMethodName(ref) << std::endl;
     }
     os << std::endl;
   }
@@ -225,42 +220,35 @@ void HiddenApiFinder::Dump(std::ostream& os) {
   // Dump fields from hidden APIs linked against.
   for (const std::pair<std::string, std::vector<MethodReference>>& pair : field_locations_) {
     HiddenApiAccessFlags::ApiList api_list = hidden_api_.GetApiList(pair.first);
-    api_counts[api_list]++;
-    os << "#" << ++count << ": Linking " << api_list << " " << pair.first << " use(s):";
+    stats->api_counts[api_list]++;
+    os << "#" << ++stats->count << ": Linking " << api_list << " " << pair.first << " use(s):";
     os << std::endl;
     for (const MethodReference& ref : pair.second) {
-      os << kPrefix << GetApiMethodName(ref) << std::endl;
+      os << kPrefix << HiddenApi::GetApiMethodName(ref) << std::endl;
     }
     os << std::endl;
   }
 
-  // Dump potential reflection uses.
-  for (const std::string& cls : classes_) {
-    for (const std::string& name : strings_) {
-      std::string full_name = cls + "->" + name;
-      HiddenApiAccessFlags::ApiList api_list = hidden_api_.GetApiList(full_name);
-      api_counts[api_list]++;
-      if (api_list != HiddenApiAccessFlags::kWhitelist) {
-        os << "#" << ++count << ": Reflection " << api_list << " " << full_name
-           << " potential use(s):";
-        os << std::endl;
-        for (const MethodReference& ref : reflection_locations_[name]) {
-          os << kPrefix << GetApiMethodName(ref) << std::endl;
+  if (dump_reflection) {
+    // Dump potential reflection uses.
+    for (const std::string& cls : classes_) {
+      for (const std::string& name : strings_) {
+        std::string full_name = cls + "->" + name;
+        HiddenApiAccessFlags::ApiList api_list = hidden_api_.GetApiList(full_name);
+        stats->api_counts[api_list]++;
+        if (api_list != HiddenApiAccessFlags::kWhitelist) {
+          stats->reflection_count++;
+          os << "#" << ++stats->count << ": Reflection " << api_list << " " << full_name
+             << " potential use(s):";
+          os << std::endl;
+          for (const MethodReference& ref : reflection_locations_[name]) {
+            os << kPrefix << HiddenApi::GetApiMethodName(ref) << std::endl;
+          }
+          os << std::endl;
         }
-        os << std::endl;
       }
     }
   }
-
-  os << count << " hidden API(s) used: "
-     << linking_count << " linked against, "
-     << count - linking_count << " potentially through reflection" << std::endl;
-  os << kPrefix << api_counts[HiddenApiAccessFlags::kBlacklist]
-     << " in blacklist" << std::endl;
-  os << kPrefix << api_counts[HiddenApiAccessFlags::kDarkGreylist]
-     << " in dark greylist" << std::endl;
-  os << kPrefix << api_counts[HiddenApiAccessFlags::kLightGreylist]
-     << " in light greylist" << std::endl;
 }
 
 }  // namespace art
