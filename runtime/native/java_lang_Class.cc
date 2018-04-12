@@ -33,6 +33,7 @@
 #include "mirror/class_loader.h"
 #include "mirror/field-inl.h"
 #include "mirror/method.h"
+#include "mirror/method_handles_lookup.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/string-inl.h"
@@ -49,12 +50,13 @@
 
 namespace art {
 
-// Returns true if the first non-ClassClass caller up the stack is in a platform dex file.
+// Returns true if the first caller outside of the Class class or java.lang.invoke package
+// is in a platform DEX file.
 static bool IsCallerInPlatformDex(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_) {
-  // Walk the stack and find the first frame not from java.lang.Class.
+  // Walk the stack and find the first frame not from java.lang.Class and not from java.lang.invoke.
   // This is very expensive. Save this till the last.
-  struct FirstNonClassClassCallerVisitor : public StackVisitor {
-    explicit FirstNonClassClassCallerVisitor(Thread* thread)
+  struct FirstExternalCallerVisitor : public StackVisitor {
+    explicit FirstExternalCallerVisitor(Thread* thread)
         : StackVisitor(thread, nullptr, StackVisitor::StackWalkKind::kIncludeInlinedFrames),
           caller(nullptr) {
     }
@@ -68,18 +70,33 @@ static bool IsCallerInPlatformDex(Thread* self) REQUIRES_SHARED(Locks::mutator_l
       } else if (m->IsRuntimeMethod()) {
         // Internal runtime method, continue walking the stack.
         return true;
-      } else if (m->GetDeclaringClass()->IsClassClass()) {
-        return true;
-      } else {
-        caller = m;
-        return false;
       }
+
+      ObjPtr<mirror::Class> declaring_class = m->GetDeclaringClass();
+      if (declaring_class->IsBootStrapClassLoaded()) {
+        if (declaring_class->IsClassClass()) {
+          return true;
+        }
+        // Check classes in the java.lang.invoke package. At the time of writing, the
+        // classes of interest are MethodHandles and MethodHandles.Lookup, but this
+        // is subject to change so conservatively cover the entire package.
+        // NB Static initializers within java.lang.invoke are permitted and do not
+        // need further stack inspection.
+        ObjPtr<mirror::Class> lookup_class = mirror::MethodHandlesLookup::StaticClass();
+        if ((declaring_class == lookup_class || declaring_class->IsInSamePackage(lookup_class))
+            && !m->IsClassInitializer()) {
+          return true;
+        }
+      }
+
+      caller = m;
+      return false;
     }
 
     ArtMethod* caller;
   };
 
-  FirstNonClassClassCallerVisitor visitor(self);
+  FirstExternalCallerVisitor visitor(self);
   visitor.WalkStack();
   return visitor.caller != nullptr &&
          hiddenapi::IsCallerInPlatformDex(visitor.caller->GetDeclaringClass());
@@ -98,26 +115,33 @@ ALWAYS_INLINE static bool ShouldEnforceHiddenApi(Thread* self)
 template<typename T>
 ALWAYS_INLINE static bool ShouldBlockAccessToMember(T* member, Thread* self)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  return hiddenapi::ShouldBlockAccessToMember(
+  hiddenapi::Action action = hiddenapi::GetMemberAction(
       member, self, IsCallerInPlatformDex, hiddenapi::kReflection);
+  if (action != hiddenapi::kAllow) {
+    hiddenapi::NotifyHiddenApiListener(member);
+  }
+
+  return action == hiddenapi::kDeny;
 }
 
 // Returns true if a class member should be discoverable with reflection given
 // the criteria. Some reflection calls only return public members
 // (public_only == true), some members should be hidden from non-boot class path
 // callers (enforce_hidden_api == true).
+template<typename T>
 ALWAYS_INLINE static bool IsDiscoverable(bool public_only,
                                          bool enforce_hidden_api,
-                                         uint32_t access_flags) {
-  if (public_only && ((access_flags & kAccPublic) == 0)) {
+                                         T* member)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (public_only && ((member->GetAccessFlags() & kAccPublic) == 0)) {
     return false;
   }
 
-  if (enforce_hidden_api && hiddenapi::GetMemberAction(access_flags) == hiddenapi::kDeny) {
-    return false;
-  }
-
-  return true;
+  return hiddenapi::GetMemberAction(member,
+                                    nullptr,
+                                    [enforce_hidden_api] (Thread*) { return !enforce_hidden_api; },
+                                    hiddenapi::kNone)
+      != hiddenapi::kDeny;
 }
 
 ALWAYS_INLINE static inline ObjPtr<mirror::Class> DecodeClass(
@@ -246,12 +270,12 @@ static mirror::ObjectArray<mirror::Field>* GetDeclaredFields(
   bool enforce_hidden_api = ShouldEnforceHiddenApi(self);
   // Lets go subtract all the non discoverable fields.
   for (ArtField& field : ifields) {
-    if (!IsDiscoverable(public_only, enforce_hidden_api, field.GetAccessFlags())) {
+    if (!IsDiscoverable(public_only, enforce_hidden_api, &field)) {
       --array_size;
     }
   }
   for (ArtField& field : sfields) {
-    if (!IsDiscoverable(public_only, enforce_hidden_api, field.GetAccessFlags())) {
+    if (!IsDiscoverable(public_only, enforce_hidden_api, &field)) {
       --array_size;
     }
   }
@@ -262,7 +286,7 @@ static mirror::ObjectArray<mirror::Field>* GetDeclaredFields(
     return nullptr;
   }
   for (ArtField& field : ifields) {
-    if (IsDiscoverable(public_only, enforce_hidden_api, field.GetAccessFlags())) {
+    if (IsDiscoverable(public_only, enforce_hidden_api, &field)) {
       auto* reflect_field = mirror::Field::CreateFromArtField<kRuntimePointerSize>(self,
                                                                                    &field,
                                                                                    force_resolve);
@@ -277,7 +301,7 @@ static mirror::ObjectArray<mirror::Field>* GetDeclaredFields(
     }
   }
   for (ArtField& field : sfields) {
-    if (IsDiscoverable(public_only, enforce_hidden_api, field.GetAccessFlags())) {
+    if (IsDiscoverable(public_only, enforce_hidden_api, &field)) {
       auto* reflect_field = mirror::Field::CreateFromArtField<kRuntimePointerSize>(self,
                                                                                    &field,
                                                                                    force_resolve);
@@ -433,12 +457,14 @@ static jobject Class_getPublicFieldRecursive(JNIEnv* env, jobject javaThis, jstr
     return nullptr;
   }
 
-  mirror::Field* field = GetPublicFieldRecursive(
-      soa.Self(), DecodeClass(soa, javaThis), name_string);
-  if (field == nullptr || ShouldBlockAccessToMember(field->GetArtField(), soa.Self())) {
+  StackHandleScope<1> hs(soa.Self());
+  Handle<mirror::Field> field = hs.NewHandle(GetPublicFieldRecursive(
+      soa.Self(), DecodeClass(soa, javaThis), name_string));
+  if (field.Get() == nullptr ||
+      ShouldBlockAccessToMember(field->GetArtField(), soa.Self())) {
     return nullptr;
   }
-  return soa.AddLocalReference<jobject>(field);
+  return soa.AddLocalReference<jobject>(field.Get());
 }
 
 static jobject Class_getDeclaredField(JNIEnv* env, jobject javaThis, jstring name) {
@@ -477,15 +503,17 @@ static jobject Class_getDeclaredConstructorInternal(
   ScopedFastNativeObjectAccess soa(env);
   DCHECK_EQ(Runtime::Current()->GetClassLinker()->GetImagePointerSize(), kRuntimePointerSize);
   DCHECK(!Runtime::Current()->IsActiveTransaction());
-  ObjPtr<mirror::Constructor> result =
+
+  StackHandleScope<1> hs(soa.Self());
+  Handle<mirror::Constructor> result = hs.NewHandle(
       mirror::Class::GetDeclaredConstructorInternal<kRuntimePointerSize, false>(
       soa.Self(),
       DecodeClass(soa, javaThis),
-      soa.Decode<mirror::ObjectArray<mirror::Class>>(args));
+      soa.Decode<mirror::ObjectArray<mirror::Class>>(args)));
   if (result == nullptr || ShouldBlockAccessToMember(result->GetArtMethod(), soa.Self())) {
     return nullptr;
   }
-  return soa.AddLocalReference<jobject>(result);
+  return soa.AddLocalReference<jobject>(result.Get());
 }
 
 static ALWAYS_INLINE inline bool MethodMatchesConstructor(
@@ -494,7 +522,7 @@ static ALWAYS_INLINE inline bool MethodMatchesConstructor(
   DCHECK(m != nullptr);
   return m->IsConstructor() &&
          !m->IsStatic() &&
-         IsDiscoverable(public_only, enforce_hidden_api, m->GetAccessFlags());
+         IsDiscoverable(public_only, enforce_hidden_api, m);
 }
 
 static jobjectArray Class_getDeclaredConstructorsInternal(
@@ -535,18 +563,19 @@ static jobjectArray Class_getDeclaredConstructorsInternal(
 static jobject Class_getDeclaredMethodInternal(JNIEnv* env, jobject javaThis,
                                                jstring name, jobjectArray args) {
   ScopedFastNativeObjectAccess soa(env);
+  StackHandleScope<1> hs(soa.Self());
   DCHECK_EQ(Runtime::Current()->GetClassLinker()->GetImagePointerSize(), kRuntimePointerSize);
   DCHECK(!Runtime::Current()->IsActiveTransaction());
-  ObjPtr<mirror::Method> result =
+  Handle<mirror::Method> result = hs.NewHandle(
       mirror::Class::GetDeclaredMethodInternal<kRuntimePointerSize, false>(
           soa.Self(),
           DecodeClass(soa, javaThis),
           soa.Decode<mirror::String>(name),
-          soa.Decode<mirror::ObjectArray<mirror::Class>>(args));
+          soa.Decode<mirror::ObjectArray<mirror::Class>>(args)));
   if (result == nullptr || ShouldBlockAccessToMember(result->GetArtMethod(), soa.Self())) {
     return nullptr;
   }
-  return soa.AddLocalReference<jobject>(result);
+  return soa.AddLocalReference<jobject>(result.Get());
 }
 
 static jobjectArray Class_getDeclaredMethodsUnchecked(JNIEnv* env, jobject javaThis,
@@ -563,7 +592,7 @@ static jobjectArray Class_getDeclaredMethodsUnchecked(JNIEnv* env, jobject javaT
     uint32_t modifiers = m.GetAccessFlags();
     // Add non-constructor declared methods.
     if ((modifiers & kAccConstructor) == 0 &&
-        IsDiscoverable(public_only, enforce_hidden_api, modifiers)) {
+        IsDiscoverable(public_only, enforce_hidden_api, &m)) {
       ++num_methods;
     }
   }
@@ -577,7 +606,7 @@ static jobjectArray Class_getDeclaredMethodsUnchecked(JNIEnv* env, jobject javaT
   for (ArtMethod& m : klass->GetDeclaredMethods(kRuntimePointerSize)) {
     uint32_t modifiers = m.GetAccessFlags();
     if ((modifiers & kAccConstructor) == 0 &&
-        IsDiscoverable(public_only, enforce_hidden_api, modifiers)) {
+        IsDiscoverable(public_only, enforce_hidden_api, &m)) {
       DCHECK_EQ(Runtime::Current()->GetClassLinker()->GetImagePointerSize(), kRuntimePointerSize);
       DCHECK(!Runtime::Current()->IsActiveTransaction());
       auto* method =

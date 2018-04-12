@@ -454,7 +454,9 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      The image writer will group them together.");
   UsageError("");
   UsageError("  --compact-dex-level=none|fast: None avoids generating compact dex, fast");
-  UsageError("      generates compact dex with low compile time.");
+  UsageError("      generates compact dex with low compile time. If speed-profile is specified as");
+  UsageError("      the compiler filter and the profile is not empty, the default compact dex");
+  UsageError("      level is always used.");
   UsageError("");
   UsageError("  --deduplicate-code=true|false: enable|disable code deduplication. Deduplicated");
   UsageError("      code will have an arbitrary symbol tagged with [DEDUPED].");
@@ -1515,10 +1517,15 @@ class Dex2Oat FINAL {
 
     // Verification results are null since we don't know if we will need them yet as the compler
     // filter may change.
-    callbacks_.reset(new QuickCompilerCallbacks(
-        IsBootImage() ?
-            CompilerCallbacks::CallbackMode::kCompileBootImage :
-            CompilerCallbacks::CallbackMode::kCompileApp));
+    CompilerCallbacks::CallbackMode callback_mode = CompilerCallbacks::CallbackMode::kCompileApp;
+    if (IsBootImage()) {
+      if (IsCoreImage()) {
+        callback_mode = CompilerCallbacks::CallbackMode::kCompileCoreImage;
+      } else {
+        callback_mode = CompilerCallbacks::CallbackMode::kCompileBootImage;
+      }
+    }
+    callbacks_.reset(new QuickCompilerCallbacks(callback_mode));
 
     RuntimeArgumentMap runtime_options;
     if (!PrepareRuntimeOptions(&runtime_options, callbacks_.get())) {
@@ -2266,12 +2273,19 @@ class Dex2Oat FINAL {
     return IsAppImage() || IsBootImage();
   }
 
+  // Returns true if we are compiling an app image.
   bool IsAppImage() const {
     return compiler_options_->IsAppImage();
   }
 
+  // Returns true if we are compiling a boot image.
   bool IsBootImage() const {
     return compiler_options_->IsBootImage();
+  }
+
+  // Returns true if we are compiling a core image (a minimal boot image for testing).
+  bool IsCoreImage() const {
+    return compiler_options_->IsCoreImage();
   }
 
   bool IsHost() const {
@@ -2514,7 +2528,10 @@ class Dex2Oat FINAL {
                                                              compiler_options_.get(),
                                                              oat_file.get()));
       elf_writers_.back()->Start();
-      const bool do_oat_writer_layout = DoDexLayoutOptimizations() || DoOatLayoutOptimizations();
+      bool do_oat_writer_layout = DoDexLayoutOptimizations() || DoOatLayoutOptimizations();
+      if (profile_compilation_info_ != nullptr && profile_compilation_info_->IsEmpty()) {
+        do_oat_writer_layout = false;
+      }
       oat_writers_.emplace_back(new linker::OatWriter(
           IsBootImage(),
           timings_,
