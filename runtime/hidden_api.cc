@@ -171,8 +171,28 @@ void MemberSignature::LogAccessToEventLog(AccessMethod access_method, Action act
   log_maker.Record();
 }
 
+static ALWAYS_INLINE bool CanUpdateMemberAccessFlags(ArtField*) {
+  return true;
+}
+
+static ALWAYS_INLINE bool CanUpdateMemberAccessFlags(ArtMethod* method) {
+  return !method->IsIntrinsic();
+}
+
 template<typename T>
-Action GetMemberActionImpl(T* member, Action action, AccessMethod access_method) {
+static ALWAYS_INLINE void MaybeWhitelistMember(Runtime* runtime, T* member)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (CanUpdateMemberAccessFlags(member) && runtime->ShouldDedupeHiddenApiWarnings()) {
+    member->SetAccessFlags(HiddenApiAccessFlags::EncodeForRuntime(
+        member->GetAccessFlags(), HiddenApiAccessFlags::kWhitelist));
+  }
+}
+
+template<typename T>
+Action GetMemberActionImpl(T* member,
+                           HiddenApiAccessFlags::ApiList api_list,
+                           Action action,
+                           AccessMethod access_method) {
   DCHECK_NE(action, kAllow);
 
   // Get the signature, we need it later.
@@ -192,18 +212,14 @@ Action GetMemberActionImpl(T* member, Action action, AccessMethod access_method)
       // Avoid re-examining the exemption list next time.
       // Note this results in no warning for the member, which seems like what one would expect.
       // Exemptions effectively adds new members to the whitelist.
-      if (runtime->ShouldDedupeHiddenApiWarnings()) {
-        member->SetAccessFlags(HiddenApiAccessFlags::EncodeForRuntime(
-                member->GetAccessFlags(), HiddenApiAccessFlags::kWhitelist));
-      }
+      MaybeWhitelistMember(runtime, member);
       return kAllow;
     }
 
     if (access_method != kNone) {
       // Print a log message with information about this class member access.
       // We do this if we're about to block access, or the app is debuggable.
-      member_signature.WarnAboutAccess(access_method,
-          HiddenApiAccessFlags::DecodeFromRuntime(member->GetAccessFlags()));
+      member_signature.WarnAboutAccess(access_method, api_list);
     }
   }
 
@@ -228,10 +244,7 @@ Action GetMemberActionImpl(T* member, Action action, AccessMethod access_method)
   if (access_method != kNone) {
     // Depending on a runtime flag, we might move the member into whitelist and
     // skip the warning the next time the member is accessed.
-    if (runtime->ShouldDedupeHiddenApiWarnings()) {
-      member->SetAccessFlags(HiddenApiAccessFlags::EncodeForRuntime(
-          member->GetAccessFlags(), HiddenApiAccessFlags::kWhitelist));
-    }
+    MaybeWhitelistMember(runtime, member);
 
     // If this action requires a UI warning, set the appropriate flag.
     if (action == kAllowButWarnAndToast || runtime->ShouldAlwaysSetHiddenApiWarningFlag()) {
@@ -244,9 +257,11 @@ Action GetMemberActionImpl(T* member, Action action, AccessMethod access_method)
 
 // Need to instantiate this.
 template Action GetMemberActionImpl<ArtField>(ArtField* member,
+                                              HiddenApiAccessFlags::ApiList api_list,
                                               Action action,
                                               AccessMethod access_method);
 template Action GetMemberActionImpl<ArtMethod>(ArtMethod* member,
+                                               HiddenApiAccessFlags::ApiList api_list,
                                                Action action,
                                                AccessMethod access_method);
 }  // namespace detail
