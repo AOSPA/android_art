@@ -17,7 +17,7 @@
 #include "java_lang_Thread.h"
 
 #include "common_throws.h"
-#include "jni_internal.h"
+#include "jni/jni_internal.h"
 #include "mirror/object.h"
 #include "monitor.h"
 #include "native_util.h"
@@ -111,16 +111,15 @@ static jint Thread_nativeGetStatus(JNIEnv* env, jobject java_thread, jboolean ha
   return -1;  // Unreachable.
 }
 
-static jboolean Thread_nativeHoldsLock(JNIEnv* env, jobject java_thread, jobject java_object) {
+static jboolean Thread_holdsLock(JNIEnv* env, jclass, jobject java_object) {
   ScopedObjectAccess soa(env);
   ObjPtr<mirror::Object> object = soa.Decode<mirror::Object>(java_object);
   if (object == nullptr) {
     ThrowNullPointerException("object == null");
     return JNI_FALSE;
   }
-  MutexLock mu(soa.Self(), *Locks::thread_list_lock_);
-  Thread* thread = Thread::FromManagedThread(soa, java_thread);
-  return thread->HoldsLock(object.Ptr());
+  Thread* thread = soa.Self();
+  return thread->HoldsLock(object);
 }
 
 static void Thread_nativeInterrupt(JNIEnv* env, jobject java_thread) {
@@ -200,7 +199,7 @@ static JNINativeMethod gMethods[] = {
   FAST_NATIVE_METHOD(Thread, isInterrupted, "()Z"),
   NATIVE_METHOD(Thread, nativeCreate, "(Ljava/lang/Thread;JZ)V"),
   NATIVE_METHOD(Thread, nativeGetStatus, "(Z)I"),
-  NATIVE_METHOD(Thread, nativeHoldsLock, "(Ljava/lang/Object;)Z"),
+  NATIVE_METHOD(Thread, holdsLock, "(Ljava/lang/Object;)Z"),
   FAST_NATIVE_METHOD(Thread, nativeInterrupt, "()V"),
   NATIVE_METHOD(Thread, nativeSetName, "(Ljava/lang/String;)V"),
   NATIVE_METHOD(Thread, nativeSetPriority, "(I)V"),

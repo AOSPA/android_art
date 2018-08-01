@@ -19,7 +19,6 @@
 #include <stdlib.h>
 #include <sys/file.h>
 #include <sys/param.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #include <fstream>
@@ -34,24 +33,24 @@
 
 #include "base/dumpable.h"
 #include "base/logging.h"  // For InitLogging.
-#include "base/mutex.h"
+#include "base/mem_map.h"
 #include "base/scoped_flock.h"
 #include "base/stringpiece.h"
 #include "base/time_utils.h"
 #include "base/unix_file/fd_file.h"
 #include "base/utils.h"
+#include "base/zip_archive.h"
 #include "boot_image_profile.h"
 #include "dex/art_dex_file_loader.h"
 #include "dex/bytecode_utils.h"
+#include "dex/class_accessor-inl.h"
 #include "dex/code_item_accessors-inl.h"
 #include "dex/dex_file.h"
 #include "dex/dex_file_loader.h"
 #include "dex/dex_file_types.h"
 #include "dex/type_reference.h"
-#include "jit/profile_compilation_info.h"
+#include "profile/profile_compilation_info.h"
 #include "profile_assistant.h"
-#include "runtime.h"
-#include "zip_archive.h"
 
 namespace art {
 
@@ -179,6 +178,11 @@ static constexpr char kMethodFlagStringHot = 'H';
 static constexpr char kMethodFlagStringStartup = 'S';
 static constexpr char kMethodFlagStringPostStartup = 'P';
 
+NO_RETURN static void Abort(const char* msg) {
+  LOG(ERROR) << msg;
+  exit(1);
+}
+
 // TODO(calin): This class has grown too much from its initial design. Split the functionality
 // into smaller, more contained pieces.
 class ProfMan FINAL {
@@ -204,8 +208,8 @@ class ProfMan FINAL {
     original_argc = argc;
     original_argv = argv;
 
-    Locks::Init();
-    InitLogging(argv, Runtime::Abort);
+    MemMap::Init();
+    InitLogging(argv, Abort);
 
     // Skip over the command name.
     argv++;
@@ -385,7 +389,7 @@ class ProfMan FINAL {
   }
 
   bool OpenApkFilesFromLocations(
-      std::function<void(std::unique_ptr<const DexFile>&&)> process_fn) {
+      const std::function<void(std::unique_ptr<const DexFile>&&)>& process_fn) {
     bool use_apk_fd_list = !apks_fd_.empty();
     if (use_apk_fd_list) {
       // Get the APKs from the collection of FDs.
@@ -836,7 +840,8 @@ class ProfMan FINAL {
 
     bool found_invoke = false;
     for (const DexInstructionPcPair& inst : CodeItemInstructionAccessor(*dex_file, code_item)) {
-      if (inst->Opcode() == Instruction::INVOKE_VIRTUAL) {
+      if (inst->Opcode() == Instruction::INVOKE_VIRTUAL ||
+          inst->Opcode() == Instruction::INVOKE_VIRTUAL_RANGE) {
         if (found_invoke) {
           LOG(ERROR) << "Multiple invoke INVOKE_VIRTUAL found: "
                      << dex_file->PrettyMethod(method_index);
@@ -925,19 +930,13 @@ class ProfMan FINAL {
       dex_resolved_classes.first->AddClass(class_ref.TypeIndex());
       std::vector<ProfileMethodInfo> methods;
       if (method_str == kClassAllMethods) {
-        // Add all of the methods.
-        const DexFile::ClassDef* class_def = dex_file->FindClassDef(class_ref.TypeIndex());
-        const uint8_t* class_data = dex_file->GetClassData(*class_def);
-        if (class_data != nullptr) {
-          ClassDataItemIterator it(*dex_file, class_data);
-          it.SkipAllFields();
-          while (it.HasNextMethod()) {
-            if (it.GetMethodCodeItemOffset() != 0) {
-              // Add all of the methods that have code to the profile.
-              const uint32_t method_idx = it.GetMemberIndex();
-              methods.push_back(ProfileMethodInfo(MethodReference(dex_file, method_idx)));
-            }
-            it.Next();
+        ClassAccessor accessor(
+            *dex_file,
+            dex_file->GetIndexForClassDef(*dex_file->FindClassDef(class_ref.TypeIndex())));
+        for (const ClassAccessor::Method& method : accessor.GetMethods()) {
+          if (method.GetCodeItemOffset() != 0) {
+            // Add all of the methods that have code to the profile.
+            methods.push_back(ProfileMethodInfo(method.GetReference()));
           }
         }
       }
@@ -1308,4 +1307,3 @@ static int profman(int argc, char** argv) {
 int main(int argc, char **argv) {
   return art::profman(argc, argv);
 }
-

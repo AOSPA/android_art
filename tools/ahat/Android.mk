@@ -28,32 +28,16 @@ LOCAL_IS_HOST_MODULE := true
 LOCAL_MODULE_TAGS := optional
 LOCAL_MODULE := ahat
 
-# Let users with Java 7 run ahat (b/28303627)
-LOCAL_JAVA_LANGUAGE_VERSION := 1.7
-
 # Make this available on the classpath of the general-tests tradefed suite.
 # It is used by libcore tests that run there.
 LOCAL_COMPATIBILITY_SUITE := general-tests
 
 include $(BUILD_HOST_JAVA_LIBRARY)
 AHAT_JAR := $(LOCAL_BUILT_MODULE)
-AHAT_API := $(intermediates.COMMON)/ahat_api.txt
-AHAT_REMOVED_API := $(intermediates.COMMON)/ahat_removed_api.txt
 
 # --- api check for ahat.jar ----------
-include $(CLEAR_VARS)
-LOCAL_SRC_FILES := $(call all-java-files-under, src/main)
-LOCAL_IS_HOST_MODULE := true
-LOCAL_MODULE_TAGS := optional
-LOCAL_MODULE_CLASS := JAVA_LIBRARIES
-LOCAL_MODULE := ahat
-LOCAL_DROIDDOC_OPTIONS := \
-  -stubpackages com.android.ahat:com.android.ahat.* \
-  -api $(AHAT_API) \
-  -removedApi $(AHAT_REMOVED_API)
-LOCAL_DROIDDOC_CUSTOM_TEMPLATE_DIR := external/doclava/res/assets/templates-sdk
-include $(BUILD_DROIDDOC)
-$(AHAT_API): $(full_target)
+AHAT_API := $(INTERNAL_PLATFORM_AHAT_API_FILE)
+AHAT_REMOVED_API := $(INTERNAL_PLATFORM_AHAT_REMOVED_API_FILE)
 
 $(eval $(call check-api, \
   ahat-check-api, \
@@ -145,6 +129,26 @@ $(AHAT_TEST_DUMP_BASE_HPROF): $(AHAT_TEST_DUMP_JAR) $(AHAT_TEST_DUMP_DEPENDENCIE
 	ANDROID_DATA=$(PRIVATE_AHAT_TEST_ANDROID_DATA) \
 	  $(PRIVATE_AHAT_TEST_ART) -d --64 -cp $(PRIVATE_AHAT_TEST_DUMP_JAR) Main $@ --base
 
+# --- ahat-ri-test-dump.jar -------
+include $(CLEAR_VARS)
+LOCAL_MODULE := ahat-ri-test-dump
+LOCAL_MODULE_TAGS := tests
+LOCAL_SRC_FILES := $(call all-java-files-under, src/ri-test-dump)
+LOCAL_IS_HOST_MODULE := true
+include $(BUILD_HOST_JAVA_LIBRARY)
+
+# Determine the location of the ri-test-dump.jar and ri-test-dump.hprof.
+# These use variables set implicitly by the include of BUILD_JAVA_LIBRARY
+# above.
+AHAT_RI_TEST_DUMP_JAR := $(LOCAL_BUILT_MODULE)
+AHAT_RI_TEST_DUMP_HPROF := $(intermediates.COMMON)/ri-test-dump.hprof
+
+# Run ahat-ri-test-dump.jar to generate ri-test-dump.hprof
+$(AHAT_RI_TEST_DUMP_HPROF): PRIVATE_AHAT_RI_TEST_DUMP_JAR := $(AHAT_RI_TEST_DUMP_JAR)
+$(AHAT_RI_TEST_DUMP_HPROF): $(AHAT_RI_TEST_DUMP_JAR)
+	rm -rf $@
+	java -cp $(PRIVATE_AHAT_RI_TEST_DUMP_JAR) Main $@
+
 # --- ahat-tests.jar --------------
 include $(CLEAR_VARS)
 LOCAL_SRC_FILES := $(call all-java-files-under, src/test)
@@ -153,6 +157,7 @@ LOCAL_JAVA_RESOURCE_FILES := \
   $(AHAT_TEST_DUMP_HPROF) \
   $(AHAT_TEST_DUMP_BASE_HPROF) \
   $(AHAT_TEST_DUMP_PROGUARD_MAP) \
+  $(AHAT_RI_TEST_DUMP_HPROF) \
   $(LOCAL_PATH)/etc/L.hprof \
   $(LOCAL_PATH)/etc/O.hprof \
   $(LOCAL_PATH)/etc/RI.hprof
@@ -160,6 +165,7 @@ LOCAL_STATIC_JAVA_LIBRARIES := ahat junit-host
 LOCAL_IS_HOST_MODULE := true
 LOCAL_MODULE_TAGS := tests
 LOCAL_MODULE := ahat-tests
+LOCAL_COMPATIBILITY_SUITE := general-tests
 include $(BUILD_HOST_JAVA_LIBRARY)
 AHAT_TEST_JAR := $(LOCAL_BUILT_MODULE)
 

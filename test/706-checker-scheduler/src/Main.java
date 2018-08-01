@@ -35,8 +35,8 @@ public class Main {
 
   /// CHECK-START-ARM64: int Main.arrayAccess() scheduler (before)
   /// CHECK:    <<Const1:i\d+>>       IntConstant 1
-  /// CHECK:    <<i0:i\d+>>           Phi
   /// CHECK:    <<res0:i\d+>>         Phi
+  /// CHECK:    <<i0:i\d+>>           Phi
   /// CHECK:    <<Array:i\d+>>        IntermediateAddress
   /// CHECK:    <<ArrayGet1:i\d+>>    ArrayGet [<<Array>>,<<i0>>]
   /// CHECK:    <<res1:i\d+>>         Add [<<res0>>,<<ArrayGet1>>]
@@ -46,8 +46,8 @@ public class Main {
 
   /// CHECK-START-ARM64: int Main.arrayAccess() scheduler (after)
   /// CHECK:    <<Const1:i\d+>>       IntConstant 1
-  /// CHECK:    <<i0:i\d+>>           Phi
   /// CHECK:    <<res0:i\d+>>         Phi
+  /// CHECK:    <<i0:i\d+>>           Phi
   /// CHECK:    <<Array:i\d+>>        IntermediateAddress
   /// CHECK:    <<ArrayGet1:i\d+>>    ArrayGet [<<Array>>,<<i0>>]
   /// CHECK:    <<i1:i\d+>>           Add [<<i0>>,<<Const1>>]
@@ -409,6 +409,7 @@ public class Main {
   /// CHECK-DAG:        StaticFieldSet
   /// CHECK-DAG:        StaticFieldSet
   public void accessFields() {
+    static_variable = 0;  // Force ClinitCheck outside the loop. b/62478025
     my_obj = new ExampleObj(1, 2);
     for (int i = 0; i < 10; i++) {
       my_obj.n1++;

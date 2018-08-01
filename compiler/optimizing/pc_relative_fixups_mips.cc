@@ -75,7 +75,7 @@ class PCRelativeHandlerVisitor : public HGraphVisitor {
     switch (load_kind) {
       case HLoadClass::LoadKind::kBootImageLinkTimePcRelative:
       case HLoadClass::LoadKind::kBootImageAddress:
-      case HLoadClass::LoadKind::kBootImageClassTable:
+      case HLoadClass::LoadKind::kBootImageRelRo:
       case HLoadClass::LoadKind::kBssEntry:
         // Add a base register for PC-relative literals on R2.
         InitializePCRelativeBasePointer();
@@ -91,7 +91,7 @@ class PCRelativeHandlerVisitor : public HGraphVisitor {
     switch (load_kind) {
       case HLoadString::LoadKind::kBootImageLinkTimePcRelative:
       case HLoadString::LoadKind::kBootImageAddress:
-      case HLoadString::LoadKind::kBootImageInternTable:
+      case HLoadString::LoadKind::kBootImageRelRo:
       case HLoadString::LoadKind::kBssEntry:
         // Add a base register for PC-relative literals on R2.
         InitializePCRelativeBasePointer();
@@ -128,20 +128,21 @@ class PCRelativeHandlerVisitor : public HGraphVisitor {
   HMipsComputeBaseMethodAddress* base_;
 };
 
-void PcRelativeFixups::Run() {
+bool PcRelativeFixups::Run() {
   CodeGeneratorMIPS* mips_codegen = down_cast<CodeGeneratorMIPS*>(codegen_);
   if (mips_codegen->GetInstructionSetFeatures().IsR6()) {
     // Do nothing for R6 because it has PC-relative addressing.
-    return;
+    return false;
   }
   if (graph_->HasIrreducibleLoops()) {
     // Do not run this optimization, as irreducible loops do not work with an instruction
     // that can be live-in at the irreducible loop header.
-    return;
+    return false;
   }
   PCRelativeHandlerVisitor visitor(graph_, codegen_);
   visitor.VisitInsertionOrder();
   visitor.MoveBaseIfNeeded();
+  return true;
 }
 
 }  // namespace mips

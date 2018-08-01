@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.4
+#!/usr/bin/env python3
 #
 # Copyright (C) 2016 The Android Open Source Project
 #
@@ -114,14 +114,6 @@ def GetEnvVariableOrError(variable_name):
     raise FatalError('{0} environmental variable not set.'.format(
         variable_name))
   return top
-
-
-def GetJackClassPath():
-  """Returns Jack's classpath."""
-  top = GetEnvVariableOrError('ANDROID_BUILD_TOP')
-  libdir = top + '/out/host/common/obj/JAVA_LIBRARIES'
-  return libdir + '/core-libart-hostdex_intermediates/classes.jack:' \
-       + libdir + '/core-oj-hostdex_intermediates/classes.jack'
 
 
 def _DexArchCachePaths(android_data_path):

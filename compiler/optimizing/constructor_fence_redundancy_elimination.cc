@@ -47,7 +47,7 @@ class CFREVisitor : public HGraphVisitor {
     candidate_fences_.push_back(constructor_fence);
 
     for (size_t input_idx = 0; input_idx < constructor_fence->InputCount(); ++input_idx) {
-      candidate_fence_targets_.Insert(constructor_fence->InputAt(input_idx));
+      candidate_fence_targets_.insert(constructor_fence->InputAt(input_idx));
     }
   }
 
@@ -208,13 +208,13 @@ class CFREVisitor : public HGraphVisitor {
     // there is no benefit to this extra complexity unless we also reordered
     // the stores to come later.
     candidate_fences_.clear();
-    candidate_fence_targets_.Clear();
+    candidate_fence_targets_.clear();
   }
 
   // A publishing 'store' is only interesting if the value being stored
   // is one of the fence `targets` in `candidate_fences`.
   bool IsInterestingPublishTarget(HInstruction* store_input) const {
-    return candidate_fence_targets_.Find(store_input) != candidate_fence_targets_.end();
+    return candidate_fence_targets_.find(store_input) != candidate_fence_targets_.end();
   }
 
   void MaybeMerge(HConstructorFence* target, HConstructorFence* src) {
@@ -250,13 +250,14 @@ class CFREVisitor : public HGraphVisitor {
   DISALLOW_COPY_AND_ASSIGN(CFREVisitor);
 };
 
-void ConstructorFenceRedundancyElimination::Run() {
+bool ConstructorFenceRedundancyElimination::Run() {
   CFREVisitor cfre_visitor(graph_, stats_);
 
   // Arbitrarily visit in reverse-post order.
   // The exact block visit order does not matter, as the algorithm
   // only operates on a single block at a time.
   cfre_visitor.VisitReversePostOrder();
+  return true;
 }
 
 }  // namespace art

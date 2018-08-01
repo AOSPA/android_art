@@ -614,56 +614,18 @@ INVOKE_TRAMPOLINE art_quick_invoke_virtual_trampoline_with_access_check, artInvo
 
 
 .macro INVOKE_STUB_CREATE_FRAME
+SAVE_SIZE=6*8   // x4, x5, x19, x20, FP, LR saved.
+    SAVE_TWO_REGS_INCREASE_FRAME x4, x5, SAVE_SIZE
+    SAVE_TWO_REGS x19, x20, 16
+    SAVE_TWO_REGS xFP, xLR, 32
 
-SAVE_SIZE=15*8   // x4, x5, x19, x20, x21, x22, x23, x24, x25, x26, x27, x28, SP, LR, FP saved.
-SAVE_SIZE_AND_METHOD=SAVE_SIZE+8
+    mov xFP, sp                            // Use xFP for frame pointer, as it's callee-saved.
+    .cfi_def_cfa_register xFP
 
+    add x10, x2, #(__SIZEOF_POINTER__ + 0xf) // Reserve space for ArtMethod*, arguments and
+    and x10, x10, # ~0xf                   // round up for 16-byte stack alignment.
+    sub sp, sp, x10                        // Adjust SP for ArtMethod*, args and alignment padding.
 
-    mov x9, sp                             // Save stack pointer.
-    .cfi_register sp,x9
-
-    add x10, x2, # SAVE_SIZE_AND_METHOD    // calculate size of frame.
-    sub x10, sp, x10                       // Calculate SP position - saves + ArtMethod* + args
-    and x10, x10, # ~0xf                   // Enforce 16 byte stack alignment.
-    mov sp, x10                            // Set new SP.
-
-    sub x10, x9, #SAVE_SIZE                // Calculate new FP (later). Done here as we must move SP
-    .cfi_def_cfa_register x10              // before this.
-    .cfi_adjust_cfa_offset SAVE_SIZE
-
-    str x28, [x10, #112]
-    .cfi_rel_offset x28, 112
-
-    stp x26, x27, [x10, #96]
-    .cfi_rel_offset x26, 96
-    .cfi_rel_offset x27, 104
-
-    stp x24, x25, [x10, #80]
-    .cfi_rel_offset x24, 80
-    .cfi_rel_offset x25, 88
-
-    stp x22, x23, [x10, #64]
-    .cfi_rel_offset x22, 64
-    .cfi_rel_offset x23, 72
-
-    stp x20, x21, [x10, #48]
-    .cfi_rel_offset x20, 48
-    .cfi_rel_offset x21, 56
-
-    stp x9, x19, [x10, #32]                // Save old stack pointer and x19.
-    .cfi_rel_offset sp, 32
-    .cfi_rel_offset x19, 40
-
-    stp x4, x5, [x10, #16]                 // Save result and shorty addresses.
-    .cfi_rel_offset x4, 16
-    .cfi_rel_offset x5, 24
-
-    stp xFP, xLR, [x10]                    // Store LR & FP.
-    .cfi_rel_offset x29, 0
-    .cfi_rel_offset x30, 8
-
-    mov xFP, x10                           // Use xFP now, as it's callee-saved.
-    .cfi_def_cfa_register x29
     mov xSELF, x3                          // Move thread pointer into SELF register.
 
     // Copy arguments into stack frame.
@@ -678,12 +640,10 @@ SAVE_SIZE_AND_METHOD=SAVE_SIZE+8
     // Copy parameters into the stack. Use numeric label as this is a macro and Clang's assembler
     // does not have unique-id variables.
 1:
-    cmp w2, #0
-    beq 2f
+    cbz w2, 2f
     sub w2, w2, #4      // Need 65536 bytes of range.
     ldr w10, [x1, x2]
     str w10, [x9, x2]
-
     b 1b
 
 2:
@@ -700,29 +660,14 @@ SAVE_SIZE_AND_METHOD=SAVE_SIZE+8
     // Branch to method.
     blr x9
 
-    // Restore return value address and shorty address.
-    ldp x4, x5, [xFP, #16]
-    .cfi_restore x4
-    .cfi_restore x5
+    // Pop the ArtMethod* (null), arguments and alignment padding from the stack.
+    mov sp, xFP
+    .cfi_def_cfa_register sp
 
-    ldr x28, [xFP, #112]
-    .cfi_restore x28
-
-    ldp x26, x27, [xFP, #96]
-    .cfi_restore x26
-    .cfi_restore x27
-
-    ldp x24, x25, [xFP, #80]
-    .cfi_restore x24
-    .cfi_restore x25
-
-    ldp x22, x23, [xFP, #64]
-    .cfi_restore x22
-    .cfi_restore x23
-
-    ldp x20, x21, [xFP, #48]
-    .cfi_restore x20
-    .cfi_restore x21
+    // Restore saved registers including value address and shorty address.
+    RESTORE_TWO_REGS x19, x20, 16
+    RESTORE_TWO_REGS xFP, xLR, 32
+    RESTORE_TWO_REGS_DECREASE_FRAME x4, x5, SAVE_SIZE
 
     // Store result (w0/x0/s0/d0) appropriately, depending on resultType.
     ldrb w10, [x5]
@@ -732,33 +677,28 @@ SAVE_SIZE_AND_METHOD=SAVE_SIZE+8
 
     // Don't set anything for a void type.
     cmp w10, #'V'
-    beq 3f
+    beq 1f
 
     // Is it a double?
     cmp w10, #'D'
-    bne 1f
-    str d0, [x4]
-    b 3f
+    beq 2f
 
-1:  // Is it a float?
+    // Is it a float?
     cmp w10, #'F'
-    bne 2f
-    str s0, [x4]
-    b 3f
+    beq 3f
 
-2:  // Just store x0. Doesn't matter if it is 64 or 32 bits.
+    // Just store x0. Doesn't matter if it is 64 or 32 bits.
     str x0, [x4]
 
-3:  // Finish up.
-    ldp x2, x19, [xFP, #32]   // Restore stack pointer and x19.
-    .cfi_restore x19
-    mov sp, x2
-    .cfi_restore sp
+1:  // Finish up.
+    ret
 
-    ldp xFP, xLR, [xFP]    // Restore old frame pointer and link register.
-    .cfi_restore x29
-    .cfi_restore x30
+2:  // Store double.
+    str d0, [x4]
+    ret
 
+3:  // Store float.
+    str s0, [x4]
     ret
 
 .endm
@@ -1057,7 +997,7 @@ END art_quick_invoke_static_stub
 
 /*  extern"C" void art_quick_osr_stub(void** stack,                x0
  *                                    size_t stack_size_in_bytes,  x1
- *                                    const uin8_t* native_pc,     x2
+ *                                    const uint8_t* native_pc,    x2
  *                                    JValue *result,              x3
  *                                    char   *shorty,              x4
  *                                    Thread *self)                x5
@@ -1211,45 +1151,36 @@ END art_quick_do_long_jump
      */
     .extern artLockObjectFromCode
 ENTRY art_quick_lock_object
-    cbz    w0, .Lslow_lock
-    add    x4, x0, #MIRROR_OBJECT_LOCK_WORD_OFFSET  // exclusive load/store has no immediate anymore
+    ldr    w1, [xSELF, #THREAD_ID_OFFSET]
+    cbz    w0, art_quick_lock_object_no_inline
+                                      // Exclusive load/store has no immediate anymore.
+    add    x4, x0, #MIRROR_OBJECT_LOCK_WORD_OFFSET
 .Lretry_lock:
-    ldr    w2, [xSELF, #THREAD_ID_OFFSET] // TODO: Can the thread ID really change during the loop?
-    ldaxr  w1, [x4]                   // acquire needed only in most common case
-    and    w3, w1, #LOCK_WORD_GC_STATE_MASK_SHIFTED_TOGGLED  // zero the gc bits
-    cbnz   w3, .Lnot_unlocked         // already thin locked
-    // unlocked case - x1: original lock word that's zero except for the read barrier bits.
-    orr    x2, x1, x2                 // x2 holds thread id with count of 0 with preserved read barrier bits
-    stxr   w3, w2, [x4]
-    cbnz   w3, .Llock_stxr_fail       // store failed, retry
+    ldaxr  w2, [x4]                   // Acquire needed only in most common case.
+    eor    w3, w2, w1                 // Prepare the value to store if unlocked
+                                      //   (thread id, count of 0 and preserved read barrier bits),
+                                      // or prepare to compare thread id for recursive lock check
+                                      //   (lock_word.ThreadId() ^ self->ThreadId()).
+    tst    w2, #LOCK_WORD_GC_STATE_MASK_SHIFTED_TOGGLED  // Test the non-gc bits.
+    b.ne   .Lnot_unlocked             // Check if unlocked.
+    // unlocked case - store w3: original lock word plus thread id, preserved read barrier bits.
+    stxr   w2, w3, [x4]
+    cbnz   w2, .Lretry_lock           // If the store failed, retry.
     ret
-.Lnot_unlocked:  // x1: original lock word
-    lsr    w3, w1, LOCK_WORD_STATE_SHIFT
-    cbnz   w3, .Lslow_lock            // if either of the top two bits are set, go slow path
-    eor    w2, w1, w2                 // lock_word.ThreadId() ^ self->ThreadId()
-    uxth   w2, w2                     // zero top 16 bits
-    cbnz   w2, .Lslow_lock            // lock word and self thread id's match -> recursive lock
-                                      // else contention, go to slow path
-    and    w3, w1, #LOCK_WORD_GC_STATE_MASK_SHIFTED_TOGGLED  // zero the gc bits.
-    add    w2, w3, #LOCK_WORD_THIN_LOCK_COUNT_ONE  // increment count in lock word placing in w2 to check overflow
-    lsr    w3, w2, #LOCK_WORD_GC_STATE_SHIFT     // if the first gc state bit is set, we overflowed.
-    cbnz   w3, .Lslow_lock            // if we overflow the count go slow path
-    add    w2, w1, #LOCK_WORD_THIN_LOCK_COUNT_ONE  // increment count for real
-    stxr   w3, w2, [x4]
-    cbnz   w3, .Llock_stxr_fail       // store failed, retry
+.Lnot_unlocked:  // w2: original lock word, w1: thread id, w3: w2 ^ w1
+                                      // Check lock word state and thread id together,
+    tst    w3, #(LOCK_WORD_STATE_MASK_SHIFTED | LOCK_WORD_THIN_LOCK_OWNER_MASK_SHIFTED)
+    b.ne   art_quick_lock_object_no_inline
+    add    w3, w2, #LOCK_WORD_THIN_LOCK_COUNT_ONE  // Increment the recursive lock count.
+    tst    w3, #LOCK_WORD_THIN_LOCK_COUNT_MASK_SHIFTED  // Test the new thin lock count.
+    b.eq   art_quick_lock_object_no_inline  // Zero as the new count indicates overflow, go slow path.
+    stxr   w2, w3, [x4]
+    cbnz   w2, .Lretry_lock           // If the store failed, retry.
     ret
-.Llock_stxr_fail:
-    b      .Lretry_lock               // retry
-.Lslow_lock:
-    SETUP_SAVE_REFS_ONLY_FRAME        // save callee saves in case we block
-    mov    x1, xSELF                  // pass Thread::Current
-    bl     artLockObjectFromCode      // (Object* obj, Thread*)
-    RESTORE_SAVE_REFS_ONLY_FRAME
-    REFRESH_MARKING_REGISTER
-    RETURN_IF_W0_IS_ZERO_OR_DELIVER
 END art_quick_lock_object
 
 ENTRY art_quick_lock_object_no_inline
+    // This is also the slow path for art_quick_lock_object.
     SETUP_SAVE_REFS_ONLY_FRAME        // save callee saves in case we block
     mov    x1, xSELF                  // pass Thread::Current
     bl     artLockObjectFromCode      // (Object* obj, Thread*)
@@ -1266,54 +1197,46 @@ END art_quick_lock_object_no_inline
      */
     .extern artUnlockObjectFromCode
 ENTRY art_quick_unlock_object
-    cbz    x0, .Lslow_unlock
-    add    x4, x0, #MIRROR_OBJECT_LOCK_WORD_OFFSET  // exclusive load/store has no immediate anymore
+    ldr    w1, [xSELF, #THREAD_ID_OFFSET]
+    cbz    x0, art_quick_unlock_object_no_inline
+                                      // Exclusive load/store has no immediate anymore.
+    add    x4, x0, #MIRROR_OBJECT_LOCK_WORD_OFFSET
 .Lretry_unlock:
 #ifndef USE_READ_BARRIER
-    ldr    w1, [x4]
+    ldr    w2, [x4]
 #else
-    ldxr   w1, [x4]                   // Need to use atomic instructions for read barrier
+    ldxr   w2, [x4]                   // Need to use atomic instructions for read barrier.
 #endif
-    lsr    w2, w1, LOCK_WORD_STATE_SHIFT
-    cbnz   w2, .Lslow_unlock          // if either of the top two bits are set, go slow path
-    ldr    w2, [xSELF, #THREAD_ID_OFFSET]
-    and    w3, w1, #LOCK_WORD_GC_STATE_MASK_SHIFTED_TOGGLED  // zero the gc bits
-    eor    w3, w3, w2                 // lock_word.ThreadId() ^ self->ThreadId()
-    uxth   w3, w3                     // zero top 16 bits
-    cbnz   w3, .Lslow_unlock          // do lock word and self thread id's match?
-    and    w3, w1, #LOCK_WORD_GC_STATE_MASK_SHIFTED_TOGGLED  // zero the gc bits
-    cmp    w3, #LOCK_WORD_THIN_LOCK_COUNT_ONE
-    bpl    .Lrecursive_thin_unlock
-    // transition to unlocked
-    and    w3, w1, #LOCK_WORD_GC_STATE_MASK_SHIFTED  // w3: zero except for the preserved read barrier bits
+    eor    w3, w2, w1                 // Prepare the value to store if simply locked
+                                      //   (mostly 0s, and preserved read barrier bits),
+                                      // or prepare to compare thread id for recursive lock check
+                                      //   (lock_word.ThreadId() ^ self->ThreadId()).
+    tst    w3, #LOCK_WORD_GC_STATE_MASK_SHIFTED_TOGGLED  // Test the non-gc bits.
+    b.ne   .Lnot_simply_locked        // Locked recursively or by other thread?
+    // Transition to unlocked.
 #ifndef USE_READ_BARRIER
     stlr   w3, [x4]
 #else
-    stlxr  w2, w3, [x4]               // Need to use atomic instructions for read barrier
-    cbnz   w2, .Lunlock_stxr_fail     // store failed, retry
+    stlxr  w2, w3, [x4]               // Need to use atomic instructions for read barrier.
+    cbnz   w2, .Lretry_unlock         // If the store failed, retry.
 #endif
     ret
-.Lrecursive_thin_unlock:  // w1: original lock word
-    sub    w1, w1, #LOCK_WORD_THIN_LOCK_COUNT_ONE  // decrement count
+.Lnot_simply_locked:
+                                      // Check lock word state and thread id together,
+    tst    w3, #(LOCK_WORD_STATE_MASK_SHIFTED | LOCK_WORD_THIN_LOCK_OWNER_MASK_SHIFTED)
+    b.ne   art_quick_unlock_object_no_inline
+    sub    w3, w2, #LOCK_WORD_THIN_LOCK_COUNT_ONE  // decrement count
 #ifndef USE_READ_BARRIER
-    str    w1, [x4]
+    str    w3, [x4]
 #else
-    stxr   w2, w1, [x4]               // Need to use atomic instructions for read barrier
-    cbnz   w2, .Lunlock_stxr_fail     // store failed, retry
+    stxr   w2, w3, [x4]               // Need to use atomic instructions for read barrier.
+    cbnz   w2, .Lretry_unlock         // If the store failed, retry.
 #endif
     ret
-.Lunlock_stxr_fail:
-    b      .Lretry_unlock             // retry
-.Lslow_unlock:
-    SETUP_SAVE_REFS_ONLY_FRAME        // save callee saves in case exception allocation triggers GC
-    mov    x1, xSELF                  // pass Thread::Current
-    bl     artUnlockObjectFromCode    // (Object* obj, Thread*)
-    RESTORE_SAVE_REFS_ONLY_FRAME
-    REFRESH_MARKING_REGISTER
-    RETURN_IF_W0_IS_ZERO_OR_DELIVER
 END art_quick_unlock_object
 
 ENTRY art_quick_unlock_object_no_inline
+    // This is also the slow path for art_quick_unlock_object.
     SETUP_SAVE_REFS_ONLY_FRAME        // save callee saves in case exception allocation triggers GC
     mov    x1, xSELF                  // pass Thread::Current
     bl     artUnlockObjectFromCode    // (Object* obj, Thread*)
@@ -1329,6 +1252,9 @@ END art_quick_unlock_object_no_inline
     .extern artInstanceOfFromCode
     .extern artThrowClassCastExceptionForObject
 ENTRY art_quick_check_instance_of
+    // Type check using the bit string passes null as the target class. In that case just throw.
+    cbz x1, .Lthrow_class_cast_exception_for_bitstring_check
+
     // Store arguments and link register
     // Stack needs to be 16B aligned on calls.
     SAVE_TWO_REGS_INCREASE_FRAME x0, x1, 32
@@ -1354,6 +1280,7 @@ ENTRY art_quick_check_instance_of
     // Restore
     RESTORE_TWO_REGS_DECREASE_FRAME x0, x1, 32
 
+.Lthrow_class_cast_exception_for_bitstring_check:
     SETUP_SAVE_ALL_CALLEE_SAVES_FRAME // save all registers as basis for long jump context
     mov x2, xSELF                     // pass Thread::Current
     bl artThrowClassCastExceptionForObject     // (Object*, Class*, Thread*)
@@ -1589,7 +1516,10 @@ ENTRY \name
 END \name
 .endm
 
-// Macro for string and type resolution and initialization.
+    /*
+     * Macro for resolution and initialization of indexed DEX file
+     * constants such as classes and strings.
+     */
 .macro ONE_ARG_SAVE_EVERYTHING_DOWNCALL name, entrypoint, runtime_method_offset = RUNTIME_SAVE_EVERYTHING_METHOD_OFFSET
     .extern \entrypoint
 ENTRY \name
@@ -1633,6 +1563,8 @@ TWO_ARG_REF_DOWNCALL art_quick_handle_fill_data, artHandleFillArrayDataFromCode,
 ONE_ARG_SAVE_EVERYTHING_DOWNCALL_FOR_CLINIT art_quick_initialize_static_storage, artInitializeStaticStorageFromCode
 ONE_ARG_SAVE_EVERYTHING_DOWNCALL_FOR_CLINIT art_quick_initialize_type, artInitializeTypeFromCode
 ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_initialize_type_and_verify_access, artInitializeTypeAndVerifyAccessFromCode
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_method_handle, artResolveMethodHandleFromCode
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_method_type, artResolveMethodTypeFromCode
 ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_string, artResolveStringFromCode
 
 // Note: Functions `art{Get,Set}<Kind>{Static,Instance}FromCompiledCode` are
@@ -1672,6 +1604,7 @@ GENERATE_ALLOC_ENTRYPOINTS_FOR_NON_TLAB_ALLOCATORS
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_region_tlab, RegionTLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_INITIALIZED(_region_tlab, RegionTLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_WITH_ACCESS_CHECK(_region_tlab, RegionTLAB)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_OBJECT(_region_tlab, RegionTLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_region_tlab, RegionTLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED8(_region_tlab, RegionTLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED16(_region_tlab, RegionTLAB)
@@ -1684,6 +1617,7 @@ GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(_region_tlab, RegionTLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_tlab, TLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_INITIALIZED(_tlab, TLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_WITH_ACCESS_CHECK(_tlab, TLAB)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_OBJECT(_tlab, TLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_tlab, TLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED8(_tlab, TLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED16(_tlab, TLAB)
@@ -2912,83 +2846,29 @@ END art_quick_read_barrier_mark_introspection
 
 .extern artInvokePolymorphic
 ENTRY art_quick_invoke_polymorphic
-    SETUP_SAVE_REFS_AND_ARGS_FRAME                // Save callee saves in case allocation triggers GC.
-    mov     x2, xSELF
-    mov     x3, sp
-    INCREASE_FRAME 16                             // Reserve space for JValue result.
-    str     xzr, [sp, #0]                         // Initialize result to zero.
-    mov     x0, sp                                // Set r0 to point to result.
-    bl      artInvokePolymorphic                  // artInvokePolymorphic(result, receiver, thread, save_area)
-    uxtb    w0, w0                                // Result is the return type descriptor as a char.
-    sub     w0, w0, 'A'                           // Convert to zero based index.
-    cmp     w0, 'Z' - 'A'
-    bhi     .Lcleanup_and_return                  // Clean-up if out-of-bounds.
-    adrp    x1, .Lhandler_table                   // Compute address of handler table.
-    add     x1, x1, :lo12:.Lhandler_table
-    ldrb    w0, [x1, w0, uxtw]                    // Lookup handler offset in handler table.
-    adr     x1, .Lstart_of_handlers
-    add     x0, x1, w0, sxtb #2                   // Convert relative offset to absolute address.
-    br      x0                                    // Branch to handler.
-
-.Lstart_of_handlers:
-.Lstore_boolean_result:
-    ldrb    w0, [sp]
-    b       .Lcleanup_and_return
-.Lstore_char_result:
-    ldrh    w0, [sp]
-    b       .Lcleanup_and_return
-.Lstore_float_result:
-    ldr     s0, [sp]
-    str     s0, [sp, #32]
-    b       .Lcleanup_and_return
-.Lstore_double_result:
-    ldr     d0, [sp]
-    str     d0, [sp, #32]
-    b       .Lcleanup_and_return
-.Lstore_long_result:
-    ldr     x0, [sp]
-    // Fall-through
-.Lcleanup_and_return:
-    DECREASE_FRAME 16
+    SETUP_SAVE_REFS_AND_ARGS_FRAME      // Save callee saves in case allocation triggers GC.
+    mov     x0, x1                      // x0 := receiver
+    mov     x1, xSELF                   // x1 := Thread::Current()
+    mov     x2, sp                      // x2 := SP
+    bl      artInvokePolymorphic        // artInvokePolymorphic(receiver, thread, save_area)
     RESTORE_SAVE_REFS_AND_ARGS_FRAME
     REFRESH_MARKING_REGISTER
-    RETURN_OR_DELIVER_PENDING_EXCEPTION_X1
-
-    .section    .rodata                           // Place handler table in read-only section away from text.
-    .align  2
-.macro HANDLER_TABLE_OFFSET handler_label
-    .byte (\handler_label - .Lstart_of_handlers) / 4
-.endm
-.Lhandler_table:
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // A
-    HANDLER_TABLE_OFFSET(.Lstore_long_result)     // B (byte)
-    HANDLER_TABLE_OFFSET(.Lstore_char_result)     // C (char)
-    HANDLER_TABLE_OFFSET(.Lstore_double_result)   // D (double)
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // E
-    HANDLER_TABLE_OFFSET(.Lstore_float_result)    // F (float)
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // G
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // H
-    HANDLER_TABLE_OFFSET(.Lstore_long_result)     // I (int)
-    HANDLER_TABLE_OFFSET(.Lstore_long_result)     // J (long)
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // K
-    HANDLER_TABLE_OFFSET(.Lstore_long_result)     // L (object - references are compressed and only 32-bits)
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // M
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // N
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // O
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // P
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // Q
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // R
-    HANDLER_TABLE_OFFSET(.Lstore_long_result)     // S (short)
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // T
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // U
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // V (void)
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // W
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // X
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // Y
-    HANDLER_TABLE_OFFSET(.Lstore_boolean_result)  // Z (boolean)
-    .text
-
+    fmov    d0, x0                      // Result is in x0. Copy to floating return register.
+    RETURN_OR_DELIVER_PENDING_EXCEPTION
 END  art_quick_invoke_polymorphic
+
+.extern artInvokeCustom
+ENTRY art_quick_invoke_custom
+    SETUP_SAVE_REFS_AND_ARGS_FRAME    // Save callee saves in case allocation triggers GC.
+                                      // x0 := call_site_idx
+    mov     x1, xSELF                 // x1 := Thread::Current()
+    mov     x2, sp                    // x2 := SP
+    bl      artInvokeCustom           // artInvokeCustom(call_site_idx, thread, save_area)
+    RESTORE_SAVE_REFS_AND_ARGS_FRAME
+    REFRESH_MARKING_REGISTER
+    fmov    d0, x0                    // Copy result to double result register.
+    RETURN_OR_DELIVER_PENDING_EXCEPTION
+END  art_quick_invoke_custom
 
 // Wrap ExecuteSwitchImpl in assembly method which specifies DEX PC for unwinding.
 //  Argument 0: x0: The context pointer for ExecuteSwitchImpl.

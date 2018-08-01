@@ -42,11 +42,13 @@
 #include "base/file_utils.h"
 #include "base/memory_tool.h"
 #include "base/mutex.h"
+#include "base/stl_util.h"
 #include "base/systrace.h"
 #include "base/timing_logger.h"
 #include "base/to_str.h"
 #include "base/utils.h"
 #include "class_linker-inl.h"
+#include "class_root.h"
 #include "debugger.h"
 #include "dex/descriptors_names.h"
 #include "dex/dex_file-inl.h"
@@ -63,10 +65,10 @@
 #include "handle_scope-inl.h"
 #include "indirect_reference_table-inl.h"
 #include "interpreter/interpreter.h"
-#include "interpreter/shadow_frame.h"
+#include "interpreter/shadow_frame-inl.h"
 #include "java_frame_root_info.h"
-#include "java_vm_ext.h"
-#include "jni_internal.h"
+#include "jni/java_vm_ext.h"
+#include "jni/jni_internal.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
 #include "mirror/object_array-inl.h"
@@ -392,6 +394,22 @@ ShadowFrame* Thread::FindOrCreateDebuggerShadowFrame(size_t frame_id,
   return shadow_frame;
 }
 
+TLSData* Thread::GetCustomTLS(const char* key) {
+  MutexLock mu(Thread::Current(), *Locks::custom_tls_lock_);
+  auto it = custom_tls_.find(key);
+  return (it != custom_tls_.end()) ? it->second.get() : nullptr;
+}
+
+void Thread::SetCustomTLS(const char* key, TLSData* data) {
+  // We will swap the old data (which might be nullptr) with this and then delete it outside of the
+  // custom_tls_lock_.
+  std::unique_ptr<TLSData> old_data(data);
+  {
+    MutexLock mu(Thread::Current(), *Locks::custom_tls_lock_);
+    custom_tls_.GetOrCreate(key, []() { return std::unique_ptr<TLSData>(); }).swap(old_data);
+  }
+}
+
 void Thread::RemoveDebuggerShadowFrameMapping(size_t frame_id) {
   FrameIdToShadowFrame* head = tlsPtr_.frame_id_to_shadow_frame;
   if (head->GetFrameId() == frame_id) {
@@ -490,7 +508,7 @@ Thread* Thread::FromManagedThread(const ScopedObjectAccessAlreadyRunnable& soa,
 
 Thread* Thread::FromManagedThread(const ScopedObjectAccessAlreadyRunnable& soa,
                                   jobject java_thread) {
-  return FromManagedThread(soa, soa.Decode<mirror::Object>(java_thread).Ptr());
+  return FromManagedThread(soa, soa.Decode<mirror::Object>(java_thread));
 }
 
 static size_t FixStackSize(size_t stack_size) {
@@ -502,6 +520,13 @@ static size_t FixStackSize(size_t stack_size) {
   // Dalvik used the bionic pthread default stack size for native threads,
   // so include that here to support apps that expect large native stacks.
   stack_size += 1 * MB;
+
+  // Under sanitization, frames of the interpreter may become bigger, both for C code as
+  // well as the ShadowFrame. Ensure a larger minimum size. Otherwise initialization
+  // of all core classes cannot be done in all test circumstances.
+  if (kMemoryToolIsAvailable) {
+    stack_size = std::max(2 * MB, stack_size);
+  }
 
   // It's not possible to request a stack smaller than the system-defined PTHREAD_STACK_MIN.
   if (stack_size < PTHREAD_STACK_MIN) {
@@ -597,7 +622,7 @@ void Thread::InstallImplicitProtection() {
           1u;
 #endif
       volatile char space[kPageSize - (kAsanMultiplier * 256)];
-      char sink ATTRIBUTE_UNUSED = space[zero];
+      char sink ATTRIBUTE_UNUSED = space[zero];  // NOLINT
       if (reinterpret_cast<uintptr_t>(space) >= target + kPageSize) {
         Touch(target);
       }
@@ -1115,21 +1140,10 @@ bool Thread::InitStackHwm() {
   Runtime* runtime = Runtime::Current();
   bool implicit_stack_check = !runtime->ExplicitStackOverflowChecks() && !runtime->IsAotCompiler();
 
-  // Valgrind on arm doesn't give the right values here. Do not install the guard page, and
-  // effectively disable stack overflow checks (we'll get segfaults, potentially) by setting
-  // stack_begin to 0.
-  const bool valgrind_on_arm =
-      (kRuntimeISA == InstructionSet::kArm || kRuntimeISA == InstructionSet::kArm64) &&
-      kMemoryToolIsValgrind &&
-      RUNNING_ON_MEMORY_TOOL != 0;
-  if (valgrind_on_arm) {
-    tlsPtr_.stack_begin = nullptr;
-  }
-
   ResetDefaultStackEnd();
 
   // Install the protected region if we are doing implicit overflow checks.
-  if (implicit_stack_check && !valgrind_on_arm) {
+  if (implicit_stack_check) {
     // The thread might have protected region at the bottom.  We need
     // to install our own region so we need to move the limits
     // of the stack to make room for it.
@@ -1214,6 +1228,34 @@ static void UnsafeLogFatalForSuspendCount(Thread* self, Thread* thread) NO_THREA
   LOG(FATAL) << ss.str();
 }
 
+void Thread::SetCanBeSuspendedByUserCode(bool can_be_suspended_by_user_code) {
+  CHECK_EQ(this, Thread::Current()) << "This function may only be called on the current thread. "
+                                    << *Thread::Current() << " tried to modify the suspendability "
+                                    << "of " << *this;
+  // NB This checks the new value! This ensures that we can only set can_be_suspended_by_user_code
+  // to false if !CanCallIntoJava().
+  DCHECK(!CanCallIntoJava() || can_be_suspended_by_user_code)
+      << "Threads able to call into java may not be marked as unsuspendable!";
+  if (can_be_suspended_by_user_code == CanBeSuspendedByUserCode()) {
+    // Don't need to do anything if nothing is changing.
+    return;
+  }
+  art::MutexLock mu(this, *Locks::user_code_suspension_lock_);
+  art::MutexLock thread_list_mu(this, *Locks::thread_suspend_count_lock_);
+
+  // We want to add the user-code suspend count if we are newly allowing user-code suspends and
+  // remove them if we are disabling them.
+  int adj = can_be_suspended_by_user_code ? GetUserCodeSuspendCount() : -GetUserCodeSuspendCount();
+  // Adjust the global suspend count appropriately. Use kInternal to not change the ForUserCode
+  // count.
+  if (adj != 0) {
+    bool suspend = ModifySuspendCountInternal(this, adj, nullptr, SuspendReason::kInternal);
+    CHECK(suspend) << this << " was unable to modify it's own suspend count!";
+  }
+  // Mark thread as accepting user-code suspensions.
+  can_be_suspended_by_user_code_ = can_be_suspended_by_user_code;
+}
+
 bool Thread::ModifySuspendCountInternal(Thread* self,
                                         int delta,
                                         AtomicInteger* suspend_barrier,
@@ -1234,6 +1276,17 @@ bool Thread::ModifySuspendCountInternal(Thread* self,
     if (UNLIKELY(delta + tls32_.user_code_suspend_count < 0)) {
       LOG(ERROR) << "attempting to modify suspend count in an illegal way.";
       return false;
+    }
+    DCHECK(this == self || this->IsSuspended())
+        << "Only self kForUserCode suspension on an unsuspended thread is allowed: " << this;
+    if (UNLIKELY(!CanBeSuspendedByUserCode())) {
+      VLOG(threads) << this << " is being requested to suspend for user code but that is disabled "
+                    << "the thread will not actually go to sleep.";
+      // Having the user_code_suspend_count still be around is useful but we don't need to actually
+      // do anything since we aren't going to 'really' suspend. Just adjust the
+      // user_code_suspend_count and return.
+      tls32_.user_code_suspend_count += delta;
+      return true;
     }
   }
   if (UNLIKELY(delta < 0 && tls32_.suspend_count <= 0)) {
@@ -1280,7 +1333,7 @@ bool Thread::ModifySuspendCountInternal(Thread* self,
     AtomicClearFlag(kSuspendRequest);
   } else {
     // Two bits might be set simultaneously.
-    tls32_.state_and_flags.as_atomic_int.FetchAndBitwiseOrSequentiallyConsistent(flags);
+    tls32_.state_and_flags.as_atomic_int.fetch_or(flags, std::memory_order_seq_cst);
     TriggerSuspend();
   }
   return true;
@@ -1318,7 +1371,7 @@ bool Thread::PassActiveSuspendBarriers(Thread* self) {
     if (pending_threads != nullptr) {
       bool done = false;
       do {
-        int32_t cur_val = pending_threads->LoadRelaxed();
+        int32_t cur_val = pending_threads->load(std::memory_order_relaxed);
         CHECK_GT(cur_val, 0) << "Unexpected value for PassActiveSuspendBarriers(): " << cur_val;
         // Reduce value by 1.
         done = pending_threads->CompareAndSetWeakRelaxed(cur_val, cur_val - 1);
@@ -1562,7 +1615,7 @@ Closure* Thread::GetFlipFunction() {
   Atomic<Closure*>* atomic_func = reinterpret_cast<Atomic<Closure*>*>(&tlsPtr_.flip_function);
   Closure* func;
   do {
-    func = atomic_func->LoadRelaxed();
+    func = atomic_func->load(std::memory_order_relaxed);
     if (func == nullptr) {
       return nullptr;
     }
@@ -1574,7 +1627,7 @@ Closure* Thread::GetFlipFunction() {
 void Thread::SetFlipFunction(Closure* function) {
   CHECK(function != nullptr);
   Atomic<Closure*>* atomic_func = reinterpret_cast<Atomic<Closure*>*>(&tlsPtr_.flip_function);
-  atomic_func->StoreSequentiallyConsistent(function);
+  atomic_func->store(function, std::memory_order_seq_cst);
 }
 
 void Thread::FullSuspendCheck() {
@@ -1582,7 +1635,7 @@ void Thread::FullSuspendCheck() {
   VLOG(threads) << this << " self-suspending";
   // Make thread appear suspended to other threads, release mutator_lock_.
   // Transition to suspended and back to runnable, re-acquire share on mutator_lock_.
-  ScopedThreadSuspension(this, kSuspended);
+  ScopedThreadSuspension(this, kSuspended);  // NOLINT
   VLOG(threads) << this << " self-reviving";
 }
 
@@ -2048,15 +2101,15 @@ void Thread::FinishStartup() {
 
   // Finish attaching the main thread.
   ScopedObjectAccess soa(Thread::Current());
-  Thread::Current()->CreatePeer("main", false, runtime->GetMainThreadGroup());
-  Thread::Current()->AssertNoPendingException();
+  soa.Self()->CreatePeer("main", false, runtime->GetMainThreadGroup());
+  soa.Self()->AssertNoPendingException();
 
-  Runtime::Current()->GetClassLinker()->RunRootClinits();
+  runtime->RunRootClinits(soa.Self());
 
   // The thread counts as started from now on. We need to add it to the ThreadGroup. For regular
   // threads, this is done in Thread.start() on the Java side.
-  Thread::Current()->NotifyThreadGroup(soa, runtime->GetMainThreadGroup());
-  Thread::Current()->AssertNoPendingException();
+  soa.Self()->NotifyThreadGroup(soa, runtime->GetMainThreadGroup());
+  soa.Self()->AssertNoPendingException();
 }
 
 void Thread::Shutdown() {
@@ -2095,8 +2148,8 @@ void Thread::NotifyThreadGroup(ScopedObjectAccessAlreadyRunnable& soa, jobject t
 Thread::Thread(bool daemon)
     : tls32_(daemon),
       wait_monitor_(nullptr),
-      custom_tls_(nullptr),
-      can_call_into_java_(true) {
+      can_call_into_java_(true),
+      can_be_suspended_by_user_code_(true) {
   wait_mutex_ = new Mutex("a thread wait mutex");
   wait_cond_ = new ConditionVariable("a thread wait condition variable", *wait_mutex_);
   tlsPtr_.instrumentation_stack = new std::deque<instrumentation::InstrumentationStackFrame>;
@@ -2106,7 +2159,7 @@ Thread::Thread(bool daemon)
                 "art::Thread has a size which is not a multiple of 4.");
   tls32_.state_and_flags.as_struct.flags = 0;
   tls32_.state_and_flags.as_struct.state = kNative;
-  tls32_.interrupted.StoreRelaxed(false);
+  tls32_.interrupted.store(false, std::memory_order_relaxed);
   memset(&tlsPtr_.held_mutexes[0], 0, sizeof(tlsPtr_.held_mutexes));
   std::fill(tlsPtr_.rosalloc_runs,
             tlsPtr_.rosalloc_runs + kNumRosAllocThreadLocalSizeBracketsInThread,
@@ -2401,24 +2454,24 @@ bool Thread::IsJWeakCleared(jweak obj) const {
 bool Thread::Interrupted() {
   DCHECK_EQ(Thread::Current(), this);
   // No other thread can concurrently reset the interrupted flag.
-  bool interrupted = tls32_.interrupted.LoadSequentiallyConsistent();
+  bool interrupted = tls32_.interrupted.load(std::memory_order_seq_cst);
   if (interrupted) {
-    tls32_.interrupted.StoreSequentiallyConsistent(false);
+    tls32_.interrupted.store(false, std::memory_order_seq_cst);
   }
   return interrupted;
 }
 
 // Implements java.lang.Thread.isInterrupted.
 bool Thread::IsInterrupted() {
-  return tls32_.interrupted.LoadSequentiallyConsistent();
+  return tls32_.interrupted.load(std::memory_order_seq_cst);
 }
 
 void Thread::Interrupt(Thread* self) {
   MutexLock mu(self, *wait_mutex_);
-  if (tls32_.interrupted.LoadSequentiallyConsistent()) {
+  if (tls32_.interrupted.load(std::memory_order_seq_cst)) {
     return;
   }
-  tls32_.interrupted.StoreSequentiallyConsistent(true);
+  tls32_.interrupted.store(true, std::memory_order_seq_cst);
   NotifyLocked(self);
 }
 
@@ -2460,7 +2513,7 @@ class FetchStackTraceVisitor : public StackVisitor {
     // save frame)
     ArtMethod* m = GetMethod();
     if (skipping_ && !m->IsRuntimeMethod() &&
-        !mirror::Throwable::GetJavaLangThrowable()->IsAssignableFrom(m->GetDeclaringClass())) {
+        !GetClassRoot<mirror::Throwable>()->IsAssignableFrom(m->GetDeclaringClass())) {
       skipping_ = false;
     }
     if (!skipping_) {
@@ -2510,7 +2563,8 @@ class BuildInternalStackTraceVisitor : public StackVisitor {
     // class of the ArtMethod pointers.
     ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
     StackHandleScope<1> hs(self_);
-    ObjPtr<mirror::Class> array_class = class_linker->GetClassRoot(ClassLinker::kObjectArrayClass);
+    ObjPtr<mirror::Class> array_class =
+        GetClassRoot<mirror::ObjectArray<mirror::Object>>(class_linker);
     // The first element is the methods and dex pc array, the other elements are declaring classes
     // for the methods to ensure classes in the stack trace don't get unloaded.
     Handle<mirror::ObjectArray<mirror::Object>> trace(
@@ -2726,7 +2780,7 @@ jobjectArray Thread::InternalStackTraceToStackTraceElementArray(
     depth = std::min(depth, traces_length);
   } else {
     // Create java_trace array and place in local reference table
-    mirror::ObjectArray<mirror::StackTraceElement>* java_traces =
+    ObjPtr<mirror::ObjectArray<mirror::StackTraceElement>> java_traces =
         class_linker->AllocStackTraceElementArray(soa.Self(), depth);
     if (java_traces == nullptr) {
       return nullptr;
@@ -2860,27 +2914,18 @@ jobjectArray Thread::CreateAnnotatedStackTrace(const ScopedObjectAccessAlreadyRu
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
 
   StackHandleScope<6> hs(soa.Self());
-  mirror::Class* aste_array_class = class_linker->FindClass(
+  Handle<mirror::Class> h_aste_array_class = hs.NewHandle(class_linker->FindSystemClass(
       soa.Self(),
-      "[Ldalvik/system/AnnotatedStackTraceElement;",
-      ScopedNullHandle<mirror::ClassLoader>());
-  if (aste_array_class == nullptr) {
+      "[Ldalvik/system/AnnotatedStackTraceElement;"));
+  if (h_aste_array_class == nullptr) {
     return nullptr;
   }
-  Handle<mirror::Class> h_aste_array_class(hs.NewHandle<mirror::Class>(aste_array_class));
+  Handle<mirror::Class> h_aste_class = hs.NewHandle(h_aste_array_class->GetComponentType());
 
-  mirror::Class* o_array_class = class_linker->FindClass(soa.Self(),
-                                                         "[Ljava/lang/Object;",
-                                                         ScopedNullHandle<mirror::ClassLoader>());
-  if (o_array_class == nullptr) {
-    // This should not fail in a healthy runtime.
-    soa.Self()->AssertPendingException();
-    return nullptr;
-  }
-  Handle<mirror::Class> h_o_array_class(hs.NewHandle<mirror::Class>(o_array_class));
+  Handle<mirror::Class> h_o_array_class =
+      hs.NewHandle(GetClassRoot<mirror::ObjectArray<mirror::Object>>(class_linker));
+  DCHECK(h_o_array_class != nullptr);  // Class roots must be already initialized.
 
-  Handle<mirror::Class> h_aste_class(hs.NewHandle<mirror::Class>(
-      h_aste_array_class->GetComponentType()));
 
   // Make sure the AnnotatedStackTraceElement.class is initialized, b/76208924 .
   class_linker->EnsureInitialized(soa.Self(),
@@ -2904,7 +2949,7 @@ jobjectArray Thread::CreateAnnotatedStackTrace(const ScopedObjectAccessAlreadyRu
 
   size_t length = dumper.stack_trace_elements_.size();
   ObjPtr<mirror::ObjectArray<mirror::Object>> array =
-      mirror::ObjectArray<mirror::Object>::Alloc(soa.Self(), aste_array_class, length);
+      mirror::ObjectArray<mirror::Object>::Alloc(soa.Self(), h_aste_array_class.Get(), length);
   if (array == nullptr) {
     soa.Self()->AssertPendingOOMException();
     return nullptr;
@@ -3021,7 +3066,8 @@ void Thread::ThrowNewWrappedException(const char* exception_class_descriptor,
 
   // If we couldn't allocate the exception, throw the pre-allocated out of memory exception.
   if (exception == nullptr) {
-    SetException(Runtime::Current()->GetPreAllocatedOutOfMemoryError());
+    Dump(LOG_STREAM(WARNING));  // The pre-allocated OOME has no stack, so help out and log one.
+    SetException(Runtime::Current()->GetPreAllocatedOutOfMemoryErrorWhenThrowingException());
     return;
   }
 
@@ -3101,7 +3147,7 @@ void Thread::ThrowOutOfMemoryError(const char* msg) {
     tls32_.throwing_OutOfMemoryError = false;
   } else {
     Dump(LOG_STREAM(WARNING));  // The pre-allocated OOME has no stack, so help out and log one.
-    SetException(Runtime::Current()->GetPreAllocatedOutOfMemoryError());
+    SetException(Runtime::Current()->GetPreAllocatedOutOfMemoryErrorWhenThrowingOOME());
   }
 }
 
@@ -3170,6 +3216,7 @@ void Thread::DumpThreadOffset(std::ostream& os, uint32_t offset) {
   QUICK_ENTRY_POINT_INFO(pAllocObjectResolved)
   QUICK_ENTRY_POINT_INFO(pAllocObjectInitialized)
   QUICK_ENTRY_POINT_INFO(pAllocObjectWithChecks)
+  QUICK_ENTRY_POINT_INFO(pAllocStringObject)
   QUICK_ENTRY_POINT_INFO(pAllocStringFromBytes)
   QUICK_ENTRY_POINT_INFO(pAllocStringFromChars)
   QUICK_ENTRY_POINT_INFO(pAllocStringFromString)
@@ -3378,7 +3425,6 @@ void Thread::QuickDeliverException() {
   ClearException();
   QuickExceptionHandler exception_handler(this, false);
   exception_handler.FindCatch(exception);
-  exception_handler.UpdateInstrumentationStack();
   if (exception_handler.GetClearException()) {
     // Exception was cleared as part of delivery.
     DCHECK(!IsExceptionPending());
@@ -3558,17 +3604,15 @@ class ReferenceMapVisitor : public StackVisitor {
       StackReference<mirror::Object>* vreg_base = reinterpret_cast<StackReference<mirror::Object>*>(
           reinterpret_cast<uintptr_t>(cur_quick_frame));
       uintptr_t native_pc_offset = method_header->NativeQuickPcOffset(GetCurrentQuickFramePc());
-      CodeInfo code_info = method_header->GetOptimizedCodeInfo();
-      CodeInfoEncoding encoding = code_info.ExtractEncoding();
-      StackMap map = code_info.GetStackMapForNativePcOffset(native_pc_offset, encoding);
+      CodeInfo code_info(method_header);
+      StackMap map = code_info.GetStackMapForNativePcOffset(native_pc_offset);
       DCHECK(map.IsValid());
 
-      T vreg_info(m, code_info, encoding, map, visitor_);
+      T vreg_info(m, code_info, map, visitor_);
 
       // Visit stack entries that hold pointers.
-      const size_t number_of_bits = code_info.GetNumberOfStackMaskBits(encoding);
-      BitMemoryRegion stack_mask = code_info.GetStackMaskOf(encoding, map);
-      for (size_t i = 0; i < number_of_bits; ++i) {
+      BitMemoryRegion stack_mask = code_info.GetStackMaskOf(map);
+      for (size_t i = 0; i < stack_mask.size_in_bits(); ++i) {
         if (stack_mask.LoadBit(i)) {
           StackReference<mirror::Object>* ref_addr = vreg_base + i;
           mirror::Object* ref = ref_addr->AsMirrorPtr();
@@ -3582,7 +3626,7 @@ class ReferenceMapVisitor : public StackVisitor {
         }
       }
       // Visit callee-save registers that hold pointers.
-      uint32_t register_mask = code_info.GetRegisterMaskOf(encoding, map);
+      uint32_t register_mask = code_info.GetRegisterMaskOf(map);
       for (size_t i = 0; i < BitSizeOf<uint32_t>(); ++i) {
         if (register_mask & (1 << i)) {
           mirror::Object** ref_addr = reinterpret_cast<mirror::Object**>(GetGPRAddress(i));
@@ -3630,7 +3674,6 @@ class ReferenceMapVisitor : public StackVisitor {
     struct UndefinedVRegInfo {
       UndefinedVRegInfo(ArtMethod* method ATTRIBUTE_UNUSED,
                         const CodeInfo& code_info ATTRIBUTE_UNUSED,
-                        const CodeInfoEncoding& encoding ATTRIBUTE_UNUSED,
                         const StackMap& map ATTRIBUTE_UNUSED,
                         RootVisitor& _visitor)
           : visitor(_visitor) {
@@ -3661,15 +3704,11 @@ class ReferenceMapVisitor : public StackVisitor {
     struct StackMapVRegInfo {
       StackMapVRegInfo(ArtMethod* method,
                        const CodeInfo& _code_info,
-                       const CodeInfoEncoding& _encoding,
                        const StackMap& map,
                        RootVisitor& _visitor)
           : number_of_dex_registers(method->DexInstructionData().RegistersSize()),
             code_info(_code_info),
-            encoding(_encoding),
-            dex_register_map(code_info.GetDexRegisterMapOf(map,
-                                                           encoding,
-                                                           number_of_dex_registers)),
+            dex_register_map(code_info.GetDexRegisterMapOf(map)),
             visitor(_visitor) {
       }
 
@@ -3682,8 +3721,7 @@ class ReferenceMapVisitor : public StackVisitor {
           REQUIRES_SHARED(Locks::mutator_lock_) {
         bool found = false;
         for (size_t dex_reg = 0; dex_reg != number_of_dex_registers; ++dex_reg) {
-          DexRegisterLocation location = dex_register_map.GetDexRegisterLocation(
-              dex_reg, number_of_dex_registers, code_info, encoding);
+          DexRegisterLocation location = dex_register_map[dex_reg];
           if (location.GetKind() == kind && static_cast<size_t>(location.GetValue()) == index) {
             visitor(ref, dex_reg, stack_visitor);
             found = true;
@@ -3717,7 +3755,6 @@ class ReferenceMapVisitor : public StackVisitor {
 
       size_t number_of_dex_registers;
       const CodeInfo& code_info;
-      const CodeInfoEncoding& encoding;
       DexRegisterMap dex_register_map;
       RootVisitor& visitor;
     };

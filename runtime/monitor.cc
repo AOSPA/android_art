@@ -59,8 +59,8 @@ static constexpr uint64_t kLongWaitMs = 100 * kDebugThresholdFudgeFactor;
  * though, because we have a full 32 bits to work with.
  *
  * The two states of an Object's lock are referred to as "thin" and "fat".  A lock may transition
- * from the "thin" state to the "fat" state and this transition is referred to as inflation. Once
- * a lock has been inflated it remains in the "fat" state indefinitely.
+ * from the "thin" state to the "fat" state and this transition is referred to as inflation. We
+ * deflate locks from time to time as part of heap trimming.
  *
  * The lock value itself is stored in mirror::Object::monitor_ and the representation is described
  * in the LockWord value type.
@@ -134,13 +134,15 @@ Monitor::Monitor(Thread* self, Thread* owner, mirror::Object* obj, int32_t hash_
 }
 
 int32_t Monitor::GetHashCode() {
-  while (!HasHashCode()) {
-    if (hash_code_.CompareAndSetWeakRelaxed(0, mirror::Object::GenerateIdentityHashCode())) {
-      break;
-    }
+  int32_t hc = hash_code_.load(std::memory_order_relaxed);
+  if (!HasHashCode()) {
+    // Use a strong CAS to prevent spurious failures since these can make the boot image
+    // non-deterministic.
+    hash_code_.CompareAndSetStrongRelaxed(0, mirror::Object::GenerateIdentityHashCode());
+    hc = hash_code_.load(std::memory_order_relaxed);
   }
   DCHECK(HasHashCode());
-  return hash_code_.LoadRelaxed();
+  return hc;
 }
 
 bool Monitor::Install(Thread* self) {
@@ -155,7 +157,7 @@ bool Monitor::Install(Thread* self) {
       break;
     }
     case LockWord::kHashCode: {
-      CHECK_EQ(hash_code_.LoadRelaxed(), static_cast<int32_t>(lw.GetHashCode()));
+      CHECK_EQ(hash_code_.load(std::memory_order_relaxed), static_cast<int32_t>(lw.GetHashCode()));
       break;
     }
     case LockWord::kFatLocked: {
@@ -173,7 +175,7 @@ bool Monitor::Install(Thread* self) {
   }
   LockWord fat(this, lw.GCState());
   // Publish the updated lock word, which may race with other threads.
-  bool success = GetObject()->CasLockWordWeakRelease(lw, fat);
+  bool success = GetObject()->CasLockWord(lw, fat, CASMode::kWeak, std::memory_order_release);
   // Lock profiling.
   if (success && owner_ != nullptr && lock_profiling_threshold_ != 0) {
     // Do not abort on dex pc errors. This can easily happen when we want to dump a stack trace on
@@ -1039,7 +1041,7 @@ mirror::Object* Monitor::MonitorEnter(Thread* self, mirror::Object* obj, bool tr
       case LockWord::kUnlocked: {
         // No ordering required for preceding lockword read, since we retest.
         LockWord thin_locked(LockWord::FromThinLockId(thread_id, 0, lock_word.GCState()));
-        if (h_obj->CasLockWordWeakAcquire(lock_word, thin_locked)) {
+        if (h_obj->CasLockWord(lock_word, thin_locked, CASMode::kWeak, std::memory_order_acquire)) {
           AtraceMonitorLock(self, h_obj.Get(), false /* is_wait */);
           return h_obj.Get();  // Success!
         }
@@ -1063,7 +1065,10 @@ mirror::Object* Monitor::MonitorEnter(Thread* self, mirror::Object* obj, bool tr
               return h_obj.Get();  // Success!
             } else {
               // Use CAS to preserve the read barrier state.
-              if (h_obj->CasLockWordWeakRelaxed(lock_word, thin_locked)) {
+              if (h_obj->CasLockWord(lock_word,
+                                     thin_locked,
+                                     CASMode::kWeak,
+                                     std::memory_order_relaxed)) {
                 AtraceMonitorLock(self, h_obj.Get(), false /* is_wait */);
                 return h_obj.Get();  // Success!
               }
@@ -1101,7 +1106,7 @@ mirror::Object* Monitor::MonitorEnter(Thread* self, mirror::Object* obj, bool tr
       case LockWord::kFatLocked: {
         // We should have done an acquire read of the lockword initially, to ensure
         // visibility of the monitor data structure. Use an explicit fence instead.
-        QuasiAtomic::ThreadFenceAcquire();
+        std::atomic_thread_fence(std::memory_order_acquire);
         Monitor* mon = lock_word.FatLockMonitor();
         if (trylock) {
           return mon->TryLock(self) ? h_obj.Get() : nullptr;
@@ -1165,7 +1170,7 @@ bool Monitor::MonitorExit(Thread* self, mirror::Object* obj) {
             return true;
           } else {
             // Use CAS to preserve the read barrier state.
-            if (h_obj->CasLockWordWeakRelease(lock_word, new_lw)) {
+            if (h_obj->CasLockWord(lock_word, new_lw, CASMode::kWeak, std::memory_order_release)) {
               AtraceMonitorUnlock();
               // Success!
               return true;

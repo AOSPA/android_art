@@ -42,6 +42,7 @@
 #include "base/array_ref.h"
 #include "base/stringpiece.h"
 #include "class_linker-inl.h"
+#include "class_root.h"
 #include "debugger.h"
 #include "dex/art_dex_file_loader.h"
 #include "dex/dex_file.h"
@@ -58,8 +59,9 @@
 #include "jdwp/object_registry.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
-#include "jni_env_ext-inl.h"
+#include "jni/jni_env_ext-inl.h"
 #include "jvmti_allocator.h"
+#include "linear_alloc.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_ext.h"
 #include "mirror/object.h"
@@ -67,6 +69,8 @@
 #include "non_debuggable_classes.h"
 #include "object_lock.h"
 #include "runtime.h"
+#include "stack.h"
+#include "thread_list.h"
 #include "ti_breakpoint.h"
 #include "ti_class_loader.h"
 #include "transform.h"
@@ -485,7 +489,7 @@ art::mirror::DexCache* Redefiner::ClassRedefinition::CreateNewDexCache(
   art::ClassLinker* cl = driver_->runtime_->GetClassLinker();
   art::Handle<art::mirror::DexCache> cache(hs.NewHandle(
       art::ObjPtr<art::mirror::DexCache>::DownCast(
-          cl->GetClassRoot(art::ClassLinker::kJavaLangDexCache)->AllocObject(driver_->self_))));
+          art::GetClassRoot<art::mirror::DexCache>(cl)->AllocObject(driver_->self_))));
   if (cache.IsNull()) {
     driver_->self_->AssertPendingOOMException();
     return nullptr;
@@ -522,7 +526,7 @@ art::mirror::Object* Redefiner::ClassRedefinition::AllocateOrGetOriginalDexFile(
     return art::mirror::ByteArray::AllocateAndFill(
         driver_->self_,
         reinterpret_cast<const signed char*>(original_dex_file_.data()),
-        original_dex_file_.size());
+        original_dex_file_.size()).Ptr();
   }
 
   // See if we already have one set.
@@ -859,12 +863,10 @@ class RedefinitionDataHolder {
                          art::Thread* self,
                          std::vector<Redefiner::ClassRedefinition>* redefinitions)
       REQUIRES_SHARED(art::Locks::mutator_lock_) :
-    arr_(
-      hs->NewHandle(
-        art::mirror::ObjectArray<art::mirror::Object>::Alloc(
-            self,
-            runtime->GetClassLinker()->GetClassRoot(art::ClassLinker::kObjectArrayClass),
-            redefinitions->size() * kNumSlots))),
+    arr_(hs->NewHandle(art::mirror::ObjectArray<art::mirror::Object>::Alloc(
+        self,
+        art::GetClassRoot<art::mirror::ObjectArray<art::mirror::Object>>(runtime->GetClassLinker()),
+        redefinitions->size() * kNumSlots))),
     redefinitions_(redefinitions) {}
 
   bool IsNull() const REQUIRES_SHARED(art::Locks::mutator_lock_) {

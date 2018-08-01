@@ -63,6 +63,8 @@ art_cc_defaults {
         "libvixld-arm64",
         "libart-gtest",
         "libdexfiled",
+        "libprofiled",
+        "libartbased",
 
         "libbase",
         "libicuuc",
@@ -115,6 +117,8 @@ art_cc_defaults {
         "libartd",
         "libartd-compiler",
         "libdexfiled",
+        "libprofiled",
+        "libartbased",
     ],
     static_libs: [
         "libgtest",
@@ -146,12 +150,15 @@ art_cc_library {
     whole_static_libs: [
         "libart-compiler-gtest",
         "libart-runtime-gtest",
+        "libartbase-art-gtest",
         "libgtest",
     ],
     shared_libs: [
         "libartd",
         "libartd-compiler",
         "libdexfiled",
+        "libprofiled",
+        "libartbased",
         "libbase",
         "libbacktrace",
     ],
@@ -182,6 +189,8 @@ art_cc_test_library {
     shared_libs: [
         "libart",
         "libdexfile",
+        "libprofile",
+        "libartbase",
     ],
 }
 
@@ -195,6 +204,8 @@ art_cc_test_library {
     shared_libs: [
         "libartd",
         "libdexfiled",
+        "libprofiled",
+        "libartbased",
     ],
 }
 
@@ -303,9 +314,14 @@ art_cc_defaults {
         "909-attach-agent/attach.cc",
         "912-classes/classes_art.cc",
         "936-search-onload/search_onload.cc",
+        "980-redefine-object/redef_object.cc",
         "983-source-transform-verify/source_transform_art.cc",
         "1940-ddms-ext/ddm_ext.cc",
         "1944-sudden-exit/sudden_exit.cc",
+    ],
+    static_libs: [
+        "libz",
+        "slicer",
     ],
 }
 
@@ -315,6 +331,8 @@ art_cc_test_library {
     shared_libs: [
         "libart",
         "libdexfile",
+        "libprofile",
+        "libartbase",
     ],
 }
 
@@ -327,6 +345,8 @@ art_cc_test_library {
     shared_libs: [
         "libartd",
         "libdexfiled",
+        "libprofiled",
+        "libartbased",
     ],
 }
 
@@ -348,7 +368,6 @@ cc_library_static {
     ],
     sdk_version: "current",
     stl: "c++_static",
-    cpp_std: "c++14",
     include_dirs: [
         // This is needed to resolve the base/ header file in libdexfile. Unfortunately there are
         // many problems with how we export headers that are making doing this the 'right' way
@@ -362,22 +381,27 @@ cc_library_static {
 }
 
 art_cc_defaults {
-    name: "libtistress-defaults",
+    name: "libtistress-srcs",
     defaults: ["libartagent-defaults"],
     srcs: [
         "ti-stress/stress.cc",
     ],
+    header_libs: ["libopenjdkjvmti_headers"],
+}
+
+art_cc_defaults {
+    name: "libtistress-defaults",
+    defaults: ["libtistress-srcs"],
     shared_libs: [
         "libbase",
         "slicer",
     ],
-    header_libs: ["libopenjdkjvmti_headers"],
 }
 
 art_cc_test_library {
     name: "libtistress",
     defaults: ["libtistress-defaults"],
-    shared_libs: ["libart"],
+    shared_libs: ["libartbase"],
 }
 
 art_cc_test_library {
@@ -386,7 +410,30 @@ art_cc_test_library {
         "art_debug_defaults",
         "libtistress-defaults",
     ],
-    shared_libs: ["libartd"],
+    shared_libs: ["libartbased"],
+}
+
+art_cc_defaults {
+    name: "libtistress-static-defaults",
+    defaults: ["libtistress-srcs"],
+    static_libs: art_static_dependencies + [
+        "slicer",
+    ],
+}
+
+art_cc_test_library {
+    name: "libtistresss",
+    defaults: ["libtistress-static-defaults"],
+    static_libs: ["libartbase"],
+}
+
+art_cc_test_library {
+    name: "libtistressds",
+    defaults: [
+        "art_debug_defaults",
+        "libtistress-static-defaults"
+    ],
+    static_libs: ["libartbased"],
 }
 
 cc_defaults {
@@ -415,6 +462,7 @@ cc_defaults {
         "154-gc-loop/heap_interface.cc",
         "167-visit-locks/visit_locks.cc",
         "169-threadgroup-jni/jni_daemon_thread.cc",
+        "172-app-image-twice/debug_print_class.cc",
         "1945-proxy-method-arguments/get_args.cc",
         "203-multi-checkpoint/multi_checkpoint.cc",
         "305-other-fault-handler/fault_handler.cc",
@@ -458,6 +506,8 @@ art_cc_test_library {
     shared_libs: [
         "libart",
         "libdexfile",
+        "libprofile",
+        "libartbase",
     ],
 }
 
@@ -470,6 +520,8 @@ art_cc_test_library {
     shared_libs: [
         "libartd",
         "libdexfiled",
+        "libprofiled",
+        "libartbased",
     ],
 }
 

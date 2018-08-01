@@ -34,6 +34,7 @@
 #include "base/enums.h"
 #include "base/macros.h"
 #include "base/quasi_atomic.h"
+#include "base/zip_archive.h"
 #include "class_linker.h"
 #include "common_throws.h"
 #include "dex/descriptors_names.h"
@@ -56,7 +57,6 @@
 #include "thread-inl.h"
 #include "transaction.h"
 #include "well_known_classes.h"
-#include "zip_archive.h"
 
 namespace art {
 namespace interpreter {
@@ -131,7 +131,7 @@ static void UnstartedRuntimeFindClass(Thread* self, Handle<mirror::String> class
   std::string descriptor(DotToDescriptor(className->ToModifiedUtf8().c_str()));
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
 
-  mirror::Class* found = class_linker->FindClass(self, descriptor.c_str(), class_loader);
+  ObjPtr<mirror::Class> found = class_linker->FindClass(self, descriptor.c_str(), class_loader);
   if (found == nullptr && abort_if_not_found) {
     if (!self->IsExceptionPending()) {
       AbortTransactionOrFail(self, "%s failed in un-started runtime for class: %s",
@@ -142,7 +142,7 @@ static void UnstartedRuntimeFindClass(Thread* self, Handle<mirror::String> class
   }
   if (found != nullptr && initialize_class) {
     StackHandleScope<1> hs(self);
-    Handle<mirror::Class> h_class(hs.NewHandle(found));
+    HandleWrapperObjPtr<mirror::Class> h_class = hs.NewHandleWrapper(&found);
     if (!class_linker->EnsureInitialized(self, h_class, true, true)) {
       CHECK(self->IsExceptionPending());
       return;
@@ -269,8 +269,7 @@ void UnstartedRuntime::UnstartedClassNewInstance(
     AbortTransactionOrFail(self, "Null-pointer in Class.newInstance.");
     return;
   }
-  mirror::Class* klass = param->AsClass();
-  Handle<mirror::Class> h_klass(hs.NewHandle(klass));
+  Handle<mirror::Class> h_klass(hs.NewHandle(param->AsClass()));
 
   // Check that it's not null.
   if (h_klass == nullptr) {
@@ -280,7 +279,7 @@ void UnstartedRuntime::UnstartedClassNewInstance(
 
   // If we're in a transaction, class must not be finalizable (it or a superclass has a finalizer).
   if (Runtime::Current()->IsActiveTransaction()) {
-    if (h_klass.Get()->IsFinalizable()) {
+    if (h_klass->IsFinalizable()) {
       AbortTransactionF(self, "Class for newInstance is finalizable: '%s'",
                         h_klass->PrettyClass().c_str());
       return;
@@ -299,7 +298,7 @@ void UnstartedRuntime::UnstartedClassNewInstance(
       cons = nullptr;
     }
     if (cons != nullptr) {
-      Handle<mirror::Object> h_obj(hs.NewHandle(klass->AllocObject(self)));
+      Handle<mirror::Object> h_obj(hs.NewHandle(h_klass->AllocObject(self)));
       CHECK(h_obj != nullptr);  // We don't expect OOM at compile-time.
       EnterInterpreterFromInvoke(self, cons, h_obj.Get(), nullptr, nullptr);
       if (!self->IsExceptionPending()) {
@@ -323,8 +322,8 @@ void UnstartedRuntime::UnstartedClassGetDeclaredField(
     Thread* self, ShadowFrame* shadow_frame, JValue* result, size_t arg_offset) {
   // Special managed code cut-out to allow field lookup in a un-started runtime that'd fail
   // going the reflective Dex way.
-  mirror::Class* klass = shadow_frame->GetVRegReference(arg_offset)->AsClass();
-  mirror::String* name2 = shadow_frame->GetVRegReference(arg_offset + 1)->AsString();
+  ObjPtr<mirror::Class> klass = shadow_frame->GetVRegReference(arg_offset)->AsClass();
+  ObjPtr<mirror::String> name2 = shadow_frame->GetVRegReference(arg_offset + 1)->AsString();
   ArtField* found = nullptr;
   for (ArtField& field : klass->GetIFields()) {
     if (name2->Equals(field.GetName())) {
@@ -376,13 +375,13 @@ void UnstartedRuntime::UnstartedClassGetDeclaredField(
 void UnstartedRuntime::UnstartedClassGetDeclaredMethod(
     Thread* self, ShadowFrame* shadow_frame, JValue* result, size_t arg_offset) {
   // Special managed code cut-out to allow method lookup in a un-started runtime.
-  mirror::Class* klass = shadow_frame->GetVRegReference(arg_offset)->AsClass();
+  ObjPtr<mirror::Class> klass = shadow_frame->GetVRegReference(arg_offset)->AsClass();
   if (klass == nullptr) {
     ThrowNullPointerExceptionForMethodAccess(shadow_frame->GetMethod(), InvokeType::kVirtual);
     return;
   }
-  mirror::String* name = shadow_frame->GetVRegReference(arg_offset + 1)->AsString();
-  mirror::ObjectArray<mirror::Class>* args =
+  ObjPtr<mirror::String> name = shadow_frame->GetVRegReference(arg_offset + 1)->AsString();
+  ObjPtr<mirror::ObjectArray<mirror::Class>> args =
       shadow_frame->GetVRegReference(arg_offset + 2)->AsObjectArray<mirror::Class>();
   Runtime* runtime = Runtime::Current();
   bool transaction = runtime->IsActiveTransaction();
@@ -414,7 +413,7 @@ void UnstartedRuntime::UnstartedClassGetDeclaredMethod(
 // Special managed code cut-out to allow constructor lookup in a un-started runtime.
 void UnstartedRuntime::UnstartedClassGetDeclaredConstructor(
     Thread* self, ShadowFrame* shadow_frame, JValue* result, size_t arg_offset) {
-  mirror::Class* klass = shadow_frame->GetVRegReference(arg_offset)->AsClass();
+  ObjPtr<mirror::Class> klass = shadow_frame->GetVRegReference(arg_offset)->AsClass();
   if (klass == nullptr) {
     ThrowNullPointerExceptionForMethodAccess(shadow_frame->GetMethod(), InvokeType::kVirtual);
     return;
@@ -510,7 +509,7 @@ void UnstartedRuntime::UnstartedClassIsAnonymousClass(
     result->SetZ(false);
     return;
   }
-  mirror::String* class_name = nullptr;
+  ObjPtr<mirror::String> class_name = nullptr;
   if (!annotations::GetInnerClass(klass, &class_name)) {
     result->SetZ(false);
     return;
@@ -830,12 +829,12 @@ void UnstartedRuntime::UnstartedSystemArraycopy(
   }
 
   // Type checking.
-  mirror::Class* src_type = shadow_frame->GetVRegReference(arg_offset)->GetClass()->
+  ObjPtr<mirror::Class> src_type = shadow_frame->GetVRegReference(arg_offset)->GetClass()->
       GetComponentType();
 
   if (!src_type->IsPrimitive()) {
     // Check that the second type is not primitive.
-    mirror::Class* trg_type = shadow_frame->GetVRegReference(arg_offset + 2)->GetClass()->
+    ObjPtr<mirror::Class> trg_type = shadow_frame->GetVRegReference(arg_offset + 2)->GetClass()->
         GetComponentType();
     if (trg_type->IsPrimitiveInt()) {
       AbortTransactionOrFail(self, "Type mismatch in arraycopy: %s vs %s",
@@ -1486,13 +1485,17 @@ void UnstartedRuntime::UnstartedUnsafeCompareAndSwapObject(
   bool success;
   // Check whether we're in a transaction, call accordingly.
   if (Runtime::Current()->IsActiveTransaction()) {
-    success = obj->CasFieldStrongSequentiallyConsistentObject<true>(MemberOffset(offset),
-                                                                    expected_value,
-                                                                    newValue);
+    success = obj->CasFieldObject<true>(MemberOffset(offset),
+                                        expected_value,
+                                        newValue,
+                                        CASMode::kStrong,
+                                        std::memory_order_seq_cst);
   } else {
-    success = obj->CasFieldStrongSequentiallyConsistentObject<false>(MemberOffset(offset),
-                                                                     expected_value,
-                                                                     newValue);
+    success = obj->CasFieldObject<false>(MemberOffset(offset),
+                                         expected_value,
+                                         newValue,
+                                         CASMode::kStrong,
+                                         std::memory_order_seq_cst);
   }
   result->SetZ(success ? 1 : 0);
 }
@@ -1540,7 +1543,7 @@ void UnstartedRuntime::UnstartedUnsafePutOrderedObject(
   }
   int64_t offset = shadow_frame->GetVRegLong(arg_offset + 2);
   mirror::Object* newValue = shadow_frame->GetVRegReference(arg_offset + 4);
-  QuasiAtomic::ThreadFenceRelease();
+  std::atomic_thread_fence(std::memory_order_release);
   if (Runtime::Current()->IsActiveTransaction()) {
     obj->SetFieldObject<true>(MemberOffset(offset), newValue);
   } else {
@@ -1692,7 +1695,7 @@ void UnstartedRuntime::UnstartedJNIVMRuntimeNewUnpaddedArray(
   ObjPtr<mirror::Class> element_class = reinterpret_cast<mirror::Object*>(args[0])->AsClass();
   Runtime* runtime = Runtime::Current();
   ObjPtr<mirror::Class> array_class =
-      runtime->GetClassLinker()->FindArrayClass(self, &element_class);
+      runtime->GetClassLinker()->FindArrayClass(self, element_class);
   DCHECK(array_class != nullptr);
   gc::AllocatorType allocator = runtime->GetHeap()->GetCurrentAllocator();
   result->SetL(mirror::Array::Alloc<true, true>(self,
@@ -1819,13 +1822,13 @@ void UnstartedRuntime::UnstartedJNIArrayCreateObjectArray(
   ObjPtr<mirror::Class> element_class = reinterpret_cast<mirror::Class*>(args[0])->AsClass();
   Runtime* runtime = Runtime::Current();
   ClassLinker* class_linker = runtime->GetClassLinker();
-  ObjPtr<mirror::Class> array_class = class_linker->FindArrayClass(self, &element_class);
+  ObjPtr<mirror::Class> array_class = class_linker->FindArrayClass(self, element_class);
   if (UNLIKELY(array_class == nullptr)) {
     CHECK(self->IsExceptionPending());
     return;
   }
   DCHECK(array_class->IsObjectArrayClass());
-  mirror::Array* new_array = mirror::ObjectArray<mirror::Object*>::Alloc(
+  ObjPtr<mirror::Array> new_array = mirror::ObjectArray<mirror::Object>::Alloc(
       self, array_class, length, runtime->GetHeap()->GetCurrentAllocator());
   result->SetL(new_array);
 }
@@ -1856,11 +1859,17 @@ void UnstartedRuntime::UnstartedJNIUnsafeCompareAndSwapInt(
   jint newValue = args[4];
   bool success;
   if (Runtime::Current()->IsActiveTransaction()) {
-    success = obj->CasFieldStrongSequentiallyConsistent32<true>(MemberOffset(offset),
-                                                                expectedValue, newValue);
+    success = obj->CasField32<true>(MemberOffset(offset),
+                                    expectedValue,
+                                    newValue,
+                                    CASMode::kStrong,
+                                    std::memory_order_seq_cst);
   } else {
-    success = obj->CasFieldStrongSequentiallyConsistent32<false>(MemberOffset(offset),
-                                                                 expectedValue, newValue);
+    success = obj->CasField32<false>(MemberOffset(offset),
+                                     expectedValue,
+                                     newValue,
+                                     CASMode::kStrong,
+                                     std::memory_order_seq_cst);
   }
   result->SetZ(success ? JNI_TRUE : JNI_FALSE);
 }
@@ -1894,7 +1903,7 @@ void UnstartedRuntime::UnstartedJNIUnsafePutObject(
 void UnstartedRuntime::UnstartedJNIUnsafeGetArrayBaseOffsetForComponentType(
     Thread* self ATTRIBUTE_UNUSED, ArtMethod* method ATTRIBUTE_UNUSED,
     mirror::Object* receiver ATTRIBUTE_UNUSED, uint32_t* args, JValue* result) {
-  mirror::Class* component = reinterpret_cast<mirror::Object*>(args[0])->AsClass();
+  ObjPtr<mirror::Class> component = reinterpret_cast<mirror::Object*>(args[0])->AsClass();
   Primitive::Type primitive_type = component->GetPrimitiveType();
   result->SetI(mirror::Array::DataOffset(Primitive::ComponentSize(primitive_type)).Int32Value());
 }
@@ -1902,7 +1911,7 @@ void UnstartedRuntime::UnstartedJNIUnsafeGetArrayBaseOffsetForComponentType(
 void UnstartedRuntime::UnstartedJNIUnsafeGetArrayIndexScaleForComponentType(
     Thread* self ATTRIBUTE_UNUSED, ArtMethod* method ATTRIBUTE_UNUSED,
     mirror::Object* receiver ATTRIBUTE_UNUSED, uint32_t* args, JValue* result) {
-  mirror::Class* component = reinterpret_cast<mirror::Object*>(args[0])->AsClass();
+  ObjPtr<mirror::Class> component = reinterpret_cast<mirror::Object*>(args[0])->AsClass();
   Primitive::Type primitive_type = component->GetPrimitiveType();
   result->SetI(Primitive::ComponentSize(primitive_type));
 }

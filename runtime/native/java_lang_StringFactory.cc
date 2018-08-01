@@ -17,9 +17,9 @@
 #include "java_lang_StringFactory.h"
 
 #include "common_throws.h"
-#include "jni_internal.h"
+#include "jni/jni_internal.h"
 #include "mirror/object-inl.h"
-#include "mirror/string.h"
+#include "mirror/string-inl.h"
 #include "native_util.h"
 #include "nativehelper/jni_macros.h"
 #include "nativehelper/scoped_local_ref.h"

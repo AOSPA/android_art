@@ -44,7 +44,7 @@
 #include "events-inl.h"
 #include "gc_root-inl.h"
 #include "jit/jit.h"
-#include "jni_internal.h"
+#include "jni/jni_internal.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
 #include "mirror/object-inl.h"
@@ -345,7 +345,7 @@ jvmtiError MethodUtil::GetMethodName(jvmtiEnv* env,
   if (generic_ptr != nullptr) {
     *generic_ptr = nullptr;
     if (!art_method->GetDeclaringClass()->IsProxyClass()) {
-      art::mirror::ObjectArray<art::mirror::String>* str_array =
+      art::ObjPtr<art::mirror::ObjectArray<art::mirror::String>> str_array =
           art::annotations::GetSignatureAnnotationForMethod(art_method);
       if (str_array != nullptr) {
         std::ostringstream oss;
@@ -783,8 +783,6 @@ jvmtiError MethodUtil::GetLocalVariableGeneric(jvmtiEnv* env ATTRIBUTE_UNUSED,
     return ERR(ILLEGAL_ARGUMENT);
   }
   art::Thread* self = art::Thread::Current();
-  // Suspend JIT since it can get confused if we deoptimize methods getting jitted.
-  art::jit::ScopedJitSuspend suspend_jit;
   art::ScopedObjectAccess soa(self);
   art::Locks::thread_list_lock_->ExclusiveLock(self);
   art::Thread* target = nullptr;
@@ -919,8 +917,6 @@ jvmtiError MethodUtil::SetLocalVariableGeneric(jvmtiEnv* env ATTRIBUTE_UNUSED,
   // TODO We should really keep track of this at the Frame granularity.
   DeoptManager::Get()->SetLocalsUpdated();
   art::Thread* self = art::Thread::Current();
-  // Suspend JIT since it can get confused if we deoptimize methods getting jitted.
-  art::jit::ScopedJitSuspend suspend_jit;
   art::ScopedObjectAccess soa(self);
   art::Locks::thread_list_lock_->ExclusiveLock(self);
   art::Thread* target = nullptr;

@@ -30,12 +30,12 @@
 #include "dex/dex_file_types.h"
 #include "gc/heap.h"
 #include "handle_scope-inl.h"
-#include "jit/profile_compilation_info.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
 #include "mirror/dex_cache-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
+#include "profile/profile_compilation_info.h"
 #include "scoped_thread_state_change-inl.h"
 
 namespace art {
@@ -46,7 +46,7 @@ class CompilerDriverTest : public CommonCompilerTest {
     TimingLogger timings("CompilerDriverTest::CompileAll", false, false);
     TimingLogger::ScopedTiming t(__FUNCTION__, &timings);
     dex_files_ = GetDexFiles(class_loader);
-    compiler_driver_->SetDexFilesForOatFile(dex_files_);;
+    SetDexFilesForOatFile(dex_files_);
     compiler_driver_->CompileAll(class_loader, dex_files_, &timings);
     t.NewTiming("MakeAllExecutable");
     MakeAllExecutable(class_loader);
@@ -88,7 +88,7 @@ class CompilerDriverTest : public CommonCompilerTest {
       StackHandleScope<1> hs(soa.Self());
       Handle<mirror::ClassLoader> loader(
           hs.NewHandle(soa.Decode<mirror::ClassLoader>(class_loader)));
-      mirror::Class* c = class_linker->FindClass(soa.Self(), descriptor, loader);
+      ObjPtr<mirror::Class> c = class_linker->FindClass(soa.Self(), descriptor, loader);
       CHECK(c != nullptr);
       const auto pointer_size = class_linker->GetImagePointerSize();
       for (auto& m : c->GetMethods(pointer_size)) {
@@ -115,14 +115,14 @@ TEST_F(CompilerDriverTest, DISABLED_LARGE_CompileDexLibCore) {
   ObjPtr<mirror::DexCache> dex_cache = class_linker_->FindDexCache(soa.Self(), dex);
   EXPECT_EQ(dex.NumStringIds(), dex_cache->NumStrings());
   for (size_t i = 0; i < dex_cache->NumStrings(); i++) {
-    const mirror::String* string = dex_cache->GetResolvedString(dex::StringIndex(i));
+    const ObjPtr<mirror::String> string = dex_cache->GetResolvedString(dex::StringIndex(i));
     EXPECT_TRUE(string != nullptr) << "string_idx=" << i;
   }
   EXPECT_EQ(dex.NumTypeIds(), dex_cache->NumResolvedTypes());
   for (size_t i = 0; i < dex_cache->NumResolvedTypes(); i++) {
-    mirror::Class* type = dex_cache->GetResolvedType(dex::TypeIndex(i));
-    EXPECT_TRUE(type != nullptr) << "type_idx=" << i
-                              << " " << dex.GetTypeDescriptor(dex.GetTypeId(dex::TypeIndex(i)));
+    const ObjPtr<mirror::Class> type = dex_cache->GetResolvedType(dex::TypeIndex(i));
+    EXPECT_TRUE(type != nullptr)
+        << "type_idx=" << i << " " << dex.GetTypeDescriptor(dex.GetTypeId(dex::TypeIndex(i)));
   }
   EXPECT_TRUE(dex_cache->StaticMethodSize() == dex_cache->NumResolvedMethods()
       || dex.NumMethodIds() ==  dex_cache->NumResolvedMethods());
@@ -184,59 +184,6 @@ TEST_F(CompilerDriverTest, AbstractMethodErrorStub) {
   }
 }
 
-class CompilerDriverMethodsTest : public CompilerDriverTest {
- protected:
-  std::unordered_set<std::string>* GetCompiledMethods() OVERRIDE {
-    return new std::unordered_set<std::string>({
-      "byte StaticLeafMethods.identity(byte)",
-      "int StaticLeafMethods.sum(int, int, int)",
-      "double StaticLeafMethods.sum(double, double, double, double)"
-    });
-  }
-};
-
-TEST_F(CompilerDriverMethodsTest, Selection) {
-  Thread* self = Thread::Current();
-  jobject class_loader;
-  {
-    ScopedObjectAccess soa(self);
-    class_loader = LoadDex("StaticLeafMethods");
-  }
-  ASSERT_NE(class_loader, nullptr);
-
-  // Need to enable dex-file writability. Methods rejected to be compiled will run through the
-  // dex-to-dex compiler.
-  for (const DexFile* dex_file : GetDexFiles(class_loader)) {
-    ASSERT_TRUE(dex_file->EnableWrite());
-  }
-
-  CompileAll(class_loader);
-
-  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  ScopedObjectAccess soa(self);
-  StackHandleScope<1> hs(self);
-  Handle<mirror::ClassLoader> h_loader(
-      hs.NewHandle(soa.Decode<mirror::ClassLoader>(class_loader)));
-  mirror::Class* klass = class_linker->FindClass(self, "LStaticLeafMethods;", h_loader);
-  ASSERT_NE(klass, nullptr);
-
-  std::unique_ptr<std::unordered_set<std::string>> expected(GetCompiledMethods());
-
-  const auto pointer_size = class_linker->GetImagePointerSize();
-  for (auto& m : klass->GetDirectMethods(pointer_size)) {
-    std::string name = m.PrettyMethod(true);
-    const void* code = m.GetEntryPointFromQuickCompiledCodePtrSize(pointer_size);
-    ASSERT_NE(code, nullptr);
-    if (expected->find(name) != expected->end()) {
-      expected->erase(name);
-      EXPECT_FALSE(class_linker->IsQuickToInterpreterBridge(code));
-    } else {
-      EXPECT_TRUE(class_linker->IsQuickToInterpreterBridge(code));
-    }
-  }
-  EXPECT_TRUE(expected->empty());
-}
-
 class CompilerDriverProfileTest : public CompilerDriverTest {
  protected:
   ProfileCompilationInfo* GetProfileCompilationInfo() OVERRIDE {
@@ -281,7 +228,7 @@ class CompilerDriverProfileTest : public CompilerDriverTest {
     StackHandleScope<1> hs(self);
     Handle<mirror::ClassLoader> h_loader(
         hs.NewHandle(soa.Decode<mirror::ClassLoader>(class_loader)));
-    mirror::Class* klass = class_linker->FindClass(self, clazz.c_str(), h_loader);
+    ObjPtr<mirror::Class> klass = class_linker->FindClass(self, clazz.c_str(), h_loader);
     ASSERT_NE(klass, nullptr);
 
     const auto pointer_size = class_linker->GetImagePointerSize();
@@ -342,7 +289,7 @@ class CompilerDriverVerifyTest : public CompilerDriverTest {
     StackHandleScope<1> hs(self);
     Handle<mirror::ClassLoader> h_loader(
         hs.NewHandle(soa.Decode<mirror::ClassLoader>(class_loader)));
-    mirror::Class* klass = class_linker->FindClass(self, clazz.c_str(), h_loader);
+    ObjPtr<mirror::Class> klass = class_linker->FindClass(self, clazz.c_str(), h_loader);
     ASSERT_NE(klass, nullptr);
     EXPECT_TRUE(klass->IsVerified());
 
@@ -384,7 +331,7 @@ TEST_F(CompilerDriverVerifyTest, RetryVerifcationStatusCheckVerified) {
     ASSERT_GT(dex_files.size(), 0u);
     dex_file = dex_files.front();
   }
-  compiler_driver_->SetDexFilesForOatFile(dex_files);
+  SetDexFilesForOatFile(dex_files);
   callbacks_->SetDoesClassUnloading(true, compiler_driver_.get());
   ClassReference ref(dex_file, 0u);
   // Test that the status is read from the compiler driver as expected.

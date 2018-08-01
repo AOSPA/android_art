@@ -17,16 +17,19 @@
 #ifndef ART_RUNTIME_JIT_JIT_CODE_CACHE_H_
 #define ART_RUNTIME_JIT_JIT_CODE_CACHE_H_
 
-#include "instrumentation.h"
+#include <iosfwd>
+#include <memory>
+#include <set>
+#include <string>
+#include <unordered_set>
+#include <vector>
 
 #include "base/arena_containers.h"
 #include "base/atomic.h"
-#include "base/histogram-inl.h"
+#include "base/histogram.h"
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "base/safe_map.h"
-#include "dex/method_reference.h"
-#include "gc_root.h"
 
 namespace art {
 
@@ -36,6 +39,7 @@ class LinearAlloc;
 class InlineCache;
 class IsMarkedVisitor;
 class JitJniStubTestHelper;
+class MemMap;
 class OatQuickMethodHeader;
 struct ProfileMethodInfo;
 class ProfilingInfo;
@@ -150,6 +154,10 @@ class JitCodeCache {
   // Return true if the code cache contains this pc.
   bool ContainsPc(const void* pc) const;
 
+  // Returns true if either the method's entrypoint is JIT compiled code or it is the
+  // instrumentation entrypoint and we can jump to jit code for this method. For testing use only.
+  bool WillExecuteJitCode(ArtMethod* method) REQUIRES(!lock_);
+
   // Return true if the code cache contains this method.
   bool ContainsMethod(ArtMethod* method) REQUIRES(!lock_);
 
@@ -206,6 +214,8 @@ class JitCodeCache {
   void RemoveMethodsIn(Thread* self, const LinearAlloc& alloc)
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void ClearAllCompiledDexCode() REQUIRES(!lock_, Locks::mutator_lock_);
 
   void CopyInlineCacheInto(const InlineCache& ic, Handle<mirror::ObjectArray<mirror::Class>> array)
       REQUIRES(!lock_)
@@ -265,6 +275,16 @@ class JitCodeCache {
     garbage_collect_code_ = value;
   }
 
+  bool GetGarbageCollectCode() const {
+    return garbage_collect_code_;
+  }
+
+  // If Jit-gc has been disabled (and instrumentation has been enabled) this will return the
+  // jit-compiled entrypoint for this method.  Otherwise it will return null.
+  const void* FindCompiledCodeForInstrumentation(ArtMethod* method)
+      REQUIRES(!lock_)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
  private:
   // Take ownership of maps.
   JitCodeCache(MemMap* code_map,
@@ -295,6 +315,11 @@ class JitCodeCache {
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Adds the given roots to the roots_data. Only a member for annotalysis.
+  void FillRootTable(uint8_t* roots_data, Handle<mirror::ObjectArray<mirror::Object>> roots)
+      REQUIRES(lock_)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   ProfilingInfo* AddProfilingInfoInternal(Thread* self,
                                           ArtMethod* method,
                                           const std::vector<uint32_t>& entries)
@@ -317,8 +342,8 @@ class JitCodeCache {
       REQUIRES(lock_)
       REQUIRES(Locks::mutator_lock_);
 
-  // Free in the mspace allocations for `code_ptr`.
-  void FreeCode(const void* code_ptr) REQUIRES(lock_);
+  // Free code and data allocations for `code_ptr`.
+  void FreeCodeAndData(const void* code_ptr) REQUIRES(lock_);
 
   // Number of bytes allocated in the code cache.
   size_t CodeCacheSizeLocked() REQUIRES(lock_);
@@ -357,10 +382,10 @@ class JitCodeCache {
       REQUIRES(lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void FreeCode(uint8_t* code) REQUIRES(lock_);
   uint8_t* AllocateCode(size_t code_size) REQUIRES(lock_);
-  void FreeData(uint8_t* data) REQUIRES(lock_);
+  void FreeCode(uint8_t* code) REQUIRES(lock_);
   uint8_t* AllocateData(size_t data_size) REQUIRES(lock_);
+  void FreeData(uint8_t* data) REQUIRES(lock_);
 
   bool IsWeakAccessEnabled(Thread* self) const;
   void WaitUntilInlineCacheAccessible(Thread* self)
@@ -371,7 +396,7 @@ class JitCodeCache {
   class JniStubData;
 
   // Lock for guarding allocations, collections, and the method_code_map_.
-  Mutex lock_;
+  Mutex lock_ BOTTOM_MUTEX_ACQUIRED_AFTER;
   // Condition to wait on during collection.
   ConditionVariable lock_cond_ GUARDED_BY(lock_);
   // Whether there is a code cache collection in progress.
@@ -409,10 +434,6 @@ class JitCodeCache {
 
   // Whether the last collection round increased the code cache.
   bool last_collection_increased_code_cache_ GUARDED_BY(lock_);
-
-  // Last time the the code_cache was updated.
-  // It is atomic to avoid locking when reading it.
-  Atomic<uint64_t> last_update_time_ns_;
 
   // Whether we can do garbage collection. Not 'const' as tests may override this.
   bool garbage_collect_code_;

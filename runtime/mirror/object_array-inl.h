@@ -32,19 +32,21 @@
 #include "object-inl.h"
 #include "runtime.h"
 #include "thread.h"
+#include "write_barrier-inl.h"
 
 namespace art {
 namespace mirror {
 
 template<class T>
-inline ObjectArray<T>* ObjectArray<T>::Alloc(Thread* self,
-                                             ObjPtr<Class> object_array_class,
-                                             int32_t length, gc::AllocatorType allocator_type) {
-  Array* array = Array::Alloc<true>(self,
-                                    object_array_class.Ptr(),
-                                    length,
-                                    ComponentSizeShiftWidth(kHeapReferenceSize),
-                                    allocator_type);
+inline ObjPtr<ObjectArray<T>> ObjectArray<T>::Alloc(Thread* self,
+                                                    ObjPtr<Class> object_array_class,
+                                                    int32_t length,
+                                                    gc::AllocatorType allocator_type) {
+  ObjPtr<Array> array = Array::Alloc<true>(self,
+                                           object_array_class,
+                                           length,
+                                           ComponentSizeShiftWidth(kHeapReferenceSize),
+                                           allocator_type);
   if (UNLIKELY(array == nullptr)) {
     return nullptr;
   }
@@ -54,9 +56,9 @@ inline ObjectArray<T>* ObjectArray<T>::Alloc(Thread* self,
 }
 
 template<class T>
-inline ObjectArray<T>* ObjectArray<T>::Alloc(Thread* self,
-                                             ObjPtr<Class> object_array_class,
-                                             int32_t length) {
+inline ObjPtr<ObjectArray<T>> ObjectArray<T>::Alloc(Thread* self,
+                                                    ObjPtr<Class> object_array_class,
+                                                    int32_t length) {
   return Alloc(self,
                object_array_class,
                length,
@@ -196,7 +198,7 @@ inline void ObjectArray<T>::AssignableMemmove(int32_t dst_pos,
       }
     }
   }
-  Runtime::Current()->GetHeap()->WriteBarrierArray(this, dst_pos, count);
+  WriteBarrier::ForArrayWrite(this, dst_pos, count);
   if (kIsDebugBuild) {
     for (int i = 0; i < count; ++i) {
       // The get will perform the VerifyObject.
@@ -245,7 +247,7 @@ inline void ObjectArray<T>::AssignableMemcpy(int32_t dst_pos,
       SetWithoutChecksAndWriteBarrier<false>(dst_pos + i, obj);
     }
   }
-  Runtime::Current()->GetHeap()->WriteBarrierArray(this, dst_pos, count);
+  WriteBarrier::ForArrayWrite(this, dst_pos, count);
   if (kIsDebugBuild) {
     for (int i = 0; i < count; ++i) {
       // The get will perform the VerifyObject.
@@ -327,7 +329,7 @@ inline void ObjectArray<T>::AssignableCheckingMemcpy(int32_t dst_pos,
       }
     }
   }
-  Runtime::Current()->GetHeap()->WriteBarrierArray(this, dst_pos, count);
+  WriteBarrier::ForArrayWrite(this, dst_pos, count);
   if (UNLIKELY(i != count)) {
     std::string actualSrcType(mirror::Object::PrettyTypeOf(o));
     std::string dstType(PrettyTypeOf());
@@ -346,7 +348,7 @@ inline void ObjectArray<T>::AssignableCheckingMemcpy(int32_t dst_pos,
 }
 
 template<class T>
-inline ObjectArray<T>* ObjectArray<T>::CopyOf(Thread* self, int32_t new_length) {
+inline ObjPtr<ObjectArray<T>> ObjectArray<T>::CopyOf(Thread* self, int32_t new_length) {
   DCHECK_GE(new_length, 0);
   // We may get copied by a compacting GC.
   StackHandleScope<1> hs(self);
@@ -354,7 +356,7 @@ inline ObjectArray<T>* ObjectArray<T>::CopyOf(Thread* self, int32_t new_length) 
   gc::Heap* heap = Runtime::Current()->GetHeap();
   gc::AllocatorType allocator_type = heap->IsMovableObject(this) ? heap->GetCurrentAllocator() :
       heap->GetCurrentNonMovingAllocator();
-  ObjectArray<T>* new_array = Alloc(self, GetClass(), new_length, allocator_type);
+  ObjPtr<ObjectArray<T>> new_array = Alloc(self, GetClass(), new_length, allocator_type);
   if (LIKELY(new_array != nullptr)) {
     new_array->AssignableMemcpy(0, h_this.Get(), 0, std::min(h_this->GetLength(), new_length));
   }

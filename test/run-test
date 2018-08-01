@@ -41,19 +41,25 @@ else
 fi
 checker="${progdir}/../tools/checker/checker.py"
 export JAVA="java"
-export JAVAC="javac -g -Xlint:-options"
+export JAVAC="javac -g -Xlint:-options -source 1.8 -target 1.8"
 export RUN="${progdir}/etc/run-test-jar"
 export DEX_LOCATION=/data/run-test/${test_dir}
 export NEED_DEX="true"
-export USE_D8="false"
-export USE_JACK="false"
+export USE_D8="true"
 export USE_DESUGAR="true"
 export SMALI_ARGS=""
 
+# If d8 was not set by the environment variable, assume it is in the path.
+if [ -z "$D8" ]; then
+  export D8="d8"
+fi
+
 # If dx was not set by the environment variable, assume it is in the path.
 if [ -z "$DX" ]; then
-  export DX="dx"
+  export DX="d8-compat-dx"
 fi
+
+export DEXMERGER="$D8"
 
 # If jasmin was not set by the environment variable, assume it is in the path.
 if [ -z "$JASMIN" ]; then
@@ -65,16 +71,6 @@ if [ -z "$SMALI" ]; then
   export SMALI="smali"
 fi
 
-# If dexmerger was not set by the environment variable, assume it is in the path.
-if [ -z "$DXMERGER" ]; then
-  export DXMERGER="dexmerger"
-fi
-
-# If jack was not set by the environment variable, assume it is in the path.
-if [ -z "$JACK" ]; then
-  export JACK="jack"
-fi
-
 # ANDROID_BUILD_TOP is not set in a build environment.
 if [ -z "$ANDROID_BUILD_TOP" ]; then
     export ANDROID_BUILD_TOP=$oldwd
@@ -84,13 +80,6 @@ fi
 if [ -z "$ANDROID_HOST_OUT" ]; then
     export ANDROID_HOST_OUT=${OUT_DIR:-$ANDROID_BUILD_TOP/out}/host/linux-x86
 fi
-
-# If JACK_CLASSPATH is not set, assume it only contains core-libart.
-if [ -z "$JACK_CLASSPATH" ]; then
-  export JACK_CLASSPATH="${ANDROID_HOST_OUT}/../common/obj/JAVA_LIBRARIES/core-libart-hostdex_intermediates/classes.jack:${ANDROID_HOST_OUT}/../common/obj/JAVA_LIBRARIES/core-oj-hostdex_intermediates/classes.jack"
-fi
-
-export JACK="$JACK -g -cp $JACK_CLASSPATH"
 
 # Allow changing DESUGAR script to something else, or to disable it with DESUGAR=false.
 if [ -z "$DESUGAR" ]; then
@@ -118,6 +107,8 @@ export ZIPALIGN
 if [ -z "$HIDDENAPI" ]; then
   export HIDDENAPI="${ANDROID_HOST_OUT}/bin/hiddenapi"
 fi
+
+chroot=
 
 info="info.txt"
 build="build"
@@ -193,7 +184,6 @@ while true; do
         image_args=""
         prebuild_mode="no"
         NEED_DEX="false"
-        USE_JACK="false"
         run_args="${run_args} --jvm"
         shift
     elif [ "x$1" = "x-O" ]; then
@@ -363,15 +353,6 @@ while true; do
     elif [ "x$1" = "x--build-only" ]; then
         build_only="yes"
         shift
-    elif [ "x$1" = "x--build-with-d8" ]; then
-        USE_D8="true"
-        shift
-    elif [ "x$1" = "x--build-with-javac-dx" ]; then
-        USE_JACK="false"
-        shift
-    elif [ "x$1" = "x--build-with-jack" ]; then
-        USE_JACK="true"
-        shift
     elif [ "x$1" = "x--output-path" ]; then
         shift
         tmp_dir=$1
@@ -380,6 +361,16 @@ while true; do
             usage="yes"
             break
         fi
+        shift
+    elif [ "x$1" = "x--chroot" ]; then
+        shift
+        if [ "x$1" = "x" ]; then
+            echo "$0 missing argument to --chroot" 1>&2
+            usage="yes"
+            break
+        fi
+        chroot="$1"
+        run_args="${run_args} --chroot $1"
         shift
     elif [ "x$1" = "x--android-root" ]; then
         shift
@@ -450,6 +441,14 @@ while true; do
     fi
 done
 
+if [ "$usage" = "no" -a "x$1" = "x" ]; then
+  echo "missing test to run" 1>&2
+  usage="yes"
+fi
+
+# The DEX_LOCATION with the chroot prefix, if any.
+chroot_dex_location="$chroot$DEX_LOCATION"
+
 run_args="${run_args} ${image_args}"
 # Allocate file descriptor real_stderr and redirect it to the shell's error
 # output (fd 2).
@@ -477,7 +476,7 @@ function err_echo() {
 # tmp_dir may be relative, resolve.
 #
 # Cannot use realpath, as it does not exist on Mac.
-# Cannot us a simple "cd", as the path might not be created yet.
+# Cannot use a simple "cd", as the path might not be created yet.
 # Cannot use readlink -m, as it does not exist on Mac.
 # Fallback to nuclear option:
 noncanonical_tmp_dir=$tmp_dir
@@ -530,12 +529,27 @@ fi
 # Most interesting target architecture variables are Makefile variables, not environment variables.
 # Try to map the suffix64 flag and what we find in ${ANDROID_PRODUCT_OUT}/data/art-test to an architecture name.
 function guess_target_arch_name() {
-    grep32bit=`ls ${ANDROID_PRODUCT_OUT}/data/art-test | grep -E '^(arm|x86|mips)$'`
-    grep64bit=`ls ${ANDROID_PRODUCT_OUT}/data/art-test | grep -E '^(arm64|x86_64|mips64)$'`
-    if [ "x${suffix64}" = "x64" ]; then
-        target_arch_name=${grep64bit}
+    # Check whether this is a device with native bridge. Currently this is hardcoded
+    # to x86 + arm.
+    x86_arm=`ls ${ANDROID_PRODUCT_OUT}/data/art-test | sort | grep -E '^(arm|x86)$'`
+    # Collapse line-breaks into spaces
+    x86_arm=$(echo $x86_arm)
+    if [ "x$x86_arm" = "xarm x86" ] ; then
+        err_echo "Native-bridge configuration detected."
+        # We only support the main arch for tests.
+        if [ "x${suffix64}" = "x64" ]; then
+            target_arch_name=""
+        else
+            target_arch_name=x86
+        fi
     else
-        target_arch_name=${grep32bit}
+        grep32bit=`ls ${ANDROID_PRODUCT_OUT}/data/art-test | grep -E '^(arm|x86|mips)$'`
+        grep64bit=`ls ${ANDROID_PRODUCT_OUT}/data/art-test | grep -E '^(arm64|x86_64|mips64)$'`
+        if [ "x${suffix64}" = "x64" ]; then
+            target_arch_name=${grep64bit}
+        else
+            target_arch_name=${grep32bit}
+        fi
     fi
 }
 
@@ -551,7 +565,13 @@ if [ "$target_mode" = "no" ]; then
     if [ "$runtime" = "jvm" ]; then
         if [ "$prebuild_mode" = "yes" ]; then
             err_echo "--prebuild with --jvm is unsupported"
-            exit 1;
+            exit 1
+        fi
+    else
+        # ART/Dalvik host mode.
+        if [ -n "$chroot" ]; then
+            err_echo "--chroot with --host is unsupported"
+            exit 1
         fi
     fi
 fi
@@ -629,6 +649,12 @@ if [ "$bisection_search" = "yes" -a "$have_patchoat" = "no" ]; then
     usage="yes"
 fi
 
+# TODO: Chroot-based bisection search is not supported yet (see below); implement it.
+if [ "$bisection_search" = "yes" -a -n "$chroot" ]; then
+  err_echo "--chroot with --bisection-search is unsupported"
+  exit 1
+fi
+
 if [ "$usage" = "no" ]; then
     if [ "x$1" = "x" -o "x$1" = "x-" ]; then
         test_dir=`basename "$oldwd"`
@@ -647,13 +673,6 @@ if [ "$usage" = "no" ]; then
     # Shift to get rid of the test name argument. The rest of the arguments
     # will get passed to the test run.
     shift
-fi
-
-# For building with javac and dx always use Java 7. The dx compiler
-# only support byte codes from Java 7 or earlier (class file major
-# version 51 or lower).
-if [ "$USE_JACK" != "true" ] && [ "$NEED_DEX" = "true" ]; then
-  export JAVAC="${JAVAC} -source 1.7 -target 1.7"
 fi
 
 if [ "$usage" = "yes" ]; then
@@ -685,9 +704,6 @@ if [ "$usage" = "yes" ]; then
         echo "    --gdb                 Run under gdb; incompatible with some tests."
         echo "    --gdb-arg             Pass an option to gdb."
         echo "    --build-only          Build test files only (off by default)."
-        echo "    --build-with-d8       Build test files with javac and d8 (off by default)."
-        echo "    --build-with-javac-dx Build test files with javac and dx (off by default)."
-        echo "    --build-with-jack     Build test files with jack and jill (on by default)."
         echo "    --interpreter         Enable interpreter only mode (off by default)."
         echo "    --jit                 Enable jit (off by default)."
         echo "    --optimizing          Enable optimizing compiler (default)."
@@ -733,6 +749,7 @@ if [ "$usage" = "yes" ]; then
         echo "                          Run with jvmti method redefinition stress testing"
         echo "    --always-clean        Delete the test files even if the test fails."
         echo "    --never-clean         Keep the test files even if the test succeeds."
+        echo "    --chroot [newroot]    Run with root directory set to newroot."
         echo "    --android-root [path] The path on target for the android root. (/system by default)."
         echo "    --dex2oat-swap        Use a dex2oat swap file."
         echo "    --instruction-set-features [string]"
@@ -867,7 +884,7 @@ if [ "$dev_mode" = "yes" ]; then
         if [ "$run_exit" = "0" ]; then
             if [ "$run_checker" = "yes" ]; then
                 if [ "$target_mode" = "yes" ]; then
-                  adb pull $cfg_output_dir/$cfg_output &> /dev/null
+                  adb pull "$chroot/$cfg_output_dir/$cfg_output" &> /dev/null
                 fi
                 "$checker" $checker_args "$cfg_output" "$tmp_dir" 2>&1
                 checker_exit="$?"
@@ -889,7 +906,7 @@ elif [ "$update_mode" = "yes" ]; then
         "./${run}" $run_args "$@" >"$output" 2>&1
         if [ "$run_checker" = "yes" ]; then
           if [ "$target_mode" = "yes" ]; then
-            adb pull $cfg_output_dir/$cfg_output &> /dev/null
+            adb pull "$chroot/$cfg_output_dir/$cfg_output" &> /dev/null
           fi
           "$checker" -q $checker_args "$cfg_output" "$tmp_dir" >> "$output" 2>&1
         fi
@@ -927,7 +944,7 @@ else
             good_run="no"
         elif [ "$run_checker" = "yes" ]; then
             if [ "$target_mode" = "yes" ]; then
-              adb pull $cfg_output_dir/$cfg_output &> /dev/null
+              adb pull "$chroot/$cfg_output_dir/$cfg_output" &> /dev/null
             fi
             "$checker" -q $checker_args "$cfg_output" "$tmp_dir" >> "$output" 2>&1
             checker_exit="$?"
@@ -987,6 +1004,7 @@ fi
 ) 2>&${real_stderr} 1>&2
 
 # Attempt bisection only if the test failed.
+# TODO: Implement support for chroot-based bisection search.
 if [ "$bisection_search" = "yes" -a "$good" != "yes" ]; then
     # Bisecting works by skipping different optimization passes which breaks checker assertions.
     if [ "$run_checker" == "yes" ]; then
@@ -998,17 +1016,18 @@ if [ "$bisection_search" = "yes" -a "$good" != "yes" ]; then
       maybe_device_mode=""
       raw_cmd=""
       if [ "$target_mode" = "yes" ]; then
-        # Produce cmdline.sh in $DEX_LOCATION. "$@" is passed as a runtime option
+        # Produce cmdline.sh in $chroot_dex_location. "$@" is passed as a runtime option
         # so that cmdline.sh forwards its arguments to dalvikvm. invoke-with is set
         # to exec in order to preserve pid when calling dalvikvm. This is required
         # for bisection search to correctly retrieve logs from device.
         "./${run}" $run_args --runtime-option '"$@"' --invoke-with exec --dry-run "$@" &> /dev/null
-        adb shell chmod u+x "$DEX_LOCATION/cmdline.sh"
+        adb shell chmod u+x "$chroot_dex_location/cmdline.sh"
         maybe_device_mode="--device"
         raw_cmd="$DEX_LOCATION/cmdline.sh"
       else
         raw_cmd="$cwd/${run} --external-log-tags $run_args $@"
       fi
+      # TODO: Pass a `--chroot` option to the bisection_search.py script and use it there.
       $ANDROID_BUILD_TOP/art/tools/bisection_search/bisection_search.py \
         $maybe_device_mode \
         --raw-cmd="$raw_cmd" \
@@ -1024,7 +1043,7 @@ if [ "$always_clean" = "yes" -o "$good" = "yes" ] && [ "$never_clean" = "no" ]; 
     cd "$oldwd"
     rm -rf "$tmp_dir"
     if [ "$target_mode" = "yes" -a "$build_exit" = "0" ]; then
-        adb shell rm -rf $DEX_LOCATION
+        adb shell rm -rf $chroot_dex_location
     fi
     if [ "$good" = "yes" ]; then
         exit 0
@@ -1041,7 +1060,7 @@ fi
     else
         echo "${TEST_NAME} files left in ${tmp_dir} on host"
         if [ "$target_mode" == "yes" ]; then
-            echo "and in ${DEX_LOCATION} on target"
+            echo "and in ${chroot_dex_location} on target"
         fi
     fi
 

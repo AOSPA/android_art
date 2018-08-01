@@ -51,7 +51,7 @@
 #include "handle_scope-inl.h"
 #include "jdwp/jdwp_priv.h"
 #include "jdwp/object_registry.h"
-#include "jni_internal.h"
+#include "jni/jni_internal.h"
 #include "jvalue-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/class.h"
@@ -1388,7 +1388,7 @@ JDWP::JdwpError Dbg::CreateObject(JDWP::RefTypeId class_id, JDWP::ObjectId* new_
     *new_object_id = 0;
     return JDWP::ERR_OUT_OF_MEMORY;
   }
-  *new_object_id = gRegistry->Add(new_object.Ptr());
+  *new_object_id = gRegistry->Add(new_object);
   return JDWP::ERR_NONE;
 }
 
@@ -1404,10 +1404,9 @@ JDWP::JdwpError Dbg::CreateArrayObject(JDWP::RefTypeId array_class_id, uint32_t 
     return error;
   }
   Thread* self = Thread::Current();
-  gc::Heap* heap = Runtime::Current()->GetHeap();
-  mirror::Array* new_array = mirror::Array::Alloc<true>(self, c, length,
-                                                        c->GetComponentSizeShift(),
-                                                        heap->GetCurrentAllocator());
+  gc::AllocatorType allocator_type = Runtime::Current()->GetHeap()->GetCurrentAllocator();
+  ObjPtr<mirror::Array> new_array =
+      mirror::Array::Alloc<true>(self, c, length, c->GetComponentSizeShift(), allocator_type);
   if (new_array == nullptr) {
     DCHECK(self->IsExceptionPending());
     self->ClearException();
@@ -1849,7 +1848,7 @@ static JValue GetArtFieldValue(ArtField* f, mirror::Object* o)
       return field_value;
 
     case Primitive::kPrimNot:
-      field_value.SetL(f->GetObject(o).Ptr());
+      field_value.SetL(f->GetObject(o));
       return field_value;
 
     case Primitive::kPrimVoid:
@@ -4359,9 +4358,11 @@ bool Dbg::DdmHandleChunk(JNIEnv* env,
           WellKnownClasses::org_apache_harmony_dalvik_ddmc_DdmServer_dispatch,
           type, dataArray.get(), 0, data.size()));
   if (env->ExceptionCheck()) {
-    LOG(INFO) << StringPrintf("Exception thrown by dispatcher for 0x%08x", type);
-    env->ExceptionDescribe();
-    env->ExceptionClear();
+    Thread* self = Thread::Current();
+    ScopedObjectAccess soa(self);
+    LOG(INFO) << StringPrintf("Exception thrown by dispatcher for 0x%08x", type) << std::endl
+              << self->GetException()->Dump();
+    self->ClearException();
     return false;
   }
 
@@ -4405,10 +4406,11 @@ bool Dbg::DdmHandleChunk(JNIEnv* env,
                           reinterpret_cast<jbyte*>(out_data->data()));
 
   if (env->ExceptionCheck()) {
+    Thread* self = Thread::Current();
+    ScopedObjectAccess soa(self);
     LOG(INFO) << StringPrintf("Exception thrown when reading response data from dispatcher 0x%08x",
-                              type);
-    env->ExceptionDescribe();
-    env->ExceptionClear();
+                              type) << std::endl << self->GetException()->Dump();
+    self->ClearException();
     return false;
   }
 

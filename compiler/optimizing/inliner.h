@@ -19,8 +19,8 @@
 
 #include "dex/dex_file_types.h"
 #include "dex/invoke_type.h"
-#include "jit/profile_compilation_info.h"
 #include "optimization.h"
+#include "profile/profile_compilation_info.h"
 
 namespace art {
 
@@ -60,7 +60,7 @@ class HInliner : public HOptimization {
         handles_(handles),
         inline_stats_(nullptr) {}
 
-  void Run() OVERRIDE;
+  bool Run() OVERRIDE;
 
   static constexpr const char* kInlinerPassName = "inliner";
 

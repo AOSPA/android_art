@@ -35,6 +35,7 @@
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "class_linker-inl.h"
+#include "class_root.h"
 #include "common_dex_operations.h"
 #include "common_throws.h"
 #include "dex/dex_file-inl.h"
@@ -217,7 +218,7 @@ static inline ObjPtr<mirror::MethodHandle> ResolveMethodHandle(Thread* self,
 }
 
 static inline ObjPtr<mirror::MethodType> ResolveMethodType(Thread* self,
-                                                           uint32_t method_type_index,
+                                                           dex::ProtoIndex method_type_index,
                                                            ArtMethod* referrer)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
@@ -241,7 +242,15 @@ bool DoInvokePolymorphic(Thread* self,
                          ShadowFrame& shadow_frame,
                          const Instruction* inst,
                          uint16_t inst_data,
-                         JValue* result);
+                         JValue* result)
+    REQUIRES_SHARED(Locks::mutator_lock_);
+
+bool DoInvokeCustom(Thread* self,
+                    ShadowFrame& shadow_frame,
+                    uint32_t call_site_idx,
+                    const InstructionOperands* operands,
+                    JValue* result)
+    REQUIRES_SHARED(Locks::mutator_lock_);
 
 // Performs a custom invoke (invoke-custom/invoke-custom-range).
 template<bool is_range>
@@ -249,7 +258,19 @@ bool DoInvokeCustom(Thread* self,
                     ShadowFrame& shadow_frame,
                     const Instruction* inst,
                     uint16_t inst_data,
-                    JValue* result);
+                    JValue* result)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  const uint32_t call_site_idx = is_range ? inst->VRegB_3rc() : inst->VRegB_35c();
+  if (is_range) {
+    RangeInstructionOperands operands(inst->VRegC_3rc(), inst->VRegA_3rc());
+    return DoInvokeCustom(self, shadow_frame, call_site_idx, &operands, result);
+  } else {
+    uint32_t args[Instruction::kMaxVarArgRegs];
+    inst->GetVarArgs(args, inst_data);
+    VarArgsInstructionOperands operands(args, inst->VRegA_35c());
+    return DoInvokeCustom(self, shadow_frame, call_site_idx, &operands, result);
+  }
+}
 
 // Handles invoke-virtual-quick and invoke-virtual-quick-range instructions.
 // Returns true on success, otherwise throws an exception and returns false.
@@ -328,7 +349,7 @@ static inline ObjPtr<mirror::String> ResolveString(Thread* self,
                                                    ShadowFrame& shadow_frame,
                                                    dex::StringIndex string_idx)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  ObjPtr<mirror::Class> java_lang_string_class = mirror::String::GetJavaLangString();
+  ObjPtr<mirror::Class> java_lang_string_class = GetClassRoot<mirror::String>();
   if (UNLIKELY(!java_lang_string_class->IsInitialized())) {
     ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
     StackHandleScope<1> hs(self);
@@ -339,12 +360,8 @@ static inline ObjPtr<mirror::String> ResolveString(Thread* self,
     }
   }
   ArtMethod* method = shadow_frame.GetMethod();
-  ObjPtr<mirror::String> string_ptr = method->GetDexCache()->GetResolvedString(string_idx);
-  if (UNLIKELY(string_ptr == nullptr)) {
-    StackHandleScope<1> hs(self);
-    Handle<mirror::DexCache> dex_cache(hs.NewHandle(method->GetDexCache()));
-    string_ptr = Runtime::Current()->GetClassLinker()->ResolveString(string_idx, dex_cache);
-  }
+  ObjPtr<mirror::String> string_ptr =
+      Runtime::Current()->GetClassLinker()->ResolveString(string_idx, method);
   return string_ptr;
 }
 
@@ -541,24 +558,6 @@ static inline void TraceExecution(const ShadowFrame& shadow_frame, const Instruc
 
 static inline bool IsBackwardBranch(int32_t branch_offset) {
   return branch_offset <= 0;
-}
-
-// Assign register 'src_reg' from shadow_frame to register 'dest_reg' into new_shadow_frame.
-static inline void AssignRegister(ShadowFrame* new_shadow_frame, const ShadowFrame& shadow_frame,
-                                  size_t dest_reg, size_t src_reg)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  // Uint required, so that sign extension does not make this wrong on 64b systems
-  uint32_t src_value = shadow_frame.GetVReg(src_reg);
-  ObjPtr<mirror::Object> o = shadow_frame.GetVRegReference<kVerifyNone>(src_reg);
-
-  // If both register locations contains the same value, the register probably holds a reference.
-  // Note: As an optimization, non-moving collectors leave a stale reference value
-  // in the references array even after the original vreg was overwritten to a non-reference.
-  if (src_value == reinterpret_cast<uintptr_t>(o.Ptr())) {
-    new_shadow_frame->SetVRegReference(dest_reg, o.Ptr());
-  } else {
-    new_shadow_frame->SetVReg(dest_reg, src_value);
-  }
 }
 
 // The arg_offset is the offset to the first input register in the frame.

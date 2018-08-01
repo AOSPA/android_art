@@ -21,20 +21,20 @@
 #include "arch/instruction_set_features.h"
 #include "base/arena_containers.h"
 #include "base/arena_object.h"
+#include "base/array_ref.h"
 #include "base/bit_field.h"
 #include "base/bit_utils.h"
 #include "base/enums.h"
+#include "base/globals.h"
+#include "base/memory_region.h"
 #include "dex/string_reference.h"
 #include "dex/type_reference.h"
-#include "globals.h"
 #include "graph_visualizer.h"
 #include "locations.h"
-#include "memory_region.h"
 #include "nodes.h"
 #include "optimizing_compiler_stats.h"
 #include "read_barrier_option.h"
 #include "stack.h"
-#include "stack_map.h"
 #include "utils/label.h"
 
 namespace art {
@@ -74,6 +74,7 @@ class CodeAllocator {
   virtual ~CodeAllocator() {}
 
   virtual uint8_t* Allocate(size_t size) = 0;
+  virtual ArrayRef<const uint8_t> GetMemory() const = 0;
 
  private:
   DISALLOW_COPY_AND_ASSIGN(CodeAllocator);
@@ -187,8 +188,6 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   // Compiles the graph to executable instructions.
   void Compile(CodeAllocator* allocator);
   static std::unique_ptr<CodeGenerator> Create(HGraph* graph,
-                                               InstructionSet instruction_set,
-                                               const InstructionSetFeatures& isa_features,
                                                const CompilerOptions& compiler_options,
                                                OptimizingCompilerStats* stats = nullptr);
   virtual ~CodeGenerator();
@@ -210,6 +209,10 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   virtual void Initialize() = 0;
   virtual void Finalize(CodeAllocator* allocator);
   virtual void EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linker_patches);
+  virtual bool NeedsThunkCode(const linker::LinkerPatch& patch) const;
+  virtual void EmitThunkCode(const linker::LinkerPatch& patch,
+                             /*out*/ ArenaVector<uint8_t>* code,
+                             /*out*/ std::string* debug_name);
   virtual void GenerateFrameEntry() = 0;
   virtual void GenerateFrameExit() = 0;
   virtual void Bind(HBasicBlock* block) = 0;
@@ -318,7 +321,10 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   }
 
   // Record native to dex mapping for a suspend point.  Required by runtime.
-  void RecordPcInfo(HInstruction* instruction, uint32_t dex_pc, SlowPathCode* slow_path = nullptr);
+  void RecordPcInfo(HInstruction* instruction,
+                    uint32_t dex_pc,
+                    SlowPathCode* slow_path = nullptr,
+                    bool native_debug_info = false);
   // Check whether we have already recorded mapping at this PC.
   bool HasStackMapAtCurrentPc();
   // Record extra stack maps if we support native debugging.
@@ -438,6 +444,8 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
       case TypeCheckKind::kArrayCheck:
       case TypeCheckKind::kUnresolvedCheck:
         return false;
+      case TypeCheckKind::kBitstringCheck:
+        return true;
     }
     LOG(FATAL) << "Unreachable";
     UNREACHABLE();
@@ -535,9 +543,12 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
 
   void GenerateInvokeStaticOrDirectRuntimeCall(
       HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path);
+
   void GenerateInvokeUnresolvedRuntimeCall(HInvokeUnresolved* invoke);
 
   void GenerateInvokePolymorphicCall(HInvokePolymorphic* invoke);
+
+  void GenerateInvokeCustomCall(HInvokeCustom* invoke);
 
   void CreateUnresolvedFieldLocationSummary(
       HInstruction* field_access,
@@ -555,6 +566,20 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
                                                         Location runtime_type_index_location,
                                                         Location runtime_return_location);
   void GenerateLoadClassRuntimeCall(HLoadClass* cls);
+
+  static void CreateLoadMethodHandleRuntimeCallLocationSummary(HLoadMethodHandle* method_handle,
+                                                             Location runtime_handle_index_location,
+                                                             Location runtime_return_location);
+  void GenerateLoadMethodHandleRuntimeCall(HLoadMethodHandle* method_handle);
+
+  static void CreateLoadMethodTypeRuntimeCallLocationSummary(HLoadMethodType* method_type,
+                                                             Location runtime_type_index_location,
+                                                             Location runtime_return_location);
+  void GenerateLoadMethodTypeRuntimeCall(HLoadMethodType* method_type);
+
+  uint32_t GetBootImageOffset(HLoadClass* load_class);
+  uint32_t GetBootImageOffset(HLoadString* load_string);
+  uint32_t GetBootImageOffset(HInvokeStaticOrDirect* invoke);
 
   static void CreateSystemArrayCopyLocationSummary(HInvoke* invoke);
 

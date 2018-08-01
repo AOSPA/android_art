@@ -18,7 +18,6 @@
 #define ART_RUNTIME_MIRROR_METHOD_HANDLES_LOOKUP_H_
 
 #include "base/utils.h"
-#include "gc_root.h"
 #include "handle.h"
 #include "obj_ptr.h"
 #include "object.h"
@@ -39,14 +38,6 @@ class MANAGED MethodHandlesLookup : public Object {
   static mirror::MethodHandlesLookup* Create(Thread* const self,
                                              Handle<Class> lookup_class)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_);
-
-  static mirror::Class* StaticClass() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return static_class_.Read();
-  }
-
-  static void SetClass(Class* klass) REQUIRES_SHARED(Locks::mutator_lock_);
-  static void ResetClass() REQUIRES_SHARED(Locks::mutator_lock_);
-  static void VisitRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Returns the result of java.lang.invoke.MethodHandles.lookup().
   static mirror::MethodHandlesLookup* GetDefault(Thread* const self)
@@ -70,8 +61,6 @@ class MANAGED MethodHandlesLookup : public Object {
   HeapReference<mirror::Class> lookup_class_;
 
   int32_t allowed_modes_;
-
-  static GcRoot<mirror::Class> static_class_;  // java.lang.invoke.MethodHandles.Lookup.class
 
   friend struct art::MethodHandlesLookupOffsets;  // for verifying offset information
   DISALLOW_IMPLICIT_CONSTRUCTORS(MethodHandlesLookup);

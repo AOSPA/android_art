@@ -262,14 +262,14 @@ class SchedulingGraph : public ValueObject {
     std::unique_ptr<SchedulingNode> node(
         new (allocator_) SchedulingNode(instr, allocator_, is_scheduling_barrier));
     SchedulingNode* result = node.get();
-    nodes_map_.Insert(std::make_pair(instr, std::move(node)));
+    nodes_map_.insert(std::make_pair(instr, std::move(node)));
     contains_scheduling_barrier_ |= is_scheduling_barrier;
     AddDependencies(instr, is_scheduling_barrier);
     return result;
   }
 
   void Clear() {
-    nodes_map_.Clear();
+    nodes_map_.clear();
     contains_scheduling_barrier_ = false;
   }
 
@@ -278,7 +278,7 @@ class SchedulingGraph : public ValueObject {
   }
 
   SchedulingNode* GetNode(const HInstruction* instr) const {
-    auto it = nodes_map_.Find(instr);
+    auto it = nodes_map_.find(instr);
     if (it == nodes_map_.end()) {
       return nullptr;
     } else {
@@ -294,7 +294,7 @@ class SchedulingGraph : public ValueObject {
   bool HasImmediateOtherDependency(const HInstruction* node, const HInstruction* other) const;
 
   size_t Size() const {
-    return nodes_map_.Size();
+    return nodes_map_.size();
   }
 
   // Dump the scheduling graph, in dot file format, appending it to the file
@@ -310,12 +310,12 @@ class SchedulingGraph : public ValueObject {
   void AddOtherDependency(SchedulingNode* node, SchedulingNode* dependency) {
     AddDependency(node, dependency, /*is_data_dependency*/false);
   }
-  bool HasMemoryDependency(const HInstruction* node, const HInstruction* other) const;
+  bool HasMemoryDependency(HInstruction* node, HInstruction* other) const;
   bool HasExceptionDependency(const HInstruction* node, const HInstruction* other) const;
-  bool HasSideEffectDependency(const HInstruction* node, const HInstruction* other) const;
-  bool ArrayAccessMayAlias(const HInstruction* node, const HInstruction* other) const;
+  bool HasSideEffectDependency(HInstruction* node, HInstruction* other) const;
+  bool ArrayAccessMayAlias(HInstruction* node, HInstruction* other) const;
   bool FieldAccessMayAlias(const HInstruction* node, const HInstruction* other) const;
-  size_t ArrayAccessHeapLocation(HInstruction* array, HInstruction* index) const;
+  size_t ArrayAccessHeapLocation(HInstruction* instruction) const;
   size_t FieldAccessHeapLocation(HInstruction* obj, const FieldInfo* field) const;
 
   // Add dependencies nodes for the given `HInstruction`: inputs, environments, and side-effects.
@@ -508,10 +508,11 @@ class HInstructionScheduling : public HOptimization {
         codegen_(cg),
         instruction_set_(instruction_set) {}
 
-  void Run() {
-    Run(/*only_optimize_loop_blocks*/ true, /*schedule_randomly*/ false);
+  bool Run() OVERRIDE {
+    return Run(/*only_optimize_loop_blocks*/ true, /*schedule_randomly*/ false);
   }
-  void Run(bool only_optimize_loop_blocks, bool schedule_randomly);
+
+  bool Run(bool only_optimize_loop_blocks, bool schedule_randomly);
 
   static constexpr const char* kInstructionSchedulingPassName = "scheduler";
 

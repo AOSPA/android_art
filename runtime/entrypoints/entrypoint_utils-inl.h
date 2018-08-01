@@ -31,7 +31,7 @@
 #include "imt_conflict_table.h"
 #include "imtable-inl.h"
 #include "indirect_reference_table.h"
-#include "jni_internal.h"
+#include "jni/jni_internal.h"
 #include "mirror/array.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
@@ -46,9 +46,7 @@ namespace art {
 
 inline ArtMethod* GetResolvedMethod(ArtMethod* outer_method,
                                     const MethodInfo& method_info,
-                                    const InlineInfo& inline_info,
-                                    const InlineInfoEncoding& encoding,
-                                    uint8_t inlining_depth)
+                                    const BitTableRange<InlineInfo>& inline_infos)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   DCHECK(!outer_method->IsObsolete());
 
@@ -57,25 +55,29 @@ inline ArtMethod* GetResolvedMethod(ArtMethod* outer_method,
   // suspended while executing it.
   ScopedAssertNoThreadSuspension sants(__FUNCTION__);
 
-  if (inline_info.EncodesArtMethodAtDepth(encoding, inlining_depth)) {
-    return inline_info.GetArtMethodAtDepth(encoding, inlining_depth);
-  }
+  {
+    InlineInfo inline_info = inline_infos.back();
 
-  uint32_t method_index = inline_info.GetMethodIndexAtDepth(encoding, method_info, inlining_depth);
-  if (inline_info.GetDexPcAtDepth(encoding, inlining_depth) == static_cast<uint32_t>(-1)) {
-    // "charAt" special case. It is the only non-leaf method we inline across dex files.
-    ArtMethod* inlined_method = jni::DecodeArtMethod(WellKnownClasses::java_lang_String_charAt);
-    DCHECK_EQ(inlined_method->GetDexMethodIndex(), method_index);
-    return inlined_method;
+    if (inline_info.EncodesArtMethod()) {
+      return inline_info.GetArtMethod();
+    }
+
+    uint32_t method_index = inline_info.GetMethodIndex(method_info);
+    if (inline_info.GetDexPc() == static_cast<uint32_t>(-1)) {
+      // "charAt" special case. It is the only non-leaf method we inline across dex files.
+      ArtMethod* inlined_method = jni::DecodeArtMethod(WellKnownClasses::java_lang_String_charAt);
+      DCHECK_EQ(inlined_method->GetDexMethodIndex(), method_index);
+      return inlined_method;
+    }
   }
 
   // Find which method did the call in the inlining hierarchy.
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   ArtMethod* method = outer_method;
-  for (uint32_t depth = 0, end = inlining_depth + 1u; depth != end; ++depth) {
-    DCHECK(!inline_info.EncodesArtMethodAtDepth(encoding, depth));
-    DCHECK_NE(inline_info.GetDexPcAtDepth(encoding, depth), static_cast<uint32_t>(-1));
-    method_index = inline_info.GetMethodIndexAtDepth(encoding, method_info, depth);
+  for (InlineInfo inline_info : inline_infos) {
+    DCHECK(!inline_info.EncodesArtMethod());
+    DCHECK_NE(inline_info.GetDexPc(), static_cast<uint32_t>(-1));
+    uint32_t method_index = inline_info.GetMethodIndex(method_info);
     ArtMethod* inlined_method = class_linker->LookupResolvedMethod(method_index,
                                                                    method->GetDexCache(),
                                                                    method->GetClassLoader());
@@ -269,14 +271,14 @@ inline mirror::Class* CheckArrayAlloc(dex::TypeIndex type_idx,
 // check.
 template <bool kAccessCheck, bool kInstrumented>
 ALWAYS_INLINE
-inline mirror::Array* AllocArrayFromCode(dex::TypeIndex type_idx,
-                                         int32_t component_count,
-                                         ArtMethod* method,
-                                         Thread* self,
-                                         gc::AllocatorType allocator_type) {
+inline ObjPtr<mirror::Array> AllocArrayFromCode(dex::TypeIndex type_idx,
+                                                int32_t component_count,
+                                                ArtMethod* method,
+                                                Thread* self,
+                                                gc::AllocatorType allocator_type) {
   bool slow_path = false;
-  mirror::Class* klass = CheckArrayAlloc<kAccessCheck>(type_idx, component_count, method,
-                                                       &slow_path);
+  ObjPtr<mirror::Class> klass =
+      CheckArrayAlloc<kAccessCheck>(type_idx, component_count, method, &slow_path);
   if (UNLIKELY(slow_path)) {
     if (klass == nullptr) {
       return nullptr;
@@ -307,7 +309,7 @@ inline mirror::Array* AllocArrayFromCodeResolved(mirror::Class* klass,
   // No need to retry a slow-path allocation as the above code won't cause a GC or thread
   // suspension.
   return mirror::Array::Alloc<kInstrumented>(self, klass, component_count,
-                                             klass->GetComponentSizeShift(), allocator_type);
+                                             klass->GetComponentSizeShift(), allocator_type).Ptr();
 }
 
 template<FindFieldType type, bool access_check>
@@ -742,33 +744,6 @@ inline ObjPtr<mirror::Class> ResolveVerifyAndClinit(dex::TypeIndex type_idx,
     return nullptr;  // Failure - Indicate to caller to deliver exception
   }
   return h_class.Get();
-}
-
-static inline ObjPtr<mirror::String> ResolveString(ClassLinker* class_linker,
-                                                   dex::StringIndex string_idx,
-                                                   ArtMethod* referrer)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  Thread::PoisonObjectPointersIfDebug();
-  ObjPtr<mirror::String> string = referrer->GetDexCache()->GetResolvedString(string_idx);
-  if (UNLIKELY(string == nullptr)) {
-    StackHandleScope<1> hs(Thread::Current());
-    Handle<mirror::DexCache> dex_cache(hs.NewHandle(referrer->GetDexCache()));
-    string = class_linker->ResolveString(string_idx, dex_cache);
-  }
-  return string;
-}
-
-inline ObjPtr<mirror::String> ResolveStringFromCode(ArtMethod* referrer,
-                                                    dex::StringIndex string_idx) {
-  Thread::PoisonObjectPointersIfDebug();
-  ObjPtr<mirror::String> string = referrer->GetDexCache()->GetResolvedString(string_idx);
-  if (UNLIKELY(string == nullptr)) {
-    StackHandleScope<1> hs(Thread::Current());
-    Handle<mirror::DexCache> dex_cache(hs.NewHandle(referrer->GetDexCache()));
-    ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-    string = class_linker->ResolveString(string_idx, dex_cache);
-  }
-  return string;
 }
 
 inline void UnlockJniSynchronizedMethod(jobject locked, Thread* self) {

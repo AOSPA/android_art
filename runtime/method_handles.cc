@@ -18,9 +18,10 @@
 
 #include "android-base/stringprintf.h"
 
+#include "class_root.h"
 #include "common_dex_operations.h"
+#include "interpreter/shadow_frame-inl.h"
 #include "jvalue-inl.h"
-#include "jvalue.h"
 #include "mirror/emulated_stack_frame.h"
 #include "mirror/method_handle_impl-inl.h"
 #include "mirror/method_type.h"
@@ -267,7 +268,7 @@ bool ConvertJValueCommon(
 
     // Then perform the actual boxing, and then set the reference.
     ObjPtr<mirror::Object> boxed = BoxPrimitive(type, src_value);
-    value->SetL(boxed.Ptr());
+    value->SetL(boxed);
     return true;
   } else {
     // The source type is a reference and the target type is a primitive, so we must unbox.
@@ -322,7 +323,7 @@ inline void CopyArgumentsFromCallerFrame(const ShadowFrame& caller_frame,
     // Note: As an optimization, non-moving collectors leave a stale reference value
     // in the references array even after the original vreg was overwritten to a non-reference.
     if (src_value == reinterpret_cast<uintptr_t>(o.Ptr())) {
-      callee_frame->SetVRegReference(dst_reg, o.Ptr());
+      callee_frame->SetVRegReference(dst_reg, o);
     } else {
       callee_frame->SetVReg(dst_reg, src_value);
     }
@@ -1022,7 +1023,7 @@ bool DoVarHandleInvokeTranslation(Thread* self,
   // Check that the first parameter is a VarHandle
   if (callsite_ptypes->GetLength() < 1 ||
       !mh_ptypes->Get(0)->IsAssignableFrom(callsite_ptypes->Get(0)) ||
-      mh_ptypes->Get(0) != mirror::VarHandle::StaticClass()) {
+      mh_ptypes->Get(0) != GetClassRoot<mirror::VarHandle>()) {
     ThrowWrongMethodTypeException(method_handle->GetMethodType(), callsite_type.Get());
     return false;
   }
@@ -1036,7 +1037,7 @@ bool DoVarHandleInvokeTranslation(Thread* self,
 
   // Cast to VarHandle instance
   Handle<mirror::VarHandle> vh(hs.NewHandle(down_cast<mirror::VarHandle*>(receiver)));
-  DCHECK(mirror::VarHandle::StaticClass()->IsAssignableFrom(vh->GetClass()));
+  DCHECK(GetClassRoot<mirror::VarHandle>()->IsAssignableFrom(vh->GetClass()));
 
   // Determine the accessor kind to dispatch
   ArtMethod* target_method = method_handle->GetTargetMethod();

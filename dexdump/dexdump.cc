@@ -45,6 +45,7 @@
 #include "android-base/logging.h"
 #include "android-base/stringprintf.h"
 
+#include "dex/class_accessor-inl.h"
 #include "dex/code_item_accessors-inl.h"
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_exception_helpers.h"
@@ -611,19 +612,11 @@ static void dumpClassDef(const DexFile* pDexFile, int idx) {
           pClassDef.class_data_off_, pClassDef.class_data_off_);
 
   // Fields and methods.
-  const u1* pEncodedData = pDexFile->GetClassData(pClassDef);
-  if (pEncodedData != nullptr) {
-    ClassDataItemIterator pClassData(*pDexFile, pEncodedData);
-    fprintf(gOutFile, "static_fields_size  : %d\n", pClassData.NumStaticFields());
-    fprintf(gOutFile, "instance_fields_size: %d\n", pClassData.NumInstanceFields());
-    fprintf(gOutFile, "direct_methods_size : %d\n", pClassData.NumDirectMethods());
-    fprintf(gOutFile, "virtual_methods_size: %d\n", pClassData.NumVirtualMethods());
-  } else {
-    fprintf(gOutFile, "static_fields_size  : 0\n");
-    fprintf(gOutFile, "instance_fields_size: 0\n");
-    fprintf(gOutFile, "direct_methods_size : 0\n");
-    fprintf(gOutFile, "virtual_methods_size: 0\n");
-  }
+  ClassAccessor accessor(*pDexFile, idx);
+  fprintf(gOutFile, "static_fields_size  : %d\n", accessor.NumStaticFields());
+  fprintf(gOutFile, "instance_fields_size: %d\n", accessor.NumInstanceFields());
+  fprintf(gOutFile, "direct_methods_size : %d\n", accessor.NumDirectMethods());
+  fprintf(gOutFile, "virtual_methods_size: %d\n", accessor.NumVirtualMethods());
   fprintf(gOutFile, "\n");
 }
 
@@ -786,11 +779,10 @@ static void dumpLocalsCb(void* /*context*/, const DexFile::LocalInfo& entry) {
 static std::unique_ptr<char[]> indexString(const DexFile* pDexFile,
                                            const Instruction* pDecInsn,
                                            size_t bufSize) {
-  static const u4 kInvalidIndex = std::numeric_limits<u4>::max();
   std::unique_ptr<char[]> buf(new char[bufSize]);
   // Determine index and width of the string.
   u4 index = 0;
-  u4 secondary_index = kInvalidIndex;
+  u2 secondary_index = 0;
   u4 width = 4;
   switch (Instruction::FormatOf(pDecInsn->Opcode())) {
     // SOME NOT SUPPORTED:
@@ -898,7 +890,7 @@ static std::unique_ptr<char[]> indexString(const DexFile* pDexFile,
                                              signature.ToString().c_str());
       }
       if (secondary_index < pDexFile->GetHeader().proto_ids_size_) {
-        const DexFile::ProtoId& protoId = pDexFile->GetProtoId(secondary_index);
+        const DexFile::ProtoId& protoId = pDexFile->GetProtoId(dex::ProtoIndex(secondary_index));
         const Signature signature = pDexFile->GetProtoSignature(protoId);
         proto = signature.ToString();
       }
@@ -916,7 +908,7 @@ static std::unique_ptr<char[]> indexString(const DexFile* pDexFile,
       break;
     case Instruction::kIndexProtoRef:
       if (index < pDexFile->GetHeader().proto_ids_size_) {
-        const DexFile::ProtoId& protoId = pDexFile->GetProtoId(index);
+        const DexFile::ProtoId& protoId = pDexFile->GetProtoId(dex::ProtoIndex(index));
         const Signature signature = pDexFile->GetProtoSignature(protoId);
         const std::string& proto = signature.ToString();
         outSize = snprintf(buf.get(), bufSize, "%s // proto@%0*x", proto.c_str(), width, index);
@@ -1705,7 +1697,7 @@ static void dumpCallSite(const DexFile* pDexFile, u4 idx) {
   dex::StringIndex method_name_idx = static_cast<dex::StringIndex>(it.GetJavaValue().i);
   const char* method_name = pDexFile->StringDataByIdx(method_name_idx);
   it.Next();
-  uint32_t method_type_idx = static_cast<uint32_t>(it.GetJavaValue().i);
+  dex::ProtoIndex method_type_idx = static_cast<dex::ProtoIndex>(it.GetJavaValue().i);
   const DexFile::ProtoId& method_type_id = pDexFile->GetProtoId(method_type_idx);
   std::string method_type = pDexFile->GetProtoSignature(method_type_id).ToString();
   it.Next();
@@ -1763,7 +1755,7 @@ static void dumpCallSite(const DexFile* pDexFile, u4 idx) {
         break;
       case EncodedArrayValueIterator::ValueType::kMethodType: {
         type = "MethodType";
-        uint32_t proto_idx = static_cast<uint32_t>(it.GetJavaValue().i);
+        dex::ProtoIndex proto_idx = static_cast<dex::ProtoIndex>(it.GetJavaValue().i);
         const DexFile::ProtoId& proto_id = pDexFile->GetProtoId(proto_idx);
         value = pDexFile->GetProtoSignature(proto_id).ToString();
         break;
@@ -1781,9 +1773,8 @@ static void dumpCallSite(const DexFile* pDexFile, u4 idx) {
       case EncodedArrayValueIterator::ValueType::kType: {
         type = "Class";
         dex::TypeIndex type_idx = static_cast<dex::TypeIndex>(it.GetJavaValue().i);
-        const DexFile::ClassDef* class_def = pDexFile->FindClassDef(type_idx);
-        value = pDexFile->GetClassDescriptor(*class_def);
-        value = descriptorClassToDot(value.c_str()).get();
+        const DexFile::TypeId& type_id = pDexFile->GetTypeId(type_idx);
+        value = pDexFile->GetTypeDescriptor(type_id);
         break;
       }
       case EncodedArrayValueIterator::ValueType::kField:

@@ -37,6 +37,8 @@ static void DefaultInitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qp
   qpoints->pInitializeStaticStorage = art_quick_initialize_static_storage;
   qpoints->pInitializeTypeAndVerifyAccess = art_quick_initialize_type_and_verify_access;
   qpoints->pInitializeType = art_quick_initialize_type;
+  qpoints->pResolveMethodHandle = art_quick_resolve_method_handle;
+  qpoints->pResolveMethodType = art_quick_resolve_method_type;
   qpoints->pResolveString = art_quick_resolve_string;
 
   // Field
@@ -104,6 +106,7 @@ static void DefaultInitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qp
   qpoints->pInvokeVirtualTrampolineWithAccessCheck =
       art_quick_invoke_virtual_trampoline_with_access_check;
   qpoints->pInvokePolymorphic = art_quick_invoke_polymorphic;
+  qpoints->pInvokeCustom = art_quick_invoke_custom;
 
   // Thread
   qpoints->pTestSuspend = art_quick_test_suspend;

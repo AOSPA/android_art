@@ -45,19 +45,18 @@ static_assert(std::is_trivially_copyable<dex::StringIndex>::value, "StringIndex 
 static_assert(sizeof(dex::TypeIndex) == sizeof(uint16_t), "TypeIndex size is wrong");
 static_assert(std::is_trivially_copyable<dex::TypeIndex>::value, "TypeIndex not trivial");
 
-void DexFile::UnHideAccessFlags(ClassDataItemIterator& class_it) {
-  uint8_t* data = const_cast<uint8_t*>(class_it.DataPointer());
-  uint32_t new_flag = class_it.GetMemberAccessFlags();
-  bool is_method = class_it.IsAtMethod();
+void DexFile::UnHideAccessFlags(uint8_t* data_ptr,
+                                uint32_t new_access_flags,
+                                bool is_method) {
   // Go back 1 uleb to start.
-  data = ReverseSearchUnsignedLeb128(data);
+  data_ptr = ReverseSearchUnsignedLeb128(data_ptr);
   if (is_method) {
     // Methods have another uleb field before the access flags
-    data = ReverseSearchUnsignedLeb128(data);
+    data_ptr = ReverseSearchUnsignedLeb128(data_ptr);
   }
-  DCHECK_EQ(HiddenApiAccessFlags::RemoveFromDex(DecodeUnsignedLeb128WithoutMovingCursor(data)),
-            new_flag);
-  UpdateUnsignedLeb128(data, new_flag);
+  DCHECK_EQ(HiddenApiAccessFlags::RemoveFromDex(DecodeUnsignedLeb128WithoutMovingCursor(data_ptr)),
+            new_access_flags);
+  UpdateUnsignedLeb128(data_ptr, new_access_flags);
 }
 
 uint32_t DexFile::CalculateChecksum() const {
@@ -281,7 +280,7 @@ const DexFile::MethodId* DexFile::FindMethodId(const DexFile::TypeId& declaring_
   // Binary search MethodIds knowing that they are sorted by class_idx, name_idx then proto_idx
   const dex::TypeIndex class_idx = GetIndexForTypeId(declaring_klass);
   const dex::StringIndex name_idx = GetIndexForStringId(name);
-  const uint16_t proto_idx = GetIndexForProtoId(signature);
+  const dex::ProtoIndex proto_idx = GetIndexForProtoId(signature);
   int32_t lo = 0;
   int32_t hi = NumMethodIds() - 1;
   while (hi >= lo) {
@@ -349,25 +348,6 @@ const DexFile::TypeId* DexFile::FindTypeId(const char* string) const {
   return nullptr;
 }
 
-const DexFile::StringId* DexFile::FindStringId(const uint16_t* string, size_t length) const {
-  int32_t lo = 0;
-  int32_t hi = NumStringIds() - 1;
-  while (hi >= lo) {
-    int32_t mid = (hi + lo) / 2;
-    const DexFile::StringId& str_id = GetStringId(dex::StringIndex(mid));
-    const char* str = GetStringData(str_id);
-    int compare = CompareModifiedUtf8ToUtf16AsCodePointValues(str, string, length);
-    if (compare > 0) {
-      lo = mid + 1;
-    } else if (compare < 0) {
-      hi = mid - 1;
-    } else {
-      return &str_id;
-    }
-  }
-  return nullptr;
-}
-
 const DexFile::TypeId* DexFile::FindTypeId(dex::StringIndex string_idx) const {
   int32_t lo = 0;
   int32_t hi = NumTypeIds() - 1;
@@ -392,7 +372,8 @@ const DexFile::ProtoId* DexFile::FindProtoId(dex::TypeIndex return_type_idx,
   int32_t hi = NumProtoIds() - 1;
   while (hi >= lo) {
     int32_t mid = (hi + lo) / 2;
-    const DexFile::ProtoId& proto = GetProtoId(mid);
+    const dex::ProtoIndex proto_idx = static_cast<dex::ProtoIndex>(mid);
+    const DexFile::ProtoId& proto = GetProtoId(proto_idx);
     int compare = return_type_idx.index_ - proto.return_type_idx_.index_;
     if (compare == 0) {
       DexFileParameterIterator it(*this, proto);
@@ -624,6 +605,15 @@ std::string DexFile::PrettyType(dex::TypeIndex type_idx) const {
   return PrettyDescriptor(GetTypeDescriptor(type_id));
 }
 
+dex::ProtoIndex DexFile::GetProtoIndexForCallSite(uint32_t call_site_idx) const {
+  const DexFile::CallSiteIdItem& csi = GetCallSiteId(call_site_idx);
+  CallSiteArrayValueIterator it(*this, csi);
+  it.Next();
+  it.Next();
+  DCHECK_EQ(EncodedArrayValueIterator::ValueType::kMethodType, it.GetValueType());
+  return dex::ProtoIndex(it.GetJavaValue().i);
+}
+
 // Checks that visibility is as expected. Includes special behavior for M and
 // before to allow runtime and build visibility when expecting runtime.
 std::ostream& operator<<(std::ostream& os, const DexFile& dex_file) {
@@ -795,6 +785,11 @@ void EncodedArrayValueIterator::Next() {
 }
 
 namespace dex {
+
+std::ostream& operator<<(std::ostream& os, const ProtoIndex& index) {
+  os << "ProtoIndex[" << index.index_ << "]";
+  return os;
+}
 
 std::ostream& operator<<(std::ostream& os, const StringIndex& index) {
   os << "StringIndex[" << index.index_ << "]";

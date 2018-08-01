@@ -31,6 +31,13 @@ class ReadBarrierTable;
 
 namespace space {
 
+// Cyclic region allocation strategy. If `true`, region allocation
+// will not try to allocate a new region from the beginning of the
+// region space, but from the last allocated region. This allocation
+// strategy reduces region reuse and should help catch some GC bugs
+// earlier.
+static constexpr bool kCyclicRegionAllocation = true;
+
 // A space that consists of equal-sized regions.
 class RegionSpace FINAL : public ContinuousMemMapAllocSpace {
  public:
@@ -292,19 +299,26 @@ class RegionSpace FINAL : public ContinuousMemMapAllocSpace {
    public:
     Region()
         : idx_(static_cast<size_t>(-1)),
-          begin_(nullptr), top_(nullptr), end_(nullptr),
-          state_(RegionState::kRegionStateAllocated), type_(RegionType::kRegionTypeToSpace),
-          objects_allocated_(0), alloc_time_(0), live_bytes_(static_cast<size_t>(-1)),
-          is_newly_allocated_(false), is_a_tlab_(false), thread_(nullptr) {}
+          live_bytes_(static_cast<size_t>(-1)),
+          begin_(nullptr),
+          thread_(nullptr),
+          top_(nullptr),
+          end_(nullptr),
+          objects_allocated_(0),
+          alloc_time_(0),
+          is_newly_allocated_(false),
+          is_a_tlab_(false),
+          state_(RegionState::kRegionStateAllocated),
+          type_(RegionType::kRegionTypeToSpace) {}
 
     void Init(size_t idx, uint8_t* begin, uint8_t* end) {
       idx_ = idx;
       begin_ = begin;
-      top_.StoreRelaxed(begin);
+      top_.store(begin, std::memory_order_relaxed);
       end_ = end;
       state_ = RegionState::kRegionStateFree;
       type_ = RegionType::kRegionTypeNone;
-      objects_allocated_.StoreRelaxed(0);
+      objects_allocated_.store(0, std::memory_order_relaxed);
       alloc_time_ = 0;
       live_bytes_ = static_cast<size_t>(-1);
       is_newly_allocated_ = false;
@@ -334,7 +348,7 @@ class RegionSpace FINAL : public ContinuousMemMapAllocSpace {
       if (is_free) {
         DCHECK(IsInNoSpace());
         DCHECK_EQ(begin_, Top());
-        DCHECK_EQ(objects_allocated_.LoadRelaxed(), 0U);
+        DCHECK_EQ(objects_allocated_.load(std::memory_order_relaxed), 0U);
       }
       return is_free;
     }
@@ -461,11 +475,11 @@ class RegionSpace FINAL : public ContinuousMemMapAllocSpace {
     }
 
     ALWAYS_INLINE uint8_t* Top() const {
-      return top_.LoadRelaxed();
+      return top_.load(std::memory_order_relaxed);
     }
 
     void SetTop(uint8_t* new_top) {
-      top_.StoreRelaxed(new_top);
+      top_.store(new_top, std::memory_order_relaxed);
     }
 
     uint8_t* End() const {
@@ -480,31 +494,31 @@ class RegionSpace FINAL : public ContinuousMemMapAllocSpace {
 
     void RecordThreadLocalAllocations(size_t num_objects, size_t num_bytes) {
       DCHECK(IsAllocated());
-      DCHECK_EQ(objects_allocated_.LoadRelaxed(), 0U);
+      DCHECK_EQ(objects_allocated_.load(std::memory_order_relaxed), 0U);
       DCHECK_EQ(Top(), end_);
-      objects_allocated_.StoreRelaxed(num_objects);
-      top_.StoreRelaxed(begin_ + num_bytes);
+      objects_allocated_.store(num_objects, std::memory_order_relaxed);
+      top_.store(begin_ + num_bytes, std::memory_order_relaxed);
       DCHECK_LE(Top(), end_);
     }
 
    private:
     size_t idx_;                        // The region's index in the region space.
+    size_t live_bytes_;                 // The live bytes. Used to compute the live percent.
     uint8_t* begin_;                    // The begin address of the region.
+    Thread* thread_;                    // The owning thread if it's a tlab.
     // Note that `top_` can be higher than `end_` in the case of a
     // large region, where an allocated object spans multiple regions
     // (large region + one or more large tail regions).
     Atomic<uint8_t*> top_;              // The current position of the allocation.
     uint8_t* end_;                      // The end address of the region.
-    RegionState state_;                 // The region state (see RegionState).
-    RegionType type_;                   // The region type (see RegionType).
     Atomic<size_t> objects_allocated_;  // The number of objects allocated.
     uint32_t alloc_time_;               // The allocation time of the region.
     // Note that newly allocated and evacuated regions use -1 as
     // special value for `live_bytes_`.
-    size_t live_bytes_;                 // The live bytes. Used to compute the live percent.
     bool is_newly_allocated_;           // True if it's allocated after the last collection.
     bool is_a_tlab_;                    // True if it's a tlab.
-    Thread* thread_;                    // The owning thread if it's a tlab.
+    RegionState state_;                 // The region state (see RegionState).
+    RegionType type_;                   // The region type (see RegionType).
 
     friend class RegionSpace;
   };
@@ -571,6 +585,28 @@ class RegionSpace FINAL : public ContinuousMemMapAllocSpace {
 
   Region* AllocateRegion(bool for_evac) REQUIRES(region_lock_);
 
+  // Scan region range [`begin`, `end`) in increasing order to try to
+  // allocate a large region having a size of `num_regs` regions. If
+  // there is no space in the region space to allocate this large
+  // region, return null.
+  //
+  // If argument `next_region` is not null, use `*next_region` to
+  // return the index to the region next to the allocated large region
+  // returned by this method.
+  template<bool kForEvac>
+  mirror::Object* AllocLargeInRange(size_t num_regs,
+                                    size_t begin,
+                                    size_t end,
+                                    /* out */ size_t* bytes_allocated,
+                                    /* out */ size_t* usable_size,
+                                    /* out */ size_t* bytes_tl_bulk_allocated,
+                                    /* out */ size_t* next_region = nullptr) REQUIRES(region_lock_);
+
+  // Poison memory areas used by dead objects within unevacuated
+  // region `r`. This is meant to detect dangling references to dead
+  // objects earlier in debug mode.
+  void PoisonDeadObjectsInUnevacuatedRegion(Region* r);
+
   Mutex region_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
 
   uint32_t time_;                  // The time as the number of collections since the startup.
@@ -599,6 +635,11 @@ class RegionSpace FINAL : public ContinuousMemMapAllocSpace {
   Region* current_region_;         // The region currently used for allocation.
   Region* evac_region_;            // The region currently used for evacuation.
   Region full_region_;             // The dummy/sentinel region that looks full.
+
+  // Index into the region array pointing to the starting region when
+  // trying to allocate a new region. Only used when
+  // `kCyclicRegionAllocation` is true.
+  size_t cyclic_alloc_region_index_ GUARDED_BY(region_lock_);
 
   // Mark bitmap used by the GC.
   std::unique_ptr<accounting::ContinuousSpaceBitmap> mark_bitmap_;

@@ -21,6 +21,7 @@
 #include <random>
 
 #include "base/bit_utils.h"
+#include "base/malloc_arena_pool.h"
 #include "base/stl_util.h"
 #include "jni_macro_assembler_x86_64.h"
 #include "utils/assembler_test.h"
@@ -29,7 +30,7 @@
 namespace art {
 
 TEST(AssemblerX86_64, CreateBuffer) {
-  ArenaPool pool;
+  MallocArenaPool pool;
   ArenaAllocator allocator(&pool);
   AssemblerBuffer buffer(&allocator);
   AssemblerBuffer::EnsureCapacity ensured(&buffer);
@@ -1280,6 +1281,38 @@ TEST_F(AssemblerX86_64Test, Paddq) {
 
 TEST_F(AssemblerX86_64Test, Psubq) {
   DriverStr(RepeatFF(&x86_64::X86_64Assembler::psubq, "psubq %{reg2}, %{reg1}"), "psubq");
+}
+
+TEST_F(AssemblerX86_64Test, Paddusb) {
+  DriverStr(RepeatFF(&x86_64::X86_64Assembler::paddusb, "paddusb %{reg2}, %{reg1}"), "paddusb");
+}
+
+TEST_F(AssemblerX86_64Test, Paddsb) {
+  DriverStr(RepeatFF(&x86_64::X86_64Assembler::paddsb, "paddsb %{reg2}, %{reg1}"), "paddsb");
+}
+
+TEST_F(AssemblerX86_64Test, Paddusw) {
+  DriverStr(RepeatFF(&x86_64::X86_64Assembler::paddusw, "paddusw %{reg2}, %{reg1}"), "paddusw");
+}
+
+TEST_F(AssemblerX86_64Test, Paddsw) {
+  DriverStr(RepeatFF(&x86_64::X86_64Assembler::paddsw, "paddsw %{reg2}, %{reg1}"), "paddsw");
+}
+
+TEST_F(AssemblerX86_64Test, Psubusb) {
+  DriverStr(RepeatFF(&x86_64::X86_64Assembler::psubusb, "psubusb %{reg2}, %{reg1}"), "psubusb");
+}
+
+TEST_F(AssemblerX86_64Test, Psubsb) {
+  DriverStr(RepeatFF(&x86_64::X86_64Assembler::psubsb, "psubsb %{reg2}, %{reg1}"), "psubsb");
+}
+
+TEST_F(AssemblerX86_64Test, Psubusw) {
+  DriverStr(RepeatFF(&x86_64::X86_64Assembler::psubusw, "psubusw %{reg2}, %{reg1}"), "psubusw");
+}
+
+TEST_F(AssemblerX86_64Test, Psubsw) {
+  DriverStr(RepeatFF(&x86_64::X86_64Assembler::psubsw, "psubsw %{reg2}, %{reg1}"), "psubsw");
 }
 
 TEST_F(AssemblerX86_64Test, Cvtsi2ss) {

@@ -22,6 +22,7 @@ DELETE_ANDROID_DATA="no"
 LAUNCH_WRAPPER=
 LIBART=libart.so
 JIT_PROFILE="no"
+ALLOW_DEFAULT_JDWP="no"
 VERBOSE="no"
 CLEAN_OAT_FILES="yes"
 EXTRA_OPTIONS=()
@@ -77,7 +78,6 @@ Usage: art [OPTIONS] [--] [ART_OPTIONS] CLASS
 Supported OPTIONS include:
   --32                     Use the 32-bit Android Runtime.
   --64                     Use the 64-bit Android Runtime.
-  --callgrind              Launch the Android Runtime in callgrind.
   -d                       Use the debug ART library (libartd.so).
   --debug                  Equivalent to -d.
   --gdb                    Launch the Android Runtime in gdb.
@@ -91,6 +91,8 @@ Supported OPTIONS include:
   --profile                Run with profiling, then run using profile data.
   --verbose                Run script verbosely.
   --no-clean               Don't cleanup oat directories.
+  --allow-default-jdwp     Don't automatically put in -XjdwpProvider:none.
+                           You probably do not want this.
 
 The ART_OPTIONS are passed directly to the Android Runtime.
 
@@ -269,9 +271,6 @@ while [[ "$1" = "-"* ]]; do
   --64)
     ART_BINARY=dalvikvm64
     ;;
-  --callgrind)
-    LAUNCH_WRAPPER="valgrind --tool=callgrind"
-    ;;
   -d)
     ;& # Fallthrough
   --debug)
@@ -309,6 +308,9 @@ while [[ "$1" = "-"* ]]; do
     ;;
   --no-clean)
     CLEAN_OAT_FILES="no"
+    ;;
+  --allow-default-jdwp)
+    ALLOW_DEFAULT_JDWP="yes"
     ;;
   --*)
     echo "unknown option: $1" 1>&2
@@ -359,6 +361,10 @@ fi
 if [ "$PERF" != "" ]; then
   LAUNCH_WRAPPER="perf record -g -o $ANDROID_DATA/perf.data -e cycles:u $LAUNCH_WRAPPER"
   EXTRA_OPTIONS+=(-Xcompiler-option --generate-debug-info)
+fi
+
+if [ "$ALLOW_DEFAULT_JDWP" = "no" ]; then
+  EXTRA_OPTIONS+=(-XjdwpProvider:none)
 fi
 
 if [ "$JIT_PROFILE" = "yes" ]; then

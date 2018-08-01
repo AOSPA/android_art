@@ -21,15 +21,15 @@
 
 #include "art_method-inl.h"
 #include "base/bit_utils.h"
+#include "base/mem_map.h"
 #include "class_linker.h"
 #include "common_compiler_test.h"
 #include "compiler.h"
 #include "dex/dex_file.h"
 #include "gtest/gtest.h"
 #include "indirect_reference_table.h"
-#include "java_vm_ext.h"
-#include "jni_internal.h"
-#include "mem_map.h"
+#include "jni/java_vm_ext.h"
+#include "jni/jni_internal.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
 #include "mirror/object-inl.h"
@@ -245,7 +245,7 @@ class JniCompilerTest : public CommonCompilerTest {
     Handle<mirror::ClassLoader> loader(
         hs.NewHandle(soa.Decode<mirror::ClassLoader>(class_loader)));
     // Compile the native method before starting the runtime
-    mirror::Class* c = class_linker_->FindClass(soa.Self(), "LMyClassNatives;", loader);
+    ObjPtr<mirror::Class> c = class_linker_->FindClass(soa.Self(), "LMyClassNatives;", loader);
     const auto pointer_size = class_linker_->GetImagePointerSize();
     ArtMethod* method = c->FindClassMethod(method_name, method_sig, pointer_size);
     ASSERT_TRUE(method != nullptr) << method_name << " " << method_sig;

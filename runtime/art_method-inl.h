@@ -245,6 +245,12 @@ inline const char* ArtMethod::GetName() {
   }
 }
 
+inline ObjPtr<mirror::String> ArtMethod::ResolveNameString() {
+  DCHECK(!IsProxyMethod());
+  const DexFile::MethodId& method_id = GetDexFile()->GetMethodId(GetDexMethodIndex());
+  return Runtime::Current()->GetClassLinker()->ResolveString(method_id.name_idx_, this);
+}
+
 inline const DexFile::CodeItem* ArtMethod::GetCodeItem() {
   return GetDexFile()->GetCodeItem(GetCodeItemOffset());
 }
@@ -324,7 +330,7 @@ inline mirror::ClassLoader* ArtMethod::GetClassLoader() {
 template <ReadBarrierOption kReadBarrierOption>
 inline mirror::DexCache* ArtMethod::GetDexCache() {
   if (LIKELY(!IsObsolete<kReadBarrierOption>())) {
-    mirror::Class* klass = GetDeclaringClass<kReadBarrierOption>();
+    ObjPtr<mirror::Class> klass = GetDeclaringClass<kReadBarrierOption>();
     return klass->GetDexCache<kDefaultVerifyFlags, kReadBarrierOption>();
   } else {
     DCHECK(!IsProxyMethod());

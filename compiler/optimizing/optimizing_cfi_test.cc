@@ -47,25 +47,20 @@ class OptimizingCFITest : public CFITest, public OptimizingUnitTestHelper {
   static constexpr bool kGenerateExpected = false;
 
   OptimizingCFITest()
-      : pool_and_allocator_(),
-        opts_(),
-        isa_features_(),
-        graph_(nullptr),
+      : graph_(nullptr),
         code_gen_(),
         blocks_(GetAllocator()->Adapter()) {}
 
-  ArenaAllocator* GetAllocator() { return pool_and_allocator_.GetAllocator(); }
-
   void SetUpFrame(InstructionSet isa) {
+    OverrideInstructionSetFeatures(isa, "default");
+
     // Ensure that slow-debug is off, so that there is no unexpected read-barrier check emitted.
     SetRuntimeDebugFlagsEnabled(false);
 
     // Setup simple context.
-    std::string error;
-    isa_features_ = InstructionSetFeatures::FromVariant(isa, "default", &error);
     graph_ = CreateGraph();
     // Generate simple frame with some spills.
-    code_gen_ = CodeGenerator::Create(graph_, isa, *isa_features_, opts_);
+    code_gen_ = CodeGenerator::Create(graph_, *compiler_options_);
     code_gen_->GetAssembler()->cfi().SetEnabled(true);
     code_gen_->InitializeCodeGenerationData();
     const int frame_size = 64;
@@ -105,15 +100,15 @@ class OptimizingCFITest : public CFITest, public OptimizingUnitTestHelper {
              const std::vector<uint8_t>& expected_asm,
              const std::vector<uint8_t>& expected_cfi) {
     // Get the outputs.
-    const std::vector<uint8_t>& actual_asm = code_allocator_.GetMemory();
+    ArrayRef<const uint8_t> actual_asm = code_allocator_.GetMemory();
     Assembler* opt_asm = code_gen_->GetAssembler();
-    const std::vector<uint8_t>& actual_cfi = *(opt_asm->cfi().data());
+    ArrayRef<const uint8_t> actual_cfi(*(opt_asm->cfi().data()));
 
     if (kGenerateExpected) {
       GenerateExpected(stdout, isa, isa_str, actual_asm, actual_cfi);
     } else {
-      EXPECT_EQ(expected_asm, actual_asm);
-      EXPECT_EQ(expected_cfi, actual_cfi);
+      EXPECT_EQ(ArrayRef<const uint8_t>(expected_asm), actual_asm);
+      EXPECT_EQ(ArrayRef<const uint8_t>(expected_cfi), actual_cfi);
     }
   }
 
@@ -140,7 +135,7 @@ class OptimizingCFITest : public CFITest, public OptimizingUnitTestHelper {
       return memory_.data();
     }
 
-    const std::vector<uint8_t>& GetMemory() { return memory_; }
+    ArrayRef<const uint8_t> GetMemory() const OVERRIDE { return ArrayRef<const uint8_t>(memory_); }
 
    private:
     std::vector<uint8_t> memory_;
@@ -148,9 +143,6 @@ class OptimizingCFITest : public CFITest, public OptimizingUnitTestHelper {
     DISALLOW_COPY_AND_ASSIGN(InternalCodeAllocator);
   };
 
-  ArenaPoolAndAllocator pool_and_allocator_;
-  CompilerOptions opts_;
-  std::unique_ptr<const InstructionSetFeatures> isa_features_;
   HGraph* graph_;
   std::unique_ptr<CodeGenerator> code_gen_;
   ArenaVector<HBasicBlock*> blocks_;

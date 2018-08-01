@@ -17,7 +17,6 @@
 #ifndef ART_RUNTIME_MIRROR_THROWABLE_H_
 #define ART_RUNTIME_MIRROR_THROWABLE_H_
 
-#include "gc_root.h"
 #include "object.h"
 
 namespace art {
@@ -44,18 +43,9 @@ class MANAGED Throwable : public Object {
   void SetCause(ObjPtr<Throwable> cause) REQUIRES_SHARED(Locks::mutator_lock_);
   void SetStackState(ObjPtr<Object> state) REQUIRES_SHARED(Locks::mutator_lock_);
   bool IsCheckedException() REQUIRES_SHARED(Locks::mutator_lock_);
-
-  static Class* GetJavaLangThrowable() REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK(!java_lang_Throwable_.IsNull());
-    return java_lang_Throwable_.Read();
-  }
+  bool IsError() REQUIRES_SHARED(Locks::mutator_lock_);
 
   int32_t GetStackDepth() REQUIRES_SHARED(Locks::mutator_lock_);
-
-  static void SetClass(ObjPtr<Class> java_lang_Throwable);
-  static void ResetClass();
-  static void VisitRoots(RootVisitor* visitor)
-      REQUIRES_SHARED(Locks::mutator_lock_);
 
  private:
   Object* GetStackState() REQUIRES_SHARED(Locks::mutator_lock_);
@@ -67,8 +57,6 @@ class MANAGED Throwable : public Object {
   HeapReference<String> detail_message_;
   HeapReference<Object> stack_trace_;
   HeapReference<Object> suppressed_exceptions_;
-
-  static GcRoot<Class> java_lang_Throwable_;
 
   friend struct art::ThrowableOffsets;  // for verifying offset information
   DISALLOW_IMPLICIT_CONSTRUCTORS(Throwable);

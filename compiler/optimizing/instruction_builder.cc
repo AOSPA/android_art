@@ -448,14 +448,8 @@ void HInstructionBuilder::BuildIntrinsic(ArtMethod* method) {
       invoke_type,
       target_method,
       HInvokeStaticOrDirect::ClinitCheckRequirement::kNone);
-  HandleInvoke(invoke,
-               in_vregs,
-               /* args */ nullptr,
-               graph_->GetNumberOfVRegs() - in_vregs,
-               /* is_range */ true,
-               dex_file_->GetMethodShorty(method_idx),
-               /* clinit_check */ nullptr,
-               /* is_unresolved */ false);
+  RangeInstructionOperands operands(graph_->GetNumberOfVRegs() - in_vregs, in_vregs);
+  HandleInvoke(invoke, operands, dex_file_->GetMethodShorty(method_idx), /* is_unresolved */ false);
 
   // Add the return instruction.
   if (return_type_ == DataType::Type::kVoid) {
@@ -916,16 +910,13 @@ static bool IsStringConstructor(ArtMethod* method) {
 bool HInstructionBuilder::BuildInvoke(const Instruction& instruction,
                                       uint32_t dex_pc,
                                       uint32_t method_idx,
-                                      uint32_t number_of_vreg_arguments,
-                                      bool is_range,
-                                      uint32_t* args,
-                                      uint32_t register_index) {
+                                      const InstructionOperands& operands) {
   InvokeType invoke_type = GetInvokeTypeFromOpCode(instruction.Opcode());
-  const char* descriptor = dex_file_->GetMethodShorty(method_idx);
-  DataType::Type return_type = DataType::FromShorty(descriptor[0]);
+  const char* shorty = dex_file_->GetMethodShorty(method_idx);
+  DataType::Type return_type = DataType::FromShorty(shorty[0]);
 
   // Remove the return type from the 'proto'.
-  size_t number_of_arguments = strlen(descriptor) - 1;
+  size_t number_of_arguments = strlen(shorty) - 1;
   if (invoke_type != kStatic) {  // instance call
     // One extra argument for 'this'.
     number_of_arguments++;
@@ -942,14 +933,7 @@ bool HInstructionBuilder::BuildInvoke(const Instruction& instruction,
                                                          dex_pc,
                                                          method_idx,
                                                          invoke_type);
-    return HandleInvoke(invoke,
-                        number_of_vreg_arguments,
-                        args,
-                        register_index,
-                        is_range,
-                        descriptor,
-                        nullptr, /* clinit_check */
-                        true /* is_unresolved */);
+    return HandleInvoke(invoke, operands, shorty, /* is_unresolved */ true);
   }
 
   // Replace calls to String.<init> with StringFactory.
@@ -976,12 +960,7 @@ bool HInstructionBuilder::BuildInvoke(const Instruction& instruction,
         invoke_type,
         target_method,
         HInvokeStaticOrDirect::ClinitCheckRequirement::kImplicit);
-    return HandleStringInit(invoke,
-                            number_of_vreg_arguments,
-                            args,
-                            register_index,
-                            is_range,
-                            descriptor);
+    return HandleStringInit(invoke, operands, shorty);
   }
 
   // Potential class initialization check, in the case of a static method call.
@@ -1041,42 +1020,39 @@ bool HInstructionBuilder::BuildInvoke(const Instruction& instruction,
                                                resolved_method,
                                                ImTable::GetImtIndex(resolved_method));
   }
-
-  return HandleInvoke(invoke,
-                      number_of_vreg_arguments,
-                      args,
-                      register_index,
-                      is_range,
-                      descriptor,
-                      clinit_check,
-                      false /* is_unresolved */);
+  return HandleInvoke(invoke, operands, shorty, /* is_unresolved */ false, clinit_check);
 }
 
-bool HInstructionBuilder::BuildInvokePolymorphic(const Instruction& instruction ATTRIBUTE_UNUSED,
-                                                 uint32_t dex_pc,
+bool HInstructionBuilder::BuildInvokePolymorphic(uint32_t dex_pc,
                                                  uint32_t method_idx,
-                                                 uint32_t proto_idx,
-                                                 uint32_t number_of_vreg_arguments,
-                                                 bool is_range,
-                                                 uint32_t* args,
-                                                 uint32_t register_index) {
-  const char* descriptor = dex_file_->GetShorty(proto_idx);
-  DCHECK_EQ(1 + ArtMethod::NumArgRegisters(descriptor), number_of_vreg_arguments);
-  DataType::Type return_type = DataType::FromShorty(descriptor[0]);
-  size_t number_of_arguments = strlen(descriptor);
+                                                 dex::ProtoIndex proto_idx,
+                                                 const InstructionOperands& operands) {
+  const char* shorty = dex_file_->GetShorty(proto_idx);
+  DCHECK_EQ(1 + ArtMethod::NumArgRegisters(shorty), operands.GetNumberOfOperands());
+  DataType::Type return_type = DataType::FromShorty(shorty[0]);
+  size_t number_of_arguments = strlen(shorty);
   HInvoke* invoke = new (allocator_) HInvokePolymorphic(allocator_,
                                                         number_of_arguments,
                                                         return_type,
                                                         dex_pc,
                                                         method_idx);
-  return HandleInvoke(invoke,
-                      number_of_vreg_arguments,
-                      args,
-                      register_index,
-                      is_range,
-                      descriptor,
-                      nullptr /* clinit_check */,
-                      false /* is_unresolved */);
+  return HandleInvoke(invoke, operands, shorty, /* is_unresolved */ false);
+}
+
+
+bool HInstructionBuilder::BuildInvokeCustom(uint32_t dex_pc,
+                                            uint32_t call_site_idx,
+                                            const InstructionOperands& operands) {
+  dex::ProtoIndex proto_idx = dex_file_->GetProtoIndexForCallSite(call_site_idx);
+  const char* shorty = dex_file_->GetShorty(proto_idx);
+  DataType::Type return_type = DataType::FromShorty(shorty[0]);
+  size_t number_of_arguments = strlen(shorty) - 1;
+  HInvoke* invoke = new (allocator_) HInvokeCustom(allocator_,
+                                                   number_of_arguments,
+                                                   call_site_idx,
+                                                   return_type,
+                                                   dex_pc);
+  return HandleInvoke(invoke, operands, shorty, /* is_unresolved */ false);
 }
 
 HNewInstance* HInstructionBuilder::BuildNewInstance(dex::TypeIndex type_index, uint32_t dex_pc) {
@@ -1098,6 +1074,10 @@ HNewInstance* HInstructionBuilder::BuildNewInstance(dex::TypeIndex type_index, u
   QuickEntrypointEnum entrypoint = kQuickAllocObjectInitialized;
   if (load_class->NeedsAccessCheck() || klass->IsFinalizable() || !klass->IsInstantiable()) {
     entrypoint = kQuickAllocObjectWithChecks;
+  }
+  // We will always be able to resolve the string class since it is in the BCP.
+  if (!klass.IsNull() && klass->IsStringClass()) {
+    entrypoint = kQuickAllocStringObject;
   }
 
   // Consider classes we haven't resolved as potentially finalizable.
@@ -1167,32 +1147,48 @@ void HInstructionBuilder::BuildConstructorFenceForAllocation(HInstruction* alloc
       MethodCompilationStat::kConstructorFenceGeneratedNew);
 }
 
-static bool IsSubClass(ObjPtr<mirror::Class> to_test, ObjPtr<mirror::Class> super_class)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  return to_test != nullptr && !to_test->IsInterface() && to_test->IsSubClass(super_class);
-}
-
 bool HInstructionBuilder::IsInitialized(Handle<mirror::Class> cls) const {
   if (cls == nullptr) {
     return false;
   }
 
-  // `CanAssumeClassIsLoaded` will return true if we're JITting, or will
-  // check whether the class is in an image for the AOT compilation.
-  if (cls->IsInitialized() &&
-      compiler_driver_->CanAssumeClassIsLoaded(cls.Get())) {
+  // Check if the class will be initialized at runtime.
+  if (cls->IsInitialized()) {
+    Runtime* runtime = Runtime::Current();
+    if (!runtime->IsAotCompiler()) {
+      DCHECK(runtime->UseJitCompilation());
+      // For JIT, the class cannot revert to an uninitialized state.
+      return true;
+    }
+    // Assume loaded only if klass is in the boot image. App classes cannot be assumed
+    // loaded because we don't even know what class loader will be used to load them.
+    const CompilerOptions& compiler_options = compiler_driver_->GetCompilerOptions();
+    if (compiler_options.IsBootImage()) {
+      std::string temp;
+      const char* descriptor = cls->GetDescriptor(&temp);
+      if (compiler_options.IsImageClass(descriptor)) {
+        return true;
+      }
+    } else {
+      if (runtime->GetHeap()->FindSpaceFromObject(cls.Get(), false)->IsImageSpace()) {
+        return true;
+      }
+    }
+  }
+
+  // We can avoid the class initialization check for `cls` only in static methods in the
+  // very same class. Instance methods of the same class can run on an escaped instance
+  // of an erroneous class. Even a superclass may need to be checked as the subclass
+  // can be completely initialized while the superclass is initializing and the subclass
+  // remains initialized when the superclass initializer throws afterwards. b/62478025
+  // Note: The HClinitCheck+HInvokeStaticOrDirect merging can still apply.
+  if ((dex_compilation_unit_->GetAccessFlags() & kAccStatic) != 0u &&
+      GetOutermostCompilingClass() == cls.Get()) {
     return true;
   }
 
-  if (IsSubClass(GetOutermostCompilingClass(), cls.Get())) {
-    return true;
-  }
-
-  // TODO: We should walk over the inlined methods, but we don't pass
-  //       that information to the builder.
-  if (IsSubClass(GetCompilingClass(), cls.Get())) {
-    return true;
-  }
+  // Note: We could walk over the inlined methods to avoid allocating excessive
+  // `HClinitCheck`s in inlined static methods but they shall be eliminated by GVN.
 
   return false;
 }
@@ -1222,26 +1218,22 @@ HClinitCheck* HInstructionBuilder::ProcessClinitCheckForInvoke(
 }
 
 bool HInstructionBuilder::SetupInvokeArguments(HInvoke* invoke,
-                                               uint32_t number_of_vreg_arguments,
-                                               uint32_t* args,
-                                               uint32_t register_index,
-                                               bool is_range,
-                                               const char* descriptor,
+                                               const InstructionOperands& operands,
+                                               const char* shorty,
                                                size_t start_index,
                                                size_t* argument_index) {
-  uint32_t descriptor_index = 1;  // Skip the return type.
-
+  uint32_t shorty_index = 1;  // Skip the return type.
+  const size_t number_of_operands = operands.GetNumberOfOperands();
   for (size_t i = start_index;
        // Make sure we don't go over the expected arguments or over the number of
        // dex registers given. If the instruction was seen as dead by the verifier,
        // it hasn't been properly checked.
-       (i < number_of_vreg_arguments) && (*argument_index < invoke->GetNumberOfArguments());
+       (i < number_of_operands) && (*argument_index < invoke->GetNumberOfArguments());
        i++, (*argument_index)++) {
-    DataType::Type type = DataType::FromShorty(descriptor[descriptor_index++]);
+    DataType::Type type = DataType::FromShorty(shorty[shorty_index++]);
     bool is_wide = (type == DataType::Type::kInt64) || (type == DataType::Type::kFloat64);
-    if (!is_range
-        && is_wide
-        && ((i + 1 == number_of_vreg_arguments) || (args[i] + 1 != args[i + 1]))) {
+    if (is_wide && ((i + 1 == number_of_operands) ||
+                    (operands.GetOperand(i) + 1 != operands.GetOperand(i + 1)))) {
       // Longs and doubles should be in pairs, that is, sequential registers. The verifier should
       // reject any class where this is violated. However, the verifier only does these checks
       // on non trivially dead instructions, so we just bailout the compilation.
@@ -1252,7 +1244,7 @@ bool HInstructionBuilder::SetupInvokeArguments(HInvoke* invoke,
                       MethodCompilationStat::kNotCompiledMalformedOpcode);
       return false;
     }
-    HInstruction* arg = LoadLocal(is_range ? register_index + i : args[i], type);
+    HInstruction* arg = LoadLocal(operands.GetOperand(i), type);
     invoke->SetArgumentAt(*argument_index, arg);
     if (is_wide) {
       i++;
@@ -1279,19 +1271,16 @@ bool HInstructionBuilder::SetupInvokeArguments(HInvoke* invoke,
 }
 
 bool HInstructionBuilder::HandleInvoke(HInvoke* invoke,
-                                       uint32_t number_of_vreg_arguments,
-                                       uint32_t* args,
-                                       uint32_t register_index,
-                                       bool is_range,
-                                       const char* descriptor,
-                                       HClinitCheck* clinit_check,
-                                       bool is_unresolved) {
+                                       const InstructionOperands& operands,
+                                       const char* shorty,
+                                       bool is_unresolved,
+                                       HClinitCheck* clinit_check) {
   DCHECK(!invoke->IsInvokeStaticOrDirect() || !invoke->AsInvokeStaticOrDirect()->IsStringInit());
 
   size_t start_index = 0;
   size_t argument_index = 0;
   if (invoke->GetInvokeType() != InvokeType::kStatic) {  // Instance call.
-    uint32_t obj_reg = is_range ? register_index : args[0];
+    uint32_t obj_reg = operands.GetOperand(0);
     HInstruction* arg = is_unresolved
         ? LoadLocal(obj_reg, DataType::Type::kReference)
         : LoadNullCheckedLocal(obj_reg, invoke->GetDexPc());
@@ -1300,14 +1289,7 @@ bool HInstructionBuilder::HandleInvoke(HInvoke* invoke,
     argument_index = 1;
   }
 
-  if (!SetupInvokeArguments(invoke,
-                            number_of_vreg_arguments,
-                            args,
-                            register_index,
-                            is_range,
-                            descriptor,
-                            start_index,
-                            &argument_index)) {
+  if (!SetupInvokeArguments(invoke, operands, shorty, start_index, &argument_index)) {
     return false;
   }
 
@@ -1327,24 +1309,14 @@ bool HInstructionBuilder::HandleInvoke(HInvoke* invoke,
 }
 
 bool HInstructionBuilder::HandleStringInit(HInvoke* invoke,
-                                           uint32_t number_of_vreg_arguments,
-                                           uint32_t* args,
-                                           uint32_t register_index,
-                                           bool is_range,
-                                           const char* descriptor) {
+                                           const InstructionOperands& operands,
+                                           const char* shorty) {
   DCHECK(invoke->IsInvokeStaticOrDirect());
   DCHECK(invoke->AsInvokeStaticOrDirect()->IsStringInit());
 
   size_t start_index = 1;
   size_t argument_index = 0;
-  if (!SetupInvokeArguments(invoke,
-                            number_of_vreg_arguments,
-                            args,
-                            register_index,
-                            is_range,
-                            descriptor,
-                            start_index,
-                            &argument_index)) {
+  if (!SetupInvokeArguments(invoke, operands, shorty, start_index, &argument_index)) {
     return false;
   }
 
@@ -1352,26 +1324,29 @@ bool HInstructionBuilder::HandleStringInit(HInvoke* invoke,
 
   // This is a StringFactory call, not an actual String constructor. Its result
   // replaces the empty String pre-allocated by NewInstance.
-  uint32_t orig_this_reg = is_range ? register_index : args[0];
+  uint32_t orig_this_reg = operands.GetOperand(0);
   HInstruction* arg_this = LoadLocal(orig_this_reg, DataType::Type::kReference);
 
   // Replacing the NewInstance might render it redundant. Keep a list of these
-  // to be visited once it is clear whether it is has remaining uses.
+  // to be visited once it is clear whether it has remaining uses.
   if (arg_this->IsNewInstance()) {
     ssa_builder_->AddUninitializedString(arg_this->AsNewInstance());
+    // Walk over all vregs and replace any occurrence of `arg_this` with `invoke`.
+    for (size_t vreg = 0, e = current_locals_->size(); vreg < e; ++vreg) {
+      if ((*current_locals_)[vreg] == arg_this) {
+        (*current_locals_)[vreg] = invoke;
+      }
+    }
   } else {
     DCHECK(arg_this->IsPhi());
-    // NewInstance is not the direct input of the StringFactory call. It might
-    // be redundant but optimizing this case is not worth the effort.
+    // We can get a phi as input of a String.<init> if there is a loop between the
+    // allocation and the String.<init> call. As we don't know which other phis might alias
+    // with `arg_this`, we keep a record of these phis and will analyze their inputs and
+    // uses once the inputs and users are populated (in ssa_builder.cc).
+    // Note: we only do this for phis, as it is a somewhat more expensive operation than
+    // what we're doing above when the input is the `HNewInstance`.
+    ssa_builder_->AddUninitializedStringPhi(arg_this->AsPhi(), invoke);
   }
-
-  // Walk over all vregs and replace any occurrence of `arg_this` with `invoke`.
-  for (size_t vreg = 0, e = current_locals_->size(); vreg < e; ++vreg) {
-    if ((*current_locals_)[vreg] == arg_this) {
-      (*current_locals_)[vreg] = invoke;
-    }
-  }
-
   return true;
 }
 
@@ -1699,11 +1674,9 @@ void HInstructionBuilder::BuildArrayAccess(const Instruction& instruction,
 
 HNewArray* HInstructionBuilder::BuildFilledNewArray(uint32_t dex_pc,
                                                     dex::TypeIndex type_index,
-                                                    uint32_t number_of_vreg_arguments,
-                                                    bool is_range,
-                                                    uint32_t* args,
-                                                    uint32_t register_index) {
-  HInstruction* length = graph_->GetIntConstant(number_of_vreg_arguments, dex_pc);
+                                                    const InstructionOperands& operands) {
+  const size_t number_of_operands = operands.GetNumberOfOperands();
+  HInstruction* length = graph_->GetIntConstant(number_of_operands, dex_pc);
   HLoadClass* cls = BuildLoadClass(type_index, dex_pc);
   HNewArray* const object = new (allocator_) HNewArray(cls, length, dex_pc);
   AppendInstruction(object);
@@ -1717,8 +1690,8 @@ HNewArray* HInstructionBuilder::BuildFilledNewArray(uint32_t dex_pc,
   bool is_reference_array = (primitive == 'L') || (primitive == '[');
   DataType::Type type = is_reference_array ? DataType::Type::kReference : DataType::Type::kInt32;
 
-  for (size_t i = 0; i < number_of_vreg_arguments; ++i) {
-    HInstruction* value = LoadLocal(is_range ? register_index + i : args[i], type);
+  for (size_t i = 0; i < number_of_operands; ++i) {
+    HInstruction* value = LoadLocal(operands.GetOperand(i), type);
     HInstruction* index = graph_->GetIntConstant(i, dex_pc);
     HArraySet* aset = new (allocator_) HArraySet(object, index, value, type, dex_pc);
     ssa_builder_->MaybeAddAmbiguousArraySet(aset);
@@ -1815,35 +1788,11 @@ void HInstructionBuilder::BuildFillWideArrayData(HInstruction* object,
   }
 }
 
-static TypeCheckKind ComputeTypeCheckKind(Handle<mirror::Class> cls)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  if (cls == nullptr) {
-    return TypeCheckKind::kUnresolvedCheck;
-  } else if (cls->IsInterface()) {
-    return TypeCheckKind::kInterfaceCheck;
-  } else if (cls->IsArrayClass()) {
-    if (cls->GetComponentType()->IsObjectClass()) {
-      return TypeCheckKind::kArrayObjectCheck;
-    } else if (cls->CannotBeAssignedFromOtherTypes()) {
-      return TypeCheckKind::kExactCheck;
-    } else {
-      return TypeCheckKind::kArrayCheck;
-    }
-  } else if (cls->IsFinal()) {
-    return TypeCheckKind::kExactCheck;
-  } else if (cls->IsAbstract()) {
-    return TypeCheckKind::kAbstractClassCheck;
-  } else {
-    return TypeCheckKind::kClassHierarchyCheck;
-  }
-}
-
 void HInstructionBuilder::BuildLoadString(dex::StringIndex string_index, uint32_t dex_pc) {
   HLoadString* load_string =
       new (allocator_) HLoadString(graph_->GetCurrentMethod(), string_index, *dex_file_, dex_pc);
   HSharpening::ProcessLoadString(load_string,
                                  code_generator_,
-                                 compiler_driver_,
                                  *dex_compilation_unit_,
                                  handles_);
   AppendInstruction(load_string);
@@ -1852,22 +1801,8 @@ void HInstructionBuilder::BuildLoadString(dex::StringIndex string_index, uint32_
 HLoadClass* HInstructionBuilder::BuildLoadClass(dex::TypeIndex type_index, uint32_t dex_pc) {
   ScopedObjectAccess soa(Thread::Current());
   const DexFile& dex_file = *dex_compilation_unit_->GetDexFile();
-  Handle<mirror::ClassLoader> class_loader = dex_compilation_unit_->GetClassLoader();
-  Handle<mirror::Class> klass = handles_->NewHandle(compiler_driver_->ResolveClass(
-      soa, dex_compilation_unit_->GetDexCache(), class_loader, type_index, dex_compilation_unit_));
-
-  bool needs_access_check = true;
-  if (klass != nullptr) {
-    if (klass->IsPublic()) {
-      needs_access_check = false;
-    } else {
-      ObjPtr<mirror::Class> compiling_class = GetCompilingClass();
-      if (compiling_class != nullptr && compiling_class->CanAccess(klass.Get())) {
-        needs_access_check = false;
-      }
-    }
-  }
-
+  Handle<mirror::Class> klass = ResolveClass(soa, type_index);
+  bool needs_access_check = LoadClassNeedsAccessCheck(klass);
   return BuildLoadClass(type_index, dex_file, klass, dex_pc, needs_access_check);
 }
 
@@ -1899,7 +1834,6 @@ HLoadClass* HInstructionBuilder::BuildLoadClass(dex::TypeIndex type_index,
 
   HLoadClass::LoadKind load_kind = HSharpening::ComputeLoadClassKind(load_class,
                                                                      code_generator_,
-                                                                     compiler_driver_,
                                                                      *dex_compilation_unit_);
 
   if (load_kind == HLoadClass::LoadKind::kInvalid) {
@@ -1912,33 +1846,100 @@ HLoadClass* HInstructionBuilder::BuildLoadClass(dex::TypeIndex type_index,
   return load_class;
 }
 
+Handle<mirror::Class> HInstructionBuilder::ResolveClass(ScopedObjectAccess& soa,
+                                                        dex::TypeIndex type_index) {
+  Handle<mirror::ClassLoader> class_loader = dex_compilation_unit_->GetClassLoader();
+  ObjPtr<mirror::Class> klass = compiler_driver_->ResolveClass(
+      soa, dex_compilation_unit_->GetDexCache(), class_loader, type_index, dex_compilation_unit_);
+  // TODO: Avoid creating excessive handles if the method references the same class repeatedly.
+  // (Use a map on the local_allocator_.)
+  return handles_->NewHandle(klass);
+}
+
+bool HInstructionBuilder::LoadClassNeedsAccessCheck(Handle<mirror::Class> klass) {
+  if (klass == nullptr) {
+    return true;
+  } else if (klass->IsPublic()) {
+    return false;
+  } else {
+    ObjPtr<mirror::Class> compiling_class = GetCompilingClass();
+    return compiling_class == nullptr || !compiling_class->CanAccess(klass.Get());
+  }
+}
+
+void HInstructionBuilder::BuildLoadMethodHandle(uint16_t method_handle_index, uint32_t dex_pc) {
+  const DexFile& dex_file = *dex_compilation_unit_->GetDexFile();
+  HLoadMethodHandle* load_method_handle = new (allocator_) HLoadMethodHandle(
+      graph_->GetCurrentMethod(), method_handle_index, dex_file, dex_pc);
+  AppendInstruction(load_method_handle);
+}
+
+void HInstructionBuilder::BuildLoadMethodType(dex::ProtoIndex proto_index, uint32_t dex_pc) {
+  const DexFile& dex_file = *dex_compilation_unit_->GetDexFile();
+  HLoadMethodType* load_method_type =
+      new (allocator_) HLoadMethodType(graph_->GetCurrentMethod(), proto_index, dex_file, dex_pc);
+  AppendInstruction(load_method_type);
+}
+
 void HInstructionBuilder::BuildTypeCheck(const Instruction& instruction,
                                          uint8_t destination,
                                          uint8_t reference,
                                          dex::TypeIndex type_index,
                                          uint32_t dex_pc) {
   HInstruction* object = LoadLocal(reference, DataType::Type::kReference);
-  HLoadClass* cls = BuildLoadClass(type_index, dex_pc);
 
   ScopedObjectAccess soa(Thread::Current());
-  TypeCheckKind check_kind = ComputeTypeCheckKind(cls->GetClass());
+  const DexFile& dex_file = *dex_compilation_unit_->GetDexFile();
+  Handle<mirror::Class> klass = ResolveClass(soa, type_index);
+  bool needs_access_check = LoadClassNeedsAccessCheck(klass);
+  TypeCheckKind check_kind = HSharpening::ComputeTypeCheckKind(
+      klass.Get(), code_generator_, needs_access_check);
+
+  HInstruction* class_or_null = nullptr;
+  HIntConstant* bitstring_path_to_root = nullptr;
+  HIntConstant* bitstring_mask = nullptr;
+  if (check_kind == TypeCheckKind::kBitstringCheck) {
+    // TODO: Allow using the bitstring check also if we need an access check.
+    DCHECK(!needs_access_check);
+    class_or_null = graph_->GetNullConstant(dex_pc);
+    MutexLock subtype_check_lock(Thread::Current(), *Locks::subtype_check_lock_);
+    uint32_t path_to_root =
+        SubtypeCheck<ObjPtr<mirror::Class>>::GetEncodedPathToRootForTarget(klass.Get());
+    uint32_t mask = SubtypeCheck<ObjPtr<mirror::Class>>::GetEncodedPathToRootMask(klass.Get());
+    bitstring_path_to_root = graph_->GetIntConstant(static_cast<int32_t>(path_to_root), dex_pc);
+    bitstring_mask = graph_->GetIntConstant(static_cast<int32_t>(mask), dex_pc);
+  } else {
+    class_or_null = BuildLoadClass(type_index, dex_file, klass, dex_pc, needs_access_check);
+  }
+  DCHECK(class_or_null != nullptr);
+
   if (instruction.Opcode() == Instruction::INSTANCE_OF) {
-    AppendInstruction(new (allocator_) HInstanceOf(object, cls, check_kind, dex_pc));
+    AppendInstruction(new (allocator_) HInstanceOf(object,
+                                                   class_or_null,
+                                                   check_kind,
+                                                   klass,
+                                                   dex_pc,
+                                                   allocator_,
+                                                   bitstring_path_to_root,
+                                                   bitstring_mask));
     UpdateLocal(destination, current_block_->GetLastInstruction());
   } else {
     DCHECK_EQ(instruction.Opcode(), Instruction::CHECK_CAST);
     // We emit a CheckCast followed by a BoundType. CheckCast is a statement
     // which may throw. If it succeeds BoundType sets the new type of `object`
     // for all subsequent uses.
-    AppendInstruction(new (allocator_) HCheckCast(object, cls, check_kind, dex_pc));
+    AppendInstruction(
+        new (allocator_) HCheckCast(object,
+                                    class_or_null,
+                                    check_kind,
+                                    klass,
+                                    dex_pc,
+                                    allocator_,
+                                    bitstring_path_to_root,
+                                    bitstring_mask));
     AppendInstruction(new (allocator_) HBoundType(object, dex_pc));
     UpdateLocal(reference, current_block_->GetLastInstruction());
   }
-}
-
-bool HInstructionBuilder::NeedsAccessCheck(dex::TypeIndex type_index, bool* finalizable) const {
-  return !compiler_driver_->CanAccessInstantiableTypeWithoutChecks(
-      LookupReferrerClass(), LookupResolvedType(type_index, *dex_compilation_unit_), finalizable);
 }
 
 bool HInstructionBuilder::CanDecodeQuickenedInfo() const {
@@ -2116,11 +2117,10 @@ bool HInstructionBuilder::ProcessDexInstruction(const Instruction& instruction,
       } else {
         method_idx = instruction.VRegB_35c();
       }
-      uint32_t number_of_vreg_arguments = instruction.VRegA_35c();
       uint32_t args[5];
-      instruction.GetVarArgs(args);
-      if (!BuildInvoke(instruction, dex_pc, method_idx,
-                       number_of_vreg_arguments, false, args, -1)) {
+      uint32_t number_of_vreg_arguments = instruction.GetVarArgs(args);
+      VarArgsInstructionOperands operands(args, number_of_vreg_arguments);
+      if (!BuildInvoke(instruction, dex_pc, method_idx, operands)) {
         return false;
       }
       break;
@@ -2143,10 +2143,8 @@ bool HInstructionBuilder::ProcessDexInstruction(const Instruction& instruction,
       } else {
         method_idx = instruction.VRegB_3rc();
       }
-      uint32_t number_of_vreg_arguments = instruction.VRegA_3rc();
-      uint32_t register_index = instruction.VRegC();
-      if (!BuildInvoke(instruction, dex_pc, method_idx,
-                       number_of_vreg_arguments, true, nullptr, register_index)) {
+      RangeInstructionOperands operands(instruction.VRegC(), instruction.VRegA_3rc());
+      if (!BuildInvoke(instruction, dex_pc, method_idx, operands)) {
         return false;
       }
       break;
@@ -2154,33 +2152,32 @@ bool HInstructionBuilder::ProcessDexInstruction(const Instruction& instruction,
 
     case Instruction::INVOKE_POLYMORPHIC: {
       uint16_t method_idx = instruction.VRegB_45cc();
-      uint16_t proto_idx = instruction.VRegH_45cc();
-      uint32_t number_of_vreg_arguments = instruction.VRegA_45cc();
+      dex::ProtoIndex proto_idx(instruction.VRegH_45cc());
       uint32_t args[5];
-      instruction.GetVarArgs(args);
-      return BuildInvokePolymorphic(instruction,
-                                    dex_pc,
-                                    method_idx,
-                                    proto_idx,
-                                    number_of_vreg_arguments,
-                                    false,
-                                    args,
-                                    -1);
+      uint32_t number_of_vreg_arguments = instruction.GetVarArgs(args);
+      VarArgsInstructionOperands operands(args, number_of_vreg_arguments);
+      return BuildInvokePolymorphic(dex_pc, method_idx, proto_idx, operands);
     }
 
     case Instruction::INVOKE_POLYMORPHIC_RANGE: {
       uint16_t method_idx = instruction.VRegB_4rcc();
-      uint16_t proto_idx = instruction.VRegH_4rcc();
-      uint32_t number_of_vreg_arguments = instruction.VRegA_4rcc();
-      uint32_t register_index = instruction.VRegC_4rcc();
-      return BuildInvokePolymorphic(instruction,
-                                    dex_pc,
-                                    method_idx,
-                                    proto_idx,
-                                    number_of_vreg_arguments,
-                                    true,
-                                    nullptr,
-                                    register_index);
+      dex::ProtoIndex proto_idx(instruction.VRegH_4rcc());
+      RangeInstructionOperands operands(instruction.VRegC_4rcc(), instruction.VRegA_4rcc());
+      return BuildInvokePolymorphic(dex_pc, method_idx, proto_idx, operands);
+    }
+
+    case Instruction::INVOKE_CUSTOM: {
+      uint16_t call_site_idx = instruction.VRegB_35c();
+      uint32_t args[5];
+      uint32_t number_of_vreg_arguments = instruction.GetVarArgs(args);
+      VarArgsInstructionOperands operands(args, number_of_vreg_arguments);
+      return BuildInvokeCustom(dex_pc, call_site_idx, operands);
+    }
+
+    case Instruction::INVOKE_CUSTOM_RANGE: {
+      uint16_t call_site_idx = instruction.VRegB_3rc();
+      RangeInstructionOperands operands(instruction.VRegC_3rc(), instruction.VRegA_3rc());
+      return BuildInvokeCustom(dex_pc, call_site_idx, operands);
     }
 
     case Instruction::NEG_INT: {
@@ -2728,30 +2725,19 @@ bool HInstructionBuilder::ProcessDexInstruction(const Instruction& instruction,
     }
 
     case Instruction::FILLED_NEW_ARRAY: {
-      uint32_t number_of_vreg_arguments = instruction.VRegA_35c();
       dex::TypeIndex type_index(instruction.VRegB_35c());
       uint32_t args[5];
-      instruction.GetVarArgs(args);
-      HNewArray* new_array = BuildFilledNewArray(dex_pc,
-                                                 type_index,
-                                                 number_of_vreg_arguments,
-                                                 /* is_range */ false,
-                                                 args,
-                                                 /* register_index */ 0);
+      uint32_t number_of_vreg_arguments = instruction.GetVarArgs(args);
+      VarArgsInstructionOperands operands(args, number_of_vreg_arguments);
+      HNewArray* new_array = BuildFilledNewArray(dex_pc, type_index, operands);
       BuildConstructorFenceForAllocation(new_array);
       break;
     }
 
     case Instruction::FILLED_NEW_ARRAY_RANGE: {
-      uint32_t number_of_vreg_arguments = instruction.VRegA_3rc();
       dex::TypeIndex type_index(instruction.VRegB_3rc());
-      uint32_t register_index = instruction.VRegC_3rc();
-      HNewArray* new_array = BuildFilledNewArray(dex_pc,
-                                                 type_index,
-                                                 number_of_vreg_arguments,
-                                                 /* is_range */ true,
-                                                 /* args*/ nullptr,
-                                                 register_index);
+      RangeInstructionOperands operands(instruction.VRegC_3rc(), instruction.VRegA_3rc());
+      HNewArray* new_array = BuildFilledNewArray(dex_pc, type_index, operands);
       BuildConstructorFenceForAllocation(new_array);
       break;
     }
@@ -2906,6 +2892,20 @@ bool HInstructionBuilder::ProcessDexInstruction(const Instruction& instruction,
       break;
     }
 
+    case Instruction::CONST_METHOD_HANDLE: {
+      uint16_t method_handle_idx = instruction.VRegB_21c();
+      BuildLoadMethodHandle(method_handle_idx, dex_pc);
+      UpdateLocal(instruction.VRegA_21c(), current_block_->GetLastInstruction());
+      break;
+    }
+
+    case Instruction::CONST_METHOD_TYPE: {
+      dex::ProtoIndex proto_idx(instruction.VRegB_21c());
+      BuildLoadMethodType(proto_idx, dex_pc);
+      UpdateLocal(instruction.VRegA_21c(), current_block_->GetLastInstruction());
+      break;
+    }
+
     case Instruction::MOVE_EXCEPTION: {
       AppendInstruction(new (allocator_) HLoadException(dex_pc));
       UpdateLocal(instruction.VRegA_11x(), current_block_->GetLastInstruction());
@@ -2959,7 +2959,21 @@ bool HInstructionBuilder::ProcessDexInstruction(const Instruction& instruction,
       break;
     }
 
-    default:
+    case Instruction::UNUSED_3E:
+    case Instruction::UNUSED_3F:
+    case Instruction::UNUSED_40:
+    case Instruction::UNUSED_41:
+    case Instruction::UNUSED_42:
+    case Instruction::UNUSED_43:
+    case Instruction::UNUSED_79:
+    case Instruction::UNUSED_7A:
+    case Instruction::UNUSED_F3:
+    case Instruction::UNUSED_F4:
+    case Instruction::UNUSED_F5:
+    case Instruction::UNUSED_F6:
+    case Instruction::UNUSED_F7:
+    case Instruction::UNUSED_F8:
+    case Instruction::UNUSED_F9: {
       VLOG(compiler) << "Did not compile "
                      << dex_file_->PrettyMethod(dex_compilation_unit_->GetDexMethodIndex())
                      << " because of unhandled instruction "
@@ -2967,6 +2981,7 @@ bool HInstructionBuilder::ProcessDexInstruction(const Instruction& instruction,
       MaybeRecordStat(compilation_stats_,
                       MethodCompilationStat::kNotCompiledUnhandledInstruction);
       return false;
+    }
   }
   return true;
 }  // NOLINT(readability/fn_size)

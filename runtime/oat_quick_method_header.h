@@ -39,8 +39,6 @@ class PACKED(4) OatQuickMethodHeader {
                                 uint32_t fp_spill_mask,
                                 uint32_t code_size);
 
-  ~OatQuickMethodHeader();
-
   static OatQuickMethodHeader* FromCodePointer(const void* code_ptr) {
     uintptr_t code = reinterpret_cast<uintptr_t>(code_ptr);
     uintptr_t header = code - OFFSETOF_MEMBER(OatQuickMethodHeader, code_);
@@ -65,18 +63,14 @@ class PACKED(4) OatQuickMethodHeader {
     return GetCodeSize() != 0 && vmap_table_offset_ != 0;
   }
 
-  const void* GetOptimizedCodeInfoPtr() const {
+  const uint8_t* GetOptimizedCodeInfoPtr() const {
     DCHECK(IsOptimized());
-    return reinterpret_cast<const void*>(code_ - vmap_table_offset_);
+    return code_ - vmap_table_offset_;
   }
 
   uint8_t* GetOptimizedCodeInfoPtr() {
     DCHECK(IsOptimized());
     return code_ - vmap_table_offset_;
-  }
-
-  CodeInfo GetOptimizedCodeInfo() const {
-    return CodeInfo(GetOptimizedCodeInfoPtr());
   }
 
   const void* GetOptimizedMethodInfoPtr() const {
@@ -165,7 +159,12 @@ class PACKED(4) OatQuickMethodHeader {
   }
 
   QuickMethodFrameInfo GetFrameInfo() const {
-    return frame_info_;
+    DCHECK(IsOptimized());
+    QuickMethodFrameInfo frame_info = CodeInfo::DecodeFrameInfo(GetOptimizedCodeInfoPtr());
+    DCHECK_EQ(frame_info.FrameSizeInBytes(), frame_info_.FrameSizeInBytes());
+    DCHECK_EQ(frame_info.CoreSpillMask(), frame_info_.CoreSpillMask());
+    DCHECK_EQ(frame_info.FpSpillMask(), frame_info_.FpSpillMask());
+    return frame_info;
   }
 
   uintptr_t ToNativeQuickPc(ArtMethod* method,

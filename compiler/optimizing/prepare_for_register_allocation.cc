@@ -17,7 +17,7 @@
 #include "prepare_for_register_allocation.h"
 
 #include "dex/dex_file_types.h"
-#include "jni_internal.h"
+#include "jni/jni_internal.h"
 #include "optimizing_compiler_stats.h"
 #include "well_known_classes.h"
 
@@ -31,6 +31,20 @@ void PrepareForRegisterAllocation::Run() {
          inst_it.Advance()) {
       inst_it.Current()->Accept(this);
     }
+  }
+}
+
+void PrepareForRegisterAllocation::VisitCheckCast(HCheckCast* check_cast) {
+  // Record only those bitstring type checks that make it to the codegen stage.
+  if (check_cast->GetTypeCheckKind() == TypeCheckKind::kBitstringCheck) {
+    MaybeRecordStat(stats_, MethodCompilationStat::kBitstringTypeCheck);
+  }
+}
+
+void PrepareForRegisterAllocation::VisitInstanceOf(HInstanceOf* instance_of) {
+  // Record only those bitstring type checks that make it to the codegen stage.
+  if (instance_of->GetTypeCheckKind() == TypeCheckKind::kBitstringCheck) {
+    MaybeRecordStat(stats_, MethodCompilationStat::kBitstringTypeCheck);
   }
 }
 

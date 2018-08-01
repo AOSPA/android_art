@@ -354,7 +354,7 @@ bool OatFileAssistant::LoadDexFiles(
     std::vector<std::unique_ptr<const DexFile>>* out_dex_files) {
   // Load the main dex file.
   std::string error_msg;
-  const OatFile::OatDexFile* oat_dex_file = oat_file.GetOatDexFile(
+  const OatDexFile* oat_dex_file = oat_file.GetOatDexFile(
       dex_location.c_str(), nullptr, &error_msg);
   if (oat_dex_file == nullptr) {
     LOG(WARNING) << error_msg;
@@ -453,7 +453,7 @@ bool OatFileAssistant::DexChecksumUpToDate(const OatFile& file, std::string* err
   for (uint32_t i = 0; i < number_of_dex_files; i++) {
     std::string dex = DexFileLoader::GetMultiDexLocation(i, dex_location_.c_str());
     uint32_t expected_checksum = (*required_dex_checksums)[i];
-    const OatFile::OatDexFile* oat_dex_file = file.GetOatDexFile(dex.c_str(), nullptr);
+    const OatDexFile* oat_dex_file = file.GetOatDexFile(dex.c_str(), nullptr);
     if (oat_dex_file == nullptr) {
       *error_msg = StringPrintf("failed to find %s in %s", dex.c_str(), file.GetLocation().c_str());
       return false;
@@ -866,6 +866,13 @@ bool OatFileAssistant::DexLocationToOatFilename(const std::string& location,
   CHECK(oat_filename != nullptr);
   CHECK(error_msg != nullptr);
 
+  // If ANDROID_DATA is not set, return false instead of aborting.
+  // This can occur for preopt when using a class loader context.
+  if (GetAndroidDataSafe(error_msg) == nullptr) {
+    *error_msg = "GetAndroidDataSafe failed: " + *error_msg;
+    return false;
+  }
+
   std::string cache_dir = GetDalvikCache(GetInstructionSetString(isa));
   if (cache_dir.empty()) {
     *error_msg = "Dalvik cache directory does not exist";
@@ -914,7 +921,7 @@ const std::vector<uint32_t>* OatFileAssistant::GetRequiredDexChecksums() {
         required_dex_checksums_found_ = true;
         for (size_t i = 0; i < odex_file->GetOatHeader().GetDexFileCount(); i++) {
           std::string dex = DexFileLoader::GetMultiDexLocation(i, dex_location_.c_str());
-          const OatFile::OatDexFile* odex_dex_file = odex_file->GetOatDexFile(dex.c_str(), nullptr);
+          const OatDexFile* odex_dex_file = odex_file->GetOatDexFile(dex.c_str(), nullptr);
           if (odex_dex_file == nullptr) {
             required_dex_checksums_found_ = false;
             break;
@@ -1223,7 +1230,9 @@ bool OatFileAssistant::OatFileInfo::ClassLoaderContextIsOkay(ClassLoaderContext*
     return false;
   }
 
-  bool result = context->VerifyClassLoaderContextMatch(file->GetClassLoaderContext());
+
+  const bool result = context->VerifyClassLoaderContextMatch(file->GetClassLoaderContext()) !=
+      ClassLoaderContext::VerificationResult::kMismatch;
   if (!result) {
     VLOG(oat) << "ClassLoaderContext check failed. Context was "
               << file->GetClassLoaderContext()

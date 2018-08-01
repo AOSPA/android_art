@@ -18,6 +18,7 @@
 
 #include "base/memory_tool.h"
 #include "class_linker-inl.h"
+#include "class_root.h"
 #include "handle_scope-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
@@ -34,12 +35,11 @@ class VerificationTest : public CommonRuntimeTest {
   VerificationTest() {}
 
   template <class T>
-  mirror::ObjectArray<T>* AllocObjectArray(Thread* self, size_t length)
+  ObjPtr<mirror::ObjectArray<T>> AllocObjectArray(Thread* self, size_t length)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
     return mirror::ObjectArray<T>::Alloc(
         self,
-        class_linker->GetClassRoot(ClassLinker::ClassRoot::kObjectArrayClass),
+        GetClassRoot<mirror::ObjectArray<mirror::Object>>(),
         length);
   }
 };
@@ -83,7 +83,7 @@ TEST_F(VerificationTest, IsValidClassOrNotInHeap) {
 }
 
 TEST_F(VerificationTest, IsValidClassInHeap) {
-  TEST_DISABLED_FOR_MEMORY_TOOL();
+  TEST_DISABLED_FOR_MEMORY_TOOL_WITH_HEAP_POISONING();
   ScopedObjectAccess soa(Thread::Current());
   VariableSizedHandleScope hs(soa.Self());
   Handle<mirror::String> string(
@@ -106,7 +106,7 @@ TEST_F(VerificationTest, DumpInvalidObjectInfo) {
 }
 
 TEST_F(VerificationTest, DumpValidObjectInfo) {
-  TEST_DISABLED_FOR_MEMORY_TOOL();
+  TEST_DISABLED_FOR_MEMORY_TOOL_WITH_HEAP_POISONING();
   ScopedLogSeverity sls(LogSeverity::INFO);
   ScopedObjectAccess soa(Thread::Current());
   Runtime* const runtime = Runtime::Current();
@@ -126,7 +126,7 @@ TEST_F(VerificationTest, DumpValidObjectInfo) {
 }
 
 TEST_F(VerificationTest, LogHeapCorruption) {
-  TEST_DISABLED_FOR_MEMORY_TOOL();
+  TEST_DISABLED_FOR_MEMORY_TOOL_WITH_HEAP_POISONING();
   ScopedLogSeverity sls(LogSeverity::INFO);
   ScopedObjectAccess soa(Thread::Current());
   Runtime* const runtime = Runtime::Current();
@@ -147,7 +147,6 @@ TEST_F(VerificationTest, LogHeapCorruption) {
 }
 
 TEST_F(VerificationTest, FindPathFromRootSet) {
-  TEST_DISABLED_FOR_MEMORY_TOOL();
   ScopedLogSeverity sls(LogSeverity::INFO);
   ScopedObjectAccess soa(Thread::Current());
   Runtime* const runtime = Runtime::Current();

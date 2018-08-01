@@ -21,7 +21,7 @@
 #include <sstream>
 
 #include "android-base/logging.h"
-#include "base/macros.h"
+#include "macros.h"
 
 namespace art {
 
@@ -97,6 +97,9 @@ class LogHelper {
   DISALLOW_ALLOCATION();
   DISALLOW_COPY_AND_ASSIGN(LogHelper);
 };
+
+// Copy the contents of file_name to the log stream for level.
+bool PrintFileToLog(const std::string& file_name, android::base::LogSeverity level);
 
 // Is verbose logging enabled for the given module? Where the module is defined in LogVerbosity.
 #define VLOG_IS_ON(module) UNLIKELY(::art::gLogVerbosity.module)

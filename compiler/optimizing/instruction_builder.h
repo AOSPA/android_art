@@ -38,12 +38,15 @@ class CompilerDriver;
 class DexCompilationUnit;
 class HBasicBlockBuilder;
 class Instruction;
+class InstructionOperands;
 class OptimizingCompilerStats;
+class ScopedObjectAccess;
 class SsaBuilder;
 class VariableSizedHandleScope;
 
 namespace mirror {
 class Class;
+class MethodType;
 }  // namespace mirror
 
 class HInstructionBuilder : public ValueObject {
@@ -94,11 +97,6 @@ class HInstructionBuilder : public ValueObject {
   void InitializeInstruction(HInstruction* instruction);
 
   void InitializeParameters();
-
-  // Returns whether the current method needs access check for the type.
-  // Output parameter finalizable is set to whether the type is finalizable.
-  bool NeedsAccessCheck(dex::TypeIndex type_index, /*out*/bool* finalizable) const
-      REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<typename T>
   void Unop_12x(const Instruction& instruction, DataType::Type type, uint32_t dex_pc);
@@ -166,29 +164,25 @@ class HInstructionBuilder : public ValueObject {
   bool BuildInvoke(const Instruction& instruction,
                    uint32_t dex_pc,
                    uint32_t method_idx,
-                   uint32_t number_of_vreg_arguments,
-                   bool is_range,
-                   uint32_t* args,
-                   uint32_t register_index);
+                   const InstructionOperands& operands);
 
   // Builds an invocation node for invoke-polymorphic and returns whether the
   // instruction is supported.
-  bool BuildInvokePolymorphic(const Instruction& instruction,
-                              uint32_t dex_pc,
+  bool BuildInvokePolymorphic(uint32_t dex_pc,
                               uint32_t method_idx,
-                              uint32_t proto_idx,
-                              uint32_t number_of_vreg_arguments,
-                              bool is_range,
-                              uint32_t* args,
-                              uint32_t register_index);
+                              dex::ProtoIndex proto_idx,
+                              const InstructionOperands& operands);
+
+  // Builds an invocation node for invoke-custom and returns whether the
+  // instruction is supported.
+  bool BuildInvokeCustom(uint32_t dex_pc,
+                         uint32_t call_site_idx,
+                         const InstructionOperands& operands);
 
   // Builds a new array node and the instructions that fill it.
   HNewArray* BuildFilledNewArray(uint32_t dex_pc,
                                  dex::TypeIndex type_index,
-                                 uint32_t number_of_vreg_arguments,
-                                 bool is_range,
-                                 uint32_t* args,
-                                 uint32_t register_index);
+                                 const InstructionOperands& operands);
 
   void BuildFillArrayData(const Instruction& instruction, uint32_t dex_pc);
 
@@ -232,6 +226,18 @@ class HInstructionBuilder : public ValueObject {
                              bool needs_access_check)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  Handle<mirror::Class> ResolveClass(ScopedObjectAccess& soa, dex::TypeIndex type_index)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  bool LoadClassNeedsAccessCheck(Handle<mirror::Class> klass)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Builds a `HLoadMethodHandle` loading the given `method_handle_index`.
+  void BuildLoadMethodHandle(uint16_t method_handle_idx, uint32_t dex_pc);
+
+  // Builds a `HLoadMethodType` loading the given `proto_index`.
+  void BuildLoadMethodType(dex::ProtoIndex proto_index, uint32_t dex_pc);
+
   // Returns the outer-most compiling method's class.
   ObjPtr<mirror::Class> GetOutermostCompilingClass() const;
 
@@ -246,29 +252,20 @@ class HInstructionBuilder : public ValueObject {
                                      HInvoke* invoke);
 
   bool SetupInvokeArguments(HInvoke* invoke,
-                            uint32_t number_of_vreg_arguments,
-                            uint32_t* args,
-                            uint32_t register_index,
-                            bool is_range,
-                            const char* descriptor,
+                            const InstructionOperands& operands,
+                            const char* shorty,
                             size_t start_index,
                             size_t* argument_index);
 
   bool HandleInvoke(HInvoke* invoke,
-                    uint32_t number_of_vreg_arguments,
-                    uint32_t* args,
-                    uint32_t register_index,
-                    bool is_range,
-                    const char* descriptor,
-                    HClinitCheck* clinit_check,
-                    bool is_unresolved);
+                    const InstructionOperands& operands,
+                    const char* shorty,
+                    bool is_unresolved,
+                    HClinitCheck* clinit_check = nullptr);
 
   bool HandleStringInit(HInvoke* invoke,
-                        uint32_t number_of_vreg_arguments,
-                        uint32_t* args,
-                        uint32_t register_index,
-                        bool is_range,
-                        const char* descriptor);
+                        const InstructionOperands& operands,
+                        const char* shorty);
   void HandleStringInitResult(HInvokeStaticOrDirect* invoke);
 
   HClinitCheck* ProcessClinitCheckForInvoke(
@@ -285,8 +282,7 @@ class HInstructionBuilder : public ValueObject {
   void BuildConstructorFenceForAllocation(HInstruction* allocation);
 
   // Return whether the compiler can assume `cls` is initialized.
-  bool IsInitialized(Handle<mirror::Class> cls) const
-      REQUIRES_SHARED(Locks::mutator_lock_);
+  bool IsInitialized(Handle<mirror::Class> cls) const REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Try to resolve a method using the class linker. Return null if a method could
   // not be resolved.

@@ -37,7 +37,6 @@
 #include "base/systrace.h"
 #include "base/time_utils.h"
 #include "common_throws.h"
-#include "cutils/sched_policy.h"
 #include "debugger.h"
 #include "dex/dex_file-inl.h"
 #include "entrypoints/quick/quick_alloc_entrypoints.h"
@@ -48,7 +47,6 @@
 #include "gc/accounting/remembered_set.h"
 #include "gc/accounting/space_bitmap-inl.h"
 #include "gc/collector/concurrent_copying.h"
-#include "gc/collector/mark_compact.h"
 #include "gc/collector/mark_sweep.h"
 #include "gc/collector/partial_mark_sweep.h"
 #include "gc/collector/semi_space.h"
@@ -72,9 +70,9 @@
 #include "heap-visit-objects-inl.h"
 #include "image.h"
 #include "intern_table.h"
-#include "java_vm_ext.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
+#include "jni/java_vm_ext.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/object-refvisitor-inl.h"
@@ -142,6 +140,10 @@ static constexpr bool kLogAllGCs = false;
 // How much we grow the TLAB if we can do it.
 static constexpr size_t kPartialTlabSize = 16 * KB;
 static constexpr bool kUsePartialTlabs = true;
+
+// Use Max heap for 2 seconds, this is smaller than the usual 5s window since we don't want to leave
+// allocate with relaxed ergonomics for that long.
+static constexpr size_t kPostForkMaxHeapDurationMS = 2000;
 
 #if defined(__LP64__) || !defined(ADDRESS_SANITIZER)
 // 300 MB (0x12c00000) - (default non-moving space capacity).
@@ -258,7 +260,6 @@ Heap::Heap(size_t initial_size,
       verify_object_mode_(kVerifyObjectModeDisabled),
       disable_moving_gc_count_(0),
       semi_space_collector_(nullptr),
-      mark_compact_collector_(nullptr),
       concurrent_copying_collector_(nullptr),
       is_running_on_memory_tool_(Runtime::Current()->IsRunningOnMemoryTool()),
       use_tlab_(use_tlab),
@@ -545,7 +546,7 @@ Heap::Heap(size_t initial_size,
     AddRememberedSet(non_moving_space_rem_set);
   }
   // TODO: Count objects in the image space here?
-  num_bytes_allocated_.StoreRelaxed(0);
+  num_bytes_allocated_.store(0, std::memory_order_relaxed);
   mark_stack_.reset(accounting::ObjectStack::Create("mark stack", kDefaultMarkStackSize,
                                                     kDefaultMarkStackSize));
   const size_t alloc_stack_capacity = max_allocation_stack_size_ + kAllocationStackReserveSize;
@@ -598,10 +599,6 @@ Heap::Heap(size_t initial_size,
       DCHECK(region_space_ != nullptr);
       concurrent_copying_collector_->SetRegionSpace(region_space_);
       garbage_collectors_.push_back(concurrent_copying_collector_);
-    }
-    if (MayUseCollector(kCollectorTypeMC)) {
-      mark_compact_collector_ = new collector::MarkCompact(this);
-      garbage_collectors_.push_back(mark_compact_collector_);
     }
   }
   if (!GetBootImageSpaces().empty() && non_moving_space_ != nullptr &&
@@ -1049,7 +1046,8 @@ void Heap::DumpGcPerformanceInfo(std::ostream& os) {
   }
 
   os << "Registered native bytes allocated: "
-     << old_native_bytes_allocated_.LoadRelaxed() + new_native_bytes_allocated_.LoadRelaxed()
+     << (old_native_bytes_allocated_.load(std::memory_order_relaxed) +
+         new_native_bytes_allocated_.load(std::memory_order_relaxed))
      << "\n";
 
   BaseMutex::DumpAll(os);
@@ -1116,11 +1114,7 @@ void Heap::DumpBlockingGcCountRateHistogram(std::ostream& os) const {
 ALWAYS_INLINE
 static inline AllocationListener* GetAndOverwriteAllocationListener(
     Atomic<AllocationListener*>* storage, AllocationListener* new_value) {
-  AllocationListener* old;
-  do {
-    old = storage->LoadSequentiallyConsistent();
-  } while (!storage->CompareAndSetStrongSequentiallyConsistent(old, new_value));
-  return old;
+  return storage->exchange(new_value);
 }
 
 Heap::~Heap() {
@@ -1138,12 +1132,11 @@ Heap::~Heap() {
   delete thread_flip_lock_;
   delete pending_task_lock_;
   delete backtrace_lock_;
-  if (unique_backtrace_count_.LoadRelaxed() != 0 || seen_backtrace_count_.LoadRelaxed() != 0) {
-    LOG(INFO) << "gc stress unique=" << unique_backtrace_count_.LoadRelaxed()
-        << " total=" << seen_backtrace_count_.LoadRelaxed() +
-            unique_backtrace_count_.LoadRelaxed();
+  uint64_t unique_count = unique_backtrace_count_.load(std::memory_order_relaxed);
+  uint64_t seen_count = seen_backtrace_count_.load(std::memory_order_relaxed);
+  if (unique_count != 0 || seen_count != 0) {
+    LOG(INFO) << "gc stress unique=" << unique_count << " total=" << (unique_count + seen_count);
   }
-
   VLOG(heap) << "Finished ~Heap()";
 }
 
@@ -1209,7 +1202,8 @@ void Heap::ThrowOutOfMemoryError(Thread* self, size_t byte_count, AllocatorType 
   // If we're in a stack overflow, do not create a new exception. It would require running the
   // constructor, which will of course still be in a stack overflow.
   if (self->IsHandlingStackOverflow()) {
-    self->SetException(Runtime::Current()->GetPreAllocatedOutOfMemoryError());
+    self->SetException(
+        Runtime::Current()->GetPreAllocatedOutOfMemoryErrorWhenHandlingStackOverflow());
     return;
   }
 
@@ -1489,7 +1483,7 @@ void Heap::VerifyObjectBody(ObjPtr<mirror::Object> obj) {
   }
 
   // Ignore early dawn of the universe verifications.
-  if (UNLIKELY(static_cast<size_t>(num_bytes_allocated_.LoadRelaxed()) < 10 * KB)) {
+  if (UNLIKELY(num_bytes_allocated_.load(std::memory_order_relaxed) < 10 * KB)) {
     return;
   }
   CHECK_ALIGNED(obj.Ptr(), kObjectAlignment) << "Object isn't aligned";
@@ -1521,9 +1515,10 @@ void Heap::RecordFree(uint64_t freed_objects, int64_t freed_bytes) {
   // Use signed comparison since freed bytes can be negative when background compaction foreground
   // transitions occurs. This is caused by the moving objects from a bump pointer space to a
   // free list backed space typically increasing memory footprint due to padding and binning.
-  DCHECK_LE(freed_bytes, static_cast<int64_t>(num_bytes_allocated_.LoadRelaxed()));
+  DCHECK_LE(freed_bytes,
+            static_cast<int64_t>(num_bytes_allocated_.load(std::memory_order_relaxed)));
   // Note: This relies on 2s complement for handling negative freed_bytes.
-  num_bytes_allocated_.FetchAndSubSequentiallyConsistent(static_cast<ssize_t>(freed_bytes));
+  num_bytes_allocated_.fetch_sub(static_cast<ssize_t>(freed_bytes));
   if (Runtime::Current()->HasStatsEnabled()) {
     RuntimeStats* thread_stats = Thread::Current()->GetStats();
     thread_stats->freed_objects += freed_objects;
@@ -1540,10 +1535,10 @@ void Heap::RecordFreeRevoke() {
   // ahead-of-time, bulk counting of bytes allocated in rosalloc thread-local buffers.
   // If there's a concurrent revoke, ok to not necessarily reset num_bytes_freed_revoke_
   // all the way to zero exactly as the remainder will be subtracted at the next GC.
-  size_t bytes_freed = num_bytes_freed_revoke_.LoadSequentiallyConsistent();
-  CHECK_GE(num_bytes_freed_revoke_.FetchAndSubSequentiallyConsistent(bytes_freed),
+  size_t bytes_freed = num_bytes_freed_revoke_.load();
+  CHECK_GE(num_bytes_freed_revoke_.fetch_sub(bytes_freed),
            bytes_freed) << "num_bytes_freed_revoke_ underflow";
-  CHECK_GE(num_bytes_allocated_.FetchAndSubSequentiallyConsistent(bytes_freed),
+  CHECK_GE(num_bytes_allocated_.fetch_sub(bytes_freed),
            bytes_freed) << "num_bytes_allocated_ underflow";
   GetCurrentGcIteration()->SetFreedRevoke(bytes_freed);
 }
@@ -1699,13 +1694,13 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
           // Always print that we ran homogeneous space compation since this can cause jank.
           VLOG(heap) << "Ran heap homogeneous space compaction, "
                     << " requested defragmentation "
-                    << count_requested_homogeneous_space_compaction_.LoadSequentiallyConsistent()
+                    << count_requested_homogeneous_space_compaction_.load()
                     << " performed defragmentation "
-                    << count_performed_homogeneous_space_compaction_.LoadSequentiallyConsistent()
+                    << count_performed_homogeneous_space_compaction_.load()
                     << " ignored homogeneous space compaction "
-                    << count_ignored_homogeneous_space_compaction_.LoadSequentiallyConsistent()
+                    << count_ignored_homogeneous_space_compaction_.load()
                     << " delayed count = "
-                    << count_delayed_oom_.LoadSequentiallyConsistent();
+                    << count_delayed_oom_.load();
         }
         break;
       }
@@ -1968,7 +1963,7 @@ void Heap::TransitionCollector(CollectorType collector_type) {
   VLOG(heap) << "TransitionCollector: " << static_cast<int>(collector_type_)
              << " -> " << static_cast<int>(collector_type);
   uint64_t start_time = NanoTime();
-  uint32_t before_allocated = num_bytes_allocated_.LoadSequentiallyConsistent();
+  uint32_t before_allocated = num_bytes_allocated_.load();
   Runtime* const runtime = Runtime::Current();
   Thread* const self = Thread::Current();
   ScopedThreadStateChange tsc(self, kWaitingPerformingGc);
@@ -2106,7 +2101,7 @@ void Heap::TransitionCollector(CollectorType collector_type) {
     ScopedObjectAccess soa(self);
     soa.Vm()->UnloadNativeLibraries();
   }
-  int32_t after_allocated = num_bytes_allocated_.LoadSequentiallyConsistent();
+  int32_t after_allocated = num_bytes_allocated_.load(std::memory_order_seq_cst);
   int32_t delta_allocated = before_allocated - after_allocated;
   std::string saved_str;
   if (delta_allocated >= 0) {
@@ -2121,10 +2116,6 @@ void Heap::TransitionCollector(CollectorType collector_type) {
 void Heap::ChangeCollector(CollectorType collector_type) {
   // TODO: Only do this with all mutators suspended to avoid races.
   if (collector_type != collector_type_) {
-    if (collector_type == kCollectorTypeMC) {
-      // Don't allow mark compact unless support is compiled in.
-      CHECK(kMarkCompactSupport);
-    }
     collector_type_ = collector_type;
     gc_plan_.clear();
     switch (collector_type_) {
@@ -2137,7 +2128,6 @@ void Heap::ChangeCollector(CollectorType collector_type) {
         }
         break;
       }
-      case kCollectorTypeMC:  // Fall-through.
       case kCollectorTypeSS:  // Fall-through.
       case kCollectorTypeGSS: {
         gc_plan_.push_back(collector::kGcTypeFull);
@@ -2257,7 +2247,8 @@ class ZygoteCompactingCollector FINAL : public collector::SemiSpace {
       // Add a new bin with the remaining space.
       AddBin(size - alloc_size, pos + alloc_size);
     }
-    // Copy the object over to its new location. Don't use alloc_size to avoid valgrind error.
+    // Copy the object over to its new location.
+    // Historical note: We did not use `alloc_size` to avoid a Valgrind error.
     memcpy(reinterpret_cast<void*>(forward_address), obj, obj_size);
     if (kUseBakerReadBarrier) {
       obj->AssertReadBarrierState();
@@ -2486,13 +2477,9 @@ collector::GarbageCollector* Heap::Compact(space::ContinuousMemMapAllocSpace* ta
     semi_space_collector_->SetToSpace(target_space);
     semi_space_collector_->Run(gc_cause, false);
     return semi_space_collector_;
-  } else {
-    CHECK(target_space->IsBumpPointerSpace())
-        << "In-place compaction is only supported for bump pointer spaces";
-    mark_compact_collector_->SetSpace(target_space->AsBumpPointerSpace());
-    mark_compact_collector_->Run(kGcCauseCollectorTransition, false);
-    return mark_compact_collector_;
   }
+  LOG(FATAL) << "Unsupported";
+  UNREACHABLE();
 }
 
 void Heap::TraceHeapSize(size_t heap_size) {
@@ -2555,7 +2542,9 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
     // Move all bytes from new_native_bytes_allocated_ to
     // old_native_bytes_allocated_ now that GC has been triggered, resetting
     // new_native_bytes_allocated_ to zero in the process.
-    old_native_bytes_allocated_.FetchAndAddRelaxed(new_native_bytes_allocated_.ExchangeRelaxed(0));
+    old_native_bytes_allocated_.fetch_add(
+        new_native_bytes_allocated_.exchange(0, std::memory_order_relaxed),
+        std::memory_order_relaxed);
   }
 
   DCHECK_LT(gc_type, collector::kGcTypeMax);
@@ -2580,14 +2569,10 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
       case kCollectorTypeCC:
         collector = concurrent_copying_collector_;
         break;
-      case kCollectorTypeMC:
-        mark_compact_collector_->SetSpace(bump_pointer_space_);
-        collector = mark_compact_collector_;
-        break;
       default:
         LOG(FATAL) << "Invalid collector type " << static_cast<size_t>(collector_type_);
     }
-    if (collector != mark_compact_collector_ && collector != concurrent_copying_collector_) {
+    if (collector != concurrent_copying_collector_) {
       temp_space_->GetMemMap()->Protect(PROT_READ | PROT_WRITE);
       if (kIsDebugBuild) {
         // Try to read each page of the memory map in case mprotect didn't work properly b/19894268.
@@ -2750,12 +2735,10 @@ class ScanVisitor {
 // Verify a reference from an object.
 class VerifyReferenceVisitor : public SingleRootVisitor {
  public:
-  VerifyReferenceVisitor(Heap* heap, Atomic<size_t>* fail_count, bool verify_referent)
+  VerifyReferenceVisitor(Thread* self, Heap* heap, size_t* fail_count, bool verify_referent)
       REQUIRES_SHARED(Locks::mutator_lock_)
-      : heap_(heap), fail_count_(fail_count), verify_referent_(verify_referent) {}
-
-  size_t GetFailureCount() const {
-    return fail_count_->LoadSequentiallyConsistent();
+      : self_(self), heap_(heap), fail_count_(fail_count), verify_referent_(verify_referent) {
+    CHECK_EQ(self_, Thread::Current());
   }
 
   void operator()(ObjPtr<mirror::Class> klass ATTRIBUTE_UNUSED, ObjPtr<mirror::Reference> ref) const
@@ -2807,8 +2790,10 @@ class VerifyReferenceVisitor : public SingleRootVisitor {
       // Verify that the reference is live.
       return true;
     }
-    if (fail_count_->FetchAndAddSequentiallyConsistent(1) == 0) {
-      // Print message on only on first failure to prevent spam.
+    CHECK_EQ(self_, Thread::Current());  // fail_count_ is private to the calling thread.
+    *fail_count_ += 1;
+    if (*fail_count_ == 1) {
+      // Only print message for the first failure to prevent spam.
       LOG(ERROR) << "!!!!!!!!!!!!!!Heap corruption detected!!!!!!!!!!!!!!!!!!!";
     }
     if (obj != nullptr) {
@@ -2894,38 +2879,41 @@ class VerifyReferenceVisitor : public SingleRootVisitor {
     return false;
   }
 
+  Thread* const self_;
   Heap* const heap_;
-  Atomic<size_t>* const fail_count_;
+  size_t* const fail_count_;
   const bool verify_referent_;
 };
 
 // Verify all references within an object, for use with HeapBitmap::Visit.
 class VerifyObjectVisitor {
  public:
-  VerifyObjectVisitor(Heap* heap, Atomic<size_t>* fail_count, bool verify_referent)
-      : heap_(heap), fail_count_(fail_count), verify_referent_(verify_referent) {}
+  VerifyObjectVisitor(Thread* self, Heap* heap, size_t* fail_count, bool verify_referent)
+      : self_(self), heap_(heap), fail_count_(fail_count), verify_referent_(verify_referent) {}
 
   void operator()(mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_) {
     // Note: we are verifying the references in obj but not obj itself, this is because obj must
     // be live or else how did we find it in the live bitmap?
-    VerifyReferenceVisitor visitor(heap_, fail_count_, verify_referent_);
+    VerifyReferenceVisitor visitor(self_, heap_, fail_count_, verify_referent_);
     // The class doesn't count as a reference but we should verify it anyways.
     obj->VisitReferences(visitor, visitor);
   }
 
   void VerifyRoots() REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Locks::heap_bitmap_lock_) {
     ReaderMutexLock mu(Thread::Current(), *Locks::heap_bitmap_lock_);
-    VerifyReferenceVisitor visitor(heap_, fail_count_, verify_referent_);
+    VerifyReferenceVisitor visitor(self_, heap_, fail_count_, verify_referent_);
     Runtime::Current()->VisitRoots(&visitor);
   }
 
-  size_t GetFailureCount() const {
-    return fail_count_->LoadSequentiallyConsistent();
+  uint32_t GetFailureCount() const REQUIRES(Locks::mutator_lock_) {
+    CHECK_EQ(self_, Thread::Current());
+    return *fail_count_;
   }
 
  private:
+  Thread* const self_;
   Heap* const heap_;
-  Atomic<size_t>* const fail_count_;
+  size_t* const fail_count_;
   const bool verify_referent_;
 };
 
@@ -2977,8 +2965,8 @@ size_t Heap::VerifyHeapReferences(bool verify_referents) {
   // Since we sorted the allocation stack content, need to revoke all
   // thread-local allocation stacks.
   RevokeAllThreadLocalAllocationStacks(self);
-  Atomic<size_t> fail_count_(0);
-  VerifyObjectVisitor visitor(this, &fail_count_, verify_referents);
+  size_t fail_count = 0;
+  VerifyObjectVisitor visitor(self, this, &fail_count, verify_referents);
   // Verify objects in the allocation stack since these will be objects which were:
   // 1. Allocated prior to the GC (pre GC verification).
   // 2. Allocated during the GC (pre sweep GC verification).
@@ -3539,6 +3527,12 @@ void Heap::ClampGrowthLimit() {
 }
 
 void Heap::ClearGrowthLimit() {
+  if (max_allowed_footprint_ == growth_limit_ && growth_limit_ < capacity_) {
+    max_allowed_footprint_ = capacity_;
+    concurrent_start_bytes_ =
+         std::max(max_allowed_footprint_, kMinConcurrentRemainingBytes) -
+         kMinConcurrentRemainingBytes;
+  }
   growth_limit_ = capacity_;
   ScopedObjectAccess soa(Thread::Current());
   for (const auto& space : continuous_spaces_) {
@@ -3595,7 +3589,7 @@ static bool CanAddHeapTask(Thread* self) REQUIRES(!Locks::runtime_shutdown_lock_
 }
 
 void Heap::ClearConcurrentGCRequest() {
-  concurrent_gc_pending_.StoreRelaxed(false);
+  concurrent_gc_pending_.store(false, std::memory_order_relaxed);
 }
 
 void Heap::RequestConcurrentGC(Thread* self, GcCause cause, bool force_full) {
@@ -3718,12 +3712,21 @@ void Heap::RequestTrim(Thread* self) {
   task_processor_->AddTask(self, added_task);
 }
 
+void Heap::IncrementNumberOfBytesFreedRevoke(size_t freed_bytes_revoke) {
+  size_t previous_num_bytes_freed_revoke =
+      num_bytes_freed_revoke_.fetch_add(freed_bytes_revoke, std::memory_order_seq_cst);
+  // Check the updated value is less than the number of bytes allocated. There is a risk of
+  // execution being suspended between the increment above and the CHECK below, leading to
+  // the use of previous_num_bytes_freed_revoke in the comparison.
+  CHECK_GE(num_bytes_allocated_.load(std::memory_order_relaxed),
+           previous_num_bytes_freed_revoke + freed_bytes_revoke);
+}
+
 void Heap::RevokeThreadLocalBuffers(Thread* thread) {
   if (rosalloc_space_ != nullptr) {
     size_t freed_bytes_revoke = rosalloc_space_->RevokeThreadLocalBuffers(thread);
     if (freed_bytes_revoke > 0U) {
-      num_bytes_freed_revoke_.FetchAndAddSequentiallyConsistent(freed_bytes_revoke);
-      CHECK_GE(num_bytes_allocated_.LoadRelaxed(), num_bytes_freed_revoke_.LoadRelaxed());
+      IncrementNumberOfBytesFreedRevoke(freed_bytes_revoke);
     }
   }
   if (bump_pointer_space_ != nullptr) {
@@ -3738,8 +3741,7 @@ void Heap::RevokeRosAllocThreadLocalBuffers(Thread* thread) {
   if (rosalloc_space_ != nullptr) {
     size_t freed_bytes_revoke = rosalloc_space_->RevokeThreadLocalBuffers(thread);
     if (freed_bytes_revoke > 0U) {
-      num_bytes_freed_revoke_.FetchAndAddSequentiallyConsistent(freed_bytes_revoke);
-      CHECK_GE(num_bytes_allocated_.LoadRelaxed(), num_bytes_freed_revoke_.LoadRelaxed());
+      IncrementNumberOfBytesFreedRevoke(freed_bytes_revoke);
     }
   }
 }
@@ -3748,8 +3750,7 @@ void Heap::RevokeAllThreadLocalBuffers() {
   if (rosalloc_space_ != nullptr) {
     size_t freed_bytes_revoke = rosalloc_space_->RevokeAllThreadLocalBuffers();
     if (freed_bytes_revoke > 0U) {
-      num_bytes_freed_revoke_.FetchAndAddSequentiallyConsistent(freed_bytes_revoke);
-      CHECK_GE(num_bytes_allocated_.LoadRelaxed(), num_bytes_freed_revoke_.LoadRelaxed());
+      IncrementNumberOfBytesFreedRevoke(freed_bytes_revoke);
     }
   }
   if (bump_pointer_space_ != nullptr) {
@@ -3761,7 +3762,7 @@ void Heap::RevokeAllThreadLocalBuffers() {
 }
 
 bool Heap::IsGCRequestPending() const {
-  return concurrent_gc_pending_.LoadRelaxed();
+  return concurrent_gc_pending_.load(std::memory_order_relaxed);
 }
 
 void Heap::RunFinalization(JNIEnv* env, uint64_t timeout) {
@@ -3771,7 +3772,7 @@ void Heap::RunFinalization(JNIEnv* env, uint64_t timeout) {
 }
 
 void Heap::RegisterNativeAllocation(JNIEnv* env, size_t bytes) {
-  size_t old_value = new_native_bytes_allocated_.FetchAndAddRelaxed(bytes);
+  size_t old_value = new_native_bytes_allocated_.fetch_add(bytes, std::memory_order_relaxed);
 
   if (old_value > NativeAllocationGcWatermark() * HeapGrowthMultiplier() &&
              !IsGCRequestPending()) {
@@ -3793,12 +3794,12 @@ void Heap::RegisterNativeFree(JNIEnv*, size_t bytes) {
   size_t allocated;
   size_t new_freed_bytes;
   do {
-    allocated = new_native_bytes_allocated_.LoadRelaxed();
+    allocated = new_native_bytes_allocated_.load(std::memory_order_relaxed);
     new_freed_bytes = std::min(allocated, bytes);
   } while (!new_native_bytes_allocated_.CompareAndSetWeakRelaxed(allocated,
                                                                    allocated - new_freed_bytes));
   if (new_freed_bytes < bytes) {
-    old_native_bytes_allocated_.FetchAndSubRelaxed(bytes - new_freed_bytes);
+    old_native_bytes_allocated_.fetch_sub(bytes - new_freed_bytes, std::memory_order_relaxed);
   }
 }
 
@@ -3912,9 +3913,9 @@ void Heap::BroadcastForNewAllocationRecords() const {
 }
 
 void Heap::CheckGcStressMode(Thread* self, ObjPtr<mirror::Object>* obj) {
+  DCHECK(gc_stress_mode_);
   auto* const runtime = Runtime::Current();
-  if (gc_stress_mode_ && runtime->GetClassLinker()->IsInitialized() &&
-      !runtime->IsActiveTransaction() && mirror::Class::HasJavaLangClass()) {
+  if (runtime->GetClassLinker()->IsInitialized() && !runtime->IsActiveTransaction()) {
     // Check if we should GC.
     bool new_backtrace = false;
     {
@@ -3932,9 +3933,9 @@ void Heap::CheckGcStressMode(Thread* self, ObjPtr<mirror::Object>* obj) {
       StackHandleScope<1> hs(self);
       auto h = hs.NewHandleWrapper(obj);
       CollectGarbage(/* clear_soft_references */ false);
-      unique_backtrace_count_.FetchAndAddSequentiallyConsistent(1);
+      unique_backtrace_count_.fetch_add(1, std::memory_order_seq_cst);
     } else {
-      seen_backtrace_count_.FetchAndAddSequentiallyConsistent(1);
+      seen_backtrace_count_.fetch_add(1, std::memory_order_seq_cst);
     }
   }
 }
@@ -4010,11 +4011,11 @@ void Heap::RemoveAllocationListener() {
 }
 
 void Heap::SetGcPauseListener(GcPauseListener* l) {
-  gc_pause_listener_.StoreRelaxed(l);
+  gc_pause_listener_.store(l, std::memory_order_relaxed);
 }
 
 void Heap::RemoveGcPauseListener() {
-  gc_pause_listener_.StoreRelaxed(nullptr);
+  gc_pause_listener_.store(nullptr, std::memory_order_relaxed);
 }
 
 mirror::Object* Heap::AllocWithNewTLAB(Thread* self,
@@ -4108,6 +4109,33 @@ const Verification* Heap::GetVerification() const {
 void Heap::VlogHeapGrowth(size_t max_allowed_footprint, size_t new_footprint, size_t alloc_size) {
   VLOG(heap) << "Growing heap from " << PrettySize(max_allowed_footprint) << " to "
              << PrettySize(new_footprint) << " for a " << PrettySize(alloc_size) << " allocation";
+}
+
+class Heap::TriggerPostForkCCGcTask : public HeapTask {
+ public:
+  explicit TriggerPostForkCCGcTask(uint64_t target_time) : HeapTask(target_time) {}
+  void Run(Thread* self) OVERRIDE {
+    gc::Heap* heap = Runtime::Current()->GetHeap();
+    // Trigger a GC, if not already done. The first GC after fork, whenever
+    // takes place, will adjust the thresholds to normal levels.
+    if (heap->max_allowed_footprint_ == heap->growth_limit_) {
+      heap->RequestConcurrentGC(self, kGcCauseBackground, false);
+    }
+  }
+};
+
+void Heap::PostForkChildAction(Thread* self) {
+  // Temporarily increase max_allowed_footprint_ and concurrent_start_bytes_ to
+  // max values to avoid GC during app launch.
+  if (collector_type_ == kCollectorTypeCC && !IsLowMemoryMode()) {
+    // Set max_allowed_footprint_ to the largest allowed value.
+    SetIdealFootprint(growth_limit_);
+    // Set concurrent_start_bytes_ to half of the heap size.
+    concurrent_start_bytes_ = std::max(max_allowed_footprint_ / 2, GetBytesAllocated());
+
+    GetTaskProcessor()->AddTask(
+        self, new TriggerPostForkCCGcTask(NanoTime() + MsToNs(kPostForkMaxHeapDurationMS)));
+  }
 }
 
 }  // namespace gc

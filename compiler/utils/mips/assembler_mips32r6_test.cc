@@ -45,6 +45,16 @@ class AssemblerMIPS32r6Test : public AssemblerTest<mips::MipsAssembler,
                         uint32_t,
                         mips::VectorRegister> Base;
 
+  // These tests were taking too long, so we hide the DriverStr() from AssemblerTest<>
+  // and reimplement it without the verification against `assembly_string`. b/73903608
+  void DriverStr(const std::string& assembly_string ATTRIBUTE_UNUSED,
+                 const std::string& test_name ATTRIBUTE_UNUSED) {
+    GetAssembler()->FinalizeCode();
+    std::vector<uint8_t> data(GetAssembler()->CodeSize());
+    MemoryRegion code(data.data(), data.size());
+    GetAssembler()->FinalizeInstructions(code);
+  }
+
   AssemblerMIPS32r6Test() :
     instruction_set_features_(MipsInstructionSetFeatures::FromVariant("mips32r6", nullptr)) {
   }
@@ -2275,6 +2285,22 @@ TEST_F(AssemblerMIPS32r6Test, FillH) {
 
 TEST_F(AssemblerMIPS32r6Test, FillW) {
   DriverStr(RepeatVR(&mips::MipsAssembler::FillW, "fill.w ${reg1}, ${reg2}"), "fill.w");
+}
+
+TEST_F(AssemblerMIPS32r6Test, PcntB) {
+  DriverStr(RepeatVV(&mips::MipsAssembler::PcntB, "pcnt.b ${reg1}, ${reg2}"), "pcnt.b");
+}
+
+TEST_F(AssemblerMIPS32r6Test, PcntH) {
+  DriverStr(RepeatVV(&mips::MipsAssembler::PcntH, "pcnt.h ${reg1}, ${reg2}"), "pcnt.h");
+}
+
+TEST_F(AssemblerMIPS32r6Test, PcntW) {
+  DriverStr(RepeatVV(&mips::MipsAssembler::PcntW, "pcnt.w ${reg1}, ${reg2}"), "pcnt.w");
+}
+
+TEST_F(AssemblerMIPS32r6Test, PcntD) {
+  DriverStr(RepeatVV(&mips::MipsAssembler::PcntD, "pcnt.d ${reg1}, ${reg2}"), "pcnt.d");
 }
 
 TEST_F(AssemblerMIPS32r6Test, LdiB) {

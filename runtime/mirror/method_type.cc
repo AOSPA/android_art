@@ -17,20 +17,28 @@
 #include "method_type.h"
 
 #include "class-inl.h"
-#include "gc_root-inl.h"
+#include "class_root.h"
 #include "method_handles.h"
 
 namespace art {
 namespace mirror {
 
-GcRoot<Class> MethodType::static_class_;
+namespace {
+
+ObjPtr<ObjectArray<Class>> AllocatePTypesArray(Thread* self, int count)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  ObjPtr<Class> class_array_type = GetClassRoot<mirror::ObjectArray<mirror::Class>>();
+  return ObjectArray<Class>::Alloc(self, class_array_type, count);
+}
+
+}  // namespace
 
 MethodType* MethodType::Create(Thread* const self,
                                Handle<Class> return_type,
                                Handle<ObjectArray<Class>> parameter_types) {
   StackHandleScope<1> hs(self);
   Handle<MethodType> mt(
-      hs.NewHandle(ObjPtr<MethodType>::DownCast(StaticClass()->AllocObject(self))));
+      hs.NewHandle(ObjPtr<MethodType>::DownCast(GetClassRoot<MethodType>()->AllocObject(self))));
 
   // TODO: Do we ever create a MethodType during a transaction ? There doesn't
   // seem like a good reason to do a polymorphic invoke that results in the
@@ -47,18 +55,41 @@ MethodType* MethodType::Create(Thread* const self,
 MethodType* MethodType::CloneWithoutLeadingParameter(Thread* const self,
                                                      ObjPtr<MethodType> method_type) {
   StackHandleScope<3> hs(self);
-  Handle<Class> rtype = hs.NewHandle(method_type->GetRType());
   Handle<ObjectArray<Class>> src_ptypes = hs.NewHandle(method_type->GetPTypes());
-  ObjPtr<Class> class_type = Class::GetJavaLangClass();
-  ObjPtr<Class> class_array_type =
-      Runtime::Current()->GetClassLinker()->FindArrayClass(self, &class_type);
-  const int32_t dst_ptypes_count = src_ptypes->GetLength() - 1;
-  Handle<ObjectArray<Class>> dst_ptypes = hs.NewHandle(
-      ObjectArray<Class>::Alloc(self, class_array_type, dst_ptypes_count));
+  Handle<Class> dst_rtype = hs.NewHandle(method_type->GetRType());
+  const int32_t dst_ptypes_count = method_type->GetNumberOfPTypes() - 1;
+  Handle<ObjectArray<Class>> dst_ptypes = hs.NewHandle(AllocatePTypesArray(self, dst_ptypes_count));
+  if (dst_ptypes.IsNull()) {
+    return nullptr;
+  }
   for (int32_t i = 0; i < dst_ptypes_count; ++i) {
     dst_ptypes->Set(i, src_ptypes->Get(i + 1));
   }
-  return Create(self, rtype, dst_ptypes);
+  return Create(self, dst_rtype, dst_ptypes);
+}
+
+MethodType* MethodType::CollectTrailingArguments(Thread* self,
+                                                 ObjPtr<MethodType> method_type,
+                                                 ObjPtr<Class> collector_array_class,
+                                                 int32_t start_index) {
+  int32_t ptypes_length = method_type->GetNumberOfPTypes();
+  if (start_index > ptypes_length) {
+    return method_type.Ptr();
+  }
+
+  StackHandleScope<4> hs(self);
+  Handle<Class> collector_class = hs.NewHandle(collector_array_class);
+  Handle<Class> dst_rtype = hs.NewHandle(method_type->GetRType());
+  Handle<ObjectArray<Class>> src_ptypes = hs.NewHandle(method_type->GetPTypes());
+  Handle<ObjectArray<Class>> dst_ptypes = hs.NewHandle(AllocatePTypesArray(self, start_index + 1));
+  if (dst_ptypes.IsNull()) {
+    return nullptr;
+  }
+  for (int32_t i = 0; i < start_index; ++i) {
+    dst_ptypes->Set(i, src_ptypes->Get(i));
+  }
+  dst_ptypes->Set(start_index, collector_class.Get());
+  return Create(self, dst_rtype, dst_ptypes);
 }
 
 size_t MethodType::NumberOfVRegs() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -135,21 +166,6 @@ std::string MethodType::PrettyDescriptor() REQUIRES_SHARED(Locks::mutator_lock_)
   ss << GetRType()->PrettyDescriptor();
 
   return ss.str();
-}
-
-void MethodType::SetClass(Class* klass) {
-  CHECK(static_class_.IsNull()) << static_class_.Read() << " " << klass;
-  CHECK(klass != nullptr);
-  static_class_ = GcRoot<Class>(klass);
-}
-
-void MethodType::ResetClass() {
-  CHECK(!static_class_.IsNull());
-  static_class_ = GcRoot<Class>(nullptr);
-}
-
-void MethodType::VisitRoots(RootVisitor* visitor) {
-  static_class_.VisitRootIfNonNull(visitor, RootInfo(kRootStickyClass));
 }
 
 }  // namespace mirror

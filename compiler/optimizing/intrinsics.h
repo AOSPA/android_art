@@ -42,7 +42,7 @@ class IntrinsicsRecognizer : public HOptimization {
                        const char* name = kIntrinsicsRecognizerPassName)
       : HOptimization(graph, name, stats) {}
 
-  void Run() OVERRIDE;
+  bool Run() OVERRIDE;
 
   // Static helper that recognizes intrinsic call. Returns true on success.
   // If it fails due to invoke type mismatch, wrong_invoke_type is set.
@@ -126,33 +126,41 @@ class IntrinsicVisitor : public ValueObject {
                                              Location return_location,
                                              Location first_argument_location);
 
-  // Temporary data structure for holding Integer.valueOf useful data. We only
-  // use it if the mirror::Class* are in the boot image, so it is fine to keep raw
-  // mirror::Class pointers in this structure.
+  // Temporary data structure for holding Integer.valueOf data for generating code.
+  // We only use it if the boot image contains the IntegerCache objects.
   struct IntegerValueOfInfo {
-    IntegerValueOfInfo()
-        : integer_cache(nullptr),
-          integer(nullptr),
-          cache(nullptr),
-          low(0),
-          high(0),
-          value_offset(0) {}
+    static constexpr uint32_t kInvalidReference = static_cast<uint32_t>(-1);
 
-    // The java.lang.IntegerCache class.
-    mirror::Class* integer_cache;
-    // The java.lang.Integer class.
-    mirror::Class* integer;
-    // Value of java.lang.IntegerCache#cache.
-    mirror::ObjectArray<mirror::Object>* cache;
-    // Value of java.lang.IntegerCache#low.
+    IntegerValueOfInfo();
+
+    // Offset of the Integer.value field for initializing a newly allocated instance.
+    uint32_t value_offset;
+    // The low value in the cache.
     int32_t low;
-    // Value of java.lang.IntegerCache#high.
-    int32_t high;
-    // The offset of java.lang.Integer.value.
-    int32_t value_offset;
+    // The length of the cache array.
+    uint32_t length;
+
+    // Boot image offset of java.lang.Integer for allocating an instance.
+    uint32_t integer_boot_image_offset;  // Set to kInvalidReference when compiling the boot image.
+
+    // This union contains references to the boot image. For app AOT or JIT compilation,
+    // these are the boot image offsets of the target. For boot image compilation, the
+    // location shall be known only at link time, so we encode a symbolic reference using
+    // IntrinsicObjects::EncodePatch().
+    union {
+      // The target value for a constant input in the cache range. If the constant input
+      // is out of range (use `low` and `length` to check), this value is bogus (set to
+      // kInvalidReference) and the code must allocate a new Integer.
+      uint32_t value_boot_image_reference;
+
+      // The cache array data used for a non-constant input in the cache range.
+      // If the input is out of range, the code must allocate a new Integer.
+      uint32_t array_data_boot_image_reference;
+    };
   };
 
-  static IntegerValueOfInfo ComputeIntegerValueOfInfo();
+  static IntegerValueOfInfo ComputeIntegerValueOfInfo(
+      HInvoke* invoke, const CompilerOptions& compiler_options);
 
  protected:
   IntrinsicVisitor() {}
@@ -266,6 +274,18 @@ void IntrinsicCodeGenerator ## Arch::Visit ## Name(HInvoke* invoke) {    \
              << " should have been converted to HIR";                    \
 }
 #define UNREACHABLE_INTRINSICS(Arch)                            \
+UNREACHABLE_INTRINSIC(Arch, MathMinIntInt)                      \
+UNREACHABLE_INTRINSIC(Arch, MathMinLongLong)                    \
+UNREACHABLE_INTRINSIC(Arch, MathMinFloatFloat)                  \
+UNREACHABLE_INTRINSIC(Arch, MathMinDoubleDouble)                \
+UNREACHABLE_INTRINSIC(Arch, MathMaxIntInt)                      \
+UNREACHABLE_INTRINSIC(Arch, MathMaxLongLong)                    \
+UNREACHABLE_INTRINSIC(Arch, MathMaxFloatFloat)                  \
+UNREACHABLE_INTRINSIC(Arch, MathMaxDoubleDouble)                \
+UNREACHABLE_INTRINSIC(Arch, MathAbsInt)                         \
+UNREACHABLE_INTRINSIC(Arch, MathAbsLong)                        \
+UNREACHABLE_INTRINSIC(Arch, MathAbsFloat)                       \
+UNREACHABLE_INTRINSIC(Arch, MathAbsDouble)                      \
 UNREACHABLE_INTRINSIC(Arch, FloatFloatToIntBits)                \
 UNREACHABLE_INTRINSIC(Arch, DoubleDoubleToLongBits)             \
 UNREACHABLE_INTRINSIC(Arch, FloatIsNaN)                         \

@@ -18,9 +18,9 @@
 
 #include "base/bit_utils.h"
 #include "base/casts.h"
+#include "base/memory_region.h"
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "entrypoints/quick/quick_entrypoints_enum.h"
-#include "memory_region.h"
 #include "thread.h"
 
 namespace art {
@@ -2793,6 +2793,26 @@ void MipsAssembler::Hadd_uD(VectorRegister wd, VectorRegister ws, VectorRegister
   DsFsmInstr(EmitMsa3R(0x5, 0x3, wt, ws, wd, 0x15)).FprOuts(wd).FprIns(ws, wt);
 }
 
+void MipsAssembler::PcntB(VectorRegister wd, VectorRegister ws) {
+  CHECK(HasMsa());
+  DsFsmInstr(EmitMsa2R(0xc1, 0x0, ws, wd, 0x1e)).FprOuts(wd).FprIns(ws);
+}
+
+void MipsAssembler::PcntH(VectorRegister wd, VectorRegister ws) {
+  CHECK(HasMsa());
+  DsFsmInstr(EmitMsa2R(0xc1, 0x1, ws, wd, 0x1e)).FprOuts(wd).FprIns(ws);
+}
+
+void MipsAssembler::PcntW(VectorRegister wd, VectorRegister ws) {
+  CHECK(HasMsa());
+  DsFsmInstr(EmitMsa2R(0xc1, 0x2, ws, wd, 0x1e)).FprOuts(wd).FprIns(ws);
+}
+
+void MipsAssembler::PcntD(VectorRegister wd, VectorRegister ws) {
+  CHECK(HasMsa());
+  DsFsmInstr(EmitMsa2R(0xc1, 0x3, ws, wd, 0x1e)).FprOuts(wd).FprIns(ws);
+}
+
 void MipsAssembler::ReplicateFPToVectorRegister(VectorRegister dst,
                                                 FRegister src,
                                                 bool is_double) {
@@ -4781,10 +4801,9 @@ void MipsAssembler::BuildFrame(size_t frame_size,
 
   // Write out entry spills.
   int32_t offset = frame_size + kFramePointerSize;
-  for (size_t i = 0; i < entry_spills.size(); ++i) {
-    MipsManagedRegister reg = entry_spills.at(i).AsMips();
+  for (const ManagedRegisterSpill& spill : entry_spills) {
+    MipsManagedRegister reg = spill.AsMips();
     if (reg.IsNoRegister()) {
-      ManagedRegisterSpill spill = entry_spills.at(i);
       offset += spill.getSize();
     } else if (reg.IsCoreRegister()) {
       StoreToOffset(kStoreWord, reg.AsCoreRegister(), SP, offset);

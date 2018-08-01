@@ -17,8 +17,8 @@
 #include "assembler_x86.h"
 
 #include "base/casts.h"
+#include "base/memory_region.h"
 #include "entrypoints/quick/quick_entrypoints.h"
-#include "memory_region.h"
 #include "thread.h"
 
 namespace art {
@@ -909,6 +909,78 @@ void X86Assembler::psubq(XmmRegister dst, XmmRegister src) {
   EmitUint8(0x66);
   EmitUint8(0x0F);
   EmitUint8(0xFB);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::paddusb(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0xDC);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::paddsb(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0xEC);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::paddusw(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0xDD);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::paddsw(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0xED);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::psubusb(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0xD8);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::psubsb(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0xE8);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::psubusw(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0xD9);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::psubsw(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0xE9);
   EmitXmmRegisterOperand(dst, src);
 }
 

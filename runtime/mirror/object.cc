@@ -87,16 +87,18 @@ Object* Object::CopyObject(ObjPtr<mirror::Object> dest,
     DCHECK_ALIGNED(dst_bytes, sizeof(uintptr_t));
     // Use word sized copies to begin.
     while (num_bytes >= sizeof(uintptr_t)) {
-      reinterpret_cast<Atomic<uintptr_t>*>(dst_bytes)->StoreRelaxed(
-          reinterpret_cast<Atomic<uintptr_t>*>(src_bytes)->LoadRelaxed());
+      reinterpret_cast<Atomic<uintptr_t>*>(dst_bytes)->store(
+          reinterpret_cast<Atomic<uintptr_t>*>(src_bytes)->load(std::memory_order_relaxed),
+          std::memory_order_relaxed);
       src_bytes += sizeof(uintptr_t);
       dst_bytes += sizeof(uintptr_t);
       num_bytes -= sizeof(uintptr_t);
     }
     // Copy possible 32 bit word.
     if (sizeof(uintptr_t) != sizeof(uint32_t) && num_bytes >= sizeof(uint32_t)) {
-      reinterpret_cast<Atomic<uint32_t>*>(dst_bytes)->StoreRelaxed(
-          reinterpret_cast<Atomic<uint32_t>*>(src_bytes)->LoadRelaxed());
+      reinterpret_cast<Atomic<uint32_t>*>(dst_bytes)->store(
+          reinterpret_cast<Atomic<uint32_t>*>(src_bytes)->load(std::memory_order_relaxed),
+          std::memory_order_relaxed);
       src_bytes += sizeof(uint32_t);
       dst_bytes += sizeof(uint32_t);
       num_bytes -= sizeof(uint32_t);
@@ -104,8 +106,9 @@ Object* Object::CopyObject(ObjPtr<mirror::Object> dest,
     // Copy remaining bytes, avoid going past the end of num_bytes since there may be a redzone
     // there.
     while (num_bytes > 0) {
-      reinterpret_cast<Atomic<uint8_t>*>(dst_bytes)->StoreRelaxed(
-          reinterpret_cast<Atomic<uint8_t>*>(src_bytes)->LoadRelaxed());
+      reinterpret_cast<Atomic<uint8_t>*>(dst_bytes)->store(
+          reinterpret_cast<Atomic<uint8_t>*>(src_bytes)->load(std::memory_order_relaxed),
+          std::memory_order_relaxed);
       src_bytes += sizeof(uint8_t);
       dst_bytes += sizeof(uint8_t);
       num_bytes -= sizeof(uint8_t);
@@ -118,16 +121,15 @@ Object* Object::CopyObject(ObjPtr<mirror::Object> dest,
     CopyReferenceFieldsWithReadBarrierVisitor visitor(dest);
     src->VisitReferences(visitor, visitor);
   }
-  gc::Heap* heap = Runtime::Current()->GetHeap();
   // Perform write barriers on copied object references.
   ObjPtr<Class> c = src->GetClass();
   if (c->IsArrayClass()) {
     if (!c->GetComponentType()->IsPrimitive()) {
       ObjectArray<Object>* array = dest->AsObjectArray<Object>();
-      heap->WriteBarrierArray(dest, 0, array->GetLength());
+      WriteBarrier::ForArrayWrite(dest, 0, array->GetLength());
     }
   } else {
-    heap->WriteBarrierEveryFieldOf(dest);
+    WriteBarrier::ForEveryFieldWrite(dest);
   }
   return dest.Ptr();
 }
@@ -173,7 +175,7 @@ Object* Object::Clone(Thread* self) {
 uint32_t Object::GenerateIdentityHashCode() {
   uint32_t expected_value, new_value;
   do {
-    expected_value = hash_code_seed.LoadRelaxed();
+    expected_value = hash_code_seed.load(std::memory_order_relaxed);
     new_value = expected_value * 1103515245 + 12345;
   } while (!hash_code_seed.CompareAndSetWeakRelaxed(expected_value, new_value) ||
       (expected_value & LockWord::kHashMask) == 0);
@@ -181,7 +183,7 @@ uint32_t Object::GenerateIdentityHashCode() {
 }
 
 void Object::SetHashCodeSeed(uint32_t new_seed) {
-  hash_code_seed.StoreRelaxed(new_seed);
+  hash_code_seed.store(new_seed, std::memory_order_relaxed);
 }
 
 int32_t Object::IdentityHashCode() {
@@ -194,7 +196,9 @@ int32_t Object::IdentityHashCode() {
         // loop iteration.
         LockWord hash_word = LockWord::FromHashCode(GenerateIdentityHashCode(), lw.GCState());
         DCHECK_EQ(hash_word.GetState(), LockWord::kHashCode);
-        if (current_this->CasLockWordWeakRelaxed(lw, hash_word)) {
+        // Use a strong CAS to prevent spurious failures since these can make the boot image
+        // non-deterministic.
+        if (current_this->CasLockWord(lw, hash_word, CASMode::kStrong, std::memory_order_relaxed)) {
           return hash_word.GetHashCode();
         }
         break;
@@ -268,7 +272,7 @@ void Object::CheckFieldAssignmentImpl(MemberOffset field_offset, ObjPtr<Object> 
     }
   }
   LOG(FATAL) << "Failed to find field for assignment to " << reinterpret_cast<void*>(this)
-      << " of type " << c->PrettyDescriptor() << " at offset " << field_offset;
+             << " of type " << c->PrettyDescriptor() << " at offset " << field_offset;
   UNREACHABLE();
 }
 
@@ -278,10 +282,7 @@ ArtField* Object::FindFieldByOffset(MemberOffset offset) {
 }
 
 std::string Object::PrettyTypeOf(ObjPtr<mirror::Object> obj) {
-  if (obj == nullptr) {
-    return "null";
-  }
-  return obj->PrettyTypeOf();
+  return (obj == nullptr) ? "null" : obj->PrettyTypeOf();
 }
 
 std::string Object::PrettyTypeOf() {

@@ -157,19 +157,7 @@ static void AddSwapMappings(Builder& builder) {
 
 static void AddCompilerMappings(Builder& builder) {
   builder.
-      Define("--compiled-classes=_")
-          .WithType<std::string>()
-          .IntoKey(M::CompiledClasses)
-      .Define("--compiled-classes-zip=_")
-          .WithType<std::string>()
-          .IntoKey(M::CompiledClassesZip)
-      .Define("--compiled-methods=_")
-          .WithType<std::string>()
-          .IntoKey(M::CompiledMethods)
-      .Define("--compiled-methods-zip=_")
-          .WithType<std::string>()
-          .IntoKey(M::CompiledMethodsZip)
-      .Define("--run-passes=_")
+      Define("--run-passes=_")
           .WithType<std::string>()
           .IntoKey(M::Passes)
       .Define("--profile-file=_")
@@ -234,10 +222,10 @@ static Parser CreateArgumentParser() {
       .Define("--force-determinism")
           .IntoKey(M::ForceDeterminism)
       .Define("--copy-dex-files=_")
-          .WithType<CopyOption>()
-          .WithValueMap({{"true", CopyOption::kOnlyIfCompressed},
-                         {"false", CopyOption::kNever},
-                         {"always", CopyOption::kAlways}})
+          .WithType<linker::CopyOption>()
+          .WithValueMap({{"true", linker::CopyOption::kOnlyIfCompressed},
+                         {"false", linker::CopyOption::kNever},
+                         {"always", linker::CopyOption::kAlways}})
           .IntoKey(M::CopyDexFiles)
       .Define("--classpath-dir=_")
           .WithType<std::string>()

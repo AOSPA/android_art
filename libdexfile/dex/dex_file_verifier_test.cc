@@ -161,7 +161,7 @@ TEST_F(DexFileVerifierTest, MethodId) {
       "method_id_proto_idx",
       [](DexFile* dex_file) {
         DexFile::MethodId* method_id = const_cast<DexFile::MethodId*>(&dex_file->GetMethodId(0));
-        method_id->proto_idx_ = 0xFF;
+        method_id->proto_idx_ = dex::ProtoIndex(0xFF);
       },
       "inter_method_id_item proto_idx");
 
@@ -173,7 +173,22 @@ TEST_F(DexFileVerifierTest, MethodId) {
         DexFile::MethodId* method_id = const_cast<DexFile::MethodId*>(&dex_file->GetMethodId(0));
         method_id->name_idx_ = dex::StringIndex(0xFF);
       },
-      "String index not available for method flags verification");
+      "Bad index for method flags verification");
+}
+
+TEST_F(DexFileVerifierTest, InitCachingWithUnicode) {
+  static const char kInitWithUnicode[] =
+      "ZGV4CjAzNQDhN60rgMnSK13MoRscTuD+NZe7f6rIkHAAAgAAcAAAAHhWNBIAAAAAAAAAAGwBAAAJ"
+      "AAAAcAAAAAMAAACUAAAAAQAAAKAAAAAAAAAAAAAAAAIAAACsAAAAAQAAALwAAAAkAQAA3AAAANwA"
+      "AADgAAAA5gAAAO4AAAD1AAAAAQEAABUBAAAgAQAAIwEAAAQAAAAFAAAABwAAAAcAAAACAAAAAAAA"
+      "AAAAAAACAAAAAQAAAAIAAAAAAAAAAAAAAAEAAAAAAAAABgAAAAAAAABgAQAAAAAAAAHAgAACwIDA"
+      "gAAGPGluaXQ+AAVIZWxsbwAKTFRlc3RTeW5jOwASTGphdmEvbGFuZy9PYmplY3Q7AAlNYWluLmph"
+      "dmEAAVYABVdvcmxkAAAAAAAAAAYABw4AAAAACgABAAEAAAAwAQAADAAAAHAQAQAJABoBAwAaAggA"
+      "GgMAABoEAQAOAAAAAQAAgIAEuAIAAAwAAAAAAAAAAQAAAAAAAAABAAAACQAAAHAAAAACAAAAAwAA"
+      "AJQAAAADAAAAAQAAAKAAAAAFAAAAAgAAAKwAAAAGAAAAAQAAALwAAAACIAAACQAAANwAAAADEAAA"
+      "AQAAACwBAAADIAAAAQAAADABAAABIAAAAQAAADgBAAAAIAAAAQAAAGABAAAAEAAAAQAAAGwBAAA=";
+  // Just ensure it verifies w/o modification.
+  VerifyModification(kInitWithUnicode, "init_with_unicode", [](DexFile*) {}, nullptr);
 }
 
 // Method flags test class generated from the following smali code. The declared-synchronized
@@ -1425,12 +1440,13 @@ TEST_F(DexFileVerifierTest, ProtoOrdering) {
           CHECK_LT(method_idx + 1u, dex_file->NumMethodIds());
           CHECK_EQ(dex_file->GetMethodId(method_idx).name_idx_,
                    dex_file->GetMethodId(method_idx + 1).name_idx_);
-          CHECK_EQ(dex_file->GetMethodId(method_idx).proto_idx_ + 1u,
-                   dex_file->GetMethodId(method_idx + 1).proto_idx_);
+          CHECK_EQ(dex_file->GetMethodId(method_idx).proto_idx_.index_ + 1u,
+                   dex_file->GetMethodId(method_idx + 1).proto_idx_.index_);
           // Their return types should be the same.
-          uint32_t proto1_idx = dex_file->GetMethodId(method_idx).proto_idx_;
+          dex::ProtoIndex proto1_idx = dex_file->GetMethodId(method_idx).proto_idx_;
           const DexFile::ProtoId& proto1 = dex_file->GetProtoId(proto1_idx);
-          const DexFile::ProtoId& proto2 = dex_file->GetProtoId(proto1_idx + 1u);
+          dex::ProtoIndex proto2_idx(proto1_idx.index_ + 1u);
+          const DexFile::ProtoId& proto2 = dex_file->GetProtoId(proto2_idx);
           CHECK_EQ(proto1.return_type_idx_, proto2.return_type_idx_);
           // And the first should not have any parameters while the second should have some.
           CHECK(!DexFileParameterIterator(*dex_file, proto1).HasNext());

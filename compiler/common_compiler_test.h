@@ -18,9 +18,11 @@
 #define ART_COMPILER_COMMON_COMPILER_TEST_H_
 
 #include <list>
-#include <unordered_set>
 #include <vector>
 
+#include "arch/instruction_set.h"
+#include "arch/instruction_set_features.h"
+#include "base/hash_set.h"
 #include "common_runtime_test.h"
 #include "compiler.h"
 #include "oat_file.h"
@@ -33,6 +35,7 @@ class ClassLoader;
 class CompilerDriver;
 class CompilerOptions;
 class CumulativeLogger;
+class DexFile;
 class ProfileCompilationInfo;
 class VerificationResults;
 
@@ -54,26 +57,15 @@ class CommonCompilerTest : public CommonRuntimeTest {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
  protected:
-  virtual void SetUp();
+  void SetUp() OVERRIDE;
 
-  virtual void SetUpRuntimeOptions(RuntimeOptions* options);
+  void SetUpRuntimeOptions(RuntimeOptions* options) OVERRIDE;
 
   Compiler::Kind GetCompilerKind() const;
   void SetCompilerKind(Compiler::Kind compiler_kind);
 
-  InstructionSet GetInstructionSet() const;
-
-  // Get the set of image classes given to the compiler-driver in SetUp. Note: the compiler
-  // driver assumes ownership of the set, so the test should properly release the set.
-  virtual std::unordered_set<std::string>* GetImageClasses();
-
-  // Get the set of compiled classes given to the compiler-driver in SetUp. Note: the compiler
-  // driver assumes ownership of the set, so the test should properly release the set.
-  virtual std::unordered_set<std::string>* GetCompiledClasses();
-
-  // Get the set of compiled methods given to the compiler-driver in SetUp. Note: the compiler
-  // driver assumes ownership of the set, so the test should properly release the set.
-  virtual std::unordered_set<std::string>* GetCompiledMethods();
+  // Get the set of image classes given to the compiler-driver in SetUp.
+  virtual std::unique_ptr<HashSet<std::string>> GetImageClasses();
 
   virtual ProfileCompilationInfo* GetProfileCompilationInfo();
 
@@ -81,7 +73,7 @@ class CommonCompilerTest : public CommonRuntimeTest {
     return CompilerFilter::kDefaultCompilerFilter;
   }
 
-  virtual void TearDown();
+  void TearDown() OVERRIDE;
 
   void CompileClass(mirror::ClassLoader* class_loader, const char* class_name)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -96,18 +88,31 @@ class CommonCompilerTest : public CommonRuntimeTest {
                             const char* method_name, const char* signature)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void CreateCompilerDriver(Compiler::Kind kind, InstructionSet isa, size_t number_of_threads = 2U);
+  void ApplyInstructionSet();
+  void OverrideInstructionSetFeatures(InstructionSet instruction_set, const std::string& variant);
+
+  void CreateCompilerDriver();
 
   void ReserveImageSpace();
 
   void UnreserveImageSpace();
 
+  void SetDexFilesForOatFile(const std::vector<const DexFile*>& dex_files);
+
+  void ClearBootImageOption();
+
   Compiler::Kind compiler_kind_ = Compiler::kOptimizing;
+  size_t number_of_threads_ = 2u;
+
+  InstructionSet instruction_set_ =
+      (kRuntimeISA == InstructionSet::kArm) ? InstructionSet::kThumb2 : kRuntimeISA;
+  // Take the default set of instruction features from the build.
+  std::unique_ptr<const InstructionSetFeatures> instruction_set_features_
+      = InstructionSetFeatures::FromCppDefines();
+
   std::unique_ptr<CompilerOptions> compiler_options_;
   std::unique_ptr<VerificationResults> verification_results_;
   std::unique_ptr<CompilerDriver> compiler_driver_;
-  std::unique_ptr<const InstructionSetFeatures> instruction_set_features_;
-
 
  private:
   std::unique_ptr<MemMap> image_reservation_;

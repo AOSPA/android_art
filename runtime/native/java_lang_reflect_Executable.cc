@@ -20,9 +20,10 @@
 #include "nativehelper/jni_macros.h"
 
 #include "art_method-inl.h"
+#include "class_root.h"
 #include "dex/dex_file_annotations.h"
 #include "handle.h"
-#include "jni_internal.h"
+#include "jni/jni_internal.h"
 #include "mirror/class-inl.h"
 #include "mirror/method.h"
 #include "mirror/object-inl.h"
@@ -319,7 +320,7 @@ static jstring Executable_getMethodNameInternal(JNIEnv* env, jobject javaMethod)
   ScopedFastNativeObjectAccess soa(env);
   ArtMethod* method = ArtMethod::FromReflectedMethod(soa, javaMethod);
   method = method->GetInterfaceMethodIfProxy(kRuntimePointerSize);
-  return soa.AddLocalReference<jstring>(method->GetNameAsString(soa.Self()));
+  return soa.AddLocalReference<jstring>(method->ResolveNameString());
 }
 
 static jclass Executable_getMethodReturnTypeInternal(JNIEnv* env, jobject javaMethod) {
@@ -335,15 +336,6 @@ static jclass Executable_getMethodReturnTypeInternal(JNIEnv* env, jobject javaMe
   return soa.AddLocalReference<jclass>(return_type);
 }
 
-// TODO: Move this to mirror::Class ? Other mirror types that commonly appear
-// as arrays have a GetArrayClass() method. This is duplicated in
-// java_lang_Class.cc as well.
-static ObjPtr<mirror::Class> GetClassArrayClass(Thread* self)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  ObjPtr<mirror::Class> class_class = mirror::Class::GetJavaLangClass();
-  return Runtime::Current()->GetClassLinker()->FindArrayClass(self, &class_class);
-}
-
 static jobjectArray Executable_getParameterTypesInternal(JNIEnv* env, jobject javaMethod) {
   ScopedFastNativeObjectAccess soa(env);
   ArtMethod* method = ArtMethod::FromReflectedMethod(soa, javaMethod);
@@ -356,10 +348,10 @@ static jobjectArray Executable_getParameterTypesInternal(JNIEnv* env, jobject ja
 
   const uint32_t num_params = params->Size();
 
-  StackHandleScope<3> hs(soa.Self());
-  Handle<mirror::Class> class_array_class = hs.NewHandle(GetClassArrayClass(soa.Self()));
+  StackHandleScope<2> hs(soa.Self());
+  ObjPtr<mirror::Class> class_array_class = GetClassRoot<mirror::ObjectArray<mirror::Class>>();
   Handle<mirror::ObjectArray<mirror::Class>> ptypes = hs.NewHandle(
-      mirror::ObjectArray<mirror::Class>::Alloc(soa.Self(), class_array_class.Get(), num_params));
+      mirror::ObjectArray<mirror::Class>::Alloc(soa.Self(), class_array_class, num_params));
   if (ptypes.IsNull()) {
     DCHECK(soa.Self()->IsExceptionPending());
     return nullptr;

@@ -22,6 +22,7 @@
 #include "handle.h"
 #include "mirror/dex_cache.h"
 #include "mirror/object_array.h"
+#include "obj_ptr.h"
 
 namespace art {
 
@@ -35,37 +36,39 @@ class ClassLinker;
 namespace annotations {
 
 // Field annotations.
-mirror::Object* GetAnnotationForField(ArtField* field, Handle<mirror::Class> annotation_class)
+ObjPtr<mirror::Object> GetAnnotationForField(ArtField* field,
+                                             Handle<mirror::Class> annotation_class)
     REQUIRES_SHARED(Locks::mutator_lock_);
-mirror::ObjectArray<mirror::Object>* GetAnnotationsForField(ArtField* field)
+ObjPtr<mirror::ObjectArray<mirror::Object>> GetAnnotationsForField(ArtField* field)
     REQUIRES_SHARED(Locks::mutator_lock_);
-mirror::ObjectArray<mirror::String>* GetSignatureAnnotationForField(ArtField* field)
+ObjPtr<mirror::ObjectArray<mirror::String>> GetSignatureAnnotationForField(ArtField* field)
     REQUIRES_SHARED(Locks::mutator_lock_);
 bool IsFieldAnnotationPresent(ArtField* field, Handle<mirror::Class> annotation_class)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
 // Method annotations.
-mirror::Object* GetAnnotationDefaultValue(ArtMethod* method)
+ObjPtr<mirror::Object> GetAnnotationDefaultValue(ArtMethod* method)
     REQUIRES_SHARED(Locks::mutator_lock_);
-mirror::Object* GetAnnotationForMethod(ArtMethod* method, Handle<mirror::Class> annotation_class)
+ObjPtr<mirror::Object> GetAnnotationForMethod(ArtMethod* method,
+                                              Handle<mirror::Class> annotation_class)
     REQUIRES_SHARED(Locks::mutator_lock_);
-mirror::ObjectArray<mirror::Object>* GetAnnotationsForMethod(ArtMethod* method)
+ObjPtr<mirror::ObjectArray<mirror::Object>> GetAnnotationsForMethod(ArtMethod* method)
     REQUIRES_SHARED(Locks::mutator_lock_);
-mirror::ObjectArray<mirror::Class>* GetExceptionTypesForMethod(ArtMethod* method)
+ObjPtr<mirror::ObjectArray<mirror::Class>> GetExceptionTypesForMethod(ArtMethod* method)
     REQUIRES_SHARED(Locks::mutator_lock_);
-mirror::ObjectArray<mirror::Object>* GetParameterAnnotations(ArtMethod* method)
+ObjPtr<mirror::ObjectArray<mirror::Object>> GetParameterAnnotations(ArtMethod* method)
     REQUIRES_SHARED(Locks::mutator_lock_);
 uint32_t GetNumberOfAnnotatedMethodParameters(ArtMethod* method)
     REQUIRES_SHARED(Locks::mutator_lock_);
-mirror::Object* GetAnnotationForMethodParameter(ArtMethod* method,
-                                                uint32_t parameter_idx,
-                                                Handle<mirror::Class> annotation_class)
+ObjPtr<mirror::Object> GetAnnotationForMethodParameter(ArtMethod* method,
+                                                       uint32_t parameter_idx,
+                                                       Handle<mirror::Class> annotation_class)
     REQUIRES_SHARED(Locks::mutator_lock_);
-bool GetParametersMetadataForMethod(ArtMethod* method,
-                                    MutableHandle<mirror::ObjectArray<mirror::String>>* names,
-                                    MutableHandle<mirror::IntArray>* access_flags)
-    REQUIRES_SHARED(Locks::mutator_lock_);
-mirror::ObjectArray<mirror::String>* GetSignatureAnnotationForMethod(ArtMethod* method)
+bool GetParametersMetadataForMethod(
+    ArtMethod* method,
+    /*out*/ MutableHandle<mirror::ObjectArray<mirror::String>>* names,
+    /*out*/ MutableHandle<mirror::IntArray>* access_flags) REQUIRES_SHARED(Locks::mutator_lock_);
+ObjPtr<mirror::ObjectArray<mirror::String>> GetSignatureAnnotationForMethod(ArtMethod* method)
     REQUIRES_SHARED(Locks::mutator_lock_);
 // Check whether `method` is annotated with `annotation_class`.
 // If `lookup_in_resolved_boot_classes` is true, look up any of the
@@ -85,25 +88,25 @@ uint32_t GetNativeMethodAnnotationAccessFlags(const DexFile& dex_file,
                                               uint32_t method_index);
 
 // Class annotations.
-mirror::Object* GetAnnotationForClass(Handle<mirror::Class> klass,
+ObjPtr<mirror::Object> GetAnnotationForClass(Handle<mirror::Class> klass,
                                       Handle<mirror::Class> annotation_class)
     REQUIRES_SHARED(Locks::mutator_lock_);
-mirror::ObjectArray<mirror::Object>* GetAnnotationsForClass(Handle<mirror::Class> klass)
+ObjPtr<mirror::ObjectArray<mirror::Object>> GetAnnotationsForClass(Handle<mirror::Class> klass)
     REQUIRES_SHARED(Locks::mutator_lock_);
-mirror::ObjectArray<mirror::Class>* GetDeclaredClasses(Handle<mirror::Class> klass)
+ObjPtr<mirror::ObjectArray<mirror::Class>> GetDeclaredClasses(Handle<mirror::Class> klass)
     REQUIRES_SHARED(Locks::mutator_lock_);
-mirror::Class* GetDeclaringClass(Handle<mirror::Class> klass)
+ObjPtr<mirror::Class> GetDeclaringClass(Handle<mirror::Class> klass)
     REQUIRES_SHARED(Locks::mutator_lock_);
-mirror::Class* GetEnclosingClass(Handle<mirror::Class> klass)
+ObjPtr<mirror::Class> GetEnclosingClass(Handle<mirror::Class> klass)
     REQUIRES_SHARED(Locks::mutator_lock_);
-mirror::Object* GetEnclosingMethod(Handle<mirror::Class> klass)
+ObjPtr<mirror::Object> GetEnclosingMethod(Handle<mirror::Class> klass)
     REQUIRES_SHARED(Locks::mutator_lock_);
-bool GetInnerClass(Handle<mirror::Class> klass, mirror::String** name)
+bool GetInnerClass(Handle<mirror::Class> klass, /*out*/ ObjPtr<mirror::String>* name)
     REQUIRES_SHARED(Locks::mutator_lock_);
 bool GetInnerClassFlags(Handle<mirror::Class> klass, uint32_t* flags)
     REQUIRES_SHARED(Locks::mutator_lock_);
-mirror::ObjectArray<mirror::String>* GetSignatureAnnotationForClass(Handle<mirror::Class> klass)
-    REQUIRES_SHARED(Locks::mutator_lock_);
+ObjPtr<mirror::ObjectArray<mirror::String>> GetSignatureAnnotationForClass(
+    Handle<mirror::Class> klass) REQUIRES_SHARED(Locks::mutator_lock_);
 const char* GetSourceDebugExtension(Handle<mirror::Class> klass)
     REQUIRES_SHARED(Locks::mutator_lock_);
 bool IsClassAnnotationPresent(Handle<mirror::Class> klass,

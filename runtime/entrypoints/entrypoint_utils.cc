@@ -26,7 +26,7 @@
 #include "entrypoints/quick/callee_save_frame.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "gc/accounting/card_table-inl.h"
-#include "java_vm_ext.h"
+#include "jni/java_vm_ext.h"
 #include "mirror/class-inl.h"
 #include "mirror/method.h"
 #include "mirror/object-inl.h"
@@ -74,11 +74,11 @@ JValue InvokeProxyInvocationHandler(ScopedObjectAccessAlreadyRunnable& soa, cons
     }
     for (size_t i = 0; i < args.size(); ++i) {
       if (shorty[i + 1] == 'L') {
-        jobject val = args.at(i).l;
+        jobject val = args[i].l;
         soa.Env()->SetObjectArrayElement(args_jobj, i, val);
       } else {
         JValue jv;
-        jv.SetJ(args.at(i).j);
+        jv.SetJ(args[i].j);
         mirror::Object* val = BoxPrimitive(Primitive::GetType(shorty[i + 1]), jv).Ptr();
         if (val == nullptr) {
           CHECK(soa.Self()->IsExceptionPending());
@@ -180,10 +180,10 @@ static inline std::pair<ArtMethod*, uintptr_t> DoGetCalleeSaveMethodOuterCallerA
     ArtMethod** sp, CalleeSaveType type) REQUIRES_SHARED(Locks::mutator_lock_) {
   DCHECK_EQ(*sp, Runtime::Current()->GetCalleeSaveMethod(type));
 
-  const size_t callee_frame_size = GetCalleeSaveFrameSize(kRuntimeISA, type);
+  const size_t callee_frame_size = RuntimeCalleeSaveFrame::GetFrameSize(type);
   auto** caller_sp = reinterpret_cast<ArtMethod**>(
       reinterpret_cast<uintptr_t>(sp) + callee_frame_size);
-  const size_t callee_return_pc_offset = GetCalleeSaveReturnPcOffset(kRuntimeISA, type);
+  const size_t callee_return_pc_offset = RuntimeCalleeSaveFrame::GetReturnPcOffset(type);
   uintptr_t caller_pc = *reinterpret_cast<uintptr_t*>(
       (reinterpret_cast<uint8_t*>(sp) + callee_return_pc_offset));
   ArtMethod* outer_method = *caller_sp;
@@ -201,18 +201,13 @@ static inline ArtMethod* DoGetCalleeSaveMethodCaller(ArtMethod* outer_method,
       DCHECK(current_code != nullptr);
       DCHECK(current_code->IsOptimized());
       uintptr_t native_pc_offset = current_code->NativeQuickPcOffset(caller_pc);
-      CodeInfo code_info = current_code->GetOptimizedCodeInfo();
+      CodeInfo code_info(current_code);
       MethodInfo method_info = current_code->GetOptimizedMethodInfo();
-      CodeInfoEncoding encoding = code_info.ExtractEncoding();
-      StackMap stack_map = code_info.GetStackMapForNativePcOffset(native_pc_offset, encoding);
+      StackMap stack_map = code_info.GetStackMapForNativePcOffset(native_pc_offset);
       DCHECK(stack_map.IsValid());
-      if (stack_map.HasInlineInfo(encoding.stack_map.encoding)) {
-        InlineInfo inline_info = code_info.GetInlineInfoOf(stack_map, encoding);
-        caller = GetResolvedMethod(outer_method,
-                                   method_info,
-                                   inline_info,
-                                   encoding.inline_info.encoding,
-                                   inline_info.GetDepth(encoding.inline_info.encoding) - 1);
+      BitTableRange<InlineInfo> inline_infos = code_info.GetInlineInfosOf(stack_map);
+      if (!inline_infos.empty()) {
+        caller = GetResolvedMethod(outer_method, method_info, inline_infos);
       }
     }
     if (kIsDebugBuild && do_caller_check) {
@@ -258,6 +253,28 @@ ArtMethod* GetCalleeSaveOuterMethod(Thread* self, CalleeSaveType type) {
   ScopedAssertNoThreadSuspension ants(__FUNCTION__);
   ArtMethod** sp = self->GetManagedStack()->GetTopQuickFrameKnownNotTagged();
   return DoGetCalleeSaveMethodOuterCallerAndPc(sp, type).first;
+}
+
+ObjPtr<mirror::MethodHandle> ResolveMethodHandleFromCode(ArtMethod* referrer,
+                                                         uint32_t method_handle_idx) {
+  Thread::PoisonObjectPointersIfDebug();
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+  return class_linker->ResolveMethodHandle(Thread::Current(), method_handle_idx, referrer);
+}
+
+ObjPtr<mirror::MethodType> ResolveMethodTypeFromCode(ArtMethod* referrer,
+                                                     dex::ProtoIndex proto_idx) {
+  Thread::PoisonObjectPointersIfDebug();
+  ObjPtr<mirror::MethodType> method_type =
+      referrer->GetDexCache()->GetResolvedMethodType(proto_idx);
+  if (UNLIKELY(method_type == nullptr)) {
+    StackHandleScope<2> hs(Thread::Current());
+    Handle<mirror::DexCache> dex_cache(hs.NewHandle(referrer->GetDexCache()));
+    Handle<mirror::ClassLoader> class_loader(hs.NewHandle(referrer->GetClassLoader()));
+    ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+    method_type = class_linker->ResolveMethodType(hs.Self(), proto_idx, dex_cache, class_loader);
+  }
+  return method_type;
 }
 
 }  // namespace art

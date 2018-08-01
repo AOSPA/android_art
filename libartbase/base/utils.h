@@ -25,11 +25,11 @@
 
 #include <android-base/logging.h>
 
-#include "base/casts.h"
-#include "base/enums.h"
-#include "base/globals.h"
-#include "base/macros.h"
-#include "base/stringpiece.h"
+#include "casts.h"
+#include "enums.h"
+#include "globals.h"
+#include "macros.h"
+#include "stringpiece.h"
 
 namespace art {
 
@@ -242,20 +242,6 @@ static inline void CheckedCall(const Func& function, const char* what, Args... a
     errno = rc;
     PLOG(FATAL) << "Checked call failed for " << what;
   }
-}
-
-// Hash bytes using a relatively fast hash.
-static inline size_t HashBytes(const uint8_t* data, size_t len) {
-  size_t hash = 0x811c9dc5;
-  for (uint32_t i = 0; i < len; ++i) {
-    hash = (hash * 16777619) ^ data[i];
-  }
-  hash += hash << 13;
-  hash ^= hash >> 7;
-  hash += hash << 3;
-  hash ^= hash >> 17;
-  hash += hash << 5;
-  return hash;
 }
 
 }  // namespace art

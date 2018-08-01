@@ -79,13 +79,14 @@ class HVecOperation : public HVariableInputSizeInstruction {
                 size_t vector_length,
                 uint32_t dex_pc)
       : HVariableInputSizeInstruction(kind,
+                                      kSIMDType,
                                       side_effects,
                                       dex_pc,
                                       allocator,
                                       number_of_inputs,
                                       kArenaAllocVectorNode),
         vector_length_(vector_length) {
-    SetPackedField<TypeField>(packed_type);
+    SetPackedField<PackedTypeField>(packed_type);
     DCHECK_LT(1u, vector_length);
   }
 
@@ -99,14 +100,9 @@ class HVecOperation : public HVariableInputSizeInstruction {
     return vector_length_ * DataType::Size(GetPackedType());
   }
 
-  // Returns the type of the vector operation.
-  DataType::Type GetType() const OVERRIDE {
-    return kSIMDType;
-  }
-
   // Returns the true component type packed in a vector.
   DataType::Type GetPackedType() const {
-    return GetPackedField<TypeField>();
+    return GetPackedField<PackedTypeField>();
   }
 
   // Assumes vector nodes cannot be moved by default. Each concrete implementation
@@ -185,12 +181,12 @@ class HVecOperation : public HVariableInputSizeInstruction {
 
  protected:
   // Additional packed bits.
-  static constexpr size_t kFieldType = HInstruction::kNumberOfGenericPackedBits;
-  static constexpr size_t kFieldTypeSize =
+  static constexpr size_t kFieldPackedType = HInstruction::kNumberOfGenericPackedBits;
+  static constexpr size_t kFieldPackedTypeSize =
       MinimumBitsToStore(static_cast<size_t>(DataType::Type::kLast));
-  static constexpr size_t kNumberOfVectorOpPackedBits = kFieldType + kFieldTypeSize;
+  static constexpr size_t kNumberOfVectorOpPackedBits = kFieldPackedType + kFieldPackedTypeSize;
   static_assert(kNumberOfVectorOpPackedBits <= kMaxNumberOfPackedBits, "Too many packed fields.");
-  using TypeField = BitField<DataType::Type, kFieldType, kFieldTypeSize>;
+  using PackedTypeField = BitField<DataType::Type, kFieldPackedType, kFieldPackedTypeSize>;
 
   DEFAULT_COPY_CONSTRUCTOR(VecOperation);
 
@@ -358,11 +354,9 @@ class HVecExtractScalar FINAL : public HVecUnaryOperation {
     DCHECK(HasConsistentPackedTypes(input, packed_type));
     DCHECK_LT(index, vector_length);
     DCHECK_EQ(index, 0u);
-  }
-
-  // Yields a single component in the vector.
-  DataType::Type GetType() const OVERRIDE {
-    return GetPackedType();
+    // Yields a single component in the vector.
+    // Overrides the kSIMDType set by the VecOperation constructor.
+    SetPackedField<TypeField>(packed_type);
   }
 
   // An extract needs to stay in place, since SIMD registers are not
@@ -533,6 +527,31 @@ class HVecAdd FINAL : public HVecBinaryOperation {
   DEFAULT_COPY_CONSTRUCTOR(VecAdd);
 };
 
+// Adds every component in the two vectors using saturation arithmetic,
+// viz. [ x1, .. , xn ] + [ y1, .. , yn ] = [ x1 +_sat y1, .. , xn +_sat yn ]
+// for either both signed or both unsigned operands x, y (reflected in packed_type).
+class HVecSaturationAdd FINAL : public HVecBinaryOperation {
+ public:
+  HVecSaturationAdd(ArenaAllocator* allocator,
+                    HInstruction* left,
+                    HInstruction* right,
+                    DataType::Type packed_type,
+                    size_t vector_length,
+                    uint32_t dex_pc)
+      : HVecBinaryOperation(
+          kVecSaturationAdd, allocator, left, right, packed_type, vector_length, dex_pc) {
+    DCHECK(HasConsistentPackedTypes(left, packed_type));
+    DCHECK(HasConsistentPackedTypes(right, packed_type));
+  }
+
+  bool CanBeMoved() const OVERRIDE { return true; }
+
+  DECLARE_INSTRUCTION(VecSaturationAdd);
+
+ protected:
+  DEFAULT_COPY_CONSTRUCTOR(VecSaturationAdd);
+};
+
 // Performs halving add on every component in the two vectors, viz.
 // rounded   [ x1, .. , xn ] hradd [ y1, .. , yn ] = [ (x1 + y1 + 1) >> 1, .. , (xn + yn + 1) >> 1 ]
 // truncated [ x1, .. , xn ] hadd  [ y1, .. , yn ] = [ (x1 + y1)     >> 1, .. , (xn + yn )    >> 1 ]
@@ -596,6 +615,31 @@ class HVecSub FINAL : public HVecBinaryOperation {
 
  protected:
   DEFAULT_COPY_CONSTRUCTOR(VecSub);
+};
+
+// Subtracts every component in the two vectors using saturation arithmetic,
+// viz. [ x1, .. , xn ] + [ y1, .. , yn ] = [ x1 -_sat y1, .. , xn -_sat yn ]
+// for either both signed or both unsigned operands x, y (reflected in packed_type).
+class HVecSaturationSub FINAL : public HVecBinaryOperation {
+ public:
+  HVecSaturationSub(ArenaAllocator* allocator,
+                    HInstruction* left,
+                    HInstruction* right,
+                    DataType::Type packed_type,
+                    size_t vector_length,
+                    uint32_t dex_pc)
+      : HVecBinaryOperation(
+          kVecSaturationSub, allocator, left, right, packed_type, vector_length, dex_pc) {
+    DCHECK(HasConsistentPackedTypes(left, packed_type));
+    DCHECK(HasConsistentPackedTypes(right, packed_type));
+  }
+
+  bool CanBeMoved() const OVERRIDE { return true; }
+
+  DECLARE_INSTRUCTION(VecSaturationSub);
+
+ protected:
+  DEFAULT_COPY_CONSTRUCTOR(VecSaturationSub);
 };
 
 // Multiplies every component in the two vectors,
@@ -887,6 +931,9 @@ class HVecSetScalars FINAL : public HVecOperation {
 
 // Multiplies every component in the two vectors, adds the result vector to the accumulator vector,
 // viz. [ a1, .. , an ] + [ x1, .. , xn ] * [ y1, .. , yn ] = [ a1 + x1 * y1, .. , an + xn * yn ].
+// For floating point types, Java rounding behavior must be preserved; the products are rounded to
+// the proper precision before being added. "Fused" multiply-add operations available on several
+// architectures are not usable since they would violate Java language rules.
 class HVecMultiplyAccumulate FINAL : public HVecOperation {
  public:
   HVecMultiplyAccumulate(ArenaAllocator* allocator,
@@ -909,6 +956,9 @@ class HVecMultiplyAccumulate FINAL : public HVecOperation {
     DCHECK(HasConsistentPackedTypes(accumulator, packed_type));
     DCHECK(HasConsistentPackedTypes(mul_left, packed_type));
     DCHECK(HasConsistentPackedTypes(mul_right, packed_type));
+    // Remove the following if we add an architecture that supports floating point multiply-add
+    // with Java-compatible rounding.
+    DCHECK(DataType::IsIntegralType(packed_type));
     SetRawInputAt(0, accumulator);
     SetRawInputAt(1, mul_left);
     SetRawInputAt(2, mul_right);

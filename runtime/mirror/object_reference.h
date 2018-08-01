@@ -18,8 +18,8 @@
 #define ART_RUNTIME_MIRROR_OBJECT_REFERENCE_H_
 
 #include "base/atomic.h"
+#include "base/globals.h"
 #include "base/mutex.h"  // For Locks::mutator_lock_.
-#include "globals.h"
 #include "heap_poisoning.h"
 #include "obj_ptr.h"
 
@@ -110,13 +110,13 @@ class MANAGED HeapReference {
   template <bool kIsVolatile = false>
   MirrorType* AsMirrorPtr() const REQUIRES_SHARED(Locks::mutator_lock_) {
     return Compression::Decompress(
-        kIsVolatile ? reference_.LoadSequentiallyConsistent() : reference_.LoadJavaData());
+        kIsVolatile ? reference_.load(std::memory_order_seq_cst) : reference_.LoadJavaData());
   }
 
   template <bool kIsVolatile = false>
   void Assign(MirrorType* other) REQUIRES_SHARED(Locks::mutator_lock_) {
     if (kIsVolatile) {
-      reference_.StoreSequentiallyConsistent(Compression::Compress(other));
+      reference_.store(Compression::Compress(other), std::memory_order_seq_cst);
     } else {
       reference_.StoreJavaData(Compression::Compress(other));
     }

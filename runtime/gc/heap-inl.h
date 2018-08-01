@@ -37,6 +37,7 @@
 #include "runtime.h"
 #include "thread-inl.h"
 #include "verify_object.h"
+#include "write_barrier-inl.h"
 
 namespace art {
 namespace gc {
@@ -151,12 +152,12 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
       // enabled. We don't need this for kAllocatorTypeRosAlloc/DlMalloc
       // cases because we don't directly allocate into the main alloc
       // space (besides promotions) under the SS/GSS collector.
-      WriteBarrierField(obj, mirror::Object::ClassOffset(), klass);
+      WriteBarrier::ForFieldWrite(obj, mirror::Object::ClassOffset(), klass);
     }
     pre_fence_visitor(obj, usable_size);
     QuasiAtomic::ThreadFenceForConstructor();
     size_t num_bytes_allocated_before =
-        num_bytes_allocated_.FetchAndAddRelaxed(bytes_tl_bulk_allocated);
+        num_bytes_allocated_.fetch_add(bytes_tl_bulk_allocated, std::memory_order_relaxed);
     new_num_bytes_allocated = num_bytes_allocated_before + bytes_tl_bulk_allocated;
     if (bytes_tl_bulk_allocated > 0) {
       // Only trace when we get an increase in the number of bytes allocated. This happens when
@@ -187,7 +188,7 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
       DCHECK(allocation_records_ != nullptr);
       allocation_records_->RecordAllocation(self, &obj, bytes_allocated);
     }
-    AllocationListener* l = alloc_listener_.LoadSequentiallyConsistent();
+    AllocationListener* l = alloc_listener_.load(std::memory_order_seq_cst);
     if (l != nullptr) {
       // Same as above. We assume that a listener that was once stored will never be deleted.
       // Otherwise we'd have to perform this under a lock.
@@ -272,7 +273,7 @@ inline mirror::Object* Heap::TryToAllocate(Thread* self,
     }
     case kAllocatorTypeRosAlloc: {
       if (kInstrumented && UNLIKELY(is_running_on_memory_tool_)) {
-        // If running on valgrind or asan, we should be using the instrumented path.
+        // If running on ASan, we should be using the instrumented path.
         size_t max_bytes_tl_bulk_allocated = rosalloc_space_->MaxBytesBulkAllocatedFor(alloc_size);
         if (UNLIKELY(IsOutOfMemoryOnAllocation(allocator_type,
                                                max_bytes_tl_bulk_allocated,
@@ -303,7 +304,7 @@ inline mirror::Object* Heap::TryToAllocate(Thread* self,
     }
     case kAllocatorTypeDlMalloc: {
       if (kInstrumented && UNLIKELY(is_running_on_memory_tool_)) {
-        // If running on valgrind, we should be using the instrumented path.
+        // If running on ASan, we should be using the instrumented path.
         ret = dlmalloc_space_->Alloc(self,
                                      alloc_size,
                                      bytes_allocated,
@@ -393,7 +394,7 @@ inline bool Heap::ShouldAllocLargeObject(ObjPtr<mirror::Class> c, size_t byte_co
 inline bool Heap::IsOutOfMemoryOnAllocation(AllocatorType allocator_type,
                                             size_t alloc_size,
                                             bool grow) {
-  size_t new_footprint = num_bytes_allocated_.LoadSequentiallyConsistent() + alloc_size;
+  size_t new_footprint = num_bytes_allocated_.load(std::memory_order_seq_cst) + alloc_size;
   if (UNLIKELY(new_footprint > max_allowed_footprint_)) {
     if (UNLIKELY(new_footprint > growth_limit_)) {
       return true;
@@ -416,22 +417,6 @@ inline void Heap::CheckConcurrentGC(Thread* self,
   if (UNLIKELY(new_num_bytes_allocated >= concurrent_start_bytes_)) {
     RequestConcurrentGCAndSaveObject(self, false, obj);
   }
-}
-
-inline void Heap::WriteBarrierField(ObjPtr<mirror::Object> dst,
-                                    MemberOffset offset ATTRIBUTE_UNUSED,
-                                    ObjPtr<mirror::Object> new_value ATTRIBUTE_UNUSED) {
-  card_table_->MarkCard(dst.Ptr());
-}
-
-inline void Heap::WriteBarrierArray(ObjPtr<mirror::Object> dst,
-                                    int start_offset ATTRIBUTE_UNUSED,
-                                    size_t length ATTRIBUTE_UNUSED) {
-  card_table_->MarkCard(dst.Ptr());
-}
-
-inline void Heap::WriteBarrierEveryFieldOf(ObjPtr<mirror::Object> obj) {
-  card_table_->MarkCard(obj.Ptr());
 }
 
 }  // namespace gc

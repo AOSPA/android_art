@@ -20,6 +20,7 @@
 #include "class_table.h"
 
 #include "gc_root-inl.h"
+#include "mirror/class.h"
 #include "oat_file.h"
 
 namespace art {
@@ -88,7 +89,7 @@ bool ClassTable::Visit(const Visitor& visitor) {
 
 template<ReadBarrierOption kReadBarrierOption>
 inline mirror::Class* ClassTable::TableSlot::Read() const {
-  const uint32_t before = data_.LoadRelaxed();
+  const uint32_t before = data_.load(std::memory_order_relaxed);
   ObjPtr<mirror::Class> const before_ptr(ExtractPtr(before));
   ObjPtr<mirror::Class> const after_ptr(
       GcRoot<mirror::Class>(before_ptr).Read<kReadBarrierOption>());
@@ -102,7 +103,7 @@ inline mirror::Class* ClassTable::TableSlot::Read() const {
 
 template<typename Visitor>
 inline void ClassTable::TableSlot::VisitRoot(const Visitor& visitor) const {
-  const uint32_t before = data_.LoadRelaxed();
+  const uint32_t before = data_.load(std::memory_order_relaxed);
   ObjPtr<mirror::Class> before_ptr(ExtractPtr(before));
   GcRoot<mirror::Class> root(before_ptr);
   visitor.VisitRoot(root.AddressWithoutBarrier());

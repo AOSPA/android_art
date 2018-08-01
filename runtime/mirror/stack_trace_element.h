@@ -17,7 +17,6 @@
 #ifndef ART_RUNTIME_MIRROR_STACK_TRACE_ELEMENT_H_
 #define ART_RUNTIME_MIRROR_STACK_TRACE_ELEMENT_H_
 
-#include "gc_root.h"
 #include "object.h"
 
 namespace art {
@@ -53,15 +52,6 @@ class MANAGED StackTraceElement FINAL : public Object {
                                   int32_t line_number)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_);
 
-  static void SetClass(ObjPtr<Class> java_lang_StackTraceElement);
-  static void ResetClass();
-  static void VisitRoots(RootVisitor* visitor)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  static Class* GetStackTraceElement() REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK(!java_lang_StackTraceElement_.IsNull());
-    return java_lang_StackTraceElement_.Read();
-  }
-
  private:
   // Field order required by test "ValidateFieldOrderOfJavaCppUnionClasses".
   HeapReference<String> declaring_class_;
@@ -75,8 +65,6 @@ class MANAGED StackTraceElement FINAL : public Object {
             ObjPtr<String> file_name,
             int32_t line_number)
       REQUIRES_SHARED(Locks::mutator_lock_);
-
-  static GcRoot<Class> java_lang_StackTraceElement_;
 
   friend struct art::StackTraceElementOffsets;  // for verifying offset information
   DISALLOW_IMPLICIT_CONSTRUCTORS(StackTraceElement);

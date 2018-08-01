@@ -20,6 +20,7 @@
 #include "base/enums.h"
 #include "builder.h"
 #include "class_linker.h"
+#include "class_root.h"
 #include "constant_folding.h"
 #include "data_type-inl.h"
 #include "dead_code_elimination.h"
@@ -124,12 +125,17 @@ void HInliner::UpdateInliningBudget() {
   }
 }
 
-void HInliner::Run() {
-  if (graph_->IsDebuggable()) {
+bool HInliner::Run() {
+  if (codegen_->GetCompilerOptions().GetInlineMaxCodeUnits() == 0) {
+    // Inlining effectively disabled.
+    return false;
+  } else if (graph_->IsDebuggable()) {
     // For simplicity, we currently never inline when the graph is debuggable. This avoids
     // doing some logic in the runtime to discover if a method could have been inlined.
-    return;
+    return false;
   }
+
+  bool didInline = false;
 
   // Initialize the number of instructions for the method being compiled. Recursive calls
   // to HInliner::Run have already updated the instruction count.
@@ -147,10 +153,11 @@ void HInliner::Run() {
   //   that this method is actually inlined;
   // - if a method's name contains the substring "$noinline$", do not
   //   inline that method.
-  // We limit this to AOT compilation, as the JIT may or may not inline
+  // We limit the latter to AOT compilation, as the JIT may or may not inline
   // depending on the state of classes at runtime.
-  const bool honor_inlining_directives =
-      IsCompilingWithCoreImage() && Runtime::Current()->IsAotCompiler();
+  const bool honor_noinline_directives = IsCompilingWithCoreImage();
+  const bool honor_inline_directives =
+      honor_noinline_directives && Runtime::Current()->IsAotCompiler();
 
   // Keep a copy of all blocks when starting the visit.
   ArenaVector<HBasicBlock*> blocks = graph_->GetReversePostOrder();
@@ -164,25 +171,32 @@ void HInliner::Run() {
       HInvoke* call = instruction->AsInvoke();
       // As long as the call is not intrinsified, it is worth trying to inline.
       if (call != nullptr && call->GetIntrinsic() == Intrinsics::kNone) {
-        if (honor_inlining_directives) {
+        if (honor_noinline_directives) {
           // Debugging case: directives in method names control or assert on inlining.
           std::string callee_name = outer_compilation_unit_.GetDexFile()->PrettyMethod(
               call->GetDexMethodIndex(), /* with_signature */ false);
           // Tests prevent inlining by having $noinline$ in their method names.
           if (callee_name.find("$noinline$") == std::string::npos) {
-            if (!TryInline(call)) {
+            if (TryInline(call)) {
+              didInline = true;
+            } else if (honor_inline_directives) {
               bool should_have_inlined = (callee_name.find("$inline$") != std::string::npos);
               CHECK(!should_have_inlined) << "Could not inline " << callee_name;
             }
           }
         } else {
+          DCHECK(!honor_inline_directives);
           // Normal case: try to inline.
-          TryInline(call);
+          if (TryInline(call)) {
+            didInline = true;
+          }
         }
       }
       instruction = next;
     }
   }
+
+  return didInline;
 }
 
 static bool IsMethodOrDeclaringClassFinal(ArtMethod* method)
@@ -446,9 +460,10 @@ static bool AlwaysThrows(CompilerDriver* const compiler_driver, ArtMethod* metho
 
 bool HInliner::TryInline(HInvoke* invoke_instruction) {
   if (invoke_instruction->IsInvokeUnresolved() ||
-      invoke_instruction->IsInvokePolymorphic()) {
-    return false;  // Don't bother to move further if we know the method is unresolved or an
-                   // invoke-polymorphic.
+      invoke_instruction->IsInvokePolymorphic() ||
+      invoke_instruction->IsInvokeCustom()) {
+    return false;  // Don't bother to move further if we know the method is unresolved or the
+                   // invocation is polymorphic (invoke-{polymorphic,custom}).
   }
 
   ScopedObjectAccess soa(Thread::Current());
@@ -524,7 +539,7 @@ static Handle<mirror::ObjectArray<mirror::Class>> AllocateInlineCacheHolder(
   Handle<mirror::ObjectArray<mirror::Class>> inline_cache = hs->NewHandle(
       mirror::ObjectArray<mirror::Class>::Alloc(
           self,
-          class_linker->GetClassRoot(ClassLinker::kClassArrayClass),
+          GetClassRoot<mirror::ObjectArray<mirror::Class>>(class_linker),
           InlineCache::kIndividualCacheSize));
   if (inline_cache == nullptr) {
     // We got an OOME. Just clear the exception, and don't inline.
@@ -716,7 +731,7 @@ HInliner::InlineCacheType HInliner::ExtractClassesFromOfflineProfile(
         offline_profile.dex_references.size());
   for (size_t i = 0; i < offline_profile.dex_references.size(); i++) {
     bool found = false;
-    for (const DexFile* dex_file : compiler_driver_->GetDexFilesForOatFile()) {
+    for (const DexFile* dex_file : codegen_->GetCompilerOptions().GetDexFilesForOatFile()) {
       if (offline_profile.dex_references[i].MatchesDex(dex_file)) {
         dex_profile_index_to_dex_cache[i] =
             caller_compilation_unit_.GetClassLinker()->FindDexCache(self, *dex_file);
@@ -764,7 +779,7 @@ HInliner::InlineCacheType HInliner::ExtractClassesFromOfflineProfile(
 HInstanceFieldGet* HInliner::BuildGetReceiverClass(ClassLinker* class_linker,
                                                    HInstruction* receiver,
                                                    uint32_t dex_pc) const {
-  ArtField* field = class_linker->GetClassRoot(ClassLinker::kJavaLangObject)->GetInstanceField(0);
+  ArtField* field = GetClassRoot<mirror::Object>(class_linker)->GetInstanceField(0);
   DCHECK_EQ(std::string(field->GetName()), "shadow$_klass_");
   HInstanceFieldGet* result = new (graph_->GetAllocator()) HInstanceFieldGet(
       receiver,
@@ -934,7 +949,7 @@ HInstruction* HInliner::AddTypeGuard(HInstruction* receiver,
                                                                    invoke_instruction->GetDexPc(),
                                                                    /* needs_access_check */ false);
   HLoadClass::LoadKind kind = HSharpening::ComputeLoadClassKind(
-      load_class, codegen_, compiler_driver_, caller_compilation_unit_);
+      load_class, codegen_, caller_compilation_unit_);
   DCHECK(kind != HLoadClass::LoadKind::kInvalid)
       << "We should always be able to reference a class for inline caches";
   // Load kind must be set before inserting the instruction into the graph.
@@ -1403,6 +1418,22 @@ size_t HInliner::CountRecursiveCallsOf(ArtMethod* method) const {
   return count;
 }
 
+static inline bool MayInline(const CompilerOptions& compiler_options,
+                             const DexFile& inlined_from,
+                             const DexFile& inlined_into) {
+  if (kIsTargetBuild) {
+    return true;
+  }
+
+  // We're not allowed to inline across dex files if we're the no-inline-from dex file.
+  if (!IsSameDexFile(inlined_from, inlined_into) &&
+      ContainsElement(compiler_options.GetNoInlineFromDexFile(), &inlined_from)) {
+    return false;
+  }
+
+  return true;
+}
+
 bool HInliner::TryBuildAndInline(HInvoke* invoke_instruction,
                                  ArtMethod* method,
                                  ReferenceTypeInfo receiver_type,
@@ -1424,8 +1455,9 @@ bool HInliner::TryBuildAndInline(HInvoke* invoke_instruction,
 
   // Check whether we're allowed to inline. The outermost compilation unit is the relevant
   // dex file here (though the transitivity of an inline chain would allow checking the calller).
-  if (!compiler_driver_->MayInline(method->GetDexFile(),
-                                   outer_compilation_unit_.GetDexFile())) {
+  if (!MayInline(codegen_->GetCompilerOptions(),
+                 *method->GetDexFile(),
+                 *outer_compilation_unit_.GetDexFile())) {
     if (TryPatternSubstitution(invoke_instruction, method, return_replacement)) {
       LOG_SUCCESS() << "Successfully replaced pattern of invoke "
                     << method->PrettyMethod();
@@ -1450,7 +1482,7 @@ bool HInliner::TryBuildAndInline(HInvoke* invoke_instruction,
     return false;
   }
 
-  size_t inline_max_code_units = compiler_driver_->GetCompilerOptions().GetInlineMaxCodeUnits();
+  size_t inline_max_code_units = codegen_->GetCompilerOptions().GetInlineMaxCodeUnits();
   if (accessor.InsnsSizeInCodeUnits() > inline_max_code_units) {
     LOG_FAIL(stats_, MethodCompilationStat::kNotInlinedCodeItem)
         << "Method " << method->PrettyMethod()
@@ -1751,7 +1783,7 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
       graph_->GetArenaStack(),
       callee_dex_file,
       method_index,
-      compiler_driver_->GetInstructionSet(),
+      codegen_->GetCompilerOptions().GetInstructionSet(),
       invoke_type,
       graph_->IsDebuggable(),
       /* osr */ false,
@@ -1788,8 +1820,8 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
     return false;
   }
 
-  if (!RegisterAllocator::CanAllocateRegistersFor(*callee_graph,
-                                                  compiler_driver_->GetInstructionSet())) {
+  if (!RegisterAllocator::CanAllocateRegistersFor(
+          *callee_graph, codegen_->GetCompilerOptions().GetInstructionSet())) {
     LOG_FAIL(stats_, MethodCompilationStat::kNotInlinedRegisterAllocator)
         << "Method " << callee_dex_file.PrettyMethod(method_index)
         << " cannot be inlined because of the register allocator";
@@ -1990,8 +2022,8 @@ void HInliner::RunOptimizations(HGraph* callee_graph,
   // optimization that could lead to a HDeoptimize. The following optimizations do not.
   HDeadCodeElimination dce(callee_graph, inline_stats_, "dead_code_elimination$inliner");
   HConstantFolding fold(callee_graph, "constant_folding$inliner");
-  HSharpening sharpening(callee_graph, codegen_, compiler_driver_);
-  InstructionSimplifier simplify(callee_graph, codegen_, compiler_driver_, inline_stats_);
+  HSharpening sharpening(callee_graph, codegen_);
+  InstructionSimplifier simplify(callee_graph, codegen_, inline_stats_);
   IntrinsicsRecognizer intrinsics(callee_graph, inline_stats_);
 
   HOptimization* optimizations[] = {
@@ -2107,9 +2139,8 @@ bool HInliner::ReturnTypeMoreSpecific(HInvoke* invoke_instruction,
         return true;
       } else if (return_replacement->IsInstanceFieldGet()) {
         HInstanceFieldGet* field_get = return_replacement->AsInstanceFieldGet();
-        ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
         if (field_get->GetFieldInfo().GetField() ==
-              class_linker->GetClassRoot(ClassLinker::kJavaLangObject)->GetInstanceField(0)) {
+                GetClassRoot<mirror::Object>()->GetInstanceField(0)) {
           return true;
         }
       }

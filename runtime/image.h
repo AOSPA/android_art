@@ -19,15 +19,15 @@
 
 #include <string.h>
 
-#include "base/bit_utils.h"
 #include "base/enums.h"
-#include "globals.h"
+#include "base/globals.h"
 #include "mirror/object.h"
 
 namespace art {
 
 class ArtField;
 class ArtMethod;
+template <class MirrorType> class ObjPtr;
 
 namespace linker {
 class ImageWriter;
@@ -207,8 +207,16 @@ class PACKED(4) ImageHeader {
   enum ImageRoot {
     kDexCaches,
     kClassRoots,
-    kClassLoader,  // App image only.
+    kOomeWhenThrowingException,       // Pre-allocated OOME when throwing exception.
+    kOomeWhenThrowingOome,            // Pre-allocated OOME when throwing OOME.
+    kOomeWhenHandlingStackOverflow,   // Pre-allocated OOME when handling StackOverflowError.
+    kNoClassDefFoundError,            // Pre-allocated NoClassDefFoundError.
+    kSpecialRoots,                    // Different for boot image and app image, see aliases below.
     kImageRootsMax,
+
+    // Aliases.
+    kAppImageClassLoader = kSpecialRoots,   // The class loader used to build the app image.
+    kBootImageLiveObjects = kSpecialRoots,  // Array of boot image objects that must be kept live.
   };
 
   enum ImageSections {
@@ -225,8 +233,10 @@ class PACKED(4) ImageHeader {
     kSectionCount,  // Number of elements in enum.
   };
 
-  static size_t NumberOfImageRoots(bool app_image) {
-    return app_image ? kImageRootsMax : kImageRootsMax - 1u;
+  static size_t NumberOfImageRoots(bool app_image ATTRIBUTE_UNUSED) {
+    // At the moment, boot image and app image have the same number of roots,
+    // though the meaning of the kSpecialRoots is different.
+    return kImageRootsMax;
   }
 
   ArtMethod* GetImageMethod(ImageMethod index) const;
@@ -278,11 +288,11 @@ class PACKED(4) ImageHeader {
   }
 
   template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
-  mirror::Object* GetImageRoot(ImageRoot image_root) const
+  ObjPtr<mirror::Object> GetImageRoot(ImageRoot image_root) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
-  mirror::ObjectArray<mirror::Object>* GetImageRoots() const
+  ObjPtr<mirror::ObjectArray<mirror::Object>> GetImageRoots() const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void RelocateImage(off_t delta);
@@ -325,22 +335,6 @@ class PACKED(4) ImageHeader {
     // App images currently require a boot image, if the size is non zero then it is an app image
     // header.
     return boot_image_size_ != 0u;
-  }
-
-  uint32_t GetBootImageConstantTablesOffset() const {
-    // Interned strings table and class table for boot image are mmapped read only.
-    DCHECK(!IsAppImage());
-    const ImageSection& interned_strings = GetInternedStringsSection();
-    DCHECK_ALIGNED(interned_strings.Offset(), kPageSize);
-    return interned_strings.Offset();
-  }
-
-  uint32_t GetBootImageConstantTablesSize() const {
-    uint32_t start_offset = GetBootImageConstantTablesOffset();
-    const ImageSection& class_table = GetClassTableSection();
-    DCHECK_LE(start_offset, class_table.Offset());
-    size_t tables_size = class_table.Offset() + class_table.Size() - start_offset;
-    return RoundUp(tables_size, kPageSize);
   }
 
   // Visit mirror::Objects in the section starting at base.

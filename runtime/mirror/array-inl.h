@@ -151,11 +151,11 @@ class SetLengthToUsableSizeVisitor {
 };
 
 template <bool kIsInstrumented, bool kFillUsable>
-inline Array* Array::Alloc(Thread* self,
-                           ObjPtr<Class> array_class,
-                           int32_t component_count,
-                           size_t component_size_shift,
-                           gc::AllocatorType allocator_type) {
+inline ObjPtr<Array> Array::Alloc(Thread* self,
+                                  ObjPtr<Class> array_class,
+                                  int32_t component_count,
+                                  size_t component_size_shift,
+                                  gc::AllocatorType allocator_type) {
   DCHECK(allocator_type != gc::kAllocatorTypeLOS);
   DCHECK(array_class != nullptr);
   DCHECK(array_class->IsArrayClass());
@@ -175,19 +175,19 @@ inline Array* Array::Alloc(Thread* self,
   }
 #endif
   gc::Heap* heap = Runtime::Current()->GetHeap();
-  Array* result;
+  ObjPtr<Array> result;
   if (!kFillUsable) {
     SetLengthVisitor visitor(component_count);
-    result = down_cast<Array*>(
+    result = ObjPtr<Array>::DownCast(MakeObjPtr(
         heap->AllocObjectWithAllocator<kIsInstrumented, true>(self, array_class, size,
-                                                              allocator_type, visitor));
+                                                              allocator_type, visitor)));
   } else {
     SetLengthToUsableSizeVisitor visitor(component_count,
                                          DataOffset(1U << component_size_shift).SizeValue(),
                                          component_size_shift);
-    result = down_cast<Array*>(
+    result = ObjPtr<Array>::DownCast(MakeObjPtr(
         heap->AllocObjectWithAllocator<kIsInstrumented, true>(self, array_class, size,
-                                                              allocator_type, visitor));
+                                                              allocator_type, visitor)));
   }
   if (kIsDebugBuild && result != nullptr && Runtime::Current()->IsStarted()) {
     array_class = result->GetClass();  // In case the array class moved.
@@ -201,15 +201,10 @@ inline Array* Array::Alloc(Thread* self,
   return result;
 }
 
-template<class T>
-inline void PrimitiveArray<T>::VisitRoots(RootVisitor* visitor) {
-  array_class_.VisitRootIfNonNull(visitor, RootInfo(kRootStickyClass));
-}
-
 template<typename T>
-inline PrimitiveArray<T>* PrimitiveArray<T>::AllocateAndFill(Thread* self,
-                                                             const T* data,
-                                                             size_t length) {
+inline ObjPtr<PrimitiveArray<T>> PrimitiveArray<T>::AllocateAndFill(Thread* self,
+                                                                   const T* data,
+                                                                   size_t length) {
   StackHandleScope<1> hs(self);
   Handle<PrimitiveArray<T>> arr(hs.NewHandle(PrimitiveArray<T>::Alloc(self, length)));
   if (!arr.IsNull()) {
@@ -217,16 +212,6 @@ inline PrimitiveArray<T>* PrimitiveArray<T>::AllocateAndFill(Thread* self,
     memcpy(arr->GetData(), data, sizeof(T) * length);
   }
   return arr.Get();
-}
-
-template<typename T>
-inline PrimitiveArray<T>* PrimitiveArray<T>::Alloc(Thread* self, size_t length) {
-  Array* raw_array = Array::Alloc<true>(self,
-                                        GetArrayClass(),
-                                        length,
-                                        ComponentSizeShiftWidth(sizeof(T)),
-                                        Runtime::Current()->GetHeap()->GetCurrentAllocator());
-  return down_cast<PrimitiveArray<T>*>(raw_array);
 }
 
 template<typename T>
@@ -459,13 +444,6 @@ void PointerArray::Memcpy(int32_t dst_pos,
                                   : src->AsIntArray());
     i_this->Memcpy(dst_pos, i_src, src_pos, count);
   }
-}
-
-template<typename T>
-inline void PrimitiveArray<T>::SetArrayClass(ObjPtr<Class> array_class) {
-  CHECK(array_class_.IsNull());
-  CHECK(array_class != nullptr);
-  array_class_ = GcRoot<Class>(array_class);
 }
 
 }  // namespace mirror

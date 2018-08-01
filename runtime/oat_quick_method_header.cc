@@ -19,6 +19,7 @@
 #include "art_method.h"
 #include "dex/dex_file_types.h"
 #include "scoped_thread_state_change-inl.h"
+#include "stack_map.h"
 #include "thread.h"
 
 namespace art {
@@ -34,23 +35,20 @@ OatQuickMethodHeader::OatQuickMethodHeader(uint32_t vmap_table_offset,
       frame_info_(frame_size_in_bytes, core_spill_mask, fp_spill_mask),
       code_size_(code_size) {}
 
-OatQuickMethodHeader::~OatQuickMethodHeader() {}
-
 uint32_t OatQuickMethodHeader::ToDexPc(ArtMethod* method,
                                        const uintptr_t pc,
                                        bool abort_on_failure) const {
   const void* entry_point = GetEntryPoint();
   uint32_t sought_offset = pc - reinterpret_cast<uintptr_t>(entry_point);
-  if (IsOptimized()) {
-    CodeInfo code_info = GetOptimizedCodeInfo();
-    CodeInfoEncoding encoding = code_info.ExtractEncoding();
-    StackMap stack_map = code_info.GetStackMapForNativePcOffset(sought_offset, encoding);
-    if (stack_map.IsValid()) {
-      return stack_map.GetDexPc(encoding.stack_map.encoding);
-    }
-  } else {
-    DCHECK(method->IsNative());
+  if (method->IsNative()) {
     return dex::kDexNoIndex;
+  } else {
+    DCHECK(IsOptimized());
+    CodeInfo code_info(this);
+    StackMap stack_map = code_info.GetStackMapForNativePcOffset(sought_offset);
+    if (stack_map.IsValid()) {
+      return stack_map.GetDexPc();
+    }
   }
   if (abort_on_failure) {
     ScopedObjectAccess soa(Thread::Current());
@@ -71,18 +69,17 @@ uintptr_t OatQuickMethodHeader::ToNativeQuickPc(ArtMethod* method,
   DCHECK(!method->IsNative());
   DCHECK(IsOptimized());
   // Search for the dex-to-pc mapping in stack maps.
-  CodeInfo code_info = GetOptimizedCodeInfo();
-  CodeInfoEncoding encoding = code_info.ExtractEncoding();
+  CodeInfo code_info(this);
 
   // All stack maps are stored in the same CodeItem section, safepoint stack
   // maps first, then catch stack maps. We use `is_for_catch_handler` to select
   // the order of iteration.
   StackMap stack_map =
-      LIKELY(is_for_catch_handler) ? code_info.GetCatchStackMapForDexPc(dex_pc, encoding)
-                                   : code_info.GetStackMapForDexPc(dex_pc, encoding);
+      LIKELY(is_for_catch_handler) ? code_info.GetCatchStackMapForDexPc(dex_pc)
+                                   : code_info.GetStackMapForDexPc(dex_pc);
   if (stack_map.IsValid()) {
     return reinterpret_cast<uintptr_t>(entry_point) +
-           stack_map.GetNativePcOffset(encoding.stack_map.encoding, kRuntimeISA);
+           stack_map.GetNativePcOffset(kRuntimeISA);
   }
   if (abort_on_failure) {
     ScopedObjectAccess soa(Thread::Current());

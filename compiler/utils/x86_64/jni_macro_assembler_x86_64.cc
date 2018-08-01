@@ -17,8 +17,8 @@
 #include "jni_macro_assembler_x86_64.h"
 
 #include "base/casts.h"
+#include "base/memory_region.h"
 #include "entrypoints/quick/quick_entrypoints.h"
-#include "memory_region.h"
 #include "thread.h"
 
 namespace art {
@@ -75,8 +75,7 @@ void X86_64JNIMacroAssembler::BuildFrame(size_t frame_size,
 
   __ movq(Address(CpuRegister(RSP), 0), method_reg.AsX86_64().AsCpuRegister());
 
-  for (size_t i = 0; i < entry_spills.size(); ++i) {
-    ManagedRegisterSpill spill = entry_spills.at(i);
+  for (const ManagedRegisterSpill& spill : entry_spills) {
     if (spill.AsX86_64().IsCpuRegister()) {
       if (spill.getSize() == 8) {
         __ movq(Address(CpuRegister(RSP), frame_size + spill.getSpillOffset()),

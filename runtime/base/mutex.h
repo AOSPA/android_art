@@ -31,10 +31,10 @@
 #include "base/globals.h"
 #include "base/macros.h"
 
-#if defined(__APPLE__)
-#define ART_USE_FUTEXES 0
-#else
+#if defined(__linux__)
 #define ART_USE_FUTEXES 1
+#else
+#define ART_USE_FUTEXES 0
 #endif
 
 // Currently Darwin doesn't support locks with timeouts.
@@ -57,7 +57,7 @@ class Mutex;
 // partial ordering and thereby cause deadlock situations to fail checks.
 //
 // [1] http://www.drdobbs.com/parallel/use-lock-hierarchies-to-avoid-deadlock/204801163
-enum LockLevel {
+enum LockLevel : uint8_t {
   kLoggingLock = 0,
   kSwapMutexesLock,
   kUnexpectedSignalLock,
@@ -65,15 +65,20 @@ enum LockLevel {
   kAbortLock,
   kNativeDebugInterfaceLock,
   kSignalHandlingLock,
+  // A generic lock level for mutexs that should not allow any additional mutexes to be gained after
+  // acquiring it.
+  kGenericBottomLock,
   kJdwpAdbStateLock,
   kJdwpSocketLock,
   kRegionSpaceRegionLock,
   kMarkSweepMarkStackLock,
+  kJitCodeCacheLock,
   kRosAllocGlobalLock,
   kRosAllocBracketLock,
   kRosAllocBulkFreeLock,
   kTaggingLockLevel,
   kTransactionLogLock,
+  kCustomTlsLock,
   kJniFunctionTableLock,
   kJniWeakGlobalsLock,
   kJniGlobalsLock,
@@ -94,7 +99,6 @@ enum LockLevel {
   kOatFileManagerLock,
   kTracingUniqueMethodsLock,
   kTracingStreamingLock,
-  kDeoptimizedMethodsLock,
   kClassLoaderClassesLock,
   kDefaultMutexLevel,
   kDexLock,
@@ -105,7 +109,6 @@ enum LockLevel {
   kMonitorPoolLock,
   kClassLinkerClassesLock,  // TODO rename.
   kDexToDexCompilerLock,
-  kJitCodeCacheLock,
   kCHALock,
   kSubtypeCheckLock,
   kBreakpointLock,
@@ -142,20 +145,20 @@ enum LockLevel {
 };
 std::ostream& operator<<(std::ostream& os, const LockLevel& rhs);
 
-const bool kDebugLocking = kIsDebugBuild;
+constexpr bool kDebugLocking = kIsDebugBuild;
 
 // Record Log contention information, dumpable via SIGQUIT.
 #ifdef ART_USE_FUTEXES
 // To enable lock contention logging, set this to true.
-const bool kLogLockContentions = false;
+constexpr bool kLogLockContentions = false;
 #else
 // Keep this false as lock contention logging is supported only with
 // futex.
-const bool kLogLockContentions = false;
+constexpr bool kLogLockContentions = false;
 #endif
-const size_t kContentionLogSize = 4;
-const size_t kContentionLogDataSize = kLogLockContentions ? 1 : 0;
-const size_t kAllMutexDataSize = kLogLockContentions ? 1 : 0;
+constexpr size_t kContentionLogSize = 4;
+constexpr size_t kContentionLogDataSize = kLogLockContentions ? 1 : 0;
+constexpr size_t kAllMutexDataSize = kLogLockContentions ? 1 : 0;
 
 // Base class for all Mutex implementations
 class BaseMutex {
@@ -196,9 +199,7 @@ class BaseMutex {
   void RecordContention(uint64_t blocked_tid, uint64_t owner_tid, uint64_t nano_time_blocked);
   void DumpContention(std::ostream& os) const;
 
-  const LockLevel level_;  // Support for lock hierarchy.
   const char* const name_;
-  bool should_respond_to_empty_checkpoint_request_;
 
   // A log entry that records contention but makes no guarantee that either tid will be held live.
   struct ContentionLogEntry {
@@ -221,10 +222,13 @@ class BaseMutex {
   };
   ContentionLogData contention_log_data_[kContentionLogDataSize];
 
+  const LockLevel level_;  // Support for lock hierarchy.
+  bool should_respond_to_empty_checkpoint_request_;
+
  public:
   bool HasEverContended() const {
     if (kLogLockContentions) {
-      return contention_log_data_->contention_count.LoadSequentiallyConsistent() > 0;
+      return contention_log_data_->contention_count.load(std::memory_order_seq_cst) > 0;
     }
     return false;
   }
@@ -307,8 +311,10 @@ class LOCKABLE Mutex : public BaseMutex {
   pthread_mutex_t mutex_;
   Atomic<pid_t> exclusive_owner_;  // Guarded by mutex_. Asynchronous reads are OK.
 #endif
-  const bool recursive_;  // Can the lock be recursively held?
+
   unsigned int recursion_count_;
+  const bool recursive_;  // Can the lock be recursively held?
+
   friend class ConditionVariable;
   DISALLOW_COPY_AND_ASSIGN(Mutex);
 };
@@ -522,8 +528,6 @@ class SCOPED_CAPABILITY MutexLock {
   Mutex& mu_;
   DISALLOW_COPY_AND_ASSIGN(MutexLock);
 };
-// Catch bug where variable name is omitted. "MutexLock (lock);" instead of "MutexLock mu(lock)".
-#define MutexLock(x) static_assert(0, "MutexLock declaration missing variable name")
 
 // Scoped locker/unlocker for a ReaderWriterMutex that acquires read access to mu upon
 // construction and releases it upon destruction.
@@ -557,9 +561,6 @@ class SCOPED_CAPABILITY WriterMutexLock {
   ReaderWriterMutex& mu_;
   DISALLOW_COPY_AND_ASSIGN(WriterMutexLock);
 };
-// Catch bug where variable name is omitted. "WriterMutexLock (lock);" instead of
-// "WriterMutexLock mu(lock)".
-#define WriterMutexLock(x) static_assert(0, "WriterMutexLock declaration missing variable name")
 
 // For StartNoThreadSuspension and EndNoThreadSuspension.
 class CAPABILITY("role") Role {
@@ -738,8 +739,20 @@ class Locks {
   // Guard accesses to the JNI function table override.
   static Mutex* jni_function_table_lock_ ACQUIRED_AFTER(jni_weak_globals_lock_);
 
+  // Guard accesses to the Thread::custom_tls_. We use this to allow the TLS of other threads to be
+  // read (the reader must hold the ThreadListLock or have some other way of ensuring the thread
+  // will not die in that case though). This is useful for (eg) the implementation of
+  // GetThreadLocalStorage.
+  static Mutex* custom_tls_lock_ ACQUIRED_AFTER(jni_function_table_lock_);
+
+  // When declaring any Mutex add BOTTOM_MUTEX_ACQUIRED_AFTER to use annotalysis to check the code
+  // doesn't try to acquire a higher level Mutex. NB Due to the way the annotalysis works this
+  // actually only encodes the mutex being below jni_function_table_lock_ although having
+  // kGenericBottomLock level is lower than this.
+  #define BOTTOM_MUTEX_ACQUIRED_AFTER ACQUIRED_AFTER(art::Locks::custom_tls_lock_)
+
   // Have an exclusive aborting thread.
-  static Mutex* abort_lock_ ACQUIRED_AFTER(jni_function_table_lock_);
+  static Mutex* abort_lock_ ACQUIRED_AFTER(custom_tls_lock_);
 
   // Allow mutual exclusion when manipulating Thread::suspend_count_.
   // TODO: Does the trade-off of a per-thread lock make sense?

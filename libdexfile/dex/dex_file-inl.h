@@ -17,11 +17,14 @@
 #ifndef ART_LIBDEXFILE_DEX_DEX_FILE_INL_H_
 #define ART_LIBDEXFILE_DEX_DEX_FILE_INL_H_
 
+#include "dex_file.h"
+
 #include "base/casts.h"
 #include "base/leb128.h"
 #include "base/stringpiece.h"
+#include "class_iterator.h"
 #include "compact_dex_file.h"
-#include "dex_file.h"
+#include "dex_instruction_iterator.h"
 #include "invoke_type.h"
 #include "standard_dex_file.h"
 
@@ -127,7 +130,7 @@ inline const char* DexFile::GetReturnTypeDescriptor(const ProtoId& proto_id) con
   return StringByTypeIdx(proto_id.return_type_idx_);
 }
 
-inline const char* DexFile::GetShorty(uint32_t proto_idx) const {
+inline const char* DexFile::GetShorty(dex::ProtoIndex proto_idx) const {
   const ProtoId& proto_id = GetProtoId(proto_idx);
   return StringDataByIdx(proto_id.shorty_idx_);
 }
@@ -525,6 +528,10 @@ inline void DexFile::ClassDef::VisitMethods(const DexFile* dex_file, const Visit
       visitor(it);
     }
   }
+}
+
+inline IterationRange<ClassIterator> DexFile::GetClasses() const {
+  return { ClassIterator(*this, 0u), ClassIterator(*this, NumClassDefs()) };
 }
 
 }  // namespace art

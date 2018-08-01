@@ -204,14 +204,12 @@ class ElfCompilationUnitWriter {
 
       // Decode dex register locations for all stack maps.
       // It might be expensive, so do it just once and reuse the result.
+      std::unique_ptr<const CodeInfo> code_info;
       std::vector<DexRegisterMap> dex_reg_maps;
       if (accessor.HasCodeItem() && mi->code_info != nullptr) {
-        const CodeInfo code_info(mi->code_info);
-        CodeInfoEncoding encoding = code_info.ExtractEncoding();
-        for (size_t s = 0; s < code_info.GetNumberOfStackMaps(encoding); ++s) {
-          const StackMap& stack_map = code_info.GetStackMapAt(s, encoding);
-          dex_reg_maps.push_back(code_info.GetDexRegisterMapOf(
-              stack_map, encoding, accessor.RegistersSize()));
+        code_info.reset(new CodeInfo(mi->code_info));
+        for (StackMap stack_map : code_info->GetStackMaps()) {
+          dex_reg_maps.push_back(code_info->GetDexRegisterMapOf(stack_map));
         }
       }
 

@@ -24,7 +24,6 @@
 
 #include "hprof.h"
 
-#include <cutils/open_memstream.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -42,6 +41,7 @@
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "base/array_ref.h"
+#include "base/globals.h"
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "base/os.h"
@@ -49,6 +49,7 @@
 #include "base/time_utils.h"
 #include "base/unix_file/fd_file.h"
 #include "class_linker.h"
+#include "class_root.h"
 #include "common_throws.h"
 #include "debugger.h"
 #include "dex/dex_file-inl.h"
@@ -59,7 +60,6 @@
 #include "gc/scoped_gc_critical_section.h"
 #include "gc/space/space.h"
 #include "gc_root.h"
-#include "globals.h"
 #include "jdwp/jdwp.h"
 #include "jdwp/jdwp_priv.h"
 #include "mirror/class-inl.h"
@@ -1418,8 +1418,7 @@ void Hprof::DumpFakeObjectArray(mirror::Object* obj, const std::set<mirror::Obje
   __ AddObjectId(obj);
   __ AddStackTraceSerialNumber(LookupStackTraceSerialNumber(obj));
   __ AddU4(elements.size());
-  __ AddClassId(LookupClassId(
-      Runtime::Current()->GetClassLinker()->GetClassRoot(ClassLinker::kObjectArrayClass)));
+  __ AddClassId(LookupClassId(GetClassRoot<mirror::ObjectArray<mirror::Object>>().Ptr()));
   for (mirror::Object* e : elements) {
     __ AddObjectId(e);
   }

@@ -27,8 +27,8 @@
 #include "base/iteration_range.h"
 #include "base/macros.h"
 #include "base/value_object.h"
+#include "class_iterator.h"
 #include "dex_file_types.h"
-#include "dex_instruction_iterator.h"
 #include "hidden_api_access_flags.h"
 #include "jni.h"
 #include "modifiers.h"
@@ -37,6 +37,7 @@ namespace art {
 
 class ClassDataItemIterator;
 class CompactDexFile;
+class DexInstructionIterator;
 enum InvokeType : uint32_t;
 class MemMap;
 class OatDexFile;
@@ -189,7 +190,7 @@ class DexFile {
   // Raw method_id_item.
   struct MethodId {
     dex::TypeIndex class_idx_;   // index into type_ids_ array for defining class
-    uint16_t proto_idx_;         // index into proto_ids_ array for method prototype
+    dex::ProtoIndex proto_idx_;  // index into proto_ids_ array for method prototype
     dex::StringIndex name_idx_;  // index into string_ids_ array for method name
 
    private:
@@ -504,9 +505,6 @@ class DexFile {
 
   const TypeId* FindTypeId(const char* string) const;
 
-  // Looks up a string id for a given utf16 string.
-  const StringId* FindStringId(const uint16_t* string, size_t length) const;
-
   // Returns the number of type identifiers in the .dex file.
   uint32_t NumTypeIds() const {
     DCHECK(header_ != nullptr) << GetLocation();
@@ -695,15 +693,15 @@ class DexFile {
   }
 
   // Returns the ProtoId at the specified index.
-  const ProtoId& GetProtoId(uint16_t idx) const {
-    DCHECK_LT(idx, NumProtoIds()) << GetLocation();
-    return proto_ids_[idx];
+  const ProtoId& GetProtoId(dex::ProtoIndex idx) const {
+    DCHECK_LT(idx.index_, NumProtoIds()) << GetLocation();
+    return proto_ids_[idx.index_];
   }
 
-  uint16_t GetIndexForProtoId(const ProtoId& proto_id) const {
+  dex::ProtoIndex GetIndexForProtoId(const ProtoId& proto_id) const {
     CHECK_GE(&proto_id, proto_ids_) << GetLocation();
     CHECK_LT(&proto_id, proto_ids_ + header_->proto_ids_size_) << GetLocation();
-    return &proto_id - proto_ids_;
+    return dex::ProtoIndex(&proto_id - proto_ids_);
   }
 
   // Looks up a proto id for a given return type and signature type list
@@ -725,7 +723,7 @@ class DexFile {
   const Signature CreateSignature(const StringPiece& signature) const;
 
   // Returns the short form method descriptor for the given prototype.
-  const char* GetShorty(uint32_t proto_idx) const;
+  const char* GetShorty(dex::ProtoIndex proto_idx) const;
 
   const TypeList* GetProtoParameters(const ProtoId& proto_id) const {
     return DataPointer<TypeList>(proto_id.parameters_off_);
@@ -738,6 +736,8 @@ class DexFile {
   const uint8_t* GetCallSiteEncodedValuesArray(const CallSiteIdItem& call_site_id) const {
     return DataBegin() + call_site_id.data_off_;
   }
+
+  dex::ProtoIndex GetProtoIndexForCallSite(uint32_t call_site_idx) const;
 
   static const TryItem* GetTryItems(const DexInstructionIterator& code_item_end, uint32_t offset);
 
@@ -1012,8 +1012,10 @@ class DexFile {
     return container_.get();
   }
 
-  // Changes the dex file pointed to by class_it to not have any hiddenapi flags.
-  static void UnHideAccessFlags(ClassDataItemIterator& class_it);
+  // Changes the dex class data pointed to by data_ptr it to not have any hiddenapi flags.
+  static void UnHideAccessFlags(uint8_t* data_ptr, uint32_t new_access_flags, bool is_method);
+
+  inline IterationRange<ClassIterator> GetClasses() const;
 
  protected:
   // First Dex format version supporting default methods.
@@ -1198,6 +1200,9 @@ class ClassDataItemIterator {
   bool IsAtMethod() const {
     return pos_ >= EndOfInstanceFieldsPos();
   }
+  bool IsAtVirtualMethod() const {
+    return pos_ >= EndOfDirectMethodsPos();
+  }
   bool HasNextStaticField() const {
     return pos_ < EndOfStaticFieldsPos();
   }
@@ -1349,9 +1354,6 @@ class ClassDataItemIterator {
     uint32_t field_idx_delta_;  // delta of index into the field_ids array for FieldId
     uint32_t access_flags_;  // access flags for the field
     ClassDataField() :  field_idx_delta_(0), access_flags_(0) {}
-
-   private:
-    DISALLOW_COPY_AND_ASSIGN(ClassDataField);
   };
   ClassDataField field_;
 
@@ -1364,9 +1366,6 @@ class ClassDataItemIterator {
     uint32_t access_flags_;
     uint32_t code_off_;
     ClassDataMethod() : method_idx_delta_(0), access_flags_(0), code_off_(0) {}
-
-   private:
-    DISALLOW_COPY_AND_ASSIGN(ClassDataMethod);
   };
   ClassDataMethod method_;
 
@@ -1377,7 +1376,6 @@ class ClassDataItemIterator {
   size_t pos_;  // integral number of items passed
   const uint8_t* ptr_pos_;  // pointer into stream of class_data_item
   uint32_t last_idx_;  // last read field or method index to apply delta to
-  DISALLOW_IMPLICIT_CONSTRUCTORS(ClassDataItemIterator);
 };
 
 class EncodedArrayValueIterator {

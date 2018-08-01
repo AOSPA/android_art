@@ -32,9 +32,8 @@
 #include <android-base/logging.h>
 
 #include "base/logging.h"  // For InitLogging.
-#include "jit/profile_compilation_info.h"
-#include "mem_map.h"
-#include "runtime.h"
+#include "base/mem_map.h"
+#include "profile/profile_compilation_info.h"
 
 namespace art {
 
@@ -66,12 +65,17 @@ static void Usage(void) {
   LOG(ERROR) << " -x : compact dex generation level, either 'none' or 'fast'";
 }
 
+NO_RETURN static void Abort(const char* msg) {
+  LOG(ERROR) << msg;
+  exit(1);
+}
+
 /*
  * Main driver of the dexlayout utility.
  */
 int DexlayoutDriver(int argc, char** argv) {
   // Art specific set up.
-  InitLogging(argv, Runtime::Abort);
+  InitLogging(argv, Abort);
   MemMap::Init();
 
   Options options;

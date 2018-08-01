@@ -28,13 +28,13 @@
 #include "jni.h"
 
 #include "art_method-inl.h"
+#include "base/mem_map.h"
 #include "base/mutex.h"
 #include "class_linker.h"
 #include "common_runtime_test.h"
 #include "dex/class_reference.h"
 #include "handle.h"
 #include "handle_scope-inl.h"
-#include "mem_map.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
 #include "monitor.h"
@@ -339,9 +339,6 @@ class RuntimeSigQuitCallbackRuntimeCallbacksTest : public RuntimeCallbacksTest {
 };
 
 TEST_F(RuntimeSigQuitCallbackRuntimeCallbacksTest, SigQuit) {
-  // SigQuit induces a dump. ASAN isn't happy with libunwind reading memory.
-  TEST_DISABLED_FOR_MEMORY_TOOL_ASAN();
-
   // The runtime needs to be started for the signal handler.
   Thread* self = Thread::Current();
 

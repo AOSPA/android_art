@@ -212,6 +212,8 @@ class Runtime {
     return finished_starting_;
   }
 
+  void RunRootClinits(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_);
+
   static Runtime* Current() {
     return instance_;
   }
@@ -291,7 +293,12 @@ class Runtime {
   // Get the special object used to mark a cleared JNI weak global.
   mirror::Object* GetClearedJniWeakGlobal() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  mirror::Throwable* GetPreAllocatedOutOfMemoryError() REQUIRES_SHARED(Locks::mutator_lock_);
+  mirror::Throwable* GetPreAllocatedOutOfMemoryErrorWhenThrowingException()
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  mirror::Throwable* GetPreAllocatedOutOfMemoryErrorWhenThrowingOOME()
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  mirror::Throwable* GetPreAllocatedOutOfMemoryErrorWhenHandlingStackOverflow()
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   mirror::Throwable* GetPreAllocatedNoClassDefFoundError()
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -393,10 +400,6 @@ class Runtime {
 
   ArtMethod* GetCalleeSaveMethodUnchecked(CalleeSaveType type)
       REQUIRES_SHARED(Locks::mutator_lock_);
-
-  QuickMethodFrameInfo GetCalleeSaveMethodFrameInfo(CalleeSaveType type) const {
-    return callee_save_method_frame_infos_[static_cast<size_t>(type)];
-  }
 
   QuickMethodFrameInfo GetRuntimeMethodFrameInfo(ArtMethod* method)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -817,7 +820,10 @@ class Runtime {
 
   // 64 bit so that we can share the same asm offsets for both 32 and 64 bits.
   uint64_t callee_save_methods_[kCalleeSaveSize];
-  GcRoot<mirror::Throwable> pre_allocated_OutOfMemoryError_;
+  // Pre-allocated exceptions (see Runtime::Init).
+  GcRoot<mirror::Throwable> pre_allocated_OutOfMemoryError_when_throwing_exception_;
+  GcRoot<mirror::Throwable> pre_allocated_OutOfMemoryError_when_throwing_oome_;
+  GcRoot<mirror::Throwable> pre_allocated_OutOfMemoryError_when_handling_stack_overflow_;
   GcRoot<mirror::Throwable> pre_allocated_NoClassDefFoundError_;
   ArtMethod* resolution_method_;
   ArtMethod* imt_conflict_method_;
@@ -830,7 +836,6 @@ class Runtime {
   GcRoot<mirror::Object> sentinel_;
 
   InstructionSet instruction_set_;
-  QuickMethodFrameInfo callee_save_method_frame_infos_[kCalleeSaveSize];
 
   CompilerCallbacks* compiler_callbacks_;
   bool is_zygote_;
@@ -881,14 +886,6 @@ class Runtime {
   ClassLinker* class_linker_;
 
   SignalCatcher* signal_catcher_;
-
-  // If true, the runtime will connect to tombstoned via a socket to
-  // request an open file descriptor to write its traces to.
-  bool use_tombstoned_traces_;
-
-  // Location to which traces must be written on SIGQUIT. Only used if
-  // tombstoned_traces_ == false.
-  std::string stack_trace_file_;
 
   std::unique_ptr<JavaVMExt> java_vm_;
 

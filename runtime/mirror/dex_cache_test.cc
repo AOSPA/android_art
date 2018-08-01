@@ -83,7 +83,7 @@ TEST_F(DexCacheTest, LinearAlloc) {
   StackHandleScope<1> hs(soa.Self());
   Handle<mirror::ClassLoader> class_loader(hs.NewHandle(
       soa.Decode<mirror::ClassLoader>(jclass_loader)));
-  mirror::Class* klass = class_linker_->FindClass(soa.Self(), "LMain;", class_loader);
+  ObjPtr<mirror::Class> klass = class_linker_->FindClass(soa.Self(), "LMain;", class_loader);
   ASSERT_TRUE(klass != nullptr);
   LinearAlloc* const linear_alloc = klass->GetClassLoader()->GetAllocator();
   EXPECT_NE(linear_alloc, runtime_->GetLinearAlloc());
@@ -169,9 +169,9 @@ TEST_F(DexCacheMethodHandlesTest, TestResolvedMethodTypes) {
 
   for (size_t i = 0; i < dex_file.NumProtoIds(); ++i) {
     const MethodTypeDexCachePair pair = method_types_cache[i].load(std::memory_order_relaxed);
-    if (pair.index == method1_id.proto_idx_) {
+    if (dex::ProtoIndex(pair.index) == method1_id.proto_idx_) {
       ASSERT_EQ(method1_type.Get(), pair.object.Read());
-    } else if (pair.index == method2_id.proto_idx_) {
+    } else if (dex::ProtoIndex(pair.index) == method2_id.proto_idx_) {
       ASSERT_EQ(method2_type.Get(), pair.object.Read());
     } else {
       ASSERT_TRUE(false);

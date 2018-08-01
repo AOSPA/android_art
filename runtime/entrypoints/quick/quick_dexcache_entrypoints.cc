@@ -64,7 +64,7 @@ static void StoreObjectInBss(ArtMethod* outer_method,
           << oat_file->GetLocation();
     }
     if (class_loader != nullptr) {
-      runtime->GetHeap()->WriteBarrierEveryFieldOf(class_loader);
+      WriteBarrier::ForEveryFieldWrite(class_loader);
     } else {
       runtime->GetClassLinker()->WriteBarrierForBootOatFileBssRoots(oat_file);
     }
@@ -183,13 +183,35 @@ extern "C" mirror::Class* artInitializeTypeAndVerifyAccessFromCode(uint32_t type
   return result.Ptr();
 }
 
+extern "C" mirror::MethodHandle* artResolveMethodHandleFromCode(uint32_t method_handle_idx,
+                                                                Thread* self)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  ScopedQuickEntrypointChecks sqec(self);
+  auto caller_and_outer =
+      GetCalleeSaveMethodCallerAndOuterMethod(self, CalleeSaveType::kSaveEverything);
+  ArtMethod* caller = caller_and_outer.caller;
+  ObjPtr<mirror::MethodHandle> result = ResolveMethodHandleFromCode(caller, method_handle_idx);
+  return result.Ptr();
+}
+
+extern "C" mirror::MethodType* artResolveMethodTypeFromCode(uint32_t proto_idx, Thread* self)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  ScopedQuickEntrypointChecks sqec(self);
+  auto caller_and_outer = GetCalleeSaveMethodCallerAndOuterMethod(self,
+                                                                  CalleeSaveType::kSaveEverything);
+  ArtMethod* caller = caller_and_outer.caller;
+  ObjPtr<mirror::MethodType> result = ResolveMethodTypeFromCode(caller, dex::ProtoIndex(proto_idx));
+  return result.Ptr();
+}
+
 extern "C" mirror::String* artResolveStringFromCode(int32_t string_idx, Thread* self)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   auto caller_and_outer = GetCalleeSaveMethodCallerAndOuterMethod(self,
                                                                   CalleeSaveType::kSaveEverything);
   ArtMethod* caller = caller_and_outer.caller;
-  ObjPtr<mirror::String> result = ResolveStringFromCode(caller, dex::StringIndex(string_idx));
+  ObjPtr<mirror::String> result =
+      Runtime::Current()->GetClassLinker()->ResolveString(dex::StringIndex(string_idx), caller);
   if (LIKELY(result != nullptr) && CanReferenceBss(caller_and_outer.outer_method, caller)) {
     StoreStringInBss(caller_and_outer.outer_method, dex::StringIndex(string_idx), result);
   }

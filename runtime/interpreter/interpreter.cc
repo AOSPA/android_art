@@ -31,6 +31,7 @@
 #include "mterp/mterp.h"
 #include "nativehelper/scoped_local_ref.h"
 #include "scoped_thread_state_change-inl.h"
+#include "shadow_frame-inl.h"
 #include "stack.h"
 #include "thread-inl.h"
 #include "unstarted_runtime.h"
@@ -243,11 +244,13 @@ static inline JValue Execute(
     const CodeItemDataAccessor& accessor,
     ShadowFrame& shadow_frame,
     JValue result_register,
-    bool stay_in_interpreter = false) REQUIRES_SHARED(Locks::mutator_lock_) {
+    bool stay_in_interpreter = false,
+    bool from_deoptimize = false) REQUIRES_SHARED(Locks::mutator_lock_) {
   DCHECK(!shadow_frame.GetMethod()->IsAbstract());
   DCHECK(!shadow_frame.GetMethod()->IsNative());
-  if (LIKELY(shadow_frame.GetDexPC() == 0)) {  // Entering the method, but not via deoptimization.
+  if (LIKELY(!from_deoptimize)) {  // Entering the method, but not via deoptimization.
     if (kIsDebugBuild) {
+      CHECK_EQ(shadow_frame.GetDexPC(), 0u);
       self->AssertNoPendingException();
     }
     instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
@@ -417,7 +420,7 @@ void EnterInterpreterFromInvoke(Thread* self,
   size_t cur_reg = num_regs - num_ins;
   if (!method->IsStatic()) {
     CHECK(receiver != nullptr);
-    shadow_frame->SetVRegReference(cur_reg, receiver.Ptr());
+    shadow_frame->SetVRegReference(cur_reg, receiver);
     ++cur_reg;
   }
   uint32_t shorty_len = 0;
@@ -428,7 +431,7 @@ void EnterInterpreterFromInvoke(Thread* self,
       case 'L': {
         ObjPtr<mirror::Object> o =
             reinterpret_cast<StackReference<mirror::Object>*>(&args[arg_pos])->AsMirrorPtr();
-        shadow_frame->SetVRegReference(cur_reg, o.Ptr());
+        shadow_frame->SetVRegReference(cur_reg, o);
         break;
       }
       case 'J': case 'D': {
@@ -568,7 +571,12 @@ void EnterInterpreterFromDeoptimize(Thread* self,
     }
     if (new_dex_pc != dex::kDexNoIndex) {
       shadow_frame->SetDexPC(new_dex_pc);
-      value = Execute(self, accessor, *shadow_frame, value);
+      value = Execute(self,
+                      accessor,
+                      *shadow_frame,
+                      value,
+                      /* stay_in_interpreter */ true,
+                      /* from_deoptimize */ true);
     }
     ShadowFrame* old_frame = shadow_frame;
     shadow_frame = shadow_frame->GetLink();

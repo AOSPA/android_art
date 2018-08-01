@@ -19,6 +19,7 @@ cc_defaults {
     defaults: ["art_defaults"],
     host_supported: true,
     srcs: [
+        "dex/art_dex_file_loader.cc",
         "dex/compact_dex_file.cc",
         "dex/compact_offset_table.cc",
         "dex/descriptors_names.cc",
@@ -32,6 +33,7 @@ cc_defaults {
         "dex/modifiers.cc",
         "dex/primitive.cc",
         "dex/standard_dex_file.cc",
+        "dex/type_lookup_table.cc",
         "dex/utf.cc",
     ],
 
@@ -54,23 +56,19 @@ cc_defaults {
     },
     generated_sources: ["dexfile_operator_srcs"],
     shared_libs: [
-        // Important note: relying on libartbase's header_lib is perfectly acceptable.
-        // However, relying on the libartbase shared library introduces further, possibly cyclic,
-	// dependencies for clients outside of ART.
+        // For MemMap.
+        "libartbase",
         "liblog",
+        // For atrace.
+        "libcutils",
         // For common macros.
         "libbase",
         "libz",
     ],
-    header_libs: [
-        "art_libartbase_headers",
-    ],
     export_include_dirs: ["."],
     export_shared_lib_headers: [
+        "libartbase",
         "libbase",
-    ],
-    export_header_lib_headers: [
-        "art_libartbase_headers",
     ],
 }
 
@@ -113,6 +111,8 @@ art_cc_test {
         "art_gtest_defaults",
     ],
     srcs: [
+        "dex/art_dex_file_loader_test.cc",
+        "dex/class_accessor_test.cc",
         "dex/code_item_accessors_test.cc",
         "dex/compact_dex_file_test.cc",
         "dex/compact_offset_table_test.cc",
@@ -123,6 +123,7 @@ art_cc_test {
         "dex/dex_instruction_test.cc",
         "dex/primitive_test.cc",
         "dex/string_reference_test.cc",
+        "dex/type_lookup_table_test.cc",
         "dex/utf_test.cc",
     ],
     shared_libs: [

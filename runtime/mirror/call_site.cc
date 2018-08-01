@@ -17,35 +17,18 @@
 #include "call_site.h"
 
 #include "class-inl.h"
-#include "gc_root-inl.h"
+#include "class_root.h"
+#include "obj_ptr-inl.h"
 
 namespace art {
 namespace mirror {
 
-GcRoot<mirror::Class> CallSite::static_class_;
-
 mirror::CallSite* CallSite::Create(Thread* const self, Handle<MethodHandle> target) {
-  StackHandleScope<1> hs(self);
-  Handle<mirror::CallSite> cs(
-      hs.NewHandle(ObjPtr<CallSite>::DownCast(StaticClass()->AllocObject(self))));
+  ObjPtr<mirror::CallSite> cs =
+      ObjPtr<CallSite>::DownCast(GetClassRoot<CallSite>()->AllocObject(self));
   CHECK(!Runtime::Current()->IsActiveTransaction());
   cs->SetFieldObject<false>(TargetOffset(), target.Get());
-  return cs.Get();
-}
-
-void CallSite::SetClass(Class* klass) {
-  CHECK(static_class_.IsNull()) << static_class_.Read() << " " << klass;
-  CHECK(klass != nullptr);
-  static_class_ = GcRoot<Class>(klass);
-}
-
-void CallSite::ResetClass() {
-  CHECK(!static_class_.IsNull());
-  static_class_ = GcRoot<Class>(nullptr);
-}
-
-void CallSite::VisitRoots(RootVisitor* visitor) {
-  static_class_.VisitRootIfNonNull(visitor, RootInfo(kRootStickyClass));
+  return cs.Ptr();
 }
 
 }  // namespace mirror

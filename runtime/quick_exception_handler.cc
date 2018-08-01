@@ -26,6 +26,7 @@
 #include "entrypoints/quick/quick_entrypoints_enum.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "handle_scope-inl.h"
+#include "interpreter/shadow_frame-inl.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
 #include "mirror/class-inl.h"
@@ -59,18 +60,24 @@ QuickExceptionHandler::QuickExceptionHandler(Thread* self, bool is_deoptimizatio
 // Finds catch handler.
 class CatchBlockStackVisitor FINAL : public StackVisitor {
  public:
-  CatchBlockStackVisitor(Thread* self, Context* context, Handle<mirror::Throwable>* exception,
-                         QuickExceptionHandler* exception_handler)
+  CatchBlockStackVisitor(Thread* self,
+                         Context* context,
+                         Handle<mirror::Throwable>* exception,
+                         QuickExceptionHandler* exception_handler,
+                         uint32_t skip_frames)
       REQUIRES_SHARED(Locks::mutator_lock_)
       : StackVisitor(self, context, StackVisitor::StackWalkKind::kIncludeInlinedFrames),
         exception_(exception),
-        exception_handler_(exception_handler) {
+        exception_handler_(exception_handler),
+        skip_frames_(skip_frames) {
   }
 
   bool VisitFrame() OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
     ArtMethod* method = GetMethod();
     exception_handler_->SetHandlerFrameDepth(GetFrameDepth());
     if (method == nullptr) {
+      DCHECK_EQ(skip_frames_, 0u)
+          << "We tried to skip an upcall! We should have returned to the upcall to finish delivery";
       // This is the upcall, we remember the frame and last pc so that we may long jump to them.
       exception_handler_->SetHandlerQuickFramePc(GetCurrentQuickFramePc());
       exception_handler_->SetHandlerQuickFrame(GetCurrentQuickFrame());
@@ -88,6 +95,10 @@ class CatchBlockStackVisitor FINAL : public StackVisitor {
         DCHECK(nullptr == exception_handler_->GetHandlerMethod());
       }
       return false;  // End stack walk.
+    }
+    if (skip_frames_ != 0) {
+      skip_frames_--;
+      return true;
     }
     if (method->IsRuntimeMethod()) {
       // Ignore callee save method.
@@ -137,47 +148,114 @@ class CatchBlockStackVisitor FINAL : public StackVisitor {
   Handle<mirror::Throwable>* exception_;
   // The quick exception handler we're visiting for.
   QuickExceptionHandler* const exception_handler_;
+  // The number of frames to skip searching for catches in.
+  uint32_t skip_frames_;
 
   DISALLOW_COPY_AND_ASSIGN(CatchBlockStackVisitor);
 };
 
+// Counts instrumentation stack frame prior to catch handler or upcall.
+class InstrumentationStackVisitor : public StackVisitor {
+ public:
+  InstrumentationStackVisitor(Thread* self, size_t frame_depth)
+      REQUIRES_SHARED(Locks::mutator_lock_)
+      : StackVisitor(self, nullptr, StackVisitor::StackWalkKind::kIncludeInlinedFrames),
+        frame_depth_(frame_depth),
+        instrumentation_frames_to_pop_(0) {
+    CHECK_NE(frame_depth_, kInvalidFrameDepth);
+  }
+
+  bool VisitFrame() REQUIRES_SHARED(Locks::mutator_lock_) {
+    size_t current_frame_depth = GetFrameDepth();
+    if (current_frame_depth < frame_depth_) {
+      CHECK(GetMethod() != nullptr);
+      if (UNLIKELY(reinterpret_cast<uintptr_t>(GetQuickInstrumentationExitPc()) == GetReturnPc())) {
+        if (!IsInInlinedFrame()) {
+          // We do not count inlined frames, because we do not instrument them. The reason we
+          // include them in the stack walking is the check against `frame_depth_`, which is
+          // given to us by a visitor that visits inlined frames.
+          ++instrumentation_frames_to_pop_;
+        }
+      }
+      return true;
+    } else {
+      // We reached the frame of the catch handler or the upcall.
+      return false;
+    }
+  }
+
+  size_t GetInstrumentationFramesToPop() const {
+    return instrumentation_frames_to_pop_;
+  }
+
+ private:
+  const size_t frame_depth_;
+  size_t instrumentation_frames_to_pop_;
+
+  DISALLOW_COPY_AND_ASSIGN(InstrumentationStackVisitor);
+};
+
+// Finds the appropriate exception catch after calling all method exit instrumentation functions.
+// Note that this might change the exception being thrown.
 void QuickExceptionHandler::FindCatch(ObjPtr<mirror::Throwable> exception) {
   DCHECK(!is_deoptimization_);
+  instrumentation::InstrumentationStackPopper popper(self_);
+  // The number of total frames we have so far popped.
+  uint32_t already_popped = 0;
+  bool popped_to_top = true;
   StackHandleScope<1> hs(self_);
-  Handle<mirror::Throwable> exception_ref(hs.NewHandle(exception));
-  if (kDebugExceptionDelivery) {
-    ObjPtr<mirror::String> msg = exception_ref->GetDetailMessage();
-    std::string str_msg(msg != nullptr ? msg->ToModifiedUtf8() : "");
-    self_->DumpStack(LOG_STREAM(INFO) << "Delivering exception: " << exception_ref->PrettyTypeOf()
-                     << ": " << str_msg << "\n");
-  }
-
-  // Walk the stack to find catch handler.
-  CatchBlockStackVisitor visitor(self_, context_, &exception_ref, this);
-  visitor.WalkStack(true);
-
-  if (kDebugExceptionDelivery) {
-    if (*handler_quick_frame_ == nullptr) {
-      LOG(INFO) << "Handler is upcall";
+  MutableHandle<mirror::Throwable> exception_ref(hs.NewHandle(exception));
+  // Sending the instrumentation events (done by the InstrumentationStackPopper) can cause new
+  // exceptions to be thrown which will override the current exception. Therefore we need to perform
+  // the search for a catch in a loop until we have successfully popped all the way to a catch or
+  // the top of the stack.
+  do {
+    if (kDebugExceptionDelivery) {
+      ObjPtr<mirror::String> msg = exception_ref->GetDetailMessage();
+      std::string str_msg(msg != nullptr ? msg->ToModifiedUtf8() : "");
+      self_->DumpStack(LOG_STREAM(INFO) << "Delivering exception: " << exception_ref->PrettyTypeOf()
+                                        << ": " << str_msg << "\n");
     }
-    if (handler_method_ != nullptr) {
-      const DexFile* dex_file = handler_method_->GetDeclaringClass()->GetDexCache()->GetDexFile();
-      int line_number = annotations::GetLineNumFromPC(dex_file, handler_method_, handler_dex_pc_);
-      LOG(INFO) << "Handler: " << handler_method_->PrettyMethod() << " (line: "
-                << line_number << ")";
+
+    // Walk the stack to find catch handler.
+    CatchBlockStackVisitor visitor(self_, context_, &exception_ref, this, /*skip*/already_popped);
+    visitor.WalkStack(true);
+    uint32_t new_pop_count = handler_frame_depth_;
+    DCHECK_GE(new_pop_count, already_popped);
+    already_popped = new_pop_count;
+
+    // Figure out how many of those frames have instrumentation we need to remove (Should be the
+    // exact same as number of new_pop_count if there aren't inlined frames).
+    InstrumentationStackVisitor instrumentation_visitor(self_, handler_frame_depth_);
+    instrumentation_visitor.WalkStack(true);
+    size_t instrumentation_frames_to_pop = instrumentation_visitor.GetInstrumentationFramesToPop();
+
+    if (kDebugExceptionDelivery) {
+      if (*handler_quick_frame_ == nullptr) {
+        LOG(INFO) << "Handler is upcall";
+      }
+      if (handler_method_ != nullptr) {
+        const DexFile* dex_file = handler_method_->GetDeclaringClass()->GetDexCache()->GetDexFile();
+        int line_number = annotations::GetLineNumFromPC(dex_file, handler_method_, handler_dex_pc_);
+        LOG(INFO) << "Handler: " << handler_method_->PrettyMethod() << " (line: "
+                  << line_number << ")";
+      }
+      LOG(INFO) << "Will attempt to pop " << instrumentation_frames_to_pop
+                << " off of the instrumentation stack";
     }
-  }
-  // Exception was cleared as part of delivery.
-  DCHECK(!self_->IsExceptionPending());
+    // Exception was cleared as part of delivery.
+    DCHECK(!self_->IsExceptionPending());
+    // If the handler is in optimized code, we need to set the catch environment.
+    if (*handler_quick_frame_ != nullptr &&
+        handler_method_header_ != nullptr &&
+        handler_method_header_->IsOptimized()) {
+      SetCatchEnvironmentForOptimizedHandler(&visitor);
+    }
+    popped_to_top = popper.PopFramesTo(instrumentation_frames_to_pop, exception_ref);
+  } while (!popped_to_top);
   if (!clear_exception_) {
     // Put exception back in root set with clear throw location.
     self_->SetException(exception_ref.Get());
-  }
-  // If the handler is in optimized code, we need to set the catch environment.
-  if (*handler_quick_frame_ != nullptr &&
-      handler_method_header_ != nullptr &&
-      handler_method_header_->IsOptimized()) {
-    SetCatchEnvironmentForOptimizedHandler(&visitor);
   }
 }
 
@@ -224,30 +302,27 @@ void QuickExceptionHandler::SetCatchEnvironmentForOptimizedHandler(StackVisitor*
 
   CodeItemDataAccessor accessor(handler_method_->DexInstructionData());
   const size_t number_of_vregs = accessor.RegistersSize();
-  CodeInfo code_info = handler_method_header_->GetOptimizedCodeInfo();
-  CodeInfoEncoding encoding = code_info.ExtractEncoding();
+  CodeInfo code_info(handler_method_header_);
 
   // Find stack map of the catch block.
-  StackMap catch_stack_map = code_info.GetCatchStackMapForDexPc(GetHandlerDexPc(), encoding);
+  StackMap catch_stack_map = code_info.GetCatchStackMapForDexPc(GetHandlerDexPc());
   DCHECK(catch_stack_map.IsValid());
-  DexRegisterMap catch_vreg_map =
-      code_info.GetDexRegisterMapOf(catch_stack_map, encoding, number_of_vregs);
-  if (!catch_vreg_map.IsValid()) {
+  DexRegisterMap catch_vreg_map = code_info.GetDexRegisterMapOf(catch_stack_map);
+  if (!catch_vreg_map.HasAnyLiveDexRegisters()) {
     return;
   }
+  DCHECK_EQ(catch_vreg_map.size(), number_of_vregs);
 
   // Find stack map of the throwing instruction.
   StackMap throw_stack_map =
-      code_info.GetStackMapForNativePcOffset(stack_visitor->GetNativePcOffset(), encoding);
+      code_info.GetStackMapForNativePcOffset(stack_visitor->GetNativePcOffset());
   DCHECK(throw_stack_map.IsValid());
-  DexRegisterMap throw_vreg_map =
-      code_info.GetDexRegisterMapOf(throw_stack_map, encoding, number_of_vregs);
-  DCHECK(throw_vreg_map.IsValid());
+  DexRegisterMap throw_vreg_map = code_info.GetDexRegisterMapOf(throw_stack_map);
+  DCHECK_EQ(throw_vreg_map.size(), number_of_vregs);
 
   // Copy values between them.
   for (uint16_t vreg = 0; vreg < number_of_vregs; ++vreg) {
-    DexRegisterLocation::Kind catch_location =
-        catch_vreg_map.GetLocationKind(vreg, number_of_vregs, code_info, encoding);
+    DexRegisterLocation::Kind catch_location = catch_vreg_map[vreg].GetKind();
     if (catch_location == DexRegisterLocation::Kind::kNone) {
       continue;
     }
@@ -255,10 +330,7 @@ void QuickExceptionHandler::SetCatchEnvironmentForOptimizedHandler(StackVisitor*
 
     // Get vreg value from its current location.
     uint32_t vreg_value;
-    VRegKind vreg_kind = ToVRegKind(throw_vreg_map.GetLocationKind(vreg,
-                                                                   number_of_vregs,
-                                                                   code_info,
-                                                                   encoding));
+    VRegKind vreg_kind = ToVRegKind(throw_vreg_map[vreg].GetKind());
     bool get_vreg_success = stack_visitor->GetVReg(stack_visitor->GetMethod(),
                                                    vreg,
                                                    vreg_kind,
@@ -269,10 +341,7 @@ void QuickExceptionHandler::SetCatchEnvironmentForOptimizedHandler(StackVisitor*
                             << "native_pc_offset=" << stack_visitor->GetNativePcOffset() << ")";
 
     // Copy value to the catch phi's stack slot.
-    int32_t slot_offset = catch_vreg_map.GetStackOffsetInBytes(vreg,
-                                                               number_of_vregs,
-                                                               code_info,
-                                                               encoding);
+    int32_t slot_offset = catch_vreg_map[vreg].GetStackOffsetInBytes();
     ArtMethod** frame_top = stack_visitor->GetCurrentQuickFrame();
     uint8_t* slot_address = reinterpret_cast<uint8_t*>(frame_top) + slot_offset;
     uint32_t* slot_ptr = reinterpret_cast<uint32_t*>(slot_address);
@@ -404,24 +473,20 @@ class DeoptimizeStackVisitor FINAL : public StackVisitor {
                                       const bool* updated_vregs)
       REQUIRES_SHARED(Locks::mutator_lock_) {
     const OatQuickMethodHeader* method_header = GetCurrentOatQuickMethodHeader();
-    CodeInfo code_info = method_header->GetOptimizedCodeInfo();
+    CodeInfo code_info(method_header);
     uintptr_t native_pc_offset = method_header->NativeQuickPcOffset(GetCurrentQuickFramePc());
-    CodeInfoEncoding encoding = code_info.ExtractEncoding();
-    StackMap stack_map = code_info.GetStackMapForNativePcOffset(native_pc_offset, encoding);
+    StackMap stack_map = code_info.GetStackMapForNativePcOffset(native_pc_offset);
     CodeItemDataAccessor accessor(m->DexInstructionData());
     const size_t number_of_vregs = accessor.RegistersSize();
-    uint32_t register_mask = code_info.GetRegisterMaskOf(encoding, stack_map);
-    BitMemoryRegion stack_mask = code_info.GetStackMaskOf(encoding, stack_map);
+    uint32_t register_mask = code_info.GetRegisterMaskOf(stack_map);
+    BitMemoryRegion stack_mask = code_info.GetStackMaskOf(stack_map);
     DexRegisterMap vreg_map = IsInInlinedFrame()
-        ? code_info.GetDexRegisterMapAtDepth(GetCurrentInliningDepth() - 1,
-                                             code_info.GetInlineInfoOf(stack_map, encoding),
-                                             encoding,
-                                             number_of_vregs)
-        : code_info.GetDexRegisterMapOf(stack_map, encoding, number_of_vregs);
-
-    if (!vreg_map.IsValid()) {
+        ? code_info.GetInlineDexRegisterMapOf(stack_map, GetCurrentInlinedFrame())
+        : code_info.GetDexRegisterMapOf(stack_map);
+    if (vreg_map.empty()) {
       return;
     }
+    DCHECK_EQ(vreg_map.size(), number_of_vregs);
 
     for (uint16_t vreg = 0; vreg < number_of_vregs; ++vreg) {
       if (updated_vregs != nullptr && updated_vregs[vreg]) {
@@ -429,22 +494,18 @@ class DeoptimizeStackVisitor FINAL : public StackVisitor {
         continue;
       }
 
-      DexRegisterLocation::Kind location =
-          vreg_map.GetLocationKind(vreg, number_of_vregs, code_info, encoding);
+      DexRegisterLocation::Kind location = vreg_map[vreg].GetKind();
       static constexpr uint32_t kDeadValue = 0xEBADDE09;
       uint32_t value = kDeadValue;
       bool is_reference = false;
 
       switch (location) {
         case DexRegisterLocation::Kind::kInStack: {
-          const int32_t offset = vreg_map.GetStackOffsetInBytes(vreg,
-                                                                number_of_vregs,
-                                                                code_info,
-                                                                encoding);
+          const int32_t offset = vreg_map[vreg].GetStackOffsetInBytes();
           const uint8_t* addr = reinterpret_cast<const uint8_t*>(GetCurrentQuickFrame()) + offset;
           value = *reinterpret_cast<const uint32_t*>(addr);
           uint32_t bit = (offset >> 2);
-          if (bit < encoding.stack_mask.encoding.BitSize() && stack_mask.LoadBit(bit)) {
+          if (bit < stack_mask.size_in_bits() && stack_mask.LoadBit(bit)) {
             is_reference = true;
           }
           break;
@@ -453,7 +514,7 @@ class DeoptimizeStackVisitor FINAL : public StackVisitor {
         case DexRegisterLocation::Kind::kInRegisterHigh:
         case DexRegisterLocation::Kind::kInFpuRegister:
         case DexRegisterLocation::Kind::kInFpuRegisterHigh: {
-          uint32_t reg = vreg_map.GetMachineRegister(vreg, number_of_vregs, code_info, encoding);
+          uint32_t reg = vreg_map[vreg].GetMachineRegister();
           bool result = GetRegisterIfAccessible(reg, ToVRegKind(location), &value);
           CHECK(result);
           if (location == DexRegisterLocation::Kind::kInRegister) {
@@ -464,7 +525,7 @@ class DeoptimizeStackVisitor FINAL : public StackVisitor {
           break;
         }
         case DexRegisterLocation::Kind::kConstant: {
-          value = vreg_map.GetConstant(vreg, number_of_vregs, code_info, encoding);
+          value = vreg_map[vreg].GetConstant();
           if (value == 0) {
             // Make it a reference for extra safety.
             is_reference = true;
@@ -475,12 +536,7 @@ class DeoptimizeStackVisitor FINAL : public StackVisitor {
           break;
         }
         default: {
-          LOG(FATAL)
-              << "Unexpected location kind "
-              << vreg_map.GetLocationInternalKind(vreg,
-                                                  number_of_vregs,
-                                                  code_info,
-                                                  encoding);
+          LOG(FATAL) << "Unexpected location kind " << vreg_map[vreg].GetKind();
           UNREACHABLE();
         }
       }
@@ -493,7 +549,7 @@ class DeoptimizeStackVisitor FINAL : public StackVisitor {
   }
 
   static VRegKind GetVRegKind(uint16_t reg, const std::vector<int32_t>& kinds) {
-    return static_cast<VRegKind>(kinds.at(reg * 2));
+    return static_cast<VRegKind>(kinds[reg * 2]);
   }
 
   QuickExceptionHandler* const exception_handler_;
@@ -582,48 +638,8 @@ void QuickExceptionHandler::DeoptimizePartialFragmentFixup(uintptr_t return_pc) 
   }
 }
 
-// Unwinds all instrumentation stack frame prior to catch handler or upcall.
-class InstrumentationStackVisitor : public StackVisitor {
- public:
-  InstrumentationStackVisitor(Thread* self, size_t frame_depth)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      : StackVisitor(self, nullptr, StackVisitor::StackWalkKind::kIncludeInlinedFrames),
-        frame_depth_(frame_depth),
-        instrumentation_frames_to_pop_(0) {
-    CHECK_NE(frame_depth_, kInvalidFrameDepth);
-  }
-
-  bool VisitFrame() REQUIRES_SHARED(Locks::mutator_lock_) {
-    size_t current_frame_depth = GetFrameDepth();
-    if (current_frame_depth < frame_depth_) {
-      CHECK(GetMethod() != nullptr);
-      if (UNLIKELY(reinterpret_cast<uintptr_t>(GetQuickInstrumentationExitPc()) == GetReturnPc())) {
-        if (!IsInInlinedFrame()) {
-          // We do not count inlined frames, because we do not instrument them. The reason we
-          // include them in the stack walking is the check against `frame_depth_`, which is
-          // given to us by a visitor that visits inlined frames.
-          ++instrumentation_frames_to_pop_;
-        }
-      }
-      return true;
-    } else {
-      // We reached the frame of the catch handler or the upcall.
-      return false;
-    }
-  }
-
-  size_t GetInstrumentationFramesToPop() const {
-    return instrumentation_frames_to_pop_;
-  }
-
- private:
-  const size_t frame_depth_;
-  size_t instrumentation_frames_to_pop_;
-
-  DISALLOW_COPY_AND_ASSIGN(InstrumentationStackVisitor);
-};
-
 uintptr_t QuickExceptionHandler::UpdateInstrumentationStack() {
+  DCHECK(is_deoptimization_) << "Non-deoptimization handlers should use FindCatch";
   uintptr_t return_pc = 0;
   if (method_tracing_active_) {
     InstrumentationStackVisitor visitor(self_, handler_frame_depth_);
@@ -631,9 +647,7 @@ uintptr_t QuickExceptionHandler::UpdateInstrumentationStack() {
 
     size_t instrumentation_frames_to_pop = visitor.GetInstrumentationFramesToPop();
     instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
-    for (size_t i = 0; i < instrumentation_frames_to_pop; ++i) {
-      return_pc = instrumentation->PopMethodForUnwind(self_, is_deoptimization_);
-    }
+    return_pc = instrumentation->PopFramesForDeoptimization(self_, instrumentation_frames_to_pop);
   }
   return return_pc;
 }

@@ -21,12 +21,12 @@
 #include <string>
 
 #include "base/atomic.h"
+#include "base/globals.h"
 #include "base/macros.h"
+#include "base/mem_map.h"
 #include "base/mutex.h"
 #include "gc/accounting/space_bitmap.h"
 #include "gc/collector/object_byte_pair.h"
-#include "globals.h"
-#include "mem_map.h"
 
 namespace art {
 namespace mirror {
@@ -272,7 +272,7 @@ class ContinuousSpace : public Space {
 
   // Current address at which the space ends, which may vary as the space is filled.
   uint8_t* End() const {
-    return end_.LoadRelaxed();
+    return end_.load(std::memory_order_relaxed);
   }
 
   // The end of the address range covered by the space.
@@ -283,7 +283,7 @@ class ContinuousSpace : public Space {
   // Change the end of the space. Be careful with use since changing the end of a space to an
   // invalid value may break the GC.
   void SetEnd(uint8_t* end) {
-    end_.StoreRelaxed(end);
+    end_.store(end, std::memory_order_relaxed);
   }
 
   void SetLimit(uint8_t* limit) {

@@ -210,6 +210,27 @@ class DataType {
   static bool IsTypeConversionImplicit(Type input_type, Type result_type);
   static bool IsTypeConversionImplicit(int64_t value, Type result_type);
 
+  static bool IsZeroExtension(Type input_type, Type result_type) {
+    return IsIntOrLongType(result_type) &&
+        IsUnsignedType(input_type) &&
+        Size(result_type) > Size(input_type);
+  }
+
+  static Type ToSigned(Type type) {
+    switch (type) {
+      case Type::kUint8:
+        return Type::kInt8;
+      case Type::kUint16:
+        return Type::kInt16;
+      case Type::kUint32:
+        return Type::kInt32;
+      case Type::kUint64:
+        return Type::kInt64;
+      default:
+        return type;
+    }
+  }
+
   static const char* PrettyDescriptor(Type type);
 
  private:

@@ -20,7 +20,7 @@
 #include "art_field-inl.h"
 #include "base/mutex.h"
 #include "handle_scope.h"
-#include "jni_internal.h"
+#include "jni/jni_internal.h"
 #include "mirror/class_loader.h"
 #include "native/dalvik_system_DexFile.h"
 #include "scoped_thread_state_change-inl.h"
@@ -147,8 +147,14 @@ inline void VisitClassLoaderDexFiles(ScopedObjectAccessAlreadyRunnable& soa,
                                      Handle<mirror::ClassLoader> class_loader,
                                      Visitor fn)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  auto helper = [&fn](const art::DexFile* dex_file, void** ATTRIBUTE_UNUSED)
+  auto helper = [&fn](const art::DexFile* dex_file, void** ret)
       REQUIRES_SHARED(Locks::mutator_lock_) {
+#ifdef __clang_analyzer__
+    *ret = nullptr;
+#else
+    UNUSED(ret);
+#endif
+
     return fn(dex_file);
   };
   VisitClassLoaderDexFiles<decltype(helper), void*>(soa,

@@ -208,6 +208,7 @@ class InstructionCodeGeneratorX86_64 : public InstructionCodeGenerator {
   // the suspend call.
   void GenerateSuspendCheck(HSuspendCheck* instruction, HBasicBlock* successor);
   void GenerateClassInitializationCheck(SlowPathCode* slow_path, CpuRegister class_reg);
+  void GenerateBitstringTypeCheckCompare(HTypeCheckInstruction* check, CpuRegister temp);
   void HandleBitwiseOperation(HBinaryOperation* operation);
   void GenerateRemFP(HRem* rem);
   void DivRemOneOrMinusOne(HBinaryOperation* instruction);
@@ -221,6 +222,10 @@ class InstructionCodeGeneratorX86_64 : public InstructionCodeGenerator {
                       const FieldInfo& field_info,
                       bool value_can_be_null);
   void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info);
+
+  void GenerateMinMaxInt(LocationSummary* locations, bool is_min, DataType::Type type);
+  void GenerateMinMaxFP(LocationSummary* locations, bool is_min, DataType::Type type);
+  void GenerateMinMax(HBinaryOperation* minmax, bool is_min);
 
   // Generate a heap reference load using one register `out`:
   //
@@ -291,7 +296,6 @@ class JumpTableRIPFixup;
 class CodeGeneratorX86_64 : public CodeGenerator {
  public:
   CodeGeneratorX86_64(HGraph* graph,
-                  const X86_64InstructionSetFeatures& isa_features,
                   const CompilerOptions& compiler_options,
                   OptimizingCompilerStats* stats = nullptr);
   virtual ~CodeGeneratorX86_64() {}
@@ -365,6 +369,8 @@ class CodeGeneratorX86_64 : public CodeGenerator {
     return InstructionSet::kX86_64;
   }
 
+  const X86_64InstructionSetFeatures& GetInstructionSetFeatures() const;
+
   // Emit a write barrier.
   void MarkGCCard(CpuRegister temp,
                   CpuRegister card,
@@ -410,6 +416,8 @@ class CodeGeneratorX86_64 : public CodeGenerator {
   void GenerateVirtualCall(
       HInvokeVirtual* invoke, Location temp, SlowPathCode* slow_path = nullptr) OVERRIDE;
 
+  void RecordBootImageIntrinsicPatch(uint32_t intrinsic_data);
+  void RecordBootImageRelRoPatch(uint32_t boot_image_offset);
   void RecordBootImageMethodPatch(HInvokeStaticOrDirect* invoke);
   void RecordMethodBssEntryPatch(HInvokeStaticOrDirect* invoke);
   void RecordBootImageTypePatch(HLoadClass* load_class);
@@ -423,7 +431,8 @@ class CodeGeneratorX86_64 : public CodeGenerator {
                               dex::TypeIndex type_index,
                               Handle<mirror::Class> handle);
 
-  void MoveFromReturnRegister(Location trg, DataType::Type type) OVERRIDE;
+  void LoadBootImageAddress(CpuRegister reg, uint32_t boot_image_reference);
+  void AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* invoke, uint32_t boot_image_offset);
 
   void EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linker_patches) OVERRIDE;
 
@@ -433,10 +442,6 @@ class CodeGeneratorX86_64 : public CodeGenerator {
                        uint64_t index_in_table) const;
 
   void EmitJitRootPatches(uint8_t* code, const uint8_t* roots_data) OVERRIDE;
-
-  const X86_64InstructionSetFeatures& GetInstructionSetFeatures() const {
-    return isa_features_;
-  }
 
   // Fast path implementation of ReadBarrier::Barrier for a heap
   // reference field load when Baker's read barriers are used.
@@ -560,6 +565,8 @@ class CodeGeneratorX86_64 : public CodeGenerator {
   // Store a 64 bit value into a DoubleStackSlot in the most efficient manner.
   void Store64BitValueToStack(Location dest, int64_t value);
 
+  void MoveFromReturnRegister(Location trg, DataType::Type type) OVERRIDE;
+
   // Assign a 64 bit constant to an address.
   void MoveInt64ToAddress(const Address& addr_low,
                           const Address& addr_high,
@@ -598,24 +605,26 @@ class CodeGeneratorX86_64 : public CodeGenerator {
   InstructionCodeGeneratorX86_64 instruction_visitor_;
   ParallelMoveResolverX86_64 move_resolver_;
   X86_64Assembler assembler_;
-  const X86_64InstructionSetFeatures& isa_features_;
 
   // Offset to the start of the constant area in the assembled code.
   // Used for fixups to the constant area.
   int constant_area_start_;
 
-  // PC-relative method patch info for kBootImageLinkTimePcRelative.
+  // PC-relative method patch info for kBootImageLinkTimePcRelative/kBootImageRelRo.
+  // Also used for type/string patches for kBootImageRelRo (same linker patch as for methods).
   ArenaDeque<PatchInfo<Label>> boot_image_method_patches_;
   // PC-relative method patch info for kBssEntry.
   ArenaDeque<PatchInfo<Label>> method_bss_entry_patches_;
   // PC-relative type patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<PatchInfo<Label>> boot_image_type_patches_;
-  // Type patch locations for kBssEntry.
+  // PC-relative type patch info for kBssEntry.
   ArenaDeque<PatchInfo<Label>> type_bss_entry_patches_;
-  // String patch locations; type depends on configuration (intern table or boot image PIC).
+  // PC-relative String patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<PatchInfo<Label>> boot_image_string_patches_;
-  // String patch locations for kBssEntry.
+  // PC-relative String patch info for kBssEntry.
   ArenaDeque<PatchInfo<Label>> string_bss_entry_patches_;
+  // PC-relative patch info for IntrinsicObjects.
+  ArenaDeque<PatchInfo<Label>> boot_image_intrinsic_patches_;
 
   // Patches for string literals in JIT compiled code.
   ArenaDeque<PatchInfo<Label>> jit_string_patches_;

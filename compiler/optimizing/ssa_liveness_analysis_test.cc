@@ -28,18 +28,11 @@
 namespace art {
 
 class SsaLivenessAnalysisTest : public OptimizingUnitTest {
- public:
-  SsaLivenessAnalysisTest()
-      : graph_(CreateGraph()),
-        compiler_options_(),
-        instruction_set_(kRuntimeISA) {
-    std::string error_msg;
-    instruction_set_features_ =
-        InstructionSetFeatures::FromVariant(instruction_set_, "default", &error_msg);
-    codegen_ = CodeGenerator::Create(graph_,
-                                     instruction_set_,
-                                     *instruction_set_features_,
-                                     compiler_options_);
+ protected:
+  void SetUp() OVERRIDE {
+    OptimizingUnitTest::SetUp();
+    graph_ = CreateGraph();
+    codegen_ = CodeGenerator::Create(graph_, *compiler_options_);
     CHECK(codegen_ != nullptr) << instruction_set_ << " is not a supported target architecture.";
     // Create entry block.
     entry_ = new (GetAllocator()) HBasicBlock(graph_);
@@ -57,9 +50,6 @@ class SsaLivenessAnalysisTest : public OptimizingUnitTest {
   }
 
   HGraph* graph_;
-  CompilerOptions compiler_options_;
-  InstructionSet instruction_set_;
-  std::unique_ptr<const InstructionSetFeatures> instruction_set_features_;
   std::unique_ptr<CodeGenerator> codegen_;
   HBasicBlock* entry_;
 };
@@ -134,12 +124,12 @@ TEST_F(SsaLivenessAnalysisTest, TestAput) {
   static const char* const expected[] = {
       "ranges: { [2,21) }, uses: { 15 17 21 }, { 15 19 } is_fixed: 0, is_split: 0 is_low: 0 "
           "is_high: 0",
-      "ranges: { [4,21) }, uses: { 19 21 }, { 15 19 } is_fixed: 0, is_split: 0 is_low: 0 "
+      "ranges: { [4,21) }, uses: { 19 21 }, { } is_fixed: 0, is_split: 0 is_low: 0 "
           "is_high: 0",
-      "ranges: { [6,21) }, uses: { 21 }, { 15 19 } is_fixed: 0, is_split: 0 is_low: 0 "
+      "ranges: { [6,21) }, uses: { 21 }, { } is_fixed: 0, is_split: 0 is_low: 0 "
           "is_high: 0",
       // Environment uses do not keep the non-reference argument alive.
-      "ranges: { [8,10) }, uses: { }, { 15 19 } is_fixed: 0, is_split: 0 is_low: 0 is_high: 0",
+      "ranges: { [8,10) }, uses: { }, { } is_fixed: 0, is_split: 0 is_low: 0 is_high: 0",
       // Environment uses keep the reference argument alive.
       "ranges: { [10,19) }, uses: { }, { 15 19 } is_fixed: 0, is_split: 0 is_low: 0 is_high: 0",
   };
@@ -207,11 +197,11 @@ TEST_F(SsaLivenessAnalysisTest, TestDeoptimize) {
   static const char* const expected[] = {
       "ranges: { [2,23) }, uses: { 15 17 23 }, { 15 21 } is_fixed: 0, is_split: 0 is_low: 0 "
           "is_high: 0",
-      "ranges: { [4,23) }, uses: { 19 23 }, { 15 21 } is_fixed: 0, is_split: 0 is_low: 0 "
+      "ranges: { [4,23) }, uses: { 19 23 }, { 21 } is_fixed: 0, is_split: 0 is_low: 0 "
           "is_high: 0",
-      "ranges: { [6,23) }, uses: { 23 }, { 15 21 } is_fixed: 0, is_split: 0 is_low: 0 is_high: 0",
+      "ranges: { [6,23) }, uses: { 23 }, { 21 } is_fixed: 0, is_split: 0 is_low: 0 is_high: 0",
       // Environment use in HDeoptimize keeps even the non-reference argument alive.
-      "ranges: { [8,21) }, uses: { }, { 15 21 } is_fixed: 0, is_split: 0 is_low: 0 is_high: 0",
+      "ranges: { [8,21) }, uses: { }, { 21 } is_fixed: 0, is_split: 0 is_low: 0 is_high: 0",
       // Environment uses keep the reference argument alive.
       "ranges: { [10,21) }, uses: { }, { 15 21 } is_fixed: 0, is_split: 0 is_low: 0 is_high: 0",
   };

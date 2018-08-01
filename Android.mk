@@ -110,22 +110,33 @@ TEST_ART_ADB_ROOT_AND_REMOUNT := \
 
 # Sync test files to the target, depends upon all things that must be pushed to the target.
 .PHONY: test-art-target-sync
-# Check if we need to sync. In case ART_TEST_ANDROID_ROOT is not empty,
-# the code below uses 'adb push' instead of 'adb sync', which does not
-# check if the files on the device have changed.
+# Check if we need to sync. In case ART_TEST_CHROOT or ART_TEST_ANDROID_ROOT
+# is not empty, the code below uses 'adb push' instead of 'adb sync',
+# which does not check if the files on the device have changed.
+# TODO: Remove support for ART_TEST_ANDROID_ROOT when it is no longer needed.
 ifneq ($(ART_TEST_NO_SYNC),true)
+# Sync system and data partitions.
 ifeq ($(ART_TEST_ANDROID_ROOT),)
+ifeq ($(ART_TEST_CHROOT),)
 test-art-target-sync: $(TEST_ART_TARGET_SYNC_DEPS)
 	$(TEST_ART_ADB_ROOT_AND_REMOUNT)
 	adb sync system && adb sync data
 else
 test-art-target-sync: $(TEST_ART_TARGET_SYNC_DEPS)
 	$(TEST_ART_ADB_ROOT_AND_REMOUNT)
-	adb wait-for-device push $(PRODUCT_OUT)/system $(ART_TEST_ANDROID_ROOT)
-# Push the contents of the `data` dir into `/data` on the device.  If
-# `/data` already exists on the device, it is not overwritten, but its
-# contents are updated.
-	adb push $(PRODUCT_OUT)/data /
+	adb wait-for-device
+	adb push $(PRODUCT_OUT)/system $(ART_TEST_CHROOT)/
+	adb push $(PRODUCT_OUT)/data $(ART_TEST_CHROOT)/
+endif
+else
+test-art-target-sync: $(TEST_ART_TARGET_SYNC_DEPS)
+	$(TEST_ART_ADB_ROOT_AND_REMOUNT)
+	adb wait-for-device
+	adb push $(PRODUCT_OUT)/system $(ART_TEST_CHROOT)$(ART_TEST_ANDROID_ROOT)
+# Push the contents of the `data` dir into `$(ART_TEST_CHROOT)/data` on the device (note
+# that $(ART_TEST_CHROOT) can be empty).  If `$(ART_TEST_CHROOT)/data` already exists on
+# the device, it is not overwritten, but its content is updated.
+	adb push $(PRODUCT_OUT)/data $(ART_TEST_CHROOT)/
 endif
 endif
 
@@ -234,19 +245,6 @@ endif
 test-art-host-dexdump: $(addprefix $(HOST_OUT_EXECUTABLES)/, dexdump2 dexlist)
 	ANDROID_HOST_OUT=$(realpath $(HOST_OUT)) art/test/dexdump/run-all-tests
 
-# Valgrind.
-.PHONY: valgrind-test-art-host
-valgrind-test-art-host: valgrind-test-art-host-gtest
-	$(hide) $(call ART_TEST_PREREQ_FINISHED,$@)
-
-.PHONY: valgrind-test-art-host32
-valgrind-test-art-host32: valgrind-test-art-host-gtest32
-	$(hide) $(call ART_TEST_PREREQ_FINISHED,$@)
-
-.PHONY: valgrind-test-art-host64
-valgrind-test-art-host64: valgrind-test-art-host-gtest64
-	$(hide) $(call ART_TEST_PREREQ_FINISHED,$@)
-
 ########################################################################
 # target test rules
 
@@ -298,7 +296,7 @@ test-art-target-jit$(ART_PHONY_TEST_TARGET_SUFFIX): test-art-target-run-test-jit
 	$(hide) $(call ART_TEST_PREREQ_FINISHED,$@)
 
 # Secondary target architecture variants:
-ifdef TARGET_2ND_ARCH
+ifdef 2ND_ART_PHONY_TEST_TARGET_SUFFIX
 .PHONY: test-art-target$(2ND_ART_PHONY_TEST_TARGET_SUFFIX)
 test-art-target$(2ND_ART_PHONY_TEST_TARGET_SUFFIX): test-art-target-gtest$(2ND_ART_PHONY_TEST_TARGET_SUFFIX) \
     test-art-target-run-test$(2ND_ART_PHONY_TEST_TARGET_SUFFIX)
@@ -320,19 +318,6 @@ test-art-target-interpreter$(2ND_ART_PHONY_TEST_TARGET_SUFFIX): test-art-target-
 test-art-target-jit$(2ND_ART_PHONY_TEST_TARGET_SUFFIX): test-art-target-run-test-jit$(2ND_ART_PHONY_TEST_TARGET_SUFFIX)
 	$(hide) $(call ART_TEST_PREREQ_FINISHED,$@)
 endif
-
-# Valgrind.
-.PHONY: valgrind-test-art-target
-valgrind-test-art-target: valgrind-test-art-target-gtest
-	$(hide) $(call ART_TEST_PREREQ_FINISHED,$@)
-
-.PHONY: valgrind-test-art-target32
-valgrind-test-art-target32: valgrind-test-art-target-gtest32
-	$(hide) $(call ART_TEST_PREREQ_FINISHED,$@)
-
-.PHONY: valgrind-test-art-target64
-valgrind-test-art-target64: valgrind-test-art-target-gtest64
-	$(hide) $(call ART_TEST_PREREQ_FINISHED,$@)
 
 
 #######################
@@ -471,10 +456,12 @@ build-art-target-golem: dex2oat dalvikvm patchoat linker libstdc++ \
                         $(ART_TARGET_SHARED_LIBRARY_BENCHMARK) \
                         $(TARGET_CORE_IMG_OUT_BASE).art \
                         $(TARGET_CORE_IMG_OUT_BASE)-interpreter.art
-	# remove libartd.so and libdexfiled.so from public.libraries.txt because golem builds
+	# remove debug libraries from public.libraries.txt because golem builds
 	# won't have it.
 	sed -i '/libartd.so/d' $(TARGET_OUT)/etc/public.libraries.txt
 	sed -i '/libdexfiled.so/d' $(TARGET_OUT)/etc/public.libraries.txt
+	sed -i '/libprofiled.so/d' $(TARGET_OUT)/etc/public.libraries.txt
+	sed -i '/libartbased.so/d' $(TARGET_OUT)/etc/public.libraries.txt
 
 ########################################################################
 # Phony target for building what go/lem requires on host.

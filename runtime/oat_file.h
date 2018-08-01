@@ -32,11 +32,11 @@
 #include "compiler_filter.h"
 #include "dex/dex_file.h"
 #include "dex/dex_file_layout.h"
+#include "dex/type_lookup_table.h"
 #include "dex/utf.h"
 #include "index_bss_mapping.h"
 #include "mirror/object.h"
 #include "oat.h"
-#include "type_lookup_table.h"
 
 namespace art {
 
@@ -69,8 +69,6 @@ class OatFile {
  public:
   // Special classpath that skips shared library check.
   static constexpr const char* kSpecialSharedLibrary = "&";
-
-  typedef art::OatDexFile OatDexFile;
 
   // Opens an oat file contained within the given elf file. This is always opened as
   // non-executable at the moment.
@@ -283,6 +281,10 @@ class OatFile {
     return p >= Begin() && p < End();
   }
 
+  size_t DataBimgRelRoSize() const {
+    return DataBimgRelRoEnd() - DataBimgRelRoBegin();
+  }
+
   size_t BssSize() const {
     return BssEnd() - BssBegin();
   }
@@ -308,15 +310,19 @@ class OatFile {
   const uint8_t* Begin() const;
   const uint8_t* End() const;
 
-  const uint8_t* BssBegin() const;
-  const uint8_t* BssEnd() const;
+  const uint8_t* DataBimgRelRoBegin() const { return data_bimg_rel_ro_begin_; }
+  const uint8_t* DataBimgRelRoEnd() const { return data_bimg_rel_ro_end_; }
 
-  const uint8_t* VdexBegin() const;
-  const uint8_t* VdexEnd() const;
+  const uint8_t* BssBegin() const { return bss_begin_; }
+  const uint8_t* BssEnd() const { return bss_end_; }
+
+  const uint8_t* VdexBegin() const { return vdex_begin_; }
+  const uint8_t* VdexEnd() const { return vdex_end_; }
 
   const uint8_t* DexBegin() const;
   const uint8_t* DexEnd() const;
 
+  ArrayRef<const uint32_t> GetBootImageRelocations() const;
   ArrayRef<ArtMethod*> GetBssMethods() const;
   ArrayRef<GcRoot<mirror::Object>> GetBssGcRoots() const;
 
@@ -362,6 +368,12 @@ class OatFile {
 
   // Pointer to end of oat region for bounds checking.
   const uint8_t* end_;
+
+  // Pointer to the .data.bimg.rel.ro section, if present, otherwise null.
+  const uint8_t* data_bimg_rel_ro_begin_;
+
+  // Pointer to the end of the .data.bimg.rel.ro section, if present, otherwise null.
+  const uint8_t* data_bimg_rel_ro_end_;
 
   // Pointer to the .bss section, if present, otherwise null.
   uint8_t* bss_begin_;
@@ -500,14 +512,14 @@ class OatDexFile FINAL {
   // Madvise the dex file based on the state we are moving to.
   static void MadviseDexFile(const DexFile& dex_file, MadviseState state);
 
-  TypeLookupTable* GetTypeLookupTable() const {
-    return lookup_table_.get();
+  const TypeLookupTable& GetTypeLookupTable() const {
+    return lookup_table_;
   }
 
   ~OatDexFile();
 
   // Create only with a type lookup table, used by the compiler to speed up compilation.
-  explicit OatDexFile(std::unique_ptr<TypeLookupTable>&& lookup_table);
+  explicit OatDexFile(TypeLookupTable&& lookup_table);
 
   // Return the dex layout sections.
   const DexLayoutSections* GetDexLayoutSections() const {
@@ -539,7 +551,7 @@ class OatDexFile FINAL {
   const IndexBssMapping* const type_bss_mapping_ = nullptr;
   const IndexBssMapping* const string_bss_mapping_ = nullptr;
   const uint32_t* const oat_class_offsets_pointer_ = 0u;
-  mutable std::unique_ptr<TypeLookupTable> lookup_table_;
+  TypeLookupTable lookup_table_;
   const DexLayoutSections* const dex_layout_sections_ = nullptr;
 
   friend class OatFile;

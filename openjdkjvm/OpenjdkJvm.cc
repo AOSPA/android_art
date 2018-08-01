@@ -48,8 +48,8 @@
 #include "common_throws.h"
 #include "gc/heap.h"
 #include "handle_scope-inl.h"
-#include "java_vm_ext.h"
-#include "jni_internal.h"
+#include "jni/java_vm_ext.h"
+#include "jni/jni_internal.h"
 #include "mirror/class_loader.h"
 #include "mirror/string-inl.h"
 #include "monitor.h"
@@ -401,7 +401,7 @@ JNIEXPORT jboolean JVM_HoldsLock(JNIEnv* env, jclass unused ATTRIBUTE_UNUSED, jo
     art::ThrowNullPointerException("object == null");
     return JNI_FALSE;
   }
-  return soa.Self()->HoldsLock(object.Ptr());
+  return soa.Self()->HoldsLock(object);
 }
 
 JNIEXPORT void JVM_SetNativeThreadName(JNIEnv* env, jobject jthread, jstring java_name) {

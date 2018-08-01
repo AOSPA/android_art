@@ -38,9 +38,9 @@
 #include "dex/dex_file_loader.h"
 #include "dex2oat_environment_test.h"
 #include "dex2oat_return_codes.h"
-#include "jit/profile_compilation_info.h"
 #include "oat.h"
 #include "oat_file.h"
+#include "profile/profile_compilation_info.h"
 #include "vdex_file.h"
 #include "ziparchive/zip_writer.h"
 
@@ -230,47 +230,15 @@ class Dex2oatTest : public Dex2oatEnvironmentTest {
       LOG(ERROR) << all_args;
     }
 
-    int link[2];
-
-    if (pipe(link) == -1) {
-      return false;
+    // We need dex2oat to actually log things.
+    auto post_fork_fn = []() { return setenv("ANDROID_LOG_TAGS", "*:d", 1) == 0; };
+    ForkAndExecResult res = ForkAndExec(argv, post_fork_fn, &output_);
+    if (res.stage != ForkAndExecResult::kFinished) {
+      *error_msg = strerror(errno);
+      return -1;
     }
-
-    pid_t pid = fork();
-    if (pid == -1) {
-      return false;
-    }
-
-    if (pid == 0) {
-      // We need dex2oat to actually log things.
-      setenv("ANDROID_LOG_TAGS", "*:d", 1);
-      dup2(link[1], STDERR_FILENO);
-      close(link[0]);
-      close(link[1]);
-      std::vector<const char*> c_args;
-      for (const std::string& str : argv) {
-        c_args.push_back(str.c_str());
-      }
-      c_args.push_back(nullptr);
-      execv(c_args[0], const_cast<char* const*>(c_args.data()));
-      exit(1);
-      UNREACHABLE();
-    } else {
-      close(link[1]);
-      char buffer[128];
-      memset(buffer, 0, 128);
-      ssize_t bytes_read = 0;
-
-      while (TEMP_FAILURE_RETRY(bytes_read = read(link[0], buffer, 128)) > 0) {
-        output_ += std::string(buffer, bytes_read);
-      }
-      close(link[0]);
-      int status = -1;
-      if (waitpid(pid, &status, 0) != -1) {
-        success_ = (status == 0);
-      }
-      return status;
-    }
+    success_ = res.StandardSuccess();
+    return res.status_code;
   }
 
   std::string output_ = "";
@@ -472,8 +440,8 @@ class Dex2oatSwapUseTest : public Dex2oatSwapTest {
 };
 
 TEST_F(Dex2oatSwapUseTest, CheckSwapUsage) {
-  // Native memory usage isn't correctly tracked under sanitization.
-  TEST_DISABLED_FOR_MEMORY_TOOL_ASAN();
+  // Native memory usage isn't correctly tracked when running under ASan.
+  TEST_DISABLED_FOR_MEMORY_TOOL();
 
   // The `native_alloc_2_ >= native_alloc_1_` assertion below may not
   // hold true on some x86 systems; disable this test while we
@@ -1054,8 +1022,6 @@ TEST_F(Dex2oatWatchdogTest, TestWatchdogOK) {
 }
 
 TEST_F(Dex2oatWatchdogTest, TestWatchdogTrigger) {
-  TEST_DISABLED_FOR_MEMORY_TOOL_VALGRIND();  // b/63052624
-
   // The watchdog is independent of dex2oat and will not delete intermediates. It is possible
   // that the compilation succeeds and the file is completely written by the time the watchdog
   // kills dex2oat (but the dex2oat threads must have been scheduled pretty badly).
@@ -1770,7 +1736,7 @@ TEST_F(Dex2oatTest, CompactDexGenerationFailureMultiDex) {
     writer.Finish();
     ASSERT_EQ(apk_file.GetFile()->Flush(), 0);
   }
-  const std::string dex_location = apk_file.GetFilename();
+  const std::string& dex_location = apk_file.GetFilename();
   const std::string odex_location = GetOdexDir() + "/output.odex";
   GenerateOdexForTest(dex_location,
                       odex_location,
@@ -1912,29 +1878,35 @@ TEST_F(Dex2oatTest, DontExtract) {
     ASSERT_EQ(dm_file.GetFile()->Flush(), 0);
   }
 
+  auto generate_and_check = [&](CompilerFilter::Filter filter) {
+    GenerateOdexForTest(dex_location,
+                        odex_location,
+                        filter,
+                        { "--dump-timings",
+                          "--dm-file=" + dm_file.GetFilename(),
+                          // Pass -Xuse-stderr-logger have dex2oat output in output_ on target.
+                          "--runtime-arg",
+                          "-Xuse-stderr-logger" },
+                        true,  // expect_success
+                        false,  // use_fd
+                        [](const OatFile& o) {
+                          CHECK(o.ContainsDexCode());
+                        });
+    // Check the output for "Fast verify", this is printed from --dump-timings.
+    std::istringstream iss(output_);
+    std::string line;
+    bool found_fast_verify = false;
+    const std::string kFastVerifyString = "Fast Verify";
+    while (std::getline(iss, line) && !found_fast_verify) {
+      found_fast_verify = found_fast_verify || line.find(kFastVerifyString) != std::string::npos;
+    }
+    EXPECT_TRUE(found_fast_verify) << "Expected to find " << kFastVerifyString << "\n" << output_;
+  };
+
   // Generate a quickened dex by using the input dm file to verify.
-  GenerateOdexForTest(dex_location,
-                      odex_location,
-                      CompilerFilter::Filter::kQuicken,
-                      { "--dump-timings",
-                        "--dm-file=" + dm_file.GetFilename(),
-                        // Pass -Xuse-stderr-logger have dex2oat output in output_ on target.
-                        "--runtime-arg",
-                        "-Xuse-stderr-logger" },
-                      true,  // expect_success
-                      false,  // use_fd
-                      [](const OatFile& o) {
-                        CHECK(o.ContainsDexCode());
-                      });
-  // Check the output for "Fast verify", this is printed from --dump-timings.
-  std::istringstream iss(output_);
-  std::string line;
-  bool found_fast_verify = false;
-  const std::string kFastVerifyString = "Fast Verify";
-  while (std::getline(iss, line) && !found_fast_verify) {
-    found_fast_verify = found_fast_verify || line.find(kFastVerifyString) != std::string::npos;
-  }
-  EXPECT_TRUE(found_fast_verify) << "Expected to find " << kFastVerifyString << "\n" << output_;
+  generate_and_check(CompilerFilter::Filter::kQuicken);
+  // Use verify compiler filter to sanity check that FastVerify works for that filter too.
+  generate_and_check(CompilerFilter::Filter::kVerify);
 }
 
 // Test that dex files with quickened opcodes aren't dequickened.
@@ -1970,7 +1942,7 @@ TEST_F(Dex2oatTest, QuickenedInput) {
         << "Failed to find candidate code item with only one code unit in last instruction.";
   });
 
-  std::string dex_location = temp_dex.GetFilename();
+  const std::string& dex_location = temp_dex.GetFilename();
   std::string odex_location = GetOdexDir() + "/quickened.odex";
   std::string vdex_location = GetOdexDir() + "/quickened.vdex";
   std::unique_ptr<File> vdex_output(OS::CreateEmptyFile(vdex_location.c_str()));
@@ -2045,7 +2017,7 @@ TEST_F(Dex2oatTest, CompactDexInvalidSource) {
     writer.Finish();
     ASSERT_EQ(invalid_dex.GetFile()->Flush(), 0);
   }
-  const std::string dex_location = invalid_dex.GetFilename();
+  const std::string& dex_location = invalid_dex.GetFilename();
   const std::string odex_location = GetOdexDir() + "/output.odex";
   std::string error_msg;
   int status = GenerateOdexForTestWithStatus(

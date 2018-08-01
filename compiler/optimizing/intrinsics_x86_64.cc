@@ -236,304 +236,6 @@ void IntrinsicCodeGeneratorX86_64::VisitShortReverseBytes(HInvoke* invoke) {
   GenReverseBytes(invoke->GetLocations(), DataType::Type::kInt16, GetAssembler());
 }
 
-
-// TODO: Consider Quick's way of doing Double abs through integer operations, as the immediate we
-//       need is 64b.
-
-static void CreateFloatToFloatPlusTemps(ArenaAllocator* allocator, HInvoke* invoke) {
-  // TODO: Enable memory operations when the assembler supports them.
-  LocationSummary* locations =
-      new (allocator) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
-  locations->SetInAt(0, Location::RequiresFpuRegister());
-  locations->SetOut(Location::SameAsFirstInput());
-  locations->AddTemp(Location::RequiresFpuRegister());  // FP reg to hold mask.
-}
-
-static void MathAbsFP(LocationSummary* locations,
-                      bool is64bit,
-                      X86_64Assembler* assembler,
-                      CodeGeneratorX86_64* codegen) {
-  Location output = locations->Out();
-
-  DCHECK(output.IsFpuRegister());
-  XmmRegister xmm_temp = locations->GetTemp(0).AsFpuRegister<XmmRegister>();
-
-  // TODO: Can mask directly with constant area using pand if we can guarantee
-  // that the literal is aligned on a 16 byte boundary.  This will avoid a
-  // temporary.
-  if (is64bit) {
-    __ movsd(xmm_temp, codegen->LiteralInt64Address(INT64_C(0x7FFFFFFFFFFFFFFF)));
-    __ andpd(output.AsFpuRegister<XmmRegister>(), xmm_temp);
-  } else {
-    __ movss(xmm_temp, codegen->LiteralInt32Address(INT32_C(0x7FFFFFFF)));
-    __ andps(output.AsFpuRegister<XmmRegister>(), xmm_temp);
-  }
-}
-
-void IntrinsicLocationsBuilderX86_64::VisitMathAbsDouble(HInvoke* invoke) {
-  CreateFloatToFloatPlusTemps(allocator_, invoke);
-}
-
-void IntrinsicCodeGeneratorX86_64::VisitMathAbsDouble(HInvoke* invoke) {
-  MathAbsFP(invoke->GetLocations(), /* is64bit */ true, GetAssembler(), codegen_);
-}
-
-void IntrinsicLocationsBuilderX86_64::VisitMathAbsFloat(HInvoke* invoke) {
-  CreateFloatToFloatPlusTemps(allocator_, invoke);
-}
-
-void IntrinsicCodeGeneratorX86_64::VisitMathAbsFloat(HInvoke* invoke) {
-  MathAbsFP(invoke->GetLocations(), /* is64bit */ false, GetAssembler(), codegen_);
-}
-
-static void CreateIntToIntPlusTemp(ArenaAllocator* allocator, HInvoke* invoke) {
-  LocationSummary* locations =
-      new (allocator) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
-  locations->SetInAt(0, Location::RequiresRegister());
-  locations->SetOut(Location::SameAsFirstInput());
-  locations->AddTemp(Location::RequiresRegister());
-}
-
-static void GenAbsInteger(LocationSummary* locations, bool is64bit, X86_64Assembler* assembler) {
-  Location output = locations->Out();
-  CpuRegister out = output.AsRegister<CpuRegister>();
-  CpuRegister mask = locations->GetTemp(0).AsRegister<CpuRegister>();
-
-  if (is64bit) {
-    // Create mask.
-    __ movq(mask, out);
-    __ sarq(mask, Immediate(63));
-    // Add mask.
-    __ addq(out, mask);
-    __ xorq(out, mask);
-  } else {
-    // Create mask.
-    __ movl(mask, out);
-    __ sarl(mask, Immediate(31));
-    // Add mask.
-    __ addl(out, mask);
-    __ xorl(out, mask);
-  }
-}
-
-void IntrinsicLocationsBuilderX86_64::VisitMathAbsInt(HInvoke* invoke) {
-  CreateIntToIntPlusTemp(allocator_, invoke);
-}
-
-void IntrinsicCodeGeneratorX86_64::VisitMathAbsInt(HInvoke* invoke) {
-  GenAbsInteger(invoke->GetLocations(), /* is64bit */ false, GetAssembler());
-}
-
-void IntrinsicLocationsBuilderX86_64::VisitMathAbsLong(HInvoke* invoke) {
-  CreateIntToIntPlusTemp(allocator_, invoke);
-}
-
-void IntrinsicCodeGeneratorX86_64::VisitMathAbsLong(HInvoke* invoke) {
-  GenAbsInteger(invoke->GetLocations(), /* is64bit */ true, GetAssembler());
-}
-
-static void GenMinMaxFP(LocationSummary* locations,
-                        bool is_min,
-                        bool is_double,
-                        X86_64Assembler* assembler,
-                        CodeGeneratorX86_64* codegen) {
-  Location op1_loc = locations->InAt(0);
-  Location op2_loc = locations->InAt(1);
-  Location out_loc = locations->Out();
-  XmmRegister out = out_loc.AsFpuRegister<XmmRegister>();
-
-  // Shortcut for same input locations.
-  if (op1_loc.Equals(op2_loc)) {
-    DCHECK(out_loc.Equals(op1_loc));
-    return;
-  }
-
-  //  (out := op1)
-  //  out <=? op2
-  //  if Nan jmp Nan_label
-  //  if out is min jmp done
-  //  if op2 is min jmp op2_label
-  //  handle -0/+0
-  //  jmp done
-  // Nan_label:
-  //  out := NaN
-  // op2_label:
-  //  out := op2
-  // done:
-  //
-  // This removes one jmp, but needs to copy one input (op1) to out.
-  //
-  // TODO: This is straight from Quick. Make NaN an out-of-line slowpath?
-
-  XmmRegister op2 = op2_loc.AsFpuRegister<XmmRegister>();
-
-  NearLabel nan, done, op2_label;
-  if (is_double) {
-    __ ucomisd(out, op2);
-  } else {
-    __ ucomiss(out, op2);
-  }
-
-  __ j(Condition::kParityEven, &nan);
-
-  __ j(is_min ? Condition::kAbove : Condition::kBelow, &op2_label);
-  __ j(is_min ? Condition::kBelow : Condition::kAbove, &done);
-
-  // Handle 0.0/-0.0.
-  if (is_min) {
-    if (is_double) {
-      __ orpd(out, op2);
-    } else {
-      __ orps(out, op2);
-    }
-  } else {
-    if (is_double) {
-      __ andpd(out, op2);
-    } else {
-      __ andps(out, op2);
-    }
-  }
-  __ jmp(&done);
-
-  // NaN handling.
-  __ Bind(&nan);
-  if (is_double) {
-    __ movsd(out, codegen->LiteralInt64Address(INT64_C(0x7FF8000000000000)));
-  } else {
-    __ movss(out, codegen->LiteralInt32Address(INT32_C(0x7FC00000)));
-  }
-  __ jmp(&done);
-
-  // out := op2;
-  __ Bind(&op2_label);
-  if (is_double) {
-    __ movsd(out, op2);
-  } else {
-    __ movss(out, op2);
-  }
-
-  // Done.
-  __ Bind(&done);
-}
-
-static void CreateFPFPToFP(ArenaAllocator* allocator, HInvoke* invoke) {
-  LocationSummary* locations =
-      new (allocator) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
-  locations->SetInAt(0, Location::RequiresFpuRegister());
-  locations->SetInAt(1, Location::RequiresFpuRegister());
-  // The following is sub-optimal, but all we can do for now. It would be fine to also accept
-  // the second input to be the output (we can simply swap inputs).
-  locations->SetOut(Location::SameAsFirstInput());
-}
-
-void IntrinsicLocationsBuilderX86_64::VisitMathMinDoubleDouble(HInvoke* invoke) {
-  CreateFPFPToFP(allocator_, invoke);
-}
-
-void IntrinsicCodeGeneratorX86_64::VisitMathMinDoubleDouble(HInvoke* invoke) {
-  GenMinMaxFP(
-      invoke->GetLocations(), /* is_min */ true, /* is_double */ true, GetAssembler(), codegen_);
-}
-
-void IntrinsicLocationsBuilderX86_64::VisitMathMinFloatFloat(HInvoke* invoke) {
-  CreateFPFPToFP(allocator_, invoke);
-}
-
-void IntrinsicCodeGeneratorX86_64::VisitMathMinFloatFloat(HInvoke* invoke) {
-  GenMinMaxFP(
-      invoke->GetLocations(), /* is_min */ true, /* is_double */ false, GetAssembler(), codegen_);
-}
-
-void IntrinsicLocationsBuilderX86_64::VisitMathMaxDoubleDouble(HInvoke* invoke) {
-  CreateFPFPToFP(allocator_, invoke);
-}
-
-void IntrinsicCodeGeneratorX86_64::VisitMathMaxDoubleDouble(HInvoke* invoke) {
-  GenMinMaxFP(
-      invoke->GetLocations(), /* is_min */ false, /* is_double */ true, GetAssembler(), codegen_);
-}
-
-void IntrinsicLocationsBuilderX86_64::VisitMathMaxFloatFloat(HInvoke* invoke) {
-  CreateFPFPToFP(allocator_, invoke);
-}
-
-void IntrinsicCodeGeneratorX86_64::VisitMathMaxFloatFloat(HInvoke* invoke) {
-  GenMinMaxFP(
-      invoke->GetLocations(), /* is_min */ false, /* is_double */ false, GetAssembler(), codegen_);
-}
-
-static void GenMinMax(LocationSummary* locations, bool is_min, bool is_long,
-                      X86_64Assembler* assembler) {
-  Location op1_loc = locations->InAt(0);
-  Location op2_loc = locations->InAt(1);
-
-  // Shortcut for same input locations.
-  if (op1_loc.Equals(op2_loc)) {
-    // Can return immediately, as op1_loc == out_loc.
-    // Note: if we ever support separate registers, e.g., output into memory, we need to check for
-    //       a copy here.
-    DCHECK(locations->Out().Equals(op1_loc));
-    return;
-  }
-
-  CpuRegister out = locations->Out().AsRegister<CpuRegister>();
-  CpuRegister op2 = op2_loc.AsRegister<CpuRegister>();
-
-  //  (out := op1)
-  //  out <=? op2
-  //  if out is min jmp done
-  //  out := op2
-  // done:
-
-  if (is_long) {
-    __ cmpq(out, op2);
-  } else {
-    __ cmpl(out, op2);
-  }
-
-  __ cmov(is_min ? Condition::kGreater : Condition::kLess, out, op2, is_long);
-}
-
-static void CreateIntIntToIntLocations(ArenaAllocator* allocator, HInvoke* invoke) {
-  LocationSummary* locations =
-      new (allocator) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
-  locations->SetInAt(0, Location::RequiresRegister());
-  locations->SetInAt(1, Location::RequiresRegister());
-  locations->SetOut(Location::SameAsFirstInput());
-}
-
-void IntrinsicLocationsBuilderX86_64::VisitMathMinIntInt(HInvoke* invoke) {
-  CreateIntIntToIntLocations(allocator_, invoke);
-}
-
-void IntrinsicCodeGeneratorX86_64::VisitMathMinIntInt(HInvoke* invoke) {
-  GenMinMax(invoke->GetLocations(), /* is_min */ true, /* is_long */ false, GetAssembler());
-}
-
-void IntrinsicLocationsBuilderX86_64::VisitMathMinLongLong(HInvoke* invoke) {
-  CreateIntIntToIntLocations(allocator_, invoke);
-}
-
-void IntrinsicCodeGeneratorX86_64::VisitMathMinLongLong(HInvoke* invoke) {
-  GenMinMax(invoke->GetLocations(), /* is_min */ true, /* is_long */ true, GetAssembler());
-}
-
-void IntrinsicLocationsBuilderX86_64::VisitMathMaxIntInt(HInvoke* invoke) {
-  CreateIntIntToIntLocations(allocator_, invoke);
-}
-
-void IntrinsicCodeGeneratorX86_64::VisitMathMaxIntInt(HInvoke* invoke) {
-  GenMinMax(invoke->GetLocations(), /* is_min */ false, /* is_long */ false, GetAssembler());
-}
-
-void IntrinsicLocationsBuilderX86_64::VisitMathMaxLongLong(HInvoke* invoke) {
-  CreateIntIntToIntLocations(allocator_, invoke);
-}
-
-void IntrinsicCodeGeneratorX86_64::VisitMathMaxLongLong(HInvoke* invoke) {
-  GenMinMax(invoke->GetLocations(), /* is_min */ false, /* is_long */ true, GetAssembler());
-}
-
 static void CreateFPToFPLocations(ArenaAllocator* allocator, HInvoke* invoke) {
   LocationSummary* locations =
       new (allocator) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
@@ -2958,58 +2660,49 @@ void IntrinsicLocationsBuilderX86_64::VisitIntegerValueOf(HInvoke* invoke) {
 }
 
 void IntrinsicCodeGeneratorX86_64::VisitIntegerValueOf(HInvoke* invoke) {
-  IntrinsicVisitor::IntegerValueOfInfo info = IntrinsicVisitor::ComputeIntegerValueOfInfo();
+  IntrinsicVisitor::IntegerValueOfInfo info =
+      IntrinsicVisitor::ComputeIntegerValueOfInfo(invoke, codegen_->GetCompilerOptions());
   LocationSummary* locations = invoke->GetLocations();
   X86_64Assembler* assembler = GetAssembler();
 
   CpuRegister out = locations->Out().AsRegister<CpuRegister>();
   InvokeRuntimeCallingConvention calling_convention;
-  if (invoke->InputAt(0)->IsConstant()) {
+  CpuRegister argument = CpuRegister(calling_convention.GetRegisterAt(0));
+  if (invoke->InputAt(0)->IsIntConstant()) {
     int32_t value = invoke->InputAt(0)->AsIntConstant()->GetValue();
-    if (value >= info.low && value <= info.high) {
+    if (static_cast<uint32_t>(value - info.low) < info.length) {
       // Just embed the j.l.Integer in the code.
-      ScopedObjectAccess soa(Thread::Current());
-      mirror::Object* boxed = info.cache->Get(value + (-info.low));
-      DCHECK(boxed != nullptr && Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(boxed));
-      uint32_t address = dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(boxed));
-      __ movl(out, Immediate(static_cast<int32_t>(address)));
+      DCHECK_NE(info.value_boot_image_reference, IntegerValueOfInfo::kInvalidReference);
+      codegen_->LoadBootImageAddress(out, info.value_boot_image_reference);
     } else {
+      DCHECK(locations->CanCall());
       // Allocate and initialize a new j.l.Integer.
       // TODO: If we JIT, we could allocate the j.l.Integer now, and store it in the
       // JIT object table.
-      CpuRegister argument = CpuRegister(calling_convention.GetRegisterAt(0));
-      uint32_t address = dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(info.integer));
-      __ movl(argument, Immediate(static_cast<int32_t>(address)));
-      codegen_->InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
-      CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+      codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
+                                             info.integer_boot_image_offset);
       __ movl(Address(out, info.value_offset), Immediate(value));
     }
   } else {
+    DCHECK(locations->CanCall());
     CpuRegister in = locations->InAt(0).AsRegister<CpuRegister>();
     // Check bounds of our cache.
     __ leal(out, Address(in, -info.low));
-    __ cmpl(out, Immediate(info.high - info.low + 1));
+    __ cmpl(out, Immediate(info.length));
     NearLabel allocate, done;
     __ j(kAboveEqual, &allocate);
     // If the value is within the bounds, load the j.l.Integer directly from the array.
-    uint32_t data_offset = mirror::Array::DataOffset(kHeapReferenceSize).Uint32Value();
-    uint32_t address = dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(info.cache));
-    if (data_offset + address <= std::numeric_limits<int32_t>::max()) {
-      __ movl(out, Address(out, TIMES_4, data_offset + address));
-    } else {
-      CpuRegister temp = CpuRegister(calling_convention.GetRegisterAt(0));
-      __ movl(temp, Immediate(static_cast<int32_t>(data_offset + address)));
-      __ movl(out, Address(temp, out, TIMES_4, 0));
-    }
+    DCHECK_NE(out.AsRegister(), argument.AsRegister());
+    codegen_->LoadBootImageAddress(argument, info.array_data_boot_image_reference);
+    static_assert((1u << TIMES_4) == sizeof(mirror::HeapReference<mirror::Object>),
+                  "Check heap reference size.");
+    __ movl(out, Address(argument, out, TIMES_4, 0));
     __ MaybeUnpoisonHeapReference(out);
     __ jmp(&done);
     __ Bind(&allocate);
     // Otherwise allocate and initialize a new j.l.Integer.
-    CpuRegister argument = CpuRegister(calling_convention.GetRegisterAt(0));
-    address = dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(info.integer));
-    __ movl(argument, Immediate(static_cast<int32_t>(address)));
-    codegen_->InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
-    CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+    codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
+                                           info.integer_boot_image_offset);
     __ movl(Address(out, info.value_offset), in);
     __ Bind(&done);
   }

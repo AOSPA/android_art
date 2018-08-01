@@ -346,6 +346,7 @@ codes.
  */
 .macro ENTRY name
     .type \name, #function
+    .hidden \name  // Hide this as a global symbol, so we do not incur plt calls.
     .global \name
     /* Cache alignment for function entry */
     .balign 16
@@ -426,6 +427,7 @@ ENTRY ExecuteMterpImpl
     GOTO_OPCODE ip                      // jump to next instruction
     /* NOTE: no fallthrough */
 
+/* File: arm64/instruction_start.S */
 
     .global artMterpAsmInstructionStart
 artMterpAsmInstructionStart = .L_op_nop
@@ -7074,18 +7076,26 @@ artMterpAsmInstructionStart = .L_op_nop
 
 
     .balign 128
+/* File: arm64/instruction_end.S */
+
     .global artMterpAsmInstructionEnd
 artMterpAsmInstructionEnd:
+
 
 /*
  * ===========================================================================
  *  Sister implementations
  * ===========================================================================
  */
+/* File: arm64/instruction_start_sister.S */
+
     .global artMterpAsmSisterStart
     .text
     .balign 4
 artMterpAsmSisterStart:
+
+/* File: arm64/instruction_end_sister.S */
+
     .global artMterpAsmSisterEnd
 artMterpAsmSisterEnd:
 
@@ -7397,11 +7407,12 @@ MterpProfileActive:
     ret
 
 
+/* File: arm64/instruction_start_alt.S */
 
     .global artMterpAsmAltInstructionStart
+artMterpAsmAltInstructionStart = .L_ALT_op_nop
     .text
 
-artMterpAsmAltInstructionStart = .L_ALT_op_nop
 /* ------------------------------ */
     .balign 128
 .L_ALT_op_nop: /* 0x00 */
@@ -11755,8 +11766,11 @@ artMterpAsmAltInstructionStart = .L_ALT_op_nop
     b      MterpCheckBefore     // (self, shadow_frame, dex_pc_ptr) Note: tail call.
 
     .balign 128
+/* File: arm64/instruction_end_alt.S */
+
     .global artMterpAsmAltInstructionEnd
 artMterpAsmAltInstructionEnd:
+
 /* File: arm64/close_cfi.S */
 // Close out the cfi info.  We're treating mterp as a single function.
 

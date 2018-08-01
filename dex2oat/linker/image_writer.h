@@ -31,17 +31,17 @@
 #include "base/bit_utils.h"
 #include "base/dchecked_vector.h"
 #include "base/enums.h"
+#include "base/hash_set.h"
 #include "base/length_prefixed_array.h"
 #include "base/macros.h"
+#include "base/mem_map.h"
 #include "base/os.h"
 #include "base/safe_map.h"
 #include "base/utils.h"
 #include "class_table.h"
-#include "driver/compiler_driver.h"
 #include "image.h"
 #include "intern_table.h"
 #include "lock_word.h"
-#include "mem_map.h"
 #include "mirror/dex_cache.h"
 #include "oat_file.h"
 #include "obj_ptr.h"
@@ -62,8 +62,11 @@ class ClassLoader;
 }  // namespace mirror
 
 class ClassLoaderVisitor;
+class CompilerOptions;
+template<class T> class Handle;
 class ImTable;
 class ImtConflictTable;
+class TimingLogger;
 
 static constexpr int kInvalidFd = -1;
 
@@ -72,16 +75,16 @@ namespace linker {
 // Write a Space built during compilation for use during execution.
 class ImageWriter FINAL {
  public:
-  ImageWriter(const CompilerDriver& compiler_driver,
+  ImageWriter(const CompilerOptions& compiler_options,
               uintptr_t image_begin,
               bool compile_pic,
               bool compile_app_image,
               ImageHeader::StorageMode image_storage_mode,
               const std::vector<const char*>& oat_filenames,
               const std::unordered_map<const DexFile*, size_t>& dex_file_oat_index_map,
-              const std::unordered_set<std::string>* dirty_image_objects);
+              const HashSet<std::string>* dirty_image_objects);
 
-  bool PrepareImageAddressSpace();
+  bool PrepareImageAddressSpace(TimingLogger* timings);
 
   bool IsImageAddressSpaceReady() const {
     DCHECK(!image_infos_.empty());
@@ -110,6 +113,8 @@ class ImageWriter FINAL {
   }
 
   ArtMethod* GetImageMethodAddress(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
+  const void* GetIntrinsicReferenceAddress(uint32_t intrinsic_data)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   size_t GetOatFileOffset(size_t oat_index) const {
     return GetImageInfo(oat_index).oat_offset_;
@@ -267,7 +272,7 @@ class ImageWriter FINAL {
 
     // Create the image sections into the out sections variable, returns the size of the image
     // excluding the bitmap.
-    size_t CreateImageSections(ImageSection* out_sections, bool app_image) const;
+    size_t CreateImageSections(ImageSection* out_sections) const;
 
     size_t GetStubOffset(StubType stub_type) const {
       DCHECK_LT(static_cast<size_t>(stub_type), kNumberOfStubTypes);
@@ -449,7 +454,11 @@ class ImageWriter FINAL {
       REQUIRES_SHARED(Locks::mutator_lock_);
   void CreateHeader(size_t oat_index)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  mirror::ObjectArray<mirror::Object>* CreateImageRoots(size_t oat_index) const
+  ObjPtr<mirror::ObjectArray<mirror::Object>> CollectDexCaches(Thread* self, size_t oat_index) const
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  ObjPtr<mirror::ObjectArray<mirror::Object>> CreateImageRoots(
+      size_t oat_index,
+      Handle<mirror::ObjectArray<mirror::Object>> boot_image_live_objects) const
       REQUIRES_SHARED(Locks::mutator_lock_);
   void CalculateObjectBinSlots(mirror::Object* obj)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -507,9 +516,8 @@ class ImageWriter FINAL {
   // classes since we do not want any boot class loader classes in the image. This means that
   // we also cannot have any classes which refer to these boot class loader non image classes.
   // PruneAppImageClass also prunes if klass depends on a non-image class according to the compiler
-  // driver.
-  bool PruneAppImageClass(ObjPtr<mirror::Class> klass)
-      REQUIRES_SHARED(Locks::mutator_lock_);
+  // options.
+  bool PruneAppImageClass(ObjPtr<mirror::Class> klass) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // early_exit is true if we had a cyclic dependency anywhere down the chain.
   bool PruneAppImageClassInternal(ObjPtr<mirror::Class> klass,
@@ -571,7 +579,7 @@ class ImageWriter FINAL {
 
   void CopyAndFixupPointer(void** target, void* value);
 
-  const CompilerDriver& compiler_driver_;
+  const CompilerOptions& compiler_options_;
 
   // Beginning target image address for the first image.
   uint8_t* global_image_begin_;
@@ -631,6 +639,9 @@ class ImageWriter FINAL {
   // null is a valid entry.
   std::unordered_set<mirror::ClassLoader*> class_loaders_;
 
+  // Boot image live objects, null for app image.
+  mirror::ObjectArray<mirror::Object>* boot_image_live_objects_;
+
   // Which mode the image is stored as, see image.h
   const ImageHeader::StorageMode image_storage_mode_;
 
@@ -641,7 +652,7 @@ class ImageWriter FINAL {
   const std::unordered_map<const DexFile*, size_t>& dex_file_oat_index_map_;
 
   // Set of objects known to be dirty in the image. Can be nullptr if there are none.
-  const std::unordered_set<std::string>* dirty_image_objects_;
+  const HashSet<std::string>* dirty_image_objects_;
 
   class ComputeLazyFieldsForClassesVisitor;
   class FixupClassVisitor;

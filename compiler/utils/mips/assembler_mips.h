@@ -24,10 +24,10 @@
 #include "arch/mips/instruction_set_features_mips.h"
 #include "base/arena_containers.h"
 #include "base/enums.h"
+#include "base/globals.h"
 #include "base/macros.h"
 #include "base/stl_util_identity.h"
 #include "constants_mips.h"
-#include "globals.h"
 #include "heap_poisoning.h"
 #include "managed_register_mips.h"
 #include "offsets.h"
@@ -755,6 +755,11 @@ class MipsAssembler FINAL : public Assembler, public JNIMacroAssembler<PointerSi
   void Hadd_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
   void Hadd_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
   void Hadd_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+
+  void PcntB(VectorRegister wd, VectorRegister ws);
+  void PcntH(VectorRegister wd, VectorRegister ws);
+  void PcntW(VectorRegister wd, VectorRegister ws);
+  void PcntD(VectorRegister wd, VectorRegister ws);
 
   // Helper for replicating floating point value in all destination elements.
   void ReplicateFPToVectorRegister(VectorRegister dst, FRegister src, bool is_double);

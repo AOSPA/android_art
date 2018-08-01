@@ -43,6 +43,7 @@
 #include "base/unix_file/fd_file.h"
 #include "base/unix_file/random_access_file_utils.h"
 #include "base/utils.h"
+#include "class_root.h"
 #include "elf_file.h"
 #include "elf_file_impl.h"
 #include "elf_utils.h"
@@ -538,7 +539,7 @@ bool PatchOat::Patch(const std::string& image_location,
 
     space_to_memmap_map.emplace(space, std::move(image));
     PatchOat p = PatchOat(isa,
-                          space_to_memmap_map.at(space).get(),
+                          space_to_memmap_map[space].get(),
                           space->GetLiveBitmap(),
                           space->GetMemMap(),
                           delta,
@@ -614,7 +615,7 @@ bool PatchOat::Patch(const std::string& image_location,
     }
   }
 
-  if (!kIsDebugBuild && !(RUNNING_ON_MEMORY_TOOL && kMemoryToolDetectsLeaks)) {
+  if (!kIsDebugBuild && !(kRunningOnMemoryTool && kMemoryToolDetectsLeaks)) {
     // We want to just exit on non-debug builds, not bringing the runtime down
     // in an orderly fashion. So release the following fields.
     runtime.release();
@@ -694,7 +695,7 @@ bool PatchOat::Verify(const std::string& image_location,
     }
   }
 
-  if (!kIsDebugBuild && !(RUNNING_ON_MEMORY_TOOL && kMemoryToolDetectsLeaks)) {
+  if (!kIsDebugBuild && !(kRunningOnMemoryTool && kMemoryToolDetectsLeaks)) {
     // We want to just exit on non-debug builds, not bringing the runtime down
     // in an orderly fashion. So release the following fields.
     runtime.release();
@@ -704,6 +705,7 @@ bool PatchOat::Verify(const std::string& image_location,
 }
 
 bool PatchOat::WriteImage(File* out) {
+  CHECK(out != nullptr);
   TimingLogger::ScopedTiming t("Writing image File", timings_);
   std::string error_msg;
 
@@ -713,7 +715,6 @@ bool PatchOat::WriteImage(File* out) {
                                             true /* read_only_mode */, &error_msg);
 
   CHECK(image_ != nullptr);
-  CHECK(out != nullptr);
   size_t expect = image_->Size();
   if (out->WriteFully(reinterpret_cast<char*>(image_->Begin()), expect) &&
       out->SetLength(expect) == 0) {
@@ -976,7 +977,7 @@ bool PatchOat::PatchImage(bool primary_image) {
   ImageHeader* image_header = reinterpret_cast<ImageHeader*>(image_->Begin());
   CHECK_GT(image_->Size(), sizeof(ImageHeader));
   // These are the roots from the original file.
-  auto* img_roots = image_header->GetImageRoots();
+  mirror::ObjectArray<mirror::Object>* img_roots = image_header->GetImageRoots().Ptr();
   image_header->RelocateImage(delta_);
 
   PatchArtFields(image_header);
@@ -1057,8 +1058,8 @@ void PatchOat::VisitObject(mirror::Object* object) {
                             native_visitor);
       }
     }
-  } else if (object->GetClass() == mirror::Method::StaticClass() ||
-             object->GetClass() == mirror::Constructor::StaticClass()) {
+  } else if (object->GetClass() == GetClassRoot<mirror::Method>() ||
+             object->GetClass() == GetClassRoot<mirror::Constructor>()) {
     // Need to go update the ArtMethod.
     auto* dest = down_cast<mirror::Executable*>(copy);
     auto* src = down_cast<mirror::Executable*>(object);

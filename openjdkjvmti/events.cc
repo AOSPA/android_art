@@ -44,8 +44,8 @@
 #include "gc/scoped_gc_critical_section.h"
 #include "handle_scope-inl.h"
 #include "instrumentation.h"
-#include "jni_env_ext-inl.h"
-#include "jni_internal.h"
+#include "jni/jni_env_ext-inl.h"
+#include "jni/jni_internal.h"
 #include "mirror/class.h"
 #include "mirror/object-inl.h"
 #include "monitor.h"
@@ -504,8 +504,9 @@ class JvmtiMethodTraceListener FINAL : public art::instrumentation::Instrumentat
       REQUIRES_SHARED(art::Locks::mutator_lock_) OVERRIDE {
     if (!method->IsRuntimeMethod() &&
         event_handler_->IsEventEnabledAnywhere(ArtJvmtiEvent::kMethodExit)) {
-      DCHECK_EQ(method->GetReturnTypePrimitive(), art::Primitive::kPrimNot)
-          << method->PrettyMethod();
+      DCHECK_EQ(
+          method->GetInterfaceMethodIfProxy(art::kRuntimePointerSize)->GetReturnTypePrimitive(),
+          art::Primitive::kPrimNot) << method->PrettyMethod();
       DCHECK(!self->IsExceptionPending());
       jvalue val;
       art::JNIEnvExt* jnienv = self->GetJniEnv();
@@ -530,8 +531,9 @@ class JvmtiMethodTraceListener FINAL : public art::instrumentation::Instrumentat
       REQUIRES_SHARED(art::Locks::mutator_lock_) OVERRIDE {
     if (!method->IsRuntimeMethod() &&
         event_handler_->IsEventEnabledAnywhere(ArtJvmtiEvent::kMethodExit)) {
-      DCHECK_NE(method->GetReturnTypePrimitive(), art::Primitive::kPrimNot)
-          << method->PrettyMethod();
+      DCHECK_NE(
+          method->GetInterfaceMethodIfProxy(art::kRuntimePointerSize)->GetReturnTypePrimitive(),
+          art::Primitive::kPrimNot) << method->PrettyMethod();
       DCHECK(!self->IsExceptionPending());
       jvalue val;
       art::JNIEnvExt* jnienv = self->GetJniEnv();
@@ -886,16 +888,29 @@ static bool EventNeedsFullDeopt(ArtJvmtiEvent event) {
     case ArtJvmtiEvent::kBreakpoint:
     case ArtJvmtiEvent::kException:
       return false;
-    // TODO We should support more of these or at least do something to make them discriminate by
-    // thread.
+    default:
+      return true;
+  }
+}
+
+static FullDeoptRequirement GetFullDeoptRequirement(ArtJvmtiEvent event) {
+  switch (event) {
+    // TODO We should support more of these as Limited or at least do something to make them
+    // discriminate by thread.
     case ArtJvmtiEvent::kMethodEntry:
-    case ArtJvmtiEvent::kExceptionCatch:
     case ArtJvmtiEvent::kMethodExit:
+      // We only need MethodEntered and MethodExited for these so we can use Stubs. We will need to
+      // disable intrinsics.
+      // TODO Offer a version of this without disabling intrinsics.
+      return FullDeoptRequirement::kStubs;
+    case ArtJvmtiEvent::kExceptionCatch:
     case ArtJvmtiEvent::kFieldModification:
     case ArtJvmtiEvent::kFieldAccess:
     case ArtJvmtiEvent::kSingleStep:
+    // NB If we ever make this runnable using stubs or some other method we will need to be careful
+    // that it doesn't require disabling intrinsics.
     case ArtJvmtiEvent::kFramePop:
-      return true;
+      return FullDeoptRequirement::kInterpreter;
     default:
       LOG(FATAL) << "Unexpected event type!";
       UNREACHABLE();
@@ -905,19 +920,18 @@ static bool EventNeedsFullDeopt(ArtJvmtiEvent event) {
 void EventHandler::SetupTraceListener(JvmtiMethodTraceListener* listener,
                                       ArtJvmtiEvent event,
                                       bool enable) {
-  bool needs_full_deopt = EventNeedsFullDeopt(event);
   // Make sure we can deopt.
   {
     art::ScopedObjectAccess soa(art::Thread::Current());
     DeoptManager* deopt_manager = DeoptManager::Get();
     if (enable) {
       deopt_manager->AddDeoptimizationRequester();
-      if (needs_full_deopt) {
-        deopt_manager->AddDeoptimizeAllMethods();
+      if (EventNeedsFullDeopt(event)) {
+        deopt_manager->AddDeoptimizeAllMethods(GetFullDeoptRequirement(event));
       }
     } else {
-      if (needs_full_deopt) {
-        deopt_manager->RemoveDeoptimizeAllMethods();
+      if (EventNeedsFullDeopt(event)) {
+        deopt_manager->RemoveDeoptimizeAllMethods(GetFullDeoptRequirement(event));
       }
       deopt_manager->RemoveDeoptimizationRequester();
     }
@@ -1001,6 +1015,27 @@ bool EventHandler::OtherMonitorEventsEnabledAnywhere(ArtJvmtiEvent event) {
   return false;
 }
 
+void EventHandler::SetupFramePopTraceListener(bool enable) {
+  if (enable) {
+    frame_pop_enabled = true;
+    SetupTraceListener(method_trace_listener_.get(), ArtJvmtiEvent::kFramePop, enable);
+  } else {
+    // remove the listener if we have no outstanding frames.
+    {
+      art::ReaderMutexLock mu(art::Thread::Current(), envs_lock_);
+      for (ArtJvmTiEnv* env : envs) {
+        art::ReaderMutexLock event_mu(art::Thread::Current(), env->event_info_mutex_);
+        if (!env->notify_frames.empty()) {
+          // Leaving FramePop listener since there are unsent FramePop events.
+          return;
+        }
+      }
+      frame_pop_enabled = false;
+    }
+    SetupTraceListener(method_trace_listener_.get(), ArtJvmtiEvent::kFramePop, enable);
+  }
+}
+
 // Handle special work for the given event type, if necessary.
 void EventHandler::HandleEventType(ArtJvmtiEvent event, bool enable) {
   switch (event) {
@@ -1015,14 +1050,14 @@ void EventHandler::HandleEventType(ArtJvmtiEvent event, bool enable) {
     case ArtJvmtiEvent::kGarbageCollectionFinish:
       SetupGcPauseTracking(gc_pause_listener_.get(), event, enable);
       return;
-    // FramePop can never be disabled once it's been turned on since we would either need to deal
-    // with dangling pointers or have missed events.
-    // TODO We really need to make this not the case anymore.
+    // FramePop can never be disabled once it's been turned on if it was turned off with outstanding
+    // pop-events since we would either need to deal with dangling pointers or have missed events.
     case ArtJvmtiEvent::kFramePop:
-      if (!enable || (enable && frame_pop_enabled)) {
+      if (enable && frame_pop_enabled) {
+        // The frame-pop event was held on by pending events so we don't need to do anything.
         break;
       } else {
-        SetupTraceListener(method_trace_listener_.get(), event, enable);
+        SetupFramePopTraceListener(enable);
         break;
       }
     case ArtJvmtiEvent::kMethodEntry:

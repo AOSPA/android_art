@@ -19,26 +19,58 @@ cc_defaults {
     defaults: ["art_defaults"],
     host_supported: true,
     srcs: [
+        "arch/instruction_set.cc",
         "base/allocator.cc",
+        "base/arena_allocator.cc",
+        "base/arena_bit_vector.cc",
         "base/bit_vector.cc",
         "base/file_magic.cc",
+        "base/file_utils.cc",
         "base/hex_dump.cc",
         "base/logging.cc",
+        "base/malloc_arena_pool.cc",
+        "base/memory_region.cc",
+        "base/mem_map.cc",
+        // "base/mem_map_fuchsia.cc", put in target when fuchsia supported by soong
+        "base/mem_map_unix.cc",
         "base/os_linux.cc",
         "base/runtime_debug.cc",
         "base/safe_copy.cc",
+        "base/scoped_arena_allocator.cc",
         "base/scoped_flock.cc",
         "base/time_utils.cc",
         "base/unix_file/fd_file.cc",
         "base/unix_file/random_access_file_utils.cc",
         "base/utils.cc",
+        "base/zip_archive.cc",
     ],
+    target: {
+        android: {
+            static_libs: [
+                // ZipArchive support, the order matters here to get all symbols.
+                "libziparchive",
+                "libz",
+            ],
+	    shared_libs: [
+	        // For android::FileMap used by libziparchive.
+                "libutils",
+	    ],
+        },
+        host: {
+            shared_libs: [
+                "libziparchive",
+                "libz",
+            ],
+        },
+    },
     generated_sources: ["art_libartbase_operator_srcs"],
     cflags: ["-DBUILDING_LIBART=1"],
     shared_libs: [
+        "liblog",
+	// For ashmem.
+        "libcutils",
         // For common macros.
         "libbase",
-        "liblog",
     ],
     export_include_dirs: ["."],
     // ART's macros.h depends on libbase's macros.h.
@@ -52,6 +84,7 @@ gensrcs {
     cmd: "$(location generate_operator_out) art/libartbase $(in) > $(out)",
     tools: ["generate_operator_out"],
     srcs: [
+        "arch/instruction_set.h",
         "base/allocator.h",
         "base/callee_save_type.h",
         "base/unix_file/fd_file.h",
@@ -67,7 +100,10 @@ art_cc_library {
     strip: {
         keep_symbols: true,
     },
-    shared_libs: ["libbase"],
+    shared_libs: [
+        "libbase",
+        "libziparchive",
+    ],
     export_shared_lib_headers: ["libbase"],
 }
 
@@ -77,29 +113,57 @@ art_cc_library {
         "art_debug_defaults",
         "libartbase_defaults",
     ],
-    shared_libs: ["libbase"],
+    shared_libs: [
+        "libbase",
+        "libziparchive",
+    ],
     export_shared_lib_headers: ["libbase"],
 }
 
-// For now many of these tests still use CommonRuntimeTest, almost universally because of
-// ScratchFile and related.
-// TODO: Remove CommonRuntimeTest dependency from these tests.
+art_cc_library {
+    name: "libartbase-art-gtest",
+    defaults: ["libart-gtest-defaults"],
+    srcs: [
+        "base/common_art_test.cc",
+    ],
+    shared_libs: [
+        "libartbased",
+        "libdexfiled",
+        "libbase",
+        "libbacktrace",
+    ],
+    header_libs: [
+        "libnativehelper_header_only",
+    ],
+    include_dirs: [
+        "external/icu/icu4c/source/common",
+    ],
+}
+
 art_cc_test {
     name: "art_libartbase_tests",
     defaults: [
         "art_gtest_defaults",
     ],
     srcs: [
+        "arch/instruction_set_test.cc",
+        "base/arena_allocator_test.cc",
         "base/bit_field_test.cc",
+        "base/bit_memory_region_test.cc",
         "base/bit_string_test.cc",
         "base/bit_struct_test.cc",
+        "base/bit_table_test.cc",
         "base/bit_utils_test.cc",
         "base/bit_vector_test.cc",
+        "base/file_utils_test.cc",
         "base/hash_set_test.cc",
         "base/hex_dump_test.cc",
         "base/histogram_test.cc",
+        "base/indenter_test.cc",
         "base/leb128_test.cc",
         "base/logging_test.cc",
+        "base/memory_region_test.cc",
+        "base/mem_map_test.cc",
         "base/safe_copy_test.cc",
         "base/scoped_flock_test.cc",
         "base/time_utils_test.cc",
@@ -108,6 +172,7 @@ art_cc_test {
         "base/unix_file/fd_file_test.cc",
         "base/utils_test.cc",
         "base/variant_map_test.cc",
+        "base/zip_archive_test.cc",
     ],
     shared_libs: [
         "libbase",

@@ -286,6 +286,17 @@ struct SubtypeCheck {
     return SubtypeCheckInfo::kUninitialized;
   }
 
+  // Retrieve the state of this class's SubtypeCheckInfo.
+  //
+  // Cost: O(Depth(Class)).
+  //
+  // Returns: The precise SubtypeCheckInfo::State.
+  static SubtypeCheckInfo::State GetState(ClassPtr klass)
+      REQUIRES(Locks::subtype_check_lock_)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    return GetSubtypeCheckInfo(klass).GetState();
+  }
+
   // Retrieve the path to root bitstring as a plain uintN_t value that is amenable to
   // be used by a fast check "encoded_src & mask_target == encoded_target".
   //
@@ -308,8 +319,9 @@ struct SubtypeCheck {
   static BitString::StorageType GetEncodedPathToRootForTarget(ClassPtr klass)
       REQUIRES(Locks::subtype_check_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK_EQ(SubtypeCheckInfo::kAssigned, GetSubtypeCheckInfo(klass).GetState());
-    return GetSubtypeCheckInfo(klass).GetEncodedPathToRoot();
+    SubtypeCheckInfo sci = GetSubtypeCheckInfo(klass);
+    DCHECK_EQ(SubtypeCheckInfo::kAssigned, sci.GetState());
+    return sci.GetEncodedPathToRoot();
   }
 
   // Retrieve the path to root bitstring mask as a plain uintN_t value that is amenable to
@@ -321,8 +333,9 @@ struct SubtypeCheck {
   static BitString::StorageType GetEncodedPathToRootMask(ClassPtr klass)
       REQUIRES(Locks::subtype_check_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK_EQ(SubtypeCheckInfo::kAssigned, GetSubtypeCheckInfo(klass).GetState());
-    return GetSubtypeCheckInfo(klass).GetEncodedPathToRootMask();
+    SubtypeCheckInfo sci = GetSubtypeCheckInfo(klass);
+    DCHECK_EQ(SubtypeCheckInfo::kAssigned, sci.GetState());
+    return sci.GetEncodedPathToRootMask();
   }
 
   // Is the source class a subclass of the target?
@@ -529,15 +542,17 @@ struct SubtypeCheck {
                                                    int32_t new_value)
       REQUIRES_SHARED(Locks::mutator_lock_) {
     if (Runtime::Current() != nullptr && Runtime::Current()->IsActiveTransaction()) {
-      return klass->template
-          CasFieldWeakSequentiallyConsistent32</*kTransactionActive*/true>(offset,
-                                                                           old_value,
-                                                                           new_value);
+      return klass->template CasField32</*kTransactionActive*/true>(offset,
+                                                                    old_value,
+                                                                    new_value,
+                                                                    CASMode::kWeak,
+                                                                    std::memory_order_seq_cst);
     } else {
-      return klass->template
-          CasFieldWeakSequentiallyConsistent32</*kTransactionActive*/false>(offset,
-                                                                            old_value,
-                                                                            new_value);
+      return klass->template CasField32</*kTransactionActive*/false>(offset,
+                                                                     old_value,
+                                                                     new_value,
+                                                                     CASMode::kWeak,
+                                                                     std::memory_order_seq_cst);
     }
   }
 

@@ -70,19 +70,19 @@ static bool MayHaveReorderingDependency(SideEffects node, SideEffects other) {
   return false;
 }
 
-size_t SchedulingGraph::ArrayAccessHeapLocation(HInstruction* array, HInstruction* index) const {
+size_t SchedulingGraph::ArrayAccessHeapLocation(HInstruction* instruction) const {
   DCHECK(heap_location_collector_ != nullptr);
-  size_t heap_loc = heap_location_collector_->GetArrayHeapLocation(array, index);
+  size_t heap_loc = heap_location_collector_->GetArrayHeapLocation(instruction);
   // This array access should be analyzed and added to HeapLocationCollector before.
   DCHECK(heap_loc != HeapLocationCollector::kHeapLocationNotFound);
   return heap_loc;
 }
 
-bool SchedulingGraph::ArrayAccessMayAlias(const HInstruction* node,
-                                          const HInstruction* other) const {
+bool SchedulingGraph::ArrayAccessMayAlias(HInstruction* node,
+                                          HInstruction* other) const {
   DCHECK(heap_location_collector_ != nullptr);
-  size_t node_heap_loc = ArrayAccessHeapLocation(node->InputAt(0), node->InputAt(1));
-  size_t other_heap_loc = ArrayAccessHeapLocation(other->InputAt(0), other->InputAt(1));
+  size_t node_heap_loc = ArrayAccessHeapLocation(node);
+  size_t other_heap_loc = ArrayAccessHeapLocation(other);
 
   // For example: arr[0] and arr[0]
   if (node_heap_loc == other_heap_loc) {
@@ -194,8 +194,8 @@ bool SchedulingGraph::FieldAccessMayAlias(const HInstruction* node,
   return true;
 }
 
-bool SchedulingGraph::HasMemoryDependency(const HInstruction* node,
-                                          const HInstruction* other) const {
+bool SchedulingGraph::HasMemoryDependency(HInstruction* node,
+                                          HInstruction* other) const {
   if (!MayHaveReorderingDependency(node->GetSideEffects(), other->GetSideEffects())) {
     return false;
   }
@@ -264,8 +264,8 @@ bool SchedulingGraph::HasExceptionDependency(const HInstruction* node,
 
 // Check whether `node` depends on `other`, taking into account `SideEffect`
 // information and `CanThrow` information.
-bool SchedulingGraph::HasSideEffectDependency(const HInstruction* node,
-                                              const HInstruction* other) const {
+bool SchedulingGraph::HasSideEffectDependency(HInstruction* node,
+                                              HInstruction* other) const {
   if (HasMemoryDependency(node, other)) {
     return true;
   }
@@ -667,7 +667,8 @@ bool HScheduler::IsSchedulable(const HInstruction* instruction) const {
   // HUnaryOperation (or HBinaryOperation), check in debug mode that we have
   // the exhaustive lists here.
   if (instruction->IsUnaryOperation()) {
-    DCHECK(instruction->IsBooleanNot() ||
+    DCHECK(instruction->IsAbs() ||
+           instruction->IsBooleanNot() ||
            instruction->IsNot() ||
            instruction->IsNeg()) << "unexpected instruction " << instruction->DebugName();
     return true;
@@ -678,6 +679,8 @@ bool HScheduler::IsSchedulable(const HInstruction* instruction) const {
            instruction->IsCompare() ||
            instruction->IsCondition() ||
            instruction->IsDiv() ||
+           instruction->IsMin() ||
+           instruction->IsMax() ||
            instruction->IsMul() ||
            instruction->IsOr() ||
            instruction->IsRem() ||
@@ -771,7 +774,7 @@ bool HScheduler::IsSchedulingBarrier(const HInstruction* instr) const {
       instr->IsSuspendCheck();
 }
 
-void HInstructionScheduling::Run(bool only_optimize_loop_blocks,
+bool HInstructionScheduling::Run(bool only_optimize_loop_blocks,
                                  bool schedule_randomly) {
 #if defined(ART_ENABLE_CODEGEN_arm64) || defined(ART_ENABLE_CODEGEN_arm)
   // Phase-local allocator that allocates scheduler internal data structures like
@@ -811,6 +814,7 @@ void HInstructionScheduling::Run(bool only_optimize_loop_blocks,
     default:
       break;
   }
+  return true;
 }
 
 }  // namespace art

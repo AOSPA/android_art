@@ -36,7 +36,6 @@
 #include "object-inl.h"
 #include "object_array.h"
 #include "read_barrier-inl.h"
-#include "reference-inl.h"
 #include "runtime.h"
 #include "string.h"
 
@@ -146,6 +145,7 @@ inline ArraySlice<ArtMethod> Class::GetDeclaredMethodsSliceUnchecked(PointerSize
                                        GetDirectMethodsStartOffset(),
                                        GetCopiedMethodsStartOffset());
 }
+
 template<VerifyObjectFlags kVerifyFlags>
 inline ArraySlice<ArtMethod> Class::GetDeclaredVirtualMethodsSlice(PointerSize pointer_size) {
   DCHECK(IsLoaded() || IsErroneous());
@@ -282,8 +282,7 @@ inline ArtMethod* Class::GetVirtualMethodUnchecked(size_t i, PointerSize pointer
   return &GetVirtualMethodsSliceUnchecked(pointer_size)[i];
 }
 
-template<VerifyObjectFlags kVerifyFlags,
-         ReadBarrierOption kReadBarrierOption>
+template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
 inline PointerArray* Class::GetVTable() {
   DCHECK(IsLoaded<kVerifyFlags>() || IsErroneous<kVerifyFlags>());
   return GetFieldObject<PointerArray, kVerifyFlags, kReadBarrierOption>(
@@ -295,7 +294,7 @@ inline PointerArray* Class::GetVTableDuringLinking() {
   return GetFieldObject<PointerArray>(OFFSET_OF_OBJECT_MEMBER(Class, vtable_));
 }
 
-inline void Class::SetVTable(PointerArray* new_vtable) {
+inline void Class::SetVTable(ObjPtr<PointerArray> new_vtable) {
   SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(Class, vtable_), new_vtable);
 }
 
@@ -303,8 +302,7 @@ inline bool Class::HasVTable() {
   return GetVTable() != nullptr || ShouldHaveEmbeddedVTable();
 }
 
-  template<VerifyObjectFlags kVerifyFlags,
-           ReadBarrierOption kReadBarrierOption>
+template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
 inline int32_t Class::GetVTableLength() {
   if (ShouldHaveEmbeddedVTable<kVerifyFlags, kReadBarrierOption>()) {
     return GetEmbeddedVTableLength();
@@ -313,15 +311,15 @@ inline int32_t Class::GetVTableLength() {
       GetVTable<kVerifyFlags, kReadBarrierOption>()->GetLength() : 0;
 }
 
-  template<VerifyObjectFlags kVerifyFlags,
-           ReadBarrierOption kReadBarrierOption>
+template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
 inline ArtMethod* Class::GetVTableEntry(uint32_t i, PointerSize pointer_size) {
   if (ShouldHaveEmbeddedVTable<kVerifyFlags, kReadBarrierOption>()) {
     return GetEmbeddedVTableEntry(i, pointer_size);
   }
   auto* vtable = GetVTable<kVerifyFlags, kReadBarrierOption>();
   DCHECK(vtable != nullptr);
-  return vtable->template GetElementPtrSize<ArtMethod*, kVerifyFlags, kReadBarrierOption>(i, pointer_size);
+  return vtable->template GetElementPtrSize<ArtMethod*, kVerifyFlags, kReadBarrierOption>(
+      i, pointer_size);
 }
 
 inline int32_t Class::GetEmbeddedVTableLength() {
@@ -411,7 +409,7 @@ inline void Class::SetObjectSize(uint32_t new_object_size) {
 //   Object[]         = int[] --> false
 //
 inline bool Class::IsArrayAssignableFromArray(ObjPtr<Class> src) {
-  DCHECK(IsArrayClass())  << PrettyClass();
+  DCHECK(IsArrayClass()) << PrettyClass();
   DCHECK(src->IsArrayClass()) << src->PrettyClass();
   return GetComponentType()->IsAssignableFrom(src->GetComponentType());
 }
@@ -488,7 +486,7 @@ inline bool Class::ResolvedMethodAccessTest(ObjPtr<Class> access_to,
     if (UNLIKELY(!this->CanAccess(dex_access_to))) {
       if (throw_on_failure) {
         ThrowIllegalAccessErrorClassForMethodDispatch(this,
-                                                      dex_access_to.Ptr(),
+                                                      dex_access_to,
                                                       method,
                                                       throw_invoke_type);
       }
@@ -623,16 +621,14 @@ inline ArtMethod* Class::FindVirtualMethodForVirtualOrInterface(ArtMethod* metho
   return FindVirtualMethodForVirtual(method, pointer_size);
 }
 
-template<VerifyObjectFlags kVerifyFlags,
-         ReadBarrierOption kReadBarrierOption>
+template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
 inline IfTable* Class::GetIfTable() {
   ObjPtr<IfTable> ret = GetFieldObject<IfTable, kVerifyFlags, kReadBarrierOption>(IfTableOffset());
   DCHECK(ret != nullptr) << PrettyClass(this);
   return ret.Ptr();
 }
 
-template<VerifyObjectFlags kVerifyFlags,
-         ReadBarrierOption kReadBarrierOption>
+template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
 inline int32_t Class::GetIfTableCount() {
   return GetIfTable<kVerifyFlags, kReadBarrierOption>()->Count();
 }
@@ -735,7 +731,7 @@ inline String* Class::GetName() {
 }
 
 inline void Class::SetName(ObjPtr<String> name) {
-    SetFieldObjectTransaction(OFFSET_OF_OBJECT_MEMBER(Class, name_), name);
+  SetFieldObjectTransaction(OFFSET_OF_OBJECT_MEMBER(Class, name_), name);
 }
 
 template<VerifyObjectFlags kVerifyFlags>
@@ -801,7 +797,7 @@ inline ObjPtr<Object> Class::Alloc(Thread* self, gc::AllocatorType allocator_typ
       obj = nullptr;
     }
   }
-  return obj.Ptr();
+  return obj;
 }
 
 inline ObjPtr<Object> Class::AllocObject(Thread* self) {
@@ -857,11 +853,6 @@ inline uint32_t Class::ComputeClassSize(bool has_embedded_vtable,
   return size;
 }
 
-template<ReadBarrierOption kReadBarrierOption>
-inline bool Class::IsReferenceClass() const {
-  return this == Reference::GetJavaLangRefReference<kReadBarrierOption>();
-}
-
 template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
 inline bool Class::IsClassClass() {
   ObjPtr<Class> java_lang_Class = GetClass<kVerifyFlags, kReadBarrierOption>()->
@@ -893,8 +884,8 @@ inline bool Class::DescriptorEquals(const char* match) {
 inline void Class::AssertInitializedOrInitializingInThread(Thread* self) {
   if (kIsDebugBuild && !IsInitialized()) {
     CHECK(IsInitializing()) << PrettyClass() << " is not initializing: " << GetStatus();
-    CHECK_EQ(GetClinitThreadId(), self->GetTid()) << PrettyClass()
-                                                  << " is initializing in a different thread";
+    CHECK_EQ(GetClinitThreadId(), self->GetTid())
+        << PrettyClass() << " is initializing in a different thread";
   }
 }
 
@@ -914,30 +905,6 @@ inline ObjectArray<ObjectArray<Class>>* Class::GetProxyThrows() {
   DCHECK_STREQ(field->GetName(), "throws");
   MemberOffset field_offset = field->GetOffset();
   return GetFieldObject<ObjectArray<ObjectArray<Class>>>(field_offset);
-}
-
-inline MemberOffset Class::GetDisableIntrinsicFlagOffset() {
-  CHECK(IsReferenceClass());
-  // First static field
-  auto* field = GetStaticField(0);
-  DCHECK_STREQ(field->GetName(), "disableIntrinsic");
-  return field->GetOffset();
-}
-
-inline MemberOffset Class::GetSlowPathFlagOffset() {
-  CHECK(IsReferenceClass());
-  // Second static field
-  auto* field = GetStaticField(1);
-  DCHECK_STREQ(field->GetName(), "slowPathEnabled");
-  return field->GetOffset();
-}
-
-inline bool Class::GetSlowPathEnabled() {
-  return GetFieldBoolean(GetSlowPathFlagOffset());
-}
-
-inline void Class::SetSlowPath(bool enabled) {
-  SetFieldBoolean<false, false>(GetSlowPathFlagOffset(), enabled);
 }
 
 inline void Class::InitializeClassVisitor::operator()(ObjPtr<Object> obj,
@@ -994,18 +961,15 @@ inline ArraySlice<ArtMethod> Class::GetDirectMethods(PointerSize pointer_size) {
   return GetDirectMethodsSliceUnchecked(pointer_size);
 }
 
-inline ArraySlice<ArtMethod> Class::GetDeclaredMethods(
-      PointerSize pointer_size) {
+inline ArraySlice<ArtMethod> Class::GetDeclaredMethods(PointerSize pointer_size) {
   return GetDeclaredMethodsSliceUnchecked(pointer_size);
 }
 
-inline ArraySlice<ArtMethod> Class::GetDeclaredVirtualMethods(
-      PointerSize pointer_size) {
+inline ArraySlice<ArtMethod> Class::GetDeclaredVirtualMethods(PointerSize pointer_size) {
   return GetDeclaredVirtualMethodsSliceUnchecked(pointer_size);
 }
 
-inline ArraySlice<ArtMethod> Class::GetVirtualMethods(
-    PointerSize pointer_size) {
+inline ArraySlice<ArtMethod> Class::GetVirtualMethods(PointerSize pointer_size) {
   CheckPointerSize(pointer_size);
   return GetVirtualMethodsSliceUnchecked(pointer_size);
 }

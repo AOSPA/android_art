@@ -28,9 +28,9 @@
 #include "base/runtime_debug.h"
 #include "debugger.h"
 #include "hidden_api.h"
-#include "java_vm_ext.h"
 #include "jit/jit.h"
-#include "jni_internal.h"
+#include "jni/java_vm_ext.h"
+#include "jni/jni_internal.h"
 #include "native_util.h"
 #include "nativehelper/jni_macros.h"
 #include "nativehelper/scoped_utf_chars.h"
@@ -100,7 +100,7 @@ class ClassSet {
   }
 
   void AddClass(ObjPtr<mirror::Class> klass) REQUIRES(Locks::mutator_lock_) {
-    class_set_.insert(self_->GetJniEnv()->AddLocalReference<jclass>(klass.Ptr()));
+    class_set_.insert(self_->GetJniEnv()->AddLocalReference<jclass>(klass));
   }
 
   const std::unordered_set<jclass>& GetClasses() const {
@@ -316,6 +316,8 @@ static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
     LOG(ERROR) << StringPrintf("Unknown bits set in runtime_flags: %#x", runtime_flags);
   }
 
+  Runtime::Current()->GetHeap()->PostForkChildAction(thread);
+
   // Update tracing.
   if (Trace::GetMethodTracingMode() != TracingMode::kTracingInactive) {
     Trace::TraceOutputMode output_mode = Trace::GetOutputMode();
@@ -346,7 +348,6 @@ static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
 
       std::string trace_file = StringPrintf("/data/misc/trace/%s.trace.bin", proc_name.c_str());
       Trace::Start(trace_file.c_str(),
-                   -1,
                    buffer_size,
                    0,   // TODO: Expose flags.
                    output_mode,

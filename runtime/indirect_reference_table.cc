@@ -16,11 +16,11 @@
 
 #include "indirect_reference_table-inl.h"
 
-#include "base/dumpable-inl.h"
+#include "base/mutator_locked_dumpable.h"
 #include "base/systrace.h"
 #include "base/utils.h"
-#include "java_vm_ext.h"
-#include "jni_internal.h"
+#include "jni/java_vm_ext.h"
+#include "jni/jni_internal.h"
 #include "nth_caller_visitor.h"
 #include "reference_table.h"
 #include "runtime.h"

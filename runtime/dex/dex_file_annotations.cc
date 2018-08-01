@@ -23,12 +23,14 @@
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "class_linker-inl.h"
+#include "class_root.h"
 #include "dex/dex_file-inl.h"
-#include "jni_internal.h"
+#include "jni/jni_internal.h"
 #include "jvalue-inl.h"
 #include "mirror/field.h"
 #include "mirror/method.h"
 #include "oat_file.h"
+#include "obj_ptr-inl.h"
 #include "reflection.h"
 #include "thread.h"
 #include "well_known_classes.h"
@@ -116,9 +118,9 @@ class ClassData {
   DISALLOW_COPY_AND_ASSIGN(ClassData);
 };
 
-mirror::Object* CreateAnnotationMember(const ClassData& klass,
-                                       Handle<mirror::Class> annotation_class,
-                                       const uint8_t** annotation)
+ObjPtr<mirror::Object> CreateAnnotationMember(const ClassData& klass,
+                                              Handle<mirror::Class> annotation_class,
+                                              const uint8_t** annotation)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
 bool IsVisibilityCompatible(uint32_t actual, uint32_t expected) {
@@ -333,7 +335,7 @@ const DexFile::AnnotationSetItem* FindAnnotationSetForClass(const ClassData& kla
   return dex_file.GetClassAnnotationSet(annotations_dir);
 }
 
-mirror::Object* ProcessEncodedAnnotation(const ClassData& klass, const uint8_t** annotation)
+ObjPtr<mirror::Object> ProcessEncodedAnnotation(const ClassData& klass, const uint8_t** annotation)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   uint32_t type_index = DecodeUnsignedLeb128(annotation);
   uint32_t size = DecodeUnsignedLeb128(annotation);
@@ -355,13 +357,13 @@ mirror::Object* ProcessEncodedAnnotation(const ClassData& klass, const uint8_t**
   }
 
   ObjPtr<mirror::Class> annotation_member_class =
-      soa.Decode<mirror::Class>(WellKnownClasses::libcore_reflect_AnnotationMember).Ptr();
-  mirror::Class* annotation_member_array_class =
-      class_linker->FindArrayClass(self, &annotation_member_class);
+      soa.Decode<mirror::Class>(WellKnownClasses::libcore_reflect_AnnotationMember);
+  ObjPtr<mirror::Class> annotation_member_array_class =
+      class_linker->FindArrayClass(self, annotation_member_class);
   if (annotation_member_array_class == nullptr) {
     return nullptr;
   }
-  mirror::ObjectArray<mirror::Object>* element_array = nullptr;
+  ObjPtr<mirror::ObjectArray<mirror::Object>> element_array = nullptr;
   if (size > 0) {
     element_array =
         mirror::ObjectArray<mirror::Object>::Alloc(self, annotation_member_array_class, size);
@@ -373,7 +375,7 @@ mirror::Object* ProcessEncodedAnnotation(const ClassData& klass, const uint8_t**
 
   Handle<mirror::ObjectArray<mirror::Object>> h_element_array(hs.NewHandle(element_array));
   for (uint32_t i = 0; i < size; ++i) {
-    mirror::Object* new_member = CreateAnnotationMember(klass, annotation_class, annotation);
+    ObjPtr<mirror::Object> new_member = CreateAnnotationMember(klass, annotation_class, annotation);
     if (new_member == nullptr) {
       return nullptr;
     }
@@ -605,7 +607,7 @@ bool ProcessAnnotationValue(const ClassData& klass,
             return false;
           }
           if (!component_type->IsPrimitive()) {
-            mirror::Object* obj = new_annotation_value.value_.GetL();
+            ObjPtr<mirror::Object> obj = new_annotation_value.value_.GetL();
             new_array->AsObjectArray<mirror::Object>()->
                 SetWithoutChecks<kTransactionActive>(i, obj);
           } else {
@@ -682,20 +684,20 @@ bool ProcessAnnotationValue(const ClassData& klass,
   *annotation_ptr = annotation;
 
   if (result_style == DexFile::kAllObjects && primitive_type != Primitive::kPrimVoid) {
-    element_object = BoxPrimitive(primitive_type, annotation_value->value_).Ptr();
+    element_object = BoxPrimitive(primitive_type, annotation_value->value_);
     set_object = true;
   }
 
   if (set_object) {
-    annotation_value->value_.SetL(element_object.Ptr());
+    annotation_value->value_.SetL(element_object);
   }
 
   return true;
 }
 
-mirror::Object* CreateAnnotationMember(const ClassData& klass,
-                                       Handle<mirror::Class> annotation_class,
-                                       const uint8_t** annotation) {
+ObjPtr<mirror::Object> CreateAnnotationMember(const ClassData& klass,
+                                              Handle<mirror::Class> annotation_class,
+                                              const uint8_t** annotation) {
   const DexFile& dex_file = klass.GetDexFile();
   Thread* self = Thread::Current();
   ScopedObjectAccessUnchecked soa(self);
@@ -799,7 +801,7 @@ const DexFile::AnnotationItem* GetAnnotationItemFromAnnotationSet(
   return nullptr;
 }
 
-mirror::Object* GetAnnotationObjectFromAnnotationSet(
+ObjPtr<mirror::Object> GetAnnotationObjectFromAnnotationSet(
     const ClassData& klass,
     const DexFile::AnnotationSetItem* annotation_set,
     uint32_t visibility,
@@ -814,11 +816,11 @@ mirror::Object* GetAnnotationObjectFromAnnotationSet(
   return ProcessEncodedAnnotation(klass, &annotation);
 }
 
-mirror::Object* GetAnnotationValue(const ClassData& klass,
-                                   const DexFile::AnnotationItem* annotation_item,
-                                   const char* annotation_name,
-                                   Handle<mirror::Class> array_class,
-                                   uint32_t expected_type)
+ObjPtr<mirror::Object> GetAnnotationValue(const ClassData& klass,
+                                          const DexFile::AnnotationItem* annotation_item,
+                                          const char* annotation_name,
+                                          Handle<mirror::Class> array_class,
+                                          uint32_t expected_type)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   const DexFile& dex_file = klass.GetDexFile();
   const uint8_t* annotation =
@@ -847,7 +849,8 @@ mirror::Object* GetAnnotationValue(const ClassData& klass,
   return annotation_value.value_.GetL();
 }
 
-mirror::ObjectArray<mirror::String>* GetSignatureValue(const ClassData& klass,
+static ObjPtr<mirror::ObjectArray<mirror::String>> GetSignatureValue(
+    const ClassData& klass,
     const DexFile::AnnotationSetItem* annotation_set)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   const DexFile& dex_file = klass.GetDexFile();
@@ -858,13 +861,10 @@ mirror::ObjectArray<mirror::String>* GetSignatureValue(const ClassData& klass,
   if (annotation_item == nullptr) {
     return nullptr;
   }
-  ObjPtr<mirror::Class> string_class = mirror::String::GetJavaLangString();
-  Handle<mirror::Class> string_array_class(hs.NewHandle(
-      Runtime::Current()->GetClassLinker()->FindArrayClass(Thread::Current(), &string_class)));
-  if (string_array_class == nullptr) {
-    return nullptr;
-  }
-  mirror::Object* obj =
+  Handle<mirror::Class> string_array_class =
+      hs.NewHandle(GetClassRoot<mirror::ObjectArray<mirror::String>>());
+  DCHECK(string_array_class != nullptr);
+  ObjPtr<mirror::Object> obj =
       GetAnnotationValue(klass, annotation_item, "value", string_array_class,
                          DexFile::kDexAnnotationArray);
   if (obj == nullptr) {
@@ -873,24 +873,22 @@ mirror::ObjectArray<mirror::String>* GetSignatureValue(const ClassData& klass,
   return obj->AsObjectArray<mirror::String>();
 }
 
-mirror::ObjectArray<mirror::Class>* GetThrowsValue(const ClassData& klass,
-                                                   const DexFile::AnnotationSetItem* annotation_set)
+ObjPtr<mirror::ObjectArray<mirror::Class>> GetThrowsValue(
+    const ClassData& klass,
+    const DexFile::AnnotationSetItem* annotation_set)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   const DexFile& dex_file = klass.GetDexFile();
-  StackHandleScope<1> hs(Thread::Current());
   const DexFile::AnnotationItem* annotation_item =
       SearchAnnotationSet(dex_file, annotation_set, "Ldalvik/annotation/Throws;",
                           DexFile::kDexVisibilitySystem);
   if (annotation_item == nullptr) {
     return nullptr;
   }
-  ObjPtr<mirror::Class> class_class = mirror::Class::GetJavaLangClass();
-  Handle<mirror::Class> class_array_class(hs.NewHandle(
-      Runtime::Current()->GetClassLinker()->FindArrayClass(Thread::Current(), &class_class)));
-  if (class_array_class == nullptr) {
-    return nullptr;
-  }
-  mirror::Object* obj =
+  StackHandleScope<1> hs(Thread::Current());
+  Handle<mirror::Class> class_array_class =
+      hs.NewHandle(GetClassRoot<mirror::ObjectArray<mirror::Class>>());
+  DCHECK(class_array_class != nullptr);
+  ObjPtr<mirror::Object> obj =
       GetAnnotationValue(klass, annotation_item, "value", class_array_class,
                          DexFile::kDexAnnotationArray);
   if (obj == nullptr) {
@@ -899,7 +897,7 @@ mirror::ObjectArray<mirror::Class>* GetThrowsValue(const ClassData& klass,
   return obj->AsObjectArray<mirror::Class>();
 }
 
-mirror::ObjectArray<mirror::Object>* ProcessAnnotationSet(
+ObjPtr<mirror::ObjectArray<mirror::Object>> ProcessAnnotationSet(
     const ClassData& klass,
     const DexFile::AnnotationSetItem* annotation_set,
     uint32_t visibility)
@@ -930,7 +928,7 @@ mirror::ObjectArray<mirror::Object>* ProcessAnnotationSet(
       continue;
     }
     const uint8_t* annotation = annotation_item->annotation_;
-    mirror::Object* annotation_obj = ProcessEncodedAnnotation(klass, &annotation);
+    ObjPtr<mirror::Object> annotation_obj = ProcessEncodedAnnotation(klass, &annotation);
     if (annotation_obj != nullptr) {
       result->SetWithoutChecks<false>(dest_index, annotation_obj);
       ++dest_index;
@@ -943,21 +941,21 @@ mirror::ObjectArray<mirror::Object>* ProcessAnnotationSet(
     return result.Get();
   }
 
-  mirror::ObjectArray<mirror::Object>* trimmed_result =
+  ObjPtr<mirror::ObjectArray<mirror::Object>> trimmed_result =
       mirror::ObjectArray<mirror::Object>::Alloc(self, annotation_array_class.Get(), dest_index);
   if (trimmed_result == nullptr) {
     return nullptr;
   }
 
   for (uint32_t i = 0; i < dest_index; ++i) {
-    mirror::Object* obj = result->GetWithoutChecks(i);
+    ObjPtr<mirror::Object> obj = result->GetWithoutChecks(i);
     trimmed_result->SetWithoutChecks<false>(i, obj);
   }
 
   return trimmed_result;
 }
 
-mirror::ObjectArray<mirror::Object>* ProcessAnnotationSetRefList(
+ObjPtr<mirror::ObjectArray<mirror::Object>> ProcessAnnotationSetRefList(
     const ClassData& klass,
     const DexFile::AnnotationSetRefList* set_ref_list,
     uint32_t size)
@@ -968,8 +966,8 @@ mirror::ObjectArray<mirror::Object>* ProcessAnnotationSetRefList(
   StackHandleScope<1> hs(self);
   ObjPtr<mirror::Class> annotation_array_class =
       soa.Decode<mirror::Class>(WellKnownClasses::java_lang_annotation_Annotation__array);
-  mirror::Class* annotation_array_array_class =
-      Runtime::Current()->GetClassLinker()->FindArrayClass(self, &annotation_array_class);
+  ObjPtr<mirror::Class> annotation_array_array_class =
+      Runtime::Current()->GetClassLinker()->FindArrayClass(self, annotation_array_class);
   if (annotation_array_array_class == nullptr) {
     return nullptr;
   }
@@ -982,8 +980,9 @@ mirror::ObjectArray<mirror::Object>* ProcessAnnotationSetRefList(
   for (uint32_t index = 0; index < size; ++index) {
     const DexFile::AnnotationSetRefItem* set_ref_item = &set_ref_list->list_[index];
     const DexFile::AnnotationSetItem* set_item = dex_file.GetSetRefItemItem(set_ref_item);
-    mirror::Object* annotation_set = ProcessAnnotationSet(klass, set_item,
-                                                          DexFile::kDexVisibilityRuntime);
+    ObjPtr<mirror::Object> annotation_set = ProcessAnnotationSet(klass,
+                                                                 set_item,
+                                                                 DexFile::kDexVisibilityRuntime);
     if (annotation_set == nullptr) {
       return nullptr;
     }
@@ -995,7 +994,8 @@ mirror::ObjectArray<mirror::Object>* ProcessAnnotationSetRefList(
 
 namespace annotations {
 
-mirror::Object* GetAnnotationForField(ArtField* field, Handle<mirror::Class> annotation_class) {
+ObjPtr<mirror::Object> GetAnnotationForField(ArtField* field,
+                                             Handle<mirror::Class> annotation_class) {
   const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForField(field);
   if (annotation_set == nullptr) {
     return nullptr;
@@ -1008,14 +1008,14 @@ mirror::Object* GetAnnotationForField(ArtField* field, Handle<mirror::Class> ann
                                               annotation_class);
 }
 
-mirror::ObjectArray<mirror::Object>* GetAnnotationsForField(ArtField* field) {
+ObjPtr<mirror::ObjectArray<mirror::Object>> GetAnnotationsForField(ArtField* field) {
   const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForField(field);
   StackHandleScope<1> hs(Thread::Current());
   const ClassData field_class(hs, field);
   return ProcessAnnotationSet(field_class, annotation_set, DexFile::kDexVisibilityRuntime);
 }
 
-mirror::ObjectArray<mirror::String>* GetSignatureAnnotationForField(ArtField* field) {
+ObjPtr<mirror::ObjectArray<mirror::String>> GetSignatureAnnotationForField(ArtField* field) {
   const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForField(field);
   if (annotation_set == nullptr) {
     return nullptr;
@@ -1037,7 +1037,7 @@ bool IsFieldAnnotationPresent(ArtField* field, Handle<mirror::Class> annotation_
   return annotation_item != nullptr;
 }
 
-mirror::Object* GetAnnotationDefaultValue(ArtMethod* method) {
+ObjPtr<mirror::Object> GetAnnotationDefaultValue(ArtMethod* method) {
   const ClassData klass(method);
   const DexFile* dex_file = &klass.GetDexFile();
   const DexFile::AnnotationsDirectoryItem* annotations_dir =
@@ -1081,7 +1081,8 @@ mirror::Object* GetAnnotationDefaultValue(ArtMethod* method) {
   return annotation_value.value_.GetL();
 }
 
-mirror::Object* GetAnnotationForMethod(ArtMethod* method, Handle<mirror::Class> annotation_class) {
+ObjPtr<mirror::Object> GetAnnotationForMethod(ArtMethod* method,
+                                              Handle<mirror::Class> annotation_class) {
   const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForMethod(method);
   if (annotation_set == nullptr) {
     return nullptr;
@@ -1090,14 +1091,14 @@ mirror::Object* GetAnnotationForMethod(ArtMethod* method, Handle<mirror::Class> 
                                               DexFile::kDexVisibilityRuntime, annotation_class);
 }
 
-mirror::ObjectArray<mirror::Object>* GetAnnotationsForMethod(ArtMethod* method) {
+ObjPtr<mirror::ObjectArray<mirror::Object>> GetAnnotationsForMethod(ArtMethod* method) {
   const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForMethod(method);
   return ProcessAnnotationSet(ClassData(method),
                               annotation_set,
                               DexFile::kDexVisibilityRuntime);
 }
 
-mirror::ObjectArray<mirror::Class>* GetExceptionTypesForMethod(ArtMethod* method) {
+ObjPtr<mirror::ObjectArray<mirror::Class>> GetExceptionTypesForMethod(ArtMethod* method) {
   const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForMethod(method);
   if (annotation_set == nullptr) {
     return nullptr;
@@ -1105,7 +1106,7 @@ mirror::ObjectArray<mirror::Class>* GetExceptionTypesForMethod(ArtMethod* method
   return GetThrowsValue(ClassData(method), annotation_set);
 }
 
-mirror::ObjectArray<mirror::Object>* GetParameterAnnotations(ArtMethod* method) {
+ObjPtr<mirror::ObjectArray<mirror::Object>> GetParameterAnnotations(ArtMethod* method) {
   const DexFile* dex_file = method->GetDexFile();
   const DexFile::ParameterAnnotationsItem* parameter_annotations =
       FindAnnotationsItemForMethod(method);
@@ -1136,9 +1137,9 @@ uint32_t GetNumberOfAnnotatedMethodParameters(ArtMethod* method) {
   return set_ref_list->size_;
 }
 
-mirror::Object* GetAnnotationForMethodParameter(ArtMethod* method,
-                                                uint32_t parameter_idx,
-                                                Handle<mirror::Class> annotation_class) {
+ObjPtr<mirror::Object> GetAnnotationForMethodParameter(ArtMethod* method,
+                                                       uint32_t parameter_idx,
+                                                       Handle<mirror::Class> annotation_class) {
   const DexFile* dex_file = method->GetDexFile();
   const DexFile::ParameterAnnotationsItem* parameter_annotations =
       FindAnnotationsItemForMethod(method);
@@ -1165,9 +1166,10 @@ mirror::Object* GetAnnotationForMethodParameter(ArtMethod* method,
                                               annotation_class);
 }
 
-bool GetParametersMetadataForMethod(ArtMethod* method,
-                                    MutableHandle<mirror::ObjectArray<mirror::String>>* names,
-                                    MutableHandle<mirror::IntArray>* access_flags) {
+bool GetParametersMetadataForMethod(
+    ArtMethod* method,
+    /*out*/ MutableHandle<mirror::ObjectArray<mirror::String>>* names,
+    /*out*/ MutableHandle<mirror::IntArray>* access_flags) {
   const DexFile::AnnotationSetItem* annotation_set =
       FindAnnotationSetForMethod(method);
   if (annotation_set == nullptr) {
@@ -1187,12 +1189,10 @@ bool GetParametersMetadataForMethod(ArtMethod* method,
   StackHandleScope<4> hs(Thread::Current());
 
   // Extract the parameters' names String[].
-  ObjPtr<mirror::Class> string_class = mirror::String::GetJavaLangString();
-  Handle<mirror::Class> string_array_class(hs.NewHandle(
-      Runtime::Current()->GetClassLinker()->FindArrayClass(Thread::Current(), &string_class)));
-  if (UNLIKELY(string_array_class == nullptr)) {
-    return false;
-  }
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+  Handle<mirror::Class> string_array_class =
+      hs.NewHandle(GetClassRoot<mirror::ObjectArray<mirror::String>>(class_linker));
+  DCHECK(string_array_class != nullptr);
 
   ClassData data(method);
   Handle<mirror::Object> names_obj =
@@ -1206,10 +1206,8 @@ bool GetParametersMetadataForMethod(ArtMethod* method,
   }
 
   // Extract the parameters' access flags int[].
-  Handle<mirror::Class> int_array_class(hs.NewHandle(mirror::IntArray::GetArrayClass()));
-  if (UNLIKELY(int_array_class == nullptr)) {
-    return false;
-  }
+  Handle<mirror::Class> int_array_class(hs.NewHandle(GetClassRoot<mirror::IntArray>(class_linker)));
+  DCHECK(int_array_class != nullptr);
   Handle<mirror::Object> access_flags_obj =
       hs.NewHandle(GetAnnotationValue(data,
                                       annotation_item,
@@ -1220,12 +1218,12 @@ bool GetParametersMetadataForMethod(ArtMethod* method,
     return false;
   }
 
-  names->Assign(names_obj.Get()->AsObjectArray<mirror::String>());
-  access_flags->Assign(access_flags_obj.Get()->AsIntArray());
+  names->Assign(names_obj->AsObjectArray<mirror::String>());
+  access_flags->Assign(access_flags_obj->AsIntArray());
   return true;
 }
 
-mirror::ObjectArray<mirror::String>* GetSignatureAnnotationForMethod(ArtMethod* method) {
+ObjPtr<mirror::ObjectArray<mirror::String>> GetSignatureAnnotationForMethod(ArtMethod* method) {
   const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForMethod(method);
   if (annotation_set == nullptr) {
     return nullptr;
@@ -1307,8 +1305,8 @@ uint32_t GetNativeMethodAnnotationAccessFlags(const DexFile& dex_file,
   return access_flags;
 }
 
-mirror::Object* GetAnnotationForClass(Handle<mirror::Class> klass,
-                                      Handle<mirror::Class> annotation_class) {
+ObjPtr<mirror::Object> GetAnnotationForClass(Handle<mirror::Class> klass,
+                                             Handle<mirror::Class> annotation_class) {
   ClassData data(klass);
   const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
   if (annotation_set == nullptr) {
@@ -1320,13 +1318,13 @@ mirror::Object* GetAnnotationForClass(Handle<mirror::Class> klass,
                                               annotation_class);
 }
 
-mirror::ObjectArray<mirror::Object>* GetAnnotationsForClass(Handle<mirror::Class> klass) {
+ObjPtr<mirror::ObjectArray<mirror::Object>> GetAnnotationsForClass(Handle<mirror::Class> klass) {
   ClassData data(klass);
   const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
   return ProcessAnnotationSet(data, annotation_set, DexFile::kDexVisibilityRuntime);
 }
 
-mirror::ObjectArray<mirror::Class>* GetDeclaredClasses(Handle<mirror::Class> klass) {
+ObjPtr<mirror::ObjectArray<mirror::Class>> GetDeclaredClasses(Handle<mirror::Class> klass) {
   ClassData data(klass);
   const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
   if (annotation_set == nullptr) {
@@ -1339,13 +1337,10 @@ mirror::ObjectArray<mirror::Class>* GetDeclaredClasses(Handle<mirror::Class> kla
     return nullptr;
   }
   StackHandleScope<1> hs(Thread::Current());
-  ObjPtr<mirror::Class> class_class = mirror::Class::GetJavaLangClass();
-  Handle<mirror::Class> class_array_class(hs.NewHandle(
-      Runtime::Current()->GetClassLinker()->FindArrayClass(hs.Self(), &class_class)));
-  if (class_array_class == nullptr) {
-    return nullptr;
-  }
-  mirror::Object* obj =
+  Handle<mirror::Class> class_array_class =
+      hs.NewHandle(GetClassRoot<mirror::ObjectArray<mirror::Class>>());
+  DCHECK(class_array_class != nullptr);
+  ObjPtr<mirror::Object> obj =
       GetAnnotationValue(data, annotation_item, "value", class_array_class,
                          DexFile::kDexAnnotationArray);
   if (obj == nullptr) {
@@ -1354,7 +1349,7 @@ mirror::ObjectArray<mirror::Class>* GetDeclaredClasses(Handle<mirror::Class> kla
   return obj->AsObjectArray<mirror::Class>();
 }
 
-mirror::Class* GetDeclaringClass(Handle<mirror::Class> klass) {
+ObjPtr<mirror::Class> GetDeclaringClass(Handle<mirror::Class> klass) {
   ClassData data(klass);
   const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
   if (annotation_set == nullptr) {
@@ -1366,17 +1361,19 @@ mirror::Class* GetDeclaringClass(Handle<mirror::Class> klass) {
   if (annotation_item == nullptr) {
     return nullptr;
   }
-  mirror::Object* obj = GetAnnotationValue(data, annotation_item, "value",
-                                           ScopedNullHandle<mirror::Class>(),
-                                           DexFile::kDexAnnotationType);
+  ObjPtr<mirror::Object> obj = GetAnnotationValue(data,
+                                                  annotation_item,
+                                                  "value",
+                                                  ScopedNullHandle<mirror::Class>(),
+                                                  DexFile::kDexAnnotationType);
   if (obj == nullptr) {
     return nullptr;
   }
   return obj->AsClass();
 }
 
-mirror::Class* GetEnclosingClass(Handle<mirror::Class> klass) {
-  mirror::Class* declaring_class = GetDeclaringClass(klass);
+ObjPtr<mirror::Class> GetEnclosingClass(Handle<mirror::Class> klass) {
+  ObjPtr<mirror::Class> declaring_class = GetDeclaringClass(klass);
   if (declaring_class != nullptr) {
     return declaring_class;
   }
@@ -1420,7 +1417,7 @@ mirror::Class* GetEnclosingClass(Handle<mirror::Class> klass) {
   return method->GetDeclaringClass();
 }
 
-mirror::Object* GetEnclosingMethod(Handle<mirror::Class> klass) {
+ObjPtr<mirror::Object> GetEnclosingMethod(Handle<mirror::Class> klass) {
   ClassData data(klass);
   const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
   if (annotation_set == nullptr) {
@@ -1438,7 +1435,7 @@ mirror::Object* GetEnclosingMethod(Handle<mirror::Class> klass) {
       DexFile::kDexAnnotationMethod);
 }
 
-bool GetInnerClass(Handle<mirror::Class> klass, mirror::String** name) {
+bool GetInnerClass(Handle<mirror::Class> klass, /*out*/ ObjPtr<mirror::String>* name) {
   ClassData data(klass);
   const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
   if (annotation_set == nullptr) {
@@ -1505,7 +1502,8 @@ bool GetInnerClassFlags(Handle<mirror::Class> klass, uint32_t* flags) {
   return true;
 }
 
-mirror::ObjectArray<mirror::String>* GetSignatureAnnotationForClass(Handle<mirror::Class> klass) {
+ObjPtr<mirror::ObjectArray<mirror::String>> GetSignatureAnnotationForClass(
+    Handle<mirror::Class> klass) {
   ClassData data(klass);
   const DexFile::AnnotationSetItem* annotation_set = FindAnnotationSetForClass(data);
   if (annotation_set == nullptr) {
