@@ -28,6 +28,7 @@
 #include "base/atomic.h"
 #include "base/histogram.h"
 #include "base/macros.h"
+#include "base/mem_map.h"
 #include "base/mutex.h"
 #include "base/safe_map.h"
 
@@ -39,7 +40,6 @@ class LinearAlloc;
 class InlineCache;
 class IsMarkedVisitor;
 class JitJniStubTestHelper;
-class MemMap;
 class OatQuickMethodHeader;
 struct ProfileMethodInfo;
 class ProfilingInfo;
@@ -136,11 +136,7 @@ class JitCodeCache {
   uint8_t* CommitCode(Thread* self,
                       ArtMethod* method,
                       uint8_t* stack_map,
-                      uint8_t* method_info,
                       uint8_t* roots_data,
-                      size_t frame_size_in_bytes,
-                      size_t core_spill_mask,
-                      size_t fp_spill_mask,
                       const uint8_t* code,
                       size_t code_size,
                       size_t data_size,
@@ -169,11 +165,9 @@ class JitCodeCache {
   // Return the number of bytes allocated.
   size_t ReserveData(Thread* self,
                      size_t stack_map_size,
-                     size_t method_info_size,
                      size_t number_of_roots,
                      ArtMethod* method,
                      uint8_t** stack_map_data,
-                     uint8_t** method_info_data,
                      uint8_t** roots_data)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!lock_);
@@ -214,8 +208,6 @@ class JitCodeCache {
   void RemoveMethodsIn(Thread* self, const LinearAlloc& alloc)
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
-
-  void ClearAllCompiledDexCode() REQUIRES(!lock_, Locks::mutator_lock_);
 
   void CopyInlineCacheInto(const InlineCache& ic, Handle<mirror::ObjectArray<mirror::Class>> array)
       REQUIRES(!lock_)
@@ -287,8 +279,8 @@ class JitCodeCache {
 
  private:
   // Take ownership of maps.
-  JitCodeCache(MemMap* code_map,
-               MemMap* data_map,
+  JitCodeCache(MemMap&& code_map,
+               MemMap&& data_map,
                size_t initial_code_capacity,
                size_t initial_data_capacity,
                size_t max_capacity,
@@ -300,11 +292,7 @@ class JitCodeCache {
   uint8_t* CommitCodeInternal(Thread* self,
                               ArtMethod* method,
                               uint8_t* stack_map,
-                              uint8_t* method_info,
                               uint8_t* roots_data,
-                              size_t frame_size_in_bytes,
-                              size_t core_spill_mask,
-                              size_t fp_spill_mask,
                               const uint8_t* code,
                               size_t code_size,
                               size_t data_size,
@@ -325,6 +313,12 @@ class JitCodeCache {
                                           const std::vector<uint32_t>& entries)
       REQUIRES(lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // If a collection is in progress, wait for it to finish. Must be called with the mutator lock.
+  // The non-mutator lock version should be used if possible. This method will release then
+  // re-acquire the mutator lock.
+  void WaitForPotentialCollectionToCompleteRunnable(Thread* self)
+      REQUIRES(lock_, !Roles::uninterruptible_) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // If a collection is in progress, wait for it to finish. Return
   // whether the thread actually waited.
@@ -402,9 +396,9 @@ class JitCodeCache {
   // Whether there is a code cache collection in progress.
   bool collection_in_progress_ GUARDED_BY(lock_);
   // Mem map which holds code.
-  std::unique_ptr<MemMap> code_map_;
+  MemMap code_map_;
   // Mem map which holds data (stack maps and profiling info).
-  std::unique_ptr<MemMap> data_map_;
+  MemMap data_map_;
   // The opaque mspace for allocating code.
   void* code_mspace_ GUARDED_BY(lock_);
   // The opaque mspace for allocating data.

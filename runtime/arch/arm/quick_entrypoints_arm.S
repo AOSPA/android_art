@@ -656,18 +656,21 @@ ENTRY art_quick_osr_stub
 END art_quick_osr_stub
 
     /*
-     * On entry r0 is uint32_t* gprs_ and r1 is uint32_t* fprs_
+     * On entry r0 is uint32_t* gprs_ and r1 is uint32_t* fprs_.
+     * Both must reside on the stack, between current SP and target SP.
+     * The r12 (IP) shall be clobbered rather than retrieved from gprs_.
      */
 ARM_ENTRY art_quick_do_long_jump
-    vldm r1, {s0-s31}     @ load all fprs from argument fprs_
-    ldr  r2, [r0, #60]    @ r2 = r15 (PC from gprs_ 60=4*15)
-    ldr  r14, [r0, #56]   @ (LR from gprs_ 56=4*14)
-    add  r0, r0, #12      @ increment r0 to skip gprs_[0..2] 12=4*3
-    ldm  r0, {r3-r13}     @ load remaining gprs from argument gprs_
+    vldm r1, {s0-s31}     @ Load all fprs from argument fprs_.
+    mov  sp, r0           @ Make SP point to gprs_.
+                          @ Do not access fprs_ from now, they may be below SP.
+    ldm  sp, {r0-r11}     @ load r0-r11 from gprs_.
+    ldr  r12, [sp, #60]   @ Load the value of PC (r15) from gprs_ (60 = 4 * 15) into IP (r12).
+    ldr  lr, [sp, #56]    @ Load LR from gprs_, 56 = 4 * 14.
+    ldr  sp, [sp, #52]    @ Load SP from gprs_ 52 = 4 * 13.
+                          @ Do not access gprs_ from now, they are below SP.
     REFRESH_MARKING_REGISTER
-    ldr  r0, [r0, #-12]   @ load r0 value
-    mov  r1, #0           @ clear result register r1
-    bx   r2               @ do long jump
+    bx   r12              @ Do long jump.
 END art_quick_do_long_jump
 
     /*
@@ -1036,8 +1039,8 @@ END \name
 .endm
 
 ONE_ARG_SAVE_EVERYTHING_DOWNCALL_FOR_CLINIT art_quick_initialize_static_storage, artInitializeStaticStorageFromCode
-ONE_ARG_SAVE_EVERYTHING_DOWNCALL_FOR_CLINIT art_quick_initialize_type, artInitializeTypeFromCode
-ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_initialize_type_and_verify_access, artInitializeTypeAndVerifyAccessFromCode
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL_FOR_CLINIT art_quick_resolve_type, artResolveTypeFromCode
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_type_and_verify_access, artResolveTypeAndVerifyAccessFromCode
 ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_method_handle, artResolveMethodHandleFromCode
 ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_method_type, artResolveMethodTypeFromCode
 ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_string, artResolveStringFromCode
@@ -2575,6 +2578,12 @@ art_quick_read_barrier_mark_introspection_gc_roots\label_suffix:
      * The thunk also performs all the fast-path checks, so we need just the
      * slow path.
      *
+     * The UnsafeCASObject intrinsic is similar to the GC roots wide approach
+     * but using ADD (register, T3) instead of the LDR (immediate, T3), so the
+     * destination register is in bits 8-11 rather than 12-15. Therefore it has
+     * its own entrypoint, art_quick_read_barrier_mark_introspection_unsafe_cas
+     * at the offset BAKER_MARK_INTROSPECTION_UNSAFE_CAS_ENTRYPOINT_OFFSET.
+     *
      * The code structure is
      *   art_quick_read_barrier_mark_introspection:                   // @0x00
      *     Up to 32 bytes code for main entrypoint fast-path code for fields
@@ -2610,6 +2619,9 @@ art_quick_read_barrier_mark_introspection_gc_roots\label_suffix:
      *     return switch.
      *   art_quick_read_barrier_mark_introspection_arrays:            // @0x100
      *     Exactly 128 bytes for array load switch cases (16x2 instructions).
+     *   art_quick_read_barrier_mark_introspection_unsafe_cas:        // @0x180
+     *     UnsafeCASObject intrinsic entrypoint for ADD (register) encoding T3
+     *     (6 bytes). Loads the return register and jumps to the runtime call.
      */
 #if defined(USE_READ_BARRIER) && defined(USE_BAKER_READ_BARRIER)
     .balign 512
@@ -2669,7 +2681,6 @@ art_quick_read_barrier_mark_introspection_narrow:
     BRBMI_RUNTIME_CALL
     b       .Lmark_introspection_return_switch
 
-
     .balign 256
     .thumb_func
     .type art_quick_read_barrier_mark_introspection_arrays, #function
@@ -2677,6 +2688,19 @@ art_quick_read_barrier_mark_introspection_narrow:
     .global art_quick_read_barrier_mark_introspection_arrays
 art_quick_read_barrier_mark_introspection_arrays:
     BRBMI_FOR_REGISTERS BRBMI_ARRAY_LOAD, BRBMI_BKPT_FILL_8B
+
+    .balign 8
+    .thumb_func
+    .type art_quick_read_barrier_mark_introspection_unsafe_cas, #function
+    .hidden art_quick_read_barrier_mark_introspection_unsafe_cas
+    .global art_quick_read_barrier_mark_introspection_unsafe_cas
+art_quick_read_barrier_mark_introspection_unsafe_cas:
+    // Load the byte of the ADD instruction that contains Rd. Adjust for the thumb state in LR.
+    // The ADD (register, T3) is |11101011000|S|Rn|(0)imm3|Rd|imm2|type|Rm| and we're using
+    // no shift (type=0, imm2=0, imm3=0), so the byte we read here, i.e. |(0)imm3|Rd|,
+    // contains only the register number, the top 4 bits are 0.
+    ldrb    rMR, [lr, #(-1 + BAKER_MARK_INTROSPECTION_UNSAFE_CAS_ADD_OFFSET + 3)]
+    b .Lmark_introspection_runtime_call
 END art_quick_read_barrier_mark_introspection
 #else  // defined(USE_READ_BARRIER) && defined(USE_BAKER_READ_BARRIER)
 ENTRY art_quick_read_barrier_mark_introspection

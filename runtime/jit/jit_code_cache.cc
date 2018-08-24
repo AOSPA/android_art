@@ -205,15 +205,16 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
   // We could do PC-relative addressing to avoid this problem, but that
   // would require reserving code and data area before submitting, which
   // means more windows for the code memory to be RWX.
-  std::unique_ptr<MemMap> data_map(MemMap::MapAnonymous(
-      "data-code-cache", nullptr,
+  MemMap data_map = MemMap::MapAnonymous(
+      "data-code-cache",
+      /* addr */ nullptr,
       max_capacity,
       kProtData,
       /* low_4gb */ true,
       /* reuse */ false,
       &error_str,
-      use_ashmem));
-  if (data_map == nullptr) {
+      use_ashmem);
+  if (!data_map.IsValid()) {
     std::ostringstream oss;
     oss << "Failed to create read write cache: " << error_str << " size=" << max_capacity;
     *error_msg = oss.str();
@@ -229,26 +230,23 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
   size_t data_size = max_capacity / 2;
   size_t code_size = max_capacity - data_size;
   DCHECK_EQ(code_size + data_size, max_capacity);
-  uint8_t* divider = data_map->Begin() + data_size;
+  uint8_t* divider = data_map.Begin() + data_size;
 
-  MemMap* code_map = data_map->RemapAtEnd(
-      divider,
-      "jit-code-cache",
-      memmap_flags_prot_code | PROT_WRITE,
-      &error_str, use_ashmem);
-  if (code_map == nullptr) {
+  MemMap code_map = data_map.RemapAtEnd(
+      divider, "jit-code-cache", memmap_flags_prot_code | PROT_WRITE, &error_str, use_ashmem);
+  if (!code_map.IsValid()) {
     std::ostringstream oss;
     oss << "Failed to create read write execute cache: " << error_str << " size=" << max_capacity;
     *error_msg = oss.str();
     return nullptr;
   }
-  DCHECK_EQ(code_map->Begin(), divider);
+  DCHECK_EQ(code_map.Begin(), divider);
   data_size = initial_capacity / 2;
   code_size = initial_capacity - data_size;
   DCHECK_EQ(code_size + data_size, initial_capacity);
   return new JitCodeCache(
-      code_map,
-      data_map.release(),
+      std::move(code_map),
+      std::move(data_map),
       code_size,
       data_size,
       max_capacity,
@@ -256,8 +254,8 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
       memmap_flags_prot_code);
 }
 
-JitCodeCache::JitCodeCache(MemMap* code_map,
-                           MemMap* data_map,
+JitCodeCache::JitCodeCache(MemMap&& code_map,
+                           MemMap&& data_map,
                            size_t initial_code_capacity,
                            size_t initial_data_capacity,
                            size_t max_capacity,
@@ -266,8 +264,8 @@ JitCodeCache::JitCodeCache(MemMap* code_map,
     : lock_("Jit code cache", kJitCodeCacheLock),
       lock_cond_("Jit code cache condition variable", lock_),
       collection_in_progress_(false),
-      code_map_(code_map),
-      data_map_(data_map),
+      code_map_(std::move(code_map)),
+      data_map_(std::move(data_map)),
       max_capacity_(max_capacity),
       current_capacity_(initial_code_capacity + initial_data_capacity),
       code_end_(initial_code_capacity),
@@ -287,8 +285,8 @@ JitCodeCache::JitCodeCache(MemMap* code_map,
       memmap_flags_prot_code_(memmap_flags_prot_code) {
 
   DCHECK_GE(max_capacity, initial_code_capacity + initial_data_capacity);
-  code_mspace_ = create_mspace_with_base(code_map_->Begin(), code_end_, false /*locked*/);
-  data_mspace_ = create_mspace_with_base(data_map_->Begin(), data_end_, false /*locked*/);
+  code_mspace_ = create_mspace_with_base(code_map_.Begin(), code_end_, false /*locked*/);
+  data_mspace_ = create_mspace_with_base(data_map_.Begin(), data_end_, false /*locked*/);
 
   if (code_mspace_ == nullptr || data_mspace_ == nullptr) {
     PLOG(FATAL) << "create_mspace_with_base failed";
@@ -298,13 +296,13 @@ JitCodeCache::JitCodeCache(MemMap* code_map,
 
   CheckedCall(mprotect,
               "mprotect jit code cache",
-              code_map_->Begin(),
-              code_map_->Size(),
+              code_map_.Begin(),
+              code_map_.Size(),
               memmap_flags_prot_code_);
   CheckedCall(mprotect,
               "mprotect jit data cache",
-              data_map_->Begin(),
-              data_map_->Size(),
+              data_map_.Begin(),
+              data_map_.Size(),
               kProtData);
 
   VLOG(jit) << "Created jit code cache: initial data size="
@@ -316,7 +314,7 @@ JitCodeCache::JitCodeCache(MemMap* code_map,
 JitCodeCache::~JitCodeCache() {}
 
 bool JitCodeCache::ContainsPc(const void* ptr) const {
-  return code_map_->Begin() <= ptr && ptr < code_map_->End();
+  return code_map_.Begin() <= ptr && ptr < code_map_.End();
 }
 
 bool JitCodeCache::WillExecuteJitCode(ArtMethod* method) {
@@ -362,21 +360,6 @@ const void* JitCodeCache::GetJniStubCode(ArtMethod* method) {
   return nullptr;
 }
 
-void JitCodeCache::ClearAllCompiledDexCode() {
-  MutexLock mu(Thread::Current(), lock_);
-  // Get rid of OSR code waiting to be put on a thread.
-  osr_code_map_.clear();
-
-  // We don't clear out or even touch method_code_map_ since that is what we use to go the other
-  // way, move from code currently-running to the method it's from. Getting rid of it would break
-  // the jit-gc, stack-walking and signal handling. Since we never look through it to go the other
-  // way (from method -> code) everything is fine.
-
-  for (ProfilingInfo* p : profiling_infos_) {
-    p->SetSavedEntryPoint(nullptr);
-  }
-}
-
 const void* JitCodeCache::FindCompiledCodeForInstrumentation(ArtMethod* method) {
   // If jit-gc is still on we use the SavedEntryPoint field for doing that and so cannot use it to
   // find the instrumentation entrypoint.
@@ -402,8 +385,8 @@ class ScopedCodeCacheWrite : ScopedTrace {
     CheckedCall(
         mprotect,
         "make code writable",
-        code_cache_->code_map_->Begin(),
-        code_cache_->code_map_->Size(),
+        code_cache_->code_map_.Begin(),
+        code_cache_->code_map_.Size(),
         code_cache_->memmap_flags_prot_code_ | PROT_WRITE);
   }
 
@@ -412,8 +395,8 @@ class ScopedCodeCacheWrite : ScopedTrace {
     CheckedCall(
         mprotect,
         "make code protected",
-        code_cache_->code_map_->Begin(),
-        code_cache_->code_map_->Size(),
+        code_cache_->code_map_.Begin(),
+        code_cache_->code_map_.Size(),
         code_cache_->memmap_flags_prot_code_);
   }
 
@@ -426,11 +409,7 @@ class ScopedCodeCacheWrite : ScopedTrace {
 uint8_t* JitCodeCache::CommitCode(Thread* self,
                                   ArtMethod* method,
                                   uint8_t* stack_map,
-                                  uint8_t* method_info,
                                   uint8_t* roots_data,
-                                  size_t frame_size_in_bytes,
-                                  size_t core_spill_mask,
-                                  size_t fp_spill_mask,
                                   const uint8_t* code,
                                   size_t code_size,
                                   size_t data_size,
@@ -441,11 +420,7 @@ uint8_t* JitCodeCache::CommitCode(Thread* self,
   uint8_t* result = CommitCodeInternal(self,
                                        method,
                                        stack_map,
-                                       method_info,
                                        roots_data,
-                                       frame_size_in_bytes,
-                                       core_spill_mask,
-                                       fp_spill_mask,
                                        code,
                                        code_size,
                                        data_size,
@@ -459,11 +434,7 @@ uint8_t* JitCodeCache::CommitCode(Thread* self,
     result = CommitCodeInternal(self,
                                 method,
                                 stack_map,
-                                method_info,
                                 roots_data,
-                                frame_size_in_bytes,
-                                core_spill_mask,
-                                fp_spill_mask,
                                 code,
                                 code_size,
                                 data_size,
@@ -635,17 +606,17 @@ void JitCodeCache::FreeCodeAndData(const void* code_ptr) {
 
 void JitCodeCache::FreeAllMethodHeaders(
     const std::unordered_set<OatQuickMethodHeader*>& method_headers) {
-  {
-    MutexLock mu(Thread::Current(), *Locks::cha_lock_);
-    Runtime::Current()->GetClassLinker()->GetClassHierarchyAnalysis()
-        ->RemoveDependentsWithMethodHeaders(method_headers);
-  }
-
   // We need to remove entries in method_headers from CHA dependencies
   // first since once we do FreeCode() below, the memory can be reused
   // so it's possible for the same method_header to start representing
   // different compile code.
   MutexLock mu(Thread::Current(), lock_);
+  {
+    MutexLock mu2(Thread::Current(), *Locks::cha_lock_);
+    Runtime::Current()->GetClassLinker()->GetClassHierarchyAnalysis()
+        ->RemoveDependentsWithMethodHeaders(method_headers);
+  }
+
   ScopedCodeCacheWrite scc(this);
   for (const OatQuickMethodHeader* method_header : method_headers) {
     FreeCodeAndData(method_header->GetCode());
@@ -759,11 +730,7 @@ void JitCodeCache::CopyInlineCacheInto(const InlineCache& ic,
 
 static void ClearMethodCounter(ArtMethod* method, bool was_warm) {
   if (was_warm) {
-    // Don't do any read barrier, as the declaring class of `method` may
-    // be in the process of being GC'ed (reading the declaring class is done
-    // when DCHECKing the declaring class is resolved, which we know it is
-    // at this point).
-    method->SetPreviouslyWarm<kWithoutReadBarrier>();
+    method->SetPreviouslyWarm();
   }
   // We reset the counter to 1 so that the profile knows that the method was executed at least once.
   // This is required for layout purposes.
@@ -773,14 +740,22 @@ static void ClearMethodCounter(ArtMethod* method, bool was_warm) {
   method->SetCounter(std::min(jit_warmup_threshold - 1, 1));
 }
 
+void JitCodeCache::WaitForPotentialCollectionToCompleteRunnable(Thread* self) {
+  while (collection_in_progress_) {
+    lock_.Unlock(self);
+    {
+      ScopedThreadSuspension sts(self, kSuspended);
+      MutexLock mu(self, lock_);
+      WaitForPotentialCollectionToComplete(self);
+    }
+    lock_.Lock(self);
+  }
+}
+
 uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
                                           ArtMethod* method,
                                           uint8_t* stack_map,
-                                          uint8_t* method_info,
                                           uint8_t* roots_data,
-                                          size_t frame_size_in_bytes,
-                                          size_t core_spill_mask,
-                                          size_t fp_spill_mask,
                                           const uint8_t* code,
                                           size_t code_size,
                                           size_t data_size,
@@ -790,6 +765,13 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
                                           const ArenaSet<ArtMethod*>&
                                               cha_single_implementation_list) {
   DCHECK(!method->IsNative() || !osr);
+
+  if (!method->IsNative()) {
+    // We need to do this before grabbing the lock_ because it needs to be able to see the string
+    // InternTable. Native methods do not have roots.
+    DCheckRootsAreValid(roots);
+  }
+
   size_t alignment = GetInstructionSetAlignment(kRuntimeISA);
   // Ensure the header ends up at expected instruction alignment.
   size_t header_size = RoundUp(sizeof(OatQuickMethodHeader), alignment);
@@ -798,48 +780,45 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
   OatQuickMethodHeader* method_header = nullptr;
   uint8_t* code_ptr = nullptr;
   uint8_t* memory = nullptr;
+  MutexLock mu(self, lock_);
+  // We need to make sure that there will be no jit-gcs going on and wait for any ongoing one to
+  // finish.
+  WaitForPotentialCollectionToCompleteRunnable(self);
   {
-    ScopedThreadSuspension sts(self, kSuspended);
-    MutexLock mu(self, lock_);
-    WaitForPotentialCollectionToComplete(self);
-    {
-      ScopedCodeCacheWrite scc(this);
-      memory = AllocateCode(total_size);
-      if (memory == nullptr) {
-        return nullptr;
-      }
-      code_ptr = memory + header_size;
+    ScopedCodeCacheWrite scc(this);
+    memory = AllocateCode(total_size);
+    if (memory == nullptr) {
+      return nullptr;
+    }
+    code_ptr = memory + header_size;
 
-      std::copy(code, code + code_size, code_ptr);
-      method_header = OatQuickMethodHeader::FromCodePointer(code_ptr);
-      new (method_header) OatQuickMethodHeader(
-          (stack_map != nullptr) ? code_ptr - stack_map : 0u,
-          (method_info != nullptr) ? code_ptr - method_info : 0u,
-          frame_size_in_bytes,
-          core_spill_mask,
-          fp_spill_mask,
-          code_size);
-      // Flush caches before we remove write permission because some ARMv8 Qualcomm kernels may
-      // trigger a segfault if a page fault occurs when requesting a cache maintenance operation.
-      // This is a kernel bug that we need to work around until affected devices (e.g. Nexus 5X and
-      // 6P) stop being supported or their kernels are fixed.
-      //
-      // For reference, this behavior is caused by this commit:
-      // https://android.googlesource.com/kernel/msm/+/3fbe6bc28a6b9939d0650f2f17eb5216c719950c
-      FlushInstructionCache(reinterpret_cast<char*>(code_ptr),
-                            reinterpret_cast<char*>(code_ptr + code_size));
-      DCHECK(!Runtime::Current()->IsAotCompiler());
-      if (has_should_deoptimize_flag) {
-        method_header->SetHasShouldDeoptimizeFlag();
-      }
+    std::copy(code, code + code_size, code_ptr);
+    method_header = OatQuickMethodHeader::FromCodePointer(code_ptr);
+    new (method_header) OatQuickMethodHeader(
+        (stack_map != nullptr) ? code_ptr - stack_map : 0u,
+        code_size);
+    // Flush caches before we remove write permission because some ARMv8 Qualcomm kernels may
+    // trigger a segfault if a page fault occurs when requesting a cache maintenance operation.
+    // This is a kernel bug that we need to work around until affected devices (e.g. Nexus 5X and
+    // 6P) stop being supported or their kernels are fixed.
+    //
+    // For reference, this behavior is caused by this commit:
+    // https://android.googlesource.com/kernel/msm/+/3fbe6bc28a6b9939d0650f2f17eb5216c719950c
+    FlushInstructionCache(reinterpret_cast<char*>(code_ptr),
+                          reinterpret_cast<char*>(code_ptr + code_size));
+    DCHECK(!Runtime::Current()->IsAotCompiler());
+    if (has_should_deoptimize_flag) {
+      method_header->SetHasShouldDeoptimizeFlag();
     }
 
     number_of_compilations_++;
   }
   // We need to update the entry point in the runnable state for the instrumentation.
   {
-    // Need cha_lock_ for checking all single-implementation flags and register
-    // dependencies.
+    // The following needs to be guarded by cha_lock_ also. Otherwise it's possible that the
+    // compiled code is considered invalidated by some class linking, but below we still make the
+    // compiled code valid for the method.  Need cha_lock_ for checking all single-implementation
+    // flags and register dependencies.
     MutexLock cha_mu(self, *Locks::cha_lock_);
     bool single_impl_still_valid = true;
     for (ArtMethod* single_impl : cha_single_implementation_list) {
@@ -865,16 +844,6 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
           single_impl, method, method_header);
     }
 
-    if (!method->IsNative()) {
-      // We need to do this before grabbing the lock_ because it needs to be able to see the string
-      // InternTable. Native methods do not have roots.
-      DCheckRootsAreValid(roots);
-    }
-
-    // The following needs to be guarded by cha_lock_ also. Otherwise it's
-    // possible that the compiled code is considered invalidated by some class linking,
-    // but below we still make the compiled code valid for the method.
-    MutexLock mu(self, lock_);
     if (UNLIKELY(method->IsNative())) {
       auto it = jni_stubs_map_.find(JniStubKey(method));
       DCHECK(it != jni_stubs_map_.end())
@@ -905,11 +874,6 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
         Runtime::Current()->GetInstrumentation()->UpdateMethodsCode(
             method, method_header->GetEntryPoint());
       }
-    }
-    if (collection_in_progress_) {
-      // We need to update the live bitmap if there is a GC to ensure it sees this new
-      // code.
-      GetLiveBitmap()->AtomicTestAndSet(FromCodeToAllocation(code_ptr));
     }
     VLOG(jit)
         << "JIT added (osr=" << std::boolalpha << osr << std::noboolalpha << ") "
@@ -1080,14 +1044,12 @@ void JitCodeCache::ClearData(Thread* self,
 
 size_t JitCodeCache::ReserveData(Thread* self,
                                  size_t stack_map_size,
-                                 size_t method_info_size,
                                  size_t number_of_roots,
                                  ArtMethod* method,
                                  uint8_t** stack_map_data,
-                                 uint8_t** method_info_data,
                                  uint8_t** roots_data) {
   size_t table_size = ComputeRootTableSize(number_of_roots);
-  size_t size = RoundUp(stack_map_size + method_info_size + table_size, sizeof(void*));
+  size_t size = RoundUp(stack_map_size + table_size, sizeof(void*));
   uint8_t* result = nullptr;
 
   {
@@ -1117,13 +1079,11 @@ size_t JitCodeCache::ReserveData(Thread* self,
   if (result != nullptr) {
     *roots_data = result;
     *stack_map_data = result + table_size;
-    *method_info_data = *stack_map_data + stack_map_size;
     FillRootTableLength(*roots_data, number_of_roots);
     return size;
   } else {
     *roots_data = nullptr;
     *stack_map_data = nullptr;
-    *method_info_data = nullptr;
     return 0;
   }
 }
@@ -1275,8 +1235,8 @@ void JitCodeCache::GarbageCollectCache(Thread* self) {
       number_of_collections_++;
       live_bitmap_.reset(CodeCacheBitmap::Create(
           "code-cache-bitmap",
-          reinterpret_cast<uintptr_t>(code_map_->Begin()),
-          reinterpret_cast<uintptr_t>(code_map_->Begin() + current_capacity_ / 2)));
+          reinterpret_cast<uintptr_t>(code_map_.Begin()),
+          reinterpret_cast<uintptr_t>(code_map_.Begin() + current_capacity_ / 2)));
       collection_in_progress_ = true;
     }
   }
@@ -1648,12 +1608,12 @@ void* JitCodeCache::MoreCore(const void* mspace, intptr_t increment) NO_THREAD_S
   if (code_mspace_ == mspace) {
     size_t result = code_end_;
     code_end_ += increment;
-    return reinterpret_cast<void*>(result + code_map_->Begin());
+    return reinterpret_cast<void*>(result + code_map_.Begin());
   } else {
     DCHECK_EQ(data_mspace_, mspace);
     size_t result = data_end_;
     data_end_ += increment;
-    return reinterpret_cast<void*>(result + data_map_->Begin());
+    return reinterpret_cast<void*>(result + data_map_.Begin());
   }
 }
 

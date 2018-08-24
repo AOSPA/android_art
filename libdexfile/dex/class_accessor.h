@@ -31,13 +31,18 @@ class ClassIteratorData;
 
 // Classes to access Dex data.
 class ClassAccessor {
- private:
+ public:
   class BaseItem {
    public:
-    explicit BaseItem(const uint8_t* ptr_pos) : ptr_pos_(ptr_pos) {}
+    explicit BaseItem(const DexFile& dex_file,
+                      const uint8_t* ptr_pos) : dex_file_(dex_file), ptr_pos_(ptr_pos) {}
 
     uint32_t GetIndex() const {
       return index_;
+    }
+
+    uint32_t GetRawAccessFlags() const {
+      return access_flags_;
     }
 
     uint32_t GetAccessFlags() const {
@@ -52,14 +57,30 @@ class ClassAccessor {
       return (GetAccessFlags() & kAccFinal) != 0;
     }
 
+    const DexFile& GetDexFile() const {
+      return dex_file_;
+    }
+
+    const uint8_t* GetDataPointer() const {
+      return ptr_pos_;
+    }
+
+    bool MemberIsNative() const {
+      return GetRawAccessFlags() & kAccNative;
+    }
+
+    bool MemberIsFinal() const {
+      return GetRawAccessFlags() & kAccFinal;
+    }
+
    protected:
     // Internal data pointer for reading.
+    const DexFile& dex_file_;
     const uint8_t* ptr_pos_ = nullptr;
     uint32_t index_ = 0u;
     uint32_t access_flags_ = 0u;
   };
 
- public:
   // A decoded version of the method of a class_data_item.
   class Method : public BaseItem {
    public:
@@ -93,9 +114,7 @@ class ClassAccessor {
     explicit Method(const DexFile& dex_file,
                     const uint8_t* ptr_pos,
                     bool is_static_or_direct = true)
-        : BaseItem(ptr_pos),
-          dex_file_(dex_file),
-          is_static_or_direct_(is_static_or_direct) {}
+        : BaseItem(dex_file, ptr_pos), is_static_or_direct_(is_static_or_direct) {}
 
     void Read();
 
@@ -121,22 +140,18 @@ class ClassAccessor {
       index_ = 0u;
     }
 
-    const DexFile& dex_file_;
     bool is_static_or_direct_ = true;
     uint32_t code_off_ = 0u;
 
     friend class ClassAccessor;
+    friend class DexFileVerifier;
   };
 
   // A decoded version of the field of a class_data_item.
   class Field : public BaseItem {
    public:
     explicit Field(const DexFile& dex_file,
-                   const uint8_t* ptr_pos) : BaseItem(ptr_pos), dex_file_(dex_file) {}
-
-    const DexFile& GetDexFile() const {
-      return dex_file_;
-    }
+                   const uint8_t* ptr_pos) : BaseItem(dex_file, ptr_pos) {}
 
     bool IsStatic() const {
      return is_static_;
@@ -154,9 +169,9 @@ class ClassAccessor {
       is_static_ = false;
     }
 
-    const DexFile& dex_file_;
     bool is_static_ = true;
     friend class ClassAccessor;
+    friend class DexFileVerifier;
   };
 
   template <typename DataType>
@@ -223,6 +238,10 @@ class ClassAccessor {
       return !(*this < rhs);
     }
 
+    const uint8_t* GetDataPointer() const {
+      return data_.ptr_pos_;
+    }
+
    private:
     // Read data at current position.
     void ReadData() {
@@ -242,14 +261,20 @@ class ClassAccessor {
     const uint32_t partition_pos_;
     // At iterator_end_, the iterator is no longer valid.
     const uint32_t iterator_end_;
+
+    friend class DexFileVerifier;
   };
 
   // Not explicit specifically for range-based loops.
   ALWAYS_INLINE ClassAccessor(const ClassIteratorData& data);
 
-  ClassAccessor(const DexFile& dex_file, const DexFile::ClassDef& class_def);
+  ALWAYS_INLINE ClassAccessor(const DexFile& dex_file, const DexFile::ClassDef& class_def);
 
-  ClassAccessor(const DexFile& dex_file, uint32_t class_def_index);
+  ALWAYS_INLINE ClassAccessor(const DexFile& dex_file, uint32_t class_def_index);
+
+  ClassAccessor(const DexFile& dex_file,
+                const uint8_t* class_data,
+                uint32_t class_def_index = DexFile::kDexNoIndex32);
 
   // Return the code item for a method.
   const DexFile::CodeItem* GetCodeItem(const Method& method) const;
@@ -332,6 +357,10 @@ class ClassAccessor {
     return class_def_index_;
   }
 
+  const DexFile::ClassDef& GetClassDef() const {
+    return dex_file_.GetClassDef(GetClassDefIndex());
+  }
+
  protected:
   // Template visitor to reduce copy paste for visiting elements.
   // No thread safety analysis since the visitor may require capabilities.
@@ -352,6 +381,8 @@ class ClassAccessor {
   const uint32_t num_instance_fields_ = 0u;
   const uint32_t num_direct_methods_ = 0u;
   const uint32_t num_virtual_methods_ = 0u;
+
+  friend class DexFileVerifier;
 };
 
 }  // namespace art

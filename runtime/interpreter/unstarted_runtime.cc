@@ -517,24 +517,23 @@ void UnstartedRuntime::UnstartedClassIsAnonymousClass(
   result->SetZ(class_name == nullptr);
 }
 
-static std::unique_ptr<MemMap> FindAndExtractEntry(const std::string& jar_file,
-                                                   const char* entry_name,
-                                                   size_t* size,
-                                                   std::string* error_msg) {
+static MemMap FindAndExtractEntry(const std::string& jar_file,
+                                  const char* entry_name,
+                                  size_t* size,
+                                  std::string* error_msg) {
   CHECK(size != nullptr);
 
   std::unique_ptr<ZipArchive> zip_archive(ZipArchive::Open(jar_file.c_str(), error_msg));
   if (zip_archive == nullptr) {
-    return nullptr;
+    return MemMap::Invalid();
   }
   std::unique_ptr<ZipEntry> zip_entry(zip_archive->Find(entry_name, error_msg));
   if (zip_entry == nullptr) {
-    return nullptr;
+    return MemMap::Invalid();
   }
-  std::unique_ptr<MemMap> tmp_map(
-      zip_entry->ExtractToMemMap(jar_file.c_str(), entry_name, error_msg));
-  if (tmp_map == nullptr) {
-    return nullptr;
+  MemMap tmp_map = zip_entry->ExtractToMemMap(jar_file.c_str(), entry_name, error_msg);
+  if (!tmp_map.IsValid()) {
+    return MemMap::Invalid();
   }
 
   // OK, from here everything seems fine.
@@ -577,18 +576,18 @@ static void GetResourceAsStream(Thread* self,
     return;
   }
 
-  std::unique_ptr<MemMap> mem_map;
+  MemMap mem_map;
   size_t map_size;
   std::string last_error_msg;  // Only store the last message (we could concatenate).
 
   for (const std::string& jar_file : split) {
     mem_map = FindAndExtractEntry(jar_file, resource_cstr, &map_size, &last_error_msg);
-    if (mem_map != nullptr) {
+    if (mem_map.IsValid()) {
       break;
     }
   }
 
-  if (mem_map == nullptr) {
+  if (!mem_map.IsValid()) {
     // Didn't find it. There's a good chance this will be the same at runtime, but still
     // conservatively abort the transaction here.
     AbortTransactionOrFail(self,
@@ -607,9 +606,9 @@ static void GetResourceAsStream(Thread* self,
     return;
   }
   // Copy in content.
-  memcpy(h_array->GetData(), mem_map->Begin(), map_size);
+  memcpy(h_array->GetData(), mem_map.Begin(), map_size);
   // Be proactive releasing memory.
-  mem_map.reset();
+  mem_map.Reset();
 
   // Create a ByteArrayInputStream.
   Handle<mirror::Class> h_class(hs.NewHandle(
@@ -1077,6 +1076,8 @@ void UnstartedRuntime::UnstartedThreadCurrentThread(
     Thread* self, ShadowFrame* shadow_frame, JValue* result, size_t arg_offset ATTRIBUTE_UNUSED) {
   if (CheckCallers(shadow_frame,
                    { "void java.lang.Thread.init(java.lang.ThreadGroup, java.lang.Runnable, "
+                         "java.lang.String, long, java.security.AccessControlContext)",
+                     "void java.lang.Thread.init(java.lang.ThreadGroup, java.lang.Runnable, "
                          "java.lang.String, long)",
                      "void java.lang.Thread.<init>()",
                      "void java.util.logging.LogManager$Cleaner.<init>("
@@ -1110,6 +1111,8 @@ void UnstartedRuntime::UnstartedThreadGetNativeState(
   if (CheckCallers(shadow_frame,
                    { "java.lang.Thread$State java.lang.Thread.getState()",
                      "java.lang.ThreadGroup java.lang.Thread.getThreadGroup()",
+                     "void java.lang.Thread.init(java.lang.ThreadGroup, java.lang.Runnable, "
+                         "java.lang.String, long, java.security.AccessControlContext)",
                      "void java.lang.Thread.init(java.lang.ThreadGroup, java.lang.Runnable, "
                          "java.lang.String, long)",
                      "void java.lang.Thread.<init>()",
@@ -1965,7 +1968,7 @@ void UnstartedRuntime::Invoke(Thread* self, const CodeItemDataAccessor& accessor
   const auto& iter = invoke_handlers_.find(name);
   if (iter != invoke_handlers_.end()) {
     // Clear out the result in case it's not zeroed out.
-    result->SetL(0);
+    result->SetL(nullptr);
 
     // Push the shadow frame. This is so the failing method can be seen in abort dumps.
     self->PushShadowFrame(shadow_frame);
@@ -1986,7 +1989,7 @@ void UnstartedRuntime::Jni(Thread* self, ArtMethod* method, mirror::Object* rece
   const auto& iter = jni_handlers_.find(name);
   if (iter != jni_handlers_.end()) {
     // Clear out the result in case it's not zeroed out.
-    result->SetL(0);
+    result->SetL(nullptr);
     (*iter->second)(self, method, receiver, args, result);
   } else if (Runtime::Current()->IsActiveTransaction()) {
     AbortTransactionF(self, "Attempt to invoke native method in non-started runtime: %s",

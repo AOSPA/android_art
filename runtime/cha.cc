@@ -142,12 +142,12 @@ void ClassHierarchyAnalysis::ResetSingleImplementationInHierarchy(ObjPtr<mirror:
 
       ArtMethod* super_method = super_it->
           GetVTableEntry<kDefaultVerifyFlags, kWithoutReadBarrier>(vtbl_index, pointer_size);
-      if (super_method->IsAbstract<kWithoutReadBarrier>() &&
+      if (super_method->IsAbstract() &&
           super_method->HasSingleImplementation<kWithoutReadBarrier>() &&
-          super_method->GetSingleImplementation<kWithoutReadBarrier>(pointer_size) == method) {
+          super_method->GetSingleImplementation(pointer_size) == method) {
         // Do like there was no single implementation defined previously
         // for this method of the superclass.
-        super_method->SetSingleImplementation<kWithoutReadBarrier>(nullptr, pointer_size);
+        super_method->SetSingleImplementation(nullptr, pointer_size);
       } else {
         // No related SingleImplementations could possibly be found any further.
         DCHECK(!super_method->HasSingleImplementation<kWithoutReadBarrier>());
@@ -168,11 +168,10 @@ void ClassHierarchyAnalysis::ResetSingleImplementationInHierarchy(ObjPtr<mirror:
          ++j) {
       ArtMethod* method = interface->GetVirtualMethod(j, pointer_size);
       if (method->HasSingleImplementation<kWithoutReadBarrier>() &&
-          alloc->ContainsUnsafe(
-              method->GetSingleImplementation<kWithoutReadBarrier>(pointer_size)) &&
-          !method->IsDefault<kWithoutReadBarrier>()) {
+          alloc->ContainsUnsafe(method->GetSingleImplementation(pointer_size)) &&
+          !method->IsDefault()) {
         // Do like there was no single implementation defined previously for this method.
-        method->SetSingleImplementation<kWithoutReadBarrier>(nullptr, pointer_size);
+        method->SetSingleImplementation(nullptr, pointer_size);
       }
     }
   }
@@ -637,38 +636,54 @@ void ClassHierarchyAnalysis::InvalidateSingleImplementationMethods(
       // We do this under cha_lock_. Committing code also grabs this lock to
       // make sure the code is only committed when all single-implementation
       // assumptions are still true.
-      MutexLock cha_mu(self, *Locks::cha_lock_);
-      // Invalidate compiled methods that assume some virtual calls have only
-      // single implementations.
-      for (ArtMethod* invalidated : invalidated_single_impl_methods) {
-        if (!invalidated->HasSingleImplementation()) {
-          // It might have been invalidated already when other class linking is
-          // going on.
-          continue;
-        }
-        invalidated->SetHasSingleImplementation(false);
-        if (invalidated->IsAbstract()) {
-          // Clear the single implementation method.
-          invalidated->SetSingleImplementation(nullptr, image_pointer_size);
-        }
+      std::vector<std::pair<ArtMethod*, OatQuickMethodHeader*>> headers;
+      {
+        MutexLock cha_mu(self, *Locks::cha_lock_);
+        // Invalidate compiled methods that assume some virtual calls have only
+        // single implementations.
+        for (ArtMethod* invalidated : invalidated_single_impl_methods) {
+          if (!invalidated->HasSingleImplementation()) {
+            // It might have been invalidated already when other class linking is
+            // going on.
+            continue;
+          }
+          invalidated->SetHasSingleImplementation(false);
+          if (invalidated->IsAbstract()) {
+            // Clear the single implementation method.
+            invalidated->SetSingleImplementation(nullptr, image_pointer_size);
+          }
 
-        if (runtime->IsAotCompiler()) {
-          // No need to invalidate any compiled code as the AotCompiler doesn't
-          // run any code.
-          continue;
-        }
+          if (runtime->IsAotCompiler()) {
+            // No need to invalidate any compiled code as the AotCompiler doesn't
+            // run any code.
+            continue;
+          }
 
-        // Invalidate all dependents.
-        for (const auto& dependent : GetDependents(invalidated)) {
-          ArtMethod* method = dependent.first;;
-          OatQuickMethodHeader* method_header = dependent.second;
-          VLOG(class_linker) << "CHA invalidated compiled code for " << method->PrettyMethod();
-          DCHECK(runtime->UseJitCompilation());
-          runtime->GetJit()->GetCodeCache()->InvalidateCompiledCodeFor(
-              method, method_header);
-          dependent_method_headers.insert(method_header);
+          // Invalidate all dependents.
+          for (const auto& dependent : GetDependents(invalidated)) {
+            ArtMethod* method = dependent.first;;
+            OatQuickMethodHeader* method_header = dependent.second;
+            VLOG(class_linker) << "CHA invalidated compiled code for " << method->PrettyMethod();
+            DCHECK(runtime->UseJitCompilation());
+            // We need to call JitCodeCache::InvalidateCompiledCodeFor but we cannot do it here
+            // since it would run into problems with lock-ordering. We don't want to re-order the
+            // locks since that would make code-commit racy.
+            headers.push_back({method, method_header});
+            dependent_method_headers.insert(method_header);
+          }
+          RemoveAllDependenciesFor(invalidated);
         }
-        RemoveAllDependenciesFor(invalidated);
+      }
+      // Since we are still loading the class that invalidated the code it's fine we have this after
+      // getting rid of the dependency. Any calls would need to be with the old version (since the
+      // new one isn't loaded yet) which still works fine. We will deoptimize just after this to
+      // ensure everything gets the new state.
+      jit::Jit* jit = Runtime::Current()->GetJit();
+      if (jit != nullptr) {
+        jit::JitCodeCache* code_cache = jit->GetCodeCache();
+        for (const auto& pair : headers) {
+          code_cache->InvalidateCompiledCodeFor(pair.first, pair.second);
+        }
       }
     }
 

@@ -355,14 +355,6 @@
         "env_vars": {"ART_READ_BARRIER_TYPE": "TABLELOOKUP"}
     },
     {
-        "tests": ["476-clinit-inline-static-invoke",
-                  "496-checker-inlining-class-loader",
-                  "508-referrer-method",
-                  "637-checker-throw-inline"],
-        "bug": "http://b/36365552",
-        "variant": "no-image & jit"
-    },
-    {
         "tests": ["530-checker-lse",
                   "530-checker-lse2",
                   "030-bad-finalizer",
@@ -556,6 +548,18 @@
         "bug": "b/33650497"
     },
     {
+        "tests": "1946-list-descriptors",
+        "description": "ASAN+interp-ac/switch interpreter means this is too slow to finish in the timeout",
+        "variant": "target & interp-ac",
+        "env_vars": {"SANITIZE_TARGET": "address"}
+    },
+    {
+        "tests": "1946-list-descriptors",
+        "description": "ASAN+interp-ac/switch interpreter means this is too slow to finish in the timeout",
+        "variant": "host & interp-ac",
+        "env_vars": {"SANITIZE_HOST": "address"}
+    },
+    {
         "tests": "202-thread-oome",
         "description": "ASAN aborts when large thread stacks are requested.",
         "variant": "host",
@@ -672,6 +676,11 @@
         "tests": "674-HelloWorld-Dm",
         "variant": "target",
         "description": ["Requires zip, which isn't available on device"]
+    },
+    {
+        "tests": ["683-clinit-inline-static-invoke"],
+        "variant": "jvm",
+        "description": ["Uses android-specific boot image class."]
     },
     {
         "tests": ["1941-dispose-stress", "522-checker-regression-monitor-exit"],
@@ -976,7 +985,9 @@
                   "677-fsi2",
                   "678-quickening",
                   "679-locks",
-                  "999-redefine-hiddenapi"],
+                  "999-redefine-hiddenapi",
+                  "1000-non-moving-space-stress",
+                  "1951-monitor-enter-no-suspend"],
         "variant": "jvm",
         "description": ["Doesn't run on RI."]
     },
@@ -1016,21 +1027,32 @@
         "description" : ["Gcstress requires the ability to open at least one file which means this test fails when it runs out."]
     },
     {
-        "tests": ["530-checker-lse2", "141-class-unload"],
+        "tests": ["530-checker-lse2", "141-class-unload", "071-dexfile"],
         "variant": "gcstress",
         "bug": "b/111543628",
         "description" : ["Test seems to timeout when run with gcstress due to slower unwinding by libbacktrace"]
     },
     {
-        "tests": ["712-varhandle-invocations", "624-checker-stringops"],
+        "tests": ["712-varhandle-invocations"],
+        "variant": "gcstress",
+        "bug": "b/111630237",
+        "description": ["Test timing out under gcstress possibly due to slower unwinding by libbacktrace"]
+    },
+    {
+        "tests": ["624-checker-stringops"],
         "variant": "optimizing & gcstress | speed-profile & gcstress",
         "bug": "b/111545159",
-        "description": ["These tests seem to expose some error with our gc when run in these configurations"]
+        "description": ["Seem to expose some error with our gc when run in these configurations"]
     },
     {
         "tests": ["021-string2"],
         "variant": "jit & debuggable",
         "bug": "b/109791792",
         "description": ["Stack too big."]
+    },
+    {
+        "tests": ["566-polymorphic-inlining"],
+        "variant": "jit & debuggable",
+        "description": ["We do not inline with debuggable."]
     }
 ]

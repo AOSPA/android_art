@@ -20,11 +20,10 @@
 #include <memory>
 
 #include "base/globals.h"
+#include "base/mem_map.h"
 #include "base/mutex.h"
 
 namespace art {
-
-class MemMap;
 
 namespace mirror {
 class Object;
@@ -56,7 +55,7 @@ class CardTable {
   static CardTable* Create(const uint8_t* heap_begin, size_t heap_capacity);
   ~CardTable();
 
-  // Set the card associated with the given address to GC_CARD_DIRTY.
+  // Set the card associated with the given address to `kCardDirty`.
   ALWAYS_INLINE void MarkCard(const void *addr) {
     *CardFromAddr(addr) = kCardDirty;
   }
@@ -64,6 +63,11 @@ class CardTable {
   // Is the object on a dirty card?
   bool IsDirty(const mirror::Object* obj) const {
     return GetCard(obj) == kCardDirty;
+  }
+
+  // Is the object on a clean card?
+  bool IsClean(const mirror::Object* obj) const {
+    return GetCard(obj) == kCardClean;
   }
 
   // Return the state of the card at an address.
@@ -84,8 +88,8 @@ class CardTable {
     }
   }
 
-  // Returns a value that when added to a heap address >> GC_CARD_SHIFT will address the appropriate
-  // card table byte. For convenience this value is cached in every Thread
+  // Returns a value that when added to a heap address >> `kCardShift` will address the appropriate
+  // card table byte. For convenience this value is cached in every Thread.
   uint8_t* GetBiasedBegin() const {
     return biased_begin_;
   }
@@ -133,7 +137,7 @@ class CardTable {
   bool AddrIsInCardTable(const void* addr) const;
 
  private:
-  CardTable(MemMap* begin, uint8_t* biased_begin, size_t offset);
+  CardTable(MemMap&& mem_map, uint8_t* biased_begin, size_t offset);
 
   // Returns true iff the card table address is within the bounds of the card table.
   bool IsValidCard(const uint8_t* card_addr) const ALWAYS_INLINE;
@@ -144,11 +148,11 @@ class CardTable {
   void VerifyCardTable();
 
   // Mmapped pages for the card table
-  std::unique_ptr<MemMap> mem_map_;
+  MemMap mem_map_;
   // Value used to compute card table addresses from object addresses, see GetBiasedBegin
   uint8_t* const biased_begin_;
   // Card table doesn't begin at the beginning of the mem_map_, instead it is displaced by offset
-  // to allow the byte value of biased_begin_ to equal GC_CARD_DIRTY
+  // to allow the byte value of `biased_begin_` to equal `kCardDirty`.
   const size_t offset_;
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(CardTable);

@@ -25,6 +25,7 @@
 #include "base/leb128.h"
 #include "base/macros.h"
 #include "base64_test_util.h"
+#include "class_accessor-inl.h"
 #include "descriptors_names.h"
 #include "dex_file-inl.h"
 #include "dex_file_loader.h"
@@ -102,11 +103,13 @@ static std::unique_ptr<const DexFile> OpenDexFileBase64(const char* base64,
   // read dex
   std::vector<std::unique_ptr<const DexFile>> tmp;
   const DexFileLoader dex_file_loader;
+  DexFileLoaderErrorCode error_code;
   bool success = dex_file_loader.OpenAll(dex_bytes.get(),
                                          length,
                                          location,
                                          /* verify */ true,
                                          /* verify_checksum */ true,
+                                         &error_code,
                                          error_msg,
                                          &tmp);
   CHECK(success) << *error_msg;
@@ -236,27 +239,10 @@ static const char kMethodFlagsTestDex[] =
 static const uint8_t* FindMethodData(const DexFile* dex_file,
                                      const char* name,
                                      /*out*/ uint32_t* method_idx = nullptr) {
-  const DexFile::ClassDef& class_def = dex_file->GetClassDef(0);
-  const uint8_t* class_data = dex_file->GetClassData(class_def);
+  ClassAccessor accessor(*dex_file, dex_file->GetClassDef(0));
 
-  ClassDataItemIterator it(*dex_file, class_data);
-
-  const uint8_t* trailing = class_data;
-  // Need to manually decode the four entries. DataPointer() doesn't work for this, as the first
-  // element has already been loaded into the iterator.
-  DecodeUnsignedLeb128(&trailing);
-  DecodeUnsignedLeb128(&trailing);
-  DecodeUnsignedLeb128(&trailing);
-  DecodeUnsignedLeb128(&trailing);
-
-  // Skip all fields.
-  while (it.HasNextStaticField() || it.HasNextInstanceField()) {
-    trailing = it.DataPointer();
-    it.Next();
-  }
-
-  while (it.HasNextMethod()) {
-    uint32_t method_index = it.GetMemberIndex();
+  for (const ClassAccessor::Method& method : accessor.GetMethods()) {
+    uint32_t method_index = method.GetIndex();
     dex::StringIndex name_index = dex_file->GetMethodId(method_index).name_idx_;
     const DexFile::StringId& string_id = dex_file->GetStringId(name_index);
     const char* str = dex_file->GetStringData(string_id);
@@ -264,12 +250,11 @@ static const uint8_t* FindMethodData(const DexFile* dex_file,
       if (method_idx != nullptr) {
         *method_idx = method_index;
       }
-      DecodeUnsignedLeb128(&trailing);
+      // Go back 2 lebs to the access flags.
+      const uint8_t* trailing = ReverseSearchUnsignedLeb128(method.GetDataPointer());
+      trailing = ReverseSearchUnsignedLeb128(trailing);
       return trailing;
     }
-
-    trailing = it.DataPointer();
-    it.Next();
   }
 
   return nullptr;
@@ -847,31 +832,17 @@ TEST_F(DexFileVerifierTest, MethodAccessFlagsInterfaces) {
 // is to the access flags, so that the caller doesn't have to handle the leb128-encoded method-index
 // delta.
 static const uint8_t* FindFieldData(const DexFile* dex_file, const char* name) {
-  const DexFile::ClassDef& class_def = dex_file->GetClassDef(0);
-  const uint8_t* class_data = dex_file->GetClassData(class_def);
+  ClassAccessor accessor(*dex_file, dex_file->GetClassDef(0));
 
-  ClassDataItemIterator it(*dex_file, class_data);
-
-  const uint8_t* trailing = class_data;
-  // Need to manually decode the four entries. DataPointer() doesn't work for this, as the first
-  // element has already been loaded into the iterator.
-  DecodeUnsignedLeb128(&trailing);
-  DecodeUnsignedLeb128(&trailing);
-  DecodeUnsignedLeb128(&trailing);
-  DecodeUnsignedLeb128(&trailing);
-
-  while (it.HasNextStaticField() || it.HasNextInstanceField()) {
-    uint32_t field_index = it.GetMemberIndex();
+  for (const ClassAccessor::Field& field : accessor.GetFields()) {
+    uint32_t field_index = field.GetIndex();
     dex::StringIndex name_index = dex_file->GetFieldId(field_index).name_idx_;
     const DexFile::StringId& string_id = dex_file->GetStringId(name_index);
     const char* str = dex_file->GetStringData(string_id);
     if (strcmp(name, str) == 0) {
-      DecodeUnsignedLeb128(&trailing);
-      return trailing;
+      // Go to the back of the access flags.
+      return ReverseSearchUnsignedLeb128(field.GetDataPointer());
     }
-
-    trailing = it.DataPointer();
-    it.Next();
   }
 
   return nullptr;

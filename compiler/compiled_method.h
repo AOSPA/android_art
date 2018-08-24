@@ -112,10 +112,6 @@ class CompiledMethod FINAL : public CompiledCode {
   CompiledMethod(CompilerDriver* driver,
                  InstructionSet instruction_set,
                  const ArrayRef<const uint8_t>& quick_code,
-                 const size_t frame_size_in_bytes,
-                 const uint32_t core_spill_mask,
-                 const uint32_t fp_spill_mask,
-                 const ArrayRef<const uint8_t>& method_info,
                  const ArrayRef<const uint8_t>& vmap_table,
                  const ArrayRef<const uint8_t>& cfi_info,
                  const ArrayRef<const linker::LinkerPatch>& patches);
@@ -126,10 +122,6 @@ class CompiledMethod FINAL : public CompiledCode {
       CompilerDriver* driver,
       InstructionSet instruction_set,
       const ArrayRef<const uint8_t>& quick_code,
-      const size_t frame_size_in_bytes,
-      const uint32_t core_spill_mask,
-      const uint32_t fp_spill_mask,
-      const ArrayRef<const uint8_t>& method_info,
       const ArrayRef<const uint8_t>& vmap_table,
       const ArrayRef<const uint8_t>& cfi_info,
       const ArrayRef<const linker::LinkerPatch>& patches);
@@ -148,20 +140,6 @@ class CompiledMethod FINAL : public CompiledCode {
     SetPackedField<IsIntrinsicField>(/* value */ true);
   }
 
-  size_t GetFrameSizeInBytes() const {
-    return frame_size_in_bytes_;
-  }
-
-  uint32_t GetCoreSpillMask() const {
-    return core_spill_mask_;
-  }
-
-  uint32_t GetFpSpillMask() const {
-    return fp_spill_mask_;
-  }
-
-  ArrayRef<const uint8_t> GetMethodInfo() const;
-
   ArrayRef<const uint8_t> GetVmapTable() const;
 
   ArrayRef<const uint8_t> GetCFIInfo() const;
@@ -177,14 +155,6 @@ class CompiledMethod FINAL : public CompiledCode {
 
   using IsIntrinsicField = BitField<bool, kIsIntrinsicLsb, kIsIntrinsicSize>;
 
-  // For quick code, the size of the activation used by the code.
-  const size_t frame_size_in_bytes_;
-  // For quick code, a bit mask describing spilled GPR callee-save registers.
-  const uint32_t core_spill_mask_;
-  // For quick code, a bit mask describing spilled FPR callee-save registers.
-  const uint32_t fp_spill_mask_;
-  // For quick code, method specific information that is not very dedupe friendly (method indices).
-  const LengthPrefixedArray<uint8_t>* const method_info_;
   // For quick code, holds code infos which contain stack maps, inline information, and etc.
   const LengthPrefixedArray<uint8_t>* const vmap_table_;
   // For quick code, a FDE entry for the debug_frame section.

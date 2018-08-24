@@ -45,6 +45,7 @@
 #include "class_root.h"
 #include "debugger.h"
 #include "dex/art_dex_file_loader.h"
+#include "dex/class_accessor-inl.h"
 #include "dex/dex_file.h"
 #include "dex/dex_file_loader.h"
 #include "dex/dex_file_types.h"
@@ -299,24 +300,23 @@ jvmtiError Redefiner::GetClassRedefinitionError(art::Handle<art::mirror::Class> 
 }
 
 // Moves dex data to an anonymous, read-only mmap'd region.
-std::unique_ptr<art::MemMap> Redefiner::MoveDataToMemMap(const std::string& original_location,
-                                                         art::ArrayRef<const unsigned char> data,
-                                                         std::string* error_msg) {
-  std::unique_ptr<art::MemMap> map(art::MemMap::MapAnonymous(
+art::MemMap Redefiner::MoveDataToMemMap(const std::string& original_location,
+                                        art::ArrayRef<const unsigned char> data,
+                                        std::string* error_msg) {
+  art::MemMap map = art::MemMap::MapAnonymous(
       StringPrintf("%s-transformed", original_location.c_str()).c_str(),
-      nullptr,
+      /* addr */ nullptr,
       data.size(),
       PROT_READ|PROT_WRITE,
-      /*low_4gb*/false,
-      /*reuse*/false,
-      error_msg));
-  if (map == nullptr) {
-    return map;
+      /*low_4gb*/ false,
+      /*reuse*/ false,
+      error_msg);
+  if (LIKELY(map.IsValid())) {
+    memcpy(map.Begin(), data.data(), data.size());
+    // Make the dex files mmap read only. This matches how other DexFiles are mmaped and prevents
+    // programs from corrupting it.
+    map.Protect(PROT_READ);
   }
-  memcpy(map->Begin(), data.data(), data.size());
-  // Make the dex files mmap read only. This matches how other DexFiles are mmaped and prevents
-  // programs from corrupting it.
-  map->Protect(PROT_READ);
   return map;
 }
 
@@ -367,17 +367,6 @@ jvmtiError Redefiner::RedefineClasses(ArtJvmTiEnv* env,
     if (res != OK) {
       return res;
     }
-    // We make a copy of the class_bytes to pass into the retransformation.
-    // This makes cleanup easier (since we unambiguously own the bytes) and also is useful since we
-    // will need to keep the original bytes around unaltered for subsequent RetransformClasses calls
-    // to get the passed in bytes.
-    unsigned char* class_bytes_copy = nullptr;
-    res = env->Allocate(definitions[i].class_byte_count, &class_bytes_copy);
-    if (res != OK) {
-      return res;
-    }
-    memcpy(class_bytes_copy, definitions[i].class_bytes, definitions[i].class_byte_count);
-
     ArtClassDefinition def;
     res = def.Init(self, definitions[i]);
     if (res != OK) {
@@ -439,23 +428,22 @@ jvmtiError Redefiner::AddRedefinition(ArtJvmTiEnv* env, const ArtClassDefinition
   }
   JvmtiUniquePtr<char> generic_unique_ptr(MakeJvmtiUniquePtr(env, generic_ptr_unused));
   JvmtiUniquePtr<char> signature_unique_ptr(MakeJvmtiUniquePtr(env, signature_ptr));
-  std::unique_ptr<art::MemMap> map(MoveDataToMemMap(original_dex_location,
-                                                    def.GetDexData(),
-                                                    error_msg_));
+  art::MemMap map = MoveDataToMemMap(original_dex_location, def.GetDexData(), error_msg_);
   std::ostringstream os;
-  if (map.get() == nullptr) {
+  if (!map.IsValid()) {
     os << "Failed to create anonymous mmap for modified dex file of class " << def.GetName()
        << "in dex file " << original_dex_location << " because: " << *error_msg_;
     *error_msg_ = os.str();
     return ERR(OUT_OF_MEMORY);
   }
-  if (map->Size() < sizeof(art::DexFile::Header)) {
+  if (map.Size() < sizeof(art::DexFile::Header)) {
     *error_msg_ = "Could not read dex file header because dex_data was too short";
     return ERR(INVALID_CLASS_FORMAT);
   }
-  uint32_t checksum = reinterpret_cast<const art::DexFile::Header*>(map->Begin())->checksum_;
+  std::string name = map.GetName();
+  uint32_t checksum = reinterpret_cast<const art::DexFile::Header*>(map.Begin())->checksum_;
   const art::ArtDexFileLoader dex_file_loader;
-  std::unique_ptr<const art::DexFile> dex_file(dex_file_loader.Open(map->GetName(),
+  std::unique_ptr<const art::DexFile> dex_file(dex_file_loader.Open(name,
                                                                     checksum,
                                                                     std::move(map),
                                                                     /*verify*/true,
@@ -569,9 +557,10 @@ void DoAllocateObsoleteMethodsCallback(art::Thread* t, void* vdata) NO_THREAD_SA
 // This creates any ArtMethod* structures needed for obsolete methods and ensures that the stack is
 // updated so they will be run.
 // TODO Rewrite so we can do this only once regardless of how many redefinitions there are.
-void Redefiner::ClassRedefinition::FindAndAllocateObsoleteMethods(art::mirror::Class* art_klass) {
+void Redefiner::ClassRedefinition::FindAndAllocateObsoleteMethods(
+    art::ObjPtr<art::mirror::Class> art_klass) {
   art::ScopedAssertNoThreadSuspension ns("No thread suspension during thread stack walking");
-  art::mirror::ClassExt* ext = art_klass->GetExtData();
+  art::ObjPtr<art::mirror::ClassExt> ext = art_klass->GetExtData();
   CHECK(ext->GetObsoleteMethods() != nullptr);
   art::ClassLinker* linker = driver_->runtime_->GetClassLinker();
   // This holds pointers to the obsolete methods map fields which are updated as needed.
@@ -619,11 +608,9 @@ bool Redefiner::ClassRedefinition::CheckSameMethods() {
   art::Handle<art::mirror::Class> h_klass(hs.NewHandle(GetMirrorClass()));
   DCHECK_EQ(dex_file_->NumClassDefs(), 1u);
 
-  art::ClassDataItemIterator new_iter(*dex_file_,
-                                      dex_file_->GetClassData(dex_file_->GetClassDef(0)));
-
   // Make sure we have the same number of methods.
-  uint32_t num_new_method = new_iter.NumVirtualMethods() + new_iter.NumDirectMethods();
+  art::ClassAccessor accessor(*dex_file_, dex_file_->GetClassDef(0));
+  uint32_t num_new_method = accessor.NumMethods();
   uint32_t num_old_method = h_klass->GetDeclaredMethodsSlice(art::kRuntimePointerSize).size();
   if (num_new_method != num_old_method) {
     bool bigger = num_new_method > num_old_method;
@@ -635,13 +622,12 @@ bool Redefiner::ClassRedefinition::CheckSameMethods() {
   }
 
   // Skip all of the fields. We should have already checked this.
-  new_iter.SkipAllFields();
   // Check each of the methods. NB we don't need to specifically check for removals since the 2 dex
   // files have the same number of methods, which means there must be an equal amount of additions
-  // and removals.
-  for (; new_iter.HasNextMethod(); new_iter.Next()) {
+  // and removals. We should have already checked the fields.
+  for (const art::ClassAccessor::Method& method : accessor.GetMethods()) {
     // Get the data on the method we are searching for
-    const art::DexFile::MethodId& new_method_id = dex_file_->GetMethodId(new_iter.GetMemberIndex());
+    const art::DexFile::MethodId& new_method_id = dex_file_->GetMethodId(method.GetIndex());
     const char* new_method_name = dex_file_->GetMethodName(new_method_id);
     art::Signature new_method_signature = dex_file_->GetMethodSignature(new_method_id);
     art::ArtMethod* old_method = FindMethod(h_klass, new_method_name, new_method_signature);
@@ -658,7 +644,7 @@ bool Redefiner::ClassRedefinition::CheckSameMethods() {
     // Since direct methods have different flags than virtual ones (specifically direct methods must
     // have kAccPrivate or kAccStatic or kAccConstructor flags) we can tell if a method changes from
     // virtual to direct.
-    uint32_t new_flags = new_iter.GetMethodAccessFlags();
+    uint32_t new_flags = method.GetAccessFlags();
     if (new_flags != (old_method->GetAccessFlags() & art::kAccValidMethodFlags)) {
       RecordFailure(ERR(UNSUPPORTED_REDEFINITION_METHOD_MODIFIERS_CHANGED),
                     StringPrintf("method '%s' (sig: %s) had different access flags",
@@ -674,20 +660,21 @@ bool Redefiner::ClassRedefinition::CheckSameFields() {
   art::StackHandleScope<1> hs(driver_->self_);
   art::Handle<art::mirror::Class> h_klass(hs.NewHandle(GetMirrorClass()));
   DCHECK_EQ(dex_file_->NumClassDefs(), 1u);
-  art::ClassDataItemIterator new_iter(*dex_file_,
-                                      dex_file_->GetClassData(dex_file_->GetClassDef(0)));
+  art::ClassAccessor new_accessor(*dex_file_, dex_file_->GetClassDef(0));
+
   const art::DexFile& old_dex_file = h_klass->GetDexFile();
-  art::ClassDataItemIterator old_iter(old_dex_file,
-                                      old_dex_file.GetClassData(*h_klass->GetClassDef()));
+  art::ClassAccessor old_accessor(old_dex_file, *h_klass->GetClassDef());
   // Instance and static fields can be differentiated by their flags so no need to check them
   // separately.
-  while (new_iter.HasNextInstanceField() || new_iter.HasNextStaticField()) {
+  auto old_fields = old_accessor.GetFields();
+  auto old_iter = old_fields.begin();
+  for (const art::ClassAccessor::Field& new_field : new_accessor.GetFields()) {
     // Get the data on the method we are searching for
-    const art::DexFile::FieldId& new_field_id = dex_file_->GetFieldId(new_iter.GetMemberIndex());
+    const art::DexFile::FieldId& new_field_id = dex_file_->GetFieldId(new_field.GetIndex());
     const char* new_field_name = dex_file_->GetFieldName(new_field_id);
     const char* new_field_type = dex_file_->GetFieldTypeDescriptor(new_field_id);
 
-    if (!(old_iter.HasNextInstanceField() || old_iter.HasNextStaticField())) {
+    if (old_iter == old_fields.end()) {
       // We are missing the old version of this method!
       RecordFailure(ERR(UNSUPPORTED_REDEFINITION_SCHEMA_CHANGED),
                     StringPrintf("Unknown field '%s' (type: %s) added!",
@@ -696,7 +683,7 @@ bool Redefiner::ClassRedefinition::CheckSameFields() {
       return false;
     }
 
-    const art::DexFile::FieldId& old_field_id = old_dex_file.GetFieldId(old_iter.GetMemberIndex());
+    const art::DexFile::FieldId& old_field_id = old_dex_file.GetFieldId(old_iter->GetIndex());
     const char* old_field_name = old_dex_file.GetFieldName(old_field_id);
     const char* old_field_type = old_dex_file.GetFieldTypeDescriptor(old_field_id);
 
@@ -714,7 +701,7 @@ bool Redefiner::ClassRedefinition::CheckSameFields() {
 
     // Since static fields have different flags than instance ones (specifically static fields must
     // have the kAccStatic flag) we can tell if a field changes from static to instance.
-    if (new_iter.GetFieldAccessFlags() != old_iter.GetFieldAccessFlags()) {
+    if (new_field.GetAccessFlags() != old_iter->GetAccessFlags()) {
       RecordFailure(ERR(UNSUPPORTED_REDEFINITION_SCHEMA_CHANGED),
                     StringPrintf("Field '%s' (sig: %s) had different access flags",
                                   new_field_name,
@@ -722,16 +709,15 @@ bool Redefiner::ClassRedefinition::CheckSameFields() {
       return false;
     }
 
-    new_iter.Next();
-    old_iter.Next();
+    ++old_iter;
   }
-  if (old_iter.HasNextInstanceField() || old_iter.HasNextStaticField()) {
+  if (old_iter != old_fields.end()) {
     RecordFailure(ERR(UNSUPPORTED_REDEFINITION_SCHEMA_CHANGED),
                   StringPrintf("field '%s' (sig: %s) is missing!",
                                 old_dex_file.GetFieldName(old_dex_file.GetFieldId(
-                                    old_iter.GetMemberIndex())),
+                                    old_iter->GetIndex())),
                                 old_dex_file.GetFieldTypeDescriptor(old_dex_file.GetFieldId(
-                                    old_iter.GetMemberIndex()))));
+                                    old_iter->GetIndex()))));
     return false;
   }
   return true;
@@ -873,73 +859,76 @@ class RedefinitionDataHolder {
     return arr_.IsNull();
   }
 
-  art::mirror::ClassLoader* GetSourceClassLoader(jint klass_index) const
+  art::ObjPtr<art::mirror::ClassLoader> GetSourceClassLoader(jint klass_index) const
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
-    return art::down_cast<art::mirror::ClassLoader*>(GetSlot(klass_index, kSlotSourceClassLoader));
+    return art::ObjPtr<art::mirror::ClassLoader>::DownCast(
+        GetSlot(klass_index, kSlotSourceClassLoader));
   }
-  art::mirror::Object* GetJavaDexFile(jint klass_index) const
+  art::ObjPtr<art::mirror::Object> GetJavaDexFile(jint klass_index) const
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     return GetSlot(klass_index, kSlotJavaDexFile);
   }
-  art::mirror::LongArray* GetNewDexFileCookie(jint klass_index) const
+  art::ObjPtr<art::mirror::LongArray> GetNewDexFileCookie(jint klass_index) const
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
-    return art::down_cast<art::mirror::LongArray*>(GetSlot(klass_index, kSlotNewDexFileCookie));
+    return art::ObjPtr<art::mirror::LongArray>::DownCast(
+        GetSlot(klass_index, kSlotNewDexFileCookie));
   }
-  art::mirror::DexCache* GetNewDexCache(jint klass_index) const
+  art::ObjPtr<art::mirror::DexCache> GetNewDexCache(jint klass_index) const
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
-    return art::down_cast<art::mirror::DexCache*>(GetSlot(klass_index, kSlotNewDexCache));
+    return art::ObjPtr<art::mirror::DexCache>::DownCast(GetSlot(klass_index, kSlotNewDexCache));
   }
-  art::mirror::Class* GetMirrorClass(jint klass_index) const
+  art::ObjPtr<art::mirror::Class> GetMirrorClass(jint klass_index) const
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
-    return art::down_cast<art::mirror::Class*>(GetSlot(klass_index, kSlotMirrorClass));
-  }
-
-  art::mirror::Object* GetOriginalDexFile(jint klass_index) const
-      REQUIRES_SHARED(art::Locks::mutator_lock_) {
-    return art::down_cast<art::mirror::Object*>(GetSlot(klass_index, kSlotOrigDexFile));
+    return art::ObjPtr<art::mirror::Class>::DownCast(GetSlot(klass_index, kSlotMirrorClass));
   }
 
-  art::mirror::PointerArray* GetOldObsoleteMethods(jint klass_index) const
+  art::ObjPtr<art::mirror::Object> GetOriginalDexFile(jint klass_index) const
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
-    return art::down_cast<art::mirror::PointerArray*>(
+    return art::ObjPtr<art::mirror::Object>::DownCast(GetSlot(klass_index, kSlotOrigDexFile));
+  }
+
+  art::ObjPtr<art::mirror::PointerArray> GetOldObsoleteMethods(jint klass_index) const
+      REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    return art::ObjPtr<art::mirror::PointerArray>::DownCast(
         GetSlot(klass_index, kSlotOldObsoleteMethods));
   }
 
-  art::mirror::ObjectArray<art::mirror::DexCache>* GetOldDexCaches(jint klass_index) const
-      REQUIRES_SHARED(art::Locks::mutator_lock_) {
-    return art::down_cast<art::mirror::ObjectArray<art::mirror::DexCache>*>(
+  art::ObjPtr<art::mirror::ObjectArray<art::mirror::DexCache>> GetOldDexCaches(
+      jint klass_index) const REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    return art::ObjPtr<art::mirror::ObjectArray<art::mirror::DexCache>>::DownCast(
         GetSlot(klass_index, kSlotOldDexCaches));
   }
 
-  void SetSourceClassLoader(jint klass_index, art::mirror::ClassLoader* loader)
+  void SetSourceClassLoader(jint klass_index, art::ObjPtr<art::mirror::ClassLoader> loader)
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     SetSlot(klass_index, kSlotSourceClassLoader, loader);
   }
-  void SetJavaDexFile(jint klass_index, art::mirror::Object* dexfile)
+  void SetJavaDexFile(jint klass_index, art::ObjPtr<art::mirror::Object> dexfile)
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     SetSlot(klass_index, kSlotJavaDexFile, dexfile);
   }
-  void SetNewDexFileCookie(jint klass_index, art::mirror::LongArray* cookie)
+  void SetNewDexFileCookie(jint klass_index, art::ObjPtr<art::mirror::LongArray> cookie)
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     SetSlot(klass_index, kSlotNewDexFileCookie, cookie);
   }
-  void SetNewDexCache(jint klass_index, art::mirror::DexCache* cache)
+  void SetNewDexCache(jint klass_index, art::ObjPtr<art::mirror::DexCache> cache)
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     SetSlot(klass_index, kSlotNewDexCache, cache);
   }
-  void SetMirrorClass(jint klass_index, art::mirror::Class* klass)
+  void SetMirrorClass(jint klass_index, art::ObjPtr<art::mirror::Class> klass)
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     SetSlot(klass_index, kSlotMirrorClass, klass);
   }
-  void SetOriginalDexFile(jint klass_index, art::mirror::Object* bytes)
+  void SetOriginalDexFile(jint klass_index, art::ObjPtr<art::mirror::Object> bytes)
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     SetSlot(klass_index, kSlotOrigDexFile, bytes);
   }
-  void SetOldObsoleteMethods(jint klass_index, art::mirror::PointerArray* methods)
+  void SetOldObsoleteMethods(jint klass_index, art::ObjPtr<art::mirror::PointerArray> methods)
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     SetSlot(klass_index, kSlotOldObsoleteMethods, methods);
   }
-  void SetOldDexCaches(jint klass_index, art::mirror::ObjectArray<art::mirror::DexCache>* caches)
+  void SetOldDexCaches(jint klass_index,
+                       art::ObjPtr<art::mirror::ObjectArray<art::mirror::DexCache>> caches)
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     SetSlot(klass_index, kSlotOldDexCaches, caches);
   }
@@ -970,8 +959,8 @@ class RedefinitionDataHolder {
   mutable art::Handle<art::mirror::ObjectArray<art::mirror::Object>> arr_;
   std::vector<Redefiner::ClassRedefinition>* redefinitions_;
 
-  art::mirror::Object* GetSlot(jint klass_index,
-                               DataSlot slot) const REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  art::ObjPtr<art::mirror::Object> GetSlot(jint klass_index, DataSlot slot) const
+      REQUIRES_SHARED(art::Locks::mutator_lock_) {
     DCHECK_LT(klass_index, Length());
     return arr_->Get((kNumSlots * klass_index) + slot);
   }
@@ -1036,31 +1025,35 @@ class RedefinitionDataIter {
     return holder_;
   }
 
-  art::mirror::ClassLoader* GetSourceClassLoader() const
+  art::ObjPtr<art::mirror::ClassLoader> GetSourceClassLoader() const
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     return holder_.GetSourceClassLoader(idx_);
   }
-  art::mirror::Object* GetJavaDexFile() const REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  art::ObjPtr<art::mirror::Object> GetJavaDexFile() const
+      REQUIRES_SHARED(art::Locks::mutator_lock_) {
     return holder_.GetJavaDexFile(idx_);
   }
-  art::mirror::LongArray* GetNewDexFileCookie() const REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  art::ObjPtr<art::mirror::LongArray> GetNewDexFileCookie() const
+      REQUIRES_SHARED(art::Locks::mutator_lock_) {
     return holder_.GetNewDexFileCookie(idx_);
   }
-  art::mirror::DexCache* GetNewDexCache() const REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  art::ObjPtr<art::mirror::DexCache> GetNewDexCache() const
+      REQUIRES_SHARED(art::Locks::mutator_lock_) {
     return holder_.GetNewDexCache(idx_);
   }
-  art::mirror::Class* GetMirrorClass() const REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  art::ObjPtr<art::mirror::Class> GetMirrorClass() const
+      REQUIRES_SHARED(art::Locks::mutator_lock_) {
     return holder_.GetMirrorClass(idx_);
   }
-  art::mirror::Object* GetOriginalDexFile() const
+  art::ObjPtr<art::mirror::Object> GetOriginalDexFile() const
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     return holder_.GetOriginalDexFile(idx_);
   }
-  art::mirror::PointerArray* GetOldObsoleteMethods() const
+  art::ObjPtr<art::mirror::PointerArray> GetOldObsoleteMethods() const
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     return holder_.GetOldObsoleteMethods(idx_);
   }
-  art::mirror::ObjectArray<art::mirror::DexCache>* GetOldDexCaches() const
+  art::ObjPtr<art::mirror::ObjectArray<art::mirror::DexCache>> GetOldDexCaches() const
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     return holder_.GetOldDexCaches(idx_);
   }
@@ -1073,28 +1066,31 @@ class RedefinitionDataIter {
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     holder_.SetSourceClassLoader(idx_, loader);
   }
-  void SetJavaDexFile(art::mirror::Object* dexfile) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  void SetJavaDexFile(art::ObjPtr<art::mirror::Object> dexfile)
+      REQUIRES_SHARED(art::Locks::mutator_lock_) {
     holder_.SetJavaDexFile(idx_, dexfile);
   }
-  void SetNewDexFileCookie(art::mirror::LongArray* cookie)
+  void SetNewDexFileCookie(art::ObjPtr<art::mirror::LongArray> cookie)
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     holder_.SetNewDexFileCookie(idx_, cookie);
   }
-  void SetNewDexCache(art::mirror::DexCache* cache) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  void SetNewDexCache(art::ObjPtr<art::mirror::DexCache> cache)
+      REQUIRES_SHARED(art::Locks::mutator_lock_) {
     holder_.SetNewDexCache(idx_, cache);
   }
-  void SetMirrorClass(art::mirror::Class* klass) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  void SetMirrorClass(art::ObjPtr<art::mirror::Class> klass)
+      REQUIRES_SHARED(art::Locks::mutator_lock_) {
     holder_.SetMirrorClass(idx_, klass);
   }
-  void SetOriginalDexFile(art::mirror::Object* bytes)
+  void SetOriginalDexFile(art::ObjPtr<art::mirror::Object> bytes)
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     holder_.SetOriginalDexFile(idx_, bytes);
   }
-  void SetOldObsoleteMethods(art::mirror::PointerArray* methods)
+  void SetOldObsoleteMethods(art::ObjPtr<art::mirror::PointerArray> methods)
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     holder_.SetOldObsoleteMethods(idx_, methods);
   }
-  void SetOldDexCaches(art::mirror::ObjectArray<art::mirror::DexCache>* caches)
+  void SetOldDexCaches(art::ObjPtr<art::mirror::ObjectArray<art::mirror::DexCache>> caches)
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
     holder_.SetOldDexCaches(idx_, caches);
   }
@@ -1378,7 +1374,7 @@ jvmtiError Redefiner::Run() {
     if (data.GetSourceClassLoader() != nullptr) {
       ClassLoaderHelper::UpdateJavaDexFile(data.GetJavaDexFile(), data.GetNewDexFileCookie());
     }
-    art::mirror::Class* klass = data.GetMirrorClass();
+    art::ObjPtr<art::mirror::Class> klass = data.GetMirrorClass();
     // TODO Rewrite so we don't do a stack walk for each and every class.
     redef.FindAndAllocateObsoleteMethods(klass);
     redef.UpdateClass(klass, data.GetNewDexCache(), data.GetOriginalDexFile());
@@ -1492,10 +1488,10 @@ void Redefiner::ClassRedefinition::UpdateClass(
 // obsolete methods).
 void Redefiner::ClassRedefinition::RestoreObsoleteMethodMapsIfUnneeded(
     const RedefinitionDataIter* cur_data) {
-  art::mirror::Class* klass = GetMirrorClass();
-  art::mirror::ClassExt* ext = klass->GetExtData();
-  art::mirror::PointerArray* methods = ext->GetObsoleteMethods();
-  art::mirror::PointerArray* old_methods = cur_data->GetOldObsoleteMethods();
+  art::ObjPtr<art::mirror::Class> klass = GetMirrorClass();
+  art::ObjPtr<art::mirror::ClassExt> ext = klass->GetExtData();
+  art::ObjPtr<art::mirror::PointerArray> methods = ext->GetObsoleteMethods();
+  art::ObjPtr<art::mirror::PointerArray> old_methods = cur_data->GetOldObsoleteMethods();
   int32_t old_length = old_methods == nullptr ? 0 : old_methods->GetLength();
   int32_t expected_length =
       old_length + klass->NumDirectMethods() + klass->NumDeclaredVirtualMethods();

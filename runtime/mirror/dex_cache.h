@@ -27,11 +27,14 @@
 
 namespace art {
 
+namespace linker {
+class ImageWriter;
+}  // namespace linker
+
 class ArtField;
 class ArtMethod;
 struct DexCacheOffsets;
 class DexFile;
-class ImageWriter;
 union JValue;
 class LinearAlloc;
 class Thread;
@@ -154,12 +157,12 @@ class MANAGED DexCache FINAL : public Object {
                 "String dex cache size is not a power of 2.");
 
   // Size of field dex cache. Needs to be a power of 2 for entrypoint assumptions to hold.
-  static constexpr size_t kDexCacheFieldCacheSize = 1024;
+  static constexpr size_t kDexCacheFieldCacheSize = 512;
   static_assert(IsPowerOfTwo(kDexCacheFieldCacheSize),
                 "Field dex cache size is not a power of 2.");
 
   // Size of method dex cache. Needs to be a power of 2 for entrypoint assumptions to hold.
-  static constexpr size_t kDexCacheMethodCacheSize = 1024;
+  static constexpr size_t kDexCacheMethodCacheSize = 512;
   static_assert(IsPowerOfTwo(kDexCacheMethodCacheSize),
                 "Method dex cache size is not a power of 2.");
 
@@ -539,6 +542,7 @@ class MANAGED DexCache FINAL : public Object {
   uint32_t num_strings_;                // Number of elements in the strings_ array.
 
   friend struct art::DexCacheOffsets;  // for verifying offset information
+  friend class linker::ImageWriter;
   friend class Object;  // For VisitReferences
   DISALLOW_IMPLICIT_CONSTRUCTORS(DexCache);
 };

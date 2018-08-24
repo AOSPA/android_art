@@ -307,7 +307,7 @@ class ImageWriter FINAL {
     // Calculate the sum total of the bin slot sizes in [0, up_to). Defaults to all bins.
     size_t GetBinSizeSum(Bin up_to) const;
 
-    std::unique_ptr<MemMap> image_;  // Memory mapped for generating the image.
+    MemMap image_;  // Memory mapped for generating the image.
 
     // Target begin of this image. Notes: It is not valid to write here, this is the address
     // of the target image, not necessarily where image_ is mapped. The address is only valid
@@ -369,6 +369,12 @@ class ImageWriter FINAL {
 
     // Class table associated with this image for serialization.
     std::unique_ptr<ClassTable> class_table_;
+
+    // Relocations of references/pointers. For boot image, it contains one bit
+    // for each location that can be relocated. For app image, it contains twice
+    // that many bits, first half contains relocations within this image and the
+    // second half contains relocations for references to the boot image.
+    std::vector<uint8_t> relocation_bitmap_;
   };
 
   // We use the lock word to store the offset of the object in the image.
@@ -393,21 +399,16 @@ class ImageWriter FINAL {
       REQUIRES_SHARED(Locks::mutator_lock_);
   BinSlot GetImageBinSlot(mirror::Object* object) const REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void AddDexCacheArrayRelocation(void* array, size_t offset, ObjPtr<mirror::DexCache> dex_cache)
+  void AddDexCacheArrayRelocation(void* array, size_t offset, size_t oat_index)
       REQUIRES_SHARED(Locks::mutator_lock_);
   void AddMethodPointerArray(mirror::PointerArray* arr) REQUIRES_SHARED(Locks::mutator_lock_);
-
-  static void* GetImageAddressCallback(void* writer, mirror::Object* obj)
-      REQUIRES_SHARED(Locks::mutator_lock_) {
-    return reinterpret_cast<ImageWriter*>(writer)->GetImageAddress(obj);
-  }
 
   mirror::Object* GetLocalAddress(mirror::Object* object) const
       REQUIRES_SHARED(Locks::mutator_lock_) {
     size_t offset = GetImageOffset(object);
     size_t oat_index = GetOatIndex(object);
     const ImageInfo& image_info = GetImageInfo(oat_index);
-    uint8_t* dst = image_info.image_->Begin() + offset;
+    uint8_t* dst = image_info.image_.Begin() + offset;
     return reinterpret_cast<mirror::Object*>(dst);
   }
 
@@ -469,21 +470,53 @@ class ImageWriter FINAL {
   void CopyAndFixupNativeData(size_t oat_index) REQUIRES_SHARED(Locks::mutator_lock_);
   void CopyAndFixupObjects() REQUIRES_SHARED(Locks::mutator_lock_);
   void CopyAndFixupObject(mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_);
-  void CopyAndFixupMethod(ArtMethod* orig, ArtMethod* copy, const ImageInfo& image_info)
+  void CopyAndFixupMethod(ArtMethod* orig, ArtMethod* copy, size_t oat_index)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void CopyAndFixupImTable(ImTable* orig, ImTable* copy) REQUIRES_SHARED(Locks::mutator_lock_);
-  void CopyAndFixupImtConflictTable(ImtConflictTable* orig, ImtConflictTable* copy)
+  void CopyAndFixupImTable(ImTable* orig, ImTable* copy, size_t oat_index)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void FixupClass(mirror::Class* orig, mirror::Class* copy)
+  void CopyAndFixupImtConflictTable(ImtConflictTable* orig,
+                                    ImtConflictTable* copy,
+                                    size_t oat_index)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void FixupObject(mirror::Object* orig, mirror::Object* copy)
+  template <bool kCheckNotNull = true>
+  void RecordImageRelocation(const void* dest, size_t oat_index, bool app_to_boot_image = false);
+  void FixupClass(mirror::Class* orig, mirror::Class* copy, size_t oat_index)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void FixupDexCache(mirror::DexCache* orig_dex_cache, mirror::DexCache* copy_dex_cache)
+  void FixupObject(mirror::Object* orig, mirror::Object* copy, size_t oat_index)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  template <typename T>
+  void FixupDexCacheArrayEntry(std::atomic<mirror::DexCachePair<T>>* orig_array,
+                               std::atomic<mirror::DexCachePair<T>>* new_array,
+                               uint32_t array_index,
+                               size_t oat_index)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  template <typename T>
+  void FixupDexCacheArrayEntry(std::atomic<mirror::NativeDexCachePair<T>>* orig_array,
+                               std::atomic<mirror::NativeDexCachePair<T>>* new_array,
+                               uint32_t array_index,
+                               size_t oat_index)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  void FixupDexCacheArrayEntry(GcRoot<mirror::CallSite>* orig_array,
+                               GcRoot<mirror::CallSite>* new_array,
+                               uint32_t array_index,
+                               size_t oat_index)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  template <typename EntryType>
+  void FixupDexCacheArray(mirror::DexCache* orig_dex_cache,
+                          mirror::DexCache* copy_dex_cache,
+                          size_t oat_index,
+                          MemberOffset array_offset,
+                          uint32_t size)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  void FixupDexCache(mirror::DexCache* orig_dex_cache,
+                     mirror::DexCache* copy_dex_cache,
+                     size_t oat_index)
       REQUIRES_SHARED(Locks::mutator_lock_);
   void FixupPointerArray(mirror::Object* dst,
                          mirror::PointerArray* arr,
                          mirror::Class* klass,
-                         Bin array_type)
+                         Bin array_type,
+                         size_t oat_index)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Get quick code for non-resolution/imt_conflict/abstract method.
@@ -531,7 +564,19 @@ class ImageWriter FINAL {
 
   static Bin BinTypeForNativeRelocationType(NativeObjectRelocationType type);
 
-  uintptr_t NativeOffsetInImage(void* obj) REQUIRES_SHARED(Locks::mutator_lock_);
+  struct NativeObjectRelocation {
+    size_t oat_index;
+    uintptr_t offset;
+    NativeObjectRelocationType type;
+
+    bool IsArtMethodRelocation() const {
+      return type == NativeObjectRelocationType::kArtMethodClean ||
+          type == NativeObjectRelocationType::kArtMethodDirty ||
+          type == NativeObjectRelocationType::kRuntimeMethod;
+    }
+  };
+
+  NativeObjectRelocation GetNativeRelocation(void* obj) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Location of where the object will be when the image is loaded at runtime.
   template <typename T>
@@ -539,7 +584,7 @@ class ImageWriter FINAL {
 
   // Location of where the temporary copy of the object currently is.
   template <typename T>
-  T* NativeCopyLocation(T* obj, mirror::DexCache* dex_cache) REQUIRES_SHARED(Locks::mutator_lock_);
+  T* NativeCopyLocation(T* obj) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Return true of obj is inside of the boot image space. This may only return true if we are
   // compiling an app image.
@@ -571,13 +616,21 @@ class ImageWriter FINAL {
   // Return true if there already exists a native allocation for an object.
   bool NativeRelocationAssigned(void* ptr) const;
 
-  void CopyReference(mirror::HeapReference<mirror::Object>* dest, ObjPtr<mirror::Object> src)
+  // Copy a reference and record image relocation.
+  template <typename DestType>
+  void CopyAndFixupReference(DestType* dest, ObjPtr<mirror::Object> src, size_t oat_index)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void CopyReference(mirror::CompressedReference<mirror::Object>* dest, ObjPtr<mirror::Object> src)
+  // Copy a native pointer and record image relocation.
+  void CopyAndFixupPointer(void** target, void* value, size_t oat_index, PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
-
-  void CopyAndFixupPointer(void** target, void* value);
+  void CopyAndFixupPointer(void** target, void* value, size_t oat_index)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  void CopyAndFixupPointer(
+      void* object, MemberOffset offset, void* value, size_t oat_index, PointerSize pointer_size)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  void CopyAndFixupPointer(void* object, MemberOffset offset, void* value, size_t oat_index)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   const CompilerOptions& compiler_options_;
 
@@ -611,17 +664,6 @@ class ImageWriter FINAL {
   // ArtField, ArtMethod relocating map. These are allocated as array of structs but we want to
   // have one entry per art field for convenience. ArtFields are placed right after the end of the
   // image objects (aka sum of bin_slot_sizes_). ArtMethods are placed right after the ArtFields.
-  struct NativeObjectRelocation {
-    size_t oat_index;
-    uintptr_t offset;
-    NativeObjectRelocationType type;
-
-    bool IsArtMethodRelocation() const {
-      return type == NativeObjectRelocationType::kArtMethodClean ||
-          type == NativeObjectRelocationType::kArtMethodDirty ||
-          type == NativeObjectRelocationType::kRuntimeMethod;
-    }
-  };
   std::unordered_map<void*, NativeObjectRelocation> native_object_relocations_;
 
   // Runtime ArtMethods which aren't reachable from any Class but need to be copied into the image.
@@ -659,7 +701,6 @@ class ImageWriter FINAL {
   class FixupRootVisitor;
   class FixupVisitor;
   class GetRootsVisitor;
-  class ImageAddressVisitorForDexCacheArray;
   class NativeLocationVisitor;
   class PruneClassesVisitor;
   class PruneClassLoaderClassesVisitor;

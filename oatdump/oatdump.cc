@@ -708,7 +708,7 @@ class OatDumper {
       return nullptr;
     }
 
-    std::unique_ptr<MemMap> mmap(MemMap::MapFile(
+    MemMap mmap = MemMap::MapFile(
         file->GetLength(),
         PROT_READ | PROT_WRITE,
         MAP_PRIVATE,
@@ -716,13 +716,13 @@ class OatDumper {
         /* start offset */ 0,
         /* low_4gb */ false,
         vdex_filename.c_str(),
-        error_msg));
-    if (mmap == nullptr) {
+        error_msg);
+    if (!mmap.IsValid()) {
       *error_msg = "Failed to mmap file " + vdex_filename + ": " + *error_msg;
       return nullptr;
     }
 
-    std::unique_ptr<VdexFile> vdex_file(new VdexFile(mmap.release()));
+    std::unique_ptr<VdexFile> vdex_file(new VdexFile(std::move(mmap)));
     if (!vdex_file->IsValid()) {
       *error_msg = "Vdex file is not valid";
       return nullptr;
@@ -867,28 +867,28 @@ class OatDumper {
 
     VariableIndentationOutputStream vios(&os);
     ScopedIndentation indent1(&vios);
-    for (size_t class_def_index = 0;
-         class_def_index < dex_file->NumClassDefs();
-         class_def_index++) {
-      const DexFile::ClassDef& class_def = dex_file->GetClassDef(class_def_index);
-      const char* descriptor = dex_file->GetClassDescriptor(class_def);
-
+    for (ClassAccessor accessor : dex_file->GetClasses()) {
       // TODO: Support regex
+      const char* descriptor = accessor.GetDescriptor();
       if (DescriptorToDot(descriptor).find(options_.class_filter_) == std::string::npos) {
         continue;
       }
 
+      const uint16_t class_def_index = accessor.GetClassDefIndex();
       uint32_t oat_class_offset = oat_dex_file.GetOatClassOffset(class_def_index);
       const OatFile::OatClass oat_class = oat_dex_file.GetOatClass(class_def_index);
       os << StringPrintf("%zd: %s (offset=0x%08x) (type_idx=%d)",
-                         class_def_index, descriptor, oat_class_offset, class_def.class_idx_.index_)
+                         static_cast<ssize_t>(class_def_index),
+                         descriptor,
+                         oat_class_offset,
+                         accessor.GetClassIdx().index_)
          << " (" << oat_class.GetStatus() << ")"
          << " (" << oat_class.GetType() << ")\n";
       // TODO: include bitmap here if type is kOatClassSomeCompiled?
       if (options_.list_classes_) {
         continue;
       }
-      if (!DumpOatClass(&vios, oat_class, *dex_file, class_def, &stop_analysis)) {
+      if (!DumpOatClass(&vios, oat_class, *dex_file, accessor, &stop_analysis)) {
         success = false;
       }
       if (stop_analysis) {
@@ -1023,22 +1023,23 @@ class OatDumper {
   }
 
   bool DumpOatClass(VariableIndentationOutputStream* vios,
-                    const OatFile::OatClass& oat_class, const DexFile& dex_file,
-                    const DexFile::ClassDef& class_def, bool* stop_analysis) {
+                    const OatFile::OatClass& oat_class,
+                    const DexFile& dex_file,
+                    const ClassAccessor& class_accessor,
+                    bool* stop_analysis) {
     bool success = true;
     bool addr_found = false;
-    const uint8_t* class_data = dex_file.GetClassData(class_def);
-    if (class_data == nullptr) {  // empty class such as a marker interface?
-      vios->Stream() << std::flush;
-      return success;
-    }
-    ClassDataItemIterator it(dex_file, class_data);
-    it.SkipAllFields();
     uint32_t class_method_index = 0;
-    while (it.HasNextMethod()) {
-      if (!DumpOatMethod(vios, class_def, class_method_index, oat_class, dex_file,
-                         it.GetMemberIndex(), it.GetMethodCodeItem(),
-                         it.GetRawMemberAccessFlags(), &addr_found)) {
+    for (const ClassAccessor::Method& method : class_accessor.GetMethods()) {
+      if (!DumpOatMethod(vios,
+                         dex_file.GetClassDef(class_accessor.GetClassDefIndex()),
+                         class_method_index,
+                         oat_class,
+                         dex_file,
+                         method.GetIndex(),
+                         method.GetCodeItem(),
+                         method.GetRawAccessFlags(),
+                         &addr_found)) {
         success = false;
       }
       if (addr_found) {
@@ -1046,9 +1047,7 @@ class OatDumper {
         return success;
       }
       class_method_index++;
-      it.Next();
     }
-    DCHECK(!it.HasNext());
     vios->Stream() << std::flush;
     return success;
   }
@@ -1311,13 +1310,12 @@ class OatDumper {
                     const CodeItemDataAccessor& code_item_accessor) {
     if (IsMethodGeneratedByOptimizingCompiler(oat_method, code_item_accessor)) {
       // The optimizing compiler outputs its CodeInfo data in the vmap table.
-      const void* raw_code_info = oat_method.GetVmapTable();
+      const uint8_t* raw_code_info = oat_method.GetVmapTable();
       if (raw_code_info != nullptr) {
         CodeInfo code_info(raw_code_info);
         DCHECK(code_item_accessor.HasCodeItem());
         ScopedIndentation indent1(vios);
-        MethodInfo method_info = oat_method.GetOatQuickMethodHeader()->GetOptimizedMethodInfo();
-        DumpCodeInfo(vios, code_info, oat_method, method_info);
+        DumpCodeInfo(vios, code_info, oat_method);
       }
     } else if (IsMethodGeneratedByDexToDexCompiler(oat_method, code_item_accessor)) {
       // We don't encode the size in the table, so just emit that we have quickened
@@ -1332,13 +1330,11 @@ class OatDumper {
   // Display a CodeInfo object emitted by the optimizing compiler.
   void DumpCodeInfo(VariableIndentationOutputStream* vios,
                     const CodeInfo& code_info,
-                    const OatFile::OatMethod& oat_method,
-                    const MethodInfo& method_info) {
+                    const OatFile::OatMethod& oat_method) {
     code_info.Dump(vios,
                    oat_method.GetCodeOffset(),
                    options_.dump_code_info_stack_maps_,
-                   instruction_set_,
-                   method_info);
+                   instruction_set_);
   }
 
   static int GetOutVROffset(uint16_t out_num, InstructionSet isa) {
@@ -1580,15 +1576,9 @@ class OatDumper {
     } else if (!bad_input && IsMethodGeneratedByOptimizingCompiler(oat_method,
                                                                    code_item_accessor)) {
       // The optimizing compiler outputs its CodeInfo data in the vmap table.
-      const OatQuickMethodHeader* method_header = oat_method.GetOatQuickMethodHeader();
       StackMapsHelper helper(oat_method.GetVmapTable(), instruction_set_);
       if (AddStatsObject(oat_method.GetVmapTable())) {
-        helper.GetCodeInfo().AddSizeStats(&stats_);
-      }
-      MethodInfo method_info(method_header->GetOptimizedMethodInfo());
-      if (AddStatsObject(method_header->GetOptimizedMethodInfoPtr())) {
-        size_t method_info_size = MethodInfo::ComputeSize(method_info.NumMethodIndices());
-        stats_.Child("MethodInfo")->AddBytes(method_info_size);
+        helper.GetCodeInfo().CollectSizeStats(oat_method.GetVmapTable(), &stats_);
       }
       const uint8_t* quick_native_pc = reinterpret_cast<const uint8_t*>(quick_code);
       size_t offset = 0;
@@ -1600,7 +1590,6 @@ class OatDumper {
           DCHECK(stack_map.IsValid());
           stack_map.Dump(vios,
                          helper.GetCodeInfo(),
-                         method_info,
                          oat_method.GetCodeOffset(),
                          instruction_set_);
           do {
@@ -1928,6 +1917,7 @@ class ImageDumper {
     const auto& intern_section = image_header_.GetInternedStringsSection();
     const auto& class_table_section = image_header_.GetClassTableSection();
     const auto& bitmap_section = image_header_.GetImageBitmapSection();
+    const auto& relocations_section = image_header_.GetImageRelocationsSection();
 
     stats_.header_bytes = header_bytes;
 
@@ -1967,7 +1957,11 @@ class ImageDumper {
     CHECK_ALIGNED(bitmap_section.Offset(), kPageSize);
     stats_.alignment_bytes += RoundUp(bitmap_offset, kPageSize) - bitmap_offset;
 
+    // There should be no space between the bitmap and relocations.
+    CHECK_EQ(bitmap_section.Offset() + bitmap_section.Size(), relocations_section.Offset());
+
     stats_.bitmap_bytes += bitmap_section.Size();
+    stats_.relocations_bytes += relocations_section.Size();
     stats_.art_field_bytes += field_section.Size();
     stats_.art_method_bytes += method_section.Size();
     stats_.dex_cache_arrays_bytes += dex_cache_arrays_section.Size();
@@ -2400,6 +2394,7 @@ class ImageDumper {
     size_t interned_strings_bytes;
     size_t class_table_bytes;
     size_t bitmap_bytes;
+    size_t relocations_bytes;
     size_t alignment_bytes;
 
     size_t managed_code_bytes;
@@ -2429,6 +2424,7 @@ class ImageDumper {
           interned_strings_bytes(0),
           class_table_bytes(0),
           bitmap_bytes(0),
+          relocations_bytes(0),
           alignment_bytes(0),
           managed_code_bytes(0),
           managed_code_bytes_ignoring_deduplication(0),
@@ -2592,6 +2588,7 @@ class ImageDumper {
                                   "interned_string_bytes  =  %8zd (%2.0f%% of art file bytes)\n"
                                   "class_table_bytes      =  %8zd (%2.0f%% of art file bytes)\n"
                                   "bitmap_bytes           =  %8zd (%2.0f%% of art file bytes)\n"
+                                  "relocations_bytes      =  %8zd (%2.0f%% of art file bytes)\n"
                                   "alignment_bytes        =  %8zd (%2.0f%% of art file bytes)\n\n",
                                   header_bytes, PercentOfFileBytes(header_bytes),
                                   object_bytes, PercentOfFileBytes(object_bytes),
@@ -2603,12 +2600,13 @@ class ImageDumper {
                                   PercentOfFileBytes(interned_strings_bytes),
                                   class_table_bytes, PercentOfFileBytes(class_table_bytes),
                                   bitmap_bytes, PercentOfFileBytes(bitmap_bytes),
+                                  relocations_bytes, PercentOfFileBytes(relocations_bytes),
                                   alignment_bytes, PercentOfFileBytes(alignment_bytes))
             << std::flush;
         CHECK_EQ(file_bytes,
                  header_bytes + object_bytes + art_field_bytes + art_method_bytes +
                  dex_cache_arrays_bytes + interned_strings_bytes + class_table_bytes +
-                 bitmap_bytes + alignment_bytes);
+                 bitmap_bytes + relocations_bytes + alignment_bytes);
       }
 
       os << "object_bytes breakdown:\n";

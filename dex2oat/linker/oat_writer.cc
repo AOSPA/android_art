@@ -26,6 +26,7 @@
 #include "base/bit_vector-inl.h"
 #include "base/enums.h"
 #include "base/file_magic.h"
+#include "base/indenter.h"
 #include "base/logging.h"  // For VLOG
 #include "base/os.h"
 #include "base/safe_map.h"
@@ -37,6 +38,7 @@
 #include "compiled_method-inl.h"
 #include "debug/method_debug_info.h"
 #include "dex/art_dex_file_loader.h"
+#include "dex/class_accessor-inl.h"
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_loader.h"
 #include "dex/dex_file_types.h"
@@ -65,6 +67,7 @@
 #include "profile/profile_compilation_info.h"
 #include "quicken_info.h"
 #include "scoped_thread_state_change-inl.h"
+#include "stack_map.h"
 #include "utils/dex_cache_arrays_layout-inl.h"
 #include "vdex_file.h"
 #include "verifier/verifier_deps.h"
@@ -442,7 +445,6 @@ OatWriter::OatWriter(const CompilerOptions& compiler_options,
     size_type_bss_mappings_(0u),
     size_string_bss_mappings_(0u),
     relative_patcher_(nullptr),
-    absolute_patch_locations_(),
     profile_compilation_info_(info),
     compact_dex_level_(compact_dex_level) {
   // If we have a profile, always use at least the default compact dex level. The reason behind
@@ -652,7 +654,7 @@ bool OatWriter::WriteAndOpenDexFiles(
     bool verify,
     bool update_input_vdex,
     CopyOption copy_dex_files,
-    /*out*/ std::vector<std::unique_ptr<MemMap>>* opened_dex_files_map,
+    /*out*/ std::vector<MemMap>* opened_dex_files_map,
     /*out*/ std::vector<std::unique_ptr<const DexFile>>* opened_dex_files) {
   CHECK(write_state_ == WriteState::kAddingDexFileSources);
 
@@ -661,7 +663,7 @@ bool OatWriter::WriteAndOpenDexFiles(
      return false;
   }
 
-  std::vector<std::unique_ptr<MemMap>> dex_files_map;
+  std::vector<MemMap> dex_files_map;
   std::vector<std::unique_ptr<const DexFile>> dex_files;
 
   // Initialize VDEX and OAT headers.
@@ -790,7 +792,7 @@ class OatWriter::DexMethodVisitor {
     return true;
   }
 
-  virtual bool VisitMethod(size_t class_def_method_index, const ClassDataItemIterator& it) = 0;
+  virtual bool VisitMethod(size_t class_def_method_index, const ClassAccessor::Method& method) = 0;
 
   virtual bool EndClass() {
     if (kIsDebugBuild) {
@@ -860,10 +862,10 @@ class OatWriter::InitBssLayoutMethodVisitor : public DexMethodVisitor {
       : DexMethodVisitor(writer, /* offset */ 0u) {}
 
   bool VisitMethod(size_t class_def_method_index ATTRIBUTE_UNUSED,
-                   const ClassDataItemIterator& it) OVERRIDE {
+                   const ClassAccessor::Method& method) OVERRIDE {
     // Look for patches with .bss references and prepare maps with placeholders for their offsets.
     CompiledMethod* compiled_method = writer_->compiler_driver_->GetCompiledMethod(
-        MethodReference(dex_file_, it.GetMemberIndex()));
+        MethodReference(dex_file_, method.GetIndex()));
     if (HasCompiledCode(compiled_method)) {
       for (const LinkerPatch& patch : compiled_method->GetPatches()) {
         if (patch.GetType() == LinkerPatch::Type::kDataBimgRelRo) {
@@ -942,12 +944,12 @@ class OatWriter::InitOatClassesMethodVisitor : public DexMethodVisitor {
   }
 
   bool VisitMethod(size_t class_def_method_index ATTRIBUTE_UNUSED,
-                   const ClassDataItemIterator& it) OVERRIDE {
+                   const ClassAccessor::Method& method) OVERRIDE {
     // Fill in the compiled_methods_ array for methods that have a
     // CompiledMethod. We track the number of non-null entries in
     // compiled_methods_with_code_ since we only want to allocate
     // OatMethodOffsets for the compiled methods.
-    uint32_t method_idx = it.GetMemberIndex();
+    uint32_t method_idx = method.GetIndex();
     CompiledMethod* compiled_method =
         writer_->compiler_driver_->GetCompiledMethod(MethodReference(dex_file_, method_idx));
     compiled_methods_.push_back(compiled_method);
@@ -1149,7 +1151,7 @@ class OatWriter::LayoutCodeMethodVisitor : public OatDexMethodVisitor {
   }
 
   bool VisitMethod(size_t class_def_method_index,
-                   const ClassDataItemIterator& it)
+                   const ClassAccessor::Method& method)
       OVERRIDE
       REQUIRES_SHARED(Locks::mutator_lock_)  {
     Locks::mutator_lock_->AssertSharedHeld(Thread::Current());
@@ -1181,7 +1183,7 @@ class OatWriter::LayoutCodeMethodVisitor : public OatDexMethodVisitor {
         }
       }
 
-      MethodReference method_ref(dex_file_, it.GetMemberIndex());
+      MethodReference method_ref(dex_file_, method.GetIndex());
 
       // Lookup method hotness from profile, if available.
       // Otherwise assume a default of none-hotness.
@@ -1198,8 +1200,8 @@ class OatWriter::LayoutCodeMethodVisitor : public OatDexMethodVisitor {
           method_ref,
           method_offsets_index_,
           class_def_index_,
-          it.GetMethodAccessFlags(),
-          it.GetMethodCodeItem(),
+          method.GetAccessFlags(),
+          method.GetCodeItem(),
           debug_info_idx
       };
       ordered_methods_.push_back(method_data);
@@ -1315,7 +1317,6 @@ class OatWriter::LayoutReserveOffsetCodeMethodVisitor : public OrderedMethodVisi
     DCHECK_LT(method_offsets_index_, oat_class->method_headers_.size());
     OatQuickMethodHeader* method_header = &oat_class->method_headers_[method_offsets_index_];
     uint32_t vmap_table_offset = method_header->GetVmapTableOffset();
-    uint32_t method_info_offset = method_header->GetMethodInfoOffset();
     // The code offset was 0 when the mapping/vmap table offset was set, so it's set
     // to 0-offset and we need to adjust it by code_offset.
     uint32_t code_offset = quick_code_offset - thumb_offset;
@@ -1326,40 +1327,20 @@ class OatWriter::LayoutReserveOffsetCodeMethodVisitor : public OrderedMethodVisi
       vmap_table_offset += code_offset;
       DCHECK_LT(vmap_table_offset, code_offset);
     }
-    if (method_info_offset != 0u) {
-      method_info_offset += code_offset;
-      DCHECK_LT(method_info_offset, code_offset);
-    }
-    uint32_t frame_size_in_bytes = compiled_method->GetFrameSizeInBytes();
-    uint32_t core_spill_mask = compiled_method->GetCoreSpillMask();
-    uint32_t fp_spill_mask = compiled_method->GetFpSpillMask();
-    *method_header = OatQuickMethodHeader(vmap_table_offset,
-                                          method_info_offset,
-                                          frame_size_in_bytes,
-                                          core_spill_mask,
-                                          fp_spill_mask,
-                                          code_size);
+    *method_header = OatQuickMethodHeader(vmap_table_offset, code_size);
 
     if (!deduped) {
       // Update offsets. (Checksum is updated when writing.)
       offset_ += sizeof(*method_header);  // Method header is prepended before code.
       offset_ += code_size;
-      // Record absolute patch locations.
-      if (!compiled_method->GetPatches().empty()) {
-        uintptr_t base_loc = offset_ - code_size - writer_->oat_header_->GetExecutableOffset();
-        for (const LinkerPatch& patch : compiled_method->GetPatches()) {
-          if (!patch.IsPcRelative()) {
-            writer_->absolute_patch_locations_.push_back(base_loc + patch.LiteralOffset());
-          }
-        }
-      }
     }
 
     // Exclude quickened dex methods (code_size == 0) since they have no native code.
     if (generate_debug_info_ && code_size != 0) {
       DCHECK(has_debug_info);
+      const uint8_t* code_info = compiled_method->GetVmapTable().data();
+      DCHECK(code_info != nullptr);
 
-      bool has_code_info = method_header->IsOptimized();
       // Record debug information for this function if we are doing that.
       debug::MethodDebugInfo& info = writer_->method_info_[debug_info_idx];
       DCHECK(info.custom_name.empty());
@@ -1376,8 +1357,8 @@ class OatWriter::LayoutReserveOffsetCodeMethodVisitor : public OrderedMethodVisi
       info.is_code_address_text_relative = true;
       info.code_address = code_offset - executable_offset_;
       info.code_size = code_size;
-      info.frame_size_in_bytes = compiled_method->GetFrameSizeInBytes();
-      info.code_info = has_code_info ? compiled_method->GetVmapTable().data() : nullptr;
+      info.frame_size_in_bytes = CodeInfo::DecodeFrameInfo(code_info).FrameSizeInBytes();
+      info.code_info = code_info;
       info.cfi = compiled_method->GetCFIInfo();
     } else {
       DCHECK(!has_debug_info);
@@ -1406,10 +1387,7 @@ class OatWriter::LayoutReserveOffsetCodeMethodVisitor : public OrderedMethodVisi
         executable_offset_(writer->oat_header_->GetExecutableOffset()),
         debuggable_(compiler_options.GetDebuggable()),
         native_debuggable_(compiler_options.GetNativeDebuggable()),
-        generate_debug_info_(compiler_options.GenerateAnyDebugInfo()) {
-    writer->absolute_patch_locations_.reserve(
-        writer->GetCompilerDriver()->GetNonRelativeLinkerPatchCount());
-  }
+        generate_debug_info_(compiler_options.GenerateAnyDebugInfo()) {}
 
   struct CodeOffsetsKeyComparator {
     bool operator()(const CompiledMethod* lhs, const CompiledMethod* rhs) const {
@@ -1420,9 +1398,6 @@ class OatWriter::LayoutReserveOffsetCodeMethodVisitor : public OrderedMethodVisi
       // If the code is the same, all other fields are likely to be the same as well.
       if (UNLIKELY(lhs->GetVmapTable().data() != rhs->GetVmapTable().data())) {
         return lhs->GetVmapTable().data() < rhs->GetVmapTable().data();
-      }
-      if (UNLIKELY(lhs->GetMethodInfo().data() != rhs->GetMethodInfo().data())) {
-        return lhs->GetMethodInfo().data() < rhs->GetMethodInfo().data();
       }
       if (UNLIKELY(lhs->GetPatches().data() != rhs->GetPatches().data())) {
         return lhs->GetPatches().data() < rhs->GetPatches().data();
@@ -1464,9 +1439,12 @@ class OatWriter::LayoutReserveOffsetCodeMethodVisitor : public OrderedMethodVisi
 class OatWriter::InitMapMethodVisitor : public OatDexMethodVisitor {
  public:
   InitMapMethodVisitor(OatWriter* writer, size_t offset)
-      : OatDexMethodVisitor(writer, offset) {}
+      : OatDexMethodVisitor(writer, offset),
+        dedupe_bit_table_(&writer_->code_info_data_) {
+  }
 
-  bool VisitMethod(size_t class_def_method_index, const ClassDataItemIterator& it ATTRIBUTE_UNUSED)
+  bool VisitMethod(size_t class_def_method_index,
+                   const ClassAccessor::Method& method ATTRIBUTE_UNUSED)
       OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
     OatClass* oat_class = &writer_->oat_classes_[oat_class_index_];
     CompiledMethod* compiled_method = oat_class->GetCompiledMethod(class_def_method_index);
@@ -1476,15 +1454,11 @@ class OatWriter::InitMapMethodVisitor : public OatDexMethodVisitor {
       DCHECK_EQ(oat_class->method_headers_[method_offsets_index_].GetVmapTableOffset(), 0u);
 
       ArrayRef<const uint8_t> map = compiled_method->GetVmapTable();
-      uint32_t map_size = map.size() * sizeof(map[0]);
-      if (map_size != 0u) {
-        size_t offset = dedupe_map_.GetOrCreate(
-            map.data(),
-            [this, map_size]() {
-              uint32_t new_offset = offset_;
-              offset_ += map_size;
-              return new_offset;
-            });
+      if (map.size() != 0u) {
+        size_t offset = dedupe_code_info_.GetOrCreate(map.data(), [=]() {
+          // Deduplicate the inner BitTable<>s within the CodeInfo.
+          return offset_ + dedupe_bit_table_.Dedupe(map.data());
+        });
         // Code offset is not initialized yet, so set the map offset to 0u-offset.
         DCHECK_EQ(oat_class->method_offsets_[method_offsets_index_].code_offset_, 0u);
         oat_class->method_headers_[method_offsets_index_].SetVmapTableOffset(0u - offset);
@@ -1496,47 +1470,13 @@ class OatWriter::InitMapMethodVisitor : public OatDexMethodVisitor {
   }
 
  private:
-  // Deduplication is already done on a pointer basis by the compiler driver,
-  // so we can simply compare the pointers to find out if things are duplicated.
-  SafeMap<const uint8_t*, uint32_t> dedupe_map_;
-};
+  // Deduplicate at CodeInfo level. The value is byte offset within code_info_data_.
+  // This deduplicates the whole CodeInfo object without going into the inner tables.
+  // The compiler already deduplicated the pointers but it did not dedupe the tables.
+  SafeMap<const uint8_t*, size_t> dedupe_code_info_;
 
-class OatWriter::InitMethodInfoVisitor : public OatDexMethodVisitor {
- public:
-  InitMethodInfoVisitor(OatWriter* writer, size_t offset) : OatDexMethodVisitor(writer, offset) {}
-
-  bool VisitMethod(size_t class_def_method_index, const ClassDataItemIterator& it ATTRIBUTE_UNUSED)
-      OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
-    OatClass* oat_class = &writer_->oat_classes_[oat_class_index_];
-    CompiledMethod* compiled_method = oat_class->GetCompiledMethod(class_def_method_index);
-
-    if (HasCompiledCode(compiled_method)) {
-      DCHECK_LT(method_offsets_index_, oat_class->method_offsets_.size());
-      DCHECK_EQ(oat_class->method_headers_[method_offsets_index_].GetMethodInfoOffset(), 0u);
-      ArrayRef<const uint8_t> map = compiled_method->GetMethodInfo();
-      const uint32_t map_size = map.size() * sizeof(map[0]);
-      if (map_size != 0u) {
-        size_t offset = dedupe_map_.GetOrCreate(
-            map.data(),
-            [this, map_size]() {
-              uint32_t new_offset = offset_;
-              offset_ += map_size;
-              return new_offset;
-            });
-        // Code offset is not initialized yet, so set the map offset to 0u-offset.
-        DCHECK_EQ(oat_class->method_offsets_[method_offsets_index_].code_offset_, 0u);
-        oat_class->method_headers_[method_offsets_index_].SetMethodInfoOffset(0u - offset);
-      }
-      ++method_offsets_index_;
-    }
-
-    return true;
-  }
-
- private:
-  // Deduplication is already done on a pointer basis by the compiler driver,
-  // so we can simply compare the pointers to find out if things are duplicated.
-  SafeMap<const uint8_t*, uint32_t> dedupe_map_;
+  // Deduplicate at BitTable level.
+  CodeInfo::Deduper dedupe_bit_table_;
 };
 
 class OatWriter::InitImageMethodVisitor : public OatDexMethodVisitor {
@@ -1570,7 +1510,7 @@ class OatWriter::InitImageMethodVisitor : public OatDexMethodVisitor {
         // Find origin method. Declaring class and dex_method_idx
         // in the copied method should be the same as in the origin
         // method.
-        mirror::Class* declaring_class = method.GetDeclaringClass();
+        ObjPtr<mirror::Class> declaring_class = method.GetDeclaringClass();
         ArtMethod* origin = declaring_class->FindClassMethod(
             declaring_class->GetDexCache(),
             method.GetDexMethodIndex(),
@@ -1593,7 +1533,7 @@ class OatWriter::InitImageMethodVisitor : public OatDexMethodVisitor {
     return true;
   }
 
-  bool VisitMethod(size_t class_def_method_index, const ClassDataItemIterator& it) OVERRIDE
+  bool VisitMethod(size_t class_def_method_index, const ClassAccessor::Method& method) OVERRIDE
       REQUIRES_SHARED(Locks::mutator_lock_) {
     // Skip methods that are not in the image.
     if (!IsImageClass()) {
@@ -1612,22 +1552,22 @@ class OatWriter::InitImageMethodVisitor : public OatDexMethodVisitor {
 
     Thread* self = Thread::Current();
     ObjPtr<mirror::DexCache> dex_cache = class_linker_->FindDexCache(self, *dex_file_);
-    ArtMethod* method;
+    ArtMethod* resolved_method;
     if (writer_->GetCompilerOptions().IsBootImage()) {
-      const InvokeType invoke_type = it.GetMethodInvokeType(
-          dex_file_->GetClassDef(class_def_index_));
+      const InvokeType invoke_type = method.GetInvokeType(
+          dex_file_->GetClassDef(class_def_index_).access_flags_);
       // Unchecked as we hold mutator_lock_ on entry.
       ScopedObjectAccessUnchecked soa(self);
       StackHandleScope<1> hs(self);
-      method = class_linker_->ResolveMethod<ClassLinker::ResolveMode::kNoChecks>(
-          it.GetMemberIndex(),
+      resolved_method = class_linker_->ResolveMethod<ClassLinker::ResolveMode::kNoChecks>(
+          method.GetIndex(),
           hs.NewHandle(dex_cache),
           ScopedNullHandle<mirror::ClassLoader>(),
           /* referrer */ nullptr,
           invoke_type);
-      if (method == nullptr) {
+      if (resolved_method == nullptr) {
         LOG(FATAL_WITHOUT_ABORT) << "Unexpected failure to resolve a method: "
-            << dex_file_->PrettyMethod(it.GetMemberIndex(), true);
+            << dex_file_->PrettyMethod(method.GetIndex(), true);
         self->AssertPendingException();
         mirror::Throwable* exc = self->GetException();
         std::string dump = exc->Dump();
@@ -1638,12 +1578,14 @@ class OatWriter::InitImageMethodVisitor : public OatDexMethodVisitor {
       // Should already have been resolved by the compiler.
       // It may not be resolved if the class failed to verify, in this case, don't set the
       // entrypoint. This is not fatal since we shall use a resolution method.
-      method = class_linker_->LookupResolvedMethod(it.GetMemberIndex(), dex_cache, class_loader_);
+      resolved_method = class_linker_->LookupResolvedMethod(method.GetIndex(),
+                                                            dex_cache,
+                                                            class_loader_);
     }
-    if (method != nullptr &&
+    if (resolved_method != nullptr &&
         compiled_method != nullptr &&
         compiled_method->GetQuickCode().size() != 0) {
-      method->SetEntryPointFromQuickCompiledCodePtrSize(
+      resolved_method->SetEntryPointFromQuickCompiledCodePtrSize(
           reinterpret_cast<void*>(offsets.code_offset_), pointer_size_);
     }
 
@@ -1868,11 +1810,6 @@ class OatWriter::WriteCodeMethodVisitor : public OrderedMethodVisitor {
                                                                    target_offset);
               break;
             }
-            case LinkerPatch::Type::kCall: {
-              uint32_t target_offset = GetTargetOffset(patch);
-              PatchCodeAddress(&patched_code_, literal_offset, target_offset);
-              break;
-            }
             case LinkerPatch::Type::kMethodRelative: {
               uint32_t target_offset = GetTargetMethodOffset(GetTargetMethod(patch));
               writer_->relative_patcher_->PatchPcRelativeReference(&patched_code_,
@@ -1959,7 +1896,7 @@ class OatWriter::WriteCodeMethodVisitor : public OrderedMethodVisitor {
       DCHECK(target != nullptr);
       const void* oat_code_offset =
           target->GetEntryPointFromQuickCompiledCodePtrSize(pointer_size_);
-      if (oat_code_offset != 0) {
+      if (oat_code_offset != nullptr) {
         DCHECK(!writer_->GetCompilerOptions().IsBootImage());
         DCHECK(!Runtime::Current()->GetClassLinker()->IsQuickResolutionStub(oat_code_offset));
         DCHECK(!Runtime::Current()->GetClassLinker()->IsQuickToInterpreterBridge(oat_code_offset));
@@ -2051,170 +1988,22 @@ class OatWriter::WriteCodeMethodVisitor : public OrderedMethodVisitor {
     data[2] = (address >> 16) & 0xffu;
     data[3] = (address >> 24) & 0xffu;
   }
-
-  void PatchCodeAddress(std::vector<uint8_t>* code, uint32_t offset, uint32_t target_offset)
-      REQUIRES_SHARED(Locks::mutator_lock_) {
-    uint32_t address = target_offset;
-    if (writer_->GetCompilerOptions().IsBootImage()) {
-      size_t oat_index = writer_->image_writer_->GetOatIndexForDexCache(dex_cache_);
-      // TODO: Clean up offset types.
-      // The target_offset must be treated as signed for cross-oat patching.
-      const void* target = reinterpret_cast<const void*>(
-          writer_->image_writer_->GetOatDataBegin(oat_index) +
-          static_cast<int32_t>(target_offset));
-      address = PointerToLowMemUInt32(target);
-    }
-    DCHECK_LE(offset + 4, code->size());
-    uint8_t* data = &(*code)[offset];
-    data[0] = address & 0xffu;
-    data[1] = (address >> 8) & 0xffu;
-    data[2] = (address >> 16) & 0xffu;
-    data[3] = (address >> 24) & 0xffu;
-  }
-};
-
-class OatWriter::WriteMapMethodVisitor : public OatDexMethodVisitor {
- public:
-  WriteMapMethodVisitor(OatWriter* writer,
-                        OutputStream* out,
-                        const size_t file_offset,
-                        size_t relative_offset)
-      : OatDexMethodVisitor(writer, relative_offset),
-        out_(out),
-        file_offset_(file_offset) {}
-
-  bool VisitMethod(size_t class_def_method_index, const ClassDataItemIterator& it) OVERRIDE {
-    OatClass* oat_class = &writer_->oat_classes_[oat_class_index_];
-    const CompiledMethod* compiled_method = oat_class->GetCompiledMethod(class_def_method_index);
-
-    if (HasCompiledCode(compiled_method)) {
-      size_t file_offset = file_offset_;
-      OutputStream* out = out_;
-
-      uint32_t map_offset = oat_class->method_headers_[method_offsets_index_].GetVmapTableOffset();
-      uint32_t code_offset = oat_class->method_offsets_[method_offsets_index_].code_offset_;
-      ++method_offsets_index_;
-
-      DCHECK((compiled_method->GetVmapTable().size() == 0u && map_offset == 0u) ||
-             (compiled_method->GetVmapTable().size() != 0u && map_offset != 0u))
-          << compiled_method->GetVmapTable().size() << " " << map_offset << " "
-          << dex_file_->PrettyMethod(it.GetMemberIndex());
-
-      // If vdex is enabled, only emit the map for compiled code. The quickening info
-      // is emitted in the vdex already.
-      if (map_offset != 0u) {
-        // Transform map_offset to actual oat data offset.
-        map_offset = (code_offset - compiled_method->CodeDelta()) - map_offset;
-        DCHECK_NE(map_offset, 0u);
-        DCHECK_LE(map_offset, offset_) << dex_file_->PrettyMethod(it.GetMemberIndex());
-
-        ArrayRef<const uint8_t> map = compiled_method->GetVmapTable();
-        size_t map_size = map.size() * sizeof(map[0]);
-        if (map_offset == offset_) {
-          // Write deduplicated map (code info for Optimizing or transformation info for dex2dex).
-          if (UNLIKELY(!out->WriteFully(map.data(), map_size))) {
-            ReportWriteFailure(it);
-            return false;
-          }
-          offset_ += map_size;
-        }
-      }
-      DCHECK_OFFSET_();
-    }
-
-    return true;
-  }
-
- private:
-  OutputStream* const out_;
-  size_t const file_offset_;
-
-  void ReportWriteFailure(const ClassDataItemIterator& it) {
-    PLOG(ERROR) << "Failed to write map for "
-        << dex_file_->PrettyMethod(it.GetMemberIndex()) << " to " << out_->GetLocation();
-  }
-};
-
-class OatWriter::WriteMethodInfoVisitor : public OatDexMethodVisitor {
- public:
-  WriteMethodInfoVisitor(OatWriter* writer,
-                         OutputStream* out,
-                         const size_t file_offset,
-                         size_t relative_offset)
-      : OatDexMethodVisitor(writer, relative_offset),
-        out_(out),
-        file_offset_(file_offset) {}
-
-  bool VisitMethod(size_t class_def_method_index, const ClassDataItemIterator& it) OVERRIDE {
-    OatClass* oat_class = &writer_->oat_classes_[oat_class_index_];
-    const CompiledMethod* compiled_method = oat_class->GetCompiledMethod(class_def_method_index);
-
-    if (HasCompiledCode(compiled_method)) {
-      size_t file_offset = file_offset_;
-      OutputStream* out = out_;
-      uint32_t map_offset = oat_class->method_headers_[method_offsets_index_].GetMethodInfoOffset();
-      uint32_t code_offset = oat_class->method_offsets_[method_offsets_index_].code_offset_;
-      ++method_offsets_index_;
-      DCHECK((compiled_method->GetMethodInfo().size() == 0u && map_offset == 0u) ||
-             (compiled_method->GetMethodInfo().size() != 0u && map_offset != 0u))
-          << compiled_method->GetMethodInfo().size() << " " << map_offset << " "
-          << dex_file_->PrettyMethod(it.GetMemberIndex());
-      if (map_offset != 0u) {
-        // Transform map_offset to actual oat data offset.
-        map_offset = (code_offset - compiled_method->CodeDelta()) - map_offset;
-        DCHECK_NE(map_offset, 0u);
-        DCHECK_LE(map_offset, offset_) << dex_file_->PrettyMethod(it.GetMemberIndex());
-
-        ArrayRef<const uint8_t> map = compiled_method->GetMethodInfo();
-        size_t map_size = map.size() * sizeof(map[0]);
-        if (map_offset == offset_) {
-          // Write deduplicated map (code info for Optimizing or transformation info for dex2dex).
-          if (UNLIKELY(!out->WriteFully(map.data(), map_size))) {
-            ReportWriteFailure(it);
-            return false;
-          }
-          offset_ += map_size;
-        }
-      }
-      DCHECK_OFFSET_();
-    }
-
-    return true;
-  }
-
- private:
-  OutputStream* const out_;
-  size_t const file_offset_;
-
-  void ReportWriteFailure(const ClassDataItemIterator& it) {
-    PLOG(ERROR) << "Failed to write map for "
-        << dex_file_->PrettyMethod(it.GetMemberIndex()) << " to " << out_->GetLocation();
-  }
 };
 
 // Visit all methods from all classes in all dex files with the specified visitor.
 bool OatWriter::VisitDexMethods(DexMethodVisitor* visitor) {
   for (const DexFile* dex_file : *dex_files_) {
-    const size_t class_def_count = dex_file->NumClassDefs();
-    for (size_t class_def_index = 0; class_def_index != class_def_count; ++class_def_index) {
-      if (UNLIKELY(!visitor->StartClass(dex_file, class_def_index))) {
+    for (ClassAccessor accessor : dex_file->GetClasses()) {
+      if (UNLIKELY(!visitor->StartClass(dex_file, accessor.GetClassDefIndex()))) {
         return false;
       }
       if (MayHaveCompiledMethods()) {
-        const DexFile::ClassDef& class_def = dex_file->GetClassDef(class_def_index);
-        const uint8_t* class_data = dex_file->GetClassData(class_def);
-        if (class_data != nullptr) {  // ie not an empty class, such as a marker interface
-          ClassDataItemIterator it(*dex_file, class_data);
-          it.SkipAllFields();
-          size_t class_def_method_index = 0u;
-          while (it.HasNextMethod()) {
-            if (!visitor->VisitMethod(class_def_method_index, it)) {
-              return false;
-            }
-            ++class_def_method_index;
-            it.Next();
+        size_t class_def_method_index = 0u;
+        for (const ClassAccessor::Method& method : accessor.GetMethods()) {
+          if (!visitor->VisitMethod(class_def_method_index, method)) {
+            return false;
           }
-          DCHECK(!it.HasNext());
+          ++class_def_method_index;
         }
       }
       if (UNLIKELY(!visitor->EndClass())) {
@@ -2281,13 +2070,8 @@ size_t OatWriter::InitOatMaps(size_t offset) {
     InitMapMethodVisitor visitor(this, offset);
     bool success = VisitDexMethods(&visitor);
     DCHECK(success);
-    offset = visitor.GetOffset();
-  }
-  {
-    InitMethodInfoVisitor visitor(this, offset);
-    bool success = VisitDexMethods(&visitor);
-    DCHECK(success);
-    offset = visitor.GetOffset();
+    code_info_data_.shrink_to_fit();
+    offset += code_info_data_.size();
   }
   return offset;
 }
@@ -3135,22 +2919,12 @@ size_t OatWriter::WriteClasses(OutputStream* out, size_t file_offset, size_t rel
 
 size_t OatWriter::WriteMaps(OutputStream* out, size_t file_offset, size_t relative_offset) {
   {
-    size_t vmap_tables_offset = relative_offset;
-    WriteMapMethodVisitor visitor(this, out, file_offset, relative_offset);
-    if (UNLIKELY(!VisitDexMethods(&visitor))) {
+    if (UNLIKELY(!out->WriteFully(code_info_data_.data(), code_info_data_.size()))) {
       return 0;
     }
-    relative_offset = visitor.GetOffset();
-    size_vmap_table_ = relative_offset - vmap_tables_offset;
-  }
-  {
-    size_t method_infos_offset = relative_offset;
-    WriteMethodInfoVisitor visitor(this, out, file_offset, relative_offset);
-    if (UNLIKELY(!VisitDexMethods(&visitor))) {
-      return 0;
-    }
-    relative_offset = visitor.GetOffset();
-    size_method_info_ = relative_offset - method_infos_offset;
+    relative_offset += code_info_data_.size();
+    size_vmap_table_ = code_info_data_.size();
+    DCHECK_OFFSET();
   }
 
   return relative_offset;
@@ -3650,12 +3424,12 @@ bool OatWriter::LayoutAndWriteDexFile(OutputStream* out, OatDexFile* oat_dex_fil
   const ArtDexFileLoader dex_file_loader;
   if (oat_dex_file->source_.IsZipEntry()) {
     ZipEntry* zip_entry = oat_dex_file->source_.GetZipEntry();
-    std::unique_ptr<MemMap> mem_map;
+    MemMap mem_map;
     {
       TimingLogger::ScopedTiming extract("Unzip", timings_);
-      mem_map.reset(zip_entry->ExtractToMemMap(location.c_str(), "classes.dex", &error_msg));
+      mem_map = zip_entry->ExtractToMemMap(location.c_str(), "classes.dex", &error_msg);
     }
-    if (mem_map == nullptr) {
+    if (!mem_map.IsValid()) {
       LOG(ERROR) << "Failed to extract dex file to mem map for layout: " << error_msg;
       return false;
     }
@@ -3910,7 +3684,7 @@ bool OatWriter::WriteDexFile(OutputStream* out,
 bool OatWriter::OpenDexFiles(
     File* file,
     bool verify,
-    /*out*/ std::vector<std::unique_ptr<MemMap>>* opened_dex_files_map,
+    /*out*/ std::vector<MemMap>* opened_dex_files_map,
     /*out*/ std::vector<std::unique_ptr<const DexFile>>* opened_dex_files) {
   TimingLogger::ScopedTiming split("OpenDexFiles", timings_);
 
@@ -3921,16 +3695,16 @@ bool OatWriter::OpenDexFiles(
 
   if (!extract_dex_files_into_vdex_) {
     std::vector<std::unique_ptr<const DexFile>> dex_files;
-    std::vector<std::unique_ptr<MemMap>> maps;
+    std::vector<MemMap> maps;
     for (OatDexFile& oat_dex_file : oat_dex_files_) {
       std::string error_msg;
-      MemMap* map = oat_dex_file.source_.GetZipEntry()->MapDirectlyOrExtract(
-          oat_dex_file.dex_file_location_data_, "zipped dex", &error_msg);
-      if (map == nullptr) {
+      maps.emplace_back(oat_dex_file.source_.GetZipEntry()->MapDirectlyOrExtract(
+          oat_dex_file.dex_file_location_data_, "zipped dex", &error_msg));
+      MemMap* map = &maps.back();
+      if (!map->IsValid()) {
         LOG(ERROR) << error_msg;
         return false;
       }
-      maps.emplace_back(map);
       // Now, open the dex file.
       const ArtDexFileLoader dex_file_loader;
       dex_files.emplace_back(dex_file_loader.Open(map->Begin(),
@@ -3961,7 +3735,7 @@ bool OatWriter::OpenDexFiles(
   size_t length = vdex_size_ - map_offset;
 
   std::string error_msg;
-  std::unique_ptr<MemMap> dex_files_map(MemMap::MapFile(
+  MemMap dex_files_map = MemMap::MapFile(
       length,
       PROT_READ | PROT_WRITE,
       MAP_SHARED,
@@ -3969,8 +3743,8 @@ bool OatWriter::OpenDexFiles(
       map_offset,
       /* low_4gb */ false,
       file->GetPath().c_str(),
-      &error_msg));
-  if (dex_files_map == nullptr) {
+      &error_msg);
+  if (!dex_files_map.IsValid()) {
     LOG(ERROR) << "Failed to mmap() dex files from oat file. File: " << file->GetPath()
                << " error: " << error_msg;
     return false;
@@ -3979,7 +3753,7 @@ bool OatWriter::OpenDexFiles(
   std::vector<std::unique_ptr<const DexFile>> dex_files;
   for (OatDexFile& oat_dex_file : oat_dex_files_) {
     const uint8_t* raw_dex_file =
-        dex_files_map->Begin() + oat_dex_file.dex_file_offset_ - map_offset;
+        dex_files_map.Begin() + oat_dex_file.dex_file_offset_ - map_offset;
 
     if (kIsDebugBuild) {
       // Sanity check our input files.

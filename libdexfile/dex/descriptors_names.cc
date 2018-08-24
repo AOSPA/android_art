@@ -19,12 +19,12 @@
 #include "android-base/stringprintf.h"
 #include "android-base/strings.h"
 
+#include "base/macros.h"
 #include "dex/utf-inl.h"
 
 namespace art {
 
 using android::base::StringAppendF;
-using android::base::StringPrintf;
 
 void AppendPrettyDescriptor(const char* descriptor, std::string* result) {
   // Count the number of '['s to get the dimensionality.
@@ -163,7 +163,7 @@ std::string DescriptorToName(const char* descriptor) {
 }
 
 // Helper for IsValidPartOfMemberNameUtf8(), a bit vector indicating valid low ascii.
-static uint32_t DEX_MEMBER_VALID_LOW_ASCII[4] = {
+static constexpr uint32_t DEX_MEMBER_VALID_LOW_ASCII[4] = {
   0x00000000,  // 00..1f low control characters; nothing valid
   0x03ff2010,  // 20..3f digits and symbols; valid: '0'..'9', '$', '-'
   0x87fffffe,  // 40..5f uppercase etc.; valid: 'A'..'Z', '_'
@@ -171,6 +171,7 @@ static uint32_t DEX_MEMBER_VALID_LOW_ASCII[4] = {
 };
 
 // Helper for IsValidPartOfMemberNameUtf8(); do not call directly.
+COLD_ATTR
 static bool IsValidPartOfMemberNameUtf8Slow(const char** pUtf8Ptr) {
   /*
    * It's a multibyte encoded character. Decode it and analyze. We
@@ -245,6 +246,7 @@ static bool IsValidPartOfMemberNameUtf8Slow(const char** pUtf8Ptr) {
  * this function returns false, then the given pointer may only have
  * been partially advanced.
  */
+ALWAYS_INLINE
 static bool IsValidPartOfMemberNameUtf8(const char** pUtf8Ptr) {
   uint8_t c = (uint8_t) **pUtf8Ptr;
   if (LIKELY(c <= 0x7f)) {

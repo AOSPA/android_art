@@ -589,9 +589,9 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
   PcRelativePatchInfo* NewStringBssEntryPatch(const DexFile& dex_file,
                                               dex::StringIndex string_index);
 
-  // Add a new baker read barrier patch and return the label to be bound
-  // before the BNE instruction.
-  vixl::aarch32::Label* NewBakerReadBarrierPatch(uint32_t custom_data);
+  // Emit the BNE instruction for baker read barrier and record
+  // the associated patch for AOT or slow path for JIT.
+  void EmitBakerReadBarrierBne(uint32_t custom_data);
 
   VIXLUInt32Literal* DeduplicateBootImageAddressLiteral(uint32_t address);
   VIXLUInt32Literal* DeduplicateJitStringLiteral(const DexFile& dex_file,
@@ -622,6 +622,19 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
                                vixl::aarch32::Register obj,
                                uint32_t offset,
                                ReadBarrierOption read_barrier_option);
+  // Generate ADD for UnsafeCASObject to reconstruct the old value from
+  // `old_value - expected` and mark it with Baker read barrier.
+  void GenerateUnsafeCasOldValueAddWithBakerReadBarrier(vixl::aarch32::Register old_value,
+                                                        vixl::aarch32::Register adjusted_old_value,
+                                                        vixl::aarch32::Register expected);
+  // Fast path implementation of ReadBarrier::Barrier for a heap
+  // reference field load when Baker's read barriers are used.
+  // Overload suitable for Unsafe.getObject/-Volatile() intrinsic.
+  void GenerateFieldLoadWithBakerReadBarrier(HInstruction* instruction,
+                                             Location ref,
+                                             vixl::aarch32::Register obj,
+                                             const vixl::aarch32::MemOperand& src,
+                                             bool needs_null_check);
   // Fast path implementation of ReadBarrier::Barrier for a heap
   // reference field load when Baker's read barriers are used.
   void GenerateFieldLoadWithBakerReadBarrier(HInstruction* instruction,
@@ -632,56 +645,12 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
                                              bool needs_null_check);
   // Fast path implementation of ReadBarrier::Barrier for a heap
   // reference array load when Baker's read barriers are used.
-  void GenerateArrayLoadWithBakerReadBarrier(HInstruction* instruction,
-                                             Location ref,
+  void GenerateArrayLoadWithBakerReadBarrier(Location ref,
                                              vixl::aarch32::Register obj,
                                              uint32_t data_offset,
                                              Location index,
                                              Location temp,
                                              bool needs_null_check);
-  // Factored implementation, used by GenerateFieldLoadWithBakerReadBarrier,
-  // GenerateArrayLoadWithBakerReadBarrier and some intrinsics.
-  //
-  // Load the object reference located at the address
-  // `obj + offset + (index << scale_factor)`, held by object `obj`, into
-  // `ref`, and mark it if needed.
-  void GenerateReferenceLoadWithBakerReadBarrier(HInstruction* instruction,
-                                                 Location ref,
-                                                 vixl::aarch32::Register obj,
-                                                 uint32_t offset,
-                                                 Location index,
-                                                 ScaleFactor scale_factor,
-                                                 Location temp,
-                                                 bool needs_null_check);
-
-  // Generate code checking whether the the reference field at the
-  // address `obj + field_offset`, held by object `obj`, needs to be
-  // marked, and if so, marking it and updating the field within `obj`
-  // with the marked value.
-  //
-  // This routine is used for the implementation of the
-  // UnsafeCASObject intrinsic with Baker read barriers.
-  //
-  // This method has a structure similar to
-  // GenerateReferenceLoadWithBakerReadBarrier, but note that argument
-  // `ref` is only as a temporary here, and thus its value should not
-  // be used afterwards.
-  void UpdateReferenceFieldWithBakerReadBarrier(HInstruction* instruction,
-                                                Location ref,
-                                                vixl::aarch32::Register obj,
-                                                Location field_offset,
-                                                Location temp,
-                                                bool needs_null_check,
-                                                vixl::aarch32::Register temp2);
-
-  // Generate a heap reference load (with no read barrier).
-  void GenerateRawReferenceLoad(HInstruction* instruction,
-                                Location ref,
-                                vixl::aarch32::Register obj,
-                                uint32_t offset,
-                                Location index,
-                                ScaleFactor scale_factor,
-                                bool needs_null_check);
 
   // Emit code checking the status of the Marking Register, and
   // aborting the program if MR does not match the value stored in the
@@ -779,10 +748,11 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
   // Encoding of thunk type and data for link-time generated thunks for Baker read barriers.
 
   enum class BakerReadBarrierKind : uint8_t {
-    kField,   // Field get or array get with constant offset (i.e. constant index).
-    kArray,   // Array get with index in register.
-    kGcRoot,  // GC root load.
-    kLast = kGcRoot
+    kField,       // Field get or array get with constant offset (i.e. constant index).
+    kArray,       // Array get with index in register.
+    kGcRoot,      // GC root load.
+    kUnsafeCas,   // UnsafeCASObject intrinsic.
+    kLast = kUnsafeCas
   };
 
   enum class BakerReadBarrierWidth : uint8_t {
@@ -847,6 +817,14 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
            BakerReadBarrierFirstRegField::Encode(root_reg) |
            BakerReadBarrierSecondRegField::Encode(kBakerReadBarrierInvalidEncodedReg) |
            BakerReadBarrierWidthField::Encode(width);
+  }
+
+  static uint32_t EncodeBakerReadBarrierUnsafeCasData(uint32_t root_reg) {
+    CheckValidReg(root_reg);
+    return BakerReadBarrierKindField::Encode(BakerReadBarrierKind::kUnsafeCas) |
+           BakerReadBarrierFirstRegField::Encode(root_reg) |
+           BakerReadBarrierSecondRegField::Encode(kBakerReadBarrierInvalidEncodedReg) |
+           BakerReadBarrierWidthField::Encode(BakerReadBarrierWidth::kWide);
   }
 
   void CompileBakerReadBarrierThunk(ArmVIXLAssembler& assembler,
@@ -915,6 +893,19 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
   StringToLiteralMap jit_string_patches_;
   // Patches for class literals in JIT compiled code.
   TypeToLiteralMap jit_class_patches_;
+
+  // Baker read barrier slow paths, mapping custom data (uint32_t) to label.
+  // Wrap the label to work around vixl::aarch32::Label being non-copyable
+  // and non-moveable and as such unusable in ArenaSafeMap<>.
+  struct LabelWrapper {
+    LabelWrapper(const LabelWrapper& src)
+        : label() {
+      DCHECK(!src.label.IsReferenced() && !src.label.IsBound());
+    }
+    LabelWrapper() = default;
+    vixl::aarch32::Label label;
+  };
+  ArenaSafeMap<uint32_t, LabelWrapper> jit_baker_read_barrier_slow_paths_;
 
   friend class linker::Thumb2RelativePatcherTest;
   DISALLOW_COPY_AND_ASSIGN(CodeGeneratorARMVIXL);

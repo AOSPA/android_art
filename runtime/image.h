@@ -230,6 +230,7 @@ class PACKED(4) ImageHeader {
     kSectionInternedStrings,
     kSectionClassTable,
     kSectionImageBitmap,
+    kSectionImageRelocations,
     kSectionCount,  // Number of elements in enum.
   };
 
@@ -240,7 +241,6 @@ class PACKED(4) ImageHeader {
   }
 
   ArtMethod* GetImageMethod(ImageMethod index) const;
-  void SetImageMethod(ImageMethod index, ArtMethod* method);
 
   const ImageSection& GetImageSection(ImageSections index) const {
     DCHECK_LT(static_cast<size_t>(index), kSectionCount);
@@ -285,6 +285,10 @@ class PACKED(4) ImageHeader {
 
   const ImageSection& GetImageBitmapSection() const {
     return GetImageSection(kSectionImageBitmap);
+  }
+
+  const ImageSection& GetImageRelocationsSection() const {
+    return GetImageSection(kSectionImageRelocations);
   }
 
   template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>

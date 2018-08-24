@@ -1286,7 +1286,7 @@ class ScopedCheck {
     }
     ArtMethod* m = jni::DecodeArtMethod(mid);
     // TODO: Better check here.
-    if (!Runtime::Current()->GetHeap()->IsValidObjectAddress(m->GetDeclaringClass())) {
+    if (!Runtime::Current()->GetHeap()->IsValidObjectAddress(m->GetDeclaringClass().Ptr())) {
       Runtime::Current()->GetHeap()->DumpSpaces(LOG_STREAM(ERROR));
       AbortF("invalid jmethodID: %p", mid);
       return nullptr;
@@ -1462,7 +1462,7 @@ class ScopedCheck {
         break;
       }
     }
-    return 0;
+    return nullptr;
   }
 
   void AbortF(const char* fmt, ...) __attribute__((__format__(__printf__, 2, 3))) {
