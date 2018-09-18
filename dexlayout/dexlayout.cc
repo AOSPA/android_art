@@ -71,26 +71,10 @@ static inline uint16_t Get2LE(unsigned char const* src) {
 }
 
 /*
- * Converts a type descriptor to human-readable "dotted" form.  For
- * example, "Ljava/lang/String;" becomes "java.lang.String", and
- * "[I" becomes "int[]".  Also converts '$' to '.', which means this
- * form can't be converted back to a descriptor.
- */
-static std::string DescriptorToDotWrapper(const char* descriptor) {
-  std::string result = DescriptorToDot(descriptor);
-  size_t found = result.find('$');
-  while (found != std::string::npos) {
-    result[found] = '.';
-    found = result.find('$', found);
-  }
-  return result;
-}
-
-/*
  * Converts the class name portion of a type descriptor to human-readable
  * "dotted" form. For example, "Ljava/lang/String;" becomes "String".
  */
-static std::string DescriptorClassToDot(const char* str) {
+static std::string DescriptorClassToName(const char* str) {
   std::string descriptor(str);
   // Reduce to just the class name prefix.
   size_t last_slash = descriptor.rfind('/');
@@ -103,13 +87,6 @@ static std::string DescriptorClassToDot(const char* str) {
   // Copy class name over, trimming trailing ';'.
   size_t size = descriptor.size() - 1 - last_slash;
   std::string result(descriptor.substr(last_slash, size));
-
-  // Replace '$' with '.'.
-  size_t dollar_sign = result.find('$');
-  while (dollar_sign != std::string::npos) {
-    result[dollar_sign] = '.';
-    dollar_sign = result.find('$', dollar_sign);
-  }
 
   return result;
 }
@@ -786,7 +763,7 @@ void DexLayout::DumpInterface(const dex_ir::TypeId* type_item, int i) {
   if (options_.output_format_ == kOutputPlain) {
     fprintf(out_file_, "    #%d              : '%s'\n", i, interface_name);
   } else {
-    std::string dot(DescriptorToDotWrapper(interface_name));
+    std::string dot(DescriptorToDot(interface_name));
     fprintf(out_file_, "<implements name=\"%s\">\n</implements>\n", dot.c_str());
   }
 }
@@ -1044,7 +1021,7 @@ void DexLayout::DumpBytecodes(uint32_t idx, const dex_ir::CodeItem* code, uint32
   const char* back_descriptor = method_id->Class()->GetStringId()->Data();
 
   // Generate header.
-  std::string dot(DescriptorToDotWrapper(back_descriptor));
+  std::string dot(DescriptorToDot(back_descriptor));
   fprintf(out_file_, "%06x:                                        |[%06x] %s.%s:%s\n",
           code_offset, code_offset, dot.c_str(), name, type_descriptor.c_str());
 
@@ -1057,26 +1034,6 @@ void DexLayout::DumpBytecodes(uint32_t idx, const dex_ir::CodeItem* code, uint32
     }
     DumpInstruction(code, code_offset, inst.DexPc(), insn_width, &inst.Inst());
   }  // for
-}
-
-/*
- * Callback for dumping each positions table entry.
- */
-static bool DumpPositionsCb(void* context, const DexFile::PositionInfo& entry) {
-  FILE* out_file = reinterpret_cast<FILE*>(context);
-  fprintf(out_file, "        0x%04x line=%d\n", entry.address_, entry.line_);
-  return false;
-}
-
-/*
- * Callback for dumping locals table entry.
- */
-static void DumpLocalsCb(void* context, const DexFile::LocalInfo& entry) {
-  const char* signature = entry.signature_ != nullptr ? entry.signature_ : "";
-  FILE* out_file = reinterpret_cast<FILE*>(context);
-  fprintf(out_file, "        0x%04x - 0x%04x reg=%d %s %s %s\n",
-          entry.start_address_, entry.end_address_, entry.reg_,
-          entry.name_, entry.descriptor_, signature);
 }
 
 /*
@@ -1135,8 +1092,13 @@ void DexLayout::DumpCode(uint32_t idx,
                                      [this](uint32_t idx) {
                                        return StringDataByIdx(idx, this->header_);
                                      },
-                                     DumpPositionsCb,
-                                     out_file_);
+                                     [&](const DexFile::PositionInfo& entry) {
+                                       fprintf(out_file_,
+                                               "        0x%04x line=%d\n",
+                                               entry.address_,
+                                               entry.line_);
+                                        return false;
+                                     });
   }
   fprintf(out_file_, "      locals        : \n");
   if (debug_info != nullptr) {
@@ -1167,8 +1129,18 @@ void DexLayout::DumpCode(uint32_t idx,
                                         StringDataByTypeIdx(dchecked_integral_cast<uint16_t>(idx),
                                                             this->header_);
                                   },
-                                  DumpLocalsCb,
-                                  out_file_);
+                                  [&](const DexFile::LocalInfo& entry) {
+                                    const char* signature =
+                                        entry.signature_ != nullptr ? entry.signature_ : "";
+                                    fprintf(out_file_,
+                                            "        0x%04x - 0x%04x reg=%d %s %s %s\n",
+                                            entry.start_address_,
+                                            entry.end_address_,
+                                            entry.reg_,
+                                            entry.name_,
+                                            entry.descriptor_,
+                                            signature);
+                                  });
   }
 }
 
@@ -1212,9 +1184,9 @@ void DexLayout::DumpMethod(uint32_t idx, uint32_t flags, const dex_ir::CodeItem*
 
     // Method name and prototype.
     if (constructor) {
-      std::string dot(DescriptorClassToDot(back_descriptor));
+      std::string dot(DescriptorClassToName(back_descriptor));
       fprintf(out_file_, "<constructor name=\"%s\"\n", dot.c_str());
-      dot = DescriptorToDotWrapper(back_descriptor);
+      dot = DescriptorToDot(back_descriptor);
       fprintf(out_file_, " type=\"%s\"\n", dot.c_str());
     } else {
       fprintf(out_file_, "<method name=\"%s\"\n", name);
@@ -1223,7 +1195,7 @@ void DexLayout::DumpMethod(uint32_t idx, uint32_t flags, const dex_ir::CodeItem*
         LOG(ERROR) << "bad method type descriptor '" << type_descriptor << "'";
         goto bail;
       }
-      std::string dot(DescriptorToDotWrapper(return_type + 1));
+      std::string dot(DescriptorToDot(return_type + 1));
       fprintf(out_file_, " return=\"%s\"\n", dot.c_str());
       fprintf(out_file_, " abstract=%s\n", QuotedBool((flags & kAccAbstract) != 0));
       fprintf(out_file_, " native=%s\n", QuotedBool((flags & kAccNative) != 0));
@@ -1265,7 +1237,7 @@ void DexLayout::DumpMethod(uint32_t idx, uint32_t flags, const dex_ir::CodeItem*
       }
       // Null terminate and display.
       *cp++ = '\0';
-      std::string dot(DescriptorToDotWrapper(tmp_buf));
+      std::string dot(DescriptorToDot(tmp_buf));
       fprintf(out_file_, "<parameter name=\"arg%d\" type=\"%s\">\n"
                         "</parameter>\n", arg_num++, dot.c_str());
     }  // while
@@ -1309,7 +1281,7 @@ void DexLayout::DumpSField(uint32_t idx, uint32_t flags, int i, dex_ir::EncodedV
     }
   } else if (options_.output_format_ == kOutputXml) {
     fprintf(out_file_, "<field name=\"%s\"\n", name);
-    std::string dot(DescriptorToDotWrapper(type_descriptor));
+    std::string dot(DescriptorToDot(type_descriptor));
     fprintf(out_file_, " type=\"%s\"\n", dot.c_str());
     fprintf(out_file_, " transient=%s\n", QuotedBool((flags & kAccTransient) != 0));
     fprintf(out_file_, " volatile=%s\n", QuotedBool((flags & kAccVolatile) != 0));
@@ -1415,10 +1387,10 @@ void DexLayout::DumpClass(int idx, char** last_package) {
     }
     fprintf(out_file_, "  Interfaces        -\n");
   } else {
-    std::string dot(DescriptorClassToDot(class_descriptor));
+    std::string dot(DescriptorClassToName(class_descriptor));
     fprintf(out_file_, "<class name=\"%s\"\n", dot.c_str());
     if (superclass_descriptor != nullptr) {
-      dot = DescriptorToDotWrapper(superclass_descriptor);
+      dot = DescriptorToDot(superclass_descriptor);
       fprintf(out_file_, " extends=\"%s\"\n", dot.c_str());
     }
     fprintf(out_file_, " interface=%s\n",
@@ -1817,14 +1789,20 @@ bool DexLayout::OutputDexFile(const DexFile* input_dex_file,
   // If options_.output_dex_directory_ is non null, we are outputting to a file.
   if (options_.output_dex_directory_ != nullptr) {
     std::string output_location(options_.output_dex_directory_);
-    size_t last_slash = dex_file_location.rfind('/');
+    const size_t last_slash = dex_file_location.rfind('/');
     std::string dex_file_directory = dex_file_location.substr(0, last_slash + 1);
     if (output_location == dex_file_directory) {
       output_location = dex_file_location + ".new";
-    } else if (last_slash != std::string::npos) {
-      output_location += dex_file_location.substr(last_slash);
     } else {
-      output_location += "/" + dex_file_location + ".new";
+      if (!output_location.empty() && output_location.back() != '/') {
+        output_location += "/";
+      }
+      const size_t separator = dex_file_location.rfind('!');
+      if (separator != std::string::npos) {
+        output_location += dex_file_location.substr(separator + 1);
+      } else {
+        output_location += "classes.dex";
+      }
     }
     new_file.reset(OS::CreateEmptyFile(output_location.c_str()));
     if (new_file == nullptr) {

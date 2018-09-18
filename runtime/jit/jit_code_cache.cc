@@ -28,6 +28,7 @@
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "base/time_utils.h"
+#include "base/utils.h"
 #include "cha.h"
 #include "debugger_interface.h"
 #include "dex/dex_file_loader.h"
@@ -53,8 +54,9 @@
 namespace art {
 namespace jit {
 
-static constexpr int kProtData = PROT_READ | PROT_WRITE;
 static constexpr int kProtCode = PROT_READ | PROT_EXEC;
+static constexpr int kProtData = PROT_READ | PROT_WRITE;
+static constexpr int kProtProfile = PROT_READ;
 
 static constexpr size_t kCodeSizeLogThreshold = 50 * KB;
 static constexpr size_t kStackMapSizeLogThreshold = 50 * KB;
@@ -168,11 +170,6 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
   ScopedTrace trace(__PRETTY_FUNCTION__);
   CHECK_GE(max_capacity, initial_capacity);
 
-  // Generating debug information is for using the Linux perf tool on
-  // host which does not work with ashmem.
-  // Also, targets linux and fuchsia do not support ashmem.
-  bool use_ashmem = !generate_debug_info && !kIsTargetLinux && !kIsTargetFuchsia;
-
   // With 'perf', we want a 1-1 mapping between an address and a method.
   // We aren't able to keep method pointers live during the instrumentation method entry trampoline
   // so we will just disable jit-gc if we are doing that.
@@ -197,7 +194,7 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
   //         to profile system server.
   // NOTE 2: We could just not create the code section at all but we will need to
   //         special case too many cases.
-  int memmap_flags_prot_code = used_only_for_profile_data ? (kProtCode & ~PROT_EXEC) : kProtCode;
+  int memmap_flags_prot_code = used_only_for_profile_data ? kProtProfile : kProtCode;
 
   std::string error_str;
   // Map name specific for android_os_Debug.cpp accounting.
@@ -212,8 +209,8 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
       kProtData,
       /* low_4gb */ true,
       /* reuse */ false,
-      &error_str,
-      use_ashmem);
+      /* reservation */ nullptr,
+      &error_str);
   if (!data_map.IsValid()) {
     std::ostringstream oss;
     oss << "Failed to create read write cache: " << error_str << " size=" << max_capacity;
@@ -233,7 +230,7 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
   uint8_t* divider = data_map.Begin() + data_size;
 
   MemMap code_map = data_map.RemapAtEnd(
-      divider, "jit-code-cache", memmap_flags_prot_code | PROT_WRITE, &error_str, use_ashmem);
+      divider, "jit-code-cache", memmap_flags_prot_code | PROT_WRITE, &error_str);
   if (!code_map.IsValid()) {
     std::ostringstream oss;
     oss << "Failed to create read write execute cache: " << error_str << " size=" << max_capacity;
@@ -533,7 +530,7 @@ static inline void ProcessWeakClass(GcRoot<mirror::Class>* root_ptr,
   // This does not need a read barrier because this is called by GC.
   mirror::Class* cls = root_ptr->Read<kWithoutReadBarrier>();
   if (cls != nullptr && cls != weak_sentinel) {
-    DCHECK((cls->IsClass<kDefaultVerifyFlags, kWithoutReadBarrier>()));
+    DCHECK((cls->IsClass<kDefaultVerifyFlags>()));
     // Look at the classloader of the class to know if it has been unloaded.
     // This does not need a read barrier because this is called by GC.
     mirror::Object* class_loader =
@@ -804,8 +801,18 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
     //
     // For reference, this behavior is caused by this commit:
     // https://android.googlesource.com/kernel/msm/+/3fbe6bc28a6b9939d0650f2f17eb5216c719950c
-    FlushInstructionCache(reinterpret_cast<char*>(code_ptr),
-                          reinterpret_cast<char*>(code_ptr + code_size));
+    FlushInstructionCache(code_ptr, code_ptr + code_size);
+
+    // Ensure CPU instruction pipelines are flushed for all cores. This is necessary for
+    // correctness as code may still be in instruction pipelines despite the i-cache flush. It is
+    // not safe to assume that changing permissions with mprotect (RX->RWX->RX) will cause a TLB
+    // shootdown (incidentally invalidating the CPU pipelines by sending an IPI to all cores to
+    // notify them of the TLB invalidation). Some architectures, notably ARM and ARM64, have
+    // hardware support that broadcasts TLB invalidations and so their kernels have no software
+    // based TLB shootdown. FlushInstructionPipeline() is a wrapper around the Linux
+    // membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED) syscall which does the appropriate flushing.
+    FlushInstructionPipeline();
+
     DCHECK(!Runtime::Current()->IsAotCompiler());
     if (has_should_deoptimize_flag) {
       method_header->SetHasShouldDeoptimizeFlag();
@@ -863,8 +870,7 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
       FillRootTable(roots_data, roots);
       {
         // Flush data cache, as compiled code references literals in it.
-        FlushDataCache(reinterpret_cast<char*>(roots_data),
-                       reinterpret_cast<char*>(roots_data + data_size));
+        FlushDataCache(roots_data, roots_data + data_size);
       }
       method_code_map_.Put(code_ptr, method);
       if (osr) {
@@ -1088,14 +1094,14 @@ size_t JitCodeCache::ReserveData(Thread* self,
   }
 }
 
-class MarkCodeVisitor FINAL : public StackVisitor {
+class MarkCodeVisitor final : public StackVisitor {
  public:
   MarkCodeVisitor(Thread* thread_in, JitCodeCache* code_cache_in)
       : StackVisitor(thread_in, nullptr, StackVisitor::StackWalkKind::kSkipInlinedFrames),
         code_cache_(code_cache_in),
         bitmap_(code_cache_->GetLiveBitmap()) {}
 
-  bool VisitFrame() OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
     const OatQuickMethodHeader* method_header = GetCurrentOatQuickMethodHeader();
     if (method_header == nullptr) {
       return true;
@@ -1113,12 +1119,12 @@ class MarkCodeVisitor FINAL : public StackVisitor {
   CodeCacheBitmap* const bitmap_;
 };
 
-class MarkCodeClosure FINAL : public Closure {
+class MarkCodeClosure final : public Closure {
  public:
   MarkCodeClosure(JitCodeCache* code_cache, Barrier* barrier)
       : code_cache_(code_cache), barrier_(barrier) {}
 
-  void Run(Thread* thread) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+  void Run(Thread* thread) override REQUIRES_SHARED(Locks::mutator_lock_) {
     ScopedTrace trace(__PRETTY_FUNCTION__);
     DCHECK(thread == Thread::Current() || thread->IsSuspended());
     MarkCodeVisitor visitor(thread, code_cache_);

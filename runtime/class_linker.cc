@@ -431,6 +431,8 @@ bool ClassLinker::InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> b
   heap->IncrementDisableMovingGC(self);
   StackHandleScope<64> hs(self);  // 64 is picked arbitrarily.
   auto class_class_size = mirror::Class::ClassClassSize(image_pointer_size_);
+  // Allocate the object as non-movable so that there are no cases where Object::IsClass returns
+  // the incorrect result when comparing to-space vs from-space.
   Handle<mirror::Class> java_lang_Class(hs.NewHandle(ObjPtr<mirror::Class>::DownCast(MakeObjPtr(
       heap->AllocNonMovableObject<true>(self, nullptr, class_class_size, VoidFunctor())))));
   CHECK(java_lang_Class != nullptr);
@@ -483,9 +485,17 @@ bool ClassLinker::InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> b
                  mirror::ObjectArray<mirror::Object>::ClassSize(image_pointer_size_))));
   object_array_class->SetComponentType(java_lang_Object.Get());
 
-  // Setup String.
+  // Setup java.lang.String.
+  //
+  // We make this class non-movable for the unlikely case where it were to be
+  // moved by a sticky-bit (minor) collection when using the Generational
+  // Concurrent Copying (CC) collector, potentially creating a stale reference
+  // in the `klass_` field of one of its instances allocated in the Large-Object
+  // Space (LOS) -- see the comment about the dirty card scanning logic in
+  // art::gc::collector::ConcurrentCopying::MarkingPhase.
   Handle<mirror::Class> java_lang_String(hs.NewHandle(
-      AllocClass(self, java_lang_Class.Get(), mirror::String::ClassSize(image_pointer_size_))));
+      AllocClass</* kMovable */ false>(
+          self, java_lang_Class.Get(), mirror::String::ClassSize(image_pointer_size_))));
   java_lang_String->SetStringClass();
   mirror::Class::SetStatus(java_lang_String, ClassStatus::kResolved, self);
 
@@ -528,13 +538,13 @@ bool ClassLinker::InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> b
 
   // Create int array type for native pointer arrays (for example vtables) on 32-bit archs.
   Handle<mirror::Class> int_array_class(hs.NewHandle(
-      AllocClass(self, java_lang_Class.Get(), mirror::Array::ClassSize(image_pointer_size_))));
+      AllocPrimitiveArrayClass(self, java_lang_Class.Get())));
   int_array_class->SetComponentType(GetClassRoot(ClassRoot::kPrimitiveInt, this));
   SetClassRoot(ClassRoot::kIntArrayClass, int_array_class.Get());
 
   // Create long array type for native pointer arrays (for example vtables) on 64-bit archs.
   Handle<mirror::Class> long_array_class(hs.NewHandle(
-      AllocClass(self, java_lang_Class.Get(), mirror::Array::ClassSize(image_pointer_size_))));
+      AllocPrimitiveArrayClass(self, java_lang_Class.Get())));
   long_array_class->SetComponentType(GetClassRoot(ClassRoot::kPrimitiveLong, this));
   SetClassRoot(ClassRoot::kLongArrayClass, long_array_class.Get());
 
@@ -610,20 +620,29 @@ bool ClassLinker::InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> b
   CHECK_EQ(dalvik_system_ClassExt->GetObjectSize(), mirror::ClassExt::InstanceSize());
 
   // Setup the primitive array type classes - can't be done until Object has a vtable.
-  SetClassRoot(ClassRoot::kBooleanArrayClass, FindSystemClass(self, "[Z"));
+  AllocAndSetPrimitiveArrayClassRoot(self,
+                                     java_lang_Class.Get(),
+                                     ClassRoot::kBooleanArrayClass,
+                                     ClassRoot::kPrimitiveBoolean,
+                                     "[Z");
 
-  SetClassRoot(ClassRoot::kByteArrayClass, FindSystemClass(self, "[B"));
+  AllocAndSetPrimitiveArrayClassRoot(
+      self, java_lang_Class.Get(), ClassRoot::kByteArrayClass, ClassRoot::kPrimitiveByte, "[B");
 
-  SetClassRoot(ClassRoot::kCharArrayClass, FindSystemClass(self, "[C"));
+  AllocAndSetPrimitiveArrayClassRoot(
+      self, java_lang_Class.Get(), ClassRoot::kCharArrayClass, ClassRoot::kPrimitiveChar, "[C");
 
-  SetClassRoot(ClassRoot::kShortArrayClass, FindSystemClass(self, "[S"));
+  AllocAndSetPrimitiveArrayClassRoot(
+      self, java_lang_Class.Get(), ClassRoot::kShortArrayClass, ClassRoot::kPrimitiveShort, "[S");
 
   CheckSystemClass(self, int_array_class, "[I");
   CheckSystemClass(self, long_array_class, "[J");
 
-  SetClassRoot(ClassRoot::kFloatArrayClass, FindSystemClass(self, "[F"));
+  AllocAndSetPrimitiveArrayClassRoot(
+      self, java_lang_Class.Get(), ClassRoot::kFloatArrayClass, ClassRoot::kPrimitiveFloat, "[F");
 
-  SetClassRoot(ClassRoot::kDoubleArrayClass, FindSystemClass(self, "[D"));
+  AllocAndSetPrimitiveArrayClassRoot(
+      self, java_lang_Class.Get(), ClassRoot::kDoubleArrayClass, ClassRoot::kPrimitiveDouble, "[D");
 
   // Run Class through FindSystemClass. This initializes the dex_cache_ fields and register it
   // in class_table_.
@@ -884,7 +903,7 @@ class SetInterpreterEntrypointArtMethodVisitor : public ArtMethodVisitor {
   explicit SetInterpreterEntrypointArtMethodVisitor(PointerSize image_pointer_size)
     : image_pointer_size_(image_pointer_size) {}
 
-  void Visit(ArtMethod* method) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+  void Visit(ArtMethod* method) override REQUIRES_SHARED(Locks::mutator_lock_) {
     if (kIsDebugBuild && !method->IsRuntimeMethod()) {
       CHECK(method->GetDeclaringClass() != nullptr);
     }
@@ -940,7 +959,6 @@ bool ClassLinker::InitFromBootImage(std::string* error_msg) {
       runtime->GetOatFileManager().RegisterImageOatFiles(spaces);
   DCHECK(!oat_files.empty());
   const OatHeader& default_oat_header = oat_files[0]->GetOatHeader();
-  CHECK_EQ(default_oat_header.GetImageFileLocationOatDataBegin(), 0U);
   const char* image_file_location = oat_files[0]->GetOatHeader().
       GetStoreValueByKey(OatHeader::kImageLocationKey);
   CHECK(image_file_location == nullptr || *image_file_location == 0);
@@ -1141,7 +1159,7 @@ class VerifyDeclaringClassVisitor : public ArtMethodVisitor {
   VerifyDeclaringClassVisitor() REQUIRES_SHARED(Locks::mutator_lock_, Locks::heap_bitmap_lock_)
       : live_bitmap_(Runtime::Current()->GetHeap()->GetLiveBitmap()) {}
 
-  virtual void Visit(ArtMethod* method)
+  void Visit(ArtMethod* method) override
       REQUIRES_SHARED(Locks::mutator_lock_, Locks::heap_bitmap_lock_) {
     ObjPtr<mirror::Class> klass = method->GetDeclaringClassUnchecked();
     if (klass != nullptr) {
@@ -1233,6 +1251,8 @@ void AppImageClassLoadersAndDexCachesHelper::Update(
     ClassTable::ClassSet* new_class_set)
     REQUIRES(!Locks::dex_lock_)
     REQUIRES_SHARED(Locks::mutator_lock_) {
+  ScopedTrace app_image_timing("AppImage:Updating");
+
   Thread* const self = Thread::Current();
   gc::Heap* const heap = Runtime::Current()->GetHeap();
   const ImageHeader& header = space->GetImageHeader();
@@ -1293,7 +1313,7 @@ void AppImageClassLoadersAndDexCachesHelper::Update(
   }
   if (ClassLinker::kAppImageMayContainStrings) {
     // Fixup all the literal strings happens at app images which are supposed to be interned.
-    ScopedTrace timing("Fixup String Intern in image and dex_cache");
+    ScopedTrace timing("AppImage:InternString");
     const auto& image_header = space->GetImageHeader();
     const auto bitmap = space->GetMarkBitmap();  // bitmap of objects
     const uint8_t* target_base = space->GetMemMap()->Begin();
@@ -1306,7 +1326,7 @@ void AppImageClassLoadersAndDexCachesHelper::Update(
     bitmap->VisitMarkedRange(objects_begin, objects_end, fixup_intern_visitor);
   }
   if (kVerifyArtMethodDeclaringClasses) {
-    ScopedTrace timing("Verify declaring classes");
+    ScopedTrace timing("AppImage:VerifyDeclaringClasses");
     ReaderMutexLock rmu(self, *Locks::heap_bitmap_lock_);
     VerifyDeclaringClassVisitor visitor;
     header.VisitPackedArtMethods(&visitor, space->Begin(), kRuntimePointerSize);
@@ -1390,7 +1410,7 @@ bool ClassLinker::OpenImageDexFiles(gc::space::ImageSpace* space,
 
 // Helper class for ArtMethod checks when adding an image. Keeps all required functionality
 // together and caches some intermediate results.
-class ImageSanityChecks FINAL {
+class ImageSanityChecks final {
  public:
   static void CheckObjects(gc::Heap* heap, ClassLinker* class_linker)
       REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -1541,7 +1561,7 @@ static void VerifyAppImage(const ImageHeader& header,
      public:
       explicit VerifyClassInTableArtMethodVisitor(ClassTable* table) : table_(table) {}
 
-      virtual void Visit(ArtMethod* method)
+      void Visit(ArtMethod* method) override
           REQUIRES_SHARED(Locks::mutator_lock_, Locks::classlinker_classes_lock_) {
         ObjPtr<mirror::Class> klass = method->GetDeclaringClass();
         if (klass != nullptr && !Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(klass)) {
@@ -1824,7 +1844,7 @@ bool ClassLinker::AddImageSpace(
       // Force every app image class's SubtypeCheck to be at least kIninitialized.
       //
       // See also ImageWriter::FixupClass.
-      ScopedTrace trace("Recalculate app image SubtypeCheck bitstrings");
+      ScopedTrace trace("AppImage:RecacluateSubtypeCheckBitstrings");
       MutexLock subtype_check_lock(Thread::Current(), *Locks::subtype_check_lock_);
       for (const ClassTable::TableSlot& root : temp_set) {
         SubtypeCheck<ObjPtr<mirror::Class>>::EnsureInitialized(root.Read());
@@ -1844,7 +1864,7 @@ bool ClassLinker::AddImageSpace(
   if (kIsDebugBuild && app_image) {
     // This verification needs to happen after the classes have been added to the class loader.
     // Since it ensures classes are in the class table.
-    ScopedTrace trace("VerifyAppImage");
+    ScopedTrace trace("AppImage:Verify");
     VerifyAppImage(header, class_loader, dex_caches, class_table, space);
   }
 
@@ -1951,7 +1971,7 @@ class VisitClassLoaderClassesVisitor : public ClassLoaderVisitor {
         done_(false) {}
 
   void Visit(ObjPtr<mirror::ClassLoader> class_loader)
-      REQUIRES_SHARED(Locks::classlinker_classes_lock_, Locks::mutator_lock_) OVERRIDE {
+      REQUIRES_SHARED(Locks::classlinker_classes_lock_, Locks::mutator_lock_) override {
     ClassTable* const class_table = class_loader->GetClassTable();
     if (!done_ && class_table != nullptr) {
       DefiningClassLoaderFilterVisitor visitor(class_loader, visitor_);
@@ -1972,7 +1992,7 @@ class VisitClassLoaderClassesVisitor : public ClassLoaderVisitor {
                                      ClassVisitor* visitor)
         : defining_class_loader_(defining_class_loader), visitor_(visitor) { }
 
-    bool operator()(ObjPtr<mirror::Class> klass) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+    bool operator()(ObjPtr<mirror::Class> klass) override REQUIRES_SHARED(Locks::mutator_lock_) {
       if (klass->GetClassLoader() != defining_class_loader_) {
         return true;
       }
@@ -2009,7 +2029,7 @@ void ClassLinker::VisitClasses(ClassVisitor* visitor) {
 
 class GetClassesInToVector : public ClassVisitor {
  public:
-  bool operator()(ObjPtr<mirror::Class> klass) OVERRIDE {
+  bool operator()(ObjPtr<mirror::Class> klass) override {
     classes_.push_back(klass);
     return true;
   }
@@ -2021,7 +2041,7 @@ class GetClassInToObjectArray : public ClassVisitor {
   explicit GetClassInToObjectArray(mirror::ObjectArray<mirror::Class>* arr)
       : arr_(arr), index_(0) {}
 
-  bool operator()(ObjPtr<mirror::Class> klass) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool operator()(ObjPtr<mirror::Class> klass) override REQUIRES_SHARED(Locks::mutator_lock_) {
     ++index_;
     if (index_ <= arr_->GetLength()) {
       arr_->Set(index_ - 1, klass);
@@ -2166,13 +2186,14 @@ ObjPtr<mirror::DexCache> ClassLinker::AllocAndInitializeDexCache(Thread* self,
   return dex_cache;
 }
 
+template <bool kMovable>
 ObjPtr<mirror::Class> ClassLinker::AllocClass(Thread* self,
                                               ObjPtr<mirror::Class> java_lang_Class,
                                               uint32_t class_size) {
   DCHECK_GE(class_size, sizeof(mirror::Class));
   gc::Heap* heap = Runtime::Current()->GetHeap();
   mirror::Class::InitializeClassVisitor visitor(class_size);
-  ObjPtr<mirror::Object> k = kMovingClasses ?
+  ObjPtr<mirror::Object> k = (kMovingClasses && kMovable) ?
       heap->AllocObject<true>(self, java_lang_Class, class_size, visitor) :
       heap->AllocNonMovableObject<true>(self, java_lang_Class, class_size, visitor);
   if (UNLIKELY(k == nullptr)) {
@@ -2184,6 +2205,18 @@ ObjPtr<mirror::Class> ClassLinker::AllocClass(Thread* self,
 
 ObjPtr<mirror::Class> ClassLinker::AllocClass(Thread* self, uint32_t class_size) {
   return AllocClass(self, GetClassRoot<mirror::Class>(this), class_size);
+}
+
+ObjPtr<mirror::Class> ClassLinker::AllocPrimitiveArrayClass(Thread* self,
+                                                            ObjPtr<mirror::Class> java_lang_Class) {
+  // We make this class non-movable for the unlikely case where it were to be
+  // moved by a sticky-bit (minor) collection when using the Generational
+  // Concurrent Copying (CC) collector, potentially creating a stale reference
+  // in the `klass_` field of one of its instances allocated in the Large-Object
+  // Space (LOS) -- see the comment about the dirty card scanning logic in
+  // art::gc::collector::ConcurrentCopying::MarkingPhase.
+  return AllocClass</* kMovable */ false>(
+      self, java_lang_Class, mirror::Array::ClassSize(image_pointer_size_));
 }
 
 ObjPtr<mirror::ObjectArray<mirror::StackTraceElement>> ClassLinker::AllocStackTraceElementArray(
@@ -3649,10 +3682,22 @@ ObjPtr<mirror::Class> ClassLinker::CreateArrayClass(Thread* self,
       new_class.Assign(GetClassRoot<mirror::ObjectArray<mirror::Object>>(this));
     } else if (strcmp(descriptor, "[Ljava/lang/String;") == 0) {
       new_class.Assign(GetClassRoot<mirror::ObjectArray<mirror::String>>(this));
+    } else if (strcmp(descriptor, "[Z") == 0) {
+      new_class.Assign(GetClassRoot<mirror::BooleanArray>(this));
+    } else if (strcmp(descriptor, "[B") == 0) {
+      new_class.Assign(GetClassRoot<mirror::ByteArray>(this));
+    } else if (strcmp(descriptor, "[C") == 0) {
+      new_class.Assign(GetClassRoot<mirror::CharArray>(this));
+    } else if (strcmp(descriptor, "[S") == 0) {
+      new_class.Assign(GetClassRoot<mirror::ShortArray>(this));
     } else if (strcmp(descriptor, "[I") == 0) {
       new_class.Assign(GetClassRoot<mirror::IntArray>(this));
     } else if (strcmp(descriptor, "[J") == 0) {
       new_class.Assign(GetClassRoot<mirror::LongArray>(this));
+    } else if (strcmp(descriptor, "[F") == 0) {
+      new_class.Assign(GetClassRoot<mirror::FloatArray>(this));
+    } else if (strcmp(descriptor, "[D") == 0) {
+      new_class.Assign(GetClassRoot<mirror::DoubleArray>(this));
     }
   }
   if (new_class == nullptr) {
@@ -3845,7 +3890,7 @@ class MoveClassTableToPreZygoteVisitor : public ClassLoaderVisitor {
 
   void Visit(ObjPtr<mirror::ClassLoader> class_loader)
       REQUIRES(Locks::classlinker_classes_lock_)
-      REQUIRES_SHARED(Locks::mutator_lock_) OVERRIDE {
+      REQUIRES_SHARED(Locks::mutator_lock_) override {
     ClassTable* const class_table = class_loader->GetClassTable();
     if (class_table != nullptr) {
       class_table->FreezeSnapshot();
@@ -3871,7 +3916,7 @@ class LookupClassesVisitor : public ClassLoaderVisitor {
        result_(result) {}
 
   void Visit(ObjPtr<mirror::ClassLoader> class_loader)
-      REQUIRES_SHARED(Locks::classlinker_classes_lock_, Locks::mutator_lock_) OVERRIDE {
+      REQUIRES_SHARED(Locks::classlinker_classes_lock_, Locks::mutator_lock_) override {
     ClassTable* const class_table = class_loader->GetClassTable();
     ObjPtr<mirror::Class> klass = class_table->Lookup(descriptor_, hash_);
     // Add `klass` only if `class_loader` is its defining (not just initiating) class loader.
@@ -4169,6 +4214,7 @@ verifier::FailureKind ClassLinker::PerformClassVerification(Thread* self,
                                                runtime->GetCompilerCallbacks(),
                                                runtime->IsAotCompiler(),
                                                log_level,
+                                               Runtime::Current()->GetTargetSdkVersion(),
                                                error_msg);
 }
 
@@ -5563,7 +5609,7 @@ bool ClassLinker::LinkMethods(Thread* self,
 // Comparator for name and signature of a method, used in finding overriding methods. Implementation
 // avoids the use of handles, if it didn't then rather than compare dex files we could compare dex
 // caches in the implementation below.
-class MethodNameAndSignatureComparator FINAL : public ValueObject {
+class MethodNameAndSignatureComparator final : public ValueObject {
  public:
   explicit MethodNameAndSignatureComparator(ArtMethod* method)
       REQUIRES_SHARED(Locks::mutator_lock_) :
@@ -7039,9 +7085,12 @@ void ClassLinker::LinkInterfaceMethodsHelper::ReallocMethods() {
       // mark this as a default, non-abstract method, since thats what it is. Also clear the
       // kAccSkipAccessChecks bit since this class hasn't been verified yet it shouldn't have
       // methods that are skipping access checks.
+      // Also clear potential kAccSingleImplementation to avoid CHA trying to inline
+      // the default method.
       DCHECK_EQ(new_method.GetAccessFlags() & kAccNative, 0u);
       constexpr uint32_t kSetFlags = kAccDefault | kAccDefaultConflict | kAccCopied;
-      constexpr uint32_t kMaskFlags = ~(kAccAbstract | kAccSkipAccessChecks);
+      constexpr uint32_t kMaskFlags =
+          ~(kAccAbstract | kAccSkipAccessChecks | kAccSingleImplementation);
       new_method.SetAccessFlags((new_method.GetAccessFlags() | kSetFlags) & kMaskFlags);
       DCHECK(new_method.IsDefaultConflicting());
       // The actual method might or might not be marked abstract since we just copied it from a
@@ -8548,6 +8597,49 @@ void ClassLinker::DumpForSigQuit(std::ostream& os) {
   ReaderMutexLock mu(soa.Self(), *Locks::classlinker_classes_lock_);
   os << "Zygote loaded classes=" << NumZygoteClasses() << " post zygote classes="
      << NumNonZygoteClasses() << "\n";
+  ReaderMutexLock mu2(soa.Self(), *Locks::dex_lock_);
+  os << "Dumping registered class loaders\n";
+  size_t class_loader_index = 0;
+  for (const ClassLoaderData& class_loader : class_loaders_) {
+    ObjPtr<mirror::ClassLoader> loader =
+        ObjPtr<mirror::ClassLoader>::DownCast(soa.Self()->DecodeJObject(class_loader.weak_root));
+    if (loader != nullptr) {
+      os << "#" << class_loader_index++ << " " << loader->GetClass()->PrettyDescriptor() << ": [";
+      bool saw_one_dex_file = false;
+      for (const DexCacheData& dex_cache : dex_caches_) {
+        if (dex_cache.IsValid() && dex_cache.class_table == class_loader.class_table) {
+          if (saw_one_dex_file) {
+            os << ":";
+          }
+          saw_one_dex_file = true;
+          os << dex_cache.dex_file->GetLocation();
+        }
+      }
+      os << "]";
+      bool found_parent = false;
+      if (loader->GetParent() != nullptr) {
+        size_t parent_index = 0;
+        for (const ClassLoaderData& class_loader2 : class_loaders_) {
+          ObjPtr<mirror::ClassLoader> loader2 = ObjPtr<mirror::ClassLoader>::DownCast(
+              soa.Self()->DecodeJObject(class_loader2.weak_root));
+          if (loader2 == loader->GetParent()) {
+            os << ", parent #" << parent_index;
+            found_parent = true;
+            break;
+          }
+          parent_index++;
+        }
+        if (!found_parent) {
+          os << ", unregistered parent of type "
+             << loader->GetParent()->GetClass()->PrettyDescriptor();
+        }
+      } else {
+        os << ", no parent";
+      }
+      os << "\n";
+    }
+  }
+  os << "Done dumping class loaders\n";
 }
 
 class CountClassesVisitor : public ClassLoaderVisitor {
@@ -8555,7 +8647,7 @@ class CountClassesVisitor : public ClassLoaderVisitor {
   CountClassesVisitor() : num_zygote_classes(0), num_non_zygote_classes(0) {}
 
   void Visit(ObjPtr<mirror::ClassLoader> class_loader)
-      REQUIRES_SHARED(Locks::classlinker_classes_lock_, Locks::mutator_lock_) OVERRIDE {
+      REQUIRES_SHARED(Locks::classlinker_classes_lock_, Locks::mutator_lock_) override {
     ClassTable* const class_table = class_loader->GetClassTable();
     if (class_table != nullptr) {
       num_zygote_classes += class_table->NumZygoteClasses(class_loader);
@@ -8605,6 +8697,19 @@ void ClassLinker::SetClassRoot(ClassRoot class_root, ObjPtr<mirror::Class> klass
   int32_t index = static_cast<int32_t>(class_root);
   DCHECK(class_roots->Get(index) == nullptr);
   class_roots->Set<false>(index, klass);
+}
+
+void ClassLinker::AllocAndSetPrimitiveArrayClassRoot(Thread* self,
+                                                     ObjPtr<mirror::Class> java_lang_Class,
+                                                     ClassRoot primitive_array_class_root,
+                                                     ClassRoot primitive_class_root,
+                                                     const char* descriptor) {
+  StackHandleScope<1> hs(self);
+  Handle<mirror::Class> primitive_array_class(hs.NewHandle(
+      AllocPrimitiveArrayClass(self, java_lang_Class)));
+  primitive_array_class->SetComponentType(GetClassRoot(primitive_class_root, this));
+  SetClassRoot(primitive_array_class_root, primitive_array_class.Get());
+  CheckSystemClass(self, primitive_array_class, descriptor);
 }
 
 jobject ClassLinker::CreateWellKnownClassLoader(Thread* self,
@@ -8825,7 +8930,7 @@ class GetResolvedClassesVisitor : public ClassVisitor {
         extra_stats_(),
         last_extra_stats_(extra_stats_.end()) { }
 
-  bool operator()(ObjPtr<mirror::Class> klass) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool operator()(ObjPtr<mirror::Class> klass) override REQUIRES_SHARED(Locks::mutator_lock_) {
     if (!klass->IsProxyClass() &&
         !klass->IsArrayClass() &&
         klass->IsResolved() &&
@@ -8913,7 +9018,7 @@ class ClassLinker::FindVirtualMethodHolderVisitor : public ClassVisitor {
       : method_(method),
         pointer_size_(pointer_size) {}
 
-  bool operator()(ObjPtr<mirror::Class> klass) REQUIRES_SHARED(Locks::mutator_lock_) OVERRIDE {
+  bool operator()(ObjPtr<mirror::Class> klass) REQUIRES_SHARED(Locks::mutator_lock_) override {
     if (klass->GetVirtualMethodsSliceUnchecked(pointer_size_).Contains(method_)) {
       holder_ = klass;
     }
@@ -8941,7 +9046,7 @@ ObjPtr<mirror::IfTable> ClassLinker::AllocIfTable(Thread* self, size_t ifcount) 
                              ifcount * mirror::IfTable::kMax)));
 }
 
-// Instantiate ResolveMethod.
+// Instantiate ClassLinker::ResolveMethod.
 template ArtMethod* ClassLinker::ResolveMethod<ClassLinker::ResolveMode::kCheckICCEAndIAE>(
     uint32_t method_idx,
     Handle<mirror::DexCache> dex_cache,
@@ -8954,5 +9059,15 @@ template ArtMethod* ClassLinker::ResolveMethod<ClassLinker::ResolveMode::kNoChec
     Handle<mirror::ClassLoader> class_loader,
     ArtMethod* referrer,
     InvokeType type);
+
+// Instantiate ClassLinker::AllocClass.
+template ObjPtr<mirror::Class> ClassLinker::AllocClass</* kMovable */ true>(
+    Thread* self,
+    ObjPtr<mirror::Class> java_lang_Class,
+    uint32_t class_size);
+template ObjPtr<mirror::Class> ClassLinker::AllocClass</* kMovable */ false>(
+    Thread* self,
+    ObjPtr<mirror::Class> java_lang_Class,
+    uint32_t class_size);
 
 }  // namespace art

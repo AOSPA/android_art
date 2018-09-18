@@ -79,7 +79,6 @@ MemMap ZipEntry::ExtractToMemMap(const char* zip_filename,
                                     GetUncompressedLength(),
                                     PROT_READ | PROT_WRITE,
                                     /* low_4gb */ false,
-                                    /* reuse */ false,
                                     error_msg);
   if (!map.IsValid()) {
     DCHECK(!error_msg->empty());
@@ -134,16 +133,14 @@ MemMap ZipEntry::MapDirectlyFromFile(const char* zip_filename, std::string* erro
   }
 
   MemMap map =
-      MemMap::MapFileAtAddress(nullptr,  // Expected pointer address
-                               GetUncompressedLength(),  // Byte count
-                               PROT_READ | PROT_WRITE,
-                               MAP_PRIVATE,
-                               zip_fd,
-                               offset,
-                               false,  // Don't restrict allocation to lower4GB
-                               false,  // Doesn't overlap existing map (reuse=false)
-                               name.c_str(),
-                               /*out*/error_msg);
+      MemMap::MapFile(GetUncompressedLength(),  // Byte count
+                      PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE,
+                      zip_fd,
+                      offset,
+                      /* low_4gb */ false,
+                      name.c_str(),
+                      error_msg);
 
   if (!map.IsValid()) {
     DCHECK(!error_msg->empty());

@@ -27,14 +27,14 @@ namespace art {
 
 class JavaVmExtTest : public CommonRuntimeTest {
  protected:
-  virtual void SetUp() {
+  void SetUp() override {
     CommonRuntimeTest::SetUp();
 
     vm_ = Runtime::Current()->GetJavaVM();
   }
 
 
-  virtual void TearDown() OVERRIDE {
+  void TearDown() override {
     CommonRuntimeTest::TearDown();
   }
 
@@ -137,7 +137,7 @@ TEST_F(JavaVmExtTest, DetachCurrentThread) {
 
 class JavaVmExtStackTraceTest : public JavaVmExtTest {
  protected:
-  void SetUpRuntimeOptions(RuntimeOptions* options) OVERRIDE {
+  void SetUpRuntimeOptions(RuntimeOptions* options) override {
     options->emplace_back("-XX:GlobalRefAllocStackTraceLimit=50000", nullptr);
   }
 };

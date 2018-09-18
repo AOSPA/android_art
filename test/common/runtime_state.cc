@@ -71,13 +71,6 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_runtimeIsSoftFail(JNIEnv* env AT
   return Runtime::Current()->IsVerificationSoftFail() ? JNI_TRUE : JNI_FALSE;
 }
 
-// public static native boolean isDex2OatEnabled();
-
-extern "C" JNIEXPORT jboolean JNICALL Java_Main_isDex2OatEnabled(JNIEnv* env ATTRIBUTE_UNUSED,
-                                                                 jclass cls ATTRIBUTE_UNUSED) {
-  return Runtime::Current()->IsDex2OatEnabled();
-}
-
 // public static native boolean hasImage();
 
 extern "C" JNIEXPORT jboolean JNICALL Java_Main_hasImage(JNIEnv* env ATTRIBUTE_UNUSED,
@@ -297,15 +290,6 @@ extern "C" JNIEXPORT void JNICALL Java_Main_fetchProfiles(JNIEnv*, jclass) {
   unused_locations.insert("fake_location");
   ScopedObjectAccess soa(Thread::Current());
   code_cache->GetProfiledMethods(unused_locations, unused_vector);
-}
-
-extern "C" JNIEXPORT jboolean JNICALL Java_Main_isClassMoveable(JNIEnv*,
-                                                                jclass,
-                                                                jclass cls) {
-  Runtime* runtime = Runtime::Current();
-  ScopedObjectAccess soa(Thread::Current());
-  ObjPtr<mirror::Class> klass = soa.Decode<mirror::Class>(cls);
-  return runtime->GetHeap()->IsMovableObject(klass);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_Main_waitForCompilation(JNIEnv*, jclass) {

@@ -86,11 +86,11 @@ class OatFile {
                        const std::string& filename,
                        const std::string& location,
                        uint8_t* requested_base,
-                       uint8_t* oat_file_begin,
                        bool executable,
                        bool low_4gb,
                        const char* abs_dex_location,
-                       std::string* error_msg);
+                       /*inout*/MemMap* reservation,  // Where to load if not null.
+                       /*out*/std::string* error_msg);
 
   // Similar to OatFile::Open(const std::string...), but accepts input vdex and
   // odex files as file descriptors. We also take zip_fd in case the vdex does not
@@ -100,11 +100,11 @@ class OatFile {
                        int oat_fd,
                        const std::string& oat_location,
                        uint8_t* requested_base,
-                       uint8_t* oat_file_begin,
                        bool executable,
                        bool low_4gb,
                        const char* abs_dex_location,
-                       std::string* error_msg);
+                       /*inout*/MemMap* reservation,  // Where to load if not null.
+                       /*out*/std::string* error_msg);
 
   // Open an oat file from an already opened File.
   // Does not use dlopen underneath so cannot be used for runtime use
@@ -129,8 +129,6 @@ class OatFile {
     return is_executable_;
   }
 
-  bool IsPic() const;
-
   // Indicates whether the oat file was compiled with full debugging capability.
   bool IsDebuggable() const;
 
@@ -146,7 +144,7 @@ class OatFile {
 
   const OatHeader& GetOatHeader() const;
 
-  class OatMethod FINAL {
+  class OatMethod final {
    public:
     void LinkMethod(ArtMethod* method) const;
 
@@ -201,7 +199,7 @@ class OatFile {
     friend class OatClass;
   };
 
-  class OatClass FINAL {
+  class OatClass final {
    public:
     ClassStatus GetStatus() const {
       return status_;
@@ -444,7 +442,7 @@ class OatFile {
 // support forward declarations of inner classes, and we want to
 // forward-declare OatDexFile so that we can store an opaque pointer to an
 // OatDexFile in DexFile.
-class OatDexFile FINAL {
+class OatDexFile final {
  public:
   // Opens the DexFile referred to by this OatDexFile from within the containing OatFile.
   std::unique_ptr<const DexFile> OpenDexFile(std::string* error_msg) const;

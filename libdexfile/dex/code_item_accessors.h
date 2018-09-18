@@ -151,11 +151,20 @@ class CodeItemDebugInfoAccessor : public CodeItemDataAccessor {
     return debug_info_offset_;
   }
 
-  template<typename NewLocalCallback>
+  template<typename NewLocalVisitor>
   bool DecodeDebugLocalInfo(bool is_static,
                             uint32_t method_idx,
-                            NewLocalCallback new_local,
-                            void* context) const;
+                            const NewLocalVisitor& new_local) const;
+
+  // Visit each parameter in the debug information. Returns the line number.
+  // The argument of the Visitor is dex::StringIndex.
+  template <typename Visitor>
+  uint32_t VisitParameterNames(const Visitor& visitor) const;
+
+  template <typename Visitor>
+  bool DecodeDebugPositionInfo(const Visitor& visitor) const;
+
+  bool GetLineNumForPc(const uint32_t pc, uint32_t* line_num) const;
 
  protected:
   ALWAYS_INLINE void Init(const CompactDexFile::CodeItem& code_item, uint32_t dex_method_index);

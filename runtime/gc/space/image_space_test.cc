@@ -41,16 +41,16 @@ TEST_F(DexoptTest, ValidateOatFile) {
   args.push_back("--dex-file=" + multidex1);
   args.push_back("--dex-file=" + dex2);
   args.push_back("--oat-file=" + oat_location);
-  ASSERT_TRUE(OatFileAssistant::Dex2Oat(args, &error_msg)) << error_msg;
+  ASSERT_TRUE(Dex2Oat(args, &error_msg)) << error_msg;
 
   std::unique_ptr<OatFile> oat(OatFile::Open(/* zip_fd */ -1,
                                              oat_location.c_str(),
                                              oat_location.c_str(),
-                                             nullptr,
-                                             nullptr,
-                                             false,
-                                             /*low_4gb*/false,
-                                             nullptr,
+                                             /* requested_base */ nullptr,
+                                             /* executable */ false,
+                                             /* low_4gb */ false,
+                                             /* abs_dex_location */ nullptr,
+                                             /* reservation */ nullptr,
                                              &error_msg));
   ASSERT_TRUE(oat != nullptr) << error_msg;
 
@@ -113,7 +113,7 @@ TEST_F(DexoptTest, ValidateOatFile) {
 template <bool kImage, bool kRelocate, bool kPatchoat, bool kImageDex2oat>
 class ImageSpaceLoadingTest : public CommonRuntimeTest {
  protected:
-  void SetUpRuntimeOptions(RuntimeOptions* options) OVERRIDE {
+  void SetUpRuntimeOptions(RuntimeOptions* options) override {
     if (kImage) {
       options->emplace_back(android::base::StringPrintf("-Ximage:%s", GetCoreArtLocation().c_str()),
                             nullptr);
@@ -152,7 +152,7 @@ TEST_F(ImageSpaceNoRelocateNoDex2oatNoPatchoatTest, Test) {
 
 class NoAccessAndroidDataTest : public ImageSpaceLoadingTest<false, true, false, true> {
  protected:
-  void SetUpRuntimeOptions(RuntimeOptions* options) OVERRIDE {
+  void SetUpRuntimeOptions(RuntimeOptions* options) override {
     const char* android_data = getenv("ANDROID_DATA");
     CHECK(android_data != nullptr);
     old_android_data_ = android_data;
@@ -172,7 +172,7 @@ class NoAccessAndroidDataTest : public ImageSpaceLoadingTest<false, true, false,
     ImageSpaceLoadingTest<false, true, false, true>::SetUpRuntimeOptions(options);
   }
 
-  void TearDown() OVERRIDE {
+  void TearDown() override {
     int result = unlink(bad_dalvik_cache_.c_str());
     CHECK_EQ(result, 0) << strerror(errno);
     result = rmdir(bad_android_data_.c_str());

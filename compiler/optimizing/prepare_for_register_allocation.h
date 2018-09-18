@@ -21,6 +21,7 @@
 
 namespace art {
 
+class CompilerOptions;
 class OptimizingCompilerStats;
 
 /**
@@ -30,9 +31,11 @@ class OptimizingCompilerStats;
  */
 class PrepareForRegisterAllocation : public HGraphDelegateVisitor {
  public:
-  explicit PrepareForRegisterAllocation(HGraph* graph,
-                                        OptimizingCompilerStats* stats = nullptr)
-      : HGraphDelegateVisitor(graph, stats) {}
+  PrepareForRegisterAllocation(HGraph* graph,
+                               const CompilerOptions& compiler_options,
+                               OptimizingCompilerStats* stats = nullptr)
+      : HGraphDelegateVisitor(graph, stats),
+        compiler_options_(compiler_options) {}
 
   void Run();
 
@@ -40,21 +43,23 @@ class PrepareForRegisterAllocation : public HGraphDelegateVisitor {
       "prepare_for_register_allocation";
 
  private:
-  void VisitCheckCast(HCheckCast* check_cast) OVERRIDE;
-  void VisitInstanceOf(HInstanceOf* instance_of) OVERRIDE;
-  void VisitNullCheck(HNullCheck* check) OVERRIDE;
-  void VisitDivZeroCheck(HDivZeroCheck* check) OVERRIDE;
-  void VisitBoundsCheck(HBoundsCheck* check) OVERRIDE;
-  void VisitBoundType(HBoundType* bound_type) OVERRIDE;
-  void VisitArraySet(HArraySet* instruction) OVERRIDE;
-  void VisitClinitCheck(HClinitCheck* check) OVERRIDE;
-  void VisitCondition(HCondition* condition) OVERRIDE;
-  void VisitConstructorFence(HConstructorFence* constructor_fence) OVERRIDE;
-  void VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invoke) OVERRIDE;
-  void VisitDeoptimize(HDeoptimize* deoptimize) OVERRIDE;
+  void VisitCheckCast(HCheckCast* check_cast) override;
+  void VisitInstanceOf(HInstanceOf* instance_of) override;
+  void VisitNullCheck(HNullCheck* check) override;
+  void VisitDivZeroCheck(HDivZeroCheck* check) override;
+  void VisitBoundsCheck(HBoundsCheck* check) override;
+  void VisitBoundType(HBoundType* bound_type) override;
+  void VisitArraySet(HArraySet* instruction) override;
+  void VisitClinitCheck(HClinitCheck* check) override;
+  void VisitCondition(HCondition* condition) override;
+  void VisitConstructorFence(HConstructorFence* constructor_fence) override;
+  void VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invoke) override;
+  void VisitDeoptimize(HDeoptimize* deoptimize) override;
 
   bool CanMoveClinitCheck(HInstruction* input, HInstruction* user) const;
   bool CanEmitConditionAt(HCondition* condition, HInstruction* user) const;
+
+  const CompilerOptions& compiler_options_;
 
   DISALLOW_COPY_AND_ASSIGN(PrepareForRegisterAllocation);
 };

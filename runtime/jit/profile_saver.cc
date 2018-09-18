@@ -255,7 +255,7 @@ class GetClassLoadersVisitor : public ClassLoaderVisitor {
         class_loaders_(class_loaders) {}
 
   void Visit(ObjPtr<mirror::ClassLoader> class_loader)
-      REQUIRES_SHARED(Locks::classlinker_classes_lock_, Locks::mutator_lock_) OVERRIDE {
+      REQUIRES_SHARED(Locks::classlinker_classes_lock_, Locks::mutator_lock_) override {
     class_loaders_->push_back(hs_->NewHandle(class_loader));
   }
 
@@ -274,7 +274,7 @@ class GetClassesVisitor : public ClassVisitor {
       : profile_boot_class_path_(profile_boot_class_path),
         out_(out) {}
 
-  virtual bool operator()(ObjPtr<mirror::Class> klass) REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool operator()(ObjPtr<mirror::Class> klass) override REQUIRES_SHARED(Locks::mutator_lock_) {
     if (klass->IsProxyClass() ||
         klass->IsArrayClass() ||
         klass->IsPrimitive() ||

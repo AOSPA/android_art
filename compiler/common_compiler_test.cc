@@ -108,7 +108,7 @@ void CommonCompilerTest::MakeExecutable(const void* code_start, size_t code_leng
   int result = mprotect(reinterpret_cast<void*>(base), len, PROT_READ | PROT_WRITE | PROT_EXEC);
   CHECK_EQ(result, 0);
 
-  FlushInstructionCache(reinterpret_cast<char*>(base), reinterpret_cast<char*>(base + len));
+  FlushInstructionCache(reinterpret_cast<void*>(base), reinterpret_cast<void*>(base + len));
 }
 
 void CommonCompilerTest::MakeExecutable(ObjPtr<mirror::ClassLoader> class_loader,
@@ -328,7 +328,6 @@ void CommonCompilerTest::ReserveImageSpace() {
                                             (size_t)120 * 1024 * 1024,  // 120MB
                                             PROT_NONE,
                                             false /* no need for 4gb flag with fixed mmap */,
-                                            false /* not reusing existing reservation */,
                                             &error_msg);
   CHECK(image_reservation_.IsValid()) << error_msg;
 }

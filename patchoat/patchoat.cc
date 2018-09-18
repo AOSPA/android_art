@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "android-base/file.h"
+#include <android-base/parseint.h>
 #include "android-base/stringprintf.h"
 #include "android-base/strings.h"
 
@@ -475,21 +476,21 @@ bool PatchOat::CreateVdexAndOatSymlinks(const std::string& input_image_filename,
                                              PROT_READ | PROT_WRITE,
                                              MAP_PRIVATE,
                                              &error_msg));
-  if (elf.get() == nullptr) {
+  if (elf == nullptr) {
     LOG(ERROR) << "Unable to open oat file " << input_oat_filename << " : " << error_msg;
     return false;
   }
 
-  MaybePic is_oat_pic = IsOatPic(elf.get());
-  if (is_oat_pic >= ERROR_FIRST) {
-    // Error logged by IsOatPic
-    return false;
-  } else if (is_oat_pic == NOT_PIC) {
-    LOG(ERROR) << "patchoat cannot be used on non-PIC oat file: " << input_oat_filename;
+  const OatHeader* oat_header = GetOatHeader(elf.get());
+  if (oat_header == nullptr) {
+    LOG(ERROR) << "Failed to find oat header in oat file " << input_oat_filename;
     return false;
   }
 
-  CHECK(is_oat_pic == PIC);
+  if (!oat_header->IsValid()) {
+    LOG(ERROR) << "Elf file " << input_oat_filename << " has an invalid oat header";
+    return false;
+  }
 
   std::string output_vdex_filename =
       ImageHeader::GetVdexLocationFromImageLocation(output_image_filename);
@@ -630,7 +631,7 @@ bool PatchOat::Patch(const std::string& image_location,
       std::string image_relocation_filename =
           output_image_relocation_directory
               + (android::base::StartsWith(original_image_filename, "/") ? "" : "/")
-              + original_image_filename.substr(original_image_filename.find_last_of("/"));
+              + original_image_filename.substr(original_image_filename.find_last_of('/'));
       int64_t input_image_size = input_image->GetLength();
       if (input_image_size < 0) {
         LOG(ERROR) << "Error while getting input image size";
@@ -784,38 +785,11 @@ bool PatchOat::IsImagePic(const ImageHeader& image_header, const std::string& im
   return true;
 }
 
-PatchOat::MaybePic PatchOat::IsOatPic(const ElfFile* oat_in) {
-  if (oat_in == nullptr) {
-    LOG(ERROR) << "No ELF input oat fie available";
-    return ERROR_OAT_FILE;
-  }
-
-  const std::string& file_path = oat_in->GetFilePath();
-
-  const OatHeader* oat_header = GetOatHeader(oat_in);
-  if (oat_header == nullptr) {
-    LOG(ERROR) << "Failed to find oat header in oat file " << file_path;
-    return ERROR_OAT_FILE;
-  }
-
-  if (!oat_header->IsValid()) {
-    LOG(ERROR) << "Elf file " << file_path << " has an invalid oat header";
-    return ERROR_OAT_FILE;
-  }
-
-  bool is_pic = oat_header->IsPic();
-  if (kIsDebugBuild) {
-    LOG(INFO) << "Oat file at " << file_path << " is " << (is_pic ? "PIC" : "not pic");
-  }
-
-  return is_pic ? PIC : NOT_PIC;
-}
-
 class PatchOat::PatchOatArtFieldVisitor : public ArtFieldVisitor {
  public:
   explicit PatchOatArtFieldVisitor(PatchOat* patch_oat) : patch_oat_(patch_oat) {}
 
-  void Visit(ArtField* field) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+  void Visit(ArtField* field) override REQUIRES_SHARED(Locks::mutator_lock_) {
     ArtField* const dest = patch_oat_->RelocatedCopyOf(field);
     dest->SetDeclaringClass(
         patch_oat_->RelocatedAddressOfPointer(field->GetDeclaringClass().Ptr()));
@@ -834,7 +808,7 @@ class PatchOat::PatchOatArtMethodVisitor : public ArtMethodVisitor {
  public:
   explicit PatchOatArtMethodVisitor(PatchOat* patch_oat) : patch_oat_(patch_oat) {}
 
-  void Visit(ArtMethod* method) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+  void Visit(ArtMethod* method) override REQUIRES_SHARED(Locks::mutator_lock_) {
     ArtMethod* const dest = patch_oat_->RelocatedCopyOf(method);
     patch_oat_->FixupMethod(method, dest);
   }
@@ -877,7 +851,7 @@ class PatchOat::FixupRootVisitor : public RootVisitor {
   }
 
   void VisitRoots(mirror::Object*** roots, size_t count, const RootInfo& info ATTRIBUTE_UNUSED)
-      OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+      override REQUIRES_SHARED(Locks::mutator_lock_) {
     for (size_t i = 0; i < count; ++i) {
       *roots[i] = patch_oat_->RelocatedAddressOfPointer(*roots[i]);
     }
@@ -885,7 +859,7 @@ class PatchOat::FixupRootVisitor : public RootVisitor {
 
   void VisitRoots(mirror::CompressedReference<mirror::Object>** roots, size_t count,
                   const RootInfo& info ATTRIBUTE_UNUSED)
-      OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+      override REQUIRES_SHARED(Locks::mutator_lock_) {
     for (size_t i = 0; i < count; ++i) {
       roots[i]->Assign(patch_oat_->RelocatedAddressOfPointer(roots[i]->AsMirrorPtr()));
     }
@@ -1299,7 +1273,7 @@ static int patchoat(int argc, char **argv) {
     } else if (option.starts_with("--base-offset-delta=")) {
       const char* base_delta_str = option.substr(strlen("--base-offset-delta=")).data();
       base_delta_set = true;
-      if (!ParseInt(base_delta_str, &base_delta)) {
+      if (!android::base::ParseInt(base_delta_str, &base_delta)) {
         Usage("Failed to parse --base-offset-delta argument '%s' as an off_t", base_delta_str);
       }
     } else if (option == "--dump-timings") {

@@ -83,7 +83,7 @@ class ImageTest : public CommonCompilerTest {
                const std::string& extra_dex = "",
                const std::initializer_list<std::string>& image_classes = {});
 
-  void SetUpRuntimeOptions(RuntimeOptions* options) OVERRIDE {
+  void SetUpRuntimeOptions(RuntimeOptions* options) override {
     CommonCompilerTest::SetUpRuntimeOptions(options);
     QuickCompilerCallbacks* new_callbacks =
         new QuickCompilerCallbacks(CompilerCallbacks::CallbackMode::kCompileBootImage);
@@ -92,7 +92,7 @@ class ImageTest : public CommonCompilerTest {
     options->push_back(std::make_pair("compilercallbacks", callbacks_.get()));
   }
 
-  std::unique_ptr<HashSet<std::string>> GetImageClasses() OVERRIDE {
+  std::unique_ptr<HashSet<std::string>> GetImageClasses() override {
     return std::make_unique<HashSet<std::string>>(image_classes_);
   }
 
@@ -340,7 +340,8 @@ inline void ImageTest::DoCompile(ImageHeader::StorageMode storage_mode,
           elf_writer->EndDataBimgRelRo(data_bimg_rel_ro);
         }
 
-        bool header_ok = oat_writer->WriteHeader(elf_writer->GetStream(), 0u, 0u, 0u);
+        bool header_ok = oat_writer->WriteHeader(elf_writer->GetStream(),
+                                                 /* image_file_location_oat_checksum */ 0u);
         ASSERT_TRUE(header_ok);
 
         writer->UpdateOatFileHeader(i, oat_writer->GetOatHeader());

@@ -29,19 +29,10 @@
   modes: [device],
   names: ["libcore.java.lang.StringTest#testFastPathString_wellFormedUtf8Sequence",
           "org.apache.harmony.tests.java.lang.ref.ReferenceQueueTest#test_remove",
+          "org.apache.harmony.tests.java.text.DateFormatTest#test_getAvailableLocales",
           "org.apache.harmony.tests.java.util.TimerTest#testOverdueTaskExecutesImmediately",
           "org.apache.harmony.tests.java.util.WeakHashMapTest#test_keySet_hasNext",
           "libcore.java.text.DecimalFormatTest#testCurrencySymbolSpacing",
           "libcore.java.text.SimpleDateFormatTest#testLocales"]
-},
-{
-  description: "GC crash",
-  result: EXEC_FAILED,
-  bug: 111545159,
-  names: ["org.apache.harmony.tests.java.util.AbstractSequentialListTest#test_addAllILjava_util_Collection",
-          "org.apache.harmony.tests.java.util.HashtableTest#test_putLjava_lang_ObjectLjava_lang_Object",
-          "org.apache.harmony.tests.java.util.VectorTest#test_addAllILjava_util_Collection",
-          "org.apache.harmony.tests.java.util.VectorTest#test_addAllLjava_util_Collection",
-          "org.apache.harmony.tests.java.io.BufferedWriterTest#test_write_LStringII_Exception"]
 }
 ]

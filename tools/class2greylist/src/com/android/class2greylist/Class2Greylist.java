@@ -33,10 +33,12 @@ import org.apache.commons.cli.ParseException;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.Charset;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -71,9 +73,10 @@ public class Class2Greylist {
                 .hasArgs()
                 .withDescription(
                         "Specify file to write greylist to. Can be specified multiple times. " +
-                        "Format is either just a filename, or \"int:filename\". If an integer is " +
-                        "given, members with a matching maxTargetSdk are written to the file; if " +
-                        "no integer is given, members with no maxTargetSdk are written.")
+                        "Format is either just a filename, or \"int[,int,...]:filename\". If " +
+                        "integers are given, members with matching maxTargetSdk values are " +
+                        "written to the file; if no integer or \"none\" is given, members with " +
+                        "no maxTargetSdk are written.")
                 .create("g"));
         options.addOption(OptionBuilder
                 .withLongOpt("write-whitelist")
@@ -85,6 +88,12 @@ public class Class2Greylist {
                 .hasArgs(0)
                 .withDescription("Enable debug")
                 .create("d"));
+        options.addOption(OptionBuilder
+                .withLongOpt("dump-all-members")
+                .withDescription("Dump all members from jar files to stdout. Ignore annotations. " +
+                        "Do not use in conjunction with any other arguments.")
+                .hasArgs(0)
+                .create('m'));
         options.addOption(OptionBuilder
                 .withLongOpt("help")
                 .hasArgs(0)
@@ -113,16 +122,21 @@ public class Class2Greylist {
         }
 
         Status status = new Status(cmd.hasOption('d'));
-        try {
-            Class2Greylist c2gl = new Class2Greylist(
-                    status,
-                    cmd.getOptionValue('p', null),
-                    cmd.getOptionValues('g'),
-                    cmd.getOptionValue('w', null),
-                    jarFiles);
-            c2gl.main();
-        } catch (IOException e) {
-            status.error(e);
+
+        if (cmd.hasOption('m')) {
+            dumpAllMembers(status, jarFiles);
+        } else {
+            try {
+                Class2Greylist c2gl = new Class2Greylist(
+                        status,
+                        cmd.getOptionValue('p', null),
+                        cmd.getOptionValues('g'),
+                        cmd.getOptionValue('w', null),
+                        jarFiles);
+                c2gl.main();
+            } catch (IOException e) {
+                status.error(e);
+            }
         }
 
         if (status.ok()) {
@@ -193,15 +207,22 @@ public class Class2Greylist {
     static Map<Integer, String> readGreylistMap(Status status, String[] argValues) {
         Map<Integer, String> map = new HashMap<>();
         for (String sdkFile : argValues) {
-            Integer maxTargetSdk = null;
+            List<Integer> maxTargetSdks = new ArrayList<>();
             String filename;
             int colonPos = sdkFile.indexOf(':');
             if (colonPos != -1) {
-                try {
-                    maxTargetSdk = Integer.valueOf(sdkFile.substring(0, colonPos));
-                } catch (NumberFormatException nfe) {
-                    status.error("Not a valid integer: %s from argument value '%s'",
-                            sdkFile.substring(0, colonPos), sdkFile);
+                String[] targets = sdkFile.substring(0, colonPos).split(",");
+                for (String target : targets) {
+                    if ("none".equals(target)) {
+                        maxTargetSdks.add(null);
+                    } else {
+                        try {
+                            maxTargetSdks.add(Integer.valueOf(target));
+                        } catch (NumberFormatException nfe) {
+                            status.error("Not a valid integer: %s from argument value '%s'",
+                                    sdkFile.substring(0, colonPos), sdkFile);
+                        }
+                    }
                 }
                 filename = sdkFile.substring(colonPos + 1);
                 if (filename.length() == 0) {
@@ -209,16 +230,33 @@ public class Class2Greylist {
                             filename, sdkFile);
                 }
             } else {
-                maxTargetSdk = null;
+                maxTargetSdks.add(null);
                 filename = sdkFile;
             }
-            if (map.containsKey(maxTargetSdk)) {
-                status.error("Multiple output files for maxTargetSdk %s", maxTargetSdk);
-            } else {
-                map.put(maxTargetSdk, filename);
+            for (Integer maxTargetSdk : maxTargetSdks) {
+                if (map.containsKey(maxTargetSdk)) {
+                    status.error("Multiple output files for maxTargetSdk %s",
+                            maxTargetSdk == null ? "none" : maxTargetSdk);
+                } else {
+                    map.put(maxTargetSdk, filename);
+                }
             }
         }
         return map;
+    }
+
+    private static void dumpAllMembers(Status status, String[] jarFiles) {
+        for (String jarFile : jarFiles) {
+            status.debug("Processing jar file %s", jarFile);
+            try {
+                JarReader reader = new JarReader(status, jarFile);
+                reader.stream().forEach(clazz -> new MemberDumpingVisitor(clazz, status)
+                        .visit());
+                reader.close();
+            } catch (IOException e) {
+                status.error(e);
+            }
+        }
     }
 
     private static void help(Options options) {

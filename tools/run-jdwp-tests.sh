@@ -260,8 +260,8 @@ else
   # we don't want to be trying to connect to adbconnection which might not have
   # been built.
   vm_args="${vm_args} --vm-arg -XjdwpProvider:none"
-  # Make sure the debuggee doesn't clean up what the debugger has generated.
-  art_debugee="$art_debugee --no-clean"
+  # Make sure the debuggee doesn't re-generate, nor clean up what the debugger has generated.
+  art_debugee="$art_debugee --no-compile --no-clean"
 fi
 
 function jlib_name {
@@ -311,10 +311,10 @@ if [[ "$plugin" != "" ]]; then
   vm_args="$vm_args --vm-arg $plugin"
 fi
 
-if $use_jit; then
-  vm_args="$vm_args --vm-arg -Xcompiler-option --vm-arg --compiler-filter=quicken"
-  debuggee_args="$debuggee_args -Xcompiler-option --compiler-filter=quicken"
-fi
+# Because we're running debuggable, we discard any AOT code.
+# Therefore we run de2oat with 'quicken' to avoid spending time compiling.
+vm_args="$vm_args --vm-arg -Xcompiler-option --vm-arg --compiler-filter=quicken"
+debuggee_args="$debuggee_args -Xcompiler-option --compiler-filter=quicken"
 
 if $instant_jit; then
   debuggee_args="$debuggee_args -Xjitthreshold:0"

@@ -447,7 +447,8 @@ define define-art-gtest-rule-target
     $$($(3)TARGET_OUT_SHARED_LIBRARIES)/libjavacore.so \
     $$($(3)TARGET_OUT_SHARED_LIBRARIES)/libopenjdkd.so \
     $$(TARGET_OUT_JAVA_LIBRARIES)/core-libart-testdex.jar \
-    $$(TARGET_OUT_JAVA_LIBRARIES)/core-oj-testdex.jar
+    $$(TARGET_OUT_JAVA_LIBRARIES)/core-oj-testdex.jar \
+    $$(TARGET_OUT_JAVA_LIBRARIES)/core-simple-testdex.jar
 
 $$(gtest_rule): PRIVATE_TARGET_EXE := $$(gtest_target_exe)
 $$(gtest_rule): PRIVATE_MAYBE_CHROOT_COMMAND := $$(maybe_chroot_command)
@@ -460,14 +461,14 @@ $$(gtest_rule): PRIVATE_GTEST_WITNESS := $$(gtest_witness)
 
 .PHONY: $$(gtest_rule)
 $$(gtest_rule): test-art-target-sync
-	$(hide) adb shell touch $$(PRIVATE_GTEST_WITNESS)
-	$(hide) adb shell rm $$(PRIVATE_GTEST_WITNESS)
-	$(hide) adb shell $$(PRIVATE_MAYBE_CHROOT_COMMAND) chmod 755 $$(PRIVATE_TARGET_EXE)
+	$(hide) $(ADB) shell touch $$(PRIVATE_GTEST_WITNESS)
+	$(hide) $(ADB) shell rm $$(PRIVATE_GTEST_WITNESS)
+	$(hide) $(ADB) shell $$(PRIVATE_MAYBE_CHROOT_COMMAND) chmod 755 $$(PRIVATE_TARGET_EXE)
 	$(hide) $$(call ART_TEST_SKIP,$$@) && \
-	  (adb shell "$$(PRIVATE_MAYBE_CHROOT_COMMAND) env $(GCOV_ENV) LD_LIBRARY_PATH=$(4) \
+	  ($(ADB) shell "$$(PRIVATE_MAYBE_CHROOT_COMMAND) env $(GCOV_ENV) LD_LIBRARY_PATH=$(4) \
 	       ANDROID_ROOT=$(ART_GTEST_TARGET_ANDROID_ROOT) $$(PRIVATE_TARGET_EXE) \
 	     && touch $$(PRIVATE_GTEST_WITNESS)" \
-	   && (adb pull $$(PRIVATE_GTEST_WITNESS) /tmp/ && $$(call ART_TEST_PASSED,$$@)) \
+	   && ($(ADB) pull $$(PRIVATE_GTEST_WITNESS) /tmp/ && $$(call ART_TEST_PASSED,$$@)) \
 	   || $$(call ART_TEST_FAILED,$$@))
 	$(hide) rm -f /tmp/$$@-$$$$PPID
 

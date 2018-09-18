@@ -41,26 +41,14 @@
 namespace art {
 namespace debug {
 
-typedef std::vector<DexFile::LocalInfo> LocalInfos;
-
-static void LocalInfoCallback(void* ctx, const DexFile::LocalInfo& entry) {
-  static_cast<LocalInfos*>(ctx)->push_back(entry);
-}
-
 static std::vector<const char*> GetParamNames(const MethodDebugInfo* mi) {
   std::vector<const char*> names;
+  DCHECK(mi->dex_file != nullptr);
   CodeItemDebugInfoAccessor accessor(*mi->dex_file, mi->code_item, mi->dex_method_index);
   if (accessor.HasCodeItem()) {
-    DCHECK(mi->dex_file != nullptr);
-    const uint8_t* stream = mi->dex_file->GetDebugInfoStream(accessor.DebugInfoOffset());
-    if (stream != nullptr) {
-      DecodeUnsignedLeb128(&stream);  // line.
-      uint32_t parameters_size = DecodeUnsignedLeb128(&stream);
-      for (uint32_t i = 0; i < parameters_size; ++i) {
-        uint32_t id = DecodeUnsignedLeb128P1(&stream);
-        names.push_back(mi->dex_file->StringDataByIdx(dex::StringIndex(id)));
-      }
-    }
+    accessor.VisitParameterNames([&](const dex::StringIndex& id) {
+      names.push_back(mi->dex_file->StringDataByIdx(id));
+    });
   }
   return names;
 }
@@ -257,11 +245,12 @@ class ElfCompilationUnitWriter {
       }
 
       // Write local variables.
-      LocalInfos local_infos;
+      std::vector<DexFile::LocalInfo> local_infos;
       if (accessor.DecodeDebugLocalInfo(is_static,
                                         mi->dex_method_index,
-                                        LocalInfoCallback,
-                                        &local_infos)) {
+                                        [&](const DexFile::LocalInfo& entry) {
+                                          local_infos.push_back(entry);
+                                        })) {
         for (const DexFile::LocalInfo& var : local_infos) {
           if (var.reg_ < accessor.RegistersSize() - accessor.InsSize()) {
             info_.StartTag(DW_TAG_variable);

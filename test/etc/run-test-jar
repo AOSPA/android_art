@@ -59,7 +59,7 @@ USE_JVMTI="n"
 VERIFY="y" # y=yes,n=no,s=softfail
 ZYGOTE=""
 DEX_VERIFY=""
-USE_DEX2OAT_AND_PATCHOAT="y"
+USE_PATCHOAT="y"
 INSTRUCTION_SET_FEATURES=""
 ARGS=""
 EXTERNAL_LOG_TAGS="n" # if y respect externally set ANDROID_LOG_TAGS.
@@ -166,14 +166,9 @@ while true; do
         shift
         BOOT_IMAGE="$1"
         shift
-    elif [ "x$1" = "x--no-dex2oat" ]; then
-        DEX2OAT="-Xcompiler:${FALSE_BIN}"
-        USE_DEX2OAT_AND_PATCHOAT="n"
-        PREBUILD="n" # Do not use prebuilt odex, either.
-        shift
     elif [ "x$1" = "x--no-patchoat" ]; then
         PATCHOAT="-Xpatchoat:${FALSE_BIN}"
-        USE_DEX2OAT_AND_PATCHOAT="n"
+        USE_PATCHOAT="n"
         shift
     elif [ "x$1" = "x--relocate" ]; then
         RELOCATE="y"
@@ -549,6 +544,7 @@ if [ "$HAVE_IMAGE" = "n" ]; then
     fi
     bpath="${framework}/core-libart${bpath_suffix}.jar"
     bpath="${bpath}:${framework}/core-oj${bpath_suffix}.jar"
+    bpath="${bpath}:${framework}/core-simple${bpath_suffix}.jar"
     bpath="${bpath}:${framework}/conscrypt${bpath_suffix}.jar"
     bpath="${bpath}:${framework}/okhttp${bpath_suffix}.jar"
     bpath="${bpath}:${framework}/bouncycastle${bpath_suffix}.jar"
@@ -588,7 +584,7 @@ if [ "$USE_GDB" = "y" ]; then
 fi
 
 if [ "$INTERPRETER" = "y" ]; then
-    INT_OPTS="-Xint"
+    INT_OPTS="${INT_OPTS} -Xint"
     if [ "$VERIFY" = "y" ] ; then
       INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=quicken"
       COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=quicken"
@@ -604,7 +600,7 @@ if [ "$INTERPRETER" = "y" ]; then
 fi
 
 if [ "$JIT" = "y" ]; then
-    INT_OPTS="-Xusejit:true"
+    INT_OPTS="${INT_OPTS} -Xusejit:true"
     if [ "$VERIFY" = "y" ] ; then
       INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=quicken"
       COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=quicken"
@@ -613,6 +609,8 @@ if [ "$JIT" = "y" ]; then
       COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=assume-verified"
       DEX_VERIFY="${DEX_VERIFY} -Xverify:none"
     fi
+else
+    INT_OPTS="${INT_OPTS} -Xusejit:false"
 fi
 
 JNI_OPTS="-Xjnigreflimit:512 -Xcheck:jni"
@@ -810,7 +808,7 @@ RUN_TEST_ASAN_OPTIONS="${RUN_TEST_ASAN_OPTIONS}detect_leaks=0"
 if [ "$EXTERNAL_LOG_TAGS" = "n" ]; then
   if [ "$DEV_MODE" = "y" ]; then
       export ANDROID_LOG_TAGS='*:d'
-  elif [ "$USE_DEX2OAT_AND_PATCHOAT" = "n" ]; then
+  elif [ "$USE_PATCHOAT" = "n" ]; then
       # All tests would log the error of failing dex2oat/patchoat. Be silent here and only
       # log fatal events.
       export ANDROID_LOG_TAGS='*:s'

@@ -137,17 +137,18 @@ inline bool Object::InstanceOf(ObjPtr<Class> klass) {
   return klass->IsAssignableFrom(GetClass<kVerifyFlags>());
 }
 
-template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
+template<VerifyObjectFlags kVerifyFlags>
 inline bool Object::IsClass() {
-  constexpr auto kNewFlags = RemoveThisFlags(kVerifyFlags);
-  Class* java_lang_Class = GetClass<kVerifyFlags, kReadBarrierOption>()->
-      template GetClass<kVerifyFlags, kReadBarrierOption>();
-  return GetClass<kNewFlags, kReadBarrierOption>() == java_lang_Class;
+  // OK to look at from-space copies since java.lang.Class.class is not movable.
+  // See b/114413743
+  ObjPtr<Class> klass = GetClass<kVerifyFlags, kWithoutReadBarrier>();
+  ObjPtr<Class> java_lang_Class = klass->template GetClass<kVerifyFlags, kWithoutReadBarrier>();
+  return klass == java_lang_Class;
 }
 
-template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
+template<VerifyObjectFlags kVerifyFlags>
 inline Class* Object::AsClass() {
-  DCHECK((IsClass<kVerifyFlags, kReadBarrierOption>()));
+  DCHECK((IsClass<kVerifyFlags>()));
   return down_cast<Class*>(this);
 }
 
@@ -350,8 +351,8 @@ inline size_t Object::SizeOf() {
   constexpr auto kNewFlags = RemoveThisFlags(kVerifyFlags);
   if (IsArrayInstance<kVerifyFlags, kRBO>()) {
     result = AsArray<kNewFlags, kRBO>()->template SizeOf<kNewFlags, kRBO>();
-  } else if (IsClass<kNewFlags, kRBO>()) {
-    result = AsClass<kNewFlags, kRBO>()->template SizeOf<kNewFlags, kRBO>();
+  } else if (IsClass<kNewFlags>()) {
+    result = AsClass<kNewFlags>()->template SizeOf<kNewFlags, kRBO>();
   } else if (GetClass<kNewFlags, kRBO>()->IsStringClass()) {
     result = AsString<kNewFlags, kRBO>()->template SizeOf<kNewFlags>();
   } else {
@@ -364,7 +365,7 @@ inline size_t Object::SizeOf() {
 template<VerifyObjectFlags kVerifyFlags, bool kIsVolatile>
 inline int8_t Object::GetFieldByte(MemberOffset field_offset) {
   Verify<kVerifyFlags>();
-  return GetField<int8_t, kIsVolatile>(field_offset);
+  return GetFieldPrimitive<int8_t, kIsVolatile>(field_offset);
 }
 
 template<VerifyObjectFlags kVerifyFlags>
@@ -391,7 +392,7 @@ inline void Object::SetFieldBoolean(MemberOffset field_offset, uint8_t new_value
         kIsVolatile);
   }
   Verify<kVerifyFlags>();
-  SetField<uint8_t, kIsVolatile>(field_offset, new_value);
+  SetFieldPrimitive<uint8_t, kIsVolatile>(field_offset, new_value);
 }
 
 template<bool kTransactionActive,
@@ -407,7 +408,7 @@ inline void Object::SetFieldByte(MemberOffset field_offset, int8_t new_value) {
                                              kIsVolatile);
   }
   Verify<kVerifyFlags>();
-  SetField<int8_t, kIsVolatile>(field_offset, new_value);
+  SetFieldPrimitive<int8_t, kIsVolatile>(field_offset, new_value);
 }
 
 template<bool kTransactionActive, bool kCheckTransaction, VerifyObjectFlags kVerifyFlags>
@@ -425,13 +426,13 @@ inline void Object::SetFieldByteVolatile(MemberOffset field_offset, int8_t new_v
 template<VerifyObjectFlags kVerifyFlags, bool kIsVolatile>
 inline uint16_t Object::GetFieldChar(MemberOffset field_offset) {
   Verify<kVerifyFlags>();
-  return GetField<uint16_t, kIsVolatile>(field_offset);
+  return GetFieldPrimitive<uint16_t, kIsVolatile>(field_offset);
 }
 
 template<VerifyObjectFlags kVerifyFlags, bool kIsVolatile>
 inline int16_t Object::GetFieldShort(MemberOffset field_offset) {
   Verify<kVerifyFlags>();
-  return GetField<int16_t, kIsVolatile>(field_offset);
+  return GetFieldPrimitive<int16_t, kIsVolatile>(field_offset);
 }
 
 template<VerifyObjectFlags kVerifyFlags>
@@ -457,7 +458,7 @@ inline void Object::SetFieldChar(MemberOffset field_offset, uint16_t new_value) 
                                              kIsVolatile);
   }
   Verify<kVerifyFlags>();
-  SetField<uint16_t, kIsVolatile>(field_offset, new_value);
+  SetFieldPrimitive<uint16_t, kIsVolatile>(field_offset, new_value);
 }
 
 template<bool kTransactionActive,
@@ -473,7 +474,7 @@ inline void Object::SetFieldShort(MemberOffset field_offset, int16_t new_value) 
                                              kIsVolatile);
   }
   Verify<kVerifyFlags>();
-  SetField<int16_t, kIsVolatile>(field_offset, new_value);
+  SetFieldPrimitive<int16_t, kIsVolatile>(field_offset, new_value);
 }
 
 template<bool kTransactionActive, bool kCheckTransaction, VerifyObjectFlags kVerifyFlags>
@@ -501,7 +502,7 @@ inline void Object::SetField32(MemberOffset field_offset, int32_t new_value) {
                                            kIsVolatile);
   }
   Verify<kVerifyFlags>();
-  SetField<int32_t, kIsVolatile>(field_offset, new_value);
+  SetFieldPrimitive<int32_t, kIsVolatile>(field_offset, new_value);
 }
 
 template<bool kTransactionActive, bool kCheckTransaction, VerifyObjectFlags kVerifyFlags>
@@ -531,7 +532,7 @@ inline void Object::SetField64(MemberOffset field_offset, int64_t new_value) {
                                            kIsVolatile);
   }
   Verify<kVerifyFlags>();
-  SetField<int64_t, kIsVolatile>(field_offset, new_value);
+  SetFieldPrimitive<int64_t, kIsVolatile>(field_offset, new_value);
 }
 
 template<bool kTransactionActive, bool kCheckTransaction, VerifyObjectFlags kVerifyFlags>
@@ -867,7 +868,7 @@ inline void Object::VisitFieldsReferences(uint32_t ref_offsets, const Visitor& v
     // inheritance hierarchy and find reference offsets the hard way. In the static case, just
     // consider this class.
     for (ObjPtr<Class> klass = kIsStatic
-            ? AsClass<kVerifyFlags, kReadBarrierOption>()
+            ? AsClass<kVerifyFlags>()
             : GetClass<kVerifyFlags, kReadBarrierOption>();
         klass != nullptr;
         klass = kIsStatic ? nullptr : klass->GetSuperClass<kVerifyFlags, kReadBarrierOption>()) {
