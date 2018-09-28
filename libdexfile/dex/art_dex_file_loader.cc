@@ -23,6 +23,7 @@
 
 #include "base/file_magic.h"
 #include "base/file_utils.h"
+#include "base/mem_map.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "base/unix_file/fd_file.h"
@@ -38,14 +39,14 @@ namespace {
 
 class MemMapContainer : public DexFileContainer {
  public:
-  explicit MemMapContainer(std::unique_ptr<MemMap>&& mem_map) : mem_map_(std::move(mem_map)) { }
+  explicit MemMapContainer(MemMap&& mem_map) : mem_map_(std::move(mem_map)) { }
   virtual ~MemMapContainer() OVERRIDE { }
 
   int GetPermissions() OVERRIDE {
-    if (mem_map_.get() == nullptr) {
+    if (!mem_map_.IsValid()) {
       return 0;
     } else {
-      return mem_map_->GetProtect();
+      return mem_map_.GetProtect();
     }
   }
 
@@ -55,24 +56,24 @@ class MemMapContainer : public DexFileContainer {
 
   bool EnableWrite() OVERRIDE {
     CHECK(IsReadOnly());
-    if (mem_map_.get() == nullptr) {
+    if (!mem_map_.IsValid()) {
       return false;
     } else {
-      return mem_map_->Protect(PROT_READ | PROT_WRITE);
+      return mem_map_.Protect(PROT_READ | PROT_WRITE);
     }
   }
 
   bool DisableWrite() OVERRIDE {
     CHECK(!IsReadOnly());
-    if (mem_map_.get() == nullptr) {
+    if (!mem_map_.IsValid()) {
       return false;
     } else {
-      return mem_map_->Protect(PROT_READ);
+      return mem_map_.Protect(PROT_READ);
     }
   }
 
  private:
-  std::unique_ptr<MemMap> mem_map_;
+  MemMap mem_map_;
   DISALLOW_COPY_AND_ASSIGN(MemMapContainer);
 };
 
@@ -180,22 +181,24 @@ std::unique_ptr<const DexFile> ArtDexFileLoader::Open(const uint8_t* base,
 
 std::unique_ptr<const DexFile> ArtDexFileLoader::Open(const std::string& location,
                                                       uint32_t location_checksum,
-                                                      std::unique_ptr<MemMap> map,
+                                                      MemMap&& map,
                                                       bool verify,
                                                       bool verify_checksum,
                                                       std::string* error_msg) const {
   ScopedTrace trace(std::string("Open dex file from mapped-memory ") + location);
-  CHECK(map.get() != nullptr);
+  CHECK(map.IsValid());
 
-  if (map->Size() < sizeof(DexFile::Header)) {
+  size_t size = map.Size();
+  if (size < sizeof(DexFile::Header)) {
     *error_msg = StringPrintf(
         "DexFile: failed to open dex file '%s' that is too short to have a header",
         location.c_str());
     return nullptr;
   }
 
-  std::unique_ptr<DexFile> dex_file = OpenCommon(map->Begin(),
-                                                 map->Size(),
+  uint8_t* begin = map.Begin();
+  std::unique_ptr<DexFile> dex_file = OpenCommon(begin,
+                                                 size,
                                                  /*data_base*/ nullptr,
                                                  /*data_size*/ 0u,
                                                  location,
@@ -285,7 +288,7 @@ std::unique_ptr<const DexFile> ArtDexFileLoader::OpenFile(int fd,
                                                           std::string* error_msg) const {
   ScopedTrace trace(std::string("Open dex file ") + std::string(location));
   CHECK(!location.empty());
-  std::unique_ptr<MemMap> map;
+  MemMap map;
   {
     File delayed_close(fd, /* check_usage */ false);
     struct stat sbuf;
@@ -300,31 +303,33 @@ std::unique_ptr<const DexFile> ArtDexFileLoader::OpenFile(int fd,
       return nullptr;
     }
     size_t length = sbuf.st_size;
-    map.reset(MemMap::MapFile(length,
-                              PROT_READ,
-                              mmap_shared ? MAP_SHARED : MAP_PRIVATE,
-                              fd,
-                              0,
-                              /*low_4gb*/false,
-                              location.c_str(),
-                              error_msg));
-    if (map == nullptr) {
+    map = MemMap::MapFile(length,
+                          PROT_READ,
+                          mmap_shared ? MAP_SHARED : MAP_PRIVATE,
+                          fd,
+                          0,
+                          /*low_4gb*/false,
+                          location.c_str(),
+                          error_msg);
+    if (!map.IsValid()) {
       DCHECK(!error_msg->empty());
       return nullptr;
     }
   }
 
-  if (map->Size() < sizeof(DexFile::Header)) {
+  const uint8_t* begin = map.Begin();
+  size_t size = map.Size();
+  if (size < sizeof(DexFile::Header)) {
     *error_msg = StringPrintf(
         "DexFile: failed to open dex file '%s' that is too short to have a header",
         location.c_str());
     return nullptr;
   }
 
-  const DexFile::Header* dex_header = reinterpret_cast<const DexFile::Header*>(map->Begin());
+  const DexFile::Header* dex_header = reinterpret_cast<const DexFile::Header*>(begin);
 
-  std::unique_ptr<DexFile> dex_file = OpenCommon(map->Begin(),
-                                                 map->Size(),
+  std::unique_ptr<DexFile> dex_file = OpenCommon(begin,
+                                                 size,
                                                  /*data_base*/ nullptr,
                                                  /*data_size*/ 0u,
                                                  location,
@@ -352,21 +357,21 @@ std::unique_ptr<const DexFile> ArtDexFileLoader::OpenOneDexFileFromZip(
     bool verify,
     bool verify_checksum,
     std::string* error_msg,
-    ZipOpenErrorCode* error_code) const {
+    DexFileLoaderErrorCode* error_code) const {
   ScopedTrace trace("Dex file open from Zip Archive " + std::string(location));
   CHECK(!location.empty());
   std::unique_ptr<ZipEntry> zip_entry(zip_archive.Find(entry_name, error_msg));
   if (zip_entry == nullptr) {
-    *error_code = ZipOpenErrorCode::kEntryNotFound;
+    *error_code = DexFileLoaderErrorCode::kEntryNotFound;
     return nullptr;
   }
   if (zip_entry->GetUncompressedLength() == 0) {
     *error_msg = StringPrintf("Dex file '%s' has zero length", location.c_str());
-    *error_code = ZipOpenErrorCode::kDexFileError;
+    *error_code = DexFileLoaderErrorCode::kDexFileError;
     return nullptr;
   }
 
-  std::unique_ptr<MemMap> map;
+  MemMap map;
   if (zip_entry->IsUncompressed()) {
     if (!zip_entry->IsAlignedTo(alignof(DexFile::Header))) {
       // Do not mmap unaligned ZIP entries because
@@ -376,8 +381,8 @@ std::unique_ptr<const DexFile> ArtDexFileLoader::OpenOneDexFileFromZip(
                    << "Falling back to extracting file.";
     } else {
       // Map uncompressed files within zip as file-backed to avoid a dirty copy.
-      map.reset(zip_entry->MapDirectlyFromFile(location.c_str(), /*out*/error_msg));
-      if (map == nullptr) {
+      map = zip_entry->MapDirectlyFromFile(location.c_str(), /*out*/error_msg);
+      if (!map.IsValid()) {
         LOG(WARNING) << "Can't mmap dex file " << location << "!" << entry_name << " directly; "
                      << "is your ZIP file corrupted? Falling back to extraction.";
         // Try again with Extraction which still has a chance of recovery.
@@ -385,21 +390,23 @@ std::unique_ptr<const DexFile> ArtDexFileLoader::OpenOneDexFileFromZip(
     }
   }
 
-  if (map == nullptr) {
+  if (!map.IsValid()) {
     // Default path for compressed ZIP entries,
     // and fallback for stored ZIP entries.
-    map.reset(zip_entry->ExtractToMemMap(location.c_str(), entry_name, error_msg));
+    map = zip_entry->ExtractToMemMap(location.c_str(), entry_name, error_msg);
   }
 
-  if (map == nullptr) {
+  if (!map.IsValid()) {
     *error_msg = StringPrintf("Failed to extract '%s' from '%s': %s", entry_name, location.c_str(),
                               error_msg->c_str());
-    *error_code = ZipOpenErrorCode::kExtractToMemoryError;
+    *error_code = DexFileLoaderErrorCode::kExtractToMemoryError;
     return nullptr;
   }
   VerifyResult verify_result;
-  std::unique_ptr<DexFile> dex_file = OpenCommon(map->Begin(),
-                                                 map->Size(),
+  uint8_t* begin = map.Begin();
+  size_t size = map.Size();
+  std::unique_ptr<DexFile> dex_file = OpenCommon(begin,
+                                                 size,
                                                  /*data_base*/ nullptr,
                                                  /*data_size*/ 0u,
                                                  location,
@@ -417,23 +424,23 @@ std::unique_ptr<const DexFile> ArtDexFileLoader::OpenOneDexFileFromZip(
   }
   if (dex_file == nullptr) {
     if (verify_result == VerifyResult::kVerifyNotAttempted) {
-      *error_code = ZipOpenErrorCode::kDexFileError;
+      *error_code = DexFileLoaderErrorCode::kDexFileError;
     } else {
-      *error_code = ZipOpenErrorCode::kVerifyError;
+      *error_code = DexFileLoaderErrorCode::kVerifyError;
     }
     return nullptr;
   }
   if (!dex_file->DisableWrite()) {
     *error_msg = StringPrintf("Failed to make dex file '%s' read only", location.c_str());
-    *error_code = ZipOpenErrorCode::kMakeReadOnlyError;
+    *error_code = DexFileLoaderErrorCode::kMakeReadOnlyError;
     return nullptr;
   }
   CHECK(dex_file->IsReadOnly()) << location;
   if (verify_result != VerifyResult::kVerifySucceeded) {
-    *error_code = ZipOpenErrorCode::kVerifyError;
+    *error_code = DexFileLoaderErrorCode::kVerifyError;
     return nullptr;
   }
-  *error_code = ZipOpenErrorCode::kNoError;
+  *error_code = DexFileLoaderErrorCode::kNoError;
   return dex_file;
 }
 
@@ -452,7 +459,7 @@ bool ArtDexFileLoader::OpenAllDexFilesFromZip(
     std::vector<std::unique_ptr<const DexFile>>* dex_files) const {
   ScopedTrace trace("Dex file open from Zip " + std::string(location));
   DCHECK(dex_files != nullptr) << "DexFile::OpenFromZip: out-param is nullptr";
-  ZipOpenErrorCode error_code;
+  DexFileLoaderErrorCode error_code;
   std::unique_ptr<const DexFile> dex_file(OpenOneDexFileFromZip(zip_archive,
                                                                 kClassesDex,
                                                                 location,
@@ -482,7 +489,7 @@ bool ArtDexFileLoader::OpenAllDexFilesFromZip(
                                                                          error_msg,
                                                                          &error_code));
       if (next_dex_file.get() == nullptr) {
-        if (error_code != ZipOpenErrorCode::kEntryNotFound) {
+        if (error_code != DexFileLoaderErrorCode::kEntryNotFound) {
           LOG(WARNING) << "Zip open failed: " << *error_msg;
         }
         break;

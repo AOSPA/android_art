@@ -78,9 +78,9 @@ class Redefiner {
 
   static jvmtiError IsModifiableClass(jvmtiEnv* env, jclass klass, jboolean* is_redefinable);
 
-  static std::unique_ptr<art::MemMap> MoveDataToMemMap(const std::string& original_location,
-                                                       art::ArrayRef<const unsigned char> data,
-                                                       std::string* error_msg);
+  static art::MemMap MoveDataToMemMap(const std::string& original_location,
+                                      art::ArrayRef<const unsigned char> data,
+                                      std::string* error_msg);
 
   // Helper for checking if redefinition/retransformation is allowed.
   static jvmtiError GetClassRedefinitionError(jclass klass, /*out*/std::string* error_msg)
@@ -136,7 +136,7 @@ class Redefiner {
         /*out*/RedefinitionDataIter* cur_data)
           REQUIRES_SHARED(art::Locks::mutator_lock_);
 
-    void FindAndAllocateObsoleteMethods(art::mirror::Class* art_klass)
+    void FindAndAllocateObsoleteMethods(art::ObjPtr<art::mirror::Class> art_klass)
         REQUIRES(art::Locks::mutator_lock_);
 
     // Checks that the dex file contains only the single expected class and that the top-level class

@@ -96,11 +96,6 @@ enum class CopyOption {
 // ...
 // VmapTable
 //
-// MethodInfo        one variable sized blob with MethodInfo.
-// MethodInfo        MethodInfos are deduplicated.
-// ...
-// MethodInfo
-//
 // OatDexFile[0]     one variable sized OatDexFile with offsets to Dex and OatClasses
 // OatDexFile[1]
 // ...
@@ -182,7 +177,7 @@ class OatWriter {
                             bool verify,
                             bool update_input_vdex,
                             CopyOption copy_dex_files,
-                            /*out*/ std::vector<std::unique_ptr<MemMap>>* opened_dex_files_map,
+                            /*out*/ std::vector<MemMap>* opened_dex_files_map,
                             /*out*/ std::vector<std::unique_ptr<const DexFile>>* opened_dex_files);
   // Initialize the writer with the given parameters.
   void Initialize(const CompilerDriver* compiler_driver,
@@ -284,11 +279,9 @@ class OatWriter {
   class OrderedMethodVisitor;
   class InitCodeMethodVisitor;
   class InitMapMethodVisitor;
-  class InitMethodInfoVisitor;
   class InitImageMethodVisitor;
   class WriteCodeMethodVisitor;
   class WriteMapMethodVisitor;
-  class WriteMethodInfoVisitor;
   class WriteQuickeningInfoMethodVisitor;
   class WriteQuickeningInfoOffsetsMethodVisitor;
 
@@ -322,7 +315,7 @@ class OatWriter {
                     bool update_input_vdex);
   bool OpenDexFiles(File* file,
                     bool verify,
-                    /*out*/ std::vector<std::unique_ptr<MemMap>>* opened_dex_files_map,
+                    /*out*/ std::vector<MemMap>* opened_dex_files_map,
                     /*out*/ std::vector<std::unique_ptr<const DexFile>>* opened_dex_files);
 
   size_t InitOatHeader(uint32_t num_dex_files, SafeMap<std::string, std::string>* key_value_store);
@@ -383,6 +376,8 @@ class OatWriter {
   std::list<std::string> zipped_dex_file_locations_;
 
   dchecked_vector<debug::MethodDebugInfo> method_info_;
+
+  std::vector<uint8_t> code_info_data_;
 
   const CompilerDriver* compiler_driver_;
   const CompilerOptions& compiler_options_;
@@ -532,9 +527,6 @@ class OatWriter {
 
   // The helper for processing relative patches is external so that we can patch across oat files.
   MultiOatRelativePatcher* relative_patcher_;
-
-  // The locations of absolute patches relative to the start of the executable section.
-  dchecked_vector<uintptr_t> absolute_patch_locations_;
 
   // Profile info used to generate new layout of files.
   ProfileCompilationInfo* profile_compilation_info_;

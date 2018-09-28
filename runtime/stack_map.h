@@ -28,7 +28,6 @@
 #include "base/memory_region.h"
 #include "dex/dex_file_types.h"
 #include "dex_register_location.h"
-#include "method_info.h"
 #include "quick/quick_method_frame_info.h"
 
 namespace art {
@@ -129,7 +128,7 @@ class StackMap : public BitTableAccessor<8> {
     OSR = 1,
     Debug = 2,
   };
-  BIT_TABLE_HEADER()
+  BIT_TABLE_HEADER(StackMap)
   BIT_TABLE_COLUMN(0, Kind)
   BIT_TABLE_COLUMN(1, PackedNativePc)
   BIT_TABLE_COLUMN(2, DexPc)
@@ -164,7 +163,6 @@ class StackMap : public BitTableAccessor<8> {
 
   void Dump(VariableIndentationOutputStream* vios,
             const CodeInfo& code_info,
-            const MethodInfo& method_info,
             uint32_t code_offset,
             InstructionSet instruction_set) const;
 };
@@ -176,7 +174,7 @@ class StackMap : public BitTableAccessor<8> {
  */
 class InlineInfo : public BitTableAccessor<6> {
  public:
-  BIT_TABLE_HEADER()
+  BIT_TABLE_HEADER(InlineInfo)
   BIT_TABLE_COLUMN(0, IsLast)  // Determines if there are further rows for further depths.
   BIT_TABLE_COLUMN(1, DexPc)
   BIT_TABLE_COLUMN(2, MethodInfoIndex)
@@ -187,10 +185,6 @@ class InlineInfo : public BitTableAccessor<6> {
 
   static constexpr uint32_t kLast = -1;
   static constexpr uint32_t kMore = 0;
-
-  uint32_t GetMethodIndex(const MethodInfo& method_info) const {
-    return method_info.GetMethodIndex(GetMethodInfoIndex());
-  }
 
   bool EncodesArtMethod() const {
     return HasArtMethodLo();
@@ -204,25 +198,30 @@ class InlineInfo : public BitTableAccessor<6> {
 
   void Dump(VariableIndentationOutputStream* vios,
             const CodeInfo& info,
-            const StackMap& stack_map,
-            const MethodInfo& method_info) const;
+            const StackMap& stack_map) const;
 };
 
-class MaskInfo : public BitTableAccessor<1> {
+class StackMask : public BitTableAccessor<1> {
  public:
-  BIT_TABLE_HEADER()
+  BIT_TABLE_HEADER(StackMask)
+  BIT_TABLE_COLUMN(0, Mask)
+};
+
+class DexRegisterMask : public BitTableAccessor<1> {
+ public:
+  BIT_TABLE_HEADER(DexRegisterMask)
   BIT_TABLE_COLUMN(0, Mask)
 };
 
 class DexRegisterMapInfo : public BitTableAccessor<1> {
  public:
-  BIT_TABLE_HEADER()
+  BIT_TABLE_HEADER(DexRegisterMapInfo)
   BIT_TABLE_COLUMN(0, CatalogueIndex)
 };
 
 class DexRegisterInfo : public BitTableAccessor<2> {
  public:
-  BIT_TABLE_HEADER()
+  BIT_TABLE_HEADER(DexRegisterInfo)
   BIT_TABLE_COLUMN(0, Kind)
   BIT_TABLE_COLUMN(1, PackedValue)
 
@@ -253,7 +252,7 @@ class DexRegisterInfo : public BitTableAccessor<2> {
 // therefore it is worth encoding the mask as value+shift.
 class RegisterMask : public BitTableAccessor<2> {
  public:
-  BIT_TABLE_HEADER()
+  BIT_TABLE_HEADER(RegisterMask)
   BIT_TABLE_COLUMN(0, Value)
   BIT_TABLE_COLUMN(1, Shift)
 
@@ -262,21 +261,51 @@ class RegisterMask : public BitTableAccessor<2> {
   }
 };
 
+// Method indices are not very dedup friendly.
+// Separating them greatly improves dedup efficiency of the other tables.
+class MethodInfo : public BitTableAccessor<1> {
+ public:
+  BIT_TABLE_HEADER(MethodInfo)
+  BIT_TABLE_COLUMN(0, MethodIndex)
+};
+
 /**
  * Wrapper around all compiler information collected for a method.
  * See the Decode method at the end for the precise binary format.
  */
 class CodeInfo {
  public:
-  explicit CodeInfo(const void* data) {
-    Decode(reinterpret_cast<const uint8_t*>(data));
+  class Deduper {
+   public:
+    explicit Deduper(std::vector<uint8_t>* output) : writer_(output) {
+      DCHECK_EQ(output->size(), 0u);
+    }
+
+    // Copy CodeInfo into output while de-duplicating the internal bit tables.
+    // It returns the byte offset of the copied CodeInfo within the output.
+    size_t Dedupe(const uint8_t* code_info);
+
+   private:
+    BitMemoryWriter<std::vector<uint8_t>> writer_;
+
+    // Deduplicate at BitTable level. The value is bit offset within the output.
+    std::map<BitMemoryRegion, uint32_t, BitMemoryRegion::Less> dedupe_map_;
+  };
+
+  enum DecodeFlags {
+    AllTables = 0,
+    // Limits the decoding only to the data needed by GC.
+    GcMasksOnly = 1,
+    // Limits the decoding only to the main stack map table and inline info table.
+    // This is sufficient for many use cases and makes the header decoding faster.
+    InlineInfoOnly = 2,
+  };
+
+  explicit CodeInfo(const uint8_t* data, DecodeFlags flags = AllTables) {
+    Decode(reinterpret_cast<const uint8_t*>(data), flags);
   }
 
-  explicit CodeInfo(MemoryRegion region) : CodeInfo(region.begin()) {
-    DCHECK_EQ(Size(), region.size());
-  }
-
-  explicit CodeInfo(const OatQuickMethodHeader* header);
+  explicit CodeInfo(const OatQuickMethodHeader* header, DecodeFlags flags = AllTables);
 
   size_t Size() const {
     return BitsToBytesRoundUp(size_in_bits_);
@@ -320,6 +349,10 @@ class CodeInfo {
 
   uint32_t GetNumberOfStackMaps() const {
     return stack_maps_.NumRows();
+  }
+
+  uint32_t GetMethodIndexOf(InlineInfo inline_info) const {
+    return method_infos_.GetRow(inline_info.GetMethodInfoIndex()).GetMethodIndex();
   }
 
   ALWAYS_INLINE DexRegisterMap GetDexRegisterMapOf(StackMap stack_map) const {
@@ -398,20 +431,22 @@ class CodeInfo {
   void Dump(VariableIndentationOutputStream* vios,
             uint32_t code_offset,
             bool verbose,
-            InstructionSet instruction_set,
-            const MethodInfo& method_info) const;
+            InstructionSet instruction_set) const;
 
   // Accumulate code info size statistics into the given Stats tree.
-  void AddSizeStats(/*out*/ Stats* parent) const;
+  static void CollectSizeStats(const uint8_t* code_info, /*out*/ Stats* parent);
 
   ALWAYS_INLINE static QuickMethodFrameInfo DecodeFrameInfo(const uint8_t* data) {
+    BitMemoryReader reader(data);
     return QuickMethodFrameInfo(
-        DecodeUnsignedLeb128(&data),
-        DecodeUnsignedLeb128(&data),
-        DecodeUnsignedLeb128(&data));
+        reader.ReadVarint() * kStackAlignment,  // Decode packed_frame_size_ and unpack.
+        reader.ReadVarint(),  // core_spill_mask_.
+        reader.ReadVarint());  // fp_spill_mask_.
   }
 
  private:
+  CodeInfo() {}
+
   // Returns lower bound (fist stack map which has pc greater or equal than the desired one).
   // It ignores catch stack maps at the end (it is the same as if they had maximum pc value).
   BitTable<StackMap>::const_iterator BinarySearchNativePc(uint32_t packed_pc) const;
@@ -421,20 +456,49 @@ class CodeInfo {
                             uint32_t first_dex_register,
                             /*out*/ DexRegisterMap* map) const;
 
-  void Decode(const uint8_t* data);
+  void Decode(const uint8_t* data, DecodeFlags flags);
 
-  uint32_t frame_size_in_bytes_;
+  // Invokes the callback with member pointer of each header field.
+  template<typename Callback>
+  ALWAYS_INLINE static void ForEachHeaderField(Callback callback) {
+    callback(&CodeInfo::packed_frame_size_);
+    callback(&CodeInfo::core_spill_mask_);
+    callback(&CodeInfo::fp_spill_mask_);
+    callback(&CodeInfo::number_of_dex_registers_);
+  }
+
+  // Invokes the callback with member pointer of each BitTable field.
+  template<typename Callback>
+  ALWAYS_INLINE static void ForEachBitTableField(Callback callback, DecodeFlags flags = AllTables) {
+    callback(&CodeInfo::stack_maps_);
+    callback(&CodeInfo::register_masks_);
+    callback(&CodeInfo::stack_masks_);
+    if (flags & DecodeFlags::GcMasksOnly) {
+      return;
+    }
+    callback(&CodeInfo::inline_infos_);
+    callback(&CodeInfo::method_infos_);
+    if (flags & DecodeFlags::InlineInfoOnly) {
+      return;
+    }
+    callback(&CodeInfo::dex_register_masks_);
+    callback(&CodeInfo::dex_register_maps_);
+    callback(&CodeInfo::dex_register_catalog_);
+  }
+
+  uint32_t packed_frame_size_;  // Frame size in kStackAlignment units.
   uint32_t core_spill_mask_;
   uint32_t fp_spill_mask_;
   uint32_t number_of_dex_registers_;
   BitTable<StackMap> stack_maps_;
   BitTable<RegisterMask> register_masks_;
-  BitTable<MaskInfo> stack_masks_;
+  BitTable<StackMask> stack_masks_;
   BitTable<InlineInfo> inline_infos_;
-  BitTable<MaskInfo> dex_register_masks_;
+  BitTable<MethodInfo> method_infos_;
+  BitTable<DexRegisterMask> dex_register_masks_;
   BitTable<DexRegisterMapInfo> dex_register_maps_;
   BitTable<DexRegisterInfo> dex_register_catalog_;
-  uint32_t size_in_bits_;
+  uint32_t size_in_bits_ = 0;
 };
 
 #undef ELEMENT_BYTE_OFFSET_AFTER

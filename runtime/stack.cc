@@ -81,9 +81,9 @@ ArtMethod* StackVisitor::GetMethod() const {
   } else if (cur_quick_frame_ != nullptr) {
     if (IsInInlinedFrame()) {
       const OatQuickMethodHeader* method_header = GetCurrentOatQuickMethodHeader();
-      MethodInfo method_info = method_header->GetOptimizedMethodInfo();
+      CodeInfo code_info(method_header);
       DCHECK(walk_kind_ != StackWalkKind::kSkipInlinedFrames);
-      return GetResolvedMethod(*GetCurrentQuickFrame(), method_info, current_inline_frames_);
+      return GetResolvedMethod(*GetCurrentQuickFrame(), code_info, current_inline_frames_);
     } else {
       return *cur_quick_frame_;
     }
@@ -597,7 +597,7 @@ static void AssertPcIsWithinQuickCode(ArtMethod* method, uintptr_t pc)
 void StackVisitor::SanityCheckFrame() const {
   if (kIsDebugBuild) {
     ArtMethod* method = GetMethod();
-    mirror::Class* declaring_class = method->GetDeclaringClass();
+    ObjPtr<mirror::Class> declaring_class = method->GetDeclaringClass();
     // Runtime methods have null declaring class.
     if (!method->IsRuntimeMethod()) {
       CHECK(declaring_class != nullptr);
@@ -613,7 +613,7 @@ void StackVisitor::SanityCheckFrame() const {
       // We get the canonical method as copied methods may have their declaring
       // class from another class loader.
       ArtMethod* canonical = method->GetCanonicalMethod();
-      mirror::Class* klass = canonical->GetDeclaringClass();
+      ObjPtr<mirror::Class> klass = canonical->GetDeclaringClass();
       LinearAlloc* const class_linear_alloc = (klass != nullptr)
           ? runtime->GetClassLinker()->GetAllocatorForClassLoader(klass->GetClassLoader())
           : linear_alloc;
@@ -795,7 +795,7 @@ void StackVisitor::WalkStack(bool include_transitions) {
             // JNI methods cannot have any inlined frames.
             && !method->IsNative()) {
           DCHECK_NE(cur_quick_frame_pc_, 0u);
-          CodeInfo code_info(cur_oat_quick_method_header_);
+          CodeInfo code_info(cur_oat_quick_method_header_, CodeInfo::DecodeFlags::InlineInfoOnly);
           uint32_t native_pc_offset =
               cur_oat_quick_method_header_->NativeQuickPcOffset(cur_quick_frame_pc_);
           StackMap stack_map = code_info.GetStackMapForNativePcOffset(native_pc_offset);

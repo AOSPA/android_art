@@ -62,12 +62,12 @@ Atomic<uint32_t> ImageSpace::bitmap_index_(0);
 
 ImageSpace::ImageSpace(const std::string& image_filename,
                        const char* image_location,
-                       MemMap* mem_map,
+                       MemMap&& mem_map,
                        accounting::ContinuousSpaceBitmap* live_bitmap,
                        uint8_t* end)
     : MemMapSpace(image_filename,
-                  mem_map,
-                  mem_map->Begin(),
+                  std::move(mem_map),
+                  mem_map.Begin(),
                   end,
                   end,
                   kGcRetentionPolicyNeverCollect),
@@ -181,18 +181,19 @@ static bool FindImageFilenameImpl(const char* image_location,
   bool have_android_data = false;
   *dalvik_cache_exists = false;
   GetDalvikCache(GetInstructionSetString(image_isa),
-                 true,
+                 /* create_if_absent */ true,
                  dalvik_cache,
                  &have_android_data,
                  dalvik_cache_exists,
                  is_global_cache);
 
-  if (have_android_data && *dalvik_cache_exists) {
+  if (*dalvik_cache_exists) {
+    DCHECK(have_android_data);
     // Always set output location even if it does not exist,
     // so that the caller knows where to create the image.
     //
     // image_location = /system/framework/boot.art
-    // *image_filename = /data/dalvik-cache/<image_isa>/boot.art
+    // *image_filename = /data/dalvik-cache/<image_isa>/system@framework@boot.art
     std::string error_msg;
     if (!GetDalvikCacheFilename(image_location,
                                 dalvik_cache->c_str(),
@@ -381,33 +382,6 @@ ImageHeader* ImageSpace::ReadImageHeader(const char* image_location,
   return nullptr;
 }
 
-static bool ChecksumsMatch(const char* image_a, const char* image_b, std::string* error_msg) {
-  DCHECK(error_msg != nullptr);
-
-  ImageHeader hdr_a;
-  ImageHeader hdr_b;
-
-  if (!ReadSpecificImageHeader(image_a, &hdr_a)) {
-    *error_msg = StringPrintf("Cannot read header of %s", image_a);
-    return false;
-  }
-  if (!ReadSpecificImageHeader(image_b, &hdr_b)) {
-    *error_msg = StringPrintf("Cannot read header of %s", image_b);
-    return false;
-  }
-
-  if (hdr_a.GetOatChecksum() != hdr_b.GetOatChecksum()) {
-    *error_msg = StringPrintf("Checksum mismatch: %u(%s) vs %u(%s)",
-                              hdr_a.GetOatChecksum(),
-                              image_a,
-                              hdr_b.GetOatChecksum(),
-                              image_b);
-    return false;
-  }
-
-  return true;
-}
-
 static bool CanWriteToDalvikCache(const InstructionSet isa) {
   const std::string dalvik_cache = GetDalvikCache(GetInstructionSetString(isa));
   if (access(dalvik_cache.c_str(), O_RDWR) == 0) {
@@ -507,9 +481,9 @@ std::ostream& operator<<(std::ostream& os, const RelocationRange& reloc) {
 
 // Helper class encapsulating loading, so we can access private ImageSpace members (this is a
 // friend class), but not declare functions in the header.
-class ImageSpaceLoader {
+class ImageSpace::Loader {
  public:
-  static std::unique_ptr<ImageSpace> Load(const char* image_location,
+  static std::unique_ptr<ImageSpace> Load(const std::string& image_location,
                                           const std::string& image_filename,
                                           bool is_zygote,
                                           bool is_global_cache,
@@ -541,7 +515,7 @@ class ImageSpaceLoader {
     // Since we are the boot image, pass null since we load the oat file from the boot image oat
     // file name.
     return Init(image_filename.c_str(),
-                image_location,
+                image_location.c_str(),
                 validate_oat_file,
                 /* oat_file */nullptr,
                 error_msg);
@@ -618,60 +592,71 @@ class ImageSpaceLoader {
     const size_t image_bitmap_offset = RoundUp(sizeof(ImageHeader) + image_header->GetDataSize(),
                                                kPageSize);
     const size_t end_of_bitmap = image_bitmap_offset + bitmap_section.Size();
-    if (end_of_bitmap != image_file_size) {
+    const ImageSection& relocations_section = image_header->GetImageRelocationsSection();
+    if (relocations_section.Offset() != bitmap_section.Offset() + bitmap_section.Size()) {
       *error_msg = StringPrintf(
-          "Image file size does not equal end of bitmap: size=%" PRIu64 " vs. %zu.", image_file_size,
-          end_of_bitmap);
+          "Relocations do not start immediately after bitmap: %u vs. %u + %u.",
+          relocations_section.Offset(),
+          bitmap_section.Offset(),
+          bitmap_section.Size());
+      return nullptr;
+    }
+    const size_t end_of_relocations = end_of_bitmap + relocations_section.Size();
+    if (end_of_relocations != image_file_size) {
+      *error_msg = StringPrintf(
+          "Image file size does not equal end of relocations: size=%" PRIu64 " vs. %zu.",
+          image_file_size,
+          end_of_relocations);
       return nullptr;
     }
 
-    std::unique_ptr<MemMap> map;
+    MemMap map;
 
     // GetImageBegin is the preferred address to map the image. If we manage to map the
     // image at the image begin, the amount of fixup work required is minimized.
     // If it is pic we will retry with error_msg for the failure case. Pass a null error_msg to
     // avoid reading proc maps for a mapping failure and slowing everything down.
-    map.reset(LoadImageFile(image_filename,
-                            image_location,
-                            *image_header,
-                            image_header->GetImageBegin(),
-                            file->Fd(),
-                            logger,
-                            image_header->IsPic() ? nullptr : error_msg));
+    map = LoadImageFile(image_filename,
+                        image_location,
+                        *image_header,
+                        image_header->GetImageBegin(),
+                        file->Fd(),
+                        logger,
+                        image_header->IsPic() ? nullptr : error_msg);
     // If the header specifies PIC mode, we can also map at a random low_4gb address since we can
     // relocate in-place.
-    if (map == nullptr && image_header->IsPic()) {
-      map.reset(LoadImageFile(image_filename,
-                              image_location,
-                              *image_header,
-                              /* address */ nullptr,
-                              file->Fd(),
-                              logger,
-                              error_msg));
+    if (!map.IsValid() && image_header->IsPic()) {
+      map = LoadImageFile(image_filename,
+                          image_location,
+                          *image_header,
+                          /* address */ nullptr,
+                          file->Fd(),
+                          logger,
+                          error_msg);
     }
     // Were we able to load something and continue?
-    if (map == nullptr) {
+    if (!map.IsValid()) {
       DCHECK(!error_msg->empty());
       return nullptr;
     }
-    DCHECK_EQ(0, memcmp(image_header, map->Begin(), sizeof(ImageHeader)));
+    DCHECK_EQ(0, memcmp(image_header, map.Begin(), sizeof(ImageHeader)));
 
-    std::unique_ptr<MemMap> image_bitmap_map(MemMap::MapFileAtAddress(nullptr,
-                                                                      bitmap_section.Size(),
-                                                                      PROT_READ, MAP_PRIVATE,
-                                                                      file->Fd(),
-                                                                      image_bitmap_offset,
-                                                                      /*low_4gb*/false,
-                                                                      /*reuse*/false,
-                                                                      image_filename,
-                                                                      error_msg));
-    if (image_bitmap_map == nullptr) {
+    MemMap image_bitmap_map = MemMap::MapFileAtAddress(nullptr,
+                                                       bitmap_section.Size(),
+                                                       PROT_READ, MAP_PRIVATE,
+                                                       file->Fd(),
+                                                       image_bitmap_offset,
+                                                       /*low_4gb*/false,
+                                                       /*reuse*/false,
+                                                       image_filename,
+                                                       error_msg);
+    if (!image_bitmap_map.IsValid()) {
       *error_msg = StringPrintf("Failed to map image bitmap: %s", error_msg->c_str());
       return nullptr;
     }
     // Loaded the map, use the image header from the file now in case we patch it with
     // RelocateInPlace.
-    image_header = reinterpret_cast<ImageHeader*>(map->Begin());
+    image_header = reinterpret_cast<ImageHeader*>(map.Begin());
     const uint32_t bitmap_index = ImageSpace::bitmap_index_.fetch_add(1, std::memory_order_seq_cst);
     std::string bitmap_name(StringPrintf("imagespace %s live-bitmap %u",
                                          image_filename,
@@ -679,15 +664,15 @@ class ImageSpaceLoader {
     // Bitmap only needs to cover until the end of the mirror objects section.
     const ImageSection& image_objects = image_header->GetObjectsSection();
     // We only want the mirror object, not the ArtFields and ArtMethods.
-    uint8_t* const image_end = map->Begin() + image_objects.End();
+    uint8_t* const image_end = map.Begin() + image_objects.End();
     std::unique_ptr<accounting::ContinuousSpaceBitmap> bitmap;
     {
       TimingLogger::ScopedTiming timing("CreateImageBitmap", &logger);
       bitmap.reset(
           accounting::ContinuousSpaceBitmap::CreateFromMemMap(
               bitmap_name,
-              image_bitmap_map.release(),
-              reinterpret_cast<uint8_t*>(map->Begin()),
+              std::move(image_bitmap_map),
+              reinterpret_cast<uint8_t*>(map.Begin()),
               // Make sure the bitmap is aligned to card size instead of just bitmap word size.
               RoundUp(image_objects.End(), gc::accounting::CardTable::kCardSize)));
       if (bitmap == nullptr) {
@@ -698,7 +683,7 @@ class ImageSpaceLoader {
     {
       TimingLogger::ScopedTiming timing("RelocateImage", &logger);
       if (!RelocateInPlace(*image_header,
-                           map->Begin(),
+                           map.Begin(),
                            bitmap.get(),
                            oat_file,
                            error_msg)) {
@@ -708,7 +693,7 @@ class ImageSpaceLoader {
     // We only want the mirror object, not the ArtFields and ArtMethods.
     std::unique_ptr<ImageSpace> space(new ImageSpace(image_filename,
                                                      image_location,
-                                                     map.release(),
+                                                     std::move(map),
                                                      bitmap.release(),
                                                      image_end));
 
@@ -796,13 +781,13 @@ class ImageSpaceLoader {
   }
 
  private:
-  static MemMap* LoadImageFile(const char* image_filename,
-                               const char* image_location,
-                               const ImageHeader& image_header,
-                               uint8_t* address,
-                               int fd,
-                               TimingLogger& logger,
-                               std::string* error_msg) {
+  static MemMap LoadImageFile(const char* image_filename,
+                              const char* image_location,
+                              const ImageHeader& image_header,
+                              uint8_t* address,
+                              int fd,
+                              TimingLogger& logger,
+                              std::string* error_msg) {
     TimingLogger::ScopedTiming timing("MapImageFile", &logger);
     const ImageHeader::StorageMode storage_mode = image_header.GetStorageMode();
     if (storage_mode == ImageHeader::kStorageModeUncompressed) {
@@ -824,45 +809,45 @@ class ImageSpaceLoader {
         *error_msg = StringPrintf("Invalid storage mode in image header %d",
                                   static_cast<int>(storage_mode));
       }
-      return nullptr;
+      return MemMap::Invalid();
     }
 
     // Reserve output and decompress into it.
-    std::unique_ptr<MemMap> map(MemMap::MapAnonymous(image_location,
-                                                     address,
-                                                     image_header.GetImageSize(),
-                                                     PROT_READ | PROT_WRITE,
-                                                     /*low_4gb*/true,
-                                                     /*reuse*/false,
-                                                     error_msg));
-    if (map != nullptr) {
+    MemMap map = MemMap::MapAnonymous(image_location,
+                                      address,
+                                      image_header.GetImageSize(),
+                                      PROT_READ | PROT_WRITE,
+                                      /*low_4gb*/ true,
+                                      /*reuse*/ false,
+                                      error_msg);
+    if (map.IsValid()) {
       const size_t stored_size = image_header.GetDataSize();
       const size_t decompress_offset = sizeof(ImageHeader);  // Skip the header.
-      std::unique_ptr<MemMap> temp_map(MemMap::MapFile(sizeof(ImageHeader) + stored_size,
-                                                       PROT_READ,
-                                                       MAP_PRIVATE,
-                                                       fd,
-                                                       /*offset*/0,
-                                                       /*low_4gb*/false,
-                                                       image_filename,
-                                                       error_msg));
-      if (temp_map == nullptr) {
+      MemMap temp_map = MemMap::MapFile(sizeof(ImageHeader) + stored_size,
+                                        PROT_READ,
+                                        MAP_PRIVATE,
+                                        fd,
+                                        /*offset*/0,
+                                        /*low_4gb*/false,
+                                        image_filename,
+                                        error_msg);
+      if (!temp_map.IsValid()) {
         DCHECK(error_msg == nullptr || !error_msg->empty());
-        return nullptr;
+        return MemMap::Invalid();
       }
-      memcpy(map->Begin(), &image_header, sizeof(ImageHeader));
+      memcpy(map.Begin(), &image_header, sizeof(ImageHeader));
       const uint64_t start = NanoTime();
       // LZ4HC and LZ4 have same internal format, both use LZ4_decompress.
       TimingLogger::ScopedTiming timing2("LZ4 decompress image", &logger);
       const size_t decompressed_size = LZ4_decompress_safe(
-          reinterpret_cast<char*>(temp_map->Begin()) + sizeof(ImageHeader),
-          reinterpret_cast<char*>(map->Begin()) + decompress_offset,
+          reinterpret_cast<char*>(temp_map.Begin()) + sizeof(ImageHeader),
+          reinterpret_cast<char*>(map.Begin()) + decompress_offset,
           stored_size,
-          map->Size() - decompress_offset);
+          map.Size() - decompress_offset);
       const uint64_t time = NanoTime() - start;
       // Add one 1 ns to prevent possible divide by 0.
       VLOG(image) << "Decompressing image took " << PrettyDuration(time) << " ("
-                  << PrettySize(static_cast<uint64_t>(map->Size()) * MsToNs(1000) / (time + 1))
+                  << PrettySize(static_cast<uint64_t>(map.Size()) * MsToNs(1000) / (time + 1))
                   << "/s)";
       if (decompressed_size + sizeof(ImageHeader) != image_header.GetImageSize()) {
         if (error_msg != nullptr) {
@@ -871,11 +856,11 @@ class ImageSpaceLoader {
               decompressed_size + sizeof(ImageHeader),
               image_header.GetImageSize());
         }
-        return nullptr;
+        return MemMap::Invalid();
       }
     }
 
-    return map.release();
+    return map;
   }
 
   class FixupVisitor : public ValueObject {
@@ -1163,7 +1148,7 @@ class ImageSpaceLoader {
         if (fixup_heap_objects_) {
           method->UpdateObjectsForImageRelocation(ForwardObjectAdapter(this));
         }
-        method->UpdateEntrypoints<kWithoutReadBarrier>(ForwardCodeAdapter(this), pointer_size_);
+        method->UpdateEntrypoints(ForwardCodeAdapter(this), pointer_size_);
       }
     }
 
@@ -1460,6 +1445,181 @@ class ImageSpaceLoader {
   }
 };
 
+class ImageSpace::BootImageLoader {
+ public:
+  BootImageLoader(const std::string& image_location, InstructionSet image_isa)
+      : image_location_(image_location),
+        image_isa_(image_isa),
+        is_zygote_(Runtime::Current()->IsZygote()),
+        has_system_(false),
+        has_cache_(false),
+        is_global_cache_(true),
+        dalvik_cache_exists_(false),
+        dalvik_cache_(),
+        cache_filename_() {
+  }
+
+  bool IsZygote() const { return is_zygote_; }
+
+  void FindImageFiles() {
+    std::string system_filename;
+    bool found_image = FindImageFilenameImpl(image_location_.c_str(),
+                                             image_isa_,
+                                             &has_system_,
+                                             &system_filename,
+                                             &dalvik_cache_exists_,
+                                             &dalvik_cache_,
+                                             &is_global_cache_,
+                                             &has_cache_,
+                                             &cache_filename_);
+    DCHECK(!dalvik_cache_exists_ || !dalvik_cache_.empty());
+    DCHECK_EQ(found_image, has_system_ || has_cache_);
+  }
+
+  bool HasSystem() const { return has_system_; }
+  bool HasCache() const { return has_cache_; }
+
+  bool DalvikCacheExists() const { return dalvik_cache_exists_; }
+  bool IsGlobalCache() const { return is_global_cache_; }
+
+  const std::string& GetDalvikCache() const {
+    return dalvik_cache_;
+  }
+
+  const std::string& GetCacheFilename() const {
+    return cache_filename_;
+  }
+
+  bool LoadFromSystem(/*out*/ std::vector<std::unique_ptr<space::ImageSpace>>* boot_image_spaces,
+                      /*out*/ uint8_t** oat_file_end,
+                      /*out*/ std::string* error_msg) REQUIRES_SHARED(Locks::mutator_lock_) {
+    std::string filename = GetSystemImageFilename(image_location_.c_str(), image_isa_);
+    std::vector<std::string> locations;
+    if (!GetBootClassPathImageLocations(image_location_, filename, &locations, error_msg)) {
+      return false;
+    }
+    std::vector<std::unique_ptr<ImageSpace>> spaces;
+    spaces.reserve(locations.size());
+    for (const std::string& location : locations) {
+      filename = GetSystemImageFilename(location.c_str(), image_isa_);
+      spaces.push_back(Loader::Load(location,
+                                    filename,
+                                    is_zygote_,
+                                    is_global_cache_,
+                                    /* validate_oat_file */ false,
+                                    error_msg));
+      if (spaces.back() == nullptr) {
+        return false;
+      }
+    }
+    *oat_file_end = GetOatFileEnd(spaces);
+    boot_image_spaces->swap(spaces);
+    return true;
+  }
+
+  bool LoadFromDalvikCache(
+      bool validate_system_checksums,
+      bool validate_oat_file,
+      /*out*/ std::vector<std::unique_ptr<space::ImageSpace>>* boot_image_spaces,
+      /*out*/ uint8_t** oat_file_end,
+      /*out*/ std::string* error_msg) REQUIRES_SHARED(Locks::mutator_lock_) {
+    DCHECK(DalvikCacheExists());
+    std::vector<std::string> locations;
+    if (!GetBootClassPathImageLocations(image_location_, cache_filename_, &locations, error_msg)) {
+      return false;
+    }
+    std::vector<std::unique_ptr<ImageSpace>> spaces;
+    spaces.reserve(locations.size());
+    for (const std::string& location : locations) {
+      std::string filename;
+      if (!GetDalvikCacheFilename(location.c_str(), dalvik_cache_.c_str(), &filename, error_msg)) {
+        return false;
+      }
+      spaces.push_back(Loader::Load(location,
+                                    filename,
+                                    is_zygote_,
+                                    is_global_cache_,
+                                    validate_oat_file,
+                                    error_msg));
+      if (spaces.back() == nullptr) {
+        return false;
+      }
+      if (validate_system_checksums) {
+        ImageHeader system_hdr;
+        std::string system_filename = GetSystemImageFilename(location.c_str(), image_isa_);
+        if (!ReadSpecificImageHeader(system_filename.c_str(), &system_hdr)) {
+          *error_msg = StringPrintf("Cannot read header of %s", system_filename.c_str());
+          return false;
+        }
+        if (spaces.back()->GetImageHeader().GetOatChecksum() != system_hdr.GetOatChecksum()) {
+          *error_msg = StringPrintf("Checksum mismatch: %u(%s) vs %u(%s)",
+                                    spaces.back()->GetImageHeader().GetOatChecksum(),
+                                    filename.c_str(),
+                                    system_hdr.GetOatChecksum(),
+                                    system_filename.c_str());
+          return false;
+        }
+      }
+    }
+    *oat_file_end = GetOatFileEnd(spaces);
+    boot_image_spaces->swap(spaces);
+    return true;
+  }
+
+ private:
+  // Extract boot class path from oat file associated with `image_filename`
+  // and list all associated image locations.
+  static bool GetBootClassPathImageLocations(const std::string& image_location,
+                                             const std::string& image_filename,
+                                             /*out*/ std::vector<std::string>* all_locations,
+                                             /*out*/ std::string* error_msg) {
+    std::string oat_filename = ImageHeader::GetOatLocationFromImageLocation(image_filename);
+    std::unique_ptr<OatFile> oat_file(OatFile::Open(/* zip_fd */ -1,
+                                                    oat_filename,
+                                                    oat_filename,
+                                                    /* requested_base */ nullptr,
+                                                    /* oat_file_begin */ nullptr,
+                                                    /* executable */ false,
+                                                    /* low_4gb */ false,
+                                                    /* abs_dex_location */ nullptr,
+                                                    error_msg));
+    if (oat_file == nullptr) {
+      *error_msg = StringPrintf("Failed to open oat file '%s' for image file %s: %s",
+                                oat_filename.c_str(),
+                                image_filename.c_str(),
+                                error_msg->c_str());
+      return false;
+    }
+    const OatHeader& oat_header = oat_file->GetOatHeader();
+    const char* boot_classpath = oat_header.GetStoreValueByKey(OatHeader::kBootClassPathKey);
+    all_locations->push_back(image_location);
+    if (boot_classpath != nullptr && boot_classpath[0] != 0) {
+      ExtractMultiImageLocations(image_location, boot_classpath, all_locations);
+    }
+    return true;
+  }
+
+  uint8_t* GetOatFileEnd(const std::vector<std::unique_ptr<ImageSpace>>& spaces) {
+    DCHECK(std::is_sorted(
+        spaces.begin(),
+        spaces.end(),
+        [](const std::unique_ptr<ImageSpace>& lhs, const std::unique_ptr<ImageSpace>& rhs) {
+          return lhs->GetOatFileEnd() < rhs->GetOatFileEnd();
+        }));
+    return AlignUp(spaces.back()->GetOatFileEnd(), kPageSize);
+  }
+
+  const std::string& image_location_;
+  InstructionSet image_isa_;
+  bool is_zygote_;
+  bool has_system_;
+  bool has_cache_;
+  bool is_global_cache_;
+  bool dalvik_cache_exists_;
+  std::string dalvik_cache_;
+  std::string cache_filename_;
+};
+
 static constexpr uint64_t kLowSpaceValue = 50 * MB;
 static constexpr uint64_t kTmpFsSentinelValue = 384 * MB;
 
@@ -1495,19 +1655,32 @@ static bool CheckSpace(const std::string& cache_filename, std::string* error_msg
   return true;
 }
 
-std::unique_ptr<ImageSpace> ImageSpace::CreateBootImage(const char* image_location,
-                                                        const InstructionSet image_isa,
-                                                        bool secondary_image,
-                                                        std::string* error_msg) {
+bool ImageSpace::LoadBootImage(
+    const std::string& image_location,
+    const InstructionSet image_isa,
+    /*out*/ std::vector<std::unique_ptr<space::ImageSpace>>* boot_image_spaces,
+    /*out*/ uint8_t** oat_file_end) {
   ScopedTrace trace(__FUNCTION__);
+
+  DCHECK(boot_image_spaces != nullptr);
+  DCHECK(boot_image_spaces->empty());
+  DCHECK(oat_file_end != nullptr);
+  DCHECK_NE(image_isa, InstructionSet::kNone);
+
+  if (image_location.empty()) {
+    return false;
+  }
+
+  BootImageLoader loader(image_location, image_isa);
 
   // Step 0: Extra zygote work.
 
   // Step 0.a: If we're the zygote, mark boot.
-  const bool is_zygote = Runtime::Current()->IsZygote();
-  if (is_zygote && !secondary_image && CanWriteToDalvikCache(image_isa)) {
+  if (loader.IsZygote() && CanWriteToDalvikCache(image_isa)) {
     MarkZygoteStart(image_isa, Runtime::Current()->GetZygoteMaxFailedBoots());
   }
+
+  loader.FindImageFiles();
 
   // Step 0.b: If we're the zygote, check for free space, and prune the cache preemptively,
   //           if necessary. While the runtime may be fine (it is pretty tolerant to
@@ -1515,50 +1688,23 @@ std::unique_ptr<ImageSpace> ImageSpace::CreateBootImage(const char* image_locati
   //
   //           The advantage of doing this proactively is that the later steps are simplified,
   //           i.e., we do not need to code retries.
-  std::string system_filename;
-  bool has_system = false;
-  std::string cache_filename;
-  bool has_cache = false;
-  bool dalvik_cache_exists = false;
-  bool is_global_cache = true;
-  std::string dalvik_cache;
-  bool found_image = FindImageFilenameImpl(image_location,
-                                           image_isa,
-                                           &has_system,
-                                           &system_filename,
-                                           &dalvik_cache_exists,
-                                           &dalvik_cache,
-                                           &is_global_cache,
-                                           &has_cache,
-                                           &cache_filename);
-
   bool dex2oat_enabled = Runtime::Current()->IsImageDex2OatEnabled();
 
-  if (is_zygote && dalvik_cache_exists && !secondary_image) {
+  if (loader.IsZygote() && loader.DalvikCacheExists()) {
     // Extra checks for the zygote. These only apply when loading the first image, explained below.
+    const std::string& dalvik_cache = loader.GetDalvikCache();
     DCHECK(!dalvik_cache.empty());
     std::string local_error_msg;
     // All secondary images are verified when the primary image is verified.
-    bool verified = VerifyImage(image_location, dalvik_cache.c_str(), image_isa, &local_error_msg);
-    // If we prune for space at a secondary image, we may end up in a crash loop with the _exit
-    // path.
+    bool verified =
+        VerifyImage(image_location.c_str(), dalvik_cache.c_str(), image_isa, &local_error_msg);
     bool check_space = CheckSpace(dalvik_cache, &local_error_msg);
     if (!verified || !check_space) {
-      // Note: it is important to only prune for space on the primary image, or we will hit the
-      //       restart path.
       LOG(WARNING) << local_error_msg << " Preemptively pruning the dalvik cache.";
       PruneDalvikCache(image_isa);
 
       // Re-evaluate the image.
-      found_image = FindImageFilenameImpl(image_location,
-                                          image_isa,
-                                          &has_system,
-                                          &system_filename,
-                                          &dalvik_cache_exists,
-                                          &dalvik_cache,
-                                          &is_global_cache,
-                                          &has_cache,
-                                          &cache_filename);
+      loader.FindImageFiles();
     }
     if (!check_space) {
       // Disable compilation/patching - we do not want to fill up the space again.
@@ -1569,39 +1715,16 @@ std::unique_ptr<ImageSpace> ImageSpace::CreateBootImage(const char* image_locati
   // Collect all the errors.
   std::vector<std::string> error_msgs;
 
-  // Step 1: Check if we have an existing and relocated image.
-
-  // Step 1.a: Have files in system and cache. Then they need to match.
-  if (found_image && has_system && has_cache) {
+  // Step 1: Check if we have an existing image in the dalvik cache.
+  if (loader.HasCache()) {
     std::string local_error_msg;
-    // Check that the files are matching.
-    if (ChecksumsMatch(system_filename.c_str(), cache_filename.c_str(), &local_error_msg)) {
-      std::unique_ptr<ImageSpace> relocated_space =
-          ImageSpaceLoader::Load(image_location,
-                                 cache_filename,
-                                 is_zygote,
-                                 is_global_cache,
-                                 /* validate_oat_file */ false,
-                                 &local_error_msg);
-      if (relocated_space != nullptr) {
-        return relocated_space;
-      }
-    }
-    error_msgs.push_back(local_error_msg);
-  }
-
-  // Step 1.b: Only have a cache file.
-  if (found_image && !has_system && has_cache) {
-    std::string local_error_msg;
-    std::unique_ptr<ImageSpace> cache_space =
-        ImageSpaceLoader::Load(image_location,
-                               cache_filename,
-                               is_zygote,
-                               is_global_cache,
-                               /* validate_oat_file */ true,
-                               &local_error_msg);
-    if (cache_space != nullptr) {
-      return cache_space;
+    // If we have system image, validate system image checksums, otherwise validate the oat file.
+    if (loader.LoadFromDalvikCache(/* validate_system_checksums */ loader.HasSystem(),
+                                   /* validate_oat_file */ !loader.HasSystem(),
+                                   boot_image_spaces,
+                                   oat_file_end,
+                                   &local_error_msg)) {
+      return true;
     }
     error_msgs.push_back(local_error_msg);
   }
@@ -1611,83 +1734,64 @@ std::unique_ptr<ImageSpace> ImageSpace::CreateBootImage(const char* image_locati
   // Step 2.a: We are not required to relocate it. Then we can use it directly.
   bool relocate = Runtime::Current()->ShouldRelocate();
 
-  if (found_image && has_system && !relocate) {
+  if (loader.HasSystem() && !relocate) {
     std::string local_error_msg;
-    std::unique_ptr<ImageSpace> system_space =
-        ImageSpaceLoader::Load(image_location,
-                               system_filename,
-                               is_zygote,
-                               is_global_cache,
-                               /* validate_oat_file */ false,
-                               &local_error_msg);
-    if (system_space != nullptr) {
-      return system_space;
+    if (loader.LoadFromSystem(boot_image_spaces, oat_file_end, &local_error_msg)) {
+      return true;
     }
     error_msgs.push_back(local_error_msg);
   }
 
-  // Step 2.b: We require a relocated image. Then we must patch it. This step fails if this is a
-  //           secondary image.
-  if (found_image && has_system && relocate) {
+  // Step 2.b: We require a relocated image. Then we must patch it.
+  if (loader.HasSystem() && relocate) {
     std::string local_error_msg;
     if (!dex2oat_enabled) {
       local_error_msg = "Patching disabled.";
-    } else if (secondary_image) {
-      // We really want a working image. Prune and restart.
-      PruneDalvikCache(image_isa);
-      _exit(1);
-    } else if (ImageCreationAllowed(is_global_cache, image_isa, &local_error_msg)) {
-      bool patch_success =
-          RelocateImage(image_location, dalvik_cache.c_str(), image_isa, &local_error_msg);
+    } else if (ImageCreationAllowed(loader.IsGlobalCache(), image_isa, &local_error_msg)) {
+      bool patch_success = RelocateImage(
+          image_location.c_str(), loader.GetDalvikCache().c_str(), image_isa, &local_error_msg);
       if (patch_success) {
-        std::unique_ptr<ImageSpace> patched_space =
-            ImageSpaceLoader::Load(image_location,
-                                   cache_filename,
-                                   is_zygote,
-                                   is_global_cache,
-                                   /* validate_oat_file */ false,
-                                   &local_error_msg);
-        if (patched_space != nullptr) {
-          return patched_space;
+        if (loader.LoadFromDalvikCache(/* validate_system_checksums */ false,
+                                       /* validate_oat_file */ false,
+                                       boot_image_spaces,
+                                       oat_file_end,
+                                       &local_error_msg)) {
+          return true;
         }
       }
     }
     error_msgs.push_back(StringPrintf("Cannot relocate image %s to %s: %s",
-                                      image_location,
-                                      cache_filename.c_str(),
+                                      image_location.c_str(),
+                                      loader.GetCacheFilename().c_str(),
                                       local_error_msg.c_str()));
   }
 
-  // Step 3: We do not have an existing image in /system, so generate an image into the dalvik
-  //         cache. This step fails if this is a secondary image.
-  if (!has_system) {
+  // Step 3: We do not have an existing image in /system,
+  //         so generate an image into the dalvik cache.
+  if (!loader.HasSystem() && loader.DalvikCacheExists()) {
     std::string local_error_msg;
     if (!dex2oat_enabled) {
       local_error_msg = "Image compilation disabled.";
-    } else if (secondary_image) {
-      local_error_msg = "Cannot compile a secondary image.";
-    } else if (ImageCreationAllowed(is_global_cache, image_isa, &local_error_msg)) {
-      bool compilation_success = GenerateImage(cache_filename, image_isa, &local_error_msg);
+    } else if (ImageCreationAllowed(loader.IsGlobalCache(), image_isa, &local_error_msg)) {
+      bool compilation_success =
+          GenerateImage(loader.GetCacheFilename(), image_isa, &local_error_msg);
       if (compilation_success) {
-        std::unique_ptr<ImageSpace> compiled_space =
-            ImageSpaceLoader::Load(image_location,
-                                   cache_filename,
-                                   is_zygote,
-                                   is_global_cache,
-                                   /* validate_oat_file */ false,
-                                   &local_error_msg);
-        if (compiled_space != nullptr) {
-          return compiled_space;
+        if (loader.LoadFromDalvikCache(/* validate_system_checksums */ false,
+                                       /* validate_oat_file */ false,
+                                       boot_image_spaces,
+                                       oat_file_end,
+                                       &local_error_msg)) {
+          return true;
         }
       }
     }
     error_msgs.push_back(StringPrintf("Cannot compile image to %s: %s",
-                                      cache_filename.c_str(),
+                                      loader.GetCacheFilename().c_str(),
                                       local_error_msg.c_str()));
   }
 
-  // We failed. Prune the cache the free up space, create a compound error message and return no
-  // image.
+  // We failed. Prune the cache the free up space, create a compound error message
+  // and return false.
   PruneDalvikCache(image_isa);
 
   std::ostringstream oss;
@@ -1698,84 +1802,11 @@ std::unique_ptr<ImageSpace> ImageSpace::CreateBootImage(const char* image_locati
     }
     oss << msg;
   }
-  *error_msg = oss.str();
 
-  return nullptr;
-}
+  LOG(ERROR) << "Could not create image space with image file '" << image_location << "'. "
+      << "Attempting to fall back to imageless running. Error was: " << oss.str();
 
-bool ImageSpace::LoadBootImage(const std::string& image_file_name,
-                               const InstructionSet image_instruction_set,
-                               std::vector<space::ImageSpace*>* boot_image_spaces,
-                               uint8_t** oat_file_end) {
-  DCHECK(boot_image_spaces != nullptr);
-  DCHECK(boot_image_spaces->empty());
-  DCHECK(oat_file_end != nullptr);
-  DCHECK_NE(image_instruction_set, InstructionSet::kNone);
-
-  if (image_file_name.empty()) {
-    return false;
-  }
-
-  // For code reuse, handle this like a work queue.
-  std::vector<std::string> image_file_names;
-  image_file_names.push_back(image_file_name);
-
-  bool error = false;
-  uint8_t* oat_file_end_tmp = *oat_file_end;
-
-  for (size_t index = 0; index < image_file_names.size(); ++index) {
-    std::string& image_name = image_file_names[index];
-    std::string error_msg;
-    std::unique_ptr<space::ImageSpace> boot_image_space_uptr = CreateBootImage(
-        image_name.c_str(),
-        image_instruction_set,
-        index > 0,
-        &error_msg);
-    if (boot_image_space_uptr != nullptr) {
-      space::ImageSpace* boot_image_space = boot_image_space_uptr.release();
-      boot_image_spaces->push_back(boot_image_space);
-      // Oat files referenced by image files immediately follow them in memory, ensure alloc space
-      // isn't going to get in the middle
-      uint8_t* oat_file_end_addr = boot_image_space->GetImageHeader().GetOatFileEnd();
-      CHECK_GT(oat_file_end_addr, boot_image_space->End());
-      oat_file_end_tmp = AlignUp(oat_file_end_addr, kPageSize);
-
-      if (index == 0) {
-        // If this was the first space, check whether there are more images to load.
-        const OatFile* boot_oat_file = boot_image_space->GetOatFile();
-        if (boot_oat_file == nullptr) {
-          continue;
-        }
-
-        const OatHeader& boot_oat_header = boot_oat_file->GetOatHeader();
-        const char* boot_classpath =
-            boot_oat_header.GetStoreValueByKey(OatHeader::kBootClassPathKey);
-        if (boot_classpath == nullptr) {
-          continue;
-        }
-
-        ExtractMultiImageLocations(image_file_name, boot_classpath, &image_file_names);
-      }
-    } else {
-      error = true;
-      LOG(ERROR) << "Could not create image space with image file '" << image_file_name << "'. "
-          << "Attempting to fall back to imageless running. Error was: " << error_msg
-          << "\nAttempted image: " << image_name;
-      break;
-    }
-  }
-
-  if (error) {
-    // Remove already loaded spaces.
-    for (space::Space* loaded_space : *boot_image_spaces) {
-      delete loaded_space;
-    }
-    boot_image_spaces->clear();
-    return false;
-  }
-
-  *oat_file_end = oat_file_end_tmp;
-  return true;
+  return false;
 }
 
 ImageSpace::~ImageSpace() {
@@ -1804,11 +1835,7 @@ ImageSpace::~ImageSpace() {
 std::unique_ptr<ImageSpace> ImageSpace::CreateFromAppImage(const char* image,
                                                            const OatFile* oat_file,
                                                            std::string* error_msg) {
-  return ImageSpaceLoader::Init(image,
-                                image,
-                                /*validate_oat_file*/false,
-                                oat_file,
-                                /*out*/error_msg);
+  return Loader::Init(image, image, /*validate_oat_file*/false, oat_file, /*out*/error_msg);
 }
 
 const OatFile* ImageSpace::GetOatFile() const {

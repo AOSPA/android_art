@@ -553,7 +553,7 @@ void Mutex::ExclusiveUnlock(Thread* self) {
         done = state_.CompareAndSetWeakSequentiallyConsistent(cur_state, 0 /* new state */);
         if (LIKELY(done)) {  // Spurious fail?
           // Wake a contender.
-          if (UNLIKELY(num_contenders_.load(std::memory_order_relaxed) > 0)) {
+          if (UNLIKELY(num_contenders_.load(std::memory_order_seq_cst) > 0)) {
             futex(state_.Address(), FUTEX_WAKE, 1, nullptr, nullptr, 0);
           }
         }
@@ -690,8 +690,8 @@ void ReaderWriterMutex::ExclusiveUnlock(Thread* self) {
       done = state_.CompareAndSetWeakSequentiallyConsistent(-1 /* cur_state*/, 0 /* new state */);
       if (LIKELY(done)) {  // Weak CAS may fail spuriously.
         // Wake any waiters.
-        if (UNLIKELY(num_pending_readers_.load(std::memory_order_relaxed) > 0 ||
-                     num_pending_writers_.load(std::memory_order_relaxed) > 0)) {
+        if (UNLIKELY(num_pending_readers_.load(std::memory_order_seq_cst) > 0 ||
+                     num_pending_writers_.load(std::memory_order_seq_cst) > 0)) {
           futex(state_.Address(), FUTEX_WAKE, -1, nullptr, nullptr, 0);
         }
       }
@@ -1142,10 +1142,6 @@ void Locks::Init() {
     DCHECK(subtype_check_lock_ == nullptr);
     subtype_check_lock_ = new Mutex("SubtypeCheck lock", current_lock_level);
 
-    UPDATE_CURRENT_LOCK_LEVEL(kCHALock);
-    DCHECK(cha_lock_ == nullptr);
-    cha_lock_ = new Mutex("CHA lock", current_lock_level);
-
     UPDATE_CURRENT_LOCK_LEVEL(kClassLinkerClassesLock);
     DCHECK(classlinker_classes_lock_ == nullptr);
     classlinker_classes_lock_ = new ReaderWriterMutex("ClassLinker classes lock",
@@ -1225,6 +1221,10 @@ void Locks::Init() {
     UPDATE_CURRENT_LOCK_LEVEL(kCustomTlsLock);
     DCHECK(custom_tls_lock_ == nullptr);
     custom_tls_lock_ = new Mutex("Thread::custom_tls_ lock", current_lock_level);
+
+    UPDATE_CURRENT_LOCK_LEVEL(kCHALock);
+    DCHECK(cha_lock_ == nullptr);
+    cha_lock_ = new Mutex("CHA lock", current_lock_level);
 
     UPDATE_CURRENT_LOCK_LEVEL(kNativeDebugInterfaceLock);
     DCHECK(native_debug_interface_lock_ == nullptr);

@@ -280,6 +280,23 @@ bool SchedulingGraph::HasSideEffectDependency(HInstruction* node,
   return false;
 }
 
+// Check if the specified instruction is a better candidate which more likely will
+// have other instructions depending on it.
+static bool IsBetterCandidateWithMoreLikelyDependencies(HInstruction* new_candidate,
+                                                        HInstruction* old_candidate) {
+  if (!new_candidate->GetSideEffects().Includes(old_candidate->GetSideEffects())) {
+    // Weaker side effects.
+    return false;
+  }
+  if (old_candidate->GetSideEffects().Includes(new_candidate->GetSideEffects())) {
+    // Same side effects, check if `new_candidate` has stronger `CanThrow()`.
+    return new_candidate->CanThrow() && !old_candidate->CanThrow();
+  } else {
+    // Stronger side effects, check if `new_candidate` has at least as strong `CanThrow()`.
+    return new_candidate->CanThrow() || !old_candidate->CanThrow();
+  }
+}
+
 void SchedulingGraph::AddDependencies(HInstruction* instruction, bool is_scheduling_barrier) {
   SchedulingNode* instruction_node = GetNode(instruction);
 
@@ -331,6 +348,7 @@ void SchedulingGraph::AddDependencies(HInstruction* instruction, bool is_schedul
 
   // Side effect dependencies.
   if (!instruction->GetSideEffects().DoesNothing() || instruction->CanThrow()) {
+    HInstruction* dep_chain_candidate = nullptr;
     for (HInstruction* other = instruction->GetNext(); other != nullptr; other = other->GetNext()) {
       SchedulingNode* other_node = GetNode(other);
       if (other_node->IsSchedulingBarrier()) {
@@ -340,7 +358,18 @@ void SchedulingGraph::AddDependencies(HInstruction* instruction, bool is_schedul
         break;
       }
       if (HasSideEffectDependency(other, instruction)) {
-        AddOtherDependency(other_node, instruction_node);
+        if (dep_chain_candidate != nullptr &&
+            HasSideEffectDependency(other, dep_chain_candidate)) {
+          // Skip an explicit dependency to reduce memory usage, rely on the transitive dependency.
+        } else {
+          AddOtherDependency(other_node, instruction_node);
+        }
+        // Check if `other` is a better candidate which more likely will have other instructions
+        // depending on it.
+        if (dep_chain_candidate == nullptr ||
+            IsBetterCandidateWithMoreLikelyDependencies(other, dep_chain_candidate)) {
+          dep_chain_candidate = other;
+        }
       }
     }
   }
@@ -545,60 +574,67 @@ SchedulingNode* CriticalPathSchedulingNodeSelector::GetHigherPrioritySchedulingN
 void HScheduler::Schedule(HGraph* graph) {
   // We run lsa here instead of in a separate pass to better control whether we
   // should run the analysis or not.
+  const HeapLocationCollector* heap_location_collector = nullptr;
   LoadStoreAnalysis lsa(graph);
   if (!only_optimize_loop_blocks_ || graph->HasLoops()) {
     lsa.Run();
-    scheduling_graph_.SetHeapLocationCollector(lsa.GetHeapLocationCollector());
+    heap_location_collector = &lsa.GetHeapLocationCollector();
   }
 
   for (HBasicBlock* block : graph->GetReversePostOrder()) {
     if (IsSchedulable(block)) {
-      Schedule(block);
+      Schedule(block, heap_location_collector);
     }
   }
 }
 
-void HScheduler::Schedule(HBasicBlock* block) {
-  ScopedArenaVector<SchedulingNode*> scheduling_nodes(allocator_->Adapter(kArenaAllocScheduler));
+void HScheduler::Schedule(HBasicBlock* block,
+                          const HeapLocationCollector* heap_location_collector) {
+  ScopedArenaAllocator allocator(block->GetGraph()->GetArenaStack());
+  ScopedArenaVector<SchedulingNode*> scheduling_nodes(allocator.Adapter(kArenaAllocScheduler));
 
   // Build the scheduling graph.
-  scheduling_graph_.Clear();
+  SchedulingGraph scheduling_graph(this, &allocator, heap_location_collector);
   for (HBackwardInstructionIterator it(block->GetInstructions()); !it.Done(); it.Advance()) {
     HInstruction* instruction = it.Current();
     CHECK_EQ(instruction->GetBlock(), block)
         << instruction->DebugName()
         << " is in block " << instruction->GetBlock()->GetBlockId()
         << ", and expected in block " << block->GetBlockId();
-    SchedulingNode* node = scheduling_graph_.AddNode(instruction, IsSchedulingBarrier(instruction));
+    SchedulingNode* node = scheduling_graph.AddNode(instruction, IsSchedulingBarrier(instruction));
     CalculateLatency(node);
     scheduling_nodes.push_back(node);
   }
 
-  if (scheduling_graph_.Size() <= 1) {
-    scheduling_graph_.Clear();
+  if (scheduling_graph.Size() <= 1) {
     return;
   }
 
   cursor_ = block->GetLastInstruction();
 
+  // The list of candidates for scheduling. A node becomes a candidate when all
+  // its predecessors have been scheduled.
+  ScopedArenaVector<SchedulingNode*> candidates(allocator.Adapter(kArenaAllocScheduler));
+
   // Find the initial candidates for scheduling.
-  candidates_.clear();
   for (SchedulingNode* node : scheduling_nodes) {
     if (!node->HasUnscheduledSuccessors()) {
       node->MaybeUpdateCriticalPath(node->GetLatency());
-      candidates_.push_back(node);
+      candidates.push_back(node);
     }
   }
 
-  ScopedArenaVector<SchedulingNode*> initial_candidates(allocator_->Adapter(kArenaAllocScheduler));
+  ScopedArenaVector<SchedulingNode*> initial_candidates(allocator.Adapter(kArenaAllocScheduler));
   if (kDumpDotSchedulingGraphs) {
     // Remember the list of initial candidates for debug output purposes.
-    initial_candidates.assign(candidates_.begin(), candidates_.end());
+    initial_candidates.assign(candidates.begin(), candidates.end());
   }
 
   // Schedule all nodes.
-  while (!candidates_.empty()) {
-    Schedule(selector_->PopHighestPriorityNode(&candidates_, scheduling_graph_));
+  selector_->Reset();
+  while (!candidates.empty()) {
+    SchedulingNode* node = selector_->PopHighestPriorityNode(&candidates, scheduling_graph);
+    Schedule(node, &candidates);
   }
 
   if (kDumpDotSchedulingGraphs) {
@@ -607,11 +643,12 @@ void HScheduler::Schedule(HBasicBlock* block) {
     std::stringstream description;
     description << graph->GetDexFile().PrettyMethod(graph->GetMethodIdx())
         << " B" << block->GetBlockId();
-    scheduling_graph_.DumpAsDotGraph(description.str(), initial_candidates);
+    scheduling_graph.DumpAsDotGraph(description.str(), initial_candidates);
   }
 }
 
-void HScheduler::Schedule(SchedulingNode* scheduling_node) {
+void HScheduler::Schedule(SchedulingNode* scheduling_node,
+                          /*inout*/ ScopedArenaVector<SchedulingNode*>* candidates) {
   // Check whether any of the node's predecessors will be valid candidates after
   // this node is scheduled.
   uint32_t path_to_node = scheduling_node->GetCriticalPath();
@@ -620,7 +657,7 @@ void HScheduler::Schedule(SchedulingNode* scheduling_node) {
         path_to_node + predecessor->GetInternalLatency() + predecessor->GetLatency());
     predecessor->DecrementNumberOfUnscheduledSuccessors();
     if (!predecessor->HasUnscheduledSuccessors()) {
-      candidates_.push_back(predecessor);
+      candidates->push_back(predecessor);
     }
   }
   for (SchedulingNode* predecessor : scheduling_node->GetOtherPredecessors()) {
@@ -630,7 +667,7 @@ void HScheduler::Schedule(SchedulingNode* scheduling_node) {
     // correctness. So we do not use them to compute the critical path.
     predecessor->DecrementNumberOfUnscheduledSuccessors();
     if (!predecessor->HasUnscheduledSuccessors()) {
-      candidates_.push_back(predecessor);
+      candidates->push_back(predecessor);
     }
   }
 
@@ -779,7 +816,6 @@ bool HInstructionScheduling::Run(bool only_optimize_loop_blocks,
 #if defined(ART_ENABLE_CODEGEN_arm64) || defined(ART_ENABLE_CODEGEN_arm)
   // Phase-local allocator that allocates scheduler internal data structures like
   // scheduling nodes, internel nodes map, dependencies, etc.
-  ScopedArenaAllocator allocator(graph_->GetArenaStack());
   CriticalPathSchedulingNodeSelector critical_path_selector;
   RandomSchedulingNodeSelector random_selector;
   SchedulingNodeSelector* selector = schedule_randomly
@@ -795,7 +831,7 @@ bool HInstructionScheduling::Run(bool only_optimize_loop_blocks,
   switch (instruction_set_) {
 #ifdef ART_ENABLE_CODEGEN_arm64
     case InstructionSet::kArm64: {
-      arm64::HSchedulerARM64 scheduler(&allocator, selector);
+      arm64::HSchedulerARM64 scheduler(selector);
       scheduler.SetOnlyOptimizeLoopBlocks(only_optimize_loop_blocks);
       scheduler.Schedule(graph_);
       break;
@@ -805,7 +841,7 @@ bool HInstructionScheduling::Run(bool only_optimize_loop_blocks,
     case InstructionSet::kThumb2:
     case InstructionSet::kArm: {
       arm::SchedulingLatencyVisitorARM arm_latency_visitor(codegen_);
-      arm::HSchedulerARM scheduler(&allocator, selector, &arm_latency_visitor);
+      arm::HSchedulerARM scheduler(selector, &arm_latency_visitor);
       scheduler.SetOnlyOptimizeLoopBlocks(only_optimize_loop_blocks);
       scheduler.Schedule(graph_);
       break;

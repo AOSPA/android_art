@@ -62,12 +62,9 @@ TEST(StackMapTest, Test1) {
   stream.EndStackMapEntry();
 
   stream.EndMethod();
-  size_t size = stream.PrepareForFillIn();
-  void* memory = allocator.Alloc(size, kArenaAllocMisc);
-  MemoryRegion region(memory, size);
-  stream.FillInCodeInfo(region);
+  ScopedArenaVector<uint8_t> memory = stream.Encode();
 
-  CodeInfo code_info(region);
+  CodeInfo code_info(memory.data());
   ASSERT_EQ(1u, code_info.GetNumberOfStackMaps());
 
   uint32_t number_of_catalog_entries = code_info.GetNumberOfLocationCatalogEntries();
@@ -151,12 +148,9 @@ TEST(StackMapTest, Test2) {
   stream.EndStackMapEntry();
 
   stream.EndMethod();
-  size_t size = stream.PrepareForFillIn();
-  void* memory = allocator.Alloc(size, kArenaAllocMisc);
-  MemoryRegion region(memory, size);
-  stream.FillInCodeInfo(region);
+  ScopedArenaVector<uint8_t> memory = stream.Encode();
 
-  CodeInfo code_info(region);
+  CodeInfo code_info(memory.data());
   ASSERT_EQ(4u, code_info.GetNumberOfStackMaps());
 
   uint32_t number_of_catalog_entries = code_info.GetNumberOfLocationCatalogEntries();
@@ -324,12 +318,9 @@ TEST(StackMapTest, TestDeduplicateInlineInfoDexRegisterMap) {
   stream.EndStackMapEntry();
 
   stream.EndMethod();
-  size_t size = stream.PrepareForFillIn();
-  void* memory = allocator.Alloc(size, kArenaAllocMisc);
-  MemoryRegion region(memory, size);
-  stream.FillInCodeInfo(region);
+  ScopedArenaVector<uint8_t> memory = stream.Encode();
 
-  CodeInfo code_info(region);
+  CodeInfo code_info(memory.data());
   ASSERT_EQ(1u, code_info.GetNumberOfStackMaps());
 
   uint32_t number_of_catalog_entries = code_info.GetNumberOfLocationCatalogEntries();
@@ -382,12 +373,9 @@ TEST(StackMapTest, TestNonLiveDexRegisters) {
   stream.EndStackMapEntry();
 
   stream.EndMethod();
-  size_t size = stream.PrepareForFillIn();
-  void* memory = allocator.Alloc(size, kArenaAllocMisc);
-  MemoryRegion region(memory, size);
-  stream.FillInCodeInfo(region);
+  ScopedArenaVector<uint8_t> memory = stream.Encode();
 
-  CodeInfo code_info(region);
+  CodeInfo code_info(memory.data());
   ASSERT_EQ(1u, code_info.GetNumberOfStackMaps());
 
   uint32_t number_of_catalog_entries = code_info.GetNumberOfLocationCatalogEntries();
@@ -444,12 +432,9 @@ TEST(StackMapTest, TestShareDexRegisterMap) {
   stream.EndStackMapEntry();
 
   stream.EndMethod();
-  size_t size = stream.PrepareForFillIn();
-  void* memory = allocator.Alloc(size, kArenaAllocMisc);
-  MemoryRegion region(memory, size);
-  stream.FillInCodeInfo(region);
+  ScopedArenaVector<uint8_t> memory = stream.Encode();
 
-  CodeInfo ci(region);
+  CodeInfo ci(memory.data());
 
   // Verify first stack map.
   StackMap sm0 = ci.GetStackMapAt(0);
@@ -495,12 +480,9 @@ TEST(StackMapTest, TestNoDexRegisterMap) {
   stream.EndStackMapEntry();
 
   stream.EndMethod();
-  size_t size = stream.PrepareForFillIn();
-  void* memory = allocator.Alloc(size, kArenaAllocMisc);
-  MemoryRegion region(memory, size);
-  stream.FillInCodeInfo(region);
+  ScopedArenaVector<uint8_t> memory = stream.Encode();
 
-  CodeInfo code_info(region);
+  CodeInfo code_info(memory.data());
   ASSERT_EQ(2u, code_info.GetNumberOfStackMaps());
 
   uint32_t number_of_catalog_entries = code_info.GetNumberOfLocationCatalogEntries();
@@ -597,12 +579,9 @@ TEST(StackMapTest, InlineTest) {
   stream.EndStackMapEntry();
 
   stream.EndMethod();
-  size_t size = stream.PrepareForFillIn();
-  void* memory = allocator.Alloc(size, kArenaAllocMisc);
-  MemoryRegion region(memory, size);
-  stream.FillInCodeInfo(region);
+  ScopedArenaVector<uint8_t> memory = stream.Encode();
 
-  CodeInfo ci(region);
+  CodeInfo ci(memory.data());
 
   {
     // Verify first stack map.
@@ -744,18 +723,57 @@ TEST(StackMapTest, TestDeduplicateStackMask) {
   stream.EndStackMapEntry();
 
   stream.EndMethod();
-  size_t size = stream.PrepareForFillIn();
-  void* memory = allocator.Alloc(size, kArenaAllocMisc);
-  MemoryRegion region(memory, size);
-  stream.FillInCodeInfo(region);
+  ScopedArenaVector<uint8_t> memory = stream.Encode();
 
-  CodeInfo code_info(region);
+  CodeInfo code_info(memory.data());
   ASSERT_EQ(2u, code_info.GetNumberOfStackMaps());
 
   StackMap stack_map1 = code_info.GetStackMapForNativePcOffset(4 * kPcAlign);
   StackMap stack_map2 = code_info.GetStackMapForNativePcOffset(8 * kPcAlign);
   EXPECT_EQ(stack_map1.GetStackMaskIndex(),
             stack_map2.GetStackMaskIndex());
+}
+
+TEST(StackMapTest, TestDedupeBitTables) {
+  MallocArenaPool pool;
+  ArenaStack arena_stack(&pool);
+  ScopedArenaAllocator allocator(&arena_stack);
+  StackMapStream stream(&allocator, kRuntimeISA);
+  stream.BeginMethod(32, 0, 0, 2);
+
+  stream.BeginStackMapEntry(0, 64 * kPcAlign);
+  stream.AddDexRegisterEntry(Kind::kInStack, 0);
+  stream.AddDexRegisterEntry(Kind::kConstant, -2);
+  stream.EndStackMapEntry();
+
+  stream.EndMethod();
+  ScopedArenaVector<uint8_t> memory = stream.Encode();
+
+  std::vector<uint8_t> out;
+  CodeInfo::Deduper deduper(&out);
+  size_t deduped1 = deduper.Dedupe(memory.data());
+  size_t deduped2 = deduper.Dedupe(memory.data());
+
+  for (size_t deduped : { deduped1, deduped2 }) {
+    CodeInfo code_info(out.data() + deduped);
+    ASSERT_EQ(1u, code_info.GetNumberOfStackMaps());
+
+    StackMap stack_map = code_info.GetStackMapAt(0);
+    ASSERT_TRUE(stack_map.Equals(code_info.GetStackMapForDexPc(0)));
+    ASSERT_TRUE(stack_map.Equals(code_info.GetStackMapForNativePcOffset(64 * kPcAlign)));
+    ASSERT_EQ(0u, stack_map.GetDexPc());
+    ASSERT_EQ(64u * kPcAlign, stack_map.GetNativePcOffset(kRuntimeISA));
+
+    ASSERT_TRUE(stack_map.HasDexRegisterMap());
+    DexRegisterMap dex_register_map = code_info.GetDexRegisterMapOf(stack_map);
+
+    ASSERT_EQ(Kind::kInStack, dex_register_map[0].GetKind());
+    ASSERT_EQ(Kind::kConstant, dex_register_map[1].GetKind());
+    ASSERT_EQ(0, dex_register_map[0].GetStackOffsetInBytes());
+    ASSERT_EQ(-2, dex_register_map[1].GetConstant());
+  }
+
+  ASSERT_GT(memory.size() * 2, out.size());
 }
 
 }  // namespace art

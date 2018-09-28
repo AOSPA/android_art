@@ -102,18 +102,10 @@ const void* CompiledCode::CodePointer(const void* code_pointer, InstructionSet i
 CompiledMethod::CompiledMethod(CompilerDriver* driver,
                                InstructionSet instruction_set,
                                const ArrayRef<const uint8_t>& quick_code,
-                               const size_t frame_size_in_bytes,
-                               const uint32_t core_spill_mask,
-                               const uint32_t fp_spill_mask,
-                               const ArrayRef<const uint8_t>& method_info,
                                const ArrayRef<const uint8_t>& vmap_table,
                                const ArrayRef<const uint8_t>& cfi_info,
                                const ArrayRef<const linker::LinkerPatch>& patches)
     : CompiledCode(driver, instruction_set, quick_code),
-      frame_size_in_bytes_(frame_size_in_bytes),
-      core_spill_mask_(core_spill_mask),
-      fp_spill_mask_(fp_spill_mask),
-      method_info_(driver->GetCompiledMethodStorage()->DeduplicateMethodInfo(method_info)),
       vmap_table_(driver->GetCompiledMethodStorage()->DeduplicateVMapTable(vmap_table)),
       cfi_info_(driver->GetCompiledMethodStorage()->DeduplicateCFIInfo(cfi_info)),
       patches_(driver->GetCompiledMethodStorage()->DeduplicateLinkerPatches(patches)) {
@@ -123,10 +115,6 @@ CompiledMethod* CompiledMethod::SwapAllocCompiledMethod(
     CompilerDriver* driver,
     InstructionSet instruction_set,
     const ArrayRef<const uint8_t>& quick_code,
-    const size_t frame_size_in_bytes,
-    const uint32_t core_spill_mask,
-    const uint32_t fp_spill_mask,
-    const ArrayRef<const uint8_t>& method_info,
     const ArrayRef<const uint8_t>& vmap_table,
     const ArrayRef<const uint8_t>& cfi_info,
     const ArrayRef<const linker::LinkerPatch>& patches) {
@@ -136,10 +124,6 @@ CompiledMethod* CompiledMethod::SwapAllocCompiledMethod(
                   driver,
                   instruction_set,
                   quick_code,
-                  frame_size_in_bytes,
-                  core_spill_mask,
-                  fp_spill_mask,
-                  method_info,
                   vmap_table,
                   cfi_info, patches);
   return ret;
@@ -156,7 +140,6 @@ CompiledMethod::~CompiledMethod() {
   storage->ReleaseLinkerPatches(patches_);
   storage->ReleaseCFIInfo(cfi_info_);
   storage->ReleaseVMapTable(vmap_table_);
-  storage->ReleaseMethodInfo(method_info_);
 }
 
 }  // namespace art

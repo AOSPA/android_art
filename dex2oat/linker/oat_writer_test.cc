@@ -26,6 +26,7 @@
 #include "compiled_method-inl.h"
 #include "compiler.h"
 #include "debug/method_debug_info.h"
+#include "dex/class_accessor-inl.h"
 #include "dex/dex_file_loader.h"
 #include "dex/quick_compiler_callbacks.h"
 #include "dex/test_dex_file_builder.h"
@@ -72,9 +73,6 @@ class OatTest : public CommonCompilerTest {
     } else {
       const void* quick_oat_code = oat_method.GetQuickCode();
       EXPECT_TRUE(quick_oat_code != nullptr) << method->PrettyMethod();
-      EXPECT_EQ(oat_method.GetFrameSizeInBytes(), compiled_method->GetFrameSizeInBytes());
-      EXPECT_EQ(oat_method.GetCoreSpillMask(), compiled_method->GetCoreSpillMask());
-      EXPECT_EQ(oat_method.GetFpSpillMask(), compiled_method->GetFpSpillMask());
       uintptr_t oat_code_aligned = RoundDown(reinterpret_cast<uintptr_t>(quick_oat_code), 2);
       quick_oat_code = reinterpret_cast<const void*>(oat_code_aligned);
       ArrayRef<const uint8_t> quick_code = compiled_method->GetQuickCode();
@@ -171,7 +169,7 @@ class OatTest : public CommonCompilerTest {
         oat_file);
     elf_writer->Start();
     OutputStream* oat_rodata = elf_writer->StartRoData();
-    std::vector<std::unique_ptr<MemMap>> opened_dex_files_maps;
+    std::vector<MemMap> opened_dex_files_maps;
     std::vector<std::unique_ptr<const DexFile>> opened_dex_files;
     if (!oat_writer.WriteAndOpenDexFiles(
         vdex_file,
@@ -248,7 +246,7 @@ class OatTest : public CommonCompilerTest {
       return false;
     }
 
-    for (std::unique_ptr<MemMap>& map : opened_dex_files_maps) {
+    for (MemMap& map : opened_dex_files_maps) {
       opened_dex_files_maps_.emplace_back(std::move(map));
     }
     for (std::unique_ptr<const DexFile>& dex_file : opened_dex_files) {
@@ -263,7 +261,7 @@ class OatTest : public CommonCompilerTest {
 
   std::unique_ptr<QuickCompilerCallbacks> callbacks_;
 
-  std::vector<std::unique_ptr<MemMap>> opened_dex_files_maps_;
+  std::vector<MemMap> opened_dex_files_maps_;
   std::vector<std::unique_ptr<const DexFile>> opened_dex_files_;
 };
 
@@ -431,22 +429,15 @@ TEST_F(OatTest, WriteRead) {
   CHECK_EQ(dex_file.GetLocationChecksum(), oat_dex_file->GetDexFileLocationChecksum());
   ScopedObjectAccess soa(Thread::Current());
   auto pointer_size = class_linker->GetImagePointerSize();
-  for (size_t i = 0; i < dex_file.NumClassDefs(); i++) {
-    const DexFile::ClassDef& class_def = dex_file.GetClassDef(i);
-    const uint8_t* class_data = dex_file.GetClassData(class_def);
+  for (ClassAccessor accessor : dex_file.GetClasses()) {
+    size_t num_virtual_methods = accessor.NumVirtualMethods();
 
-    size_t num_virtual_methods = 0;
-    if (class_data != nullptr) {
-      ClassDataItemIterator it(dex_file, class_data);
-      num_virtual_methods = it.NumVirtualMethods();
-    }
-
-    const char* descriptor = dex_file.GetClassDescriptor(class_def);
+    const char* descriptor = accessor.GetDescriptor();
     ObjPtr<mirror::Class> klass = class_linker->FindClass(soa.Self(),
                                                           descriptor,
                                                           ScopedNullHandle<mirror::ClassLoader>());
 
-    const OatFile::OatClass oat_class = oat_dex_file->GetOatClass(i);
+    const OatFile::OatClass oat_class = oat_dex_file->GetOatClass(accessor.GetClassDefIndex());
     CHECK_EQ(ClassStatus::kNotReady, oat_class.GetStatus()) << descriptor;
     CHECK_EQ(kCompile ? OatClassType::kOatClassAllCompiled : OatClassType::kOatClassNoneCompiled,
              oat_class.GetType()) << descriptor;
@@ -475,7 +466,7 @@ TEST_F(OatTest, OatHeaderSizeCheck) {
   // it is time to update OatHeader::kOatVersion
   EXPECT_EQ(76U, sizeof(OatHeader));
   EXPECT_EQ(4U, sizeof(OatMethodOffsets));
-  EXPECT_EQ(24U, sizeof(OatQuickMethodHeader));
+  EXPECT_EQ(8U, sizeof(OatQuickMethodHeader));
   EXPECT_EQ(166 * static_cast<size_t>(GetInstructionSetPointerSize(kRuntimeISA)),
             sizeof(QuickEntryPoints));
 }

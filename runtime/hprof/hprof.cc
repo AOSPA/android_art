@@ -718,7 +718,7 @@ class Hprof : public SingleRootVisitor {
           source_file = "";
         }
         __ AddStringId(LookupStringId(source_file));
-        auto class_result = classes_.find(method->GetDeclaringClass());
+        auto class_result = classes_.find(method->GetDeclaringClass().Ptr());
         CHECK(class_result != classes_.end());
         __ AddU4(class_result->second);
         __ AddU4(frame->ComputeLineNumber());
@@ -1590,7 +1590,7 @@ void Hprof::VisitRoot(mirror::Object* obj, const RootInfo& info) {
   if (obj == nullptr) {
     return;
   }
-  MarkRootObject(obj, 0, xlate[info.GetType()], info.GetThreadId());
+  MarkRootObject(obj, nullptr, xlate[info.GetType()], info.GetThreadId());
 }
 
 // If "direct_to_ddms" is true, the other arguments are ignored, and data is

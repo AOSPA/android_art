@@ -265,13 +265,11 @@ target_config = {
             'ART_USE_READ_BARRIER' : 'false'
         }
     },
-    # TODO: Remove this configuration, when the ART Buildbot is no
-    # longer using it for 'host-x86_64-valgrind'.
-    'art-gtest-valgrind64': {
-      # Disabled: Valgrind is no longer supported.
-      # 'make' : 'valgrind-test-art-host64',
-        'env': {
-            'ART_USE_READ_BARRIER' : 'false'
+    'art-generational-cc': {
+        'make' : 'test-art-host-gtest',
+        'run-test' : [],
+        'env' : {
+            'ART_USE_GENERATIONAL_CC' : 'true'
         }
     },
 
@@ -287,9 +285,9 @@ target_config = {
             'ASAN_OPTIONS' : 'detect_leaks=0'
         }
     },
-    # TODO: Also exercise '--interp-ac' in 'art-asan', when b/109813469 is addressed.
     'art-asan': {
         'run-test' : ['--interpreter',
+                      '--interp-ac',
                       '--optimizing',
                       '--jit',
                       '--speed-profile'],

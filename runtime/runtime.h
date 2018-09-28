@@ -29,6 +29,7 @@
 
 #include "arch/instruction_set.h"
 #include "base/macros.h"
+#include "base/mem_map.h"
 #include "base/mutex.h"
 #include "deoptimization_kind.h"
 #include "dex/dex_file_types.h"
@@ -86,7 +87,6 @@ class InternTable;
 class IsMarkedVisitor;
 class JavaVMExt;
 class LinearAlloc;
-class MemMap;
 class MonitorList;
 class MonitorPool;
 class NullPointerHandler;
@@ -779,6 +779,10 @@ class Runtime {
 
   static constexpr int32_t kUnsetSdkVersion = 0u;
 
+  uint32_t GetVerifierLoggingThresholdMs() const {
+    return verifier_logging_threshold_ms_;
+  }
+
  private:
   static void InitPlatformSignalHandlers();
 
@@ -1086,7 +1090,9 @@ class Runtime {
   std::atomic<uint32_t> deoptimization_counts_[
       static_cast<uint32_t>(DeoptimizationKind::kLast) + 1];
 
-  std::unique_ptr<MemMap> protected_fault_page_;
+  MemMap protected_fault_page_;
+
+  uint32_t verifier_logging_threshold_ms_;
 
   DISALLOW_COPY_AND_ASSIGN(Runtime);
 };
