@@ -92,7 +92,7 @@ static uint32_t GetDebugInfoStreamSize(const uint8_t* debug_info_stream) {
 template<class T> class CollectionMap : public CollectionBase {
  public:
   CollectionMap() = default;
-  virtual ~CollectionMap() OVERRIDE { }
+  ~CollectionMap() override { }
 
   template <class... Args>
   T* CreateAndAddItem(CollectionVector<T>& vector,
@@ -114,6 +114,8 @@ template<class T> class CollectionMap : public CollectionBase {
     auto it = collection_.find(offset);
     return it != collection_.end() ? it->second : nullptr;
   }
+
+  uint32_t Size() const override { return size(); }
 
   // Lower case for template interop with std::map.
   uint32_t size() const { return collection_.size(); }

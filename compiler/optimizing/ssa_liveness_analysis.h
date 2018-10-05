@@ -60,7 +60,7 @@ class BlockInfo : public ArenaObject<kArenaAllocSsaLiveness> {
  * A live range contains the start and end of a range where an instruction or a temporary
  * is live.
  */
-class LiveRange FINAL : public ArenaObject<kArenaAllocSsaLiveness> {
+class LiveRange final : public ArenaObject<kArenaAllocSsaLiveness> {
  public:
   LiveRange(size_t start, size_t end, LiveRange* next) : start_(start), end_(end), next_(next) {
     DCHECK_LT(start, end);
@@ -230,12 +230,25 @@ class SafepointPosition : public ArenaObject<kArenaAllocSsaLiveness> {
       : instruction_(instruction),
         next_(nullptr) {}
 
+  static size_t ComputePosition(HInstruction* instruction) {
+    // We special case instructions emitted at use site, as their
+    // safepoint position needs to be at their use.
+    if (instruction->IsEmittedAtUseSite()) {
+      // Currently only applies to implicit null checks, which are emitted
+      // at the next instruction.
+      DCHECK(instruction->IsNullCheck()) << instruction->DebugName();
+      return instruction->GetLifetimePosition() + 2;
+    } else {
+      return instruction->GetLifetimePosition();
+    }
+  }
+
   void SetNext(SafepointPosition* next) {
     next_ = next;
   }
 
   size_t GetPosition() const {
-    return instruction_->GetLifetimePosition();
+    return ComputePosition(instruction_);
   }
 
   SafepointPosition* GetNext() const {
@@ -922,7 +935,7 @@ class LiveInterval : public ArenaObject<kArenaAllocSsaLiveness> {
     if (first_safepoint_ == nullptr) {
       first_safepoint_ = last_safepoint_ = safepoint;
     } else {
-      DCHECK_LT(last_safepoint_->GetPosition(), safepoint->GetPosition());
+      DCHECK_LE(last_safepoint_->GetPosition(), safepoint->GetPosition());
       last_safepoint_->SetNext(safepoint);
       last_safepoint_ = safepoint;
     }
@@ -1251,6 +1264,13 @@ class SsaLivenessAnalysis : public ValueObject {
 
   // Update the live_out set of the block and returns whether it has changed.
   bool UpdateLiveOut(const HBasicBlock& block);
+
+  static void ProcessEnvironment(HInstruction* instruction,
+                                 HInstruction* actual_user,
+                                 BitVector* live_in);
+  static void RecursivelyProcessInputs(HInstruction* instruction,
+                                       HInstruction* actual_user,
+                                       BitVector* live_in);
 
   // Returns whether `instruction` in an HEnvironment held by `env_holder`
   // should be kept live by the HEnvironment.

@@ -782,8 +782,6 @@ class DexFile {
   // Callback for "new locals table entry".
   typedef void (*DexDebugNewLocalCb)(void* context, const LocalInfo& entry);
 
-  static bool LineNumForPcCb(void* context, const PositionInfo& entry);
-
   const AnnotationsDirectoryItem* GetAnnotationsDirectory(const ClassDef& class_def) const {
     return DataPointer<AnnotationsDirectoryItem>(class_def.annotations_off_);
   }
@@ -865,15 +863,6 @@ class DexFile {
     DBG_LINE_RANGE           = 15,
   };
 
-  struct LineNumFromPcContext {
-    LineNumFromPcContext(uint32_t address, uint32_t line_num)
-        : address_(address), line_num_(line_num) {}
-    uint32_t address_;
-    uint32_t line_num_;
-   private:
-    DISALLOW_COPY_AND_ASSIGN(LineNumFromPcContext);
-  };
-
   // Returns false if there is no debugging information or if it cannot be decoded.
   template<typename NewLocalCallback, typename IndexToStringData, typename TypeIndexToStringData>
   static bool DecodeDebugLocalInfo(const uint8_t* stream,
@@ -885,10 +874,9 @@ class DexFile {
                                    uint16_t registers_size,
                                    uint16_t ins_size,
                                    uint16_t insns_size_in_code_units,
-                                   IndexToStringData index_to_string_data,
-                                   TypeIndexToStringData type_index_to_string_data,
-                                   NewLocalCallback new_local,
-                                   void* context);
+                                   const IndexToStringData& index_to_string_data,
+                                   const TypeIndexToStringData& type_index_to_string_data,
+                                   const NewLocalCallback& new_local) NO_THREAD_SAFETY_ANALYSIS;
   template<typename NewLocalCallback>
   bool DecodeDebugLocalInfo(uint32_t registers_size,
                             uint32_t ins_size,
@@ -896,19 +884,13 @@ class DexFile {
                             uint32_t debug_info_offset,
                             bool is_static,
                             uint32_t method_idx,
-                            NewLocalCallback new_local,
-                            void* context) const;
+                            const NewLocalCallback& new_local) const;
 
   // Returns false if there is no debugging information or if it cannot be decoded.
   template<typename DexDebugNewPosition, typename IndexToStringData>
   static bool DecodeDebugPositionInfo(const uint8_t* stream,
-                                      IndexToStringData index_to_string_data,
-                                      DexDebugNewPosition position_functor,
-                                      void* context);
-  template<typename DexDebugNewPosition>
-  bool DecodeDebugPositionInfo(uint32_t debug_info_offset,
-                               DexDebugNewPosition position_functor,
-                               void* context) const;
+                                      const IndexToStringData& index_to_string_data,
+                                      const DexDebugNewPosition& position_functor);
 
   const char* GetSourceFile(const ClassDef& class_def) const {
     if (!class_def.source_file_idx_.IsValid()) {
@@ -1013,7 +995,14 @@ class DexFile {
   // Changes the dex class data pointed to by data_ptr it to not have any hiddenapi flags.
   static void UnHideAccessFlags(uint8_t* data_ptr, uint32_t new_access_flags, bool is_method);
 
-  inline IterationRange<ClassIterator> GetClasses() const;
+  // Iterate dex classes and remove hiddenapi flags in fields and methods.
+  void UnhideApis() const;
+
+  IterationRange<ClassIterator> GetClasses() const;
+
+  template <typename Visitor>
+  static uint32_t DecodeDebugInfoParameterNames(const uint8_t** debug_info,
+                                                const Visitor& visitor);
 
  protected:
   // First Dex format version supporting default methods.

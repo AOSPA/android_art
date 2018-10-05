@@ -41,13 +41,13 @@ class DummyOatFile : public OatFile {
 class DummyImageSpace : public space::ImageSpace {
  public:
   DummyImageSpace(MemMap&& map,
-                  accounting::ContinuousSpaceBitmap* live_bitmap,
+                  std::unique_ptr<accounting::ContinuousSpaceBitmap> live_bitmap,
                   std::unique_ptr<DummyOatFile>&& oat_file,
                   MemMap&& oat_map)
       : ImageSpace("DummyImageSpace",
                    /*image_location*/"",
                    std::move(map),
-                   live_bitmap,
+                   std::move(live_bitmap),
                    map.End()),
         oat_map_(std::move(oat_map)) {
     oat_file_ = std::move(oat_file);
@@ -88,7 +88,6 @@ class ImmuneSpacesTest : public CommonRuntimeTest {
                                       image_size,
                                       PROT_READ | PROT_WRITE,
                                       /*low_4gb*/true,
-                                      /*reuse*/false,
                                       &error_str);
     if (!map.IsValid()) {
       LOG(ERROR) << error_str;
@@ -102,7 +101,6 @@ class ImmuneSpacesTest : public CommonRuntimeTest {
                                           oat_size,
                                           PROT_READ | PROT_WRITE,
                                           /*low_4gb*/true,
-                                          /*reuse*/false,
                                           &error_str);
     if (!oat_map.IsValid()) {
       LOG(ERROR) << error_str;
@@ -132,7 +130,7 @@ class ImmuneSpacesTest : public CommonRuntimeTest {
         ImageHeader::kStorageModeUncompressed,
         /*storage_size*/0u);
     return new DummyImageSpace(std::move(map),
-                               live_bitmap.release(),
+                               std::move(live_bitmap),
                                std::move(oat_file),
                                std::move(oat_map));
   }
@@ -146,7 +144,6 @@ class ImmuneSpacesTest : public CommonRuntimeTest {
                                       size,
                                       PROT_READ | PROT_WRITE,
                                       /*low_4gb*/ true,
-                                      /*reuse*/ false,
                                       &error_str);
     if (!map.IsValid()) {
       LOG(ERROR) << "Failed to allocate memory region " << error_str;
@@ -170,19 +167,19 @@ class DummySpace : public space::ContinuousSpace {
                         end,
                         /*limit*/end) {}
 
-  space::SpaceType GetType() const OVERRIDE {
+  space::SpaceType GetType() const override {
     return space::kSpaceTypeMallocSpace;
   }
 
-  bool CanMoveObjects() const OVERRIDE {
+  bool CanMoveObjects() const override {
     return false;
   }
 
-  accounting::ContinuousSpaceBitmap* GetLiveBitmap() const OVERRIDE {
+  accounting::ContinuousSpaceBitmap* GetLiveBitmap() const override {
     return nullptr;
   }
 
-  accounting::ContinuousSpaceBitmap* GetMarkBitmap() const OVERRIDE {
+  accounting::ContinuousSpaceBitmap* GetMarkBitmap() const override {
     return nullptr;
   }
 };

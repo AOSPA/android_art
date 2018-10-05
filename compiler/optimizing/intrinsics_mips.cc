@@ -108,7 +108,7 @@ class IntrinsicSlowPathMIPS : public SlowPathCodeMIPS {
  public:
   explicit IntrinsicSlowPathMIPS(HInvoke* invoke) : SlowPathCodeMIPS(invoke), invoke_(invoke) { }
 
-  void EmitNativeCode(CodeGenerator* codegen_in) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen_in) override {
     CodeGeneratorMIPS* codegen = down_cast<CodeGeneratorMIPS*>(codegen_in);
 
     __ Bind(GetEntryLabel());
@@ -137,7 +137,7 @@ class IntrinsicSlowPathMIPS : public SlowPathCodeMIPS {
     __ B(GetExitLabel());
   }
 
-  const char* GetDescription() const OVERRIDE { return "IntrinsicSlowPathMIPS"; }
+  const char* GetDescription() const override { return "IntrinsicSlowPathMIPS"; }
 
  private:
   // The instruction where this slow path is happening.
@@ -1516,13 +1516,6 @@ void IntrinsicCodeGeneratorMIPS::VisitStringCompareTo(HInvoke* invoke) {
 
 // boolean java.lang.String.equals(Object anObject)
 void IntrinsicLocationsBuilderMIPS::VisitStringEquals(HInvoke* invoke) {
-  if (kEmitCompilerReadBarrier &&
-      !StringEqualsOptimizations(invoke).GetArgumentIsString() &&
-      !StringEqualsOptimizations(invoke).GetNoReadBarrierForStringClass()) {
-    // No support for this odd case (String class is moveable, not in the boot image).
-    return;
-  }
-
   LocationSummary* locations =
       new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
   locations->SetInAt(0, Location::RequiresRegister());

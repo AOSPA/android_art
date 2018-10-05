@@ -37,6 +37,7 @@ art_cc_binary {
     shared_libs: [
         "libart",
         "libart-compiler",
+        "libart-dexlayout",
         "libart-disassembler",
         "libdexfile",
         "libartbase",
@@ -54,6 +55,7 @@ art_cc_binary {
     shared_libs: [
         "libartd",
         "libartd-compiler",
+        "libartd-dexlayout",
         "libartd-disassembler",
         "libdexfiled",
         "libartbased",
@@ -66,7 +68,9 @@ cc_defaults {
     name: "oatdumps-defaults",
     device_supported: false,
     static_executable: true,
-    defaults: ["oatdump-defaults"],
+    defaults: [
+        "oatdump-defaults",
+    ],
     target: {
         darwin: {
             enabled: false,
@@ -80,18 +84,21 @@ cc_defaults {
         // Try to get rid of it.
         "-z muldefs",
     ],
-    static_libs: art_static_dependencies,
+    static_libs: ["libsigchain_dummy"],
 }
 
 art_cc_binary {
     name: "oatdumps",
-    defaults: ["oatdumps-defaults"],
+    defaults: [
+        "libart_static_defaults",
+        "libartbase_static_defaults",
+        "libdexfile_static_defaults",
+        "libprofile_static_defaults",
+        "libart-compiler_static_defaults",
+        "libart-dexlayout_static_defaults",
+        "oatdumps-defaults",
+    ],
     static_libs: [
-        "libart",
-        "libdexfile",
-        "libprofile",
-        "libartbase",
-        "libart-compiler",
         "libart-disassembler",
         "libvixl-arm",
         "libvixl-arm64",
@@ -102,6 +109,12 @@ art_cc_binary {
     name: "oatdumpds",
     defaults: [
         "art_debug_defaults",
+        "libartd_static_defaults",
+        "libartbased_static_defaults",
+        "libdexfiled_static_defaults",
+        "libprofiled_static_defaults",
+        "libartd-compiler_static_defaults",
+        "libartd-dexlayout_static_defaults",
         "oatdumps-defaults",
     ],
     target: {
@@ -110,15 +123,11 @@ art_cc_binary {
         },
     },
     static_libs: [
-        "libartd",
-        "libdexfiled",
-        "libprofiled",
-        "libartbased",
-        "libartd-compiler",
         "libartd-disassembler",
         "libvixld-arm",
         "libvixld-arm64",
     ],
+    group_static_libs: true,
 }
 
 art_cc_test {

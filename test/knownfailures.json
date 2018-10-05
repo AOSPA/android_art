@@ -76,7 +76,7 @@
     },
     {
         "tests" : "629-vdex-speed",
-        "variant": "interp-ac | no-dex2oat | interpreter | jit | relocate-npatchoat",
+        "variant": "interp-ac | interpreter | jit | relocate-npatchoat",
         "description": "629 requires compilation."
     },
     {
@@ -163,7 +163,7 @@
     },
     {
         "tests": "147-stripped-dex-fallback",
-        "variant": "no-dex2oat | no-image | relocate-npatchoat",
+        "variant": "no-image | relocate-npatchoat",
         "description": ["147-stripped-dex-fallback is disabled because it",
                         "requires --prebuild."]
     },
@@ -174,7 +174,7 @@
                   "119-noimage-patchoat",
                   "137-cfi",
                   "138-duplicate-classes-check2"],
-        "variant": "no-dex2oat | no-image | relocate-npatchoat",
+        "variant": "no-image | relocate-npatchoat",
         "description": ["All these tests check that we have sane behavior if we",
                         "don't have a patchoat or dex2oat. Therefore we",
                         "shouldn't run them in situations where we actually",
@@ -246,7 +246,7 @@
                   "613-inlining-dex-cache",
                   "626-set-resolved-string",
                   "638-checker-inline-cache-intrinsic"],
-        "variant": "trace  | stream",
+        "variant": "trace | stream",
         "description": ["These tests expect JIT compilation, which is",
                         "suppressed when tracing."]
     },
@@ -255,6 +255,11 @@
         "variant": "interp-ac | interpreter | trace | stream",
         "description": ["This test expects JIT compilation, which is",
                         "suppressed when tracing."]
+    },
+    {
+        "tests": "638-checker-inline-cache-intrinsic",
+        "variant": "interpreter | interp-ac",
+        "description": ["Test expects JIT compilation"]
     },
     {
         "tests": "597-deopt-invoke-stub",
@@ -573,6 +578,30 @@
     },
     {
         "tests": [
+            "018-stack-overflow",
+            "107-int-math2"
+        ],
+        "description": [
+            "Insufficient stack guards for ASAN."
+        ],
+        "variant": "interp-ac & host",
+        "env_vars": {"SANITIZE_HOST": "address"},
+        "bug": "b/31098551"
+    },
+    {
+        "tests": [
+            "018-stack-overflow",
+            "107-int-math2"
+        ],
+        "description": [
+            "Insufficient stack guards for ASAN."
+        ],
+        "variant": "interp-ac & target",
+        "env_vars": {"SANITIZE_TARGET": "address"},
+        "bug": "b/31098551"
+    },
+    {
+        "tests": [
             "059-finalizer-throw",
             "074-gc-thrash",
             "911-get-stack-trace",
@@ -644,9 +673,9 @@
     },
     {
         "tests": "660-clinit",
-        "variant": "no-image | no-dex2oat | no-prebuild | jvmti-stress | redefine-stress",
+        "variant": "no-image | no-prebuild | jvmti-stress | redefine-stress",
         "description": ["Tests <clinit> for app images, which --no-image, --no-prebuild, ",
-                        "--no-dex2oat, and --redefine-stress do not create"]
+                        "and --redefine-stress do not create"]
     },
     {
         "tests": ["961-default-iface-resolution-gen",
@@ -668,9 +697,14 @@
         "description": ["Tests that depend on input-vdex are not supported with compact dex"]
     },
     {
-        "tests": "661-oat-writer-layout",
-        "variant": "interp-ac | interpreter | jit | no-dex2oat | no-prebuild | no-image | trace | redefine-stress | jvmti-stress",
-        "description": ["Test is designed to only check --compiler-filter=speed"]
+        "tests": ["661-oat-writer-layout"],
+        "variant": "interp-ac | interpreter | jit | no-prebuild | no-image | trace | redefine-stress | jvmti-stress",
+        "description": ["Test is designed to only check --optimizing"]
+    },
+    {
+        "tests": ["004-StackWalk"],
+        "variant": "interp-ac | interpreter | jit | no-prebuild | no-image | trace | redefine-stress | jvmti-stress | debuggable",
+        "description": ["Test is designed to only check --optimizing"]
     },
     {
         "tests": "674-HelloWorld-Dm",
@@ -1005,7 +1039,7 @@
     },
     {
         "tests": "677-fsi",
-        "variant": "no-dex2oat | no-image | no-prebuild | relocate-npatchoat | jvm",
+        "variant": "no-image | no-prebuild | relocate-npatchoat | jvm",
         "description": ["Test requires a successful dex2oat invocation"]
     },
     {
@@ -1039,12 +1073,6 @@
         "description": ["Test timing out under gcstress possibly due to slower unwinding by libbacktrace"]
     },
     {
-        "tests": ["624-checker-stringops"],
-        "variant": "optimizing & gcstress | speed-profile & gcstress",
-        "bug": "b/111545159",
-        "description": ["Seem to expose some error with our gc when run in these configurations"]
-    },
-    {
         "tests": ["021-string2"],
         "variant": "jit & debuggable",
         "bug": "b/109791792",
@@ -1054,5 +1082,12 @@
         "tests": ["566-polymorphic-inlining"],
         "variant": "jit & debuggable",
         "description": ["We do not inline with debuggable."]
+    },
+    {
+        "tests": ["135-MirandaDispatch"],
+        "variant": "interp-ac & 32 & host",
+        "env_vars": {"SANITIZE_HOST": "address"},
+        "bug": "b/112993554",
+        "description": ["Timeout with ASan and interp-ac on 32-bit host (x86)."]
     }
 ]

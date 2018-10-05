@@ -73,7 +73,7 @@ static constexpr int kInvalidFd = -1;
 namespace linker {
 
 // Write a Space built during compilation for use during execution.
-class ImageWriter FINAL {
+class ImageWriter final {
  public:
   ImageWriter(const CompilerOptions& compiler_options,
               uintptr_t image_begin,
@@ -428,10 +428,6 @@ class ImageWriter FINAL {
 
   // Debug aid that list of requested image classes.
   void DumpImageClasses();
-
-  // Preinitializes some otherwise lazy fields (such as Class name) to avoid runtime image dirtying.
-  void ComputeLazyFieldsForImageClasses()
-      REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Visit all class loaders.
   void VisitClassLoaders(ClassLoaderVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);

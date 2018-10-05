@@ -63,7 +63,7 @@ using StringDexCachePair = DexCachePair<String>;
 using StringDexCacheType = std::atomic<StringDexCachePair>;
 
 // C++ mirror of java.lang.Class
-class MANAGED Class FINAL : public Object {
+class MANAGED Class final : public Object {
  public:
   // A magic value for reference_instance_offsets_. Ignore the bits and walk the super chain when
   // this is the value.
@@ -430,8 +430,7 @@ class MANAGED Class FINAL : public Object {
            ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   bool IsArrayClass() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsClassClass() REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool IsThrowableClass() REQUIRES_SHARED(Locks::mutator_lock_);

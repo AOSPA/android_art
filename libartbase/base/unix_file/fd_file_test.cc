@@ -23,8 +23,11 @@ namespace unix_file {
 
 class FdFileTest : public RandomAccessFileTest {
  protected:
-  virtual RandomAccessFile* MakeTestFile() {
-    return new FdFile(fileno(tmpfile()), false);
+  RandomAccessFile* MakeTestFile() override {
+    FILE* tmp = tmpfile();
+    int fd = dup(fileno(tmp));
+    fclose(tmp);
+    return new FdFile(fd, false);
   }
 };
 

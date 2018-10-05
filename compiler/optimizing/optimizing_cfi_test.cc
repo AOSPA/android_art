@@ -128,12 +128,12 @@ class OptimizingCFITest : public CFITest, public OptimizingUnitTestHelper {
    public:
     InternalCodeAllocator() {}
 
-    virtual uint8_t* Allocate(size_t size) {
+    uint8_t* Allocate(size_t size) override {
       memory_.resize(size);
       return memory_.data();
     }
 
-    ArrayRef<const uint8_t> GetMemory() const OVERRIDE { return ArrayRef<const uint8_t>(memory_); }
+    ArrayRef<const uint8_t> GetMemory() const override { return ArrayRef<const uint8_t>(memory_); }
 
    private:
     std::vector<uint8_t> memory_;

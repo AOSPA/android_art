@@ -82,7 +82,7 @@ class ReadBarrierSystemArrayCopySlowPathX86 : public SlowPathCode {
     DCHECK(kUseBakerReadBarrier);
   }
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     CodeGeneratorX86* x86_codegen = down_cast<CodeGeneratorX86*>(codegen);
     LocationSummary* locations = instruction_->GetLocations();
     DCHECK(locations->CanCall());
@@ -160,7 +160,7 @@ class ReadBarrierSystemArrayCopySlowPathX86 : public SlowPathCode {
     __ jmp(GetExitLabel());
   }
 
-  const char* GetDescription() const OVERRIDE { return "ReadBarrierSystemArrayCopySlowPathX86"; }
+  const char* GetDescription() const override { return "ReadBarrierSystemArrayCopySlowPathX86"; }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(ReadBarrierSystemArrayCopySlowPathX86);
@@ -922,13 +922,6 @@ void IntrinsicCodeGeneratorX86::VisitStringCompareTo(HInvoke* invoke) {
 }
 
 void IntrinsicLocationsBuilderX86::VisitStringEquals(HInvoke* invoke) {
-  if (kEmitCompilerReadBarrier &&
-      !StringEqualsOptimizations(invoke).GetArgumentIsString() &&
-      !StringEqualsOptimizations(invoke).GetNoReadBarrierForStringClass()) {
-    // No support for this odd case (String class is moveable, not in the boot image).
-    return;
-  }
-
   LocationSummary* locations =
       new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
   locations->SetInAt(0, Location::RequiresRegister());

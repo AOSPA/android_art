@@ -112,7 +112,7 @@ class IntrinsicSlowPathARM64 : public SlowPathCodeARM64 {
   explicit IntrinsicSlowPathARM64(HInvoke* invoke)
       : SlowPathCodeARM64(invoke), invoke_(invoke) { }
 
-  void EmitNativeCode(CodeGenerator* codegen_in) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen_in) override {
     CodeGeneratorARM64* codegen = down_cast<CodeGeneratorARM64*>(codegen_in);
     __ Bind(GetEntryLabel());
 
@@ -145,7 +145,7 @@ class IntrinsicSlowPathARM64 : public SlowPathCodeARM64 {
     __ B(GetExitLabel());
   }
 
-  const char* GetDescription() const OVERRIDE { return "IntrinsicSlowPathARM64"; }
+  const char* GetDescription() const override { return "IntrinsicSlowPathARM64"; }
 
  private:
   // The instruction where this slow path is happening.
@@ -163,7 +163,7 @@ class ReadBarrierSystemArrayCopySlowPathARM64 : public SlowPathCodeARM64 {
     DCHECK(kUseBakerReadBarrier);
   }
 
-  void EmitNativeCode(CodeGenerator* codegen_in) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen_in) override {
     CodeGeneratorARM64* codegen = down_cast<CodeGeneratorARM64*>(codegen_in);
     LocationSummary* locations = instruction_->GetLocations();
     DCHECK(locations->CanCall());
@@ -216,7 +216,7 @@ class ReadBarrierSystemArrayCopySlowPathARM64 : public SlowPathCodeARM64 {
     __ B(GetExitLabel());
   }
 
-  const char* GetDescription() const OVERRIDE { return "ReadBarrierSystemArrayCopySlowPathARM64"; }
+  const char* GetDescription() const override { return "ReadBarrierSystemArrayCopySlowPathARM64"; }
 
  private:
   Location tmp_;
@@ -1006,9 +1006,9 @@ class BakerReadBarrierCasSlowPathARM64 : public SlowPathCodeARM64 {
   explicit BakerReadBarrierCasSlowPathARM64(HInvoke* invoke)
       : SlowPathCodeARM64(invoke) {}
 
-  const char* GetDescription() const OVERRIDE { return "BakerReadBarrierCasSlowPathARM64"; }
+  const char* GetDescription() const override { return "BakerReadBarrierCasSlowPathARM64"; }
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     CodeGeneratorARM64* arm64_codegen = down_cast<CodeGeneratorARM64*>(codegen);
     Arm64Assembler* assembler = arm64_codegen->GetAssembler();
     MacroAssembler* masm = assembler->GetVIXLAssembler();
@@ -1398,13 +1398,6 @@ static const char* GetConstString(HInstruction* candidate, uint32_t* utf16_lengt
 }
 
 void IntrinsicLocationsBuilderARM64::VisitStringEquals(HInvoke* invoke) {
-  if (kEmitCompilerReadBarrier &&
-      !StringEqualsOptimizations(invoke).GetArgumentIsString() &&
-      !StringEqualsOptimizations(invoke).GetNoReadBarrierForStringClass()) {
-    // No support for this odd case (String class is moveable, not in the boot image).
-    return;
-  }
-
   LocationSummary* locations =
       new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
   locations->SetInAt(0, Location::RequiresRegister());

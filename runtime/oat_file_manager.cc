@@ -72,7 +72,6 @@ const OatFile* OatFileManager::RegisterOatFile(std::unique_ptr<const OatFile> oa
       CHECK_NE(oat_file->Begin(), existing->Begin()) << "Oat file already mapped at that location";
     }
   }
-  have_non_pic_oat_file_ = have_non_pic_oat_file_ || !oat_file->IsPic();
   const OatFile* ret = oat_file.get();
   oat_files_.insert(std::move(oat_file));
   return ret;
@@ -143,7 +142,7 @@ const OatFile* OatFileManager::GetPrimaryOatFile() const {
 }
 
 OatFileManager::OatFileManager()
-    : have_non_pic_oat_file_(false), only_use_system_oat_files_(false) {}
+    : only_use_system_oat_files_(false) {}
 
 OatFileManager::~OatFileManager() {
   // Explicitly clear oat_files_ since the OatFile destructor calls back into OatFileManager for
@@ -465,57 +464,15 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
                                       !runtime->IsAotCompiler(),
                                       only_use_system_oat_files_);
 
-  // Lock the target oat location to avoid races generating and loading the
-  // oat file.
-  std::string error_msg;
-  if (!oat_file_assistant.Lock(/*out*/&error_msg)) {
-    // Don't worry too much if this fails. If it does fail, it's unlikely we
-    // can generate an oat file anyway.
-    VLOG(class_linker) << "OatFileAssistant::Lock: " << error_msg;
-  }
-
-  const OatFile* source_oat_file = nullptr;
-
-  if (!oat_file_assistant.IsUpToDate()) {
-    // Update the oat file on disk if we can, based on the --compiler-filter
-    // option derived from the current runtime options.
-    // This may fail, but that's okay. Best effort is all that matters here.
-    // TODO(calin): b/64530081 b/66984396. Pass a null context to verify and compile
-    // secondary dex files in isolation (and avoid to extract/verify the main apk
-    // if it's in the class path). Note this trades correctness for performance
-    // since the resulting slow down is unacceptable in some cases until b/64530081
-    // is fixed.
-    // We still pass the class loader context when the classpath string of the runtime
-    // is not empty, which is the situation when ART is invoked standalone.
-    ClassLoaderContext* actual_context = Runtime::Current()->GetClassPathString().empty()
-        ? nullptr
-        : context.get();
-    switch (oat_file_assistant.MakeUpToDate(/*profile_changed*/ false,
-                                            actual_context,
-                                            /*out*/ &error_msg)) {
-      case OatFileAssistant::kUpdateFailed:
-        LOG(WARNING) << error_msg;
-        break;
-
-      case OatFileAssistant::kUpdateNotAttempted:
-        // Avoid spamming the logs if we decided not to attempt making the oat
-        // file up to date.
-        VLOG(oat) << error_msg;
-        break;
-
-      case OatFileAssistant::kUpdateSucceeded:
-        // Nothing to do.
-        break;
-    }
-  }
-
   // Get the oat file on disk.
   std::unique_ptr<const OatFile> oat_file(oat_file_assistant.GetBestOatFile().release());
   VLOG(oat) << "OatFileAssistant(" << dex_location << ").GetBestOatFile()="
             << reinterpret_cast<uintptr_t>(oat_file.get())
             << " (executable=" << (oat_file != nullptr ? oat_file->IsExecutable() : false) << ")";
 
+  const OatFile* source_oat_file = nullptr;
   CheckCollisionResult check_collision_result = CheckCollisionResult::kPerformedHasCollisions;
+  std::string error_msg;
   if ((class_loader != nullptr || dex_elements != nullptr) && oat_file != nullptr) {
     // Prevent oat files from being loaded if no class_loader or dex_elements are provided.
     // This can happen when the deprecated DexFile.<init>(String) is called directly, and it
@@ -569,6 +526,8 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
   if (source_oat_file != nullptr) {
     bool added_image_space = false;
     if (source_oat_file->IsExecutable()) {
+      ScopedTrace app_image_timing("AppImage:Loading");
+
       // We need to throw away the image space if we are debuggable but the oat-file source of the
       // image is not otherwise we might get classes with inlined methods or other such things.
       std::unique_ptr<gc::space::ImageSpace> image_space;

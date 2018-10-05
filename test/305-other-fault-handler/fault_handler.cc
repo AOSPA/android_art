@@ -29,7 +29,7 @@
 
 namespace art {
 
-class TestFaultHandler FINAL : public FaultHandler {
+class TestFaultHandler final : public FaultHandler {
  public:
   explicit TestFaultHandler(FaultManager* manager)
       : FaultHandler(manager),
@@ -40,6 +40,7 @@ class TestFaultHandler FINAL : public FaultHandler {
                                          /* prot */ PROT_NONE,
                                          /* low_4gb */ false,
                                          /* reuse */ false,
+                                         /* reservation */ nullptr,
                                          /* error_msg */ &map_error_,
                                          /* use_ashmem */ false)),
         was_hit_(false) {
@@ -51,7 +52,7 @@ class TestFaultHandler FINAL : public FaultHandler {
     manager_->RemoveHandler(this);
   }
 
-  bool Action(int sig, siginfo_t* siginfo, void* context ATTRIBUTE_UNUSED) OVERRIDE {
+  bool Action(int sig, siginfo_t* siginfo, void* context ATTRIBUTE_UNUSED) override {
     CHECK_EQ(sig, SIGSEGV);
     CHECK_EQ(reinterpret_cast<uint32_t*>(siginfo->si_addr),
              GetTargetPointer()) << "Segfault on unexpected address!";

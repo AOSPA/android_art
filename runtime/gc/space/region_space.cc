@@ -59,7 +59,6 @@ MemMap RegionSpace::CreateMemMap(const std::string& name,
                                    capacity + kRegionSize,
                                    PROT_READ | PROT_WRITE,
                                    /* low_4gb */ true,
-                                   /* reuse */ false,
                                    &error_msg);
     if (mem_map.IsValid() || requested_begin == nullptr) {
       break;
@@ -727,7 +726,7 @@ void RegionSpace::DumpNonFreeRegions(std::ostream& os) {
 void RegionSpace::RecordAlloc(mirror::Object* ref) {
   CHECK(ref != nullptr);
   Region* r = RefToRegion(ref);
-  r->objects_allocated_.fetch_add(1, std::memory_order_seq_cst);
+  r->objects_allocated_.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool RegionSpace::AllocNewTlab(Thread* self, size_t min_bytes) {

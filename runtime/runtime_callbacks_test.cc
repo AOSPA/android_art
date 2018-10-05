@@ -50,7 +50,7 @@ namespace art {
 
 class RuntimeCallbacksTest : public CommonRuntimeTest {
  protected:
-  void SetUp() OVERRIDE {
+  void SetUp() override {
     CommonRuntimeTest::SetUp();
 
     Thread* self = Thread::Current();
@@ -60,7 +60,7 @@ class RuntimeCallbacksTest : public CommonRuntimeTest {
     AddListener();
   }
 
-  void TearDown() OVERRIDE {
+  void TearDown() override {
     {
       Thread* self = Thread::Current();
       ScopedObjectAccess soa(self);
@@ -101,10 +101,10 @@ class ThreadLifecycleCallbackRuntimeCallbacksTest : public RuntimeCallbacksTest 
   }
 
  protected:
-  void AddListener() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+  void AddListener() override REQUIRES(Locks::mutator_lock_) {
     Runtime::Current()->GetRuntimeCallbacks()->AddThreadLifecycleCallback(&cb_);
   }
-  void RemoveListener() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+  void RemoveListener() override REQUIRES(Locks::mutator_lock_) {
     Runtime::Current()->GetRuntimeCallbacks()->RemoveThreadLifecycleCallback(&cb_);
   }
 
@@ -117,7 +117,7 @@ class ThreadLifecycleCallbackRuntimeCallbacksTest : public RuntimeCallbacksTest 
   };
 
   struct Callback : public ThreadLifecycleCallback {
-    void ThreadStart(Thread* self) OVERRIDE {
+    void ThreadStart(Thread* self) override {
       if (state == CallbackState::kBase) {
         state = CallbackState::kStarted;
         stored_self = self;
@@ -126,7 +126,7 @@ class ThreadLifecycleCallbackRuntimeCallbacksTest : public RuntimeCallbacksTest 
       }
     }
 
-    void ThreadDeath(Thread* self) OVERRIDE {
+    void ThreadDeath(Thread* self) override {
       if (state == CallbackState::kStarted && self == stored_self) {
         state = CallbackState::kDied;
       } else {
@@ -194,8 +194,7 @@ TEST_F(ThreadLifecycleCallbackRuntimeCallbacksTest, ThreadLifecycleCallbackAttac
                                       /* addr */ nullptr,
                                       128 * kPageSize,  // Just some small stack.
                                       PROT_READ | PROT_WRITE,
-                                      false,
-                                      false,
+                                      /* low_4gb */ false,
                                       &error_msg);
   ASSERT_TRUE(stack.IsValid()) << error_msg;
 
@@ -220,10 +219,10 @@ TEST_F(ThreadLifecycleCallbackRuntimeCallbacksTest, ThreadLifecycleCallbackAttac
 
 class ClassLoadCallbackRuntimeCallbacksTest : public RuntimeCallbacksTest {
  protected:
-  void AddListener() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+  void AddListener() override REQUIRES(Locks::mutator_lock_) {
     Runtime::Current()->GetRuntimeCallbacks()->AddClassLoadCallback(&cb_);
   }
-  void RemoveListener() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+  void RemoveListener() override REQUIRES(Locks::mutator_lock_) {
     Runtime::Current()->GetRuntimeCallbacks()->RemoveClassLoadCallback(&cb_);
   }
 
@@ -253,14 +252,14 @@ class ClassLoadCallbackRuntimeCallbacksTest : public RuntimeCallbacksTest {
   }
 
   struct Callback : public ClassLoadCallback {
-    virtual void ClassPreDefine(const char* descriptor,
-                                Handle<mirror::Class> klass ATTRIBUTE_UNUSED,
-                                Handle<mirror::ClassLoader> class_loader ATTRIBUTE_UNUSED,
-                                const DexFile& initial_dex_file,
-                                const DexFile::ClassDef& initial_class_def ATTRIBUTE_UNUSED,
-                                /*out*/DexFile const** final_dex_file ATTRIBUTE_UNUSED,
-                                /*out*/DexFile::ClassDef const** final_class_def ATTRIBUTE_UNUSED)
-        OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+    void ClassPreDefine(const char* descriptor,
+                        Handle<mirror::Class> klass ATTRIBUTE_UNUSED,
+                        Handle<mirror::ClassLoader> class_loader ATTRIBUTE_UNUSED,
+                        const DexFile& initial_dex_file,
+                        const DexFile::ClassDef& initial_class_def ATTRIBUTE_UNUSED,
+                        /*out*/DexFile const** final_dex_file ATTRIBUTE_UNUSED,
+                        /*out*/DexFile::ClassDef const** final_class_def ATTRIBUTE_UNUSED) override
+        REQUIRES_SHARED(Locks::mutator_lock_) {
       const std::string& location = initial_dex_file.GetLocation();
       std::string event =
           std::string("PreDefine:") + descriptor + " <" +
@@ -268,14 +267,14 @@ class ClassLoadCallbackRuntimeCallbacksTest : public RuntimeCallbacksTest {
       data.push_back(event);
     }
 
-    void ClassLoad(Handle<mirror::Class> klass) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+    void ClassLoad(Handle<mirror::Class> klass) override REQUIRES_SHARED(Locks::mutator_lock_) {
       std::string tmp;
       std::string event = std::string("Load:") + klass->GetDescriptor(&tmp);
       data.push_back(event);
     }
 
     void ClassPrepare(Handle<mirror::Class> temp_klass,
-                      Handle<mirror::Class> klass) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+                      Handle<mirror::Class> klass) override REQUIRES_SHARED(Locks::mutator_lock_) {
       std::string tmp, tmp2;
       std::string event = std::string("Prepare:") + klass->GetDescriptor(&tmp)
           + "[" + temp_klass->GetDescriptor(&tmp2) + "]";
@@ -320,15 +319,15 @@ TEST_F(ClassLoadCallbackRuntimeCallbacksTest, ClassLoadCallback) {
 
 class RuntimeSigQuitCallbackRuntimeCallbacksTest : public RuntimeCallbacksTest {
  protected:
-  void AddListener() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+  void AddListener() override REQUIRES(Locks::mutator_lock_) {
     Runtime::Current()->GetRuntimeCallbacks()->AddRuntimeSigQuitCallback(&cb_);
   }
-  void RemoveListener() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+  void RemoveListener() override REQUIRES(Locks::mutator_lock_) {
     Runtime::Current()->GetRuntimeCallbacks()->RemoveRuntimeSigQuitCallback(&cb_);
   }
 
   struct Callback : public RuntimeSigQuitCallback {
-    void SigQuit() OVERRIDE {
+    void SigQuit() override {
       ++sigquit_count;
     }
 
@@ -363,20 +362,20 @@ TEST_F(RuntimeSigQuitCallbackRuntimeCallbacksTest, SigQuit) {
 
 class RuntimePhaseCallbackRuntimeCallbacksTest : public RuntimeCallbacksTest {
  protected:
-  void AddListener() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+  void AddListener() override REQUIRES(Locks::mutator_lock_) {
     Runtime::Current()->GetRuntimeCallbacks()->AddRuntimePhaseCallback(&cb_);
   }
-  void RemoveListener() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+  void RemoveListener() override REQUIRES(Locks::mutator_lock_) {
     Runtime::Current()->GetRuntimeCallbacks()->RemoveRuntimePhaseCallback(&cb_);
   }
 
-  void TearDown() OVERRIDE {
+  void TearDown() override {
     // Bypass RuntimeCallbacksTest::TearDown, as the runtime is already gone.
     CommonRuntimeTest::TearDown();
   }
 
   struct Callback : public RuntimePhaseCallback {
-    void NextRuntimePhase(RuntimePhaseCallback::RuntimePhase p) OVERRIDE {
+    void NextRuntimePhase(RuntimePhaseCallback::RuntimePhase p) override {
       if (p == RuntimePhaseCallback::RuntimePhase::kInitialAgents) {
         if (start_seen > 0 || init_seen > 0 || death_seen > 0) {
           LOG(FATAL) << "Unexpected order";
@@ -435,10 +434,10 @@ TEST_F(RuntimePhaseCallbackRuntimeCallbacksTest, Phases) {
 
 class MonitorWaitCallbacksTest : public RuntimeCallbacksTest {
  protected:
-  void AddListener() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+  void AddListener() override REQUIRES(Locks::mutator_lock_) {
     Runtime::Current()->GetRuntimeCallbacks()->AddMonitorCallback(&cb_);
   }
-  void RemoveListener() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+  void RemoveListener() override REQUIRES(Locks::mutator_lock_) {
     Runtime::Current()->GetRuntimeCallbacks()->RemoveMonitorCallback(&cb_);
   }
 
@@ -459,20 +458,20 @@ class MonitorWaitCallbacksTest : public RuntimeCallbacksTest {
       ref_ = { &k->GetDexFile(), k->GetDexClassDefIndex() };
     }
 
-    void MonitorContendedLocking(Monitor* mon ATTRIBUTE_UNUSED)
+    void MonitorContendedLocking(Monitor* mon ATTRIBUTE_UNUSED) override
         REQUIRES_SHARED(Locks::mutator_lock_) { }
 
-    void MonitorContendedLocked(Monitor* mon ATTRIBUTE_UNUSED)
+    void MonitorContendedLocked(Monitor* mon ATTRIBUTE_UNUSED) override
         REQUIRES_SHARED(Locks::mutator_lock_) { }
 
-    void ObjectWaitStart(Handle<mirror::Object> obj, int64_t millis ATTRIBUTE_UNUSED)
+    void ObjectWaitStart(Handle<mirror::Object> obj, int64_t millis ATTRIBUTE_UNUSED) override
         REQUIRES_SHARED(Locks::mutator_lock_) {
       if (IsInterestingObject(obj.Get())) {
         saw_wait_start_ = true;
       }
     }
 
-    void MonitorWaitFinished(Monitor* m, bool timed_out ATTRIBUTE_UNUSED)
+    void MonitorWaitFinished(Monitor* m, bool timed_out ATTRIBUTE_UNUSED) override
         REQUIRES_SHARED(Locks::mutator_lock_) {
       if (IsInterestingObject(m->GetObject())) {
         saw_wait_finished_ = true;

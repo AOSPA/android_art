@@ -39,12 +39,12 @@ namespace art {
 namespace gc {
 namespace space {
 
-class MemoryToolLargeObjectMapSpace FINAL : public LargeObjectMapSpace {
+class MemoryToolLargeObjectMapSpace final : public LargeObjectMapSpace {
  public:
   explicit MemoryToolLargeObjectMapSpace(const std::string& name) : LargeObjectMapSpace(name) {
   }
 
-  ~MemoryToolLargeObjectMapSpace() OVERRIDE {
+  ~MemoryToolLargeObjectMapSpace() override {
     // Historical note: We were deleting large objects to keep Valgrind happy if there were
     // any large objects such as Dex cache arrays which aren't freed since they are held live
     // by the class linker.
@@ -52,7 +52,7 @@ class MemoryToolLargeObjectMapSpace FINAL : public LargeObjectMapSpace {
 
   mirror::Object* Alloc(Thread* self, size_t num_bytes, size_t* bytes_allocated,
                         size_t* usable_size, size_t* bytes_tl_bulk_allocated)
-      OVERRIDE {
+      override {
     mirror::Object* obj =
         LargeObjectMapSpace::Alloc(self, num_bytes + kMemoryToolRedZoneBytes * 2, bytes_allocated,
                                    usable_size, bytes_tl_bulk_allocated);
@@ -68,21 +68,21 @@ class MemoryToolLargeObjectMapSpace FINAL : public LargeObjectMapSpace {
     return object_without_rdz;
   }
 
-  size_t AllocationSize(mirror::Object* obj, size_t* usable_size) OVERRIDE {
+  size_t AllocationSize(mirror::Object* obj, size_t* usable_size) override {
     return LargeObjectMapSpace::AllocationSize(ObjectWithRedzone(obj), usable_size);
   }
 
-  bool IsZygoteLargeObject(Thread* self, mirror::Object* obj) const OVERRIDE {
+  bool IsZygoteLargeObject(Thread* self, mirror::Object* obj) const override {
     return LargeObjectMapSpace::IsZygoteLargeObject(self, ObjectWithRedzone(obj));
   }
 
-  size_t Free(Thread* self, mirror::Object* obj) OVERRIDE {
+  size_t Free(Thread* self, mirror::Object* obj) override {
     mirror::Object* object_with_rdz = ObjectWithRedzone(obj);
     MEMORY_TOOL_MAKE_UNDEFINED(object_with_rdz, AllocationSize(obj, nullptr));
     return LargeObjectMapSpace::Free(self, object_with_rdz);
   }
 
-  bool Contains(const mirror::Object* obj) const OVERRIDE {
+  bool Contains(const mirror::Object* obj) const override {
     return LargeObjectMapSpace::Contains(ObjectWithRedzone(obj));
   }
 
@@ -108,8 +108,10 @@ void LargeObjectSpace::SwapBitmaps() {
   mark_bitmap_->SetName(temp_name);
 }
 
-LargeObjectSpace::LargeObjectSpace(const std::string& name, uint8_t* begin, uint8_t* end)
+LargeObjectSpace::LargeObjectSpace(const std::string& name, uint8_t* begin, uint8_t* end,
+                                   const char* lock_name)
     : DiscontinuousSpace(name, kGcRetentionPolicyAlwaysCollect),
+      lock_(lock_name, kAllocSpaceLock),
       num_bytes_allocated_(0), num_objects_allocated_(0), total_bytes_allocated_(0),
       total_objects_allocated_(0), begin_(begin), end_(end) {
 }
@@ -120,8 +122,7 @@ void LargeObjectSpace::CopyLiveToMarked() {
 }
 
 LargeObjectMapSpace::LargeObjectMapSpace(const std::string& name)
-    : LargeObjectSpace(name, nullptr, nullptr),
-      lock_("large object map space lock", kAllocSpaceLock) {}
+    : LargeObjectSpace(name, nullptr, nullptr, "large object map space lock") {}
 
 LargeObjectMapSpace* LargeObjectMapSpace::Create(const std::string& name) {
   if (Runtime::Current()->IsRunningOnMemoryTool()) {
@@ -140,7 +141,6 @@ mirror::Object* LargeObjectMapSpace::Alloc(Thread* self, size_t num_bytes,
                                         num_bytes,
                                         PROT_READ | PROT_WRITE,
                                         /* low_4gb */ true,
-                                        /* reuse */ false,
                                         &error_msg);
   if (UNLIKELY(!mem_map.IsValid())) {
     LOG(WARNING) << "Large object allocation failed: " << error_msg;
@@ -354,7 +354,6 @@ FreeListSpace* FreeListSpace::Create(const std::string& name, uint8_t* requested
                                         size,
                                         PROT_READ | PROT_WRITE,
                                         /* low_4gb */ true,
-                                        /* reuse */ false,
                                         &error_msg);
   CHECK(mem_map.IsValid()) << "Failed to allocate large object space mem map: " << error_msg;
   return new FreeListSpace(name, std::move(mem_map), mem_map.Begin(), mem_map.End());
@@ -364,9 +363,8 @@ FreeListSpace::FreeListSpace(const std::string& name,
                              MemMap&& mem_map,
                              uint8_t* begin,
                              uint8_t* end)
-    : LargeObjectSpace(name, begin, end),
-      mem_map_(std::move(mem_map)),
-      lock_("free list space lock", kAllocSpaceLock) {
+    : LargeObjectSpace(name, begin, end, "free list space lock"),
+      mem_map_(std::move(mem_map)) {
   const size_t space_capacity = end - begin;
   free_end_ = space_capacity;
   CHECK_ALIGNED(space_capacity, kAlignment);
@@ -378,7 +376,6 @@ FreeListSpace::FreeListSpace(const std::string& name,
                            alloc_info_size,
                            PROT_READ | PROT_WRITE,
                            /* low_4gb */ false,
-                           /* reuse */ false,
                            &error_msg);
   CHECK(allocation_info_map_.IsValid()) << "Failed to allocate allocation info map" << error_msg;
   allocation_info_ = reinterpret_cast<AllocationInfo*>(allocation_info_map_.Begin());

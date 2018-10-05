@@ -60,6 +60,17 @@ void DexFile::UnHideAccessFlags(uint8_t* data_ptr,
   UpdateUnsignedLeb128(data_ptr, new_access_flags);
 }
 
+void DexFile::UnhideApis() const {
+  for (ClassAccessor accessor : GetClasses()) {
+    for (const ClassAccessor::Field& field : accessor.GetFields()) {
+      field.UnHideAccessFlags();
+    }
+    for (const ClassAccessor::Method& method : accessor.GetMethods()) {
+      method.UnHideAccessFlags();
+    }
+  }
+}
+
 uint32_t DexFile::CalculateChecksum() const {
   return CalculateChecksum(Begin(), Size());
 }
@@ -479,22 +490,6 @@ int32_t DexFile::FindTryItem(const TryItem* try_items, uint32_t tries_size, uint
   }
   // No match.
   return -1;
-}
-
-bool DexFile::LineNumForPcCb(void* raw_context, const PositionInfo& entry) {
-  LineNumFromPcContext* context = reinterpret_cast<LineNumFromPcContext*>(raw_context);
-
-  // We know that this callback will be called in
-  // ascending address order, so keep going until we find
-  // a match or we've just gone past it.
-  if (entry.address_ > context->address_) {
-    // The line number from the previous positions callback
-    // wil be the final result.
-    return true;
-  } else {
-    context->line_num_ = entry.line_;
-    return entry.address_ == context->address_;
-  }
 }
 
 // Read a signed integer.  "zwidth" is the zero-based byte count.

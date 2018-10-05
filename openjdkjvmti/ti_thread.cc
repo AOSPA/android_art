@@ -82,7 +82,7 @@ struct ThreadCallback : public art::ThreadLifecycleCallback {
                                          thread.get());
   }
 
-  void ThreadStart(art::Thread* self) OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  void ThreadStart(art::Thread* self) override REQUIRES_SHARED(art::Locks::mutator_lock_) {
     if (!started) {
       // Runtime isn't started. We only expect at most the signal handler or JIT threads to be
       // started here.
@@ -101,7 +101,7 @@ struct ThreadCallback : public art::ThreadLifecycleCallback {
     Post<ArtJvmtiEvent::kThreadStart>(self);
   }
 
-  void ThreadDeath(art::Thread* self) OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  void ThreadDeath(art::Thread* self) override REQUIRES_SHARED(art::Locks::mutator_lock_) {
     Post<ArtJvmtiEvent::kThreadEnd>(self);
   }
 
@@ -1110,7 +1110,7 @@ jvmtiError ThreadUtil::StopThread(jvmtiEnv* env ATTRIBUTE_UNUSED,
    public:
     explicit StopThreadClosure(art::Handle<art::mirror::Throwable> except) : exception_(except) { }
 
-    void Run(art::Thread* me) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    void Run(art::Thread* me) override REQUIRES_SHARED(art::Locks::mutator_lock_) {
       // Make sure the thread is prepared to notice the exception.
       art::Runtime::Current()->GetInstrumentation()->InstrumentThreadStack(me);
       me->SetAsyncException(exception_.Get());

@@ -29,7 +29,7 @@ namespace gc {
 
 class HeapTest : public CommonRuntimeTest {
  public:
-  void SetUp() OVERRIDE {
+  void SetUp() override {
     MemMap::Init();
     std::string error_msg;
     // Reserve the preferred address to force the heap to use another one for testing.
@@ -38,7 +38,6 @@ class HeapTest : public CommonRuntimeTest {
                                      16 * KB,
                                      PROT_READ,
                                      /*low_4gb*/ true,
-                                     /*reuse*/ false,
                                      &error_msg);
     ASSERT_TRUE(reserved_.IsValid()) << error_msg;
     CommonRuntimeTest::SetUp();
@@ -97,7 +96,7 @@ TEST_F(HeapTest, DumpGCPerformanceOnShutdown) {
 }
 
 class ZygoteHeapTest : public CommonRuntimeTest {
-  void SetUpRuntimeOptions(RuntimeOptions* options) {
+  void SetUpRuntimeOptions(RuntimeOptions* options) override {
     CommonRuntimeTest::SetUpRuntimeOptions(options);
     options->push_back(std::make_pair("-Xzygote", nullptr));
   }

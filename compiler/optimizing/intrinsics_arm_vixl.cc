@@ -85,7 +85,7 @@ class IntrinsicSlowPathARMVIXL : public SlowPathCodeARMVIXL {
     return calling_convention_visitor.GetMethodLocation();
   }
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     ArmVIXLAssembler* assembler = down_cast<ArmVIXLAssembler*>(codegen->GetAssembler());
     __ Bind(GetEntryLabel());
 
@@ -111,7 +111,7 @@ class IntrinsicSlowPathARMVIXL : public SlowPathCodeARMVIXL {
     __ B(GetExitLabel());
   }
 
-  const char* GetDescription() const OVERRIDE { return "IntrinsicSlowPath"; }
+  const char* GetDescription() const override { return "IntrinsicSlowPath"; }
 
  private:
   // The instruction where this slow path is happening.
@@ -173,7 +173,7 @@ class ReadBarrierSystemArrayCopySlowPathARMVIXL : public SlowPathCodeARMVIXL {
     DCHECK(kUseBakerReadBarrier);
   }
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     CodeGeneratorARMVIXL* arm_codegen = down_cast<CodeGeneratorARMVIXL*>(codegen);
     ArmVIXLAssembler* assembler = arm_codegen->GetAssembler();
     LocationSummary* locations = instruction_->GetLocations();
@@ -233,7 +233,7 @@ class ReadBarrierSystemArrayCopySlowPathARMVIXL : public SlowPathCodeARMVIXL {
     __ B(GetExitLabel());
   }
 
-  const char* GetDescription() const OVERRIDE {
+  const char* GetDescription() const override {
     return "ReadBarrierSystemArrayCopySlowPathARMVIXL";
   }
 
@@ -969,9 +969,9 @@ class BakerReadBarrierCasSlowPathARMVIXL : public SlowPathCodeARMVIXL {
   explicit BakerReadBarrierCasSlowPathARMVIXL(HInvoke* invoke)
       : SlowPathCodeARMVIXL(invoke) {}
 
-  const char* GetDescription() const OVERRIDE { return "BakerReadBarrierCasSlowPathARMVIXL"; }
+  const char* GetDescription() const override { return "BakerReadBarrierCasSlowPathARMVIXL"; }
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     CodeGeneratorARMVIXL* arm_codegen = down_cast<CodeGeneratorARMVIXL*>(codegen);
     ArmVIXLAssembler* assembler = arm_codegen->GetAssembler();
     __ Bind(GetEntryLabel());
@@ -1458,13 +1458,6 @@ static const char* GetConstString(HInstruction* candidate, uint32_t* utf16_lengt
 }
 
 void IntrinsicLocationsBuilderARMVIXL::VisitStringEquals(HInvoke* invoke) {
-  if (kEmitCompilerReadBarrier &&
-      !StringEqualsOptimizations(invoke).GetArgumentIsString() &&
-      !StringEqualsOptimizations(invoke).GetNoReadBarrierForStringClass()) {
-    // No support for this odd case (String class is moveable, not in the boot image).
-    return;
-  }
-
   LocationSummary* locations =
       new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
   InvokeRuntimeCallingConventionARMVIXL calling_convention;
