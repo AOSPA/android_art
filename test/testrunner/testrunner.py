@@ -117,6 +117,7 @@ build = False
 gdb = False
 gdb_arg = ''
 runtime_option = ''
+with_agent = []
 run_test_option = []
 stop_testrunner = False
 dex2oat_jobs = -1   # -1 corresponds to default threads for dex2oat
@@ -147,7 +148,7 @@ def gather_test_info():
   VARIANT_TYPE_DICT['gc'] = {'gcstress', 'gcverify', 'cms'}
   VARIANT_TYPE_DICT['prebuild'] = {'no-prebuild', 'prebuild'}
   VARIANT_TYPE_DICT['cdex_level'] = {'cdex-none', 'cdex-fast'}
-  VARIANT_TYPE_DICT['relocate'] = {'relocate-npatchoat', 'relocate', 'no-relocate'}
+  VARIANT_TYPE_DICT['relocate'] = {'relocate', 'no-relocate'}
   VARIANT_TYPE_DICT['jni'] = {'jni', 'forcecopy', 'checkjni'}
   VARIANT_TYPE_DICT['address_sizes'] = {'64', '32'}
   VARIANT_TYPE_DICT['jvmti'] = {'no-jvmti', 'jvmti-stress', 'redefine-stress', 'trace-stress',
@@ -333,6 +334,9 @@ def run_tests(tests):
   if runtime_option:
     for opt in runtime_option:
       options_all += ' --runtime-option ' + opt
+  if with_agent:
+    for opt in with_agent:
+      options_all += ' --with-agent ' + opt
 
   if dex2oat_jobs != -1:
     options_all += ' --dex2oat-jobs ' + str(dex2oat_jobs)
@@ -436,8 +440,6 @@ def run_tests(tests):
         options_test += ' --relocate'
       elif relocate == 'no-relocate':
         options_test += ' --no-relocate'
-      elif relocate == 'relocate-npatchoat':
-        options_test += ' --relocate --no-patchoat'
 
       if trace == 'trace':
         options_test += ' --trace'
@@ -911,6 +913,7 @@ def parse_option():
   global timeout
   global dex2oat_jobs
   global run_all_configs
+  global with_agent
 
   parser = argparse.ArgumentParser(description="Runs all or a subset of the ART test suite.")
   parser.add_argument('-t', '--test', action='append', dest='tests', help='name(s) of the test(s)')
@@ -943,6 +946,8 @@ def parse_option():
                             This should be enclosed in single-quotes to allow for spaces. The option
                             will be split using shlex.split() prior to invoking run-test.
                             Example \"--run-test-option='--with-agent libtifast.so=MethodExit'\"""")
+  global_group.add_argument('--with-agent', action='append', dest='with_agent',
+                            help="""Pass an agent to be attached to the runtime""")
   global_group.add_argument('--runtime-option', action='append', dest='runtime_option',
                             help="""Pass an option to the runtime. Runtime options
                             starting with a '-' must be separated by a '=', for
@@ -991,6 +996,7 @@ def parse_option():
     if options['gdb_arg']:
       gdb_arg = options['gdb_arg']
   runtime_option = options['runtime_option'];
+  with_agent = options['with_agent'];
   run_test_option = sum(map(shlex.split, options['run_test_option']), [])
 
   timeout = options['timeout']

@@ -175,11 +175,11 @@ class PACKED(4) ImageHeader {
     return pointer_size_;
   }
 
-  off_t GetPatchDelta() const {
+  int32_t GetPatchDelta() const {
     return patch_delta_;
   }
 
-  void SetPatchDelta(off_t patch_delta) {
+  void SetPatchDelta(int32_t patch_delta) {
     patch_delta_ = patch_delta;
   }
 
@@ -219,6 +219,16 @@ class PACKED(4) ImageHeader {
     kBootImageLiveObjects = kSpecialRoots,  // Array of boot image objects that must be kept live.
   };
 
+  /*
+   * This describes the number and ordering of sections inside of Boot
+   * and App Images.  It is very important that changes to this struct
+   * are reflected in the compiler and loader.
+   *
+   * See:
+   *   - ImageWriter::ImageInfo::CreateImageSections()
+   *   - ImageWriter::Write()
+   *   - ImageWriter::AllocMemory()
+   */
   enum ImageSections {
     kSectionObjects,
     kSectionArtFields,
@@ -229,6 +239,7 @@ class PACKED(4) ImageHeader {
     kSectionDexCacheArrays,
     kSectionInternedStrings,
     kSectionClassTable,
+    kSectionStringReferenceOffsets,
     kSectionImageBitmap,
     kSectionImageRelocations,
     kSectionCount,  // Number of elements in enum.
@@ -291,6 +302,10 @@ class PACKED(4) ImageHeader {
     return GetImageSection(kSectionImageRelocations);
   }
 
+  const ImageSection& GetImageStringReferenceOffsetsSection() const {
+    return GetImageSection(kSectionStringReferenceOffsets);
+  }
+
   template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   ObjPtr<mirror::Object> GetImageRoot(ImageRoot image_root) const
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -299,9 +314,9 @@ class PACKED(4) ImageHeader {
   ObjPtr<mirror::ObjectArray<mirror::Object>> GetImageRoots() const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void RelocateImage(off_t delta);
-  void RelocateImageMethods(off_t delta);
-  void RelocateImageObjects(off_t delta);
+  void RelocateImage(int64_t delta);
+  void RelocateImageMethods(int64_t delta);
+  void RelocateImageObjects(int64_t delta);
 
   bool CompilePic() const {
     return compile_pic_ != 0;
@@ -450,6 +465,39 @@ class PACKED(4) ImageHeader {
 
   friend class linker::ImageWriter;
 };
+
+/*
+ * Tags the last bit.  Used by AppImage logic to differentiate between managed
+ * and native references.
+ */
+template<typename T>
+T SetNativeRefTag(T val) {
+  static_assert(std::is_integral<T>::value, "Expected integral type.");
+
+  return val | 1u;
+}
+
+/*
+ * Retrieves the value of the last bit.  Used by AppImage logic to
+ * differentiate between managed and native references.
+ */
+template<typename T>
+bool HasNativeRefTag(T val) {
+  static_assert(std::is_integral<T>::value, "Expected integral type.");
+
+  return (val & 1u) == 1u;
+}
+
+/*
+ * Sets the last bit of the value to 0.  Used by AppImage logic to
+ * differentiate between managed and native references.
+ */
+template<typename T>
+T ClearNativeRefTag(T val) {
+  static_assert(std::is_integral<T>::value, "Expected integral type.");
+
+  return val & ~1u;
+}
 
 std::ostream& operator<<(std::ostream& os, const ImageHeader::ImageMethod& policy);
 std::ostream& operator<<(std::ostream& os, const ImageHeader::ImageRoot& policy);

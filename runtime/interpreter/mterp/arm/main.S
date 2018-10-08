@@ -259,6 +259,14 @@ unspecified registers or condition codes.
     mov     \reg, #0
     str     \reg, [rREFS, \vreg, lsl #2]
 .endm
+.macro SET_VREG_WIDE regLo, regHi, vreg
+    add     ip, rFP, \vreg, lsl #2
+    strd    \regLo, \regHi, [ip]
+    mov     \regLo, #0
+    mov     \regHi, #0
+    add     ip, rREFS, \vreg, lsl #2
+    strd    \regLo, \regHi, [ip]
+.endm
 .macro SET_VREG_OBJECT reg, vreg, tmpreg
     str     \reg, [rFP, \vreg, lsl #2]
     str     \reg, [rREFS, \vreg, lsl #2]
@@ -292,7 +300,7 @@ unspecified registers or condition codes.
 .endm
 
 /*
- * cfi support macros.
+ * function support macros.
  */
 .macro ENTRY name
     .arm
@@ -302,14 +310,17 @@ unspecified registers or condition codes.
     /* Cache alignment for function entry */
     .balign 16
 \name:
-    .cfi_startproc
-    .fnstart
 .endm
 
 .macro END name
-    .fnend
-    .cfi_endproc
     .size \name, .-\name
+.endm
+
+// Macro to unpoison (negate) the reference for heap poisoning.
+.macro UNPOISON_HEAP_REF rRef
+#ifdef USE_HEAP_POISONING
+    rsb \rRef, \rRef, #0
+#endif  // USE_HEAP_POISONING
 .endm
 
 %def entry():
@@ -345,6 +356,7 @@ unspecified registers or condition codes.
  */
 
 ENTRY ExecuteMterpImpl
+    .cfi_startproc
     stmfd   sp!, {r3-r10,fp,lr}         @ save 10 regs, (r3 just to align 64)
     .cfi_adjust_cfa_offset 40
     .cfi_rel_offset r3, 0
@@ -389,6 +401,8 @@ ENTRY ExecuteMterpImpl
     GET_INST_OPCODE ip                  @ extract opcode from rINST
     GOTO_OPCODE ip                      @ jump to next instruction
     /* NOTE: no fallthrough */
+    // cfi info continues, and covers the whole mterp implementation.
+    END ExecuteMterpImpl
 
 %def alt_stub():
 /*
@@ -411,8 +425,7 @@ ENTRY ExecuteMterpImpl
 
 
 %def helpers():
-%  op_float_to_long_helper_code()
-%  op_double_to_long_helper_code()
+    ENTRY MterpHelpers
 
 %def footer():
 /*
@@ -710,8 +723,8 @@ MterpProfileActive:
     mov     r0, rINST                               @ restore return value
     ldmfd   sp!, {r3-r10,fp,pc}                     @ restore 10 regs and return
 
-    END ExecuteMterpImpl
-
+    .cfi_endproc
+    END MterpHelpers
 
 %def instruction_end():
 
@@ -742,3 +755,12 @@ artMterpAsmInstructionStart = .L_op_nop
     .global artMterpAsmAltInstructionStart
 artMterpAsmAltInstructionStart = .L_ALT_op_nop
     .text
+
+%def opcode_start():
+    ENTRY Mterp_${opcode}
+%def opcode_end():
+    END Mterp_${opcode}
+%def helper_start(name):
+    ENTRY ${name}
+%def helper_end(name):
+    END ${name}

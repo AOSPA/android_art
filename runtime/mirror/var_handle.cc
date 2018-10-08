@@ -691,7 +691,7 @@ class TypeAdaptorAccessor : public Object::Accessor<T> {
 template <typename T>
 class FieldAccessViaAccessor {
  public:
-  typedef Object::Accessor<T> Accessor;
+  using Accessor = Object::Accessor<T>;
 
   // Apply an Accessor to get a field in an object.
   static void Get(ObjPtr<Object> obj,
@@ -1033,7 +1033,7 @@ bool FieldAccessor<ObjPtr<Object>>::Dispatch(VarHandle::AccessMode access_mode,
                                                                CASMode::kStrong,
                                                                std::memory_order_seq_cst);
       }
-      StoreResult(cas_result, result);
+      StoreResult(static_cast<uint8_t>(cas_result), result);
       break;
     }
     case VarHandle::AccessMode::kWeakCompareAndSet:
@@ -1058,7 +1058,7 @@ bool FieldAccessor<ObjPtr<Object>>::Dispatch(VarHandle::AccessMode access_mode,
             CASMode::kWeak,
             std::memory_order_seq_cst);
       }
-      StoreResult(cas_result, result);
+      StoreResult(static_cast<uint8_t>(cas_result), result);
       break;
     }
     case VarHandle::AccessMode::kCompareAndExchange:

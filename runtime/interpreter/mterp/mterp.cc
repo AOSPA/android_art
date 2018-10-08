@@ -172,7 +172,7 @@ extern "C" size_t MterpInvokeVirtual(Thread* self,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   JValue* result_register = shadow_frame->GetResultRegister();
   const Instruction* inst = Instruction::At(dex_pc_ptr);
-  return DoFastInvoke<kVirtual>(
+  return DoInvoke<kVirtual, /*is_range*/ false, /*access_check*/ false, /*fast_invoke*/ true>(
       self, *shadow_frame, inst, inst_data, result_register);
 }
 
@@ -183,7 +183,7 @@ extern "C" size_t MterpInvokeSuper(Thread* self,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   JValue* result_register = shadow_frame->GetResultRegister();
   const Instruction* inst = Instruction::At(dex_pc_ptr);
-  return DoInvoke<kSuper, false, false>(
+  return DoInvoke<kSuper, /*is_range*/ false, /*access_check*/ false>(
       self, *shadow_frame, inst, inst_data, result_register);
 }
 
@@ -194,7 +194,7 @@ extern "C" size_t MterpInvokeInterface(Thread* self,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   JValue* result_register = shadow_frame->GetResultRegister();
   const Instruction* inst = Instruction::At(dex_pc_ptr);
-  return DoInvoke<kInterface, false, false>(
+  return DoInvoke<kInterface, /*is_range*/ false, /*access_check*/ false>(
       self, *shadow_frame, inst, inst_data, result_register);
 }
 
@@ -205,7 +205,7 @@ extern "C" size_t MterpInvokeDirect(Thread* self,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   JValue* result_register = shadow_frame->GetResultRegister();
   const Instruction* inst = Instruction::At(dex_pc_ptr);
-  return DoFastInvoke<kDirect>(
+  return DoInvoke<kDirect, /*is_range*/ false, /*access_check*/ false, /*fast_invoke*/ true>(
       self, *shadow_frame, inst, inst_data, result_register);
 }
 
@@ -216,7 +216,7 @@ extern "C" size_t MterpInvokeStatic(Thread* self,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   JValue* result_register = shadow_frame->GetResultRegister();
   const Instruction* inst = Instruction::At(dex_pc_ptr);
-  return DoFastInvoke<kStatic>(
+  return DoInvoke<kStatic, /*is_range*/ false, /*access_check*/ false, /*fast_invoke*/ true>(
       self, *shadow_frame, inst, inst_data, result_register);
 }
 
@@ -249,7 +249,7 @@ extern "C" size_t MterpInvokeVirtualRange(Thread* self,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   JValue* result_register = shadow_frame->GetResultRegister();
   const Instruction* inst = Instruction::At(dex_pc_ptr);
-  return DoInvoke<kVirtual, true, false>(
+  return DoInvoke<kVirtual, /*is_range*/ true, /*access_check*/ false>(
       self, *shadow_frame, inst, inst_data, result_register);
 }
 
@@ -260,7 +260,7 @@ extern "C" size_t MterpInvokeSuperRange(Thread* self,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   JValue* result_register = shadow_frame->GetResultRegister();
   const Instruction* inst = Instruction::At(dex_pc_ptr);
-  return DoInvoke<kSuper, true, false>(
+  return DoInvoke<kSuper, /*is_range*/ true, /*access_check*/ false>(
       self, *shadow_frame, inst, inst_data, result_register);
 }
 
@@ -271,7 +271,7 @@ extern "C" size_t MterpInvokeInterfaceRange(Thread* self,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   JValue* result_register = shadow_frame->GetResultRegister();
   const Instruction* inst = Instruction::At(dex_pc_ptr);
-  return DoInvoke<kInterface, true, false>(
+  return DoInvoke<kInterface, /*is_range*/ true, /*access_check*/ false>(
       self, *shadow_frame, inst, inst_data, result_register);
 }
 
@@ -282,7 +282,7 @@ extern "C" size_t MterpInvokeDirectRange(Thread* self,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   JValue* result_register = shadow_frame->GetResultRegister();
   const Instruction* inst = Instruction::At(dex_pc_ptr);
-  return DoInvoke<kDirect, true, false>(
+  return DoInvoke<kDirect, /*is_range*/ true, /*access_check*/ false>(
       self, *shadow_frame, inst, inst_data, result_register);
 }
 
@@ -293,7 +293,7 @@ extern "C" size_t MterpInvokeStaticRange(Thread* self,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   JValue* result_register = shadow_frame->GetResultRegister();
   const Instruction* inst = Instruction::At(dex_pc_ptr);
-  return DoInvoke<kStatic, true, false>(
+  return DoInvoke<kStatic, /*is_range*/ true, /*access_check*/ false>(
       self, *shadow_frame, inst, inst_data, result_register);
 }
 
@@ -748,6 +748,10 @@ NO_INLINE bool MterpFieldAccessSlow(Instruction* inst,
   return true;
 }
 
+// This methods is called from assembly to handle field access instructions.
+//
+// This method is fairly hot.  It is long, but it has been carefully optimized.
+// It contains only fully inlined methods -> no spills -> no prologue/epilogue.
 template<typename PrimType, FindFieldType kAccessType>
 ALWAYS_INLINE bool MterpFieldAccessFast(Instruction* inst,
                                         uint16_t inst_data,
@@ -756,8 +760,32 @@ ALWAYS_INLINE bool MterpFieldAccessFast(Instruction* inst,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   constexpr bool kIsStatic = (kAccessType & FindFieldFlags::StaticBit) != 0;
 
+  // Try to find the field in small thread-local cache first.
+  InterpreterCache* tls_cache = self->GetInterpreterCache();
+  size_t tls_value;
+  if (LIKELY(tls_cache->Get(inst, &tls_value))) {
+    // The meaning of the cache value is opcode-specific.
+    // It is ArtFiled* for static fields and the raw offset for instance fields.
+    size_t offset = kIsStatic
+        ? reinterpret_cast<ArtField*>(tls_value)->GetOffset().SizeValue()
+        : tls_value;
+    if (kIsDebugBuild) {
+      uint32_t field_idx = kIsStatic ? inst->VRegB_21c() : inst->VRegC_22c();
+      ArtField* field = FindFieldFromCode<kAccessType, /* access_checks */ false>(
+          field_idx, shadow_frame->GetMethod(), self, sizeof(PrimType));
+      DCHECK_EQ(offset, field->GetOffset().SizeValue());
+    }
+    ObjPtr<mirror::Object> obj = kIsStatic
+        ? reinterpret_cast<ArtField*>(tls_value)->GetDeclaringClass()
+        : MakeObjPtr(shadow_frame->GetVRegReference(inst->VRegB_22c(inst_data)));
+    if (LIKELY(obj != nullptr)) {
+      MterpFieldAccess<PrimType, kAccessType>(
+          inst, inst_data, shadow_frame, obj, MemberOffset(offset), /* is_volatile */ false);
+      return true;
+    }
+  }
+
   // This effectively inlines the fast path from ArtMethod::GetDexCache.
-  // It avoids non-inlined call which in turn allows elimination of the prologue and epilogue.
   ArtMethod* referrer = shadow_frame->GetMethod();
   if (LIKELY(!referrer->IsObsolete())) {
     // Avoid read barriers, since we need only the pointer to the native (non-movable)
@@ -777,6 +805,14 @@ ALWAYS_INLINE bool MterpFieldAccessFast(Instruction* inst,
             ? field->GetDeclaringClass().Ptr()
             : shadow_frame->GetVRegReference(inst->VRegB_22c(inst_data));
         if (LIKELY(kIsStatic || obj != nullptr)) {
+          // Only non-volatile fields are allowed in the thread-local cache.
+          if (LIKELY(!field->IsVolatile())) {
+            if (kIsStatic) {
+              tls_cache->Set(inst, reinterpret_cast<uintptr_t>(field));
+            } else {
+              tls_cache->Set(inst, field->GetOffset().SizeValue());
+            }
+          }
           MterpFieldAccess<PrimType, kAccessType>(
               inst, inst_data, shadow_frame, obj, field->GetOffset(), field->IsVolatile());
           return true;

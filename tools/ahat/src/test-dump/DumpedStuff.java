@@ -124,6 +124,47 @@ public class DumpedStuff extends SuperDumpedStuff {
     }
   }
 
+  public interface IDumpedManager {
+    public static class Stub extends android.os.Binder implements IDumpedManager {
+      private static final java.lang.String DESCRIPTOR = "DumpedStuff$IDumpedManager";
+      public Stub() {
+        super(DESCRIPTOR);
+      }
+      public static class Proxy implements IDumpedManager {
+        android.os.IBinder mRemote;
+        Proxy(android.os.IBinder binderProxy) {
+          mRemote = binderProxy;
+        }
+      }
+    }
+  }
+
+  public interface IBinderInterfaceImpostor {
+    public static class Stub {
+      public static class Proxy implements IBinderInterfaceImpostor {
+        android.os.IBinder mFakeRemote = new android.os.BinderProxy();
+        Proxy(android.os.IBinder binderProxy) {
+          mFakeRemote = binderProxy;
+        }
+      }
+    }
+  }
+
+  private static class BinderProxyCarrier {
+    android.os.IBinder mRemote;
+    BinderProxyCarrier(android.os.IBinder binderProxy) {
+      mRemote = binderProxy;
+    }
+  }
+
+  private static class BinderService extends IDumpedManager.Stub {
+    // Intentionally empty
+  };
+
+  private static class FakeBinderService extends IBinderInterfaceImpostor.Stub {
+    // Intentionally empty
+  };
+
   public String basicString = "hello, world";
   public String nonAscii = "Sigma (Ʃ) is not ASCII";
   public String embeddedZero = "embedded\0...";  // Non-ASCII for string compression purposes.
@@ -158,6 +199,17 @@ public class DumpedStuff extends SuperDumpedStuff {
   public int[] modifiedArray;
   public Object objectAllocatedAtKnownSite;
   public Object objectAllocatedAtKnownSubSite;
+  public android.os.IBinder correctBinderProxy = new android.os.BinderProxy();
+  public android.os.IBinder imposedBinderProxy = new android.os.BinderProxy();
+  public android.os.IBinder carriedBinderProxy = new android.os.BinderProxy();
+  Object correctBinderProxyObject = new IDumpedManager.Stub.Proxy(correctBinderProxy);
+  Object impostorBinderProxyObject = new IBinderInterfaceImpostor.Stub.Proxy(imposedBinderProxy);
+  Object carrierBinderProxyObject = new BinderProxyCarrier(carriedBinderProxy);
+
+  Object binderService = new BinderService();
+  Object fakeBinderService = new FakeBinderService();
+  Object binderToken = new android.os.Binder();
+  Object namedBinderToken = new android.os.Binder("awesomeToken");
 
   // Allocate those objects that we need to not be GC'd before taking the heap
   // dump.

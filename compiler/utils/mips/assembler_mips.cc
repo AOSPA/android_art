@@ -179,7 +179,7 @@ void MipsAssembler::PatchCFI(size_t number_of_delayed_adjust_pcs) {
     return;
   }
 
-  typedef DebugFrameOpCodeWriterForAssembler::DelayedAdvancePC DelayedAdvancePC;
+  using DelayedAdvancePC = DebugFrameOpCodeWriterForAssembler::DelayedAdvancePC;
   const auto data = cfi().ReleaseStreamAndPrepareForDelayedAdvancePC();
   const std::vector<uint8_t>& old_stream = data.first;
   const std::vector<DelayedAdvancePC>& advances = data.second;
@@ -3610,7 +3610,7 @@ void MipsAssembler::FinalizeLabeledBranch(MipsLabel* label) {
     label->LinkTo(branch_id);
   }
   // Reserve space for the branch.
-  while (length--) {
+  for (; length != 0u; --length) {
     Nop();
   }
 }

@@ -62,10 +62,10 @@ public class Main {
 
     public static void main(String[] args) throws Exception {
         System.loadLibrary(args[0]);
-        // Only test stack frames in compiled mode.
-        if (!hasOatFile() || isInterpreted()) {
-          disableStackFrameAsserts();
-        }
+        // TODO: Stack frame assertions are irrelevant in this test as we now
+        // always run JIT with debuggable. 685-deoptimizeable is the proper version
+        // of this test, but we keep this version around to diagnose a gcstress issue.
+        disableStackFrameAsserts();
         final HashMap<DummyObject, Long> map = new HashMap<DummyObject, Long>();
 
         // Single-frame deoptimization that covers partial fragment.
@@ -126,6 +126,9 @@ public class Main {
                     assertIsManaged();
                     map.put(new DummyObject(10), Long.valueOf(100));
                     assertIsInterpreted();  // Every deoptimizeable method is deoptimized.
+                    if (map.get(new DummyObject(10)) == null) {
+                        System.out.println("Expected map to contain DummyObject(10)");
+                    }
                 } catch (Exception e) {
                     e.printStackTrace(System.out);
                 }

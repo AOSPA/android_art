@@ -24,6 +24,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <fstream>
 #include <memory>
 
 #include "android-base/file.h"
@@ -213,42 +214,25 @@ void SleepForever() {
   }
 }
 
-bool FlushInstructionPipeline() {
-  // membarrier(2) is only supported for target builds (b/111199492).
-#if defined(__BIONIC__)
-  static constexpr int kSyncCoreMask =
-      MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE |
-      MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE;
-  static bool have_probed = false;
-  static bool have_sync_core = false;
+std::string GetProcessStatus(const char* key) {
+  // Build search pattern of key and separator.
+  std::string pattern(key);
+  pattern.push_back(':');
 
-  if (UNLIKELY(!have_probed)) {
-    // Probe membarrier(2) commands supported by kernel.
-    int commands = syscall(__NR_membarrier, MEMBARRIER_CMD_QUERY, 0);
-    if (commands >= 0) {
-      have_sync_core = (commands & kSyncCoreMask) == kSyncCoreMask;
-      if (have_sync_core) {
-        // Register with kernel that we'll be using the private expedited sync core command.
-        CheckedCall(syscall,
-                    "membarrier register sync core",
-                    __NR_membarrier,
-                    MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE,
-                    0);
+  // Search for status lines starting with pattern.
+  std::ifstream fs("/proc/self/status");
+  std::string line;
+  while (std::getline(fs, line)) {
+    if (strncmp(pattern.c_str(), line.c_str(), pattern.size()) == 0) {
+      // Skip whitespace in matching line (if any).
+      size_t pos = line.find_first_not_of(" \t", pattern.size());
+      if (UNLIKELY(pos == std::string::npos)) {
+        break;
       }
+      return std::string(line, pos);
     }
-    have_probed = true;
   }
-
-  if (have_sync_core) {
-    CheckedCall(syscall,
-                "membarrier sync core",
-                __NR_membarrier,
-                MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE,
-                0);
-    return true;
-  }
-#endif  // defined(__BIONIC__)
-  return false;
+  return "<unknown>";
 }
 
 }  // namespace art

@@ -38,6 +38,7 @@
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "handle_scope.h"
 #include "instrumentation.h"
+#include "interpreter/interpreter_cache.h"
 #include "jvalue.h"
 #include "managed_stack.h"
 #include "offsets.h"
@@ -650,28 +651,28 @@ class Thread {
   //
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> ThinLockIdOffset() {
+  static constexpr ThreadOffset<pointer_size> ThinLockIdOffset() {
     return ThreadOffset<pointer_size>(
         OFFSETOF_MEMBER(Thread, tls32_) +
         OFFSETOF_MEMBER(tls_32bit_sized_values, thin_lock_thread_id));
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> InterruptedOffset() {
+  static constexpr ThreadOffset<pointer_size> InterruptedOffset() {
     return ThreadOffset<pointer_size>(
         OFFSETOF_MEMBER(Thread, tls32_) +
         OFFSETOF_MEMBER(tls_32bit_sized_values, interrupted));
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> ThreadFlagsOffset() {
+  static constexpr ThreadOffset<pointer_size> ThreadFlagsOffset() {
     return ThreadOffset<pointer_size>(
         OFFSETOF_MEMBER(Thread, tls32_) +
         OFFSETOF_MEMBER(tls_32bit_sized_values, state_and_flags));
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> IsGcMarkingOffset() {
+  static constexpr ThreadOffset<pointer_size> IsGcMarkingOffset() {
     return ThreadOffset<pointer_size>(
         OFFSETOF_MEMBER(Thread, tls32_) +
         OFFSETOF_MEMBER(tls_32bit_sized_values, is_gc_marking));
@@ -686,21 +687,12 @@ class Thread {
 
  private:
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> ThreadOffsetFromTlsPtr(size_t tls_ptr_offset) {
+  static constexpr ThreadOffset<pointer_size> ThreadOffsetFromTlsPtr(size_t tls_ptr_offset) {
     size_t base = OFFSETOF_MEMBER(Thread, tlsPtr_);
-    size_t scale;
-    size_t shrink;
-    if (pointer_size == kRuntimePointerSize) {
-      scale = 1;
-      shrink = 1;
-    } else if (pointer_size > kRuntimePointerSize) {
-      scale = static_cast<size_t>(pointer_size) / static_cast<size_t>(kRuntimePointerSize);
-      shrink = 1;
-    } else {
-      DCHECK_GT(kRuntimePointerSize, pointer_size);
-      scale = 1;
-      shrink = static_cast<size_t>(kRuntimePointerSize) / static_cast<size_t>(pointer_size);
-    }
+    size_t scale = (pointer_size > kRuntimePointerSize) ?
+      static_cast<size_t>(pointer_size) / static_cast<size_t>(kRuntimePointerSize) : 1;
+    size_t shrink = (kRuntimePointerSize > pointer_size) ?
+      static_cast<size_t>(kRuntimePointerSize) / static_cast<size_t>(pointer_size) : 1;
     return ThreadOffset<pointer_size>(base + ((tls_ptr_offset * scale) / shrink));
   }
 
@@ -740,82 +732,82 @@ class Thread {
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> SelfOffset() {
+  static constexpr ThreadOffset<pointer_size> SelfOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values, self));
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> MterpCurrentIBaseOffset() {
+  static constexpr ThreadOffset<pointer_size> MterpCurrentIBaseOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(
         OFFSETOF_MEMBER(tls_ptr_sized_values, mterp_current_ibase));
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> MterpDefaultIBaseOffset() {
+  static constexpr ThreadOffset<pointer_size> MterpDefaultIBaseOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(
         OFFSETOF_MEMBER(tls_ptr_sized_values, mterp_default_ibase));
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> MterpAltIBaseOffset() {
+  static constexpr ThreadOffset<pointer_size> MterpAltIBaseOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(
         OFFSETOF_MEMBER(tls_ptr_sized_values, mterp_alt_ibase));
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> ExceptionOffset() {
+  static constexpr ThreadOffset<pointer_size> ExceptionOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values, exception));
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> PeerOffset() {
+  static constexpr ThreadOffset<pointer_size> PeerOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values, opeer));
   }
 
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> CardTableOffset() {
+  static constexpr ThreadOffset<pointer_size> CardTableOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values, card_table));
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> ThreadSuspendTriggerOffset() {
+  static constexpr ThreadOffset<pointer_size> ThreadSuspendTriggerOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(
         OFFSETOF_MEMBER(tls_ptr_sized_values, suspend_trigger));
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> ThreadLocalPosOffset() {
+  static constexpr ThreadOffset<pointer_size> ThreadLocalPosOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values,
                                                                 thread_local_pos));
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> ThreadLocalEndOffset() {
+  static constexpr ThreadOffset<pointer_size> ThreadLocalEndOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values,
                                                                 thread_local_end));
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> ThreadLocalObjectsOffset() {
+  static constexpr ThreadOffset<pointer_size> ThreadLocalObjectsOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values,
                                                                 thread_local_objects));
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> RosAllocRunsOffset() {
+  static constexpr ThreadOffset<pointer_size> RosAllocRunsOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values,
                                                                 rosalloc_runs));
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> ThreadLocalAllocStackTopOffset() {
+  static constexpr ThreadOffset<pointer_size> ThreadLocalAllocStackTopOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values,
                                                                 thread_local_alloc_stack_top));
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> ThreadLocalAllocStackEndOffset() {
+  static constexpr ThreadOffset<pointer_size> ThreadLocalAllocStackEndOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values,
                                                                 thread_local_alloc_stack_end));
   }
@@ -858,19 +850,19 @@ class Thread {
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> StackEndOffset() {
+  static constexpr ThreadOffset<pointer_size> StackEndOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(
         OFFSETOF_MEMBER(tls_ptr_sized_values, stack_end));
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> JniEnvOffset() {
+  static constexpr ThreadOffset<pointer_size> JniEnvOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(
         OFFSETOF_MEMBER(tls_ptr_sized_values, jni_env));
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> TopOfManagedStackOffset() {
+  static constexpr ThreadOffset<pointer_size> TopOfManagedStackOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(
         OFFSETOF_MEMBER(tls_ptr_sized_values, managed_stack) +
         ManagedStack::TaggedTopQuickFrameOffset());
@@ -892,7 +884,7 @@ class Thread {
   ALWAYS_INLINE ShadowFrame* PopShadowFrame();
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> TopShadowFrameOffset() {
+  static constexpr ThreadOffset<pointer_size> TopShadowFrameOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(
         OFFSETOF_MEMBER(tls_ptr_sized_values, managed_stack) +
         ManagedStack::TopShadowFrameOffset());
@@ -921,7 +913,7 @@ class Thread {
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> TopHandleScopeOffset() {
+  static constexpr ThreadOffset<pointer_size> TopHandleScopeOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values,
                                                                 top_handle_scope));
   }
@@ -989,25 +981,17 @@ class Thread {
     --tls32_.disable_thread_flip_count;
   }
 
-  // Returns true if the thread is subject to user_code_suspensions.
-  bool CanBeSuspendedByUserCode() const {
-    return can_be_suspended_by_user_code_;
+  // Returns true if the thread is a runtime thread (eg from a ThreadPool).
+  bool IsRuntimeThread() const {
+    return is_runtime_thread_;
   }
 
-  // Sets CanBeSuspenededByUserCode and adjusts the suspend-count as needed. This may only be called
-  // when running on the current thread. It is **absolutely required** that this be called only on
-  // the Thread::Current() thread.
-  void SetCanBeSuspendedByUserCode(bool can_be_suspended_by_user_code)
-      REQUIRES(!Locks::thread_suspend_count_lock_, !Locks::user_code_suspension_lock_);
-
-  // Returns true if the thread is allowed to call into java.
-  bool CanCallIntoJava() const {
-    return can_call_into_java_;
+  void SetIsRuntimeThread(bool is_runtime_thread) {
+    is_runtime_thread_ = is_runtime_thread;
   }
 
-  void SetCanCallIntoJava(bool can_call_into_java) {
-    can_call_into_java_ = can_call_into_java;
-  }
+  // Returns true if the thread is allowed to load java classes.
+  bool CanLoadClasses() const;
 
   // Activates single step control for debugging. The thread takes the
   // ownership of the given SingleStepControl*. It is deleted by a call
@@ -1299,6 +1283,29 @@ class Thread {
                                        jobject thread_group)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  ALWAYS_INLINE InterpreterCache* GetInterpreterCache() {
+    return &interpreter_cache_;
+  }
+
+  // Clear all thread-local interpreter caches.
+  //
+  // Since the caches are keyed by memory pointer to dex instructions, this must be
+  // called when any dex code is unloaded (before different code gets loaded at the
+  // same memory location).
+  //
+  // If presence of cache entry implies some pre-conditions, this must also be
+  // called if the pre-conditions might no longer hold true.
+  static void ClearAllInterpreterCaches();
+
+  template<PointerSize pointer_size>
+  static constexpr ThreadOffset<pointer_size> InterpreterCacheOffset() {
+    return ThreadOffset<pointer_size>(OFFSETOF_MEMBER(Thread, interpreter_cache_));
+  }
+
+  static constexpr int InterpreterCacheSizeLog2() {
+    return WhichPowerOf2(InterpreterCache::kSize);
+  }
+
  private:
   explicit Thread(bool daemon);
   ~Thread() REQUIRES(!Locks::mutator_lock_, !Locks::thread_suspend_count_lock_);
@@ -1563,9 +1570,8 @@ class Thread {
     // critical section enter.
     uint32_t disable_thread_flip_count;
 
-    // If CanBeSuspendedByUserCode, how much of 'suspend_count_' is by request of user code, used to
-    // distinguish threads suspended by the runtime from those suspended by user code. Otherwise
-    // this is just a count of how many user-code suspends have been attempted (but were ignored).
+    // How much of 'suspend_count_' is by request of user code, used to distinguish threads
+    // suspended by the runtime from those suspended by user code.
     // This should have GUARDED_BY(Locks::user_code_suspension_lock_) but auto analysis cannot be
     // told that AssertHeld should be good enough.
     int user_code_suspend_count GUARDED_BY(Locks::thread_suspend_count_lock_);
@@ -1759,6 +1765,14 @@ class Thread {
     mirror::Throwable* async_exception;
   } tlsPtr_;
 
+  // Small thread-local cache to be used from the interpreter.
+  // It is keyed by dex instruction pointer.
+  // The value is opcode-depended (e.g. field offset).
+  InterpreterCache interpreter_cache_;
+
+  // All fields below this line should not be accessed by native code. This means these fields can
+  // be modified, rearranged, added or removed without having to modify asm_support.h
+
   // Guards the 'wait_monitor_' members.
   Mutex* wait_mutex_ DEFAULT_MUTEX_ACQUIRED_AFTER;
 
@@ -1780,13 +1794,8 @@ class Thread {
   // compiled code or entrypoints.
   SafeMap<std::string, std::unique_ptr<TLSData>> custom_tls_ GUARDED_BY(Locks::custom_tls_lock_);
 
-  // True if the thread is allowed to call back into java (for e.g. during class resolution).
-  // By default this is true.
-  bool can_call_into_java_;
-
-  // True if the thread is subject to user-code suspension. By default this is true. This can only
-  // be false for threads where '!can_call_into_java_'.
-  bool can_be_suspended_by_user_code_;
+  // True if the thread is some form of runtime thread (ex, GC or JIT).
+  bool is_runtime_thread_;
 
   friend class Dbg;  // For SetStateUnsafe.
   friend class gc::collector::SemiSpace;  // For getting stack traces.
