@@ -888,15 +888,6 @@ void Trace::Branch(Thread* /*thread*/, ArtMethod* method,
   LOG(ERROR) << "Unexpected branch event in tracing" << ArtMethod::PrettyMethod(method);
 }
 
-void Trace::InvokeVirtualOrInterface(Thread*,
-                                     Handle<mirror::Object>,
-                                     ArtMethod* method,
-                                     uint32_t dex_pc,
-                                     ArtMethod*) {
-  LOG(ERROR) << "Unexpected invoke event in tracing" << ArtMethod::PrettyMethod(method)
-             << " " << dex_pc;
-}
-
 void Trace::WatchedFramePop(Thread* self ATTRIBUTE_UNUSED,
                             const ShadowFrame& frame ATTRIBUTE_UNUSED) {
   LOG(ERROR) << "Unexpected WatchedFramePop event in tracing";
@@ -1124,7 +1115,7 @@ static void DumpThread(Thread* t, void* arg) {
 
 void Trace::DumpThreadList(std::ostream& os) {
   Thread* self = Thread::Current();
-  for (auto it : exited_threads_) {
+  for (const auto& it : exited_threads_) {
     os << it.first << "\t" << it.second << "\n";
   }
   Locks::thread_list_lock_->AssertNotHeld(self);

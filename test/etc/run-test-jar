@@ -17,7 +17,7 @@ CHROOT=
 COMPILE_FLAGS=""
 DALVIKVM="dalvikvm32"
 DEBUGGER="n"
-WITH_AGENT=""
+WITH_AGENT=()
 DEBUGGER_AGENT=""
 WRAP_DEBUGGER_AGENT="n"
 DEV_MODE="n"
@@ -40,7 +40,6 @@ LIBRARY_DIRECTORY="lib"
 TEST_DIRECTORY="nativetest"
 MAIN=""
 OPTIMIZE="y"
-PATCHOAT=""
 PREBUILD="y"
 QUIET="n"
 RELOCATE="n"
@@ -59,7 +58,6 @@ USE_JVMTI="n"
 VERIFY="y" # y=yes,n=no,s=softfail
 ZYGOTE=""
 DEX_VERIFY=""
-USE_PATCHOAT="y"
 INSTRUCTION_SET_FEATURES=""
 ARGS=""
 EXTERNAL_LOG_TAGS="n" # if y respect externally set ANDROID_LOG_TAGS.
@@ -166,10 +164,6 @@ while true; do
         shift
         BOOT_IMAGE="$1"
         shift
-    elif [ "x$1" = "x--no-patchoat" ]; then
-        PATCHOAT="-Xpatchoat:${FALSE_BIN}"
-        USE_PATCHOAT="n"
-        shift
     elif [ "x$1" = "x--relocate" ]; then
         RELOCATE="y"
         shift
@@ -232,7 +226,7 @@ while true; do
     elif [ "x$1" = "x--with-agent" ]; then
         shift
         USE_JVMTI="y"
-        WITH_AGENT="$1"
+        WITH_AGENT+=("$1")
         shift
     elif [ "x$1" = "x--debug-wrap-agent" ]; then
         WRAP_DEBUGGER_AGENT="y"
@@ -454,9 +448,9 @@ elif [ "$DEBUGGER" = "agent" ]; then
   DEBUGGER_OPTS="-agentpath:${AGENTPATH}=transport=dt_socket,address=$PORT,server=y,suspend=y"
 fi
 
-if [ "x$WITH_AGENT" != "x" ]; then
-  FLAGS="${FLAGS} -agentpath:${WITH_AGENT}"
-fi
+for agent in "${WITH_AGENT[@]}"; do
+  FLAGS="${FLAGS} -agentpath:${agent}"
+done
 
 if [ "$USE_JVMTI" = "y" ]; then
   if [ "$USE_JVM" = "n" ]; then
@@ -774,7 +768,6 @@ dalvikvm_cmdline="$INVOKE_WITH $GDB $ANDROID_ROOT/bin/$DALVIKVM \
                   $FLAGS \
                   $DEX_VERIFY \
                   -XXlib:$LIB \
-                  $PATCHOAT \
                   $DEX2OAT \
                   $DALVIKVM_ISA_FEATURES_ARGS \
                   $ZYGOTE \
@@ -803,15 +796,11 @@ if [ "x$RUN_TEST_ASAN_OPTIONS" != "x" ] ; then
 fi
 RUN_TEST_ASAN_OPTIONS="${RUN_TEST_ASAN_OPTIONS}detect_leaks=0"
 
-# For running, we must turn off logging when dex2oat or patchoat are missing. Otherwise we use
+# For running, we must turn off logging when dex2oat is missing. Otherwise we use
 # the same defaults as for prebuilt: everything when --dev, otherwise errors and above only.
 if [ "$EXTERNAL_LOG_TAGS" = "n" ]; then
   if [ "$DEV_MODE" = "y" ]; then
       export ANDROID_LOG_TAGS='*:d'
-  elif [ "$USE_PATCHOAT" = "n" ]; then
-      # All tests would log the error of failing dex2oat/patchoat. Be silent here and only
-      # log fatal events.
-      export ANDROID_LOG_TAGS='*:s'
   elif [ "$HAVE_IMAGE" = "n" ]; then
       # All tests would log the error of missing image. Be silent here and only log fatal
       # events.
@@ -988,6 +977,7 @@ else
 
     if [ "$USE_GDB" = "y" ]; then
       # When running under gdb, we cannot do piping and grepping...
+      echo "Run 'gdbclient.py -p <pid printed below>' to debug."
       $cmdline "$@"
     else
       if [ "$TIME_OUT" != "gdb" ]; then

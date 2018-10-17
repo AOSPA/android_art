@@ -226,51 +226,51 @@ class MANAGED DexCache final : public Object {
     return GetFieldObject<String>(OFFSET_OF_OBJECT_MEMBER(DexCache, location_));
   }
 
-  static MemberOffset StringsOffset() {
+  static constexpr MemberOffset StringsOffset() {
     return OFFSET_OF_OBJECT_MEMBER(DexCache, strings_);
   }
 
-  static MemberOffset ResolvedTypesOffset() {
+  static constexpr MemberOffset ResolvedTypesOffset() {
     return OFFSET_OF_OBJECT_MEMBER(DexCache, resolved_types_);
   }
 
-  static MemberOffset ResolvedFieldsOffset() {
+  static constexpr MemberOffset ResolvedFieldsOffset() {
     return OFFSET_OF_OBJECT_MEMBER(DexCache, resolved_fields_);
   }
 
-  static MemberOffset ResolvedMethodsOffset() {
+  static constexpr MemberOffset ResolvedMethodsOffset() {
     return OFFSET_OF_OBJECT_MEMBER(DexCache, resolved_methods_);
   }
 
-  static MemberOffset ResolvedMethodTypesOffset() {
+  static constexpr MemberOffset ResolvedMethodTypesOffset() {
     return OFFSET_OF_OBJECT_MEMBER(DexCache, resolved_method_types_);
   }
 
-  static MemberOffset ResolvedCallSitesOffset() {
+  static constexpr MemberOffset ResolvedCallSitesOffset() {
     return OFFSET_OF_OBJECT_MEMBER(DexCache, resolved_call_sites_);
   }
 
-  static MemberOffset NumStringsOffset() {
+  static constexpr MemberOffset NumStringsOffset() {
     return OFFSET_OF_OBJECT_MEMBER(DexCache, num_strings_);
   }
 
-  static MemberOffset NumResolvedTypesOffset() {
+  static constexpr MemberOffset NumResolvedTypesOffset() {
     return OFFSET_OF_OBJECT_MEMBER(DexCache, num_resolved_types_);
   }
 
-  static MemberOffset NumResolvedFieldsOffset() {
+  static constexpr MemberOffset NumResolvedFieldsOffset() {
     return OFFSET_OF_OBJECT_MEMBER(DexCache, num_resolved_fields_);
   }
 
-  static MemberOffset NumResolvedMethodsOffset() {
+  static constexpr MemberOffset NumResolvedMethodsOffset() {
     return OFFSET_OF_OBJECT_MEMBER(DexCache, num_resolved_methods_);
   }
 
-  static MemberOffset NumResolvedMethodTypesOffset() {
+  static constexpr MemberOffset NumResolvedMethodTypesOffset() {
     return OFFSET_OF_OBJECT_MEMBER(DexCache, num_resolved_method_types_);
   }
 
-  static MemberOffset NumResolvedCallSitesOffset() {
+  static constexpr MemberOffset NumResolvedCallSitesOffset() {
     return OFFSET_OF_OBJECT_MEMBER(DexCache, num_resolved_call_sites_);
   }
 
@@ -326,16 +326,18 @@ class MANAGED DexCache final : public Object {
   ObjPtr<CallSite> SetResolvedCallSite(uint32_t call_site_idx, ObjPtr<CallSite> resolved)
       REQUIRES_SHARED(Locks::mutator_lock_) WARN_UNUSED;
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   StringDexCacheType* GetStrings() ALWAYS_INLINE REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetFieldPtr64<StringDexCacheType*>(StringsOffset());
+    return GetFieldPtr64<StringDexCacheType*, kVerifyFlags>(StringsOffset());
   }
 
   void SetStrings(StringDexCacheType* strings) ALWAYS_INLINE REQUIRES_SHARED(Locks::mutator_lock_) {
     SetFieldPtr<false>(StringsOffset(), strings);
   }
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   TypeDexCacheType* GetResolvedTypes() ALWAYS_INLINE REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetFieldPtr<TypeDexCacheType*>(ResolvedTypesOffset());
+    return GetFieldPtr<TypeDexCacheType*, kVerifyFlags>(ResolvedTypesOffset());
   }
 
   void SetResolvedTypes(TypeDexCacheType* resolved_types)
@@ -364,9 +366,10 @@ class MANAGED DexCache final : public Object {
     SetFieldPtr<false>(ResolvedFieldsOffset(), resolved_fields);
   }
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   MethodTypeDexCacheType* GetResolvedMethodTypes()
       ALWAYS_INLINE REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetFieldPtr64<MethodTypeDexCacheType*>(ResolvedMethodTypesOffset());
+    return GetFieldPtr64<MethodTypeDexCacheType*, kVerifyFlags>(ResolvedMethodTypesOffset());
   }
 
   void SetResolvedMethodTypes(MethodTypeDexCacheType* resolved_method_types)
@@ -375,10 +378,11 @@ class MANAGED DexCache final : public Object {
     SetFieldPtr<false>(ResolvedMethodTypesOffset(), resolved_method_types);
   }
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   GcRoot<CallSite>* GetResolvedCallSites()
       ALWAYS_INLINE
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetFieldPtr<GcRoot<CallSite>*>(ResolvedCallSitesOffset());
+    return GetFieldPtr<GcRoot<CallSite>*, kVerifyFlags>(ResolvedCallSitesOffset());
   }
 
   void SetResolvedCallSites(GcRoot<CallSite>* resolved_call_sites)
@@ -387,28 +391,34 @@ class MANAGED DexCache final : public Object {
     SetFieldPtr<false>(ResolvedCallSitesOffset(), resolved_call_sites);
   }
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   size_t NumStrings() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetField32(NumStringsOffset());
+    return GetField32<kVerifyFlags>(NumStringsOffset());
   }
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   size_t NumResolvedTypes() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetField32(NumResolvedTypesOffset());
+    return GetField32<kVerifyFlags>(NumResolvedTypesOffset());
   }
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   size_t NumResolvedMethods() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetField32(NumResolvedMethodsOffset());
+    return GetField32<kVerifyFlags>(NumResolvedMethodsOffset());
   }
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   size_t NumResolvedFields() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetField32(NumResolvedFieldsOffset());
+    return GetField32<kVerifyFlags>(NumResolvedFieldsOffset());
   }
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   size_t NumResolvedMethodTypes() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetField32(NumResolvedMethodTypesOffset());
+    return GetField32<kVerifyFlags>(NumResolvedMethodTypesOffset());
   }
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   size_t NumResolvedCallSites() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetField32(NumResolvedCallSitesOffset());
+    return GetField32<kVerifyFlags>(NumResolvedCallSitesOffset());
   }
 
   const DexFile* GetDexFile() ALWAYS_INLINE REQUIRES_SHARED(Locks::mutator_lock_) {

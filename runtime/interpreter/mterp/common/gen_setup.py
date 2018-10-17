@@ -15,6 +15,8 @@
 #
 
 # Common global variables and helper methods for the in-memory python script.
+# The script starts with this file and is followed by the code generated form
+# the templated snippets. Those define all the helper functions used below.
 
 import sys, re
 from cStringIO import StringIO
@@ -42,9 +44,29 @@ def write_opcode(num, name, write_method, is_alt):
   if is_alt:
     alt_stub()
   else:
+    opcode_start()
     write_method()
+    opcode_end()
   write_line("")
   opnum, opcode = None, None
+
+generated_helpers = list()
+
+# This method generates a helper using the provided writer method.
+# The output is temporarily redirected to in-memory buffer.
+# It returns the symbol which can be used to jump to the helper.
+def add_helper(name_suffix, write_helper):
+  global out
+  old_out = out
+  out = StringIO()
+  name = "Mterp_" + opcode + "_" + name_suffix
+  helper_start(name)
+  write_helper()
+  helper_end(name)
+  out.seek(0)
+  generated_helpers.append(out.read())
+  out = old_out
+  return name
 
 def generate(output_filename):
   out.seek(0)
@@ -58,6 +80,8 @@ def generate(output_filename):
   balign()
   instruction_end()
 
+  for helper in generated_helpers:
+    out.write(helper)
   helpers()
 
   instruction_start_alt()

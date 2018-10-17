@@ -92,10 +92,10 @@ static constexpr bool kOatWriterForceOatCodeLayout = false;
 
 static constexpr bool kOatWriterDebugOatCodeLayout = false;
 
-typedef DexFile::Header __attribute__((aligned(1))) UnalignedDexFileHeader;
+using UnalignedDexFileHeader __attribute__((__aligned__(1))) = DexFile::Header;
 
 const UnalignedDexFileHeader* AsUnalignedDexFileHeader(const uint8_t* raw_data) {
-    return reinterpret_cast<const UnalignedDexFileHeader*>(raw_data);
+  return reinterpret_cast<const UnalignedDexFileHeader*>(raw_data);
 }
 
 class ChecksumUpdatingOutputStream : public OutputStream {
@@ -2405,7 +2405,7 @@ bool OatWriter::WriteRodata(OutputStream* out) {
   if (static_cast<uint32_t>(new_offset) != expected_file_offset) {
     PLOG(ERROR) << "Failed to seek to oat code section. Actual: " << new_offset
                 << " Expected: " << expected_file_offset << " File: " << out->GetLocation();
-    return 0;
+    return false;
   }
   DCHECK_OFFSET();
 

@@ -42,11 +42,11 @@ static const char* kProgramName = "dexlayout";
 /*
  * Shows usage.
  */
-static void Usage(void) {
+static void Usage() {
   LOG(ERROR) << "Copyright (C) 2016 The Android Open Source Project\n";
   LOG(ERROR) << kProgramName
              << ": [-a] [-c] [-d] [-e] [-f] [-h] [-i] [-l layout] [-o outfile] [-p profile]"
-                " [-s] [-t] [-v] [-w directory] dexfile...\n";
+                " [-s] [-t] [-u] [-v] [-w directory] dexfile...\n";
   LOG(ERROR) << " -a : display annotations";
   LOG(ERROR) << " -b : build dex_ir";
   LOG(ERROR) << " -c : verify checksum and exit";
@@ -85,7 +85,7 @@ int DexlayoutDriver(int argc, char** argv) {
   bool want_usage = false;
 
   // Parse all arguments.
-  while (1) {
+  while (true) {
     const int ic = getopt(argc, argv, "abcdefghil:o:p:stuvw:x:");
     if (ic < 0) {
       break;  // done

@@ -49,7 +49,6 @@ class VerifierDepsCompilerCallbacks : public CompilerCallbacks {
 
   void MethodVerified(verifier::MethodVerifier* verifier ATTRIBUTE_UNUSED) override {}
   void ClassRejected(ClassReference ref ATTRIBUTE_UNUSED) override {}
-  bool IsRelocationPossible() override { return false; }
 
   verifier::VerifierDeps* GetVerifierDeps() const override { return deps_; }
   void SetVerifierDeps(verifier::VerifierDeps* deps) override { deps_ = deps; }
@@ -424,7 +423,7 @@ class VerifierDepsTest : public CommonCompilerTest {
     return verifier_deps_->dex_deps_.size();
   }
 
-  size_t HasEachKindOfRecord() {
+  bool HasEachKindOfRecord() {
     bool has_strings = false;
     bool has_assignability = false;
     bool has_classes = false;

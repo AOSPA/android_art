@@ -31,7 +31,8 @@ namespace space {
 static constexpr uint kEvacuateLivePercentThreshold = 75U;
 
 // Whether we protect the unused and cleared regions.
-static constexpr bool kProtectClearedRegions = true;
+// Only protect for target builds to prevent flaky test failures (b/63131961).
+static constexpr bool kProtectClearedRegions = kIsTargetBuild;
 
 // Wether we poison memory areas occupied by dead objects in unevacuated regions.
 static constexpr bool kPoisonDeadObjectsInUnevacuatedRegions = true;
@@ -69,6 +70,7 @@ MemMap RegionSpace::CreateMemMap(const std::string& name,
   if (!mem_map.IsValid()) {
     LOG(ERROR) << "Failed to allocate pages for alloc space (" << name << ") of size "
         << PrettySize(capacity) << " with message " << error_msg;
+    PrintFileToLog("/proc/self/maps", LogSeverity::ERROR);
     MemMap::DumpMaps(LOG_STREAM(ERROR));
     return MemMap::Invalid();
   }

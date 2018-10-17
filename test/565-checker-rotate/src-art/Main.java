@@ -20,11 +20,10 @@ public class Main {
 
   private static Class main2;
 
-  /// CHECK-START: int Main.rotateLeftByte(byte, int) intrinsics_recognition (after)
-  /// CHECK-DAG:     <<Method:[ij]\d+>> CurrentMethod
+  /// CHECK-START: int Main.rotateLeftByte(byte, int) builder (after)
   /// CHECK:         <<ArgVal:b\d+>>  ParameterValue
   /// CHECK:         <<ArgDist:i\d+>> ParameterValue
-  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>,<<Method>>] intrinsic:IntegerRotateLeft
+  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>{{(,[ij]\d+)?}}] intrinsic:IntegerRotateLeft
   /// CHECK-DAG:                      Return [<<Result>>]
 
   /// CHECK-START: int Main.rotateLeftByte(byte, int) instruction_simplifier (after)
@@ -41,11 +40,10 @@ public class Main {
     return Integer.rotateLeft(value, distance);
   }
 
-  /// CHECK-START: int Main.rotateLeftShort(short, int) intrinsics_recognition (after)
-  /// CHECK-DAG:     <<Method:[ij]\d+>> CurrentMethod
+  /// CHECK-START: int Main.rotateLeftShort(short, int) builder (after)
   /// CHECK:         <<ArgVal:s\d+>>  ParameterValue
   /// CHECK:         <<ArgDist:i\d+>> ParameterValue
-  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>,<<Method>>] intrinsic:IntegerRotateLeft
+  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>{{(,[ij]\d+)?}}] intrinsic:IntegerRotateLeft
   /// CHECK-DAG:                      Return [<<Result>>]
 
   /// CHECK-START: int Main.rotateLeftShort(short, int) instruction_simplifier (after)
@@ -62,11 +60,10 @@ public class Main {
     return Integer.rotateLeft(value, distance);
   }
 
-  /// CHECK-START: int Main.rotateLeftChar(char, int) intrinsics_recognition (after)
-  /// CHECK-DAG:     <<Method:[ij]\d+>> CurrentMethod
+  /// CHECK-START: int Main.rotateLeftChar(char, int) builder (after)
   /// CHECK:         <<ArgVal:c\d+>>  ParameterValue
   /// CHECK:         <<ArgDist:i\d+>> ParameterValue
-  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>,<<Method>>] intrinsic:IntegerRotateLeft
+  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>{{(,[ij]\d+)?}}] intrinsic:IntegerRotateLeft
   /// CHECK-DAG:                      Return [<<Result>>]
 
   /// CHECK-START: int Main.rotateLeftChar(char, int) instruction_simplifier (after)
@@ -83,11 +80,10 @@ public class Main {
     return Integer.rotateLeft(value, distance);
   }
 
-  /// CHECK-START: int Main.rotateLeftInt(int, int) intrinsics_recognition (after)
-  /// CHECK-DAG:     <<Method:[ij]\d+>> CurrentMethod
+  /// CHECK-START: int Main.rotateLeftInt(int, int) builder (after)
   /// CHECK:         <<ArgVal:i\d+>>  ParameterValue
   /// CHECK:         <<ArgDist:i\d+>> ParameterValue
-  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>,<<Method>>] intrinsic:IntegerRotateLeft
+  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>{{(,[ij]\d+)?}}] intrinsic:IntegerRotateLeft
   /// CHECK-DAG:                      Return [<<Result>>]
 
   /// CHECK-START: int Main.rotateLeftInt(int, int) instruction_simplifier (after)
@@ -104,11 +100,10 @@ public class Main {
     return Integer.rotateLeft(value, distance);
   }
 
-  /// CHECK-START: long Main.rotateLeftLong(long, int) intrinsics_recognition (after)
-  /// CHECK-DAG:     <<Method:[ij]\d+>> CurrentMethod
+  /// CHECK-START: long Main.rotateLeftLong(long, int) builder (after)
   /// CHECK:         <<ArgVal:j\d+>>  ParameterValue
   /// CHECK:         <<ArgDist:i\d+>> ParameterValue
-  /// CHECK-DAG:     <<Result:j\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>,<<Method>>] intrinsic:LongRotateLeft
+  /// CHECK-DAG:     <<Result:j\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>{{(,[ij]\d+)?}}] intrinsic:LongRotateLeft
   /// CHECK-DAG:                      Return [<<Result>>]
 
   /// CHECK-START: long Main.rotateLeftLong(long, int) instruction_simplifier (after)
@@ -125,11 +120,10 @@ public class Main {
     return Long.rotateLeft(value, distance);
   }
 
-  /// CHECK-START: int Main.rotateRightByte(byte, int) intrinsics_recognition (after)
-  /// CHECK-DAG:     <<Method:[ij]\d+>> CurrentMethod
+  /// CHECK-START: int Main.rotateRightByte(byte, int) builder (after)
   /// CHECK:         <<ArgVal:b\d+>>  ParameterValue
   /// CHECK:         <<ArgDist:i\d+>> ParameterValue
-  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>,<<Method>>] intrinsic:IntegerRotateRight
+  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>{{(,[ij]\d+)?}}] intrinsic:IntegerRotateRight
   /// CHECK-DAG:                      Return [<<Result>>]
 
   /// CHECK-START: int Main.rotateRightByte(byte, int) instruction_simplifier (after)
@@ -145,11 +139,10 @@ public class Main {
     return Integer.rotateRight(value, distance);
   }
 
-  /// CHECK-START: int Main.rotateRightShort(short, int) intrinsics_recognition (after)
-  /// CHECK-DAG:     <<Method:[ij]\d+>> CurrentMethod
+  /// CHECK-START: int Main.rotateRightShort(short, int) builder (after)
   /// CHECK:         <<ArgVal:s\d+>>  ParameterValue
   /// CHECK:         <<ArgDist:i\d+>> ParameterValue
-  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>,<<Method>>] intrinsic:IntegerRotateRight
+  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>{{(,[ij]\d+)?}}] intrinsic:IntegerRotateRight
   /// CHECK-DAG:                      Return [<<Result>>]
 
   /// CHECK-START: int Main.rotateRightShort(short, int) instruction_simplifier (after)
@@ -165,11 +158,10 @@ public class Main {
     return Integer.rotateRight(value, distance);
   }
 
-  /// CHECK-START: int Main.rotateRightChar(char, int) intrinsics_recognition (after)
-  /// CHECK-DAG:     <<Method:[ij]\d+>> CurrentMethod
+  /// CHECK-START: int Main.rotateRightChar(char, int) builder (after)
   /// CHECK:         <<ArgVal:c\d+>>  ParameterValue
   /// CHECK:         <<ArgDist:i\d+>> ParameterValue
-  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>,<<Method>>] intrinsic:IntegerRotateRight
+  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>{{(,[ij]\d+)?}}] intrinsic:IntegerRotateRight
   /// CHECK-DAG:                      Return [<<Result>>]
 
   /// CHECK-START: int Main.rotateRightChar(char, int) instruction_simplifier (after)
@@ -185,11 +177,10 @@ public class Main {
     return Integer.rotateRight(value, distance);
   }
 
-  /// CHECK-START: int Main.rotateRightInt(int, int) intrinsics_recognition (after)
-  /// CHECK-DAG:     <<Method:[ij]\d+>> CurrentMethod
+  /// CHECK-START: int Main.rotateRightInt(int, int) builder (after)
   /// CHECK:         <<ArgVal:i\d+>>  ParameterValue
   /// CHECK:         <<ArgDist:i\d+>> ParameterValue
-  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>,<<Method>>] intrinsic:IntegerRotateRight
+  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>{{(,[ij]\d+)?}}] intrinsic:IntegerRotateRight
   /// CHECK-DAG:                      Return [<<Result>>]
 
   /// CHECK-START: int Main.rotateRightInt(int, int) instruction_simplifier (after)
@@ -205,11 +196,10 @@ public class Main {
     return Integer.rotateRight(value, distance);
   }
 
-  /// CHECK-START: long Main.rotateRightLong(long, int) intrinsics_recognition (after)
-  /// CHECK-DAG:     <<Method:[ij]\d+>> CurrentMethod
+  /// CHECK-START: long Main.rotateRightLong(long, int) builder (after)
   /// CHECK:         <<ArgVal:j\d+>>  ParameterValue
   /// CHECK:         <<ArgDist:i\d+>> ParameterValue
-  /// CHECK-DAG:     <<Result:j\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>,<<Method>>] intrinsic:LongRotateRight
+  /// CHECK-DAG:     <<Result:j\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>{{(,[ij]\d+)?}}] intrinsic:LongRotateRight
   /// CHECK-DAG:                      Return [<<Result>>]
 
   /// CHECK-START: long Main.rotateRightLong(long, int) instruction_simplifier (after)
@@ -226,11 +216,10 @@ public class Main {
   }
 
 
-  /// CHECK-START: int Main.rotateLeftIntWithByteDistance(int, byte) intrinsics_recognition (after)
-  /// CHECK-DAG:     <<Method:[ij]\d+>> CurrentMethod
+  /// CHECK-START: int Main.rotateLeftIntWithByteDistance(int, byte) builder (after)
   /// CHECK:         <<ArgVal:i\d+>>  ParameterValue
   /// CHECK:         <<ArgDist:b\d+>> ParameterValue
-  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>,<<Method>>] intrinsic:IntegerRotateLeft
+  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>{{(,[ij]\d+)?}}] intrinsic:IntegerRotateLeft
   /// CHECK-DAG:                      Return [<<Result>>]
 
   /// CHECK-START: int Main.rotateLeftIntWithByteDistance(int, byte) instruction_simplifier (after)
@@ -247,11 +236,10 @@ public class Main {
     return Integer.rotateLeft(value, distance);
   }
 
-  /// CHECK-START: int Main.rotateRightIntWithByteDistance(int, byte) intrinsics_recognition (after)
-  /// CHECK-DAG:     <<Method:[ij]\d+>> CurrentMethod
+  /// CHECK-START: int Main.rotateRightIntWithByteDistance(int, byte) builder (after)
   /// CHECK:         <<ArgVal:i\d+>>  ParameterValue
   /// CHECK:         <<ArgDist:b\d+>> ParameterValue
-  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>,<<Method>>] intrinsic:IntegerRotateRight
+  /// CHECK-DAG:     <<Result:i\d+>>  InvokeStaticOrDirect [<<ArgVal>>,<<ArgDist>>{{(,[ij]\d+)?}}] intrinsic:IntegerRotateRight
   /// CHECK-DAG:                      Return [<<Result>>]
 
   /// CHECK-START: int Main.rotateRightIntWithByteDistance(int, byte) instruction_simplifier (after)

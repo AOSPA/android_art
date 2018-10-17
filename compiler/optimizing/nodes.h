@@ -29,6 +29,7 @@
 #include "base/quasi_atomic.h"
 #include "base/stl_util.h"
 #include "base/transform_array_ref.h"
+#include "art_method.h"
 #include "data_type.h"
 #include "deoptimization_kind.h"
 #include "dex/dex_file.h"
@@ -128,6 +129,7 @@ enum GraphAnalysisResult {
   kAnalysisInvalidBytecode,
   kAnalysisFailThrowCatchLoop,
   kAnalysisFailAmbiguousArrayOp,
+  kAnalysisFailIrreducibleLoopAndStringInit,
   kAnalysisSuccess,
 };
 
@@ -1453,6 +1455,7 @@ class HLoopInformationOutwardIterator : public ValueObject {
   M(VecSetScalars, VecOperation)                                        \
   M(VecMultiplyAccumulate, VecOperation)                                \
   M(VecSADAccumulate, VecOperation)                                     \
+  M(VecDotProd, VecOperation)                                           \
   M(VecLoad, VecMemoryOperation)                                        \
   M(VecStore, VecMemoryOperation)                                       \
 
@@ -4322,7 +4325,7 @@ class HInvoke : public HVariableInputSizeInstruction {
   bool IsIntrinsic() const { return intrinsic_ != Intrinsics::kNone; }
 
   ArtMethod* GetResolvedMethod() const { return resolved_method_; }
-  void SetResolvedMethod(ArtMethod* method) { resolved_method_ = method; }
+  void SetResolvedMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
 
   DECLARE_ABSTRACT_INSTRUCTION(Invoke);
 
@@ -4354,12 +4357,14 @@ class HInvoke : public HVariableInputSizeInstruction {
           number_of_arguments + number_of_other_inputs,
           kArenaAllocInvokeInputs),
       number_of_arguments_(number_of_arguments),
-      resolved_method_(resolved_method),
       dex_method_index_(dex_method_index),
       intrinsic_(Intrinsics::kNone),
       intrinsic_optimizations_(0) {
     SetPackedField<InvokeTypeField>(invoke_type);
     SetPackedFlag<kFlagCanThrow>(true);
+    // Check mutator lock, constructors lack annotalysis support.
+    Locks::mutator_lock_->AssertNotExclusiveHeld(Thread::Current());
+    SetResolvedMethod(resolved_method);
   }
 
   DEFAULT_COPY_CONSTRUCTOR(Invoke);
@@ -4533,8 +4538,7 @@ class HInvokeStaticOrDirect final : public HInvoke {
                 allocator,
                 number_of_arguments,
                 // There is potentially one extra argument for the HCurrentMethod node, and
-                // potentially one other if the clinit check is explicit, and potentially
-                // one other if the method is a string factory.
+                // potentially one other if the clinit check is explicit.
                 (NeedsCurrentMethodInput(dispatch_info.method_load_kind) ? 1u : 0u) +
                     (clinit_check_requirement == ClinitCheckRequirement::kExplicit ? 1u : 0u),
                 return_type,
@@ -6136,6 +6140,9 @@ class HBoundsCheck final : public HExpression<2> {
 
  private:
   static constexpr size_t kFlagIsStringCharAt = kNumberOfGenericPackedBits;
+  static constexpr size_t kNumberOfBoundsCheckPackedBits = kFlagIsStringCharAt + 1;
+  static_assert(kNumberOfBoundsCheckPackedBits <= HInstruction::kMaxNumberOfPackedBits,
+                "Too many packed fields.");
 };
 
 class HSuspendCheck final : public HExpression<0> {

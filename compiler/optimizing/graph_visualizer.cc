@@ -106,8 +106,7 @@ std::ostream& operator<<(std::ostream& os, const StringList& list) {
   }
 }
 
-typedef Disassembler* create_disasm_prototype(InstructionSet instruction_set,
-                                              DisassemblerOptions* options);
+using create_disasm_prototype = Disassembler*(InstructionSet, DisassemblerOptions*);
 class HGraphVisualizerDisassembler {
  public:
   HGraphVisualizerDisassembler(InstructionSet instruction_set,
@@ -562,6 +561,14 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
   void VisitVecMultiplyAccumulate(HVecMultiplyAccumulate* instruction) override {
     VisitVecOperation(instruction);
     StartAttributeStream("kind") << instruction->GetOpKind();
+  }
+
+  void VisitVecDotProd(HVecDotProd* instruction) override {
+    VisitVecOperation(instruction);
+    DataType::Type arg_type = instruction->InputAt(1)->AsVecOperation()->GetPackedType();
+    StartAttributeStream("type") << (instruction->IsZeroExtending() ?
+                                    DataType::ToUnsigned(arg_type) :
+                                    DataType::ToSigned(arg_type));
   }
 
 #if defined(ART_ENABLE_CODEGEN_arm) || defined(ART_ENABLE_CODEGEN_arm64)
