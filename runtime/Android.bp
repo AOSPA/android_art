@@ -19,8 +19,8 @@
 // new jit code is generated. We don't want it to be called when a different function with the same
 // (empty) body is called.
 JIT_DEBUG_REGISTER_CODE_LDFLAGS = [
-    "-Wl,--keep-unique,__jit_debug_register_code",
-    "-Wl,--keep-unique,__dex_debug_register_code"
+    // "-Wl,--keep-unique,__jit_debug_register_code",
+    // "-Wl,--keep-unique,__dex_debug_register_code"
 ]
 
 libart_cc_defaults {
