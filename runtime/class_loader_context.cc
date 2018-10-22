@@ -19,6 +19,7 @@
 #include <android-base/parseint.h>
 
 #include "art_field-inl.h"
+#include "base/casts.h"
 #include "base/dchecked_vector.h"
 #include "base/stl_util.h"
 #include "class_linker.h"
@@ -63,10 +64,10 @@ ClassLoaderContext::~ClassLoaderContext() {
     // make sure we do not de-allocate them.
     for (ClassLoaderInfo& info : class_loader_chain_) {
       for (std::unique_ptr<OatFile>& oat_file : info.opened_oat_files) {
-        oat_file.release();
+        oat_file.release();  // NOLINT b/117926937
       }
       for (std::unique_ptr<const DexFile>& dex_file : info.opened_dex_files) {
-        dex_file.release();
+        dex_file.release();  // NOLINT b/117926937
       }
     }
   }
@@ -474,8 +475,8 @@ static bool CollectDexFilesFromJavaDexFile(ObjPtr<mirror::Object> java_dex_file,
   int32_t long_array_size = long_array->GetLength();
   // Index 0 from the long array stores the oat file. The dex files start at index 1.
   for (int32_t j = 1; j < long_array_size; ++j) {
-    const DexFile* cp_dex_file = reinterpret_cast<const DexFile*>(static_cast<uintptr_t>(
-        long_array->GetWithoutChecks(j)));
+    const DexFile* cp_dex_file =
+        reinterpret_cast64<const DexFile*>(long_array->GetWithoutChecks(j));
     if (cp_dex_file != nullptr && cp_dex_file->NumClassDefs() > 0) {
       // TODO(calin): It's unclear why the dex files with no classes are skipped here and when
       // cp_dex_file can be null.

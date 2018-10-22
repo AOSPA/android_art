@@ -18,6 +18,7 @@
 
 #include <cmath>
 
+#include "base/casts.h"
 #include "base/enums.h"
 #include "class_root.h"
 #include "debugger.h"
@@ -371,6 +372,12 @@ bool DoIPutQuick(const ShadowFrame& shadow_frame, const Instruction* inst, uint1
     if (UNLIKELY(self->IsExceptionPending())) {
       return false;
     }
+    if (UNLIKELY(shadow_frame.GetForcePopFrame())) {
+      // Don't actually set the field. The next instruction will force us to pop.
+      DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
+      DCHECK(PrevFrameWillRetry(self, shadow_frame));
+      return true;
+    }
   }
   // Note: iput-x-quick instructions are only for non-volatile fields.
   switch (field_type) {
@@ -440,6 +447,11 @@ bool MoveToExceptionHandler(Thread* self,
       self->IsExceptionThrownByCurrentMethod(exception.Get())) {
     // See b/65049545 for why we don't need to check to see if the exception has changed.
     instrumentation->ExceptionThrownEvent(self, exception.Get());
+    if (shadow_frame.GetForcePopFrame()) {
+      // We will check in the caller for GetForcePopFrame again. We need to bail out early to
+      // prevent an ExceptionHandledEvent from also being sent before popping.
+      return true;
+    }
   }
   bool clear_exception = false;
   uint32_t found_dex_pc = shadow_frame.GetMethod()->FindCatchBlock(
@@ -584,10 +596,10 @@ void SetStringInitValueToAllAliases(ShadowFrame* shadow_frame,
   for (uint32_t i = 0, e = shadow_frame->NumberOfVRegs(); i < e; ++i) {
     if (shadow_frame->GetVRegReference(i) == existing) {
       DCHECK_EQ(shadow_frame->GetVRegReference(i),
-                reinterpret_cast<mirror::Object*>(static_cast<uint32_t>(shadow_frame->GetVReg(i))));
+                reinterpret_cast32<mirror::Object*>(shadow_frame->GetVReg(i)));
       shadow_frame->SetVRegReference(i, result.GetL());
       DCHECK_EQ(shadow_frame->GetVRegReference(i),
-                reinterpret_cast<mirror::Object*>(static_cast<uint32_t>(shadow_frame->GetVReg(i))));
+                reinterpret_cast32<mirror::Object*>(shadow_frame->GetVReg(i)));
     }
   }
 }
@@ -1445,7 +1457,7 @@ static inline void AssignRegister(ShadowFrame* new_shadow_frame, const ShadowFra
   // If both register locations contains the same value, the register probably holds a reference.
   // Note: As an optimization, non-moving collectors leave a stale reference value
   // in the references array even after the original vreg was overwritten to a non-reference.
-  if (src_value == reinterpret_cast<uintptr_t>(o.Ptr())) {
+  if (src_value == reinterpret_cast32<uint32_t>(o.Ptr())) {
     new_shadow_frame->SetVRegReference(dest_reg, o);
   } else {
     new_shadow_frame->SetVReg(dest_reg, src_value);

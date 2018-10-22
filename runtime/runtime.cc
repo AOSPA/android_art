@@ -49,7 +49,6 @@
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "asm_support.h"
-#include "asm_support_check.h"
 #include "base/aborting.h"
 #include "base/arena_allocator.h"
 #include "base/atomic.h"
@@ -86,7 +85,7 @@
 #include "hidden_api.h"
 #include "image-inl.h"
 #include "instrumentation.h"
-#include "intern_table.h"
+#include "intern_table-inl.h"
 #include "interpreter/interpreter.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
@@ -165,6 +164,11 @@
 #ifdef ART_TARGET_ANDROID
 #include <android/set_abort_message.h>
 #endif
+
+// Static asserts to check the values of generated assembly-support macros.
+#define ASM_DEFINE(NAME, EXPR) static_assert((NAME) == (EXPR), "Unexpected value of " #NAME);
+#include "asm_defines.def"
+#undef ASM_DEFINE
 
 namespace art {
 
@@ -257,6 +261,7 @@ Runtime::Runtime()
       is_native_bridge_loaded_(false),
       is_native_debuggable_(false),
       async_exceptions_thrown_(false),
+      non_standard_exits_enabled_(false),
       is_java_debuggable_(false),
       zygote_max_failed_boots_(0),
       experimental_flags_(ExperimentalFlags::kNone),
@@ -277,7 +282,6 @@ Runtime::Runtime()
   static_assert(Runtime::kCalleeSaveSize ==
                     static_cast<uint32_t>(CalleeSaveType::kLastCalleeSaveType), "Unexpected size");
 
-  CheckAsmSupportOffsetsAndSizes();
   std::fill(callee_save_methods_, callee_save_methods_ + arraysize(callee_save_methods_), 0u);
   interpreter::CheckInterpreterAsmConstants();
   callbacks_.reset(new RuntimeCallbacks());
@@ -1485,7 +1489,9 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     }
     {
       ScopedTrace trace2("AddImageStringsToTable");
-      GetInternTable()->AddImagesStringsToTable(heap_->GetBootImageSpaces());
+      for (gc::space::ImageSpace* image_space : heap_->GetBootImageSpaces()) {
+        GetInternTable()->AddImageStringsToTable(image_space, VoidFunctor());
+      }
     }
     if (IsJavaDebuggable()) {
       // Now that we have loaded the boot image, deoptimize its methods if we are running
