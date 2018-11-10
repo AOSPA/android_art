@@ -708,25 +708,42 @@ void CompilerDriver::Resolve(jobject class_loader,
   }
 }
 
-static void ResolveConstStrings(CompilerDriver* driver,
-                                const std::vector<const DexFile*>& dex_files,
-                                TimingLogger* timings) {
+void CompilerDriver::ResolveConstStrings(const std::vector<const DexFile*>& dex_files,
+                                         bool only_startup_strings,
+                                         TimingLogger* timings) {
   ScopedObjectAccess soa(Thread::Current());
   StackHandleScope<1> hs(soa.Self());
   ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
   MutableHandle<mirror::DexCache> dex_cache(hs.NewHandle<mirror::DexCache>(nullptr));
+  size_t num_instructions = 0u;
 
   for (const DexFile* dex_file : dex_files) {
     dex_cache.Assign(class_linker->FindDexCache(soa.Self(), *dex_file));
     TimingLogger::ScopedTiming t("Resolve const-string Strings", timings);
 
     for (ClassAccessor accessor : dex_file->GetClasses()) {
-      if (!driver->IsClassToCompile(accessor.GetDescriptor())) {
+      if (!IsClassToCompile(accessor.GetDescriptor())) {
         // Compilation is skipped, do not resolve const-string in code of this class.
         // FIXME: Make sure that inlining honors this. b/26687569
         continue;
       }
+
+      const bool is_startup_class =
+          profile_compilation_info_ != nullptr &&
+          profile_compilation_info_->ContainsClass(*dex_file, accessor.GetClassIdx());
+
       for (const ClassAccessor::Method& method : accessor.GetMethods()) {
+        const bool is_clinit = (method.GetAccessFlags() & kAccConstructor) != 0 &&
+            (method.GetAccessFlags() & kAccStatic) != 0;
+        const bool is_startup_clinit = is_startup_class && is_clinit;
+
+        if (only_startup_strings &&
+            profile_compilation_info_ != nullptr &&
+            (!profile_compilation_info_->GetMethodHotness(method.GetReference()).IsStartup() &&
+             !is_startup_clinit)) {
+          continue;
+        }
+
         // Resolve const-strings in the code. Done to have deterministic allocation behavior. Right
         // now this is single-threaded for simplicity.
         // TODO: Collect the relevant string indices in parallel, then allocate them sequentially
@@ -740,6 +757,7 @@ static void ResolveConstStrings(CompilerDriver* driver,
                   : inst->VRegB_31c());
               ObjPtr<mirror::String> string = class_linker->ResolveString(string_index, dex_cache);
               CHECK(string != nullptr) << "Could not allocate a string when forcing determinism";
+              ++num_instructions;
               break;
             }
 
@@ -750,6 +768,7 @@ static void ResolveConstStrings(CompilerDriver* driver,
       }
     }
   }
+  VLOG(compiler) << "Resolved " << num_instructions << " const string instructions";
 }
 
 // Initialize type check bit strings for check-cast and instance-of in the code. Done to have
@@ -897,8 +916,10 @@ void CompilerDriver::PreCompile(jobject class_loader,
 
   if (GetCompilerOptions().IsForceDeterminism() && GetCompilerOptions().IsBootImage()) {
     // Resolve strings from const-string. Do this now to have a deterministic image.
-    ResolveConstStrings(this, dex_files, timings);
+    ResolveConstStrings(dex_files, /*only_startup_strings=*/ false, timings);
     VLOG(compiler) << "Resolve const-strings: " << GetMemoryUsageString(false);
+  } else if (GetCompilerOptions().ResolveStartupConstStrings()) {
+    ResolveConstStrings(dex_files, /*only_startup_strings=*/ true, timings);
   }
 
   Verify(class_loader, dex_files, timings);
@@ -1146,7 +1167,7 @@ static void MaybeAddToImageClasses(Thread* self,
     if (klass->IsArrayClass()) {
       MaybeAddToImageClasses(self, klass->GetComponentType(), image_classes);
     }
-    klass.Assign(klass->GetSuperClass());
+    klass = klass->GetSuperClass();
   }
 }
 

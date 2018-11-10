@@ -61,6 +61,7 @@ GTEST_DEX_DIRECTORIES := \
   StaticLeafMethods \
   Statics \
   StaticsFromCode \
+  StringLiterals \
   Transaction \
   XandY
 
@@ -174,7 +175,7 @@ ART_GTEST_compiler_driver_test_DEX_DEPS := AbstractMethod StaticLeafMethods Prof
 ART_GTEST_dex_cache_test_DEX_DEPS := Main Packages MethodTypes
 ART_GTEST_dexanalyze_test_DEX_DEPS := MultiDex
 ART_GTEST_dexlayout_test_DEX_DEPS := ManyMethods
-ART_GTEST_dex2oat_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) ManyMethods Statics VerifierDeps MainUncompressed EmptyUncompressed
+ART_GTEST_dex2oat_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) ManyMethods Statics VerifierDeps MainUncompressed EmptyUncompressed StringLiterals
 ART_GTEST_dex2oat_image_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) Statics VerifierDeps
 ART_GTEST_exception_test_DEX_DEPS := ExceptionHandle
 ART_GTEST_hiddenapi_test_DEX_DEPS := HiddenApi
@@ -404,6 +405,7 @@ ART_TEST_TARGET_GTEST$(ART_PHONY_TEST_TARGET_SUFFIX)_RULES :=
 ART_TEST_TARGET_GTEST$(2ND_ART_PHONY_TEST_TARGET_SUFFIX)_RULES :=
 ART_TEST_TARGET_GTEST_RULES :=
 ART_TEST_HOST_GTEST_DEPENDENCIES :=
+ART_TEST_TARGET_GTEST_DEPENDENCIES :=
 
 ART_GTEST_TARGET_ANDROID_ROOT := '/system'
 ifneq ($(ART_TEST_ANDROID_ROOT),)
@@ -432,7 +434,7 @@ define define-art-gtest-rule-target
 
   # Add the test dependencies to test-art-target-sync, which will be a prerequisite for the test
   # to ensure files are pushed to the device.
-  TEST_ART_TARGET_SYNC_DEPS += \
+  gtest_deps := \
     $$(ART_GTEST_$(1)_TARGET_DEPS) \
     $(foreach file,$(ART_GTEST_$(1)_DEX_DEPS),$(ART_TEST_TARGET_GTEST_$(file)_DEX)) \
     $$(gtest_exe) \
@@ -441,6 +443,8 @@ define define-art-gtest-rule-target
     $$(TARGET_OUT_JAVA_LIBRARIES)/core-libart-testdex.jar \
     $$(TARGET_OUT_JAVA_LIBRARIES)/core-oj-testdex.jar \
     $$(TARGET_OUT_JAVA_LIBRARIES)/core-simple-testdex.jar
+
+  ART_TEST_TARGET_GTEST_DEPENDENCIES += $$(gtest_deps)
 
 $$(gtest_rule): PRIVATE_TARGET_EXE := $$(gtest_target_exe)
 $$(gtest_rule): PRIVATE_MAYBE_CHROOT_COMMAND := $$(maybe_chroot_command)
@@ -473,6 +477,7 @@ $$(gtest_rule): test-art-target-sync
   maybe_chroot_command :=
   maybe_art_test_chroot :=
   gtest_target_exe :=
+  gtest_deps :=
   gtest_exe :=
   gtest_rule :=
 endef  # define-art-gtest-rule-target

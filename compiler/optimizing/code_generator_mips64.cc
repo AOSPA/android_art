@@ -1680,7 +1680,7 @@ void CodeGeneratorMIPS64::LoadBootImageAddress(GpuRegister reg, uint32_t boot_im
     PcRelativePatchInfo* info_low = NewBootImageIntrinsicPatch(boot_image_reference, info_high);
     EmitPcRelativeAddressPlaceholderHigh(info_high, AT, info_low);
     __ Daddiu(reg, AT, /* placeholder */ 0x5678);
-  } else if (Runtime::Current()->IsAotCompiler()) {
+  } else if (GetCompilerOptions().GetCompilePic()) {
     PcRelativePatchInfo* info_high = NewBootImageRelRoPatch(boot_image_reference);
     PcRelativePatchInfo* info_low = NewBootImageRelRoPatch(boot_image_reference, info_high);
     EmitPcRelativeAddressPlaceholderHigh(info_high, AT, info_low);
@@ -6633,10 +6633,8 @@ void LocationsBuilderMIPS64::VisitNewArray(HNewArray* instruction) {
 }
 
 void InstructionCodeGeneratorMIPS64::VisitNewArray(HNewArray* instruction) {
-  // Note: if heap poisoning is enabled, the entry point takes care
-  // of poisoning the reference.
-  QuickEntrypointEnum entrypoint =
-      CodeGenerator::GetArrayAllocationEntrypoint(instruction->GetLoadClass()->GetClass());
+  // Note: if heap poisoning is enabled, the entry point takes care of poisoning the reference.
+  QuickEntrypointEnum entrypoint = CodeGenerator::GetArrayAllocationEntrypoint(instruction);
   codegen_->InvokeRuntime(entrypoint, instruction, instruction->GetDexPc());
   CheckEntrypointTypes<kQuickAllocArrayResolved, void*, mirror::Class*, int32_t>();
   DCHECK(!codegen_->IsLeafMethod());

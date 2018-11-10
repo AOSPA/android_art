@@ -53,6 +53,7 @@
 #include "handle_scope-inl.h"
 #include "image.h"
 #include "imt_conflict_table.h"
+#include "intern_table-inl.h"
 #include "jni/jni_internal.h"
 #include "linear_alloc.h"
 #include "lock_word.h"
@@ -2408,8 +2409,6 @@ void ImageWriter::CreateHeader(size_t oat_index) {
       boot_oat_begin,
       boot_oat_end - boot_oat_begin,
       static_cast<uint32_t>(target_ptr_size_),
-      compile_pic_,
-      /*is_pic*/compile_app_image_,
       image_storage_mode_,
       /*data_size*/0u);
 
@@ -2612,7 +2611,7 @@ void ImageWriter::CopyAndFixupNativeData(size_t oat_index) {
     // the VisitRoots() will update the memory directly rather than the copies.
     // This also relies on visit roots not doing any verification which could fail after we update
     // the roots to be the image addresses.
-    temp_intern_table.AddTableFromMemory(intern_table_memory_ptr);
+    temp_intern_table.AddTableFromMemory(intern_table_memory_ptr, VoidFunctor());
     CHECK_EQ(temp_intern_table.Size(), intern_table->Size());
     temp_intern_table.VisitRoots(&root_visitor, kVisitRootFlagAllRoots);
     // Record relocations. (The root visitor does not get to see the slot addresses.)
@@ -3339,7 +3338,6 @@ void ImageWriter::UpdateOatFileHeader(size_t oat_index, const OatHeader& oat_hea
 ImageWriter::ImageWriter(
     const CompilerOptions& compiler_options,
     uintptr_t image_begin,
-    bool compile_pic,
     bool compile_app_image,
     ImageHeader::StorageMode image_storage_mode,
     const std::vector<const char*>& oat_filenames,
@@ -3348,7 +3346,6 @@ ImageWriter::ImageWriter(
     : compiler_options_(compiler_options),
       global_image_begin_(reinterpret_cast<uint8_t*>(image_begin)),
       image_objects_offset_begin_(0),
-      compile_pic_(compile_pic),
       compile_app_image_(compile_app_image),
       target_ptr_size_(InstructionSetPointerSize(compiler_options.GetInstructionSet())),
       image_infos_(oat_filenames.size()),

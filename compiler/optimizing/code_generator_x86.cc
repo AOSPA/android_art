@@ -4525,10 +4525,8 @@ void LocationsBuilderX86::VisitNewArray(HNewArray* instruction) {
 }
 
 void InstructionCodeGeneratorX86::VisitNewArray(HNewArray* instruction) {
-  // Note: if heap poisoning is enabled, the entry point takes cares
-  // of poisoning the reference.
-  QuickEntrypointEnum entrypoint =
-      CodeGenerator::GetArrayAllocationEntrypoint(instruction->GetLoadClass()->GetClass());
+  // Note: if heap poisoning is enabled, the entry point takes care of poisoning the reference.
+  QuickEntrypointEnum entrypoint = CodeGenerator::GetArrayAllocationEntrypoint(instruction);
   codegen_->InvokeRuntime(entrypoint, instruction, instruction->GetDexPc());
   CheckEntrypointTypes<kQuickAllocArrayResolved, void*, mirror::Class*, int32_t>();
   DCHECK(!codegen_->IsLeafMethod());
@@ -4988,7 +4986,7 @@ void CodeGeneratorX86::LoadBootImageAddress(Register reg,
         invoke->GetLocations()->InAt(invoke->GetSpecialInputIndex()).AsRegister<Register>();
     __ leal(reg, Address(method_address_reg, CodeGeneratorX86::kDummy32BitOffset));
     RecordBootImageIntrinsicPatch(method_address, boot_image_reference);
-  } else if (Runtime::Current()->IsAotCompiler()) {
+  } else if (GetCompilerOptions().GetCompilePic()) {
     DCHECK_EQ(invoke->InputCount(), invoke->GetNumberOfArguments() + 1u);
     HX86ComputeBaseMethodAddress* method_address =
         invoke->InputAt(invoke->GetSpecialInputIndex())->AsX86ComputeBaseMethodAddress();
