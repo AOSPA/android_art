@@ -18,8 +18,13 @@
 
 #include <nativehelper/scoped_local_ref.h>
 
+#include "art_field-inl.h"
+#include "art_method-inl.h"
 #include "base/dumpable.h"
-#include "thread-current-inl.h"
+#include "base/sdk_version.h"
+#include "dex/class_accessor-inl.h"
+#include "scoped_thread_state_change.h"
+#include "thread-inl.h"
 #include "well_known_classes.h"
 
 #ifdef ART_TARGET_ANDROID
@@ -44,37 +49,47 @@ static constexpr bool kLogAllAccesses = false;
 
 static inline std::ostream& operator<<(std::ostream& os, AccessMethod value) {
   switch (value) {
-    case kNone:
+    case AccessMethod::kNone:
       LOG(FATAL) << "Internal access to hidden API should not be logged";
       UNREACHABLE();
-    case kReflection:
+    case AccessMethod::kReflection:
       os << "reflection";
       break;
-    case kJNI:
+    case AccessMethod::kJNI:
       os << "JNI";
       break;
-    case kLinking:
+    case AccessMethod::kLinking:
       os << "linking";
       break;
   }
   return os;
 }
 
-static constexpr bool EnumsEqual(EnforcementPolicy policy, HiddenApiAccessFlags::ApiList apiList) {
-  return static_cast<int>(policy) == static_cast<int>(apiList);
-}
-
-// GetMemberAction-related static_asserts.
-static_assert(
-    EnumsEqual(EnforcementPolicy::kDarkGreyAndBlackList, HiddenApiAccessFlags::kDarkGreylist) &&
-    EnumsEqual(EnforcementPolicy::kBlacklistOnly, HiddenApiAccessFlags::kBlacklist),
-    "Mismatch between EnforcementPolicy and ApiList enums");
-static_assert(
-    EnforcementPolicy::kJustWarn < EnforcementPolicy::kDarkGreyAndBlackList &&
-    EnforcementPolicy::kDarkGreyAndBlackList < EnforcementPolicy::kBlacklistOnly,
-    "EnforcementPolicy values ordering not correct");
-
 namespace detail {
+
+// Do not change the values of items in this enum, as they are written to the
+// event log for offline analysis. Any changes will interfere with that analysis.
+enum AccessContextFlags {
+  // Accessed member is a field if this bit is set, else a method
+  kMemberIsField = 1 << 0,
+  // Indicates if access was denied to the member, instead of just printing a warning.
+  kAccessDenied  = 1 << 1,
+};
+
+static SdkVersion GetMaxAllowedSdkVersionForApiList(ApiList api_list) {
+  switch (api_list) {
+    case ApiList::kWhitelist:
+    case ApiList::kLightGreylist:
+      return SdkVersion::kMax;
+    case ApiList::kDarkGreylist:
+      return SdkVersion::kO_MR1;
+    case ApiList::kBlacklist:
+      return SdkVersion::kMin;
+    case ApiList::kNoList:
+      LOG(FATAL) << "Unexpected value";
+      UNREACHABLE();
+  }
+}
 
 MemberSignature::MemberSignature(ArtField* field) {
   class_name_ = field->GetDeclaringClass()->GetDescriptor(&tmp_);
@@ -133,11 +148,11 @@ void MemberSignature::Dump(std::ostream& os) const {
   }
 }
 
-void MemberSignature::WarnAboutAccess(AccessMethod access_method,
-                                      HiddenApiAccessFlags::ApiList list) {
+void MemberSignature::WarnAboutAccess(AccessMethod access_method, hiddenapi::ApiList list) {
   LOG(WARNING) << "Accessing hidden " << (type_ == kField ? "field " : "method ")
                << Dumpable<MemberSignature>(*this) << " (" << list << ", " << access_method << ")";
 }
+
 #ifdef ART_TARGET_ANDROID
 // Convert an AccessMethod enum to a value for logging from the proto enum.
 // This method may look odd (the enum values are current the same), but it
@@ -146,13 +161,13 @@ void MemberSignature::WarnAboutAccess(AccessMethod access_method,
 // future.
 inline static int32_t GetEnumValueForLog(AccessMethod access_method) {
   switch (access_method) {
-    case kNone:
+    case AccessMethod::kNone:
       return android::metricslogger::ACCESS_METHOD_NONE;
-    case kReflection:
+    case AccessMethod::kReflection:
       return android::metricslogger::ACCESS_METHOD_REFLECTION;
-    case kJNI:
+    case AccessMethod::kJNI:
       return android::metricslogger::ACCESS_METHOD_JNI;
-    case kLinking:
+    case AccessMethod::kLinking:
       return android::metricslogger::ACCESS_METHOD_LINKING;
     default:
       DCHECK(false);
@@ -160,9 +175,9 @@ inline static int32_t GetEnumValueForLog(AccessMethod access_method) {
 }
 #endif
 
-void MemberSignature::LogAccessToEventLog(AccessMethod access_method, Action action_taken) {
+void MemberSignature::LogAccessToEventLog(AccessMethod access_method, bool access_denied) {
 #ifdef ART_TARGET_ANDROID
-  if (access_method == kLinking || access_method == kNone) {
+  if (access_method == AccessMethod::kLinking || access_method == AccessMethod::kNone) {
     // Linking warnings come from static analysis/compilation of the bytecode
     // and can contain false positives (i.e. code that is never run). We choose
     // not to log these in the event log.
@@ -171,7 +186,7 @@ void MemberSignature::LogAccessToEventLog(AccessMethod access_method, Action act
   }
   ComplexEventLogger log_maker(ACTION_HIDDEN_API_ACCESSED);
   log_maker.AddTaggedData(FIELD_HIDDEN_API_ACCESS_METHOD, GetEnumValueForLog(access_method));
-  if (action_taken == kDeny) {
+  if (access_denied) {
     log_maker.AddTaggedData(FIELD_HIDDEN_API_ACCESS_DENIED, 1);
   }
   const std::string& package_name = Runtime::Current()->GetProcessPackageName();
@@ -184,109 +199,16 @@ void MemberSignature::LogAccessToEventLog(AccessMethod access_method, Action act
   log_maker.Record();
 #else
   UNUSED(access_method);
-  UNUSED(action_taken);
+  UNUSED(access_denied);
 #endif
 }
 
-static ALWAYS_INLINE bool CanUpdateMemberAccessFlags(ArtField*) {
-  return true;
-}
-
-static ALWAYS_INLINE bool CanUpdateMemberAccessFlags(ArtMethod* method) {
-  return !method->IsIntrinsic();
-}
-
-template<typename T>
-static ALWAYS_INLINE void MaybeWhitelistMember(Runtime* runtime, T* member)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  if (CanUpdateMemberAccessFlags(member) && runtime->ShouldDedupeHiddenApiWarnings()) {
-    member->SetAccessFlags(HiddenApiAccessFlags::EncodeForRuntime(
-        member->GetAccessFlags(), HiddenApiAccessFlags::kWhitelist));
-  }
-}
-
-template<typename T>
-Action GetMemberActionImpl(T* member,
-                           HiddenApiAccessFlags::ApiList api_list,
-                           Action action,
-                           AccessMethod access_method) {
-  DCHECK_NE(action, kAllow);
-
-  // Get the signature, we need it later.
-  MemberSignature member_signature(member);
-
-  Runtime* runtime = Runtime::Current();
-
-  // Check for an exemption first. Exempted APIs are treated as white list.
-  // We only do this if we're about to deny, or if the app is debuggable. This is because:
-  // - we only print a warning for light greylist violations for debuggable apps
-  // - for non-debuggable apps, there is no distinction between light grey & whitelisted APIs.
-  // - we want to avoid the overhead of checking for exemptions for light greylisted APIs whenever
-  //   possible.
-  const bool shouldWarn = kLogAllAccesses || runtime->IsJavaDebuggable();
-  if (shouldWarn || action == kDeny) {
-    if (member_signature.IsExempted(runtime->GetHiddenApiExemptions())) {
-      action = kAllow;
-      // Avoid re-examining the exemption list next time.
-      // Note this results in no warning for the member, which seems like what one would expect.
-      // Exemptions effectively adds new members to the whitelist.
-      MaybeWhitelistMember(runtime, member);
-      return kAllow;
-    }
-
-    if (access_method != kNone) {
-      // Print a log message with information about this class member access.
-      // We do this if we're about to block access, or the app is debuggable.
-      member_signature.WarnAboutAccess(access_method, api_list);
-    }
+void MemberSignature::NotifyHiddenApiListener(AccessMethod access_method) {
+  if (access_method != AccessMethod::kReflection && access_method != AccessMethod::kJNI) {
+    // We can only up-call into Java during reflection and JNI down-calls.
+    return;
   }
 
-  if (kIsTargetBuild && !kIsTargetLinux) {
-    uint32_t eventLogSampleRate = runtime->GetHiddenApiEventLogSampleRate();
-    // Assert that RAND_MAX is big enough, to ensure sampling below works as expected.
-    static_assert(RAND_MAX >= 0xffff, "RAND_MAX too small");
-    if (eventLogSampleRate != 0 &&
-        (static_cast<uint32_t>(std::rand()) & 0xffff) < eventLogSampleRate) {
-      member_signature.LogAccessToEventLog(access_method, action);
-    }
-  }
-
-  if (action == kDeny) {
-    // Block access
-    return action;
-  }
-
-  // Allow access to this member but print a warning.
-  DCHECK(action == kAllowButWarn || action == kAllowButWarnAndToast);
-
-  if (access_method != kNone) {
-    // Depending on a runtime flag, we might move the member into whitelist and
-    // skip the warning the next time the member is accessed.
-    MaybeWhitelistMember(runtime, member);
-
-    // If this action requires a UI warning, set the appropriate flag.
-    if (shouldWarn &&
-        (action == kAllowButWarnAndToast || runtime->ShouldAlwaysSetHiddenApiWarningFlag())) {
-      runtime->SetPendingHiddenApiWarning(true);
-    }
-  }
-
-  return action;
-}
-
-// Need to instantiate this.
-template Action GetMemberActionImpl<ArtField>(ArtField* member,
-                                              HiddenApiAccessFlags::ApiList api_list,
-                                              Action action,
-                                              AccessMethod access_method);
-template Action GetMemberActionImpl<ArtMethod>(ArtMethod* member,
-                                               HiddenApiAccessFlags::ApiList api_list,
-                                               Action action,
-                                               AccessMethod access_method);
-}  // namespace detail
-
-template<typename T>
-void NotifyHiddenApiListener(T* member) {
   Runtime* runtime = Runtime::Current();
   if (!runtime->IsAotCompiler()) {
     ScopedObjectAccessUnchecked soa(Thread::Current());
@@ -298,9 +220,8 @@ void NotifyHiddenApiListener(T* member) {
     // If the consumer is non-null, we call back to it to let it know that we
     // have encountered an API that's in one of our lists.
     if (consumer_object != nullptr) {
-      detail::MemberSignature member_signature(member);
       std::ostringstream member_signature_str;
-      member_signature.Dump(member_signature_str);
+      Dump(member_signature_str);
 
       ScopedLocalRef<jobject> signature_str(
           soa.Env(),
@@ -314,8 +235,146 @@ void NotifyHiddenApiListener(T* member) {
   }
 }
 
-template void NotifyHiddenApiListener<ArtMethod>(ArtMethod* member);
-template void NotifyHiddenApiListener<ArtField>(ArtField* member);
+static ALWAYS_INLINE bool CanUpdateRuntimeFlags(ArtField*) {
+  return true;
+}
+
+static ALWAYS_INLINE bool CanUpdateRuntimeFlags(ArtMethod* method) {
+  return !method->IsIntrinsic();
+}
+
+template<typename T>
+static ALWAYS_INLINE void MaybeWhitelistMember(Runtime* runtime, T* member)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (CanUpdateRuntimeFlags(member) && runtime->ShouldDedupeHiddenApiWarnings()) {
+    member->SetAccessFlags(member->GetAccessFlags() | kAccPublicApi);
+  }
+}
+
+static constexpr uint32_t kNoDexFlags = 0u;
+static constexpr uint32_t kInvalidDexFlags = static_cast<uint32_t>(-1);
+
+uint32_t GetDexFlags(ArtField* field) REQUIRES_SHARED(Locks::mutator_lock_) {
+  ObjPtr<mirror::Class> declaring_class = field->GetDeclaringClass();
+  DCHECK(declaring_class != nullptr) << "Fields always have a declaring class";
+
+  const DexFile::ClassDef* class_def = declaring_class->GetClassDef();
+  if (class_def == nullptr) {
+    return kNoDexFlags;
+  }
+
+  uint32_t flags = kInvalidDexFlags;
+  DCHECK(!AreValidFlags(flags));
+
+  ClassAccessor accessor(declaring_class->GetDexFile(),
+                         *class_def,
+                         /* parse_hiddenapi_class_data= */ true);
+  auto fn_visit = [&](const ClassAccessor::Field& dex_field) {
+    if (dex_field.GetIndex() == field->GetDexFieldIndex()) {
+      flags = dex_field.GetHiddenapiFlags();
+    }
+  };
+  accessor.VisitFields(fn_visit, fn_visit);
+
+  CHECK_NE(flags, kInvalidDexFlags) << "Could not find flags for field " << field->PrettyField();
+  DCHECK(AreValidFlags(flags));
+  return flags;
+}
+
+uint32_t GetDexFlags(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_) {
+  ObjPtr<mirror::Class> declaring_class = method->GetDeclaringClass();
+  if (declaring_class.IsNull()) {
+    DCHECK(method->IsRuntimeMethod());
+    return kNoDexFlags;
+  }
+
+  const DexFile::ClassDef* class_def = declaring_class->GetClassDef();
+  if (class_def == nullptr) {
+    return kNoDexFlags;
+  }
+
+  uint32_t flags = kInvalidDexFlags;
+  DCHECK(!AreValidFlags(flags));
+
+  ClassAccessor accessor(declaring_class->GetDexFile(),
+                         *class_def,
+                         /* parse_hiddenapi_class_data= */ true);
+  auto fn_visit = [&](const ClassAccessor::Method& dex_method) {
+    if (dex_method.GetIndex() == method->GetDexMethodIndex()) {
+      flags = dex_method.GetHiddenapiFlags();
+    }
+  };
+  accessor.VisitMethods(fn_visit, fn_visit);
+
+  CHECK_NE(flags, kInvalidDexFlags) << "Could not find flags for method " << method->PrettyMethod();
+  DCHECK(AreValidFlags(flags));
+  return flags;
+}
+
+template<typename T>
+bool ShouldDenyAccessToMemberImpl(T* member,
+                                  hiddenapi::ApiList api_list,
+                                  AccessMethod access_method) {
+  DCHECK(member != nullptr);
+
+  Runtime* runtime = Runtime::Current();
+  EnforcementPolicy policy = runtime->GetHiddenApiEnforcementPolicy();
+
+  const bool deny_access =
+      (policy == EnforcementPolicy::kEnabled) &&
+      IsSdkVersionSetAndMoreThan(runtime->GetTargetSdkVersion(),
+                                 GetMaxAllowedSdkVersionForApiList(api_list));
+
+  MemberSignature member_signature(member);
+
+  // Check for an exemption first. Exempted APIs are treated as white list.
+  if (member_signature.IsExempted(runtime->GetHiddenApiExemptions())) {
+    // Avoid re-examining the exemption list next time.
+    // Note this results in no warning for the member, which seems like what one would expect.
+    // Exemptions effectively adds new members to the whitelist.
+    MaybeWhitelistMember(runtime, member);
+    return false;
+  }
+
+  if (access_method != AccessMethod::kNone) {
+    // Print a log message with information about this class member access.
+    // We do this if we're about to deny access, or the app is debuggable.
+    if (kLogAllAccesses || deny_access || runtime->IsJavaDebuggable()) {
+      member_signature.WarnAboutAccess(access_method, api_list);
+    }
+
+    // If there is a StrictMode listener, notify it about this violation.
+    member_signature.NotifyHiddenApiListener(access_method);
+
+    // If event log sampling is enabled, report this violation.
+    if (kIsTargetBuild && !kIsTargetLinux) {
+      uint32_t eventLogSampleRate = runtime->GetHiddenApiEventLogSampleRate();
+      // Assert that RAND_MAX is big enough, to ensure sampling below works as expected.
+      static_assert(RAND_MAX >= 0xffff, "RAND_MAX too small");
+      if (eventLogSampleRate != 0 &&
+          (static_cast<uint32_t>(std::rand()) & 0xffff) < eventLogSampleRate) {
+        member_signature.LogAccessToEventLog(access_method, deny_access);
+      }
+    }
+
+    // If this access was not denied, move the member into whitelist and skip
+    // the warning the next time the member is accessed.
+    if (!deny_access) {
+      MaybeWhitelistMember(runtime, member);
+    }
+  }
+
+  return deny_access;
+}
+
+// Need to instantiate this.
+template bool ShouldDenyAccessToMemberImpl<ArtField>(ArtField* member,
+                                                     hiddenapi::ApiList api_list,
+                                                     AccessMethod access_method);
+template bool ShouldDenyAccessToMemberImpl<ArtMethod>(ArtMethod* member,
+                                                      hiddenapi::ApiList api_list,
+                                                      AccessMethod access_method);
+}  // namespace detail
 
 }  // namespace hiddenapi
 }  // namespace art

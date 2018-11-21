@@ -33,6 +33,7 @@
 #include "experimental_flags.h"
 #include "gc/heap.h"
 #include "handle_scope-inl.h"
+#include "mirror/array-alloc-inl.h"
 #include "mirror/accessible_object.h"
 #include "mirror/call_site.h"
 #include "mirror/class-inl.h"
@@ -45,6 +46,7 @@
 #include "mirror/method_handles_lookup.h"
 #include "mirror/method_type.h"
 #include "mirror/object-inl.h"
+#include "mirror/object_array-alloc-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/proxy.h"
 #include "mirror/reference.h"
@@ -660,12 +662,14 @@ struct DexCacheOffsets : public CheckOffsets<mirror::DexCache> {
   DexCacheOffsets() : CheckOffsets<mirror::DexCache>(false, "Ljava/lang/DexCache;") {
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, dex_file_), "dexFile");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, location_), "location");
+    addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_preresolved_strings_), "numPreResolvedStrings");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_resolved_call_sites_), "numResolvedCallSites");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_resolved_fields_), "numResolvedFields");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_resolved_method_types_), "numResolvedMethodTypes");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_resolved_methods_), "numResolvedMethods");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_resolved_types_), "numResolvedTypes");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_strings_), "numStrings");
+    addOffset(OFFSETOF_MEMBER(mirror::DexCache, preresolved_strings_), "preResolvedStrings");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, resolved_call_sites_), "resolvedCallSites");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, resolved_fields_), "resolvedFields");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, resolved_method_types_), "resolvedMethodTypes");
@@ -1034,8 +1038,8 @@ TEST_F(ClassLinkerTest, LookupResolvedTypeErroneousInit) {
   // Force initialization to turn the class erroneous.
   bool initialized = class_linker_->EnsureInitialized(soa.Self(),
                                                       klass,
-                                                      /* can_init_fields */ true,
-                                                      /* can_init_parents */ true);
+                                                      /* can_init_fields= */ true,
+                                                      /* can_init_parents= */ true);
   EXPECT_FALSE(initialized);
   EXPECT_TRUE(soa.Self()->IsExceptionPending());
   soa.Self()->ClearException();
@@ -1320,15 +1324,15 @@ TEST_F(ClassLinkerTest, ResolveVerifyAndClinit) {
   ObjPtr<mirror::Class> uninit = ResolveVerifyAndClinit(type_idx,
                                                         clinit,
                                                         soa.Self(),
-                                                        /* can_run_clinit */ true,
-                                                        /* verify_access */ false);
+                                                        /* can_run_clinit= */ true,
+                                                        /* verify_access= */ false);
   EXPECT_TRUE(uninit != nullptr);
   EXPECT_FALSE(uninit->IsInitialized());
   ObjPtr<mirror::Class> init = ResolveVerifyAndClinit(type_idx,
                                                       getS0,
                                                       soa.Self(),
-                                                      /* can_run_clinit */ true,
-                                                      /* verify_access */ false);
+                                                      /* can_run_clinit= */ true,
+                                                      /* verify_access= */ false);
   EXPECT_TRUE(init != nullptr);
   EXPECT_TRUE(init->IsInitialized());
 }
@@ -1530,7 +1534,7 @@ TEST_F(ClassLinkerTest, RegisterDexFileName) {
   {
     WriterMutexLock mu(soa.Self(), *Locks::dex_lock_);
     // Check that inserting with a UTF16 name works.
-    class_linker->RegisterDexFileLocked(*dex_file, dex_cache.Get(), /* class_loader */ nullptr);
+    class_linker->RegisterDexFileLocked(*dex_file, dex_cache.Get(), /* class_loader= */ nullptr);
   }
 }
 
@@ -1699,14 +1703,14 @@ TEST_F(ClassLinkerClassLoaderTest, CreatePathClassLoader) {
   jobject class_loader_a = LoadDexInPathClassLoader("ForClassLoaderA", nullptr);
   VerifyClassResolution("LDefinedInA;", class_loader_a, class_loader_a);
   VerifyClassResolution("Ljava/lang/String;", class_loader_a, nullptr);
-  VerifyClassResolution("LDefinedInB;", class_loader_a, nullptr, /*should_find*/ false);
+  VerifyClassResolution("LDefinedInB;", class_loader_a, nullptr, /*should_find=*/ false);
 }
 
 TEST_F(ClassLinkerClassLoaderTest, CreateDelegateLastClassLoader) {
   jobject class_loader_a = LoadDexInDelegateLastClassLoader("ForClassLoaderA", nullptr);
   VerifyClassResolution("LDefinedInA;", class_loader_a, class_loader_a);
   VerifyClassResolution("Ljava/lang/String;", class_loader_a, nullptr);
-  VerifyClassResolution("LDefinedInB;", class_loader_a, nullptr, /*should_find*/ false);
+  VerifyClassResolution("LDefinedInB;", class_loader_a, nullptr, /*should_find=*/ false);
 }
 
 TEST_F(ClassLinkerClassLoaderTest, CreateClassLoaderChain) {
@@ -1753,7 +1757,7 @@ TEST_F(ClassLinkerClassLoaderTest, CreateClassLoaderChain) {
   VerifyClassResolution("LDefinedInAC;", class_loader_d, class_loader_a);
 
   // Sanity check that we don't find an undefined class.
-  VerifyClassResolution("LNotDefined;", class_loader_d, nullptr, /*should_find*/ false);
+  VerifyClassResolution("LNotDefined;", class_loader_d, nullptr, /*should_find=*/ false);
 }
 
 }  // namespace art

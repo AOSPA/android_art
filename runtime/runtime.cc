@@ -61,6 +61,7 @@
 #include "base/mutex.h"
 #include "base/os.h"
 #include "base/quasi_atomic.h"
+#include "base/sdk_version.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "base/unix_file/fd_file.h"
@@ -95,6 +96,7 @@
 #include "linear_alloc.h"
 #include "memory_representation.h"
 #include "mirror/array.h"
+#include "mirror/class-alloc-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_ext.h"
 #include "mirror/class_loader.h"
@@ -252,7 +254,7 @@ Runtime::Runtime()
       preinitialization_transactions_(),
       verify_(verifier::VerifyMode::kNone),
       allow_dex_file_fallback_(true),
-      target_sdk_version_(kUnsetSdkVersion),
+      target_sdk_version_(static_cast<uint32_t>(SdkVersion::kUnset)),
       implicit_null_checks_(false),
       implicit_so_checks_(false),
       implicit_suspend_checks_(false),
@@ -268,10 +270,8 @@ Runtime::Runtime()
       oat_file_manager_(nullptr),
       is_low_memory_mode_(false),
       safe_mode_(false),
-      hidden_api_policy_(hiddenapi::EnforcementPolicy::kNoChecks),
-      pending_hidden_api_warning_(false),
+      hidden_api_policy_(hiddenapi::EnforcementPolicy::kDisabled),
       dedupe_hidden_api_warnings_(true),
-      always_set_hidden_api_warning_flag_(false),
       hidden_api_access_event_log_rate_(0),
       dump_native_stack_on_sig_quit_(true),
       pruned_dalvik_cache_(false),
@@ -305,15 +305,15 @@ Runtime::~Runtime() {
     // Very few things are actually capable of distinguishing between the peer & peerless states so
     // this should be fine.
     bool thread_attached = AttachCurrentThread("Shutdown thread",
-                                               /* as_daemon */ false,
+                                               /* as_daemon= */ false,
                                                GetSystemThreadGroup(),
-                                               /* Create peer */ IsStarted());
+                                               /* create_peer= */ IsStarted());
     if (UNLIKELY(!thread_attached)) {
       LOG(WARNING) << "Failed to attach shutdown thread. Trying again without a peer.";
       CHECK(AttachCurrentThread("Shutdown thread (no java peer)",
-                                /* as_daemon */   false,
-                                /* thread_group*/ nullptr,
-                                /* Create peer */ false));
+                                /* as_daemon= */   false,
+                                /* thread_group=*/ nullptr,
+                                /* create_peer= */ false));
     }
     self = Thread::Current();
   } else {
@@ -406,6 +406,7 @@ Runtime::~Runtime() {
   if (jit_ != nullptr) {
     VLOG(jit) << "Deleting jit";
     jit_.reset(nullptr);
+    jit_code_cache_.reset(nullptr);
   }
 
   // Shutdown the fault manager if it was initialized.
@@ -614,7 +615,7 @@ bool Runtime::ParseOptions(const RuntimeOptions& raw_options,
                            bool ignore_unrecognized,
                            RuntimeArgumentMap* runtime_options) {
   Locks::Init();
-  InitLogging(/* argv */ nullptr, Abort);  // Calls Locks::Init() as a side effect.
+  InitLogging(/* argv= */ nullptr, Abort);  // Calls Locks::Init() as a side effect.
   bool parsed = ParsedOptions::Parse(raw_options, ignore_unrecognized, runtime_options);
   if (!parsed) {
     LOG(ERROR) << "Failed to parse options";
@@ -743,7 +744,7 @@ bool Runtime::Start() {
 
   self->TransitionFromRunnableToSuspended(kNative);
 
-  started_ = true;
+  DoAndMaybeSwitchInterpreter([=](){ started_ = true; });
 
   if (!IsImageDex2OatEnabled() || !GetHeap()->HasBootImageSpace()) {
     ScopedObjectAccess soa(self);
@@ -785,16 +786,10 @@ bool Runtime::Start() {
   // recoding profiles. Maybe we should consider changing the name to be more clear it's
   // not only about compiling. b/28295073.
   if (jit_options_->UseJitCompilation() || jit_options_->GetSaveProfilingInfo()) {
+    // Try to load compiler pre zygote to reduce PSS. b/27744947
     std::string error_msg;
-    if (!IsZygote()) {
-    // If we are the zygote then we need to wait until after forking to create the code cache
-    // due to SELinux restrictions on r/w/x memory regions.
-      CreateJit();
-    } else if (jit_options_->UseJitCompilation()) {
-      if (!jit::Jit::LoadCompilerLibrary(&error_msg)) {
-        // Try to load compiler pre zygote to reduce PSS. b/27744947
-        LOG(WARNING) << "Failed to load JIT compiler with error " << error_msg;
-      }
+    if (!jit::Jit::LoadCompilerLibrary(&error_msg)) {
+      LOG(WARNING) << "Failed to load JIT compiler with error " << error_msg;
     }
   }
 
@@ -815,7 +810,7 @@ bool Runtime::Start() {
         ? NativeBridgeAction::kInitialize
         : NativeBridgeAction::kUnload;
     InitNonZygoteOrPostFork(self->GetJniEnv(),
-                            /* is_system_server */ false,
+                            /* is_system_server= */ false,
                             action,
                             GetInstructionSetString(kRuntimeISA));
   }
@@ -891,28 +886,30 @@ void Runtime::InitNonZygoteOrPostFork(
     }
   }
 
-  // Create the thread pools.
-  heap_->CreateThreadPool();
-  // Reset the gc performance data at zygote fork so that the GCs
-  // before fork aren't attributed to an app.
-  heap_->ResetGcPerformanceInfo();
-
-  // We may want to collect profiling samples for system server, but we never want to JIT there.
   if (is_system_server) {
-    jit_options_->SetUseJitCompilation(false);
     jit_options_->SetSaveProfilingInfo(profile_system_server);
     if (profile_system_server) {
       jit_options_->SetWaitForJitNotificationsToSaveProfile(false);
       VLOG(profiler) << "Enabling system server profiles";
     }
   }
-  if (!safe_mode_ &&
-      (jit_options_->UseJitCompilation() || jit_options_->GetSaveProfilingInfo()) &&
-      jit_ == nullptr) {
+
+  if (jit_ == nullptr) {
+    // The system server's code cache was initialized specially. For other zygote forks or
+    // processes create it now.
+    if (!is_system_server) {
+      CreateJitCodeCache(/*rwx_memory_allowed=*/true);
+    }
     // Note that when running ART standalone (not zygote, nor zygote fork),
     // the jit may have already been created.
     CreateJit();
   }
+
+  // Create the thread pools.
+  heap_->CreateThreadPool();
+  // Reset the gc performance data at zygote fork so that the GCs
+  // before fork aren't attributed to an app.
+  heap_->ResetGcPerformanceInfo();
 
   StartSignalCatcher();
 
@@ -1002,9 +999,9 @@ static bool OpenDexFilesFromImage(const std::string& image_location,
     std::string error_msg;
 
     std::unique_ptr<VdexFile> vdex_file(VdexFile::Open(vdex_filename,
-                                                       false /* writable */,
-                                                       false /* low_4gb */,
-                                                       false, /* unquicken */
+                                                       /* writable= */ false,
+                                                       /* low_4gb= */ false,
+                                                       /* unquicken= */ false,
                                                        &error_msg));
     if (vdex_file.get() == nullptr) {
       return false;
@@ -1015,15 +1012,15 @@ static bool OpenDexFilesFromImage(const std::string& image_location,
       return false;
     }
     std::unique_ptr<ElfFile> elf_file(ElfFile::Open(file.get(),
-                                                    false /* writable */,
-                                                    false /* program_header_only */,
-                                                    false /* low_4gb */,
+                                                    /* writable= */ false,
+                                                    /* program_header_only= */ false,
+                                                    /* low_4gb= */ false,
                                                     &error_msg));
     if (elf_file.get() == nullptr) {
       return false;
     }
     std::unique_ptr<const OatFile> oat_file(
-        OatFile::OpenWithElfFile(/* zip_fd */ -1,
+        OatFile::OpenWithElfFile(/* zip_fd= */ -1,
                                  elf_file.release(),
                                  vdex_file.release(),
                                  oat_location,
@@ -1104,6 +1101,10 @@ void Runtime::SetSentinel(mirror::Object* sentinel) {
   sentinel_ = GcRoot<mirror::Object>(sentinel);
 }
 
+GcRoot<mirror::Object> Runtime::GetSentinel() {
+  return sentinel_;
+}
+
 static inline void CreatePreAllocatedException(Thread* self,
                                                Runtime* runtime,
                                                GcRoot<mirror::Throwable>* exception,
@@ -1117,7 +1118,7 @@ static inline void CreatePreAllocatedException(Thread* self,
   CHECK(klass != nullptr);
   gc::AllocatorType allocator_type = runtime->GetHeap()->GetCurrentAllocator();
   ObjPtr<mirror::Throwable> exception_object = ObjPtr<mirror::Throwable>::DownCast(
-      klass->Alloc</* kIsInstrumented */ true>(self, allocator_type));
+      klass->Alloc</* kIsInstrumented= */ true>(self, allocator_type));
   CHECK(exception_object != nullptr);
   *exception = GcRoot<mirror::Throwable>(exception_object);
   // Initialize the "detailMessage" field.
@@ -1127,7 +1128,7 @@ static inline void CreatePreAllocatedException(Thread* self,
   ArtField* detailMessageField =
       throwable->FindDeclaredInstanceField("detailMessage", "Ljava/lang/String;");
   CHECK(detailMessageField != nullptr);
-  detailMessageField->SetObject</* kTransactionActive */ false>(exception->Read(), message);
+  detailMessageField->SetObject</* kTransactionActive= */ false>(exception->Read(), message);
 }
 
 bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
@@ -1160,8 +1161,10 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                                                  reinterpret_cast<uint8_t*>(kSentinelAddr),
                                                  kPageSize,
                                                  PROT_NONE,
-                                                 /* low_4g */ true,
-                                                 /* error_msg */ nullptr);
+                                                 /*low_4gb=*/ true,
+                                                 /*reuse=*/ false,
+                                                 /*reservation=*/ nullptr,
+                                                 /*error_msg=*/ nullptr);
     if (!protected_fault_page_.IsValid()) {
       LOG(WARNING) << "Could not reserve sentinel fault page";
     } else if (reinterpret_cast<uintptr_t>(protected_fault_page_.Begin()) != kSentinelAddr) {
@@ -1231,8 +1234,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // As is, we're encoding some logic here about which specific policy to use, which would be better
   // controlled by the framework.
   hidden_api_policy_ = do_hidden_api_checks
-      ? hiddenapi::EnforcementPolicy::kDarkGreyAndBlackList
-      : hiddenapi::EnforcementPolicy::kNoChecks;
+      ? hiddenapi::EnforcementPolicy::kEnabled
+      : hiddenapi::EnforcementPolicy::kDisabled;
 
   no_sig_chain_ = runtime_options.Exists(Opt::NoSigChain);
   force_native_bridge_ = runtime_options.Exists(Opt::ForceNativeBridge);
@@ -1371,13 +1374,13 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     arena_pool_.reset(new MallocArenaPool());
     jit_arena_pool_.reset(new MallocArenaPool());
   } else {
-    arena_pool_.reset(new MemMapArenaPool(/* low_4gb */ false));
-    jit_arena_pool_.reset(new MemMapArenaPool(/* low_4gb */ false, "CompilerMetadata"));
+    arena_pool_.reset(new MemMapArenaPool(/* low_4gb= */ false));
+    jit_arena_pool_.reset(new MemMapArenaPool(/* low_4gb= */ false, "CompilerMetadata"));
   }
 
   if (IsAotCompiler() && Is64BitInstructionSet(kRuntimeISA)) {
     // 4gb, no malloc. Explanation in header.
-    low_4gb_arena_pool_.reset(new MemMapArenaPool(/* low_4gb */ true));
+    low_4gb_arena_pool_.reset(new MemMapArenaPool(/* low_4gb= */ true));
   }
   linear_alloc_.reset(CreateLinearAlloc());
 
@@ -2148,7 +2151,7 @@ ArtMethod* Runtime::CreateImtConflictMethod(LinearAlloc* linear_alloc) {
     method->SetEntryPointFromQuickCompiledCode(GetQuickImtConflictStub());
   }
   // Create empty conflict table.
-  method->SetImtConflictTable(class_linker->CreateImtConflictTable(/*count*/0u, linear_alloc),
+  method->SetImtConflictTable(class_linker->CreateImtConflictTable(/*count=*/0u, linear_alloc),
                               pointer_size);
   return method;
 }
@@ -2280,7 +2283,7 @@ void Runtime::RegisterAppInfo(const std::vector<std::string>& code_paths,
     LOG(WARNING) << "JIT profile information will not be recorded: profile filename is empty.";
     return;
   }
-  if (!OS::FileExists(profile_output_filename.c_str(), false /*check_file_type*/)) {
+  if (!OS::FileExists(profile_output_filename.c_str(), /*check_file_type=*/ false)) {
     LOG(WARNING) << "JIT profile information will not be recorded: profile file does not exits.";
     return;
   }
@@ -2481,16 +2484,51 @@ void Runtime::AddCurrentRuntimeFeaturesAsDex2OatArguments(std::vector<std::strin
   argv->push_back(feature_string);
 }
 
-void Runtime::CreateJit() {
-  CHECK(!IsAotCompiler());
+void Runtime::CreateJitCodeCache(bool rwx_memory_allowed) {
   if (kIsDebugBuild && GetInstrumentation()->IsForcedInterpretOnly()) {
     DCHECK(!jit_options_->UseJitCompilation());
   }
-  std::string error_msg;
-  jit_.reset(jit::Jit::Create(jit_options_.get(), &error_msg));
-  if (jit_.get() == nullptr) {
-    LOG(WARNING) << "Failed to create JIT " << error_msg;
+
+  if (!jit_options_->UseJitCompilation() && !jit_options_->GetSaveProfilingInfo()) {
     return;
+  }
+
+  // SystemServer has execmem blocked by SELinux so can not use RWX page permissions after the
+  // cache initialized.
+  jit_options_->SetRWXMemoryAllowed(rwx_memory_allowed);
+
+  std::string error_msg;
+  bool profiling_only = !jit_options_->UseJitCompilation();
+  jit_code_cache_.reset(jit::JitCodeCache::Create(jit_options_->GetCodeCacheInitialCapacity(),
+                                                  jit_options_->GetCodeCacheMaxCapacity(),
+                                                  profiling_only,
+                                                  jit_options_->RWXMemoryAllowed(),
+                                                  &error_msg));
+  if (jit_code_cache_.get() == nullptr) {
+    LOG(WARNING) << "Failed to create JIT Code Cache: " << error_msg;
+  }
+}
+
+void Runtime::CreateJit() {
+  DCHECK(jit_ == nullptr);
+  if (jit_code_cache_.get() == nullptr) {
+    if (!IsSafeMode()) {
+      LOG(WARNING) << "Missing code cache, cannot create JIT.";
+    }
+    return;
+  }
+  if (IsSafeMode()) {
+    LOG(INFO) << "Not creating JIT because of SafeMode.";
+    jit_code_cache_.reset();
+    return;
+  }
+
+  jit::Jit* jit = jit::Jit::Create(jit_code_cache_.get(), jit_options_.get());
+  DoAndMaybeSwitchInterpreter([=](){ jit_.reset(jit); });
+  if (jit == nullptr) {
+    LOG(WARNING) << "Failed to allocate JIT";
+    // Release JIT code cache resources (several MB of memory).
+    jit_code_cache_.reset();
   }
 }
 
@@ -2519,12 +2557,12 @@ void Runtime::FixupConflictTables() {
   const PointerSize pointer_size = GetClassLinker()->GetImagePointerSize();
   if (imt_unimplemented_method_->GetImtConflictTable(pointer_size) == nullptr) {
     imt_unimplemented_method_->SetImtConflictTable(
-        ClassLinker::CreateImtConflictTable(/*count*/0u, GetLinearAlloc(), pointer_size),
+        ClassLinker::CreateImtConflictTable(/*count=*/0u, GetLinearAlloc(), pointer_size),
         pointer_size);
   }
   if (imt_conflict_method_->GetImtConflictTable(pointer_size) == nullptr) {
     imt_conflict_method_->SetImtConflictTable(
-          ClassLinker::CreateImtConflictTable(/*count*/0u, GetLinearAlloc(), pointer_size),
+          ClassLinker::CreateImtConflictTable(/*count=*/0u, GetLinearAlloc(), pointer_size),
           pointer_size);
   }
 }

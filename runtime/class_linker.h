@@ -111,9 +111,7 @@ class AllocatorVisitor {
 
 class ClassLinker {
  public:
-  // Disabled until AppImageLoadingHelper::UpdateInternStrings does the missing GC card marks.
-  // Bug: 117846779
-  static constexpr bool kAppImageMayContainStrings = false;
+  static constexpr bool kAppImageMayContainStrings = true;
 
   explicit ClassLinker(InternTable* intern_table);
   virtual ~ClassLinker();
@@ -198,6 +196,7 @@ class ClassLinker {
       REQUIRES(!Locks::classlinker_classes_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  ObjPtr<mirror::Class> LookupPrimitiveClass(char type) REQUIRES_SHARED(Locks::mutator_lock_);
   ObjPtr<mirror::Class> FindPrimitiveClass(char type) REQUIRES_SHARED(Locks::mutator_lock_);
 
   void DumpForSigQuit(std::ostream& os) REQUIRES(!Locks::classlinker_classes_lock_);
@@ -316,10 +315,7 @@ class ClassLinker {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   template <ResolveMode kResolveMode>
-  ALWAYS_INLINE ArtMethod* ResolveMethod(Thread* self,
-                                         uint32_t method_idx,
-                                         ArtMethod* referrer,
-                                         InvokeType type)
+  ArtMethod* ResolveMethod(Thread* self, uint32_t method_idx, ArtMethod* referrer, InvokeType type)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_, !Roles::uninterruptible_);
   ArtMethod* ResolveMethodWithoutInvokeType(uint32_t method_idx,
@@ -559,12 +555,7 @@ class ClassLinker {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
-  ObjPtr<mirror::ObjectArray<mirror::Class>> GetClassRoots() REQUIRES_SHARED(Locks::mutator_lock_) {
-    ObjPtr<mirror::ObjectArray<mirror::Class>> class_roots =
-        class_roots_.Read<kReadBarrierOption>();
-    DCHECK(class_roots != nullptr);
-    return class_roots;
-  }
+  ObjPtr<mirror::ObjectArray<mirror::Class>> GetClassRoots() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Move the class table to the pre-zygote table to reduce memory usage. This works by ensuring
   // that no more classes are ever added to the pre zygote table which makes it that the pages
@@ -877,6 +868,15 @@ class ClassLinker {
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_);
 
+  bool FindClassInSharedLibraries(ScopedObjectAccessAlreadyRunnable& soa,
+                                  Thread* self,
+                                  const char* descriptor,
+                                  size_t hash,
+                                  Handle<mirror::ClassLoader> class_loader,
+                                  /*out*/ ObjPtr<mirror::Class>* result)
+      REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(!Locks::dex_lock_);
+
   // Finds the class in the classpath of the given class loader. It only searches the class loader
   // dex files and does not recurse into its parent.
   // The method checks that the provided class loader is either a PathClassLoader or a
@@ -1043,12 +1043,12 @@ class ClassLinker {
    public:
     // This slot must become a default conflict method.
     static MethodTranslation CreateConflictingMethod() {
-      return MethodTranslation(Type::kConflict, /*translation*/nullptr);
+      return MethodTranslation(Type::kConflict, /*translation=*/nullptr);
     }
 
     // This slot must become an abstract method.
     static MethodTranslation CreateAbstractMethod() {
-      return MethodTranslation(Type::kAbstract, /*translation*/nullptr);
+      return MethodTranslation(Type::kAbstract, /*translation=*/nullptr);
     }
 
     // Use the given method as the current value for this vtable slot during translation.

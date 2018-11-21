@@ -20,6 +20,7 @@
 #include "class_root.h"
 #include "common_runtime_test.h"
 #include "gc/space/space-inl.h"
+#include "mirror/array-alloc-inl.h"
 #include "mirror/array-inl.h"
 #include "space_bitmap-inl.h"
 #include "thread-current-inl.h"
@@ -184,7 +185,7 @@ void ModUnionTableTest::RunTest(ModUnionTableFactory::TableType type) {
   ResetClass();
   // Create another space that we can put references in.
   std::unique_ptr<space::DlMallocSpace> other_space(space::DlMallocSpace::Create(
-      "other space", 128 * KB, 4 * MB, 4 * MB, nullptr, false));
+      "other space", 128 * KB, 4 * MB, 4 * MB, /*can_move_objects=*/ false));
   ASSERT_TRUE(other_space.get() != nullptr);
   {
     ScopedThreadSuspension sts(self, kSuspended);

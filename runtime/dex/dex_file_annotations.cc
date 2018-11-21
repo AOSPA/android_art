@@ -22,13 +22,18 @@
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
+#include "base/sdk_version.h"
 #include "class_linker-inl.h"
 #include "class_root.h"
 #include "dex/dex_file-inl.h"
 #include "jni/jni_internal.h"
 #include "jvalue-inl.h"
+#include "mirror/array-alloc-inl.h"
+#include "mirror/class-alloc-inl.h"
 #include "mirror/field.h"
 #include "mirror/method.h"
+#include "mirror/object_array-alloc-inl.h"
+#include "mirror/object_array-inl.h"
 #include "oat_file.h"
 #include "obj_ptr-inl.h"
 #include "reflection.h"
@@ -125,8 +130,7 @@ ObjPtr<mirror::Object> CreateAnnotationMember(const ClassData& klass,
 
 bool IsVisibilityCompatible(uint32_t actual, uint32_t expected) {
   if (expected == DexFile::kDexVisibilityRuntime) {
-    int32_t sdk_version = Runtime::Current()->GetTargetSdkVersion();
-    if (sdk_version > 0 && sdk_version <= 23) {
+    if (IsSdkVersionSetAndAtMost(Runtime::Current()->GetTargetSdkVersion(), SdkVersion::kM)) {
       return actual == DexFile::kDexVisibilityRuntime || actual == DexFile::kDexVisibilityBuild;
     }
   }
@@ -1251,7 +1255,7 @@ static void DCheckNativeAnnotation(const char* descriptor, jclass cls) {
     // WellKnownClasses may not be initialized yet, so `klass` may be null.
     if (klass != nullptr) {
       // Lookup using the boot class path loader should yield the annotation class.
-      CHECK_EQ(klass, linker->LookupClass(soa.Self(), descriptor, /* class_loader */ nullptr));
+      CHECK_EQ(klass, linker->LookupClass(soa.Self(), descriptor, /* class_loader= */ nullptr));
     }
   }
 }

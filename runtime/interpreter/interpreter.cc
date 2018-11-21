@@ -237,7 +237,11 @@ enum InterpreterImplKind {
   kMterpImplKind          // Assembly interpreter
 };
 
+#if ART_USE_CXX_INTERPRETER
+static constexpr InterpreterImplKind kInterpreterImplKind = kSwitchImplKind;
+#else
 static constexpr InterpreterImplKind kInterpreterImplKind = kMterpImplKind;
+#endif
 
 static inline JValue Execute(
     Thread* self,
@@ -248,6 +252,14 @@ static inline JValue Execute(
     bool from_deoptimize = false) REQUIRES_SHARED(Locks::mutator_lock_) {
   DCHECK(!shadow_frame.GetMethod()->IsAbstract());
   DCHECK(!shadow_frame.GetMethod()->IsNative());
+
+  // Check that we are using the right interpreter.
+  if (kIsDebugBuild && self->UseMterp() != CanUseMterp()) {
+    // The flag might be currently being updated on all threads. Retry with lock.
+    MutexLock tll_mu(self, *Locks::thread_list_lock_);
+    DCHECK_EQ(self->UseMterp(), CanUseMterp());
+  }
+
   if (LIKELY(!from_deoptimize)) {  // Entering the method, but not via deoptimization.
     if (kIsDebugBuild) {
       CHECK_EQ(shadow_frame.GetDexPC(), 0u);
@@ -321,7 +333,7 @@ static inline JValue Execute(
       } else {
         while (true) {
           // Mterp does not support all instrumentation/debugging.
-          if (MterpShouldSwitchInterpreters() != 0) {
+          if (!self->UseMterp()) {
             return ExecuteSwitchImpl<false, false>(self, accessor, shadow_frame, result_register,
                                                    false);
           }
@@ -587,8 +599,8 @@ void EnterInterpreterFromDeoptimize(Thread* self,
                       accessor,
                       *shadow_frame,
                       value,
-                      /* stay_in_interpreter */ true,
-                      /* from_deoptimize */ true);
+                      /* stay_in_interpreter= */ true,
+                      /* from_deoptimize= */ true);
     }
     ShadowFrame* old_frame = shadow_frame;
     shadow_frame = shadow_frame->GetLink();

@@ -509,21 +509,11 @@ class ImageSpace::Loader {
     const size_t image_bitmap_offset = RoundUp(sizeof(ImageHeader) + image_header->GetDataSize(),
                                                kPageSize);
     const size_t end_of_bitmap = image_bitmap_offset + bitmap_section.Size();
-    const ImageSection& relocations_section = image_header->GetImageRelocationsSection();
-    if (relocations_section.Offset() != bitmap_section.Offset() + bitmap_section.Size()) {
+    if (end_of_bitmap != image_file_size) {
       *error_msg = StringPrintf(
-          "Relocations do not start immediately after bitmap: %u vs. %u + %u.",
-          relocations_section.Offset(),
-          bitmap_section.Offset(),
-          bitmap_section.Size());
-      return nullptr;
-    }
-    const size_t end_of_relocations = end_of_bitmap + relocations_section.Size();
-    if (end_of_relocations != image_file_size) {
-      *error_msg = StringPrintf(
-          "Image file size does not equal end of relocations: size=%" PRIu64 " vs. %zu.",
+          "Image file size does not equal end of bitmap: size=%" PRIu64 " vs. %zu.",
           image_file_size,
-          end_of_relocations);
+          end_of_bitmap);
       return nullptr;
     }
 
@@ -632,9 +622,9 @@ class ImageSpace::Loader {
                               /*inout*/MemMap* image_reservation,
                               /*out*/std::string* error_msg) {
     TimingLogger::ScopedTiming timing("MapImageFile", logger);
-    uint8_t* address = (image_reservation != nullptr) ? image_reservation->Begin() : nullptr;
     const ImageHeader::StorageMode storage_mode = image_header.GetStorageMode();
     if (storage_mode == ImageHeader::kStorageModeUncompressed) {
+      uint8_t* address = (image_reservation != nullptr) ? image_reservation->Begin() : nullptr;
       return MemMap::MapFileAtAddress(address,
                                       image_header.GetImageSize(),
                                       PROT_READ | PROT_WRITE,
@@ -659,11 +649,9 @@ class ImageSpace::Loader {
 
     // Reserve output and decompress into it.
     MemMap map = MemMap::MapAnonymous(image_location,
-                                      address,
                                       image_header.GetImageSize(),
                                       PROT_READ | PROT_WRITE,
                                       /*low_4gb=*/ true,
-                                      /*reuse=*/ false,
                                       image_reservation,
                                       error_msg);
     if (map.IsValid()) {
@@ -844,7 +832,7 @@ class ImageSpace::Loader {
           reinterpret_cast<uintptr_t>(array) + kObjectAlignment);
       // If the bit is not set then the contents have not yet been updated.
       if (!visited_->Test(contents_bit)) {
-        array->Fixup<kVerifyNone, kWithoutReadBarrier>(array, pointer_size_, visitor);
+        array->Fixup<kVerifyNone>(array, pointer_size_, visitor);
         visited_->Set(contents_bit);
       }
     }
@@ -1182,6 +1170,19 @@ class ImageSpace::Loader {
           }
           dex_cache->FixupResolvedCallSites<kWithoutReadBarrier>(new_call_sites, fixup_adapter);
         }
+
+        GcRoot<mirror::String>* preresolved_strings = dex_cache->GetPreResolvedStrings();
+        if (preresolved_strings != nullptr) {
+          GcRoot<mirror::String>* new_array = fixup_adapter.ForwardObject(preresolved_strings);
+          if (preresolved_strings != new_array) {
+            dex_cache->SetPreResolvedStrings(new_array);
+          }
+          const size_t num_preresolved_strings = dex_cache->NumPreResolvedStrings();
+          for (size_t j = 0; j < num_preresolved_strings; ++j) {
+            new_array[j] = GcRoot<mirror::String>(
+                fixup_adapter(new_array[j].Read<kWithoutReadBarrier>()));
+          }
+        }
       }
     }
     {
@@ -1240,7 +1241,7 @@ class ImageSpace::Loader {
           for (GcRoot<mirror::String>& root : strings) {
             root = GcRoot<mirror::String>(fixup_adapter(root.Read<kWithoutReadBarrier>()));
           }
-        });
+        }, /*is_boot_image=*/ false);
       }
     }
     if (VLOG_IS_ON(image)) {
@@ -1741,6 +1742,10 @@ class ImageSpace::BootImageLoader {
           dex_cache,
           mirror::DexCache::ResolvedCallSitesOffset(),
           dex_cache->NumResolvedCallSites<kVerifyNone>());
+      FixupDexCacheArray<GcRoot<mirror::String>>(
+          dex_cache,
+          mirror::DexCache::PreResolvedStringsOffset(),
+          dex_cache->NumPreResolvedStrings<kVerifyNone>());
     }
 
    private:
@@ -1781,6 +1786,11 @@ class ImageSpace::BootImageLoader {
     }
 
     void FixupDexCacheArrayEntry(GcRoot<mirror::CallSite>* array, uint32_t index)
+        REQUIRES_SHARED(Locks::mutator_lock_) {
+      PatchGcRoot(diff_, &array[index]);
+    }
+
+    void FixupDexCacheArrayEntry(GcRoot<mirror::String>* array, uint32_t index)
         REQUIRES_SHARED(Locks::mutator_lock_) {
       PatchGcRoot(diff_, &array[index]);
     }
@@ -1874,7 +1884,7 @@ class ImageSpace::BootImageLoader {
           }
           auto* iftable = klass->GetIfTable<kVerifyNone, kWithoutReadBarrier>();
           if (iftable != nullptr) {
-            int32_t ifcount = klass->GetIfTableCount<kVerifyNone, kWithoutReadBarrier>();
+            int32_t ifcount = klass->GetIfTableCount<kVerifyNone>();
             for (int32_t i = 0; i != ifcount; ++i) {
               mirror::PointerArray* unpatched_ifarray =
                   iftable->GetMethodArrayOrNull<kVerifyNone, kWithoutReadBarrier>(i);

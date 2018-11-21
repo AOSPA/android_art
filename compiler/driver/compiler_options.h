@@ -42,6 +42,7 @@ class VerifierDepsTest;
 class DexFile;
 enum class InstructionSet;
 class InstructionSetFeatures;
+class ProfileCompilationInfo;
 
 class CompilerOptions final {
  public:
@@ -56,6 +57,12 @@ class CompilerOptions final {
   static const bool kDefaultGenerateMiniDebugInfo = false;
   static const size_t kDefaultInlineMaxCodeUnits = 32;
   static constexpr size_t kUnsetInlineMaxCodeUnits = -1;
+
+  enum class ImageType : uint8_t {
+    kNone,                // JIT or AOT app compilation producing only an oat file but no image.
+    kBootImage,           // Creating boot image.
+    kAppImage,            // Creating app image.
+  };
 
   CompilerOptions();
   ~CompilerOptions();
@@ -190,32 +197,32 @@ class CompilerOptions final {
 
   // Are we compiling a boot image?
   bool IsBootImage() const {
-    return boot_image_;
+    return image_type_ == ImageType::kBootImage;
   }
 
   bool IsBaseline() const {
     return baseline_;
   }
 
-  // Are we compiling a core image (small boot image only used for ART testing)?
-  bool IsCoreImage() const {
-    // Ensure that `core_image_` => `boot_image_`.
-    DCHECK(!core_image_ || boot_image_);
-    return core_image_;
-  }
-
   // Are we compiling an app image?
   bool IsAppImage() const {
-    return app_image_;
+    return image_type_ == ImageType::kAppImage;
   }
 
-  void DisableAppImage() {
-    app_image_ = false;
+  // Returns whether we are compiling against a "core" image, which
+  // is an indicative we are running tests. The compiler will use that
+  // information for checking invariants.
+  bool CompilingWithCoreImage() const {
+    return compiling_with_core_image_;
   }
 
   // Should the code be compiled as position independent?
   bool GetCompilePic() const {
     return compile_pic_;
+  }
+
+  const ProfileCompilationInfo* GetProfileCompilationInfo() const {
+    return profile_compilation_info_;
   }
 
   bool HasVerboseMethods() const {
@@ -351,9 +358,8 @@ class CompilerOptions final {
   // Must not be empty for real boot image, only for tests pretending to compile boot image.
   HashSet<std::string> image_classes_;
 
-  bool boot_image_;
-  bool core_image_;
-  bool app_image_;
+  ImageType image_type_;
+  bool compiling_with_core_image_;
   bool baseline_;
   bool debuggable_;
   bool generate_debug_info_;
@@ -369,6 +375,9 @@ class CompilerOptions final {
 
   // When using a profile file only the top K% of the profiled samples will be compiled.
   double top_k_profile_threshold_;
+
+  // Info for profile guided compilation.
+  const ProfileCompilationInfo* profile_compilation_info_;
 
   // Vector of methods to have verbose output enabled for.
   std::vector<std::string> verbose_methods_;

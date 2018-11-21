@@ -3560,7 +3560,40 @@ void InstructionCodeGeneratorX86_64::DivRemOneOrMinusOne(HBinaryOperation* instr
       LOG(FATAL) << "Unexpected type for div by (-)1 " << instruction->GetResultType();
   }
 }
+void InstructionCodeGeneratorX86_64::RemByPowerOfTwo(HRem* instruction) {
+  LocationSummary* locations = instruction->GetLocations();
+  Location second = locations->InAt(1);
+  CpuRegister out = locations->Out().AsRegister<CpuRegister>();
+  CpuRegister numerator = locations->InAt(0).AsRegister<CpuRegister>();
+  int64_t imm = Int64FromConstant(second.GetConstant());
+  DCHECK(IsPowerOfTwo(AbsOrMin(imm)));
+  uint64_t abs_imm = AbsOrMin(imm);
+  CpuRegister tmp = locations->GetTemp(0).AsRegister<CpuRegister>();
+  if (instruction->GetResultType() == DataType::Type::kInt32) {
+    NearLabel done;
+    __ movl(out, numerator);
+    __ andl(out, Immediate(abs_imm-1));
+    __ j(Condition::kZero, &done);
+    __ leal(tmp, Address(out, static_cast<int32_t>(~(abs_imm-1))));
+    __ testl(numerator, numerator);
+    __ cmov(Condition::kLess, out, tmp, false);
+    __ Bind(&done);
 
+  } else {
+    DCHECK_EQ(instruction->GetResultType(), DataType::Type::kInt64);
+    codegen_->Load64BitValue(tmp, abs_imm - 1);
+    NearLabel done;
+
+    __ movq(out, numerator);
+    __ andq(out, tmp);
+    __ j(Condition::kZero, &done);
+    __ movq(tmp, numerator);
+    __ sarq(tmp, Immediate(63));
+    __ shlq(tmp, Immediate(WhichPowerOf2(abs_imm)));
+    __ orq(out, tmp);
+    __ Bind(&done);
+  }
+}
 void InstructionCodeGeneratorX86_64::DivByPowerOfTwo(HDiv* instruction) {
   LocationSummary* locations = instruction->GetLocations();
   Location second = locations->InAt(1);
@@ -3737,8 +3770,12 @@ void InstructionCodeGeneratorX86_64::GenerateDivRemIntegral(HBinaryOperation* in
       // Do not generate anything. DivZeroCheck would prevent any code to be executed.
     } else if (imm == 1 || imm == -1) {
       DivRemOneOrMinusOne(instruction);
-    } else if (instruction->IsDiv() && IsPowerOfTwo(AbsOrMin(imm))) {
-      DivByPowerOfTwo(instruction->AsDiv());
+    } else if (IsPowerOfTwo(AbsOrMin(imm))) {
+      if (is_div) {
+        DivByPowerOfTwo(instruction->AsDiv());
+      } else {
+        RemByPowerOfTwo(instruction->AsRem());
+      }
     } else {
       DCHECK(imm <= -2 || imm >= 2);
       GenerateDivRemWithAnyConstant(instruction);
@@ -6731,6 +6768,48 @@ void InstructionCodeGeneratorX86_64::VisitMonitorOperation(HMonitorOperation* in
     CheckEntrypointTypes<kQuickLockObject, void, mirror::Object*>();
   } else {
     CheckEntrypointTypes<kQuickUnlockObject, void, mirror::Object*>();
+  }
+}
+
+void LocationsBuilderX86_64::VisitX86AndNot(HX86AndNot* instruction) {
+  DCHECK(codegen_->GetInstructionSetFeatures().HasAVX2());
+  DCHECK(DataType::IsIntOrLongType(instruction->GetType())) << instruction->GetType();
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(instruction);
+  locations->SetInAt(0, Location::RequiresRegister());
+  // There is no immediate variant of negated bitwise and in X86.
+  locations->SetInAt(1, Location::RequiresRegister());
+  locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
+}
+
+void LocationsBuilderX86_64::VisitX86MaskOrResetLeastSetBit(HX86MaskOrResetLeastSetBit* instruction) {
+  DCHECK(codegen_->GetInstructionSetFeatures().HasAVX2());
+  DCHECK(DataType::IsIntOrLongType(instruction->GetType())) << instruction->GetType();
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(instruction);
+  locations->SetInAt(0, Location::RequiresRegister());
+  locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
+}
+
+void InstructionCodeGeneratorX86_64::VisitX86AndNot(HX86AndNot* instruction) {
+  LocationSummary* locations = instruction->GetLocations();
+  Location first = locations->InAt(0);
+  Location second = locations->InAt(1);
+  Location dest = locations->Out();
+  __ andn(dest.AsRegister<CpuRegister>(), first.AsRegister<CpuRegister>(), second.AsRegister<CpuRegister>());
+}
+
+void InstructionCodeGeneratorX86_64::VisitX86MaskOrResetLeastSetBit(HX86MaskOrResetLeastSetBit* instruction) {
+  LocationSummary* locations = instruction->GetLocations();
+  Location src = locations->InAt(0);
+  Location dest = locations->Out();
+  switch (instruction->GetOpKind()) {
+    case HInstruction::kAnd:
+      __ blsr(dest.AsRegister<CpuRegister>(), src.AsRegister<CpuRegister>());
+      break;
+    case HInstruction::kXor:
+      __ blsmsk(dest.AsRegister<CpuRegister>(), src.AsRegister<CpuRegister>());
+      break;
+    default:
+      LOG(FATAL) << "Unreachable";
   }
 }
 

@@ -579,6 +579,7 @@ bool OptimizingCompiler::RunArchOptimizations(HGraph* graph,
 #ifdef ART_ENABLE_CODEGEN_x86
     case InstructionSet::kX86: {
       OptimizationDef x86_optimizations[] = {
+        OptDef(OptimizationPass::kInstructionSimplifierX86),
         OptDef(OptimizationPass::kSideEffectsAnalysis),
         OptDef(OptimizationPass::kGlobalValueNumbering, "GVN$after_arch"),
         OptDef(OptimizationPass::kPcRelativeFixupsX86),
@@ -595,6 +596,7 @@ bool OptimizingCompiler::RunArchOptimizations(HGraph* graph,
 #ifdef ART_ENABLE_CODEGEN_x86_64
     case InstructionSet::kX86_64: {
       OptimizationDef x86_64_optimizations[] = {
+        OptDef(OptimizationPass::kInstructionSimplifierX86_64),
         OptDef(OptimizationPass::kSideEffectsAnalysis),
         OptDef(OptimizationPass::kGlobalValueNumbering, "GVN$after_arch"),
         OptDef(OptimizationPass::kX86MemoryOperandGeneration)
@@ -870,7 +872,6 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* allocator,
                           code_item_accessor,
                           &dex_compilation_unit,
                           &dex_compilation_unit,
-                          compiler_driver,
                           codegen.get(),
                           compilation_stats_.get(),
                           interpreter_metadata,
@@ -991,7 +992,6 @@ CodeGenerator* OptimizingCompiler::TryCompileIntrinsic(
                           CodeItemDebugInfoAccessor(),  // Null code item.
                           &dex_compilation_unit,
                           &dex_compilation_unit,
-                          compiler_driver,
                           codegen.get(),
                           compilation_stats_.get(),
                           /* interpreter_metadata */ ArrayRef<const uint8_t>(),
@@ -1056,6 +1056,15 @@ CompiledMethod* OptimizingCompiler::Compile(const DexFile::CodeItem* code_item,
     std::unique_ptr<CodeGenerator> codegen;
     bool compiled_intrinsic = false;
     {
+      ScopedObjectAccess soa(Thread::Current());
+      ArtMethod* method =
+          runtime->GetClassLinker()->ResolveMethod<ClassLinker::ResolveMode::kCheckICCEAndIAE>(
+              method_idx, dex_cache, jclass_loader, /*referrer=*/ nullptr, invoke_type);
+      DCHECK_EQ(method == nullptr, soa.Self()->IsExceptionPending());
+      soa.Self()->ClearException();  // Suppress exception if any.
+      VariableSizedHandleScope handles(soa.Self());
+      Handle<mirror::Class> compiling_class =
+          handles.NewHandle(method != nullptr ? method->GetDeclaringClass() : nullptr);
       DexCompilationUnit dex_compilation_unit(
           jclass_loader,
           runtime->GetClassLinker(),
@@ -1064,12 +1073,9 @@ CompiledMethod* OptimizingCompiler::Compile(const DexFile::CodeItem* code_item,
           class_def_idx,
           method_idx,
           access_flags,
-          /* verified_method */ nullptr,  // Not needed by the Optimizing compiler.
-          dex_cache);
-      ScopedObjectAccess soa(Thread::Current());
-      ArtMethod* method = compiler_driver->ResolveMethod(
-            soa, dex_cache, jclass_loader, &dex_compilation_unit, method_idx, invoke_type);
-      VariableSizedHandleScope handles(soa.Self());
+          /*verified_method=*/ nullptr,  // Not needed by the Optimizing compiler.
+          dex_cache,
+          compiling_class);
       // Go to native so that we don't block GC during compilation.
       ScopedThreadSuspension sts(soa.Self(), kNative);
       if (method != nullptr && UNLIKELY(method->IsIntrinsic())) {
@@ -1130,7 +1136,7 @@ CompiledMethod* OptimizingCompiler::Compile(const DexFile::CodeItem* code_item,
   }
 
   if (kIsDebugBuild &&
-      IsCompilingWithCoreImage() &&
+      compiler_driver->GetCompilerOptions().CompilingWithCoreImage() &&
       IsInstructionSetSupported(compiler_driver->GetCompilerOptions().GetInstructionSet())) {
     // For testing purposes, we put a special marker on method names
     // that should be compiled with this compiler (when the
@@ -1171,21 +1177,23 @@ CompiledMethod* OptimizingCompiler::JniCompile(uint32_t access_flags,
   if (compiler_options.IsBootImage()) {
     ScopedObjectAccess soa(Thread::Current());
     ArtMethod* method = runtime->GetClassLinker()->LookupResolvedMethod(
-        method_idx, dex_cache.Get(), /* class_loader */ nullptr);
+        method_idx, dex_cache.Get(), /*class_loader=*/ nullptr);
     if (method != nullptr && UNLIKELY(method->IsIntrinsic())) {
+      VariableSizedHandleScope handles(soa.Self());
       ScopedNullHandle<mirror::ClassLoader> class_loader;  // null means boot class path loader.
+      Handle<mirror::Class> compiling_class = handles.NewHandle(method->GetDeclaringClass());
       DexCompilationUnit dex_compilation_unit(
           class_loader,
           runtime->GetClassLinker(),
           dex_file,
-          /* code_item */ nullptr,
-          /* class_def_idx */ DexFile::kDexNoIndex16,
+          /*code_item=*/ nullptr,
+          /*class_def_idx=*/ DexFile::kDexNoIndex16,
           method_idx,
           access_flags,
-          /* verified_method */ nullptr,
-          dex_cache);
+          /*verified_method=*/ nullptr,
+          dex_cache,
+          compiling_class);
       CodeVectorAllocator code_allocator(&allocator);
-      VariableSizedHandleScope handles(soa.Self());
       // Go to native so that we don't block GC during compilation.
       ScopedThreadSuspension sts(soa.Self(), kNative);
       std::unique_ptr<CodeGenerator> codegen(
@@ -1226,28 +1234,9 @@ Compiler* CreateOptimizingCompiler(CompilerDriver* driver) {
   return new OptimizingCompiler(driver);
 }
 
-bool IsCompilingWithCoreImage() {
-  const std::string& image = Runtime::Current()->GetImageLocation();
-  return CompilerDriver::IsCoreImageFilename(image);
-}
-
 bool EncodeArtMethodInInlineInfo(ArtMethod* method ATTRIBUTE_UNUSED) {
   // Note: the runtime is null only for unit testing.
   return Runtime::Current() == nullptr || !Runtime::Current()->IsAotCompiler();
-}
-
-bool CanEncodeInlinedMethodInStackMap(const DexFile& caller_dex_file, ArtMethod* callee) {
-  if (!Runtime::Current()->IsAotCompiler()) {
-    // JIT can always encode methods in stack maps.
-    return true;
-  }
-  if (IsSameDexFile(caller_dex_file, *callee->GetDexFile())) {
-    return true;
-  }
-  // TODO(ngeoffray): Support more AOT cases for inlining:
-  // - methods in multidex
-  // - methods in boot image for on-device non-PIC compilation.
-  return false;
 }
 
 bool OptimizingCompiler::JitCompile(Thread* self,
@@ -1349,6 +1338,7 @@ bool OptimizingCompiler::JitCompile(Thread* self,
 
   std::unique_ptr<CodeGenerator> codegen;
   {
+    Handle<mirror::Class> compiling_class = handles.NewHandle(method->GetDeclaringClass());
     DexCompilationUnit dex_compilation_unit(
         class_loader,
         runtime->GetClassLinker(),
@@ -1357,8 +1347,9 @@ bool OptimizingCompiler::JitCompile(Thread* self,
         class_def_idx,
         method_idx,
         access_flags,
-        /* verified_method */ nullptr,
-        dex_cache);
+        /*verified_method=*/ nullptr,
+        dex_cache,
+        compiling_class);
 
     // Go to native so that we don't block GC during compilation.
     ScopedThreadSuspension sts(self, kNative);

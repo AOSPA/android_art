@@ -78,23 +78,27 @@ static void EnableDebugger() {
     }
   }
 #endif
-  // We don't want core dumps, though, so set the core dump size to 0.
+  // We don't want core dumps, though, so set the soft limit on core dump size
+  // to 0 without changing the hard limit.
   rlimit rl;
+  if (getrlimit(RLIMIT_CORE, &rl) == -1) {
+    PLOG(ERROR) << "getrlimit(RLIMIT_CORE) failed for pid " << getpid();
+  } else {
 #ifdef __ANDROID__
-  char prop_value[PROPERTY_VALUE_MAX];
-  property_get("persist.debug.trace", prop_value, "0");
-  if (prop_value[0] == '1') {
+    char prop_value[PROPERTY_VALUE_MAX];
+    property_get("persist.debug.trace", prop_value, "0");
+    if (prop_value[0] == '1') {
       LOG(INFO) << "setting RLIM to infinity for process " << getpid();
       rl.rlim_cur = RLIM_INFINITY;
-  } else {
+    } else {
       rl.rlim_cur = 0;
-  }
+    }
 #else
-  rl.rlim_cur = 0;
+    rl.rlim_cur = 0;
 #endif
-  rl.rlim_max = RLIM_INFINITY;
-  if (setrlimit(RLIMIT_CORE, &rl) == -1) {
-    PLOG(ERROR) << "setrlimit(RLIMIT_CORE) failed for pid " << getpid();
+    if (setrlimit(RLIMIT_CORE, &rl) == -1) {
+      PLOG(ERROR) << "setrlimit(RLIMIT_CORE) failed for pid " << getpid();
+    }
   }
 }
 
@@ -165,7 +169,8 @@ static void CollectNonDebuggableClasses() REQUIRES(!Locks::mutator_lock_) {
     // Drop the shared mutator lock.
     ScopedThreadSuspension sts(self, art::ThreadState::kNative);
     // Get exclusive mutator lock with suspend all.
-    ScopedSuspendAll suspend("Checking stacks for non-obsoletable methods!", /*long_suspend*/false);
+    ScopedSuspendAll suspend("Checking stacks for non-obsoletable methods!",
+                             /*long_suspend=*/false);
     MutexLock mu(Thread::Current(), *Locks::thread_list_lock_);
     runtime->GetThreadList()->ForEach(DoCollectNonDebuggableCallback, &classes);
   }
@@ -237,7 +242,9 @@ static uint32_t EnableDebugFeatures(uint32_t runtime_flags) {
   if ((runtime_flags & DEBUG_ALWAYS_JIT) != 0) {
     jit::JitOptions* jit_options = runtime->GetJITOptions();
     CHECK(jit_options != nullptr);
-    jit_options->SetJitAtFirstUse();
+    Runtime::Current()->DoAndMaybeSwitchInterpreter([=]() {
+        jit_options->SetJitAtFirstUse();
+    });
     runtime_flags &= ~DEBUG_ALWAYS_JIT;
   }
 
@@ -292,6 +299,15 @@ static jlong ZygoteHooks_nativePreFork(JNIEnv* env, jclass) {
   return reinterpret_cast<jlong>(ThreadForEnv(env));
 }
 
+static void ZygoteHooks_nativePostForkSystemServer(JNIEnv* env ATTRIBUTE_UNUSED,
+                                                   jclass klass ATTRIBUTE_UNUSED) {
+  // This JIT code cache for system server is created whilst the runtime is still single threaded.
+  // System server has a window where it can create executable pages for this purpose, but this is
+  // turned off after this hook. Consequently, the only JIT mode supported is the dual-view JIT
+  // where one mapping is R->RW and the other is RX. Single view requires RX->RWX->RX.
+  Runtime::Current()->CreateJitCodeCache(/*rwx_memory_allowed=*/false);
+}
+
 static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
                                             jclass,
                                             jlong token,
@@ -305,8 +321,7 @@ static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
   // Our system thread ID, etc, has changed so reset Thread state.
   thread->InitAfterFork();
   runtime_flags = EnableDebugFeatures(runtime_flags);
-  hiddenapi::EnforcementPolicy api_enforcement_policy = hiddenapi::EnforcementPolicy::kNoChecks;
-  bool dedupe_hidden_api_warnings = true;
+  hiddenapi::EnforcementPolicy api_enforcement_policy = hiddenapi::EnforcementPolicy::kDisabled;
 
   if ((runtime_flags & DISABLE_VERIFIER) != 0) {
     Runtime::Current()->DisableVerifier();
@@ -373,23 +388,20 @@ static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
     }
   }
 
-  bool do_hidden_api_checks = api_enforcement_policy != hiddenapi::EnforcementPolicy::kNoChecks;
+  bool do_hidden_api_checks = api_enforcement_policy != hiddenapi::EnforcementPolicy::kDisabled;
   DCHECK(!(is_system_server && do_hidden_api_checks))
       << "SystemServer should be forked with EnforcementPolicy::kDisable";
   DCHECK(!(is_zygote && do_hidden_api_checks))
       << "Child zygote processes should be forked with EnforcementPolicy::kDisable";
   Runtime::Current()->SetHiddenApiEnforcementPolicy(api_enforcement_policy);
-  Runtime::Current()->SetDedupeHiddenApiWarnings(dedupe_hidden_api_warnings);
-  if (api_enforcement_policy != hiddenapi::EnforcementPolicy::kNoChecks &&
+  Runtime::Current()->SetDedupeHiddenApiWarnings(true);
+  if (api_enforcement_policy != hiddenapi::EnforcementPolicy::kDisabled &&
       Runtime::Current()->GetHiddenApiEventLogSampleRate() != 0) {
     // Hidden API checks are enabled, and we are sampling access for the event log. Initialize the
     // random seed, to ensure the sampling is actually random. We do this post-fork, as doing it
     // pre-fork would result in the same sequence for every forked process.
     std::srand(static_cast<uint32_t>(NanoTime()));
   }
-
-  // Clear the hidden API warning flag, in case it was set.
-  Runtime::Current()->SetPendingHiddenApiWarning(false);
 
   if (is_zygote) {
     // If creating a child-zygote, do not call into the runtime's post-fork logic.
@@ -412,7 +424,7 @@ static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
         env,
         is_system_server,
         Runtime::NativeBridgeAction::kUnload,
-        /*isa*/ nullptr,
+        /*isa=*/ nullptr,
         profile_system_server);
   }
 }
@@ -429,6 +441,7 @@ static void ZygoteHooks_stopZygoteNoThreadCreation(JNIEnv* env ATTRIBUTE_UNUSED,
 
 static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(ZygoteHooks, nativePreFork, "()J"),
+  NATIVE_METHOD(ZygoteHooks, nativePostForkSystemServer, "()V"),
   NATIVE_METHOD(ZygoteHooks, nativePostForkChild, "(JIZZLjava/lang/String;)V"),
   NATIVE_METHOD(ZygoteHooks, startZygoteNoThreadCreation, "()V"),
   NATIVE_METHOD(ZygoteHooks, stopZygoteNoThreadCreation, "()V"),

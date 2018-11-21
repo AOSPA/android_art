@@ -29,6 +29,7 @@ extern "C" void android_set_application_target_sdk_version(uint32_t version);
 #include "arch/instruction_set.h"
 #include "art_method-inl.h"
 #include "base/enums.h"
+#include "base/sdk_version.h"
 #include "class_linker-inl.h"
 #include "common_throws.h"
 #include "debugger.h"
@@ -44,6 +45,7 @@ extern "C" void android_set_application_target_sdk_version(uint32_t version);
 #include "intern_table.h"
 #include "jni/java_vm_ext.h"
 #include "jni/jni_internal.h"
+#include "mirror/array-alloc-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/dex_cache-inl.h"
 #include "mirror/object-inl.h"
@@ -73,10 +75,6 @@ static void VMRuntime_startJitCompilation(JNIEnv*, jobject) {
 }
 
 static void VMRuntime_disableJitCompilation(JNIEnv*, jobject) {
-}
-
-static jboolean VMRuntime_hasUsedHiddenApi(JNIEnv*, jobject) {
-  return Runtime::Current()->HasPendingHiddenApiWarning() ? JNI_TRUE : JNI_FALSE;
 }
 
 static void VMRuntime_setHiddenApiExemptions(JNIEnv* env,
@@ -259,12 +257,15 @@ static void VMRuntime_setTargetSdkVersionNative(JNIEnv*, jobject, jint target_sd
   // where workarounds can be enabled.
   // Note that targetSdkVersion may be CUR_DEVELOPMENT (10000).
   // Note that targetSdkVersion may be 0, meaning "current".
-  Runtime::Current()->SetTargetSdkVersion(target_sdk_version);
+  uint32_t uint_target_sdk_version =
+      target_sdk_version <= 0 ? static_cast<uint32_t>(SdkVersion::kUnset)
+                              : static_cast<uint32_t>(target_sdk_version);
+  Runtime::Current()->SetTargetSdkVersion(uint_target_sdk_version);
 
 #ifdef ART_TARGET_ANDROID
   // This part is letting libc/dynamic linker know about current app's
   // target sdk version to enable compatibility workarounds.
-  android_set_application_target_sdk_version(static_cast<uint32_t>(target_sdk_version));
+  android_set_application_target_sdk_version(uint_target_sdk_version);
 #endif
 }
 
@@ -374,7 +375,7 @@ static void PreloadDexCachesResolveType(Thread* self,
   const char* class_name = dex_file->StringByTypeIdx(type_idx);
   ClassLinker* linker = Runtime::Current()->GetClassLinker();
   ObjPtr<mirror::Class> klass = (class_name[1] == '\0')
-      ? linker->FindPrimitiveClass(class_name[0])
+      ? linker->LookupPrimitiveClass(class_name[0])
       : linker->LookupClass(self, class_name, nullptr);
   if (klass == nullptr) {
     return;
@@ -404,7 +405,7 @@ static void PreloadDexCachesResolveField(ObjPtr<mirror::DexCache> dex_cache,
   const DexFile* dex_file = dex_cache->GetDexFile();
   const DexFile::FieldId& field_id = dex_file->GetFieldId(field_idx);
   ObjPtr<mirror::Class> klass = Runtime::Current()->GetClassLinker()->LookupResolvedType(
-      field_id.class_idx_, dex_cache, /* class_loader */ nullptr);
+      field_id.class_idx_, dex_cache, /* class_loader= */ nullptr);
   if (klass == nullptr) {
     return;
   }
@@ -432,12 +433,12 @@ static void PreloadDexCachesResolveMethod(ObjPtr<mirror::DexCache> dex_cache, ui
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
 
   ObjPtr<mirror::Class> klass = class_linker->LookupResolvedType(
-      method_id.class_idx_, dex_cache, /* class_loader */ nullptr);
+      method_id.class_idx_, dex_cache, /* class_loader= */ nullptr);
   if (klass == nullptr) {
     return;
   }
   // Call FindResolvedMethod to populate the dex cache.
-  class_linker->FindResolvedMethod(klass, dex_cache, /* class_loader */ nullptr, method_idx);
+  class_linker->FindResolvedMethod(klass, dex_cache, /* class_loader= */ nullptr, method_idx);
 }
 
 struct DexCacheStats {
@@ -696,7 +697,6 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(VMRuntime, concurrentGC, "()V"),
   NATIVE_METHOD(VMRuntime, disableJitCompilation, "()V"),
   FAST_NATIVE_METHOD(VMRuntime, hasBootImageSpaces, "()Z"),  // Could be CRITICAL.
-  NATIVE_METHOD(VMRuntime, hasUsedHiddenApi, "()Z"),
   NATIVE_METHOD(VMRuntime, setHiddenApiExemptions, "([Ljava/lang/String;)V"),
   NATIVE_METHOD(VMRuntime, setHiddenApiAccessLogSamplingRate, "(I)V"),
   NATIVE_METHOD(VMRuntime, getTargetHeapUtilization, "()F"),

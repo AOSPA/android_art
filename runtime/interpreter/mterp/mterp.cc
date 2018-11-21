@@ -25,6 +25,7 @@
 #include "interpreter/interpreter_common.h"
 #include "interpreter/interpreter_intrinsics.h"
 #include "interpreter/shadow_frame-inl.h"
+#include "mirror/string-alloc-inl.h"
 
 namespace art {
 namespace interpreter {
@@ -142,27 +143,22 @@ extern "C" ssize_t MterpDoPackedSwitch(const uint16_t* switchData, int32_t testV
   return entries[index];
 }
 
-extern "C" size_t MterpShouldSwitchInterpreters()
+bool CanUseMterp()
     REQUIRES_SHARED(Locks::mutator_lock_) {
   const Runtime* const runtime = Runtime::Current();
-  const instrumentation::Instrumentation* const instrumentation = runtime->GetInstrumentation();
-  return instrumentation->NonJitProfilingActive() ||
-      Dbg::IsDebuggerActive() ||
+  return
+      runtime->IsStarted() &&
+      !runtime->IsAotCompiler() &&
+      !Dbg::IsDebuggerActive() &&
+      !runtime->GetInstrumentation()->IsActive() &&
       // mterp only knows how to deal with the normal exits. It cannot handle any of the
       // non-standard force-returns.
-      // TODO We really only need to switch interpreters if a PopFrame has actually happened. We
-      // should check this here.
-      UNLIKELY(runtime->AreNonStandardExitsEnabled()) ||
+      !runtime->AreNonStandardExitsEnabled() &&
       // An async exception has been thrown. We need to go to the switch interpreter. MTerp doesn't
       // know how to deal with these so we could end up never dealing with it if we are in an
-      // infinite loop. Since this can be called in a tight loop and getting the current thread
-      // requires a TLS read we instead first check a short-circuit runtime flag that will only be
-      // set if something tries to set an async exception. This will make this function faster in
-      // the common case where no async exception has ever been sent. We don't need to worry about
-      // synchronization on the runtime flag since it is only set in a checkpoint which will either
-      // take place on the current thread or act as a synchronization point.
-      (UNLIKELY(runtime->AreAsyncExceptionsThrown()) &&
-       Thread::Current()->IsAsyncExceptionPending());
+      // infinite loop.
+      !runtime->AreAsyncExceptionsThrown() &&
+      (runtime->GetJit() == nullptr || !runtime->GetJit()->JitAtFirstUse());
 }
 
 
@@ -228,7 +224,7 @@ extern "C" size_t MterpInvokeCustom(Thread* self,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   JValue* result_register = shadow_frame->GetResultRegister();
   const Instruction* inst = Instruction::At(dex_pc_ptr);
-  return DoInvokeCustom<false /* is_range */>(
+  return DoInvokeCustom</* is_range= */ false>(
       self, *shadow_frame, inst, inst_data, result_register);
 }
 
@@ -239,7 +235,7 @@ extern "C" size_t MterpInvokePolymorphic(Thread* self,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   JValue* result_register = shadow_frame->GetResultRegister();
   const Instruction* inst = Instruction::At(dex_pc_ptr);
-  return DoInvokePolymorphic<false /* is_range */>(
+  return DoInvokePolymorphic</* is_range= */ false>(
       self, *shadow_frame, inst, inst_data, result_register);
 }
 
@@ -305,7 +301,7 @@ extern "C" size_t MterpInvokeCustomRange(Thread* self,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   JValue* result_register = shadow_frame->GetResultRegister();
   const Instruction* inst = Instruction::At(dex_pc_ptr);
-  return DoInvokeCustom<true /* is_range */>(self, *shadow_frame, inst, inst_data, result_register);
+  return DoInvokeCustom</*is_range=*/ true>(self, *shadow_frame, inst, inst_data, result_register);
 }
 
 extern "C" size_t MterpInvokePolymorphicRange(Thread* self,
@@ -315,7 +311,7 @@ extern "C" size_t MterpInvokePolymorphicRange(Thread* self,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   JValue* result_register = shadow_frame->GetResultRegister();
   const Instruction* inst = Instruction::At(dex_pc_ptr);
-  return DoInvokePolymorphic<true /* is_range */>(
+  return DoInvokePolymorphic</* is_range= */ true>(
       self, *shadow_frame, inst, inst_data, result_register);
 }
 
@@ -326,25 +322,8 @@ extern "C" size_t MterpInvokeVirtualQuick(Thread* self,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   JValue* result_register = shadow_frame->GetResultRegister();
   const Instruction* inst = Instruction::At(dex_pc_ptr);
-  const uint32_t vregC = inst->VRegC_35c();
-  const uint32_t vtable_idx = inst->VRegB_35c();
-  ObjPtr<mirror::Object> const receiver = shadow_frame->GetVRegReference(vregC);
-  if (receiver != nullptr) {
-    ArtMethod* const called_method = receiver->GetClass()->GetEmbeddedVTableEntry(
-        vtable_idx, kRuntimePointerSize);
-    if ((called_method != nullptr) && called_method->IsIntrinsic()) {
-      if (MterpHandleIntrinsic(shadow_frame, called_method, inst, inst_data, result_register)) {
-        jit::Jit* jit = Runtime::Current()->GetJit();
-        if (jit != nullptr) {
-          jit->InvokeVirtualOrInterface(
-              receiver, shadow_frame->GetMethod(), shadow_frame->GetDexPC(), called_method);
-        }
-        return !self->IsExceptionPending();
-      }
-    }
-  }
-  return DoInvokeVirtualQuick<false>(
-      self, *shadow_frame, inst, inst_data, result_register);
+  return DoInvoke<kVirtual, /*is_range=*/ false, /*do_access_check=*/ false, /*is_mterp=*/ true,
+      /*is_quick=*/ true>(self, *shadow_frame, inst, inst_data, result_register);
 }
 
 extern "C" size_t MterpInvokeVirtualQuickRange(Thread* self,
@@ -354,8 +333,8 @@ extern "C" size_t MterpInvokeVirtualQuickRange(Thread* self,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   JValue* result_register = shadow_frame->GetResultRegister();
   const Instruction* inst = Instruction::At(dex_pc_ptr);
-  return DoInvokeVirtualQuick<true>(
-      self, *shadow_frame, inst, inst_data, result_register);
+  return DoInvoke<kVirtual, /*is_range=*/ true, /*do_access_check=*/ false, /*is_mterp=*/ true,
+      /*is_quick=*/ true>(self, *shadow_frame, inst, inst_data, result_register);
 }
 
 extern "C" void MterpThreadFenceForConstructor() {
@@ -383,8 +362,8 @@ extern "C" size_t MterpConstClass(uint32_t index,
   ObjPtr<mirror::Class> c = ResolveVerifyAndClinit(dex::TypeIndex(index),
                                                    shadow_frame->GetMethod(),
                                                    self,
-                                                   /* can_run_clinit */ false,
-                                                   /* verify_access */ false);
+                                                   /* can_run_clinit= */ false,
+                                                   /* verify_access= */ false);
   if (UNLIKELY(c == nullptr)) {
     return true;
   }
@@ -471,8 +450,8 @@ extern "C" size_t MterpNewInstance(ShadowFrame* shadow_frame, Thread* self, uint
   ObjPtr<mirror::Class> c = ResolveVerifyAndClinit(dex::TypeIndex(inst->VRegB_21c()),
                                                    shadow_frame->GetMethod(),
                                                    self,
-                                                   /* can_run_clinit */ false,
-                                                   /* verify_access */ false);
+                                                   /* can_run_clinit= */ false,
+                                                   /* verify_access= */ false);
   if (LIKELY(c != nullptr)) {
     if (UNLIKELY(c->IsStringClass())) {
       gc::AllocatorType allocator_type = Runtime::Current()->GetHeap()->GetCurrentAllocator();
@@ -562,6 +541,13 @@ extern "C" size_t MterpHandleException(Thread* self, ShadowFrame* shadow_frame)
 
 extern "C" void MterpCheckBefore(Thread* self, ShadowFrame* shadow_frame, uint16_t* dex_pc_ptr)
     REQUIRES_SHARED(Locks::mutator_lock_) {
+  // Check that we are using the right interpreter.
+  if (kIsDebugBuild && self->UseMterp() != CanUseMterp()) {
+    // The flag might be currently being updated on all threads. Retry with lock.
+    MutexLock tll_mu(self, *Locks::thread_list_lock_);
+    DCHECK_EQ(self->UseMterp(), CanUseMterp());
+  }
+  DCHECK(!Runtime::Current()->IsActiveTransaction());
   const Instruction* inst = Instruction::At(dex_pc_ptr);
   uint16_t inst_data = inst->Fetch16(0);
   if (inst->Opcode(inst_data) == Instruction::MOVE_EXCEPTION) {
@@ -661,7 +647,7 @@ extern "C" void MterpLogSuspendFallback(Thread* self, ShadowFrame* shadow_frame,
 extern "C" size_t MterpSuspendCheck(Thread* self)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   self->AllowThreadSuspension();
-  return MterpShouldSwitchInterpreters();
+  return !self->UseMterp();
 }
 
 // Execute single field access instruction (get/put, static/instance).
@@ -684,8 +670,8 @@ ALWAYS_INLINE void MterpFieldAccess(Instruction* inst,
   if (kIsPrimitive) {
     if (kIsRead) {
       PrimType value = UNLIKELY(is_volatile)
-          ? obj->GetFieldPrimitive<PrimType, /*kIsVolatile*/ true>(offset)
-          : obj->GetFieldPrimitive<PrimType, /*kIsVolatile*/ false>(offset);
+          ? obj->GetFieldPrimitive<PrimType, /*kIsVolatile=*/ true>(offset)
+          : obj->GetFieldPrimitive<PrimType, /*kIsVolatile=*/ false>(offset);
       if (sizeof(PrimType) == sizeof(uint64_t)) {
         shadow_frame->SetVRegLong(vRegA, value);  // Set two consecutive registers.
       } else {
@@ -696,9 +682,9 @@ ALWAYS_INLINE void MterpFieldAccess(Instruction* inst,
           ? shadow_frame->GetVRegLong(vRegA)
           : shadow_frame->GetVReg(vRegA);
       if (UNLIKELY(is_volatile)) {
-        obj->SetFieldPrimitive<PrimType, /*kIsVolatile*/ true>(offset, value);
+        obj->SetFieldPrimitive<PrimType, /*kIsVolatile=*/ true>(offset, value);
       } else {
-        obj->SetFieldPrimitive<PrimType, /*kIsVolatile*/ false>(offset, value);
+        obj->SetFieldPrimitive<PrimType, /*kIsVolatile=*/ false>(offset, value);
       }
     }
   } else {  // Object.
@@ -710,9 +696,9 @@ ALWAYS_INLINE void MterpFieldAccess(Instruction* inst,
     } else {  // Write.
       ObjPtr<mirror::Object> value = shadow_frame->GetVRegReference(vRegA);
       if (UNLIKELY(is_volatile)) {
-        obj->SetFieldObjectVolatile</*kTransactionActive*/ false>(offset, value);
+        obj->SetFieldObjectVolatile</*kTransactionActive=*/ false>(offset, value);
       } else {
-        obj->SetFieldObject</*kTransactionActive*/ false>(offset, value);
+        obj->SetFieldObject</*kTransactionActive=*/ false>(offset, value);
       }
     }
   }
@@ -731,7 +717,7 @@ NO_INLINE bool MterpFieldAccessSlow(Instruction* inst,
   shadow_frame->SetDexPCPtr(reinterpret_cast<uint16_t*>(inst));
   ArtMethod* referrer = shadow_frame->GetMethod();
   uint32_t field_idx = kIsStatic ? inst->VRegB_21c() : inst->VRegC_22c();
-  ArtField* field = FindFieldFromCode<kAccessType, /* access_checks */ false>(
+  ArtField* field = FindFieldFromCode<kAccessType, /* access_checks= */ false>(
       field_idx, referrer, self, sizeof(PrimType));
   if (UNLIKELY(field == nullptr)) {
     DCHECK(self->IsExceptionPending());
@@ -772,7 +758,7 @@ ALWAYS_INLINE bool MterpFieldAccessFast(Instruction* inst,
         : tls_value;
     if (kIsDebugBuild) {
       uint32_t field_idx = kIsStatic ? inst->VRegB_21c() : inst->VRegC_22c();
-      ArtField* field = FindFieldFromCode<kAccessType, /* access_checks */ false>(
+      ArtField* field = FindFieldFromCode<kAccessType, /* access_checks= */ false>(
           field_idx, shadow_frame->GetMethod(), self, sizeof(PrimType));
       DCHECK_EQ(offset, field->GetOffset().SizeValue());
     }
@@ -781,7 +767,7 @@ ALWAYS_INLINE bool MterpFieldAccessFast(Instruction* inst,
         : MakeObjPtr(shadow_frame->GetVRegReference(inst->VRegB_22c(inst_data)));
     if (LIKELY(obj != nullptr)) {
       MterpFieldAccess<PrimType, kAccessType>(
-          inst, inst_data, shadow_frame, obj, MemberOffset(offset), /* is_volatile */ false);
+          inst, inst_data, shadow_frame, obj, MemberOffset(offset), /* is_volatile= */ false);
       return true;
     }
   }
@@ -800,7 +786,7 @@ ALWAYS_INLINE bool MterpFieldAccessFast(Instruction* inst,
     if (LIKELY(field != nullptr)) {
       bool initialized = !kIsStatic || field->GetDeclaringClass()->IsInitialized();
       if (LIKELY(initialized)) {
-        DCHECK_EQ(field, (FindFieldFromCode<kAccessType, /* access_checks */ false>(
+        DCHECK_EQ(field, (FindFieldFromCode<kAccessType, /* access_checks= */ false>(
             field_idx, referrer, self, sizeof(PrimType))));
         ObjPtr<mirror::Object> obj = kIsStatic
             ? field->GetDeclaringClass().Ptr()
@@ -932,7 +918,7 @@ extern "C" ssize_t MterpAddHotnessBatch(ArtMethod* method,
   jit::Jit* jit = Runtime::Current()->GetJit();
   if (jit != nullptr) {
     int16_t count = shadow_frame->GetCachedHotnessCountdown() - shadow_frame->GetHotnessCountdown();
-    jit->AddSamples(self, method, count, /*with_backedges*/ true);
+    jit->AddSamples(self, method, count, /*with_backedges=*/ true);
   }
   return MterpSetUpHotnessCountdown(method, shadow_frame, self);
 }
@@ -957,7 +943,7 @@ extern "C" size_t MterpMaybeDoOnStackReplacement(Thread* self,
     osr_countdown = jit::Jit::kJitRecheckOSRThreshold;
     if (offset <= 0) {
       // Keep updating hotness in case a compilation request was dropped.  Eventually it will retry.
-      jit->AddSamples(self, method, osr_countdown, /*with_backedges*/ true);
+      jit->AddSamples(self, method, osr_countdown, /*with_backedges=*/ true);
     }
     did_osr = jit::Jit::MaybeDoOnStackReplacement(self, method, dex_pc, offset, result);
   }

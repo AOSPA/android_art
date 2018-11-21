@@ -30,7 +30,6 @@
 #include "dex/dex_file-inl.h"
 #include "dex/invoke_type.h"
 #include "dex_cache.h"
-#include "gc/heap-inl.h"
 #include "iftable.h"
 #include "object-inl.h"
 #include "object_array.h"
@@ -295,16 +294,20 @@ inline void Class::SetVTable(ObjPtr<PointerArray> new_vtable) {
 }
 
 inline bool Class::HasVTable() {
-  return GetVTable() != nullptr || ShouldHaveEmbeddedVTable();
+  // No read barrier is needed for comparing with null.
+  return GetVTable<kDefaultVerifyFlags, kWithoutReadBarrier>() != nullptr ||
+         ShouldHaveEmbeddedVTable();
 }
 
-template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
+template<VerifyObjectFlags kVerifyFlags>
 inline int32_t Class::GetVTableLength() {
   if (ShouldHaveEmbeddedVTable<kVerifyFlags>()) {
     return GetEmbeddedVTableLength();
   }
-  return GetVTable<kVerifyFlags, kReadBarrierOption>() != nullptr ?
-      GetVTable<kVerifyFlags, kReadBarrierOption>()->GetLength() : 0;
+  // We do not need a read barrier here as the length is constant,
+  // both from-space and to-space vtables shall yield the same result.
+  ObjPtr<PointerArray> vtable = GetVTable<kVerifyFlags, kWithoutReadBarrier>();
+  return vtable != nullptr ? vtable->GetLength() : 0;
 }
 
 template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
@@ -312,10 +315,9 @@ inline ArtMethod* Class::GetVTableEntry(uint32_t i, PointerSize pointer_size) {
   if (ShouldHaveEmbeddedVTable<kVerifyFlags>()) {
     return GetEmbeddedVTableEntry(i, pointer_size);
   }
-  auto* vtable = GetVTable<kVerifyFlags, kReadBarrierOption>();
+  ObjPtr<PointerArray> vtable = GetVTable<kVerifyFlags, kReadBarrierOption>();
   DCHECK(vtable != nullptr);
-  return vtable->template GetElementPtrSize<ArtMethod*, kVerifyFlags, kReadBarrierOption>(
-      i, pointer_size);
+  return vtable->GetElementPtrSize<ArtMethod*, kVerifyFlags>(i, pointer_size);
 }
 
 template<VerifyObjectFlags kVerifyFlags>
@@ -625,9 +627,11 @@ inline IfTable* Class::GetIfTable() {
   return ret.Ptr();
 }
 
-template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
+template<VerifyObjectFlags kVerifyFlags>
 inline int32_t Class::GetIfTableCount() {
-  return GetIfTable<kVerifyFlags, kReadBarrierOption>()->Count();
+  // We do not need a read barrier here as the length is constant,
+  // both from-space and to-space iftables shall yield the same result.
+  return GetIfTable<kVerifyFlags, kWithoutReadBarrier>()->Count();
 }
 
 inline void Class::SetIfTable(ObjPtr<IfTable> new_iftable) {
@@ -750,58 +754,6 @@ inline size_t Class::GetPrimitiveTypeSizeShift() {
   DCHECK_EQ(size_shift,
             Primitive::ComponentSizeShift(static_cast<Primitive::Type>(v32 & kPrimitiveTypeMask)));
   return size_shift;
-}
-
-inline void Class::CheckObjectAlloc() {
-  DCHECK(!IsArrayClass())
-      << PrettyClass()
-      << "A array shouldn't be allocated through this "
-      << "as it requires a pre-fence visitor that sets the class size.";
-  DCHECK(!IsClassClass())
-      << PrettyClass()
-      << "A class object shouldn't be allocated through this "
-      << "as it requires a pre-fence visitor that sets the class size.";
-  DCHECK(!IsStringClass())
-      << PrettyClass()
-      << "A string shouldn't be allocated through this "
-      << "as it requires a pre-fence visitor that sets the class size.";
-  DCHECK(IsInstantiable()) << PrettyClass();
-  // TODO: decide whether we want this check. It currently fails during bootstrap.
-  // DCHECK(!Runtime::Current()->IsStarted() || IsInitializing()) << PrettyClass();
-  DCHECK_GE(this->object_size_, sizeof(Object));
-}
-
-template<bool kIsInstrumented, bool kCheckAddFinalizer>
-inline ObjPtr<Object> Class::Alloc(Thread* self, gc::AllocatorType allocator_type) {
-  CheckObjectAlloc();
-  gc::Heap* heap = Runtime::Current()->GetHeap();
-  const bool add_finalizer = kCheckAddFinalizer && IsFinalizable();
-  if (!kCheckAddFinalizer) {
-    DCHECK(!IsFinalizable());
-  }
-  // Note that the this pointer may be invalidated after the allocation.
-  ObjPtr<Object> obj =
-      heap->AllocObjectWithAllocator<kIsInstrumented, false>(self,
-                                                             this,
-                                                             this->object_size_,
-                                                             allocator_type,
-                                                             VoidFunctor());
-  if (add_finalizer && LIKELY(obj != nullptr)) {
-    heap->AddFinalizerReference(self, &obj);
-    if (UNLIKELY(self->IsExceptionPending())) {
-      // Failed to allocate finalizer reference, it means that the whole allocation failed.
-      obj = nullptr;
-    }
-  }
-  return obj;
-}
-
-inline ObjPtr<Object> Class::AllocObject(Thread* self) {
-  return Alloc<true>(self, Runtime::Current()->GetHeap()->GetCurrentAllocator());
-}
-
-inline ObjPtr<Object> Class::AllocNonMovableObject(Thread* self) {
-  return Alloc<true>(self, Runtime::Current()->GetHeap()->GetCurrentNonMovingAllocator());
 }
 
 inline uint32_t Class::ComputeClassSize(bool has_embedded_vtable,
@@ -1023,7 +975,17 @@ inline bool Class::IsObjectArrayClass() {
   // We do not need a read barrier here as the primitive type is constant,
   // both from-space and to-space component type classes shall yield the same result.
   ObjPtr<Class> const component_type = GetComponentType<kVerifyFlags, kWithoutReadBarrier>();
-  return component_type != nullptr && !component_type->IsPrimitive<kVerifyFlags>();
+  constexpr VerifyObjectFlags kNewFlags = RemoveThisFlags(kVerifyFlags);
+  return component_type != nullptr && !component_type->IsPrimitive<kNewFlags>();
+}
+
+template<VerifyObjectFlags kVerifyFlags>
+bool Class::IsPrimitiveArray() {
+  // We do not need a read barrier here as the primitive type is constant,
+  // both from-space and to-space component type classes shall yield the same result.
+  ObjPtr<Class> const component_type = GetComponentType<kVerifyFlags, kWithoutReadBarrier>();
+  constexpr VerifyObjectFlags kNewFlags = RemoveThisFlags(kVerifyFlags);
+  return component_type != nullptr && component_type->IsPrimitive<kNewFlags>();
 }
 
 inline bool Class::IsAssignableFrom(ObjPtr<Class> src) {
@@ -1073,8 +1035,8 @@ inline void Class::FixupNativePointer(
   T old_value = GetFieldPtrWithSize<T, kVerifyFlags>(member_offset, pointer_size);
   T new_value = visitor(old_value, address);
   if (old_value != new_value) {
-    dest->SetFieldPtrWithSize</* kTransactionActive */ false,
-                              /* kCheckTransaction */ true,
+    dest->SetFieldPtrWithSize</* kTransactionActive= */ false,
+                              /* kCheckTransaction= */ true,
                               kVerifyNone>(member_offset, new_value, pointer_size);
   }
 }
@@ -1138,6 +1100,16 @@ inline bool Class::CannotBeAssignedFromOtherTypes() {
   }
   ObjPtr<Class> component = GetComponentType();
   return component->IsPrimitive() || component->CannotBeAssignedFromOtherTypes();
+}
+
+template <bool kCheckTransaction>
+inline void Class::SetClassLoader(ObjPtr<ClassLoader> new_class_loader) {
+  if (kCheckTransaction && Runtime::Current()->IsActiveTransaction()) {
+    SetFieldObject<true>(OFFSET_OF_OBJECT_MEMBER(Class, class_loader_), new_class_loader);
+  } else {
+    DCHECK(!Runtime::Current()->IsActiveTransaction());
+    SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(Class, class_loader_), new_class_loader);
+  }
 }
 
 }  // namespace mirror

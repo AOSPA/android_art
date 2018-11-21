@@ -438,7 +438,7 @@ void ThreadList::RunEmptyCheckpoint() {
   // Wake up the threads blocking for weak ref access so that they will respond to the empty
   // checkpoint request. Otherwise we will hang as they are blocking in the kRunnable state.
   Runtime::Current()->GetHeap()->GetReferenceProcessor()->BroadcastForSlowPath(self);
-  Runtime::Current()->BroadcastForNewSystemWeaks(/*broadcast_for_checkpoint*/true);
+  Runtime::Current()->BroadcastForNewSystemWeaks(/*broadcast_for_checkpoint=*/true);
   {
     ScopedThreadStateChange tsc(self, kWaitingForCheckPointsToRun);
     uint64_t total_wait_time = 0;
@@ -491,9 +491,9 @@ void ThreadList::RunEmptyCheckpoint() {
               // Found a runnable thread that hasn't responded to the empty checkpoint request.
               // Assume it's stuck and safe to dump its stack.
               thread->Dump(LOG_STREAM(FATAL_WITHOUT_ABORT),
-                           /*dump_native_stack*/ true,
-                           /*backtrace_map*/ nullptr,
-                           /*force_dump_stack*/ true);
+                           /*dump_native_stack=*/ true,
+                           /*backtrace_map=*/ nullptr,
+                           /*force_dump_stack=*/ true);
             }
           }
         }
@@ -764,7 +764,8 @@ void ThreadList::SuspendAllInternal(Thread* self,
     int32_t cur_val = pending_threads.load(std::memory_order_relaxed);
     if (LIKELY(cur_val > 0)) {
 #if ART_USE_FUTEXES
-      if (futex(pending_threads.Address(), FUTEX_WAIT, cur_val, &wait_timeout, nullptr, 0) != 0) {
+      if (futex(pending_threads.Address(), FUTEX_WAIT_PRIVATE, cur_val, &wait_timeout, nullptr, 0)
+          != 0) {
         // EAGAIN and EINTR both indicate a spurious failure, try again from the beginning.
         if ((errno != EAGAIN) && (errno != EINTR)) {
           if (errno == ETIMEDOUT) {
@@ -1431,6 +1432,7 @@ void ThreadList::Register(Thread* self) {
     }
     self->SetWeakRefAccessEnabled(cc->IsWeakRefAccessEnabled());
   }
+  self->NotifyInTheadList();
 }
 
 void ThreadList::Unregister(Thread* self) {
