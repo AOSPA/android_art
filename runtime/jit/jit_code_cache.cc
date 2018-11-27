@@ -165,11 +165,6 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
   ScopedTrace trace(__PRETTY_FUNCTION__);
   CHECK_GE(max_capacity, initial_capacity);
 
-  // Generating debug information is for using the Linux perf tool on
-  // host which does not work with ashmem.
-  // Also, target linux does not support ashmem.
-  bool use_ashmem = !generate_debug_info && !kIsTargetLinux;
-
   // With 'perf', we want a 1-1 mapping between an address and a method.
   bool garbage_collect_code = !generate_debug_info;
 
@@ -205,8 +200,7 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
       kProtData,
       /* low_4gb */ true,
       /* reuse */ false,
-      &error_str,
-      use_ashmem));
+      &error_str));
   if (data_map == nullptr) {
     std::ostringstream oss;
     oss << "Failed to create read write cache: " << error_str << " size=" << max_capacity;
@@ -229,7 +223,7 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
       divider,
       "jit-code-cache",
       memmap_flags_prot_code | PROT_WRITE,
-      &error_str, use_ashmem);
+      &error_str);
   if (code_map == nullptr) {
     std::ostringstream oss;
     oss << "Failed to create read write execute cache: " << error_str << " size=" << max_capacity;
