@@ -313,10 +313,10 @@ class JvmtiFunctions {
     return StackUtil::GetFrameCount(env, thread, count_ptr);
   }
 
-  static jvmtiError PopFrame(jvmtiEnv* env, jthread thread ATTRIBUTE_UNUSED) {
+  static jvmtiError PopFrame(jvmtiEnv* env, jthread thread) {
     ENSURE_VALID_ENV(env);
     ENSURE_HAS_CAP(env, can_pop_frame);
-    return ERR(NOT_IMPLEMENTED);
+    return StackUtil::PopFrame(env, thread);
   }
 
   static jvmtiError GetFrameLocation(jvmtiEnv* env,
@@ -1195,7 +1195,7 @@ class JvmtiFunctions {
 #undef ADD_CAPABILITY
     gEventHandler->HandleChangedCapabilities(ArtJvmTiEnv::AsArtJvmTiEnv(env),
                                              changed,
-                                             /*added*/true);
+                                             /*added=*/true);
     return ret;
   }
 
@@ -1219,7 +1219,7 @@ class JvmtiFunctions {
 #undef DEL_CAPABILITY
     gEventHandler->HandleChangedCapabilities(ArtJvmTiEnv::AsArtJvmTiEnv(env),
                                              changed,
-                                             /*added*/false);
+                                             /*added=*/false);
     return OK;
   }
 

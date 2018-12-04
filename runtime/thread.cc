@@ -45,6 +45,7 @@
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "base/bit_utils.h"
+#include "base/casts.h"
 #include "base/file_utils.h"
 #include "base/memory_tool.h"
 #include "base/mutex.h"
@@ -500,7 +501,7 @@ void* Thread::CreateCallback(void* arg) {
 Thread* Thread::FromManagedThread(const ScopedObjectAccessAlreadyRunnable& soa,
                                   ObjPtr<mirror::Object> thread_peer) {
   ArtField* f = jni::DecodeArtField(WellKnownClasses::java_lang_Thread_nativePeer);
-  Thread* result = reinterpret_cast<Thread*>(static_cast<uintptr_t>(f->GetLong(thread_peer)));
+  Thread* result = reinterpret_cast64<Thread*>(f->GetLong(thread_peer));
   // Sanity check that if we have a result it is either suspended or we hold the thread_list_lock_
   // to stop it from going away.
   if (kIsDebugBuild) {
@@ -728,7 +729,7 @@ void Thread::CreateNativeThread(JNIEnv* env, jobject java_peer, size_t stack_siz
       // JNIEnvExt we created.
       // Note: we can't check for tmp_jni_env == nullptr, as that would require synchronization
       //       between the threads.
-      child_jni_env_ext.release();
+      child_jni_env_ext.release();  // NOLINT pthreads API.
       return;
     }
   }
@@ -907,7 +908,7 @@ Thread* Thread::Attach(const char* thread_name, bool as_daemon, jobject thread_p
     }
     self->GetJniEnv()->SetLongField(thread_peer,
                                     WellKnownClasses::java_lang_Thread_nativePeer,
-                                    reinterpret_cast<jlong>(self));
+                                    reinterpret_cast64<jlong>(self));
     return true;
   };
   return Attach(thread_name, as_daemon, set_peer_action);
@@ -949,8 +950,9 @@ void Thread::CreatePeer(const char* name, bool as_daemon, jobject thread_group) 
 
   Thread* self = this;
   DCHECK_EQ(self, Thread::Current());
-  env->SetLongField(peer.get(), WellKnownClasses::java_lang_Thread_nativePeer,
-                    reinterpret_cast<jlong>(self));
+  env->SetLongField(peer.get(),
+                    WellKnownClasses::java_lang_Thread_nativePeer,
+                    reinterpret_cast64<jlong>(self));
 
   ScopedObjectAccess soa(self);
   StackHandleScope<1> hs(self);
@@ -3368,11 +3370,41 @@ void Thread::QuickDeliverException() {
     HandleWrapperObjPtr<mirror::Throwable> h_exception(hs.NewHandleWrapper(&exception));
     instrumentation->ExceptionThrownEvent(this, exception.Ptr());
   }
-  // Does instrumentation need to deoptimize the stack?
-  // Note: we do this *after* reporting the exception to instrumentation in case it
-  // now requires deoptimization. It may happen if a debugger is attached and requests
-  // new events (single-step, breakpoint, ...) when the exception is reported.
-  if (Dbg::IsForcedInterpreterNeededForException(this)) {
+  // Does instrumentation need to deoptimize the stack or otherwise go to interpreter for something?
+  // Note: we do this *after* reporting the exception to instrumentation in case it now requires
+  // deoptimization. It may happen if a debugger is attached and requests new events (single-step,
+  // breakpoint, ...) when the exception is reported.
+  //
+  // Note we need to check for both force_frame_pop and force_retry_instruction. The first is
+  // expected to happen fairly regularly but the second can only happen if we are using
+  // instrumentation trampolines (for example with DDMS tracing). That forces us to do deopt later
+  // and see every frame being popped. We don't need to handle it any differently.
+  ShadowFrame* cf;
+  bool force_deopt;
+  {
+    NthCallerVisitor visitor(this, 0, false);
+    visitor.WalkStack();
+    cf = visitor.GetCurrentShadowFrame();
+    if (cf == nullptr) {
+      cf = FindDebuggerShadowFrame(visitor.GetFrameId());
+    }
+    bool force_frame_pop = cf != nullptr && cf->GetForcePopFrame();
+    bool force_retry_instr = cf != nullptr && cf->GetForceRetryInstruction();
+    if (kIsDebugBuild && force_frame_pop) {
+      NthCallerVisitor penultimate_visitor(this, 1, false);
+      penultimate_visitor.WalkStack();
+      ShadowFrame* penultimate_frame = penultimate_visitor.GetCurrentShadowFrame();
+      if (penultimate_frame == nullptr) {
+        penultimate_frame = FindDebuggerShadowFrame(penultimate_visitor.GetFrameId());
+      }
+      DCHECK(penultimate_frame != nullptr &&
+             penultimate_frame->GetForceRetryInstruction())
+          << "Force pop frame without retry instruction found. penultimate frame is null: "
+          << (penultimate_frame == nullptr ? "true" : "false");
+    }
+    force_deopt = force_frame_pop || force_retry_instr;
+  }
+  if (Dbg::IsForcedInterpreterNeededForException(this) || force_deopt) {
     NthCallerVisitor visitor(this, 0, false);
     visitor.WalkStack();
     if (Runtime::Current()->IsAsyncDeoptimizeable(visitor.caller_pc)) {
@@ -3380,10 +3412,18 @@ void Thread::QuickDeliverException() {
       const DeoptimizationMethodType method_type = DeoptimizationMethodType::kDefault;
       // Save the exception into the deoptimization context so it can be restored
       // before entering the interpreter.
+      if (force_deopt) {
+        VLOG(deopt) << "Deopting " << cf->GetMethod()->PrettyMethod() << " for frame-pop";
+        DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
+        // Get rid of the exception since we are doing a framepop instead.
+        LOG(WARNING) << "Suppressing pending exception for retry-instruction/frame-pop: "
+                     << exception->Dump();
+        ClearException();
+      }
       PushDeoptimizationContext(
           JValue(),
           false /* is_reference */,
-          exception,
+          (force_deopt ? nullptr : exception),
           false /* from_code */,
           method_type);
       artDeoptimize(this);
@@ -3567,8 +3607,8 @@ class ReferenceMapVisitor : public StackVisitor {
     if (!m->IsNative() && !m->IsRuntimeMethod() && (!m->IsProxyMethod() || m->IsConstructor())) {
       const OatQuickMethodHeader* method_header = GetCurrentOatQuickMethodHeader();
       DCHECK(method_header->IsOptimized());
-      StackReference<mirror::Object>* vreg_base = reinterpret_cast<StackReference<mirror::Object>*>(
-          reinterpret_cast<uintptr_t>(cur_quick_frame));
+      StackReference<mirror::Object>* vreg_base =
+          reinterpret_cast<StackReference<mirror::Object>*>(cur_quick_frame);
       uintptr_t native_pc_offset = method_header->NativeQuickPcOffset(GetCurrentQuickFramePc());
       CodeInfo code_info(method_header, kPrecise
           ? CodeInfo::DecodeFlags::AllTables  // We will need dex register maps.

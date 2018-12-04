@@ -17,7 +17,9 @@
 package com.android.class2greylist;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableMap.Builder;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 import com.google.common.io.Files;
@@ -41,6 +43,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * Build time tool for extracting a list of members from jar files that have the @UsedByApps
@@ -48,16 +51,20 @@ import java.util.Set;
  */
 public class Class2Greylist {
 
-    private static final String GREYLIST_ANNOTATION = "Landroid/annotation/UnsupportedAppUsage;";
+    private static final Set<String> GREYLIST_ANNOTATIONS =
+            ImmutableSet.of(
+                    "Landroid/annotation/UnsupportedAppUsage;",
+                    "Ldalvik/annotation/compat/UnsupportedAppUsage;");
     private static final Set<String> WHITELIST_ANNOTATIONS = ImmutableSet.of();
 
     private final Status mStatus;
     private final String mPublicApiListFile;
     private final String[] mPerSdkOutputFiles;
     private final String mWhitelistFile;
+    private final String mCsvMetadataFile;
     private final String[] mJarFiles;
     private final GreylistConsumer mOutput;
-    private final Set<Integer> mAllowedSdkVersions;
+    private final Predicate<Integer> mAllowedSdkVersions;
     private final Set<String> mPublicApis;
 
 
@@ -95,10 +102,17 @@ public class Class2Greylist {
                 .hasArgs(0)
                 .create('m'));
         options.addOption(OptionBuilder
+                .withLongOpt("write-metadata-csv")
+                .hasArgs(1)
+                .withDescription("Specify a file to write API metaadata to. This is a CSV file " +
+                        "containing any annotation properties for all members. Do not use in " +
+                        "conjunction with --write-greylist or --write-whitelist.")
+                .create('c'));
+        options.addOption(OptionBuilder
                 .withLongOpt("help")
                 .hasArgs(0)
                 .withDescription("Show this help")
-                .create("h"));
+                .create('h'));
 
         CommandLineParser parser = new GnuParser();
         CommandLine cmd;
@@ -132,6 +146,7 @@ public class Class2Greylist {
                         cmd.getOptionValue('p', null),
                         cmd.getOptionValues('g'),
                         cmd.getOptionValue('w', null),
+                        cmd.getOptionValue('c', null),
                         jarFiles);
                 c2gl.main();
             } catch (IOException e) {
@@ -149,22 +164,33 @@ public class Class2Greylist {
 
     @VisibleForTesting
     Class2Greylist(Status status, String publicApiListFile, String[] perSdkLevelOutputFiles,
-            String whitelistOutputFile, String[] jarFiles) throws IOException {
+            String whitelistOutputFile, String csvMetadataFile, String[] jarFiles)
+            throws IOException {
         mStatus = status;
         mPublicApiListFile = publicApiListFile;
         mPerSdkOutputFiles = perSdkLevelOutputFiles;
         mWhitelistFile = whitelistOutputFile;
+        mCsvMetadataFile = csvMetadataFile;
         mJarFiles = jarFiles;
-        if (mPerSdkOutputFiles != null) {
+        if (mCsvMetadataFile != null) {
+            mOutput = new CsvGreylistConsumer(mStatus, mCsvMetadataFile);
+            mAllowedSdkVersions = x -> true;
+        } else {
             Map<Integer, String> outputFiles = readGreylistMap(mStatus, mPerSdkOutputFiles);
             mOutput = new FileWritingGreylistConsumer(mStatus, outputFiles, mWhitelistFile);
-            mAllowedSdkVersions = outputFiles.keySet();
-        } else {
-            // TODO remove this once per-SDK greylist support integrated into the build.
-            // Right now, mPerSdkOutputFiles is always null as the build never passes the
-            // corresponding command lind flags. Once the build is updated, can remove this.
-            mOutput = new SystemOutGreylistConsumer();
-            mAllowedSdkVersions = new HashSet<>(Arrays.asList(null, 26, 28));
+            mAllowedSdkVersions = new Predicate<Integer>(){
+                @Override
+                public boolean test(Integer i) {
+                    return outputFiles.keySet().contains(i);
+                }
+
+                @Override
+                public String toString() {
+                    // we reply on this toString behaviour for readable error messages in
+                    // GreylistAnnotationHandler
+                    return Joiner.on(",").join(outputFiles.keySet());
+                }
+            };
         }
 
         if (mPublicApiListFile != null) {
@@ -176,10 +202,11 @@ public class Class2Greylist {
     }
 
     private Map<String, AnnotationHandler> createAnnotationHandlers() {
-        return ImmutableMap.<String, AnnotationHandler>builder()
-                .put(GreylistAnnotationHandler.ANNOTATION_NAME,
-                        new GreylistAnnotationHandler(
-                                mStatus, mOutput, mPublicApis, mAllowedSdkVersions))
+        Builder<String, AnnotationHandler> builder = ImmutableMap.builder();
+        GreylistAnnotationHandler greylistAnnotationHandler = new GreylistAnnotationHandler(
+            mStatus, mOutput, mPublicApis, mAllowedSdkVersions);
+        GREYLIST_ANNOTATIONS.forEach(a -> builder.put(a, greylistAnnotationHandler));
+        return builder
                 .put(CovariantReturnTypeHandler.ANNOTATION_NAME,
                         new CovariantReturnTypeHandler(mOutput, mPublicApis))
                 .put(CovariantReturnTypeMultiHandler.ANNOTATION_NAME,
