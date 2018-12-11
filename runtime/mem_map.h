@@ -82,6 +82,9 @@ class MemMap {
   // of the source mmap is returned to the caller.
   bool ReplaceWith(/*in-out*/MemMap** source, /*out*/std::string* error);
 
+  // Set a debug friendly name for a map. It will be prefixed with "dalvik-".
+  static void SetDebugName(void* map_ptr, const char* name, size_t size);
+
   // Request an anonymous region of length 'byte_count' and a requested base address.
   // Use null as the requested base address if you don't care.
   // "reuse" allows re-mapping an address range from an existing mapping.
@@ -90,15 +93,15 @@ class MemMap {
   // 'name' will be used -- on systems that support it -- to give the mapping
   // a name.
   //
-  // On success, returns returns a MemMap instance.  On failure, returns null.
+  // On success, returns returns a valid MemMap.  On failure, returns an invalid MemMap.
   static MemMap* MapAnonymous(const char* name,
-                              uint8_t* addr,
-                              size_t byte_count,
-                              int prot,
-                              bool low_4gb,
-                              bool reuse,
-                              std::string* error_msg,
-                              bool use_ashmem = true);
+                             uint8_t* addr,
+                             size_t byte_count,
+                             int prot,
+                             bool low_4gb,
+                             bool reuse,
+                             std::string* error_msg,
+                             bool use_debug_name = true);
 
   // Create placeholder for a region allocated by direct call to mmap.
   // This is useful when we do not have control over the code calling mmap,
@@ -199,10 +202,10 @@ class MemMap {
 
   // Unmap the pages at end and remap them to create another memory map.
   MemMap* RemapAtEnd(uint8_t* new_end,
-                     const char* tail_name,
-                     int tail_prot,
-                     std::string* error_msg,
-                     bool use_ashmem = true);
+                    const char* tail_name,
+                    int tail_prot,
+                    std::string* error_msg,
+                    bool use_debug_name = true);
 
   static bool CheckNoGaps(MemMap* begin_map, MemMap* end_map)
       REQUIRES(!MemMap::mem_maps_lock_);
