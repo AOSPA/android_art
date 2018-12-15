@@ -184,17 +184,17 @@ void CommonCompilerTest::OverrideInstructionSetFeatures(InstructionSet instructi
 void CommonCompilerTest::CreateCompilerDriver() {
   ApplyInstructionSet();
 
-  compiler_options_->boot_image_ = true;
+  compiler_options_->image_type_ = CompilerOptions::ImageType::kBootImage;
   compiler_options_->compile_pic_ = false;  // Non-PIC boot image is a test configuration.
   compiler_options_->SetCompilerFilter(GetCompilerFilter());
   compiler_options_->image_classes_.swap(*GetImageClasses());
+  compiler_options_->profile_compilation_info_ = GetProfileCompilationInfo();
   compiler_driver_.reset(new CompilerDriver(compiler_options_.get(),
                                             verification_results_.get(),
                                             compiler_kind_,
                                             &compiler_options_->image_classes_,
                                             number_of_threads_,
-                                            /* swap_fd */ -1,
-                                            GetProfileCompilationInfo()));
+                                            /* swap_fd */ -1));
 }
 
 void CommonCompilerTest::SetUpRuntimeOptions(RuntimeOptions* options) {
@@ -328,6 +328,8 @@ void CommonCompilerTest::ReserveImageSpace() {
                                             (size_t)120 * 1024 * 1024,  // 120MB
                                             PROT_NONE,
                                             false /* no need for 4gb flag with fixed mmap */,
+                                            /*reuse=*/ false,
+                                            /*reservation=*/ nullptr,
                                             &error_msg);
   CHECK(image_reservation_.IsValid()) << error_msg;
 }
@@ -343,7 +345,7 @@ void CommonCompilerTest::SetDexFilesForOatFile(const std::vector<const DexFile*>
 }
 
 void CommonCompilerTest::ClearBootImageOption() {
-  compiler_options_->boot_image_ = false;
+  compiler_options_->image_type_ = CompilerOptions::ImageType::kNone;
 }
 
 }  // namespace art

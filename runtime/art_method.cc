@@ -33,6 +33,7 @@
 #include "dex/dex_instruction.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "gc/accounting/card_table-inl.h"
+#include "hidden_api.h"
 #include "interpreter/interpreter.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
@@ -324,12 +325,12 @@ void ArtMethod::Invoke(Thread* self, uint32_t* args, uint32_t args_size, JValue*
   if (UNLIKELY(!runtime->IsStarted() || Dbg::IsForcedInterpreterNeededForCalling(self, this))) {
     if (IsStatic()) {
       art::interpreter::EnterInterpreterFromInvoke(
-          self, this, nullptr, args, result, /*stay_in_interpreter*/ true);
+          self, this, nullptr, args, result, /*stay_in_interpreter=*/ true);
     } else {
       mirror::Object* receiver =
           reinterpret_cast<StackReference<mirror::Object>*>(&args[0])->AsMirrorPtr();
       art::interpreter::EnterInterpreterFromInvoke(
-          self, this, receiver, args + 1, result, /*stay_in_interpreter*/ true);
+          self, this, receiver, args + 1, result, /*stay_in_interpreter=*/ true);
     }
   } else {
     DCHECK_EQ(runtime->GetClassLinker()->GetImagePointerSize(), kRuntimePointerSize);
@@ -682,22 +683,71 @@ bool ArtMethod::HasAnyCompiledCode() {
   return GetOatMethodQuickCode(runtime->GetClassLinker()->GetImagePointerSize()) != nullptr;
 }
 
+void ArtMethod::SetIntrinsic(uint32_t intrinsic) {
+  // Currently we only do intrinsics for static/final methods or methods of final
+  // classes. We don't set kHasSingleImplementation for those methods.
+  DCHECK(IsStatic() || IsFinal() || GetDeclaringClass()->IsFinal()) <<
+      "Potential conflict with kAccSingleImplementation";
+  static const int kAccFlagsShift = CTZ(kAccIntrinsicBits);
+  DCHECK_LE(intrinsic, kAccIntrinsicBits >> kAccFlagsShift);
+  uint32_t intrinsic_bits = intrinsic << kAccFlagsShift;
+  uint32_t new_value = (GetAccessFlags() & ~kAccIntrinsicBits) | kAccIntrinsic | intrinsic_bits;
+  if (kIsDebugBuild) {
+    uint32_t java_flags = (GetAccessFlags() & kAccJavaFlagsMask);
+    bool is_constructor = IsConstructor();
+    bool is_synchronized = IsSynchronized();
+    bool skip_access_checks = SkipAccessChecks();
+    bool is_fast_native = IsFastNative();
+    bool is_critical_native = IsCriticalNative();
+    bool is_copied = IsCopied();
+    bool is_miranda = IsMiranda();
+    bool is_default = IsDefault();
+    bool is_default_conflict = IsDefaultConflicting();
+    bool is_compilable = IsCompilable();
+    bool must_count_locks = MustCountLocks();
+    uint32_t hiddenapi_flags = hiddenapi::GetRuntimeFlags(this);
+    SetAccessFlags(new_value);
+    DCHECK_EQ(java_flags, (GetAccessFlags() & kAccJavaFlagsMask));
+    DCHECK_EQ(is_constructor, IsConstructor());
+    DCHECK_EQ(is_synchronized, IsSynchronized());
+    DCHECK_EQ(skip_access_checks, SkipAccessChecks());
+    DCHECK_EQ(is_fast_native, IsFastNative());
+    DCHECK_EQ(is_critical_native, IsCriticalNative());
+    DCHECK_EQ(is_copied, IsCopied());
+    DCHECK_EQ(is_miranda, IsMiranda());
+    DCHECK_EQ(is_default, IsDefault());
+    DCHECK_EQ(is_default_conflict, IsDefaultConflicting());
+    DCHECK_EQ(is_compilable, IsCompilable());
+    DCHECK_EQ(must_count_locks, MustCountLocks());
+    // Only DCHECK that we have preserved the hidden API access flags if the
+    // original method was not on the whitelist. This is because the core image
+    // does not have the access flags set (b/77733081). It is fine to hard-code
+    // these because (a) warnings on greylist do not change semantics, and
+    // (b) only VarHandle intrinsics are blacklisted at the moment and they
+    // should not be used outside tests with disabled API checks.
+    if ((hiddenapi_flags & kAccHiddenapiBits) == 0) {
+      DCHECK_EQ(hiddenapi_flags, hiddenapi::GetRuntimeFlags(this)) << PrettyMethod();
+    }
+  } else {
+    SetAccessFlags(new_value);
+  }
+}
+
 void ArtMethod::SetNotIntrinsic() {
   if (!IsIntrinsic()) {
     return;
   }
 
-  // Query the hidden API access flags of the intrinsic.
-  HiddenApiAccessFlags::ApiList intrinsic_api_list = GetHiddenApiAccessFlags();
+  // Read the existing hiddenapi flags.
+  uint32_t hiddenapi_runtime_flags = hiddenapi::GetRuntimeFlags(this);
 
   // Clear intrinsic-related access flags.
   ClearAccessFlags(kAccIntrinsic | kAccIntrinsicBits);
 
   // Re-apply hidden API access flags now that the method is not an intrinsic.
-  SetAccessFlags(HiddenApiAccessFlags::EncodeForRuntime(GetAccessFlags(), intrinsic_api_list));
-  DCHECK_EQ(GetHiddenApiAccessFlags(), intrinsic_api_list);
+  SetAccessFlags(GetAccessFlags() | hiddenapi_runtime_flags);
+  DCHECK_EQ(hiddenapi_runtime_flags, hiddenapi::GetRuntimeFlags(this));
 }
-
 
 void ArtMethod::CopyFrom(ArtMethod* src, PointerSize image_pointer_size) {
   memcpy(reinterpret_cast<void*>(this), reinterpret_cast<const void*>(src),

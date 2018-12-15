@@ -28,6 +28,7 @@
 #include "base/indenter.h"
 #include "base/logging.h"  // For VLOG.
 #include "base/mutex-inl.h"
+#include "base/sdk_version.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "base/time_utils.h"
@@ -242,7 +243,7 @@ FailureKind MethodVerifier::VerifyClass(Thread* self,
     *previous_idx = method_idx;
     const InvokeType type = method.GetInvokeType(class_def.access_flags_);
     ArtMethod* resolved_method = linker->ResolveMethod<ClassLinker::ResolveMode::kNoChecks>(
-        method_idx, dex_cache, class_loader, /* referrer */ nullptr, type);
+        method_idx, dex_cache, class_loader, /* referrer= */ nullptr, type);
     if (resolved_method == nullptr) {
       DCHECK(self->IsExceptionPending());
       // We couldn't resolve the method, but continue regardless.
@@ -263,7 +264,7 @@ FailureKind MethodVerifier::VerifyClass(Thread* self,
                                                       callbacks,
                                                       allow_soft_failures,
                                                       log_level,
-                                                      /*need_precise_constants*/ false,
+                                                      /*need_precise_constants=*/ false,
                                                       api_level,
                                                       &hard_failure_msg);
     if (result.kind == FailureKind::kHardFailure) {
@@ -340,11 +341,11 @@ MethodVerifier::FailureData MethodVerifier::VerifyMethod(Thread* self,
                           method_idx,
                           method,
                           method_access_flags,
-                          true /* can_load_classes */,
+                          /* can_load_classes= */ true,
                           allow_soft_failures,
                           need_precise_constants,
-                          false /* verify to dump */,
-                          true /* allow_thread_suspension */,
+                          /* verify to dump */ false,
+                          /* allow_thread_suspension= */ true,
                           api_level);
   if (verifier.Verify()) {
     // Verification completed, however failures may be pending that didn't cause the verification
@@ -475,11 +476,11 @@ MethodVerifier* MethodVerifier::VerifyMethodAndDump(Thread* self,
                                                 dex_method_idx,
                                                 method,
                                                 method_access_flags,
-                                                true /* can_load_classes */,
-                                                true /* allow_soft_failures */,
-                                                true /* need_precise_constants */,
-                                                true /* verify_to_dump */,
-                                                true /* allow_thread_suspension */,
+                                                /* can_load_classes= */ true,
+                                                /* allow_soft_failures= */ true,
+                                                /* need_precise_constants= */ true,
+                                                /* verify_to_dump= */ true,
+                                                /* allow_thread_suspension= */ true,
                                                 api_level);
   verifier->Verify();
   verifier->DumpFailures(vios->Stream());
@@ -570,11 +571,11 @@ void MethodVerifier::FindLocksAtDexPc(
                           m->GetDexMethodIndex(),
                           m,
                           m->GetAccessFlags(),
-                          false /* can_load_classes */,
-                          true  /* allow_soft_failures */,
-                          false /* need_precise_constants */,
-                          false /* verify_to_dump */,
-                          false /* allow_thread_suspension */,
+                          /* can_load_classes= */ false,
+                          /* allow_soft_failures= */ true,
+                          /* need_precise_constants= */ false,
+                          /* verify_to_dump= */ false,
+                          /* allow_thread_suspension= */ false,
                           api_level);
   verifier.interesting_dex_pc_ = dex_pc;
   verifier.monitor_enter_dex_pcs_ = monitor_enter_dex_pcs;
@@ -3677,9 +3678,10 @@ const RegType& MethodVerifier::ResolveClass(dex::TypeIndex class_idx) {
   // Note: we do this for unresolved classes to trigger re-verification at runtime.
   if (C == CheckAccess::kYes &&
       result->IsNonZeroReferenceTypes() &&
-      (api_level_ >= 28u || !result->IsUnresolvedTypes())) {
+      (IsSdkVersionSetAndAtLeast(api_level_, SdkVersion::kP) || !result->IsUnresolvedTypes())) {
     const RegType& referrer = GetDeclaringClass();
-    if ((api_level_ >= 28u || !referrer.IsUnresolvedTypes()) && !referrer.CanAccess(*result)) {
+    if ((IsSdkVersionSetAndAtLeast(api_level_, SdkVersion::kP) || !referrer.IsUnresolvedTypes()) &&
+        !referrer.CanAccess(*result)) {
       Fail(VERIFY_ERROR_ACCESS_CLASS) << "(possibly) illegal class access: '"
                                       << referrer << "' -> '" << *result << "'";
     }
@@ -4562,7 +4564,9 @@ ArtField* MethodVerifier::GetStaticField(int field_idx) {
   }
   if (klass_type.IsUnresolvedTypes()) {
     // Accessibility checks depend on resolved fields.
-    DCHECK(klass_type.Equals(GetDeclaringClass()) || !failures_.empty() || api_level_ < 28u);
+    DCHECK(klass_type.Equals(GetDeclaringClass()) ||
+           !failures_.empty() ||
+           IsSdkVersionSetAndLessThan(api_level_, SdkVersion::kP));
 
     return nullptr;  // Can't resolve Class so no more to do here, will do checking at runtime.
   }
@@ -4603,7 +4607,9 @@ ArtField* MethodVerifier::GetInstanceField(const RegType& obj_type, int field_id
   }
   if (klass_type.IsUnresolvedTypes()) {
     // Accessibility checks depend on resolved fields.
-    DCHECK(klass_type.Equals(GetDeclaringClass()) || !failures_.empty() || api_level_ < 28u);
+    DCHECK(klass_type.Equals(GetDeclaringClass()) ||
+           !failures_.empty() ||
+           IsSdkVersionSetAndLessThan(api_level_, SdkVersion::kP));
 
     return nullptr;  // Can't resolve Class so no more to do here
   }
@@ -4739,7 +4745,7 @@ void MethodVerifier::VerifyISFieldAccess(const Instruction* inst, const RegType&
       DCHECK(!can_load_classes_ || self_->IsExceptionPending());
       self_->ClearException();
     }
-  } else if (api_level_ >= 28u) {
+  } else if (IsSdkVersionSetAndAtLeast(api_level_, SdkVersion::kP)) {
     // If we don't have the field (it seems we failed resolution) and this is a PUT, we need to
     // redo verification at runtime as the field may be final, unless the field id shows it's in
     // the same class.

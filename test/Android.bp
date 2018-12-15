@@ -59,8 +59,7 @@ art_cc_defaults {
     shared_libs: [
         "libartd",
         "libartd-disassembler",
-        "libvixld-arm",
-        "libvixld-arm64",
+        "libvixld",
         "libart-gtest",
         "libdexfiled",
         "libprofiled",
@@ -292,6 +291,7 @@ art_cc_defaults {
         "1950-unprepared-transform/unprepared_transform.cc",
         "1951-monitor-enter-no-suspend/raw_monitor.cc",
         "1953-pop-frame/pop_frame.cc",
+        "1957-error-ext/lasterror.cc",
     ],
     // Use NDK-compatible headers for ctstiagent.
     header_libs: [

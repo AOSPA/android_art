@@ -71,7 +71,6 @@ template<class T> class ObjectArray;
 
 namespace jit {
 
-class JitInstrumentationCache;
 class ScopedCodeCacheWrite;
 
 // Alignment in bits that will suit all architectures.
@@ -92,16 +91,10 @@ class JitCodeCache {
   // in the out arg error_msg.
   static JitCodeCache* Create(size_t initial_capacity,
                               size_t max_capacity,
-                              bool generate_debug_info,
                               bool used_only_for_profile_data,
+                              bool rwx_memory_allowed,
                               std::string* error_msg);
   ~JitCodeCache();
-
-  // Number of bytes allocated in the code cache.
-  size_t CodeCacheSize() REQUIRES(!lock_);
-
-  // Number of bytes allocated in the data cache.
-  size_t DataCacheSize() REQUIRES(!lock_);
 
   bool NotifyCompilationOf(ArtMethod* method, Thread* self, bool osr)
       REQUIRES_SHARED(Locks::mutator_lock_)
@@ -177,10 +170,6 @@ class JitCodeCache {
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!lock_);
 
-  CodeCacheBitmap* GetLiveBitmap() const {
-    return live_bitmap_.get();
-  }
-
   // Perform a collection on the code cache.
   void GarbageCollectCache(Thread* self)
       REQUIRES(!lock_)
@@ -234,10 +223,6 @@ class JitCodeCache {
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  uint64_t GetLastUpdateTimeNs() const;
-
-  size_t GetMemorySizeOfCodePointer(const void* ptr) REQUIRES(!lock_);
-
   void InvalidateCompiledCodeFor(ArtMethod* method, const OatQuickMethodHeader* code)
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -261,8 +246,8 @@ class JitCodeCache {
   void MoveObsoleteMethod(ArtMethod* old_method, ArtMethod* new_method)
       REQUIRES(!lock_) REQUIRES(Locks::mutator_lock_);
 
-  // Dynamically change whether we want to garbage collect code. Should only be used
-  // by tests.
+  // Dynamically change whether we want to garbage collect code. Should only be used during JIT
+  // initialization or by tests.
   void SetGarbageCollectCode(bool value) {
     garbage_collect_code_ = value;
   }
@@ -284,8 +269,7 @@ class JitCodeCache {
                MemMap&& non_exec_pages,
                size_t initial_data_capacity,
                size_t initial_exec_capacity,
-               size_t max_capacity,
-               bool garbage_collect_code);
+               size_t max_capacity);
 
   // Internal version of 'CommitCode' that will not retry if the
   // allocation fails. Return null if the allocation fails.
@@ -340,6 +324,12 @@ class JitCodeCache {
   void FreeCodeAndData(const void* code_ptr) REQUIRES(lock_);
 
   // Number of bytes allocated in the code cache.
+  size_t CodeCacheSize() REQUIRES(!lock_);
+
+  // Number of bytes allocated in the data cache.
+  size_t DataCacheSize() REQUIRES(!lock_);
+
+  // Number of bytes allocated in the code cache.
   size_t CodeCacheSizeLocked() REQUIRES(lock_);
 
   // Number of bytes allocated in the data cache.
@@ -375,6 +365,10 @@ class JitCodeCache {
   bool CheckLiveCompiledCodeHasProfilingInfo()
       REQUIRES(lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
+
+  CodeCacheBitmap* GetLiveBitmap() const {
+    return live_bitmap_.get();
+  }
 
   uint8_t* AllocateCode(size_t code_size) REQUIRES(lock_);
   void FreeCode(uint8_t* code) REQUIRES(lock_);

@@ -56,6 +56,7 @@ enum class EnforcementPolicy;
 
 namespace jit {
 class Jit;
+class JitCodeCache;
 class JitOptions;
 }  // namespace jit
 
@@ -534,10 +535,6 @@ class Runtime {
     return hidden_api_policy_;
   }
 
-  void SetPendingHiddenApiWarning(bool value) {
-    pending_hidden_api_warning_ = value;
-  }
-
   void SetHiddenApiExemptions(const std::vector<std::string>& exemptions) {
     hidden_api_exemptions_ = exemptions;
   }
@@ -546,24 +543,12 @@ class Runtime {
     return hidden_api_exemptions_;
   }
 
-  bool HasPendingHiddenApiWarning() const {
-    return pending_hidden_api_warning_;
-  }
-
   void SetDedupeHiddenApiWarnings(bool value) {
     dedupe_hidden_api_warnings_ = value;
   }
 
   bool ShouldDedupeHiddenApiWarnings() {
     return dedupe_hidden_api_warnings_;
-  }
-
-  void AlwaysSetHiddenApiWarningFlag() {
-    always_set_hidden_api_warning_flag_ = true;
-  }
-
-  bool ShouldAlwaysSetHiddenApiWarningFlag() const {
-    return always_set_hidden_api_warning_flag_;
   }
 
   void SetHiddenApiEventLogSampleRate(uint32_t rate) {
@@ -598,11 +583,11 @@ class Runtime {
     return is_running_on_memory_tool_;
   }
 
-  void SetTargetSdkVersion(int32_t version) {
+  void SetTargetSdkVersion(uint32_t version) {
     target_sdk_version_ = version;
   }
 
-  int32_t GetTargetSdkVersion() const {
+  uint32_t GetTargetSdkVersion() const {
     return target_sdk_version_;
   }
 
@@ -613,6 +598,8 @@ class Runtime {
   bool AreExperimentalFlagsEnabled(ExperimentalFlags flags) {
     return (experimental_flags_ & flags) != ExperimentalFlags::kNone;
   }
+
+  void CreateJitCodeCache(bool rwx_memory_allowed);
 
   // Create the JIT and instrumentation and code cache.
   void CreateJit();
@@ -647,6 +634,13 @@ class Runtime {
   void DeoptimizeBootImage();
 
   bool IsNativeDebuggable() const {
+    CHECK(!is_zygote_ || IsAotCompiler());
+    return is_native_debuggable_;
+  }
+
+  // Note: prefer not to use this method, but the checked version above. The separation exists
+  //       as the runtime state may change for a zygote child.
+  bool IsNativeDebuggableZygoteOK() const {
     return is_native_debuggable_;
   }
 
@@ -659,7 +653,7 @@ class Runtime {
   }
 
   void SetNonStandardExitsEnabled() {
-    non_standard_exits_enabled_ = true;
+    DoAndMaybeSwitchInterpreter([=](){ non_standard_exits_enabled_ = true; });
   }
 
   bool AreAsyncExceptionsThrown() const {
@@ -667,8 +661,19 @@ class Runtime {
   }
 
   void SetAsyncExceptionsThrown() {
-    async_exceptions_thrown_ = true;
+    DoAndMaybeSwitchInterpreter([=](){ async_exceptions_thrown_ = true; });
   }
+
+  // Change state and re-check which interpreter should be used.
+  //
+  // This must be called whenever there is an event that forces
+  // us to use different interpreter (e.g. debugger is attached).
+  //
+  // Changing the state using the lamda gives us some multihreading safety.
+  // It ensures that two calls do not interfere with each other and
+  // it makes it possible to DCHECK that thread local flag is correct.
+  template<typename Action>
+  static void DoAndMaybeSwitchInterpreter(Action lamda);
 
   // Returns the build fingerprint, if set. Otherwise an empty string is returned.
   std::string GetFingerprint() {
@@ -677,6 +682,9 @@ class Runtime {
 
   // Called from class linker.
   void SetSentinel(mirror::Object* sentinel) REQUIRES_SHARED(Locks::mutator_lock_);
+  // For testing purpose only.
+  // TODO: Remove this when this is no longer needed (b/116087961).
+  GcRoot<mirror::Object> GetSentinel() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Create a normal LinearAlloc or low 4gb version if we are 64 bit AOT compiler.
   LinearAlloc* CreateLinearAlloc();
@@ -688,6 +696,11 @@ class Runtime {
 
   double GetHashTableMinLoadFactor() const;
   double GetHashTableMaxLoadFactor() const;
+
+  bool IsSafeMode() const {
+    CHECK(!is_zygote_);
+    return safe_mode_;
+  }
 
   void SetSafeMode(bool mode) {
     safe_mode_ = mode;
@@ -779,8 +792,6 @@ class Runtime {
   JdwpProvider GetJdwpProvider() const {
     return jdwp_provider_;
   }
-
-  static constexpr int32_t kUnsetSdkVersion = 0u;
 
   uint32_t GetVerifierLoggingThresholdMs() const {
     return verifier_logging_threshold_ms_;
@@ -895,6 +906,7 @@ class Runtime {
   std::unique_ptr<JavaVMExt> java_vm_;
 
   std::unique_ptr<jit::Jit> jit_;
+  std::unique_ptr<jit::JitCodeCache> jit_code_cache_;
   std::unique_ptr<jit::JitOptions> jit_options_;
 
   // Fault message, printed when we get a SIGSEGV.
@@ -961,7 +973,7 @@ class Runtime {
   std::vector<std::string> cpu_abilist_;
 
   // Specifies target SDK version to allow workarounds for certain API levels.
-  int32_t target_sdk_version_;
+  uint32_t target_sdk_version_;
 
   // Implicit checks flags.
   bool implicit_null_checks_;       // NullPointer checks are implicit.

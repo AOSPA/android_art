@@ -53,11 +53,14 @@
 #include "jdwp/object_registry.h"
 #include "jni/jni_internal.h"
 #include "jvalue-inl.h"
+#include "mirror/array-alloc-inl.h"
+#include "mirror/class-alloc-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/class.h"
 #include "mirror/class_loader.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
+#include "mirror/string-alloc-inl.h"
 #include "mirror/string-inl.h"
 #include "mirror/throwable.h"
 #include "nativehelper/scoped_local_ref.h"
@@ -65,6 +68,7 @@
 #include "oat_file.h"
 #include "obj_ptr-inl.h"
 #include "reflection.h"
+#include "runtime-inl.h"
 #include "scoped_thread_state_change-inl.h"
 #include "stack.h"
 #include "thread_list.h"
@@ -688,7 +692,7 @@ void Dbg::GoActive() {
     runtime->GetInstrumentation()->EnableDeoptimization();
   }
   instrumentation_events_ = 0;
-  gDebuggerActive = true;
+  Runtime::DoAndMaybeSwitchInterpreter([=](){ gDebuggerActive = true; });
   Runtime::Current()->GetRuntimeCallbacks()->AddMethodInspectionCallback(&gDebugActiveCallback);
   LOG(INFO) << "Debugger is active";
 }
@@ -726,7 +730,7 @@ void Dbg::Disconnected() {
       if (RequiresDeoptimization()) {
         runtime->GetInstrumentation()->DisableDeoptimization(kDbgInstrumentationKey);
       }
-      gDebuggerActive = false;
+      Runtime::DoAndMaybeSwitchInterpreter([=](){ gDebuggerActive = false; });
       Runtime::Current()->GetRuntimeCallbacks()->RemoveMethodInspectionCallback(
           &gDebugActiveCallback);
     }
@@ -943,7 +947,7 @@ JDWP::JdwpError Dbg::GetContendedMonitor(JDWP::ObjectId thread_id,
 JDWP::JdwpError Dbg::GetInstanceCounts(const std::vector<JDWP::RefTypeId>& class_ids,
                                        std::vector<uint64_t>* counts) {
   gc::Heap* heap = Runtime::Current()->GetHeap();
-  heap->CollectGarbage(/* clear_soft_references */ false, gc::GcCause::kGcCauseDebugger);
+  heap->CollectGarbage(/* clear_soft_references= */ false, gc::GcCause::kGcCauseDebugger);
   VariableSizedHandleScope hs(Thread::Current());
   std::vector<Handle<mirror::Class>> classes;
   counts->clear();
@@ -964,7 +968,7 @@ JDWP::JdwpError Dbg::GetInstances(JDWP::RefTypeId class_id, int32_t max_count,
                                   std::vector<JDWP::ObjectId>* instances) {
   gc::Heap* heap = Runtime::Current()->GetHeap();
   // We only want reachable instances, so do a GC.
-  heap->CollectGarbage(/* clear_soft_references */ false, gc::GcCause::kGcCauseDebugger);
+  heap->CollectGarbage(/* clear_soft_references= */ false, gc::GcCause::kGcCauseDebugger);
   JDWP::JdwpError error;
   ObjPtr<mirror::Class> c = DecodeClass(class_id, &error);
   if (c == nullptr) {
@@ -974,7 +978,7 @@ JDWP::JdwpError Dbg::GetInstances(JDWP::RefTypeId class_id, int32_t max_count,
   std::vector<Handle<mirror::Object>> raw_instances;
   Runtime::Current()->GetHeap()->GetInstances(hs,
                                               hs.NewHandle(c),
-                                              /* use_is_assignable_from */ false,
+                                              /* use_is_assignable_from= */ false,
                                               max_count,
                                               raw_instances);
   for (size_t i = 0; i < raw_instances.size(); ++i) {
@@ -986,7 +990,7 @@ JDWP::JdwpError Dbg::GetInstances(JDWP::RefTypeId class_id, int32_t max_count,
 JDWP::JdwpError Dbg::GetReferringObjects(JDWP::ObjectId object_id, int32_t max_count,
                                          std::vector<JDWP::ObjectId>* referring_objects) {
   gc::Heap* heap = Runtime::Current()->GetHeap();
-  heap->CollectGarbage(/* clear_soft_references */ false, gc::GcCause::kGcCauseDebugger);
+  heap->CollectGarbage(/* clear_soft_references= */ false, gc::GcCause::kGcCauseDebugger);
   JDWP::JdwpError error;
   ObjPtr<mirror::Object> o = gRegistry->Get<mirror::Object*>(object_id, &error);
   if (o == nullptr) {
@@ -3074,7 +3078,7 @@ void Dbg::PostException(mirror::Throwable* exception_object) {
   Handle<mirror::Throwable> h_exception(handle_scope.NewHandle(exception_object));
   std::unique_ptr<Context> context(Context::Create());
   CatchLocationFinder clf(self, h_exception, context.get());
-  clf.WalkStack(/* include_transitions */ false);
+  clf.WalkStack(/* include_transitions= */ false);
   JDWP::EventLocation exception_throw_location;
   SetEventLocation(&exception_throw_location, clf.GetThrowMethod(), clf.GetThrowDexPc());
   JDWP::EventLocation exception_catch_location;
@@ -3733,7 +3737,7 @@ class ScopedDebuggerThreadSuspension {
           bool timed_out;
           ThreadList* const thread_list = Runtime::Current()->GetThreadList();
           suspended_thread = thread_list->SuspendThreadByPeer(thread_peer,
-                                                              /* request_suspension */ true,
+                                                              /* request_suspension= */ true,
                                                               SuspendReason::kForDebugger,
                                                               &timed_out);
         }
@@ -4744,7 +4748,7 @@ class HeapChunkContext {
       REQUIRES_SHARED(Locks::mutator_lock_) {
     if (ProcessRecord(start, used_bytes)) {
       uint8_t state = ExamineNativeObject(start);
-      AppendChunk(state, start, used_bytes + chunk_overhead_, true /*is_native*/);
+      AppendChunk(state, start, used_bytes + chunk_overhead_, /*is_native=*/ true);
       startOfNextMemoryChunk_ = reinterpret_cast<char*>(start) + used_bytes + chunk_overhead_;
     }
   }
@@ -4756,7 +4760,7 @@ class HeapChunkContext {
       // OLD-TODO: if context.merge, see if this chunk is different from the last chunk.
       // If it's the same, we should combine them.
       uint8_t state = ExamineJavaObject(reinterpret_cast<mirror::Object*>(start));
-      AppendChunk(state, start, used_bytes + chunk_overhead_, false /*is_native*/);
+      AppendChunk(state, start, used_bytes + chunk_overhead_, /*is_native=*/ false);
       startOfNextMemoryChunk_ = reinterpret_cast<char*>(start) + used_bytes + chunk_overhead_;
     }
   }

@@ -19,6 +19,7 @@
 
 #include <setjmp.h>
 
+#include <atomic>
 #include <bitset>
 #include <deque>
 #include <iosfwd>
@@ -580,6 +581,11 @@ class Thread {
     return poison_object_cookie_;
   }
 
+  // Parking for 0ns of relative time means an untimed park, negative (though
+  // should be handled in java code) returns immediately
+  void Park(bool is_absolute, int64_t time) REQUIRES_SHARED(Locks::mutator_lock_);
+  void Unpark();
+
  private:
   void NotifyLocked(Thread* self) REQUIRES(wait_mutex_);
 
@@ -669,6 +675,13 @@ class Thread {
     return ThreadOffset<pointer_size>(
         OFFSETOF_MEMBER(Thread, tls32_) +
         OFFSETOF_MEMBER(tls_32bit_sized_values, state_and_flags));
+  }
+
+  template<PointerSize pointer_size>
+  static constexpr ThreadOffset<pointer_size> UseMterpOffset() {
+    return ThreadOffset<pointer_size>(
+        OFFSETOF_MEMBER(Thread, tls32_) +
+        OFFSETOF_MEMBER(tls_32bit_sized_values, use_mterp));
   }
 
   template<PointerSize pointer_size>
@@ -1113,6 +1126,10 @@ class Thread {
     tls32_.state_and_flags.as_atomic_int.fetch_and(-1 ^ flag, std::memory_order_seq_cst);
   }
 
+  bool UseMterp() const {
+    return tls32_.use_mterp.load();
+  }
+
   void ResetQuickAllocEntryPointsForThread(bool is_marking);
 
   // Returns the remaining space in the TLAB.
@@ -1282,6 +1299,9 @@ class Thread {
   explicit Thread(bool daemon);
   ~Thread() REQUIRES(!Locks::mutator_lock_, !Locks::thread_suspend_count_lock_);
   void Destroy();
+
+  void NotifyInTheadList()
+      REQUIRES_SHARED(Locks::thread_list_lock_);
 
   // Attaches the calling native thread to the runtime, returning the new native peer.
   // Used to implement JNI AttachCurrentThread and AttachCurrentThreadAsDaemon calls.
@@ -1528,6 +1548,8 @@ class Thread {
     // Thread "interrupted" status; stays raised until queried or thrown.
     Atomic<bool32_t> interrupted;
 
+    AtomicInteger park_state_;
+
     // True if the thread is allowed to access a weak ref (Reference::GetReferent() and system
     // weaks) and to potentially mark an object alive/gray. This is used for concurrent reference
     // processing of the CC collector only. This is thread local so that we can enable/disable weak
@@ -1547,6 +1569,10 @@ class Thread {
     // This should have GUARDED_BY(Locks::user_code_suspension_lock_) but auto analysis cannot be
     // told that AssertHeld should be good enough.
     int user_code_suspend_count GUARDED_BY(Locks::thread_suspend_count_lock_);
+
+    // True if everything is in the ideal state for fast interpretation.
+    // False if we need to switch to the C++ interpreter to handle special cases.
+    std::atomic<bool32_t> use_mterp;
   } tls32_;
 
   struct PACKED(8) tls_64bit_sized_values {

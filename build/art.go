@@ -53,6 +53,9 @@ func globalFlags(ctx android.BaseContext) ([]string, []string) {
 		cflags = append(cflags, "-DART_HEAP_POISONING=1")
 		asflags = append(asflags, "-DART_HEAP_POISONING=1")
 	}
+	if envTrue(ctx, "ART_USE_CXX_INTERPRETER") {
+		cflags = append(cflags, "-DART_USE_CXX_INTERPRETER=1")
+	}
 
 	if !envFalse(ctx, "ART_USE_READ_BARRIER") && ctx.AConfig().ArtUseReadBarrier() {
 		// Used to change the read barrier type. Valid values are BAKER, BROOKS,
@@ -154,8 +157,7 @@ func hostFlags(ctx android.BaseContext) []string {
 	if len(ctx.AConfig().SanitizeHost()) > 0 {
 		// art/test/137-cfi/cfi.cc
 		// error: stack frame size of 1944 bytes in function 'Java_Main_unwindInProcess'
-		// error: stack frame size of 6520 bytes in function 'art::interpreter::ExecuteSwitchImplCpp'
-		hostFrameSizeLimit = 7400
+		hostFrameSizeLimit = 6400
 	}
 	cflags = append(cflags,
 		fmt.Sprintf("-Wframe-larger-than=%d", hostFrameSizeLimit),
@@ -356,7 +358,8 @@ func libartStaticDefaultsFactory() android.Module {
 		// TODO: express this in .bp instead b/79671158
 		if !envTrue(ctx, "ART_TARGET_LINUX") {
 			p.Target.Android.Static_libs = []string{
-				"libmetricslogger_static",
+				"libmetricslogger",
+				"libstatssocket",
 			}
 		}
 		ctx.AppendProperties(p)

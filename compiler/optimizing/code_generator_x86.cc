@@ -3497,6 +3497,27 @@ void InstructionCodeGeneratorX86::DivRemOneOrMinusOne(HBinaryOperation* instruct
   }
 }
 
+void InstructionCodeGeneratorX86::RemByPowerOfTwo(HRem* instruction) {
+  LocationSummary* locations = instruction->GetLocations();
+  Location second = locations->InAt(1);
+
+  Register out = locations->Out().AsRegister<Register>();
+  Register numerator = locations->InAt(0).AsRegister<Register>();
+
+  int32_t imm = Int64FromConstant(second.GetConstant());
+  DCHECK(IsPowerOfTwo(AbsOrMin(imm)));
+  uint32_t abs_imm = static_cast<uint32_t>(AbsOrMin(imm));
+
+  Register tmp = locations->GetTemp(0).AsRegister<Register>();
+  NearLabel done;
+  __ movl(out, numerator);
+  __ andl(out, Immediate(abs_imm-1));
+  __ j(Condition::kZero, &done);
+  __ leal(tmp, Address(out, static_cast<int32_t>(~(abs_imm-1))));
+  __ testl(numerator, numerator);
+  __ cmovl(Condition::kLess, out, tmp);
+  __ Bind(&done);
+}
 
 void InstructionCodeGeneratorX86::DivByPowerOfTwo(HDiv* instruction) {
   LocationSummary* locations = instruction->GetLocations();
@@ -3610,8 +3631,12 @@ void InstructionCodeGeneratorX86::GenerateDivRemIntegral(HBinaryOperation* instr
           // Do not generate anything for 0. DivZeroCheck would forbid any generated code.
         } else if (imm == 1 || imm == -1) {
           DivRemOneOrMinusOne(instruction);
-        } else if (is_div && IsPowerOfTwo(AbsOrMin(imm))) {
-          DivByPowerOfTwo(instruction->AsDiv());
+        } else if (IsPowerOfTwo(AbsOrMin(imm))) {
+          if (is_div) {
+            DivByPowerOfTwo(instruction->AsDiv());
+          } else {
+            RemByPowerOfTwo(instruction->AsRem());
+          }
         } else {
           DCHECK(imm <= -2 || imm >= 2);
           GenerateDivRemWithAnyConstant(instruction);
@@ -7421,6 +7446,61 @@ void InstructionCodeGeneratorX86::VisitMonitorOperation(HMonitorOperation* instr
     CheckEntrypointTypes<kQuickLockObject, void, mirror::Object*>();
   } else {
     CheckEntrypointTypes<kQuickUnlockObject, void, mirror::Object*>();
+  }
+}
+
+void LocationsBuilderX86::VisitX86AndNot(HX86AndNot* instruction) {
+  DCHECK(codegen_->GetInstructionSetFeatures().HasAVX2());
+  DCHECK(DataType::IsIntOrLongType(instruction->GetType())) << instruction->GetType();
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(instruction);
+  locations->SetInAt(0, Location::RequiresRegister());
+  locations->SetInAt(1, Location::RequiresRegister());
+  locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
+}
+
+void InstructionCodeGeneratorX86::VisitX86AndNot(HX86AndNot* instruction) {
+  LocationSummary* locations = instruction->GetLocations();
+  Location first = locations->InAt(0);
+  Location second = locations->InAt(1);
+  Location dest = locations->Out();
+  if (instruction->GetResultType() == DataType::Type::kInt32) {
+    __ andn(dest.AsRegister<Register>(),
+            first.AsRegister<Register>(),
+            second.AsRegister<Register>());
+  } else {
+    DCHECK_EQ(instruction->GetResultType(), DataType::Type::kInt64);
+    __ andn(dest.AsRegisterPairLow<Register>(),
+            first.AsRegisterPairLow<Register>(),
+            second.AsRegisterPairLow<Register>());
+    __ andn(dest.AsRegisterPairHigh<Register>(),
+            first.AsRegisterPairHigh<Register>(),
+            second.AsRegisterPairHigh<Register>());
+  }
+}
+
+void LocationsBuilderX86::VisitX86MaskOrResetLeastSetBit(HX86MaskOrResetLeastSetBit* instruction) {
+  DCHECK(codegen_->GetInstructionSetFeatures().HasAVX2());
+  DCHECK(instruction->GetType() == DataType::Type::kInt32) << instruction->GetType();
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(instruction);
+  locations->SetInAt(0, Location::RequiresRegister());
+  locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
+}
+
+void InstructionCodeGeneratorX86::VisitX86MaskOrResetLeastSetBit(
+    HX86MaskOrResetLeastSetBit* instruction) {
+  LocationSummary* locations = instruction->GetLocations();
+  Location src = locations->InAt(0);
+  Location dest = locations->Out();
+  DCHECK(instruction->GetResultType() == DataType::Type::kInt32);
+  switch (instruction->GetOpKind()) {
+    case HInstruction::kAnd:
+      __ blsr(dest.AsRegister<Register>(), src.AsRegister<Register>());
+      break;
+    case HInstruction::kXor:
+      __ blsmsk(dest.AsRegister<Register>(), src.AsRegister<Register>());
+      break;
+    default:
+      LOG(FATAL) << "Unreachable";
   }
 }
 

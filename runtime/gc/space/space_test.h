@@ -22,6 +22,7 @@
 
 #include "base/globals.h"
 #include "common_runtime_test.h"
+#include "handle_scope-inl.h"
 #include "mirror/array-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
@@ -122,8 +123,10 @@ class SpaceTest : public Super {
     return mirror::Array::DataOffset(Primitive::ComponentSize(Primitive::kPrimByte)).Uint32Value();
   }
 
-  typedef MallocSpace* (*CreateSpaceFn)(const std::string& name, size_t initial_size, size_t growth_limit,
-                                        size_t capacity, uint8_t* requested_begin);
+  typedef MallocSpace* (*CreateSpaceFn)(const std::string& name,
+                                        size_t initial_size,
+                                        size_t growth_limit,
+                                        size_t capacity);
 
   void SizeFootPrintGrowthLimitAndTrimBody(MallocSpace* space, intptr_t object_size,
                                            int round, size_t growth_limit);
@@ -322,7 +325,7 @@ void SpaceTest<Super>::SizeFootPrintGrowthLimitAndTrimDriver(size_t object_size,
   size_t initial_size = 4 * MB;
   size_t growth_limit = 8 * MB;
   size_t capacity = 16 * MB;
-  MallocSpace* space(create_space("test", initial_size, growth_limit, capacity, nullptr));
+  MallocSpace* space(create_space("test", initial_size, growth_limit, capacity));
   ASSERT_TRUE(space != nullptr);
 
   // Basic sanity

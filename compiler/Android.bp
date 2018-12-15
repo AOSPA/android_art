@@ -157,6 +157,8 @@ art_cc_defaults {
                 "optimizing/code_generator_x86.cc",
                 "optimizing/code_generator_vector_x86.cc",
                 "optimizing/intrinsics_x86.cc",
+                "optimizing/instruction_simplifier_x86_shared.cc",
+                "optimizing/instruction_simplifier_x86.cc",
                 "optimizing/pc_relative_fixups_x86.cc",
                 "optimizing/x86_memory_gen.cc",
                 "utils/x86/assembler_x86.cc",
@@ -168,6 +170,7 @@ art_cc_defaults {
             srcs: [
                 "jni/quick/x86_64/calling_convention_x86_64.cc",
                 "optimizing/intrinsics_x86_64.cc",
+                "optimizing/instruction_simplifier_x86_64.cc",
                 "optimizing/code_generator_x86_64.cc",
                 "optimizing/code_generator_vector_x86_64.cc",
                 "utils/x86_64/assembler_x86_64.cc",
@@ -180,7 +183,6 @@ art_cc_defaults {
     shared_libs: [
         "libbase",
         "libcutils",  // for atrace.
-        "liblzma",
     ],
     include_dirs: ["art/disassembler"],
     header_libs: [
@@ -196,7 +198,6 @@ cc_defaults {
     static_libs: [
         "libbase",
         "libcutils",
-        "liblzma",
     ],
 }
 
@@ -230,12 +231,12 @@ art_cc_library {
             // VIXL assembly support for ARM targets.
             static: {
                 whole_static_libs: [
-                    "libvixl-arm",
+                    "libvixl",
                 ],
             },
             shared: {
                 shared_libs: [
-                    "libvixl-arm",
+                    "libvixl",
                 ],
             },
         },
@@ -243,12 +244,12 @@ art_cc_library {
             // VIXL assembly support for ARM64 targets.
             static: {
                 whole_static_libs: [
-                    "libvixl-arm64",
+                    "libvixl",
                 ],
             },
             shared: {
                 shared_libs: [
-                    "libvixl-arm64",
+                    "libvixl",
                 ],
             },
         },
@@ -292,12 +293,12 @@ art_cc_library {
             // VIXL assembly support for ARM targets.
             static: {
                 whole_static_libs: [
-                    "libvixld-arm",
+                    "libvixld",
                 ],
             },
             shared: {
                 shared_libs: [
-                    "libvixld-arm",
+                    "libvixld",
                 ],
             },
         },
@@ -305,12 +306,12 @@ art_cc_library {
             // VIXL assembly support for ARM64 targets.
             static: {
                 whole_static_libs: [
-                    "libvixld-arm64",
+                    "libvixld",
                 ],
             },
             shared: {
                 shared_libs: [
-                    "libvixld-arm64",
+                    "libvixld",
                 ],
             },
         },
@@ -451,8 +452,7 @@ art_cc_test {
         "libprofiled",
         "libartd-compiler",
         "libartd-simulator-container",
-        "libvixld-arm",
-        "libvixld-arm64",
+        "libvixld",
 
         "libbacktrace",
         "libnativeloader",
@@ -509,7 +509,6 @@ art_cc_test {
     },
     shared_libs: [
         "libartd-compiler",
-        "libvixld-arm",
-        "libvixld-arm64",
+        "libvixld",
     ],
 }

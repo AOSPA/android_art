@@ -19,6 +19,7 @@
 #include "arch/instruction_set_features.h"
 #include "art_method-inl.h"
 #include "base/enums.h"
+#include "base/file_utils.h"
 #include "base/stl_util.h"
 #include "base/unix_file/fd_file.h"
 #include "class_linker.h"
@@ -393,7 +394,6 @@ TEST_F(OatTest, WriteRead) {
 
   ScratchFile tmp_base, tmp_oat(tmp_base, ".oat"), tmp_vdex(tmp_base, ".vdex");
   SafeMap<std::string, std::string> key_value_store;
-  key_value_store.Put(OatHeader::kImageLocationKey, "lue.art");
   bool success = WriteElf(tmp_vdex.GetFile(),
                           tmp_oat.GetFile(),
                           class_linker->GetBootClassPath(),
@@ -417,7 +417,6 @@ TEST_F(OatTest, WriteRead) {
   ASSERT_TRUE(oat_header.IsValid());
   ASSERT_EQ(class_linker->GetBootClassPath().size(), oat_header.GetDexFileCount());  // core
   ASSERT_EQ(42U, oat_header.GetImageFileLocationOatChecksum());
-  ASSERT_EQ("lue.art", std::string(oat_header.GetStoreValueByKey(OatHeader::kImageLocationKey)));
 
   ASSERT_TRUE(java_lang_dex_file_ != nullptr);
   const DexFile& dex_file = *java_lang_dex_file_;
@@ -516,7 +515,6 @@ TEST_F(OatTest, EmptyTextSection) {
 
   ScratchFile tmp_base, tmp_oat(tmp_base, ".oat"), tmp_vdex(tmp_base, ".vdex");
   SafeMap<std::string, std::string> key_value_store;
-  key_value_store.Put(OatHeader::kImageLocationKey, "test.art");
   bool success = WriteElf(tmp_vdex.GetFile(),
                           tmp_oat.GetFile(),
                           dex_files,
@@ -583,7 +581,6 @@ void OatTest::TestDexFileInput(bool verify, bool low_4gb, bool use_profile) {
 
   ScratchFile tmp_base, tmp_oat(tmp_base, ".oat"), tmp_vdex(tmp_base, ".vdex");
   SafeMap<std::string, std::string> key_value_store;
-  key_value_store.Put(OatHeader::kImageLocationKey, "test.art");
   std::unique_ptr<ProfileCompilationInfo>
       profile_compilation_info(use_profile ? new ProfileCompilationInfo() : nullptr);
   success = WriteElf(tmp_vdex.GetFile(),
@@ -713,7 +710,6 @@ void OatTest::TestZipFileInput(bool verify) {
   ASSERT_TRUE(success) << strerror(errno);
 
   SafeMap<std::string, std::string> key_value_store;
-  key_value_store.Put(OatHeader::kImageLocationKey, "test.art");
   {
     // Test using the AddDexFileSource() interface with the zip file.
     std::vector<const char*> input_filenames = { zip_file.GetFilename().c_str() };
@@ -765,7 +761,7 @@ void OatTest::TestZipFileInput(bool verify) {
 
   {
     // Test using the AddZipDexFileSource() interface with the zip file handle.
-    File zip_fd(dup(zip_file.GetFd()), /*check_usage=*/ false);
+    File zip_fd(DupCloexec(zip_file.GetFd()), /*check_usage=*/ false);
     ASSERT_NE(-1, zip_fd.Fd());
 
     ScratchFile tmp_base, tmp_oat(tmp_base, ".oat"), tmp_vdex(tmp_base, ".vdex");
@@ -830,7 +826,6 @@ void OatTest::TestZipFileInputWithEmptyDex() {
   ASSERT_TRUE(success) << strerror(errno);
 
   SafeMap<std::string, std::string> key_value_store;
-  key_value_store.Put(OatHeader::kImageLocationKey, "test.art");
   std::vector<const char*> input_filenames = { zip_file.GetFilename().c_str() };
   ScratchFile oat_file, vdex_file(oat_file, ".vdex");
   std::unique_ptr<ProfileCompilationInfo> profile_compilation_info(new ProfileCompilationInfo());

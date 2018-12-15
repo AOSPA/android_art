@@ -14,10 +14,10 @@
  * limitations under the License.
  */
 
-#include "string-inl.h"
+#include "string-alloc-inl.h"
 
 #include "arch/memcmp16.h"
-#include "array.h"
+#include "array-alloc-inl.h"
 #include "base/array_ref.h"
 #include "base/stl_util.h"
 #include "class-inl.h"

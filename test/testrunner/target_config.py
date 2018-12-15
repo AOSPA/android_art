@@ -40,6 +40,12 @@ target_config = {
     'art-interpreter' : {
         'run-test' : ['--interpreter']
     },
+    'art-interpreter-cxx' : {
+        'run-test' : ['--interpreter'],
+        'env' : {
+            'ART_USE_CXX_INTERPRETER' : 'true'
+        }
+    },
     'art-interpreter-access-checks' : {
         'run-test' : ['--interp-ac']
     },
@@ -322,5 +328,13 @@ target_config = {
     },
     'art-golem-linux-x64': {
         'golem' : 'linux-x64'
+    },
+    'art-linux-bionic-x64': {
+        'build': '{ANDROID_BUILD_TOP}/art/tools/build_linux_bionic_tests.sh {MAKE_OPTIONS}',
+        # Currently failing on the build-bots due to some library search path issue.
+        # 'run-test': ['--run-test-option=--bionic',
+        #              '--host',
+        #              '--64',
+        #              '--no-build-dependencies'],
     },
 }

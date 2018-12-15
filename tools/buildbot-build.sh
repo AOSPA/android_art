@@ -61,7 +61,7 @@ while true; do
 done
 
 # Allow to build successfully in master-art.
-extra_args=SOONG_ALLOW_MISSING_DEPENDENCIES=true
+extra_args="SOONG_ALLOW_MISSING_DEPENDENCIES=true TEMPORARY_DISABLE_PATH_RESTRICTIONS=true"
 
 if [[ $mode == "host" ]]; then
   make_command="make $j_arg $extra_args $showcommands build-art-host-tests $common_targets"
@@ -81,6 +81,8 @@ elif [[ $mode == "target" ]]; then
     # These targets are needed for the chroot environment.
     make_command+=" crash_dump event-log-tags"
   fi
+  # Build the Runtime APEX.
+  make_command+=" com.android.runtime"
   mode_suffix="-target"
 fi
 
@@ -92,4 +94,5 @@ done
 
 
 echo "Executing $make_command"
+# Disable path restrictions to enable luci builds using vpython.
 bash -c "$make_command"

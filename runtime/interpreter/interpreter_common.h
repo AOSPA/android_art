@@ -42,6 +42,8 @@
 #include "dex/dex_instruction-inl.h"
 #include "entrypoints/entrypoint_utils-inl.h"
 #include "handle_scope-inl.h"
+#include "interpreter_mterp_impl.h"
+#include "interpreter_switch_impl.h"
 #include "jit/jit.h"
 #include "mirror/call_site.h"
 #include "mirror/class-inl.h"
@@ -51,6 +53,7 @@
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/string-inl.h"
+#include "mterp/mterp.h"
 #include "obj_ptr.h"
 #include "stack.h"
 #include "thread.h"
@@ -121,9 +124,16 @@ template<bool is_range, bool do_assignability_check>
 bool DoCall(ArtMethod* called_method, Thread* self, ShadowFrame& shadow_frame,
             const Instruction* inst, uint16_t inst_data, JValue* result);
 
+bool UseFastInterpreterToInterpreterInvoke(ArtMethod* method)
+    REQUIRES_SHARED(Locks::mutator_lock_);
+
+// Throws exception if we are getting close to the end of the stack.
+NO_INLINE bool CheckStackOverflow(Thread* self, size_t frame_size)
+    REQUIRES_SHARED(Locks::mutator_lock_);
+
 // Handles all invoke-XXX/range instructions except for invoke-polymorphic[/range].
 // Returns true on success, otherwise throws an exception and returns false.
-template<InvokeType type, bool is_range, bool do_access_check, bool is_mterp>
+template<InvokeType type, bool is_range, bool do_access_check, bool is_mterp, bool is_quick = false>
 static ALWAYS_INLINE bool DoInvoke(Thread* self,
                                    ShadowFrame& shadow_frame,
                                    const Instruction* inst,
@@ -131,7 +141,9 @@ static ALWAYS_INLINE bool DoInvoke(Thread* self,
                                    JValue* result)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   // Make sure to check for async exceptions before anything else.
-  if (UNLIKELY(self->ObserveAsyncException())) {
+  if (is_mterp && self->UseMterp()) {
+    DCHECK(!self->ObserveAsyncException());
+  } else if (UNLIKELY(self->ObserveAsyncException())) {
     return false;
   }
   const uint32_t method_idx = (is_range) ? inst->VRegB_3rc() : inst->VRegB_35c();
@@ -142,7 +154,9 @@ static ALWAYS_INLINE bool DoInvoke(Thread* self,
   InterpreterCache* tls_cache = self->GetInterpreterCache();
   size_t tls_value;
   ArtMethod* resolved_method;
-  if (LIKELY(tls_cache->Get(inst, &tls_value))) {
+  if (is_quick) {
+    resolved_method = nullptr;  // We don't know/care what the original method was.
+  } else if (LIKELY(tls_cache->Get(inst, &tls_value))) {
     resolved_method = reinterpret_cast<ArtMethod*>(tls_value);
   } else {
     ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
@@ -161,10 +175,20 @@ static ALWAYS_INLINE bool DoInvoke(Thread* self,
   // Null pointer check and virtual method resolution.
   ObjPtr<mirror::Object> receiver =
       (type == kStatic) ? nullptr : shadow_frame.GetVRegReference(vregC);
-  ArtMethod* const called_method = FindMethodToCall<type, do_access_check>(
-      method_idx, resolved_method, &receiver, sf_method, self);
-
-  // The shadow frame should already be pushed, so we don't need to update it.
+  ArtMethod* called_method;
+  if (is_quick) {
+    if (UNLIKELY(receiver == nullptr)) {
+      // We lost the reference to the method index so we cannot get a more precise exception.
+      ThrowNullPointerExceptionFromDexPC();
+      return false;
+    }
+    DCHECK(receiver->GetClass()->ShouldHaveEmbeddedVTable());
+    called_method = receiver->GetClass()->GetEmbeddedVTableEntry(
+        /*vtable_idx=*/ method_idx, Runtime::Current()->GetClassLinker()->GetImagePointerSize());
+  } else {
+    called_method = FindMethodToCall<type, do_access_check>(
+        method_idx, resolved_method, &receiver, sf_method, self);
+  }
   if (UNLIKELY(called_method == nullptr)) {
     CHECK(self->IsExceptionPending());
     result->SetJ(0);
@@ -189,6 +213,92 @@ static ALWAYS_INLINE bool DoInvoke(Thread* self,
       }
       return !self->IsExceptionPending();
     }
+  }
+
+  // Check whether we can use the fast path. The result is cached in the ArtMethod.
+  // If the bit is not set, we explicitly recheck all the conditions.
+  // If any of the conditions get falsified, it is important to clear the bit.
+  bool use_fast_path = false;
+  if (is_mterp && self->UseMterp()) {
+    use_fast_path = called_method->UseFastInterpreterToInterpreterInvoke();
+    if (!use_fast_path) {
+      use_fast_path = UseFastInterpreterToInterpreterInvoke(called_method);
+      if (use_fast_path) {
+        called_method->SetFastInterpreterToInterpreterInvokeFlag();
+      }
+    }
+  }
+
+  if (use_fast_path) {
+    DCHECK(Runtime::Current()->IsStarted());
+    DCHECK(!Runtime::Current()->IsActiveTransaction());
+    DCHECK(called_method->SkipAccessChecks());
+    DCHECK(!called_method->IsNative());
+    DCHECK(!called_method->IsProxyMethod());
+    DCHECK(!called_method->IsIntrinsic());
+    DCHECK(!(called_method->GetDeclaringClass()->IsStringClass() &&
+        called_method->IsConstructor()));
+    DCHECK(type != kStatic || called_method->GetDeclaringClass()->IsInitialized());
+
+    const uint16_t number_of_inputs =
+        (is_range) ? inst->VRegA_3rc(inst_data) : inst->VRegA_35c(inst_data);
+    CodeItemDataAccessor accessor(called_method->DexInstructionData());
+    uint32_t num_regs = accessor.RegistersSize();
+    DCHECK_EQ(number_of_inputs, accessor.InsSize());
+    DCHECK_GE(num_regs, number_of_inputs);
+    size_t first_dest_reg = num_regs - number_of_inputs;
+
+    if (UNLIKELY(!CheckStackOverflow(self, ShadowFrame::ComputeSize(num_regs)))) {
+      return false;
+    }
+
+    if (jit != nullptr) {
+      jit->AddSamples(self, called_method, 1, /* with_backedges */false);
+    }
+
+    // Create shadow frame on the stack.
+    const char* old_cause = self->StartAssertNoThreadSuspension("DoFastInvoke");
+    ShadowFrameAllocaUniquePtr shadow_frame_unique_ptr =
+        CREATE_SHADOW_FRAME(num_regs, &shadow_frame, called_method, /* dex pc */ 0);
+    ShadowFrame* new_shadow_frame = shadow_frame_unique_ptr.get();
+    if (is_range) {
+      size_t src = vregC;
+      for (size_t i = 0, dst = first_dest_reg; i < number_of_inputs; ++i, ++dst, ++src) {
+        *new_shadow_frame->GetVRegAddr(dst) = *shadow_frame.GetVRegAddr(src);
+        *new_shadow_frame->GetShadowRefAddr(dst) = *shadow_frame.GetShadowRefAddr(src);
+      }
+    } else {
+      uint32_t arg[Instruction::kMaxVarArgRegs];
+      inst->GetVarArgs(arg, inst_data);
+      for (size_t i = 0, dst = first_dest_reg; i < number_of_inputs; ++i, ++dst) {
+        *new_shadow_frame->GetVRegAddr(dst) = *shadow_frame.GetVRegAddr(arg[i]);
+        *new_shadow_frame->GetShadowRefAddr(dst) = *shadow_frame.GetShadowRefAddr(arg[i]);
+      }
+    }
+    self->PushShadowFrame(new_shadow_frame);
+    self->EndAssertNoThreadSuspension(old_cause);
+
+    DCheckStaticState(self, called_method);
+    while (true) {
+      // Mterp does not support all instrumentation/debugging.
+      if (!self->UseMterp()) {
+        *result =
+            ExecuteSwitchImpl<false, false>(self, accessor, *new_shadow_frame, *result, false);
+        break;
+      }
+      if (ExecuteMterpImpl(self, accessor.Insns(), new_shadow_frame, result)) {
+        break;
+      } else {
+        // Mterp didn't like that instruction.  Single-step it with the reference interpreter.
+        *result = ExecuteSwitchImpl<false, false>(self, accessor, *new_shadow_frame, *result, true);
+        if (new_shadow_frame->GetDexPC() == dex::kDexNoIndex) {
+          break;  // Single-stepped a return or an exception not handled locally.
+        }
+      }
+    }
+    self->PopShadowFrame();
+
+    return !self->IsExceptionPending();
   }
 
   return DoCall<is_range, do_access_check>(called_method, self, shadow_frame, inst, inst_data,
@@ -255,45 +365,6 @@ bool DoInvokeCustom(Thread* self,
     inst->GetVarArgs(args, inst_data);
     VarArgsInstructionOperands operands(args, inst->VRegA_35c());
     return DoInvokeCustom(self, shadow_frame, call_site_idx, &operands, result);
-  }
-}
-
-// Handles invoke-virtual-quick and invoke-virtual-quick-range instructions.
-// Returns true on success, otherwise throws an exception and returns false.
-template<bool is_range>
-static inline bool DoInvokeVirtualQuick(Thread* self, ShadowFrame& shadow_frame,
-                                        const Instruction* inst, uint16_t inst_data,
-                                        JValue* result)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  const uint32_t vregC = (is_range) ? inst->VRegC_3rc() : inst->VRegC_35c();
-  ObjPtr<mirror::Object> const receiver = shadow_frame.GetVRegReference(vregC);
-  if (UNLIKELY(receiver == nullptr)) {
-    // We lost the reference to the method index so we cannot get a more
-    // precised exception message.
-    ThrowNullPointerExceptionFromDexPC();
-    return false;
-  }
-  const uint32_t vtable_idx = (is_range) ? inst->VRegB_3rc() : inst->VRegB_35c();
-  CHECK(receiver->GetClass()->ShouldHaveEmbeddedVTable());
-  ArtMethod* const called_method = receiver->GetClass()->GetEmbeddedVTableEntry(
-      vtable_idx, Runtime::Current()->GetClassLinker()->GetImagePointerSize());
-  if (UNLIKELY(called_method == nullptr)) {
-    CHECK(self->IsExceptionPending());
-    result->SetJ(0);
-    return false;
-  } else if (UNLIKELY(!called_method->IsInvokable())) {
-    called_method->ThrowInvocationTimeError();
-    result->SetJ(0);
-    return false;
-  } else {
-    jit::Jit* jit = Runtime::Current()->GetJit();
-    if (jit != nullptr) {
-      jit->InvokeVirtualOrInterface(
-          receiver, shadow_frame.GetMethod(), shadow_frame.GetDexPC(), called_method);
-      jit->AddSamples(self, shadow_frame.GetMethod(), 1, /*with_backedges*/false);
-    }
-    // No need to check since we've been quickened.
-    return DoCall<is_range, false>(called_method, self, shadow_frame, inst, inst_data, result);
   }
 }
 
