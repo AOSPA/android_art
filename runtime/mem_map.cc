@@ -23,6 +23,10 @@
 #include <sys/resource.h>
 #endif
 
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
+
 #include <map>
 #include <memory>
 #include <sstream>
@@ -57,6 +61,9 @@ using Maps = AllocationTrackingMultiMap<void*, MemMap*, kAllocatorTagMaps>;
 
 // All the non-empty MemMaps. Use a multimap as we do a reserve-and-divide (eg ElfMap::Load()).
 static Maps* gMaps GUARDED_BY(MemMap::GetMemMapsLock()) = nullptr;
+
+// A map containing unique strings used for indentifying anonymous mappings
+static std::map<std::string, int> debugStrMap GUARDED_BY(MemMap::GetMemMapsLock());
 
 static std::ostream& operator<<(
     std::ostream& os,
@@ -290,6 +297,29 @@ static inline void* TryMemMapLow4GB(void* ptr,
 }
 #endif
 
+void MemMap::SetDebugName(void* map_ptr, const char* name, size_t size) {
+  // Debug naming is only used for Android target builds. For Linux targets,
+  // we'll still call prctl but it wont do anything till we upstream the prctl.
+  // lock as std::map is not thread-safe
+  std::lock_guard<std::mutex> mu(*mem_maps_lock_);
+
+  std::string debug_friendly_name("dalvik-");
+  debug_friendly_name += name;
+  auto it = debugStrMap.find(debug_friendly_name);
+
+  if (it == debugStrMap.end()) {
+    it = debugStrMap.insert(std::make_pair(std::move(debug_friendly_name), 1)).first;
+  }
+
+  DCHECK(it != debugStrMap.end());
+#if defined(PR_SET_VMA) && defined(__linux__)
+  prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, map_ptr, size, it->first.c_str());
+#else
+  // Prevent variable unused compiler errors.
+  UNUSED(map_ptr, size);
+#endif
+}
+
 MemMap* MemMap::MapAnonymous(const char* name,
                              uint8_t* expected_ptr,
                              size_t byte_count,
@@ -297,11 +327,11 @@ MemMap* MemMap::MapAnonymous(const char* name,
                              bool low_4gb,
                              bool reuse,
                              std::string* error_msg,
-                             bool use_ashmem) {
+                             bool use_debug_name) {
 #ifndef __LP64__
   UNUSED(low_4gb);
 #endif
-  use_ashmem = use_ashmem && !kIsTargetLinux;
+
   if (byte_count == 0) {
     return new MemMap(name, nullptr, 0, nullptr, 0, prot, false);
   }
@@ -317,40 +347,7 @@ MemMap* MemMap::MapAnonymous(const char* name,
     flags |= MAP_FIXED;
   }
 
-  if (use_ashmem) {
-    if (!kIsTargetBuild) {
-      // When not on Android (either host or assuming a linux target) ashmem is faked using
-      // files in /tmp. Ensure that such files won't fail due to ulimit restrictions. If they
-      // will then use a regular mmap.
-      struct rlimit rlimit_fsize;
-      CHECK_EQ(getrlimit(RLIMIT_FSIZE, &rlimit_fsize), 0);
-      use_ashmem = (rlimit_fsize.rlim_cur == RLIM_INFINITY) ||
-        (page_aligned_byte_count < rlimit_fsize.rlim_cur);
-    }
-  }
-
   unique_fd fd;
-
-
-  if (use_ashmem) {
-    // android_os_Debug.cpp read_mapinfo assumes all ashmem regions associated with the VM are
-    // prefixed "dalvik-".
-    std::string debug_friendly_name("dalvik-");
-    debug_friendly_name += name;
-    fd.reset(ashmem_create_region(debug_friendly_name.c_str(), page_aligned_byte_count));
-
-    if (fd.get() == -1) {
-      // We failed to create the ashmem region. Print a warning, but continue
-      // anyway by creating a true anonymous mmap with an fd of -1. It is
-      // better to use an unlabelled anonymous map than to fail to create a
-      // map at all.
-      PLOG(WARNING) << "ashmem_create_region failed for '" << name << "'";
-    } else {
-      // We succeeded in creating the ashmem region. Use the created ashmem
-      // region as backing for the mmap.
-      flags &= ~MAP_ANONYMOUS;
-    }
-  }
 
   // We need to store and potentially set an error number for pretty printing of errors
   int saved_errno = 0;
@@ -384,6 +381,11 @@ MemMap* MemMap::MapAnonymous(const char* name,
   if (!CheckMapRequest(expected_ptr, actual, page_aligned_byte_count, error_msg)) {
     return nullptr;
   }
+
+ if (use_debug_name) {
+    SetDebugName(actual, name, page_aligned_byte_count);
+  }
+
   return new MemMap(name, reinterpret_cast<uint8_t*>(actual), byte_count, actual,
                     page_aligned_byte_count, prot, reuse);
 }
@@ -628,8 +630,7 @@ MemMap::MemMap(const std::string& name, uint8_t* begin, size_t size, void* base_
 }
 
 MemMap* MemMap::RemapAtEnd(uint8_t* new_end, const char* tail_name, int tail_prot,
-                           std::string* error_msg, bool use_ashmem) {
-  use_ashmem = use_ashmem && !kIsTargetLinux;
+                           std::string* error_msg, bool use_debug_name) {
   DCHECK_GE(new_end, Begin());
   DCHECK_LE(new_end, End());
   DCHECK_LE(begin_ + size_, reinterpret_cast<uint8_t*>(base_begin_) + base_size_);
@@ -655,19 +656,6 @@ MemMap* MemMap::RemapAtEnd(uint8_t* new_end, const char* tail_name, int tail_pro
 
   unique_fd fd;
   int flags = MAP_PRIVATE | MAP_ANONYMOUS;
-  if (use_ashmem) {
-    // android_os_Debug.cpp read_mapinfo assumes all ashmem regions associated with the VM are
-    // prefixed "dalvik-".
-    std::string debug_friendly_name("dalvik-");
-    debug_friendly_name += tail_name;
-    fd.reset(ashmem_create_region(debug_friendly_name.c_str(), tail_base_size));
-    flags = MAP_PRIVATE | MAP_FIXED;
-    if (fd.get() == -1) {
-      *error_msg = StringPrintf("ashmem_create_region failed for '%s': %s",
-                                tail_name, strerror(errno));
-      return nullptr;
-    }
-  }
 
   MEMORY_TOOL_MAKE_UNDEFINED(tail_base_begin, tail_base_size);
   // Unmap/map the tail region.
@@ -695,6 +683,10 @@ MemMap* MemMap::RemapAtEnd(uint8_t* new_end, const char* tail_name, int tail_pro
                               fd.get());
     return nullptr;
   }
+ if (use_debug_name) {
+    SetDebugName(actual, tail_name, tail_base_size);
+  }
+
   return new MemMap(tail_name, actual, tail_size, actual, tail_base_size, tail_prot, false);
 }
 
