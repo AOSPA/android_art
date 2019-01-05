@@ -61,8 +61,10 @@ COMPILER_OPTIONS_KEY (std::string,                 RegisterAllocationStrategy)
 COMPILER_OPTIONS_KEY (ParseStringList<','>,        VerboseMethods)
 COMPILER_OPTIONS_KEY (bool,                        DeduplicateCode,            true)
 COMPILER_OPTIONS_KEY (Unit,                        CountHotnessInCompiledCode)
+COMPILER_OPTIONS_KEY (ProfileMethodsCheck,         CheckProfiledMethods)
 COMPILER_OPTIONS_KEY (Unit,                        DumpTimings)
 COMPILER_OPTIONS_KEY (Unit,                        DumpPassTimings)
 COMPILER_OPTIONS_KEY (Unit,                        DumpStats)
+COMPILER_OPTIONS_KEY (unsigned int,                MaxImageBlockSize)
 
 #undef COMPILER_OPTIONS_KEY

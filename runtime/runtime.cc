@@ -278,6 +278,7 @@ Runtime::Runtime()
       // Initially assume we perceive jank in case the process state is never updated.
       process_state_(kProcessStateJankPerceptible),
       zygote_no_threads_(false),
+      process_cpu_start_time_(ProcessCpuNanoTime()),
       verifier_logging_threshold_ms_(100) {
   static_assert(Runtime::kCalleeSaveSize ==
                     static_cast<uint32_t>(CalleeSaveType::kLastCalleeSaveType), "Unexpected size");
@@ -321,11 +322,20 @@ Runtime::~Runtime() {
   }
 
   if (dump_gc_performance_on_shutdown_) {
+    process_cpu_end_time_ = ProcessCpuNanoTime();
     ScopedLogSeverity sls(LogSeverity::INFO);
     // This can't be called from the Heap destructor below because it
     // could call RosAlloc::InspectAll() which needs the thread_list
     // to be still alive.
     heap_->DumpGcPerformanceInfo(LOG_STREAM(INFO));
+
+    uint64_t process_cpu_time = process_cpu_end_time_ - process_cpu_start_time_;
+    uint64_t gc_cpu_time = heap_->GetTotalGcCpuTime();
+    float ratio = static_cast<float>(gc_cpu_time) / process_cpu_time;
+    LOG_STREAM(INFO) << "GC CPU time " << PrettyDuration(gc_cpu_time)
+        << " out of process CPU time " << PrettyDuration(process_cpu_time)
+        << " (" << ratio << ")"
+        << "\n";
   }
 
   if (jit_ != nullptr) {
@@ -791,6 +801,8 @@ bool Runtime::Start() {
     if (!jit::Jit::LoadCompilerLibrary(&error_msg)) {
       LOG(WARNING) << "Failed to load JIT compiler with error " << error_msg;
     }
+    CreateJitCodeCache(/*rwx_memory_allowed=*/true);
+    CreateJit();
   }
 
   // Send the start phase event. We have to wait till here as this is when the main thread peer
@@ -894,15 +906,8 @@ void Runtime::InitNonZygoteOrPostFork(
     }
   }
 
-  if (jit_ == nullptr) {
-    // The system server's code cache was initialized specially. For other zygote forks or
-    // processes create it now.
-    if (!is_system_server) {
-      CreateJitCodeCache(/*rwx_memory_allowed=*/true);
-    }
-    // Note that when running ART standalone (not zygote, nor zygote fork),
-    // the jit may have already been created.
-    CreateJit();
+  if (jit_ != nullptr) {
+    jit_->CreateThreadPool();
   }
 
   // Create the thread pools.
@@ -951,127 +956,12 @@ void Runtime::StartDaemonThreads() {
   VLOG(startup) << "Runtime::StartDaemonThreads exiting";
 }
 
-// Attempts to open dex files from image(s). Given the image location, try to find the oat file
-// and open it to get the stored dex file. If the image is the first for a multi-image boot
-// classpath, go on and also open the other images.
-static bool OpenDexFilesFromImage(const std::string& image_location,
-                                  std::vector<std::unique_ptr<const DexFile>>* dex_files,
-                                  size_t* failures) {
-  DCHECK(dex_files != nullptr) << "OpenDexFilesFromImage: out-param is nullptr";
-
-  // Use a work-list approach, so that we can easily reuse the opening code.
-  std::vector<std::string> image_locations;
-  image_locations.push_back(image_location);
-
-  for (size_t index = 0; index < image_locations.size(); ++index) {
-    std::string system_filename;
-    bool has_system = false;
-    std::string cache_filename_unused;
-    bool dalvik_cache_exists_unused;
-    bool has_cache_unused;
-    bool is_global_cache_unused;
-    bool found_image = gc::space::ImageSpace::FindImageFilename(image_locations[index].c_str(),
-                                                                kRuntimeISA,
-                                                                &system_filename,
-                                                                &has_system,
-                                                                &cache_filename_unused,
-                                                                &dalvik_cache_exists_unused,
-                                                                &has_cache_unused,
-                                                                &is_global_cache_unused);
-
-    if (!found_image || !has_system) {
-      return false;
-    }
-
-    // We are falling back to non-executable use of the oat file because patching failed, presumably
-    // due to lack of space.
-    std::string vdex_filename =
-        ImageHeader::GetVdexLocationFromImageLocation(system_filename.c_str());
-    std::string oat_filename =
-        ImageHeader::GetOatLocationFromImageLocation(system_filename.c_str());
-    std::string oat_location =
-        ImageHeader::GetOatLocationFromImageLocation(image_locations[index].c_str());
-    // Note: in the multi-image case, the image location may end in ".jar," and not ".art." Handle
-    //       that here.
-    if (android::base::EndsWith(oat_location, ".jar")) {
-      oat_location.replace(oat_location.length() - 3, 3, "oat");
-    }
-    std::string error_msg;
-
-    std::unique_ptr<VdexFile> vdex_file(VdexFile::Open(vdex_filename,
-                                                       /* writable= */ false,
-                                                       /* low_4gb= */ false,
-                                                       /* unquicken= */ false,
-                                                       &error_msg));
-    if (vdex_file.get() == nullptr) {
-      return false;
-    }
-
-    std::unique_ptr<File> file(OS::OpenFileForReading(oat_filename.c_str()));
-    if (file.get() == nullptr) {
-      return false;
-    }
-    std::unique_ptr<ElfFile> elf_file(ElfFile::Open(file.get(),
-                                                    /* writable= */ false,
-                                                    /* program_header_only= */ false,
-                                                    /* low_4gb= */ false,
-                                                    &error_msg));
-    if (elf_file.get() == nullptr) {
-      return false;
-    }
-    std::unique_ptr<const OatFile> oat_file(
-        OatFile::OpenWithElfFile(/* zip_fd= */ -1,
-                                 elf_file.release(),
-                                 vdex_file.release(),
-                                 oat_location,
-                                 nullptr,
-                                 &error_msg));
-    if (oat_file == nullptr) {
-      LOG(WARNING) << "Unable to use '" << oat_filename << "' because " << error_msg;
-      return false;
-    }
-
-    for (const OatDexFile* oat_dex_file : oat_file->GetOatDexFiles()) {
-      if (oat_dex_file == nullptr) {
-        *failures += 1;
-        continue;
-      }
-      std::unique_ptr<const DexFile> dex_file = oat_dex_file->OpenDexFile(&error_msg);
-      if (dex_file.get() == nullptr) {
-        *failures += 1;
-      } else {
-        dex_files->push_back(std::move(dex_file));
-      }
-    }
-
-    if (index == 0) {
-      // First file. See if this is a multi-image environment, and if so, enqueue the other images.
-      const OatHeader& boot_oat_header = oat_file->GetOatHeader();
-      const char* boot_cp = boot_oat_header.GetStoreValueByKey(OatHeader::kBootClassPathKey);
-      if (boot_cp != nullptr) {
-        gc::space::ImageSpace::ExtractMultiImageLocations(image_locations[0],
-                                                          boot_cp,
-                                                          &image_locations);
-      }
-    }
-
-    Runtime::Current()->GetOatFileManager().RegisterOatFile(std::move(oat_file));
-  }
-  return true;
-}
-
-
 static size_t OpenDexFiles(const std::vector<std::string>& dex_filenames,
                            const std::vector<std::string>& dex_locations,
-                           const std::string& image_location,
                            std::vector<std::unique_ptr<const DexFile>>* dex_files) {
   DCHECK(dex_files != nullptr) << "OpenDexFiles: out-param is nullptr";
   size_t failure_count = 0;
-  if (!image_location.empty() && OpenDexFilesFromImage(image_location, dex_files, &failure_count)) {
-    return failure_count;
-  }
   const ArtDexFileLoader dex_file_loader;
-  failure_count = 0;
   for (size_t i = 0; i < dex_filenames.size(); i++) {
     const char* dex_filename = dex_filenames[i].c_str();
     const char* dex_location = dex_locations[i].c_str();
@@ -1351,7 +1241,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     }
     case JdwpProvider::kUnset: {
       LOG(FATAL) << "Illegal jdwp provider " << jdwp_provider_ << " was not filtered out!";
-      break;
     }
   }
   callbacks_->AddThreadLifecycleCallback(Dbg::GetThreadLifecycleCallback());
@@ -1517,10 +1406,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     if (runtime_options.Exists(Opt::BootClassPathDexList)) {
       boot_class_path.swap(*runtime_options.GetOrDefault(Opt::BootClassPathDexList));
     } else {
-      OpenDexFiles(dex_filenames,
-                   dex_locations,
-                   runtime_options.GetOrDefault(Opt::Image),
-                   &boot_class_path);
+      OpenDexFiles(dex_filenames, dex_locations, &boot_class_path);
     }
     instruction_set_ = runtime_options.GetOrDefault(Opt::ImageInstructionSet);
     if (!class_linker_->InitWithoutImage(std::move(boot_class_path), &error_msg)) {
@@ -1969,7 +1855,7 @@ int32_t Runtime::GetStat(int kind) {
     return 0;  // backward compatibility
   default:
     LOG(FATAL) << "Unknown statistic " << kind;
-    return -1;  // unreachable
+    UNREACHABLE();
   }
 }
 
@@ -2493,16 +2379,11 @@ void Runtime::CreateJitCodeCache(bool rwx_memory_allowed) {
     return;
   }
 
-  // SystemServer has execmem blocked by SELinux so can not use RWX page permissions after the
-  // cache initialized.
-  jit_options_->SetRWXMemoryAllowed(rwx_memory_allowed);
-
   std::string error_msg;
   bool profiling_only = !jit_options_->UseJitCompilation();
-  jit_code_cache_.reset(jit::JitCodeCache::Create(jit_options_->GetCodeCacheInitialCapacity(),
-                                                  jit_options_->GetCodeCacheMaxCapacity(),
-                                                  profiling_only,
-                                                  jit_options_->RWXMemoryAllowed(),
+  jit_code_cache_.reset(jit::JitCodeCache::Create(profiling_only,
+                                                  rwx_memory_allowed,
+                                                  IsZygote(),
                                                   &error_msg));
   if (jit_code_cache_.get() == nullptr) {
     LOG(WARNING) << "Failed to create JIT Code Cache: " << error_msg;
