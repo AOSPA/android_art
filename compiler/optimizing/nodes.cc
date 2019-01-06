@@ -20,6 +20,7 @@
 #include "art_method-inl.h"
 #include "base/bit_utils.h"
 #include "base/bit_vector-inl.h"
+#include "base/logging.h"
 #include "base/stl_util.h"
 #include "class_linker-inl.h"
 #include "class_root.h"
@@ -1230,7 +1231,7 @@ bool HInstructionList::FoundBefore(const HInstruction* instruction1,
     }
   }
   LOG(FATAL) << "Did not find an order between two instructions of the same block.";
-  return true;
+  UNREACHABLE();
 }
 
 bool HInstruction::StrictlyDominates(HInstruction* other_instruction) const {
@@ -1253,7 +1254,7 @@ bool HInstruction::StrictlyDominates(HInstruction* other_instruction) const {
       } else {
         // There is no order among phis.
         LOG(FATAL) << "There is no dominance between phis of a same block.";
-        return false;
+        UNREACHABLE();
       }
     } else {
       // `this` is not a phi.

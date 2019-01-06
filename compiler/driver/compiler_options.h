@@ -44,6 +44,13 @@ enum class InstructionSet;
 class InstructionSetFeatures;
 class ProfileCompilationInfo;
 
+// Enum for CheckProfileMethodsCompiled. Outside CompilerOptions so it can be forward-declared.
+enum class ProfileMethodsCheck : uint8_t {
+  kNone,
+  kLog,
+  kAbort,
+};
+
 class CompilerOptions final {
  public:
   // Guide heuristics to determine whether to compile method if profile data not available.
@@ -324,6 +331,18 @@ class CompilerOptions final {
     return resolve_startup_const_strings_;
   }
 
+  ProfileMethodsCheck CheckProfiledMethodsCompiled() const {
+    return check_profiled_methods_;
+  }
+
+  uint32_t MaxImageBlockSize() const {
+    return max_image_block_size_;
+  }
+
+  void SetMaxImageBlockSize(uint32_t size) {
+    max_image_block_size_ = size;
+  }
+
  private:
   bool ParseDumpInitFailures(const std::string& option, std::string* error_msg);
   void ParseDumpCfgPasses(const StringPiece& option, UsageFn Usage);
@@ -408,6 +427,13 @@ class CompilerOptions final {
   // Whether we eagerly resolve all of the const strings that are loaded from startup methods in the
   // profile.
   bool resolve_startup_const_strings_;
+
+  // When running profile-guided compilation, check that methods intended to be compiled end
+  // up compiled and are not punted.
+  ProfileMethodsCheck check_profiled_methods_;
+
+  // Maximum solid block size in the generated image.
+  uint32_t max_image_block_size_;
 
   RegisterAllocator::Strategy register_allocation_strategy_;
 
