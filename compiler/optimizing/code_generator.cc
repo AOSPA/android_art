@@ -414,7 +414,7 @@ void CodeGenerator::Compile(CodeAllocator* allocator) {
     // This ensures that we have correct native line mapping for all native instructions.
     // It is necessary to make stepping over a statement work. Otherwise, any initial
     // instructions (e.g. moves) would be assumed to be the start of next statement.
-    MaybeRecordNativeDebugInfo(nullptr /* instruction */, block->GetDexPc());
+    MaybeRecordNativeDebugInfo(/* instruction= */ nullptr, block->GetDexPc());
     for (HInstructionIterator it(block->GetInstructions()); !it.Done(); it.Advance()) {
       HInstruction* current = it.Current();
       if (current->HasEnvironment()) {
@@ -987,7 +987,7 @@ static void CheckCovers(uint32_t dex_pc,
 // dex branch instructions.
 static void CheckLoopEntriesCanBeUsedForOsr(const HGraph& graph,
                                             const CodeInfo& code_info,
-                                            const DexFile::CodeItem& code_item) {
+                                            const dex::CodeItem& code_item) {
   if (graph.HasTryCatch()) {
     // One can write loops through try/catch, which we do not support for OSR anyway.
     return;
@@ -1029,7 +1029,7 @@ static void CheckLoopEntriesCanBeUsedForOsr(const HGraph& graph,
   }
 }
 
-ScopedArenaVector<uint8_t> CodeGenerator::BuildStackMaps(const DexFile::CodeItem* code_item) {
+ScopedArenaVector<uint8_t> CodeGenerator::BuildStackMaps(const dex::CodeItem* code_item) {
   ScopedArenaVector<uint8_t> stack_map = GetStackMapStream()->Encode();
   if (kIsDebugBuild && code_item != nullptr) {
     CheckLoopEntriesCanBeUsedForOsr(*graph_, CodeInfo(stack_map.data()), *code_item);
@@ -1085,7 +1085,7 @@ void CodeGenerator::RecordPcInfo(HInstruction* instruction,
     // call). Therefore register_mask contains both callee-save and caller-save
     // registers that hold objects. We must remove the spilled caller-save from the
     // mask, since they will be overwritten by the callee.
-    uint32_t spills = GetSlowPathSpills(locations, /* core_registers */ true);
+    uint32_t spills = GetSlowPathSpills(locations, /* core_registers= */ true);
     register_mask &= ~spills;
   } else {
     // The register mask must be a subset of callee-save registers.
@@ -1164,7 +1164,7 @@ void CodeGenerator::MaybeRecordNativeDebugInfo(HInstruction* instruction,
       // Ensure that we do not collide with the stack map of the previous instruction.
       GenerateNop();
     }
-    RecordPcInfo(instruction, dex_pc, slow_path, /* native_debug_info */ true);
+    RecordPcInfo(instruction, dex_pc, slow_path, /* native_debug_info= */ true);
   }
 }
 
@@ -1182,8 +1182,8 @@ void CodeGenerator::RecordCatchBlockInfo() {
 
     stack_map_stream->BeginStackMapEntry(dex_pc,
                                          native_pc,
-                                         /* register_mask */ 0,
-                                         /* stack_mask */ nullptr,
+                                         /* register_mask= */ 0,
+                                         /* sp_mask= */ nullptr,
                                          StackMap::Kind::Catch);
 
     HInstruction* current_phi = block->GetFirstPhi();
@@ -1555,7 +1555,7 @@ void CodeGenerator::ValidateInvokeRuntimeWithoutRecordingPcInfo(HInstruction* in
 void SlowPathCode::SaveLiveRegisters(CodeGenerator* codegen, LocationSummary* locations) {
   size_t stack_offset = codegen->GetFirstRegisterSlotInSlowPath();
 
-  const uint32_t core_spills = codegen->GetSlowPathSpills(locations, /* core_registers */ true);
+  const uint32_t core_spills = codegen->GetSlowPathSpills(locations, /* core_registers= */ true);
   for (uint32_t i : LowToHighBits(core_spills)) {
     // If the register holds an object, update the stack mask.
     if (locations->RegisterContainsObject(i)) {
@@ -1567,7 +1567,7 @@ void SlowPathCode::SaveLiveRegisters(CodeGenerator* codegen, LocationSummary* lo
     stack_offset += codegen->SaveCoreRegister(stack_offset, i);
   }
 
-  const uint32_t fp_spills = codegen->GetSlowPathSpills(locations, /* core_registers */ false);
+  const uint32_t fp_spills = codegen->GetSlowPathSpills(locations, /* core_registers= */ false);
   for (uint32_t i : LowToHighBits(fp_spills)) {
     DCHECK_LT(stack_offset, codegen->GetFrameSize() - codegen->FrameEntrySpillSize());
     DCHECK_LT(i, kMaximumNumberOfExpectedRegisters);
@@ -1579,14 +1579,14 @@ void SlowPathCode::SaveLiveRegisters(CodeGenerator* codegen, LocationSummary* lo
 void SlowPathCode::RestoreLiveRegisters(CodeGenerator* codegen, LocationSummary* locations) {
   size_t stack_offset = codegen->GetFirstRegisterSlotInSlowPath();
 
-  const uint32_t core_spills = codegen->GetSlowPathSpills(locations, /* core_registers */ true);
+  const uint32_t core_spills = codegen->GetSlowPathSpills(locations, /* core_registers= */ true);
   for (uint32_t i : LowToHighBits(core_spills)) {
     DCHECK_LT(stack_offset, codegen->GetFrameSize() - codegen->FrameEntrySpillSize());
     DCHECK_LT(i, kMaximumNumberOfExpectedRegisters);
     stack_offset += codegen->RestoreCoreRegister(stack_offset, i);
   }
 
-  const uint32_t fp_spills = codegen->GetSlowPathSpills(locations, /* core_registers */ false);
+  const uint32_t fp_spills = codegen->GetSlowPathSpills(locations, /* core_registers= */ false);
   for (uint32_t i : LowToHighBits(fp_spills)) {
     DCHECK_LT(stack_offset, codegen->GetFrameSize() - codegen->FrameEntrySpillSize());
     DCHECK_LT(i, kMaximumNumberOfExpectedRegisters);

@@ -18,6 +18,7 @@
 #define ART_COMPILER_LINKER_ELF_BUILDER_H_
 
 #include <vector>
+#include <deque>
 
 #include "arch/instruction_set.h"
 #include "arch/mips/instruction_set_features_mips.h"
@@ -281,10 +282,10 @@ class ElfBuilder final {
                         name,
                         SHT_STRTAB,
                         flags,
-                        /* link */ nullptr,
-                        /* info */ 0,
+                        /* link= */ nullptr,
+                        /* info= */ 0,
                         align,
-                        /* entsize */ 0) { }
+                        /* entsize= */ 0) { }
 
     Elf_Word Add(const std::string& name) {
       if (CachedSection::GetCacheSize() == 0u) {
@@ -305,10 +306,10 @@ class ElfBuilder final {
                   name,
                   SHT_STRTAB,
                   flags,
-                  /* link */ nullptr,
-                  /* info */ 0,
+                  /* link= */ nullptr,
+                  /* info= */ 0,
                   align,
-                  /* entsize */ 0) {
+                  /* entsize= */ 0) {
       Reset();
     }
 
@@ -350,35 +351,15 @@ class ElfBuilder final {
                   type,
                   flags,
                   strtab,
-                  /* info */ 1,
+                  /* info= */ 1,
                   sizeof(Elf_Off),
                   sizeof(Elf_Sym)) {
       syms_.push_back(Elf_Sym());  // The symbol table always has to start with NULL symbol.
     }
 
     // Buffer symbol for this section.  It will be written later.
-    // If the symbol's section is null, it will be considered absolute (SHN_ABS).
-    // (we use this in JIT to reference code which is stored outside the debug ELF file)
     void Add(Elf_Word name,
              const Section* section,
-             Elf_Addr addr,
-             Elf_Word size,
-             uint8_t binding,
-             uint8_t type) {
-      Elf_Word section_index;
-      if (section != nullptr) {
-        DCHECK_LE(section->GetAddress(), addr);
-        DCHECK_LE(addr, section->GetAddress() + section->header_.sh_size);
-        section_index = section->GetSectionIndex();
-      } else {
-        section_index = static_cast<Elf_Word>(SHN_ABS);
-      }
-      Add(name, section_index, addr, size, binding, type);
-    }
-
-    // Buffer symbol for this section.  It will be written later.
-    void Add(Elf_Word name,
-             Elf_Word section_index,
              Elf_Addr addr,
              Elf_Word size,
              uint8_t binding,
@@ -388,26 +369,38 @@ class ElfBuilder final {
       sym.st_value = addr;
       sym.st_size = size;
       sym.st_other = 0;
-      sym.st_shndx = section_index;
       sym.st_info = (binding << 4) + (type & 0xf);
-      syms_.push_back(sym);
+      Add(sym, section);
+    }
+
+    // Buffer symbol for this section.  It will be written later.
+    void Add(Elf_Sym sym, const Section* section) {
+      DCHECK(section != nullptr);
+      DCHECK_LE(section->GetAddress(), sym.st_value);
+      DCHECK_LE(sym.st_value, section->GetAddress() + section->header_.sh_size);
+      sym.st_shndx = section->GetSectionIndex();
 
       // The sh_info file must be set to index one-past the last local symbol.
-      if (binding == STB_LOCAL) {
-        this->header_.sh_info = syms_.size();
+      if (sym.getBinding() == STB_LOCAL) {
+        DCHECK_EQ(syms_.back().getBinding(), STB_LOCAL);
+        this->header_.sh_info = syms_.size() + 1;
       }
+
+      syms_.push_back(sym);
     }
 
     Elf_Word GetCacheSize() { return syms_.size() * sizeof(Elf_Sym); }
 
     void WriteCachedSection() {
       this->Start();
-      this->WriteFully(syms_.data(), syms_.size() * sizeof(Elf_Sym));
+      for (; !syms_.empty(); syms_.pop_front()) {
+        this->WriteFully(&syms_.front(), sizeof(Elf_Sym));
+      }
       this->End();
     }
 
    private:
-    std::vector<Elf_Sym> syms_;  // Buffered/cached content of the whole section.
+    std::deque<Elf_Sym> syms_;  // Buffered/cached content of the whole section.
   };
 
   class AbiflagsSection final : public Section {
@@ -775,7 +768,7 @@ class ElfBuilder final {
       // The runtime does not care about the size of this symbol (it uses the "lastword" symbol).
       // We use size 0 (meaning "unknown size" in ELF) to prevent overlap with the debug symbols.
       Elf_Word oatexec = dynstr_.Add("oatexec");
-      dynsym_.Add(oatexec, &text_, text_.GetAddress(), /* size */ 0, STB_GLOBAL, STT_OBJECT);
+      dynsym_.Add(oatexec, &text_, text_.GetAddress(), /* size= */ 0, STB_GLOBAL, STT_OBJECT);
       Elf_Word oatlastword = dynstr_.Add("oatlastword");
       Elf_Word oatlastword_address = text_.GetAddress() + text_size - 4;
       dynsym_.Add(oatlastword, &text_, oatlastword_address, 4, STB_GLOBAL, STT_OBJECT);
@@ -831,7 +824,7 @@ class ElfBuilder final {
     }
     if (dex_size != 0u) {
       Elf_Word oatdex = dynstr_.Add("oatdex");
-      dynsym_.Add(oatdex, &dex_, dex_.GetAddress(), /* size */ 0, STB_GLOBAL, STT_OBJECT);
+      dynsym_.Add(oatdex, &dex_, dex_.GetAddress(), /* size= */ 0, STB_GLOBAL, STT_OBJECT);
       Elf_Word oatdexlastword = dynstr_.Add("oatdexlastword");
       Elf_Word oatdexlastword_address = dex_.GetAddress() + dex_size - 4;
       dynsym_.Add(oatdexlastword, &dex_, oatdexlastword_address, 4, STB_GLOBAL, STT_OBJECT);

@@ -129,10 +129,11 @@ define build-art-test-dex
     LOCAL_DEX_PREOPT := false
     LOCAL_ADDITIONAL_DEPENDENCIES := art/build/Android.common_test.mk $(4)
     LOCAL_MODULE_TAGS := tests
-    LOCAL_JAVA_LIBRARIES := $(TARGET_CORE_JARS)
+    LOCAL_JAVA_LIBRARIES := $(TARGET_TEST_CORE_JARS)
     LOCAL_MODULE_PATH := $(3)
     LOCAL_DEX_PREOPT_IMAGE_LOCATION := $(TARGET_CORE_IMG_OUT)
     ifneq ($(wildcard $(LOCAL_PATH)/$(2)/main.list),)
+      LOCAL_MIN_SDK_VERSION := 19
       LOCAL_DX_FLAGS := --multi-dex --main-dex-list=$(LOCAL_PATH)/$(2)/main.list --minimal-main-dex
     endif
     include $(BUILD_JAVA_LIBRARY)
@@ -145,9 +146,10 @@ define build-art-test-dex
     LOCAL_NO_STANDARD_LIBRARIES := true
     LOCAL_DEX_PREOPT := false
     LOCAL_ADDITIONAL_DEPENDENCIES := art/build/Android.common_test.mk $(4)
-    LOCAL_JAVA_LIBRARIES := $(HOST_CORE_JARS)
+    LOCAL_JAVA_LIBRARIES := $(HOST_TEST_CORE_JARS)
     LOCAL_DEX_PREOPT_IMAGE := $(HOST_CORE_IMG_LOCATION)
     ifneq ($(wildcard $(LOCAL_PATH)/$(2)/main.list),)
+      LOCAL_MIN_SDK_VERSION := 19
       LOCAL_DX_FLAGS := --multi-dex --main-dex-list=$(LOCAL_PATH)/$(2)/main.list --minimal-main-dex
     endif
     include $(BUILD_HOST_DALVIK_JAVA_LIBRARY)

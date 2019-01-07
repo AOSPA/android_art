@@ -57,7 +57,7 @@ inline ObjPtr<mirror::Class> CompilerDriver::ResolveCompilingMethodsClass(
     const DexCompilationUnit* mUnit) {
   DCHECK_EQ(dex_cache->GetDexFile(), mUnit->GetDexFile());
   DCHECK_EQ(class_loader.Get(), mUnit->GetClassLoader().Get());
-  const DexFile::MethodId& referrer_method_id =
+  const dex::MethodId& referrer_method_id =
       mUnit->GetDexFile()->GetMethodId(mUnit->GetDexMethodIndex());
   return ResolveClass(soa, dex_cache, class_loader, referrer_method_id.class_idx_, mUnit);
 }
@@ -97,11 +97,6 @@ inline std::pair<bool, bool> CompilerDriver::IsFastInstanceField(
                                              field_idx);
   bool fast_put = fast_get && (!resolved_field->IsFinal() || fields_class == referrer_class);
   return std::make_pair(fast_get, fast_put);
-}
-
-inline VerificationResults* CompilerDriver::GetVerificationResults() const {
-  DCHECK(Runtime::Current()->IsAotCompiler());
-  return verification_results_;
 }
 
 }  // namespace art

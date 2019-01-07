@@ -44,11 +44,12 @@ class ApiList {
     // The max release code implicitly includes all maintenance releases,
     // e.g. GreylistMaxO is accessible to targetSdkVersion <= 27 (O_MR1).
     kGreylistMaxO =  3,
+    kGreylistMaxP =  4,
 
     // Special values
     kInvalid =       static_cast<uint32_t>(-1),
     kMinValue =      kWhitelist,
-    kMaxValue =      kGreylistMaxO,
+    kMaxValue =      kGreylistMaxP,
   };
 
   static constexpr const char* kNames[] = {
@@ -56,13 +57,17 @@ class ApiList {
     "greylist",
     "blacklist",
     "greylist-max-o",
+    "greylist-max-p",
   };
+
+  static constexpr const char* kInvalidName = "invalid";
 
   static constexpr SdkVersion kMaxSdkVersions[] {
     /* whitelist */ SdkVersion::kMax,
     /* greylist */ SdkVersion::kMax,
     /* blacklist */ SdkVersion::kMin,
     /* greylist-max-o */ SdkVersion::kO_MR1,
+    /* greylist-max-p */ SdkVersion::kP,
   };
 
   static ApiList MinValue() { return ApiList(Value::kMinValue); }
@@ -70,19 +75,28 @@ class ApiList {
 
   explicit ApiList(Value value) : value_(value) {}
 
-  const Value value_;
+  Value value_;
 
  public:
   static ApiList Whitelist() { return ApiList(Value::kWhitelist); }
   static ApiList Greylist() { return ApiList(Value::kGreylist); }
   static ApiList Blacklist() { return ApiList(Value::kBlacklist); }
   static ApiList GreylistMaxO() { return ApiList(Value::kGreylistMaxO); }
+  static ApiList GreylistMaxP() { return ApiList(Value::kGreylistMaxP); }
   static ApiList Invalid() { return ApiList(Value::kInvalid); }
 
   // Decodes ApiList from dex hiddenapi flags.
   static ApiList FromDexFlags(uint32_t dex_flags) {
     if (MinValue().GetIntValue() <= dex_flags && dex_flags <= MaxValue().GetIntValue()) {
       return ApiList(static_cast<Value>(dex_flags));
+    }
+    return Invalid();
+  }
+
+  // Decodes ApiList from its integer value.
+  static ApiList FromIntValue(IntValueType int_value) {
+    if (MinValue().GetIntValue() <= int_value && int_value <= MaxValue().GetIntValue()) {
+      return ApiList(static_cast<Value>(int_value));
     }
     return Invalid();
   }
@@ -108,7 +122,7 @@ class ApiList {
     return static_cast<IntValueType>(value_);
   }
 
-  const char* GetName() const { return kNames[GetIntValue()]; }
+  const char* GetName() const { return IsValid() ? kNames[GetIntValue()]: kInvalidName; }
 
   SdkVersion GetMaxAllowedSdkVersion() const { return kMaxSdkVersions[GetIntValue()]; }
 

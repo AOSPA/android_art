@@ -126,11 +126,11 @@ extern "C" void jit_unload(void* handle) {
 }
 
 extern "C" bool jit_compile_method(
-    void* handle, ArtMethod* method, Thread* self, bool osr)
+    void* handle, ArtMethod* method, Thread* self, bool baseline, bool osr)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   auto* jit_compiler = reinterpret_cast<JitCompiler*>(handle);
   DCHECK(jit_compiler != nullptr);
-  return jit_compiler->CompileMethod(self, method, osr);
+  return jit_compiler->CompileMethod(self, method, baseline, osr);
 }
 
 extern "C" void jit_types_loaded(void* handle, mirror::Class** types, size_t count)
@@ -142,10 +142,14 @@ extern "C" void jit_types_loaded(void* handle, mirror::Class** types, size_t cou
     const ArrayRef<mirror::Class*> types_array(types, count);
     std::vector<uint8_t> elf_file = debug::WriteDebugElfFileForClasses(
         kRuntimeISA, compiler_options.GetInstructionSetFeatures(), types_array);
-    MutexLock mu(Thread::Current(), *Locks::native_debug_interface_lock_);
     // We never free debug info for types, so we don't need to provide a handle
     // (which would have been otherwise used as identifier to remove it later).
-    AddNativeDebugInfoForJit(nullptr /* handle */, elf_file);
+    AddNativeDebugInfoForJit(Thread::Current(),
+                             /*code_ptr=*/ nullptr,
+                             elf_file,
+                             debug::PackElfFileForJIT,
+                             compiler_options.GetInstructionSet(),
+                             compiler_options.GetInstructionSetFeatures());
   }
 }
 
@@ -167,11 +171,9 @@ JitCompiler::JitCompiler() {
 
   compiler_driver_.reset(new CompilerDriver(
       compiler_options_.get(),
-      /* verification_results */ nullptr,
       Compiler::kOptimizing,
-      /* image_classes */ nullptr,
-      /* thread_count */ 1,
-      /* swap_fd */ -1));
+      /* thread_count= */ 1,
+      /* swap_fd= */ -1));
   // Disable dedupe so we can remove compiled methods.
   compiler_driver_->SetDedupeEnabled(false);
 }
@@ -182,7 +184,7 @@ JitCompiler::~JitCompiler() {
   }
 }
 
-bool JitCompiler::CompileMethod(Thread* self, ArtMethod* method, bool osr) {
+bool JitCompiler::CompileMethod(Thread* self, ArtMethod* method, bool baseline, bool osr) {
   SCOPED_TRACE << "JIT compiling " << method->PrettyMethod();
 
   DCHECK(!method->IsProxyMethod());
@@ -199,7 +201,7 @@ bool JitCompiler::CompileMethod(Thread* self, ArtMethod* method, bool osr) {
     TimingLogger::ScopedTiming t2("Compiling", &logger);
     JitCodeCache* const code_cache = runtime->GetJit()->GetCodeCache();
     success = compiler_driver_->GetCompiler()->JitCompile(
-        self, code_cache, method, /* baseline= */ false, osr, jit_logger_.get());
+        self, code_cache, method, baseline, osr, jit_logger_.get());
   }
 
   // Trim maps to reduce memory usage.

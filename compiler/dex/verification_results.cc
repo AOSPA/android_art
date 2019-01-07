@@ -97,7 +97,7 @@ void VerificationResults::ProcessVerifiedMethod(verifier::MethodVerifier* method
   }
 }
 
-const VerifiedMethod* VerificationResults::GetVerifiedMethod(MethodReference ref) {
+const VerifiedMethod* VerificationResults::GetVerifiedMethod(MethodReference ref) const {
   const VerifiedMethod* ret = nullptr;
   if (atomic_verified_methods_.Get(ref, &ret)) {
     return ret;
@@ -112,7 +112,7 @@ void VerificationResults::CreateVerifiedMethodFor(MethodReference ref) {
   // which have no verifier error, nor has methods that we know will throw
   // at runtime.
   std::unique_ptr<VerifiedMethod> verified_method = std::make_unique<VerifiedMethod>(
-      /* encountered_error_types */ 0, /* has_runtime_throw */ false);
+      /* encountered_error_types= */ 0, /* has_runtime_throw= */ false);
   if (atomic_verified_methods_.Insert(ref,
                                       /*expected*/ nullptr,
                                       verified_method.get()) ==
@@ -129,13 +129,13 @@ void VerificationResults::AddRejectedClass(ClassReference ref) {
   DCHECK(IsClassRejected(ref));
 }
 
-bool VerificationResults::IsClassRejected(ClassReference ref) {
+bool VerificationResults::IsClassRejected(ClassReference ref) const {
   ReaderMutexLock mu(Thread::Current(), rejected_classes_lock_);
   return (rejected_classes_.find(ref) != rejected_classes_.end());
 }
 
 bool VerificationResults::IsCandidateForCompilation(MethodReference&,
-                                                    const uint32_t access_flags) {
+                                                    const uint32_t access_flags) const {
   if (!compiler_options_->IsAotCompilationEnabled()) {
     return false;
   }

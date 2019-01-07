@@ -28,9 +28,9 @@
 #include <vector>
 
 #include "arch/instruction_set.h"
+#include "base/locks.h"
 #include "base/macros.h"
 #include "base/mem_map.h"
-#include "base/mutex.h"
 #include "deoptimization_kind.h"
 #include "dex/dex_file_types.h"
 #include "experimental_flags.h"
@@ -99,6 +99,7 @@ class SignalCatcher;
 class StackOverflowHandler;
 class SuspensionHandler;
 class ThreadList;
+class ThreadPool;
 class Trace;
 struct TraceConfig;
 class Transaction;
@@ -242,8 +243,14 @@ class Runtime {
 
   ~Runtime();
 
-  const std::string& GetBootClassPathString() const {
-    return boot_class_path_string_;
+  const std::vector<std::string>& GetBootClassPath() const {
+    return boot_class_path_;
+  }
+
+  const std::vector<std::string>& GetBootClassPathLocations() const {
+    DCHECK(boot_class_path_locations_.empty() ||
+           boot_class_path_locations_.size() == boot_class_path_.size());
+    return boot_class_path_locations_.empty() ? boot_class_path_ : boot_class_path_locations_;
   }
 
   const std::string& GetClassPathString() const {
@@ -444,6 +451,7 @@ class Runtime {
   bool UseJitCompilation() const;
 
   void PreZygoteFork();
+  void PostZygoteFork();
   void InitNonZygoteOrPostFork(
       JNIEnv* env,
       bool is_system_server,
@@ -510,12 +518,7 @@ class Runtime {
   void RecordResolveString(ObjPtr<mirror::DexCache> dex_cache, dex::StringIndex string_idx) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void SetFaultMessage(const std::string& message) REQUIRES(!fault_message_lock_);
-  // Only read by the signal handler, NO_THREAD_SAFETY_ANALYSIS to prevent lock order violations
-  // with the unexpected_signal_lock_.
-  const std::string& GetFaultMessage() NO_THREAD_SAFETY_ANALYSIS {
-    return fault_message_;
-  }
+  void SetFaultMessage(const std::string& message);
 
   void AddCurrentRuntimeFeaturesAsDex2OatArguments(std::vector<std::string>* arg_vector) const;
 
@@ -789,6 +792,28 @@ class Runtime {
     return verifier_logging_threshold_ms_;
   }
 
+  // Atomically delete the thread pool if the reference count is 0.
+  bool DeleteThreadPool() REQUIRES(!Locks::runtime_thread_pool_lock_);
+
+  // Wait for all the thread workers to be attached.
+  void WaitForThreadPoolWorkersToStart() REQUIRES(!Locks::runtime_thread_pool_lock_);
+
+  // Scoped usage of the runtime thread pool. Prevents the pool from being
+  // deleted. Note that the thread pool is only for startup and gets deleted after.
+  class ScopedThreadPoolUsage {
+   public:
+    ScopedThreadPoolUsage();
+    ~ScopedThreadPoolUsage();
+
+    // Return the thread pool.
+    ThreadPool* GetThreadPool() const {
+      return thread_pool_;
+    }
+
+   private:
+    ThreadPool* const thread_pool_;
+  };
+
  private:
   static void InitPlatformSignalHandlers();
 
@@ -818,6 +843,15 @@ class Runtime {
   // need to be visited once per GC cycle.
   void VisitConstantRoots(RootVisitor* visitor)
       REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Note: To be lock-free, GetFaultMessage temporarily replaces the lock message with null.
+  //       As such, there is a window where a call will return an empty string. In general,
+  //       only aborting code should retrieve this data (via GetFaultMessageForAbortLogging
+  //       friend).
+  std::string GetFaultMessage();
+
+  ThreadPool* AcquireThreadPool() REQUIRES(!Locks::runtime_thread_pool_lock_);
+  void ReleaseThreadPool() REQUIRES(!Locks::runtime_thread_pool_lock_);
 
   // A pointer to the active runtime or null.
   static Runtime* instance_;
@@ -859,7 +893,8 @@ class Runtime {
   std::vector<std::string> image_compiler_options_;
   std::string image_location_;
 
-  std::string boot_class_path_string_;
+  std::vector<std::string> boot_class_path_;
+  std::vector<std::string> boot_class_path_locations_;
   std::string class_path_string_;
   std::vector<std::string> properties_;
 
@@ -901,9 +936,13 @@ class Runtime {
   std::unique_ptr<jit::JitCodeCache> jit_code_cache_;
   std::unique_ptr<jit::JitOptions> jit_options_;
 
-  // Fault message, printed when we get a SIGSEGV.
-  Mutex fault_message_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
-  std::string fault_message_ GUARDED_BY(fault_message_lock_);
+  // Runtime thread pool. The pool is only for startup and gets deleted after.
+  std::unique_ptr<ThreadPool> thread_pool_ GUARDED_BY(Locks::runtime_thread_pool_lock_);
+  size_t thread_pool_ref_count_ GUARDED_BY(Locks::runtime_thread_pool_lock_);
+
+  // Fault message, printed when we get a SIGSEGV. Stored as a native-heap object and accessed
+  // lock-free, so needs to be atomic.
+  std::atomic<std::string*> fault_message_;
 
   // A non-zero value indicates that a thread has been created but not yet initialized. Guarded by
   // the shutdown lock so that threads aren't born while we're shutting down.
@@ -1101,10 +1140,11 @@ class Runtime {
 
   MemMap protected_fault_page_;
 
-  uint64_t process_cpu_start_time_;
-  uint64_t process_cpu_end_time_;
-
   uint32_t verifier_logging_threshold_ms_;
+
+  // Note: See comments on GetFaultMessage.
+  friend std::string GetFaultMessageForAbortLogging();
+  friend class ScopedThreadPoolUsage;
 
   DISALLOW_COPY_AND_ASSIGN(Runtime);
 };

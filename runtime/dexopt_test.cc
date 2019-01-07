@@ -46,26 +46,13 @@ void DexoptTest::PostRuntimeCreate() {
   ReserveImageSpace();
 }
 
-static std::string ImageLocation() {
-  Runtime* runtime = Runtime::Current();
-  const std::vector<gc::space::ImageSpace*>& image_spaces =
-      runtime->GetHeap()->GetBootImageSpaces();
-  if (image_spaces.empty()) {
-    return "";
-  }
-  return image_spaces[0]->GetImageLocation();
-}
-
 bool DexoptTest::Dex2Oat(const std::vector<std::string>& args, std::string* error_msg) {
-  Runtime* runtime = Runtime::Current();
-
   std::vector<std::string> argv;
-  argv.push_back(runtime->GetCompilerExecutable());
-  if (runtime->IsJavaDebuggable()) {
-    argv.push_back("--debuggable");
+  if (!CommonRuntimeTest::StartDex2OatCommandLine(&argv, error_msg)) {
+    return false;
   }
-  runtime->AddCurrentRuntimeFeaturesAsDex2OatArguments(&argv);
 
+  Runtime* runtime = Runtime::Current();
   if (runtime->GetHiddenApiEnforcementPolicy() != hiddenapi::EnforcementPolicy::kDisabled) {
     argv.push_back("--runtime-arg");
     argv.push_back("-Xhidden-api-checks");
@@ -74,11 +61,6 @@ bool DexoptTest::Dex2Oat(const std::vector<std::string>& args, std::string* erro
   if (!kIsTargetBuild) {
     argv.push_back("--host");
   }
-
-  argv.push_back("--boot-image=" + ImageLocation());
-
-  std::vector<std::string> compiler_options = runtime->GetCompilerOptions();
-  argv.insert(argv.end(), compiler_options.begin(), compiler_options.end());
 
   argv.insert(argv.end(), args.begin(), args.end());
 
@@ -134,19 +116,19 @@ void DexoptTest::GenerateOatForTest(const std::string& dex_location,
   ASSERT_TRUE(odex_file.get() != nullptr) << error_msg;
   EXPECT_EQ(filter, odex_file->GetCompilerFilter());
 
-  std::unique_ptr<ImageHeader> image_header(
-          gc::space::ImageSpace::ReadImageHeader(image_location.c_str(),
-                                                 kRuntimeISA,
-                                                 &error_msg));
-  ASSERT_TRUE(image_header != nullptr) << error_msg;
+  std::string boot_image_checksums = gc::space::ImageSpace::GetBootClassPathChecksums(
+      Runtime::Current()->GetBootClassPath(), image_location, kRuntimeISA, &error_msg);
+  ASSERT_FALSE(boot_image_checksums.empty()) << error_msg;
+
   const OatHeader& oat_header = odex_file->GetOatHeader();
-  uint32_t boot_image_checksum = image_header->GetImageChecksum();
 
   if (CompilerFilter::DependsOnImageChecksum(filter)) {
+    const char* checksums = oat_header.GetStoreValueByKey(OatHeader::kBootClassPathChecksumsKey);
+    ASSERT_TRUE(checksums != nullptr);
     if (with_alternate_image) {
-      EXPECT_NE(boot_image_checksum, oat_header.GetBootImageChecksum());
+      EXPECT_NE(boot_image_checksums, checksums);
     } else {
-      EXPECT_EQ(boot_image_checksum, oat_header.GetBootImageChecksum());
+      EXPECT_EQ(boot_image_checksums, checksums);
     }
   }
 }
