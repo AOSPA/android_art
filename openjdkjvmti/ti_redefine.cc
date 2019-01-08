@@ -63,9 +63,13 @@
 #include "jni/jni_env_ext-inl.h"
 #include "jvmti_allocator.h"
 #include "linear_alloc.h"
+#include "mirror/array-alloc-inl.h"
+#include "mirror/class-alloc-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_ext.h"
 #include "mirror/object.h"
+#include "mirror/object_array-alloc-inl.h"
+#include "mirror/object_array-inl.h"
 #include "nativehelper/scoped_local_ref.h"
 #include "non_debuggable_classes.h"
 #include "object_lock.h"
@@ -305,7 +309,6 @@ art::MemMap Redefiner::MoveDataToMemMap(const std::string& original_location,
                                         std::string* error_msg) {
   art::MemMap map = art::MemMap::MapAnonymous(
       StringPrintf("%s-transformed", original_location.c_str()).c_str(),
-      /* addr= */ nullptr,
       data.size(),
       PROT_READ|PROT_WRITE,
       /*low_4gb=*/ false,
@@ -1424,6 +1427,11 @@ void Redefiner::ClassRedefinition::UpdateMethods(art::ObjPtr<art::mirror::Class>
     method.SetCodeItemOffset(dex_file_->FindCodeItemOffset(class_def, dex_method_idx));
     // Clear all the intrinsics related flags.
     method.SetNotIntrinsic();
+    // Disable hiddenapi checks when accessing this method.
+    // Redefining hiddenapi flags is unsupported for the same reasons as redefining
+    // access flags. Moreover, ArtMethod loses pointer to the old dex file, so just
+    // disable the checks completely for consistency.
+    method.SetAccessFlags(method.GetAccessFlags() | art::kAccPublicApi);
   }
 }
 
@@ -1442,6 +1450,11 @@ void Redefiner::ClassRedefinition::UpdateFields(art::ObjPtr<art::mirror::Class> 
       CHECK(new_field_id != nullptr);
       // We only need to update the index since the other data in the ArtField cannot be updated.
       field.SetDexFieldIndex(dex_file_->GetIndexForFieldId(*new_field_id));
+      // Disable hiddenapi checks when accessing this method.
+      // Redefining hiddenapi flags is unsupported for the same reasons as redefining
+      // access flags. Moreover, ArtField loses pointer to the old dex file, so just
+      // disable the checks completely for consistency.
+      field.SetAccessFlags(field.GetAccessFlags() | art::kAccPublicApi);
     }
   }
 }

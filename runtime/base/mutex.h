@@ -68,6 +68,14 @@ enum LockLevel : uint8_t {
   // A generic lock level for mutexs that should not allow any additional mutexes to be gained after
   // acquiring it.
   kGenericBottomLock,
+  // Tracks the second acquisition at the same lock level for kThreadWaitLock. This is an exception
+  // to the normal lock ordering, used to implement Monitor::Wait - while holding one kThreadWait
+  // level lock, it is permitted to acquire a second one - with internal safeguards to ensure that
+  // the second lock acquisition does not result in deadlock. This is implemented in the lock
+  // order by treating the second acquisition of a kThreadWaitLock as a kThreadWaitWakeLock
+  // acquisition. Thus, acquiring kThreadWaitWakeLock requires holding kThreadWaitLock.
+  kThreadWaitWakeLock,
+  kThreadWaitLock,
   kJdwpAdbStateLock,
   kJdwpSocketLock,
   kRegionSpaceRegionLock,
@@ -480,7 +488,9 @@ class ConditionVariable {
   ConditionVariable(const char* name, Mutex& mutex);
   ~ConditionVariable();
 
+  // Requires the mutex to be held.
   void Broadcast(Thread* self);
+  // Requires the mutex to be held.
   void Signal(Thread* self);
   // TODO: No thread safety analysis on Wait and TimedWait as they call mutex operations via their
   //       pointer copy, thereby defeating annotalysis.
@@ -505,6 +515,8 @@ class ConditionVariable {
   // Number of threads that have come into to wait, not the length of the waiters on the futex as
   // waiters may have been requeued onto guard_. Guarded by guard_.
   volatile int32_t num_waiters_;
+
+  void RequeueWaiters(int32_t count);
 #else
   pthread_cond_t cond_;
 #endif

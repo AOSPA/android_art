@@ -22,7 +22,6 @@
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "class_linker.h"
-#include "gc/heap-inl.h"
 #include "gc_root-inl.h"
 #include "handle_scope-inl.h"
 #include "mirror/class_loader.h"
@@ -315,7 +314,7 @@ inline ArtMethod* ClassLinker::GetResolvedMethod(uint32_t method_idx, ArtMethod*
     // Check if the invoke type matches the class type.
     ObjPtr<mirror::DexCache> dex_cache = referrer->GetDexCache();
     ObjPtr<mirror::ClassLoader> class_loader = referrer->GetClassLoader();
-    if (CheckInvokeClassMismatch</* kThrow */ false>(dex_cache, type, method_idx, class_loader)) {
+    if (CheckInvokeClassMismatch</* kThrow= */ false>(dex_cache, type, method_idx, class_loader)) {
       return nullptr;
     }
     // Check access.
@@ -366,7 +365,7 @@ inline ArtMethod* ClassLinker::ResolveMethod(Thread* self,
     // Check if the invoke type matches the class type.
     ObjPtr<mirror::DexCache> dex_cache = referrer->GetDexCache();
     ObjPtr<mirror::ClassLoader> class_loader = referrer->GetClassLoader();
-    if (CheckInvokeClassMismatch</* kThrow */ true>(dex_cache, type, method_idx, class_loader)) {
+    if (CheckInvokeClassMismatch</* kThrow= */ true>(dex_cache, type, method_idx, class_loader)) {
       DCHECK(Thread::Current()->IsExceptionPending());
       return nullptr;
     }
@@ -437,6 +436,14 @@ inline void ClassLinker::VisitClassTables(const Visitor& visitor) {
       visitor(data.class_table);
     }
   }
+}
+
+template <ReadBarrierOption kReadBarrierOption>
+inline ObjPtr<mirror::ObjectArray<mirror::Class>> ClassLinker::GetClassRoots() {
+  ObjPtr<mirror::ObjectArray<mirror::Class>> class_roots =
+      class_roots_.Read<kReadBarrierOption>();
+  DCHECK(class_roots != nullptr);
+  return class_roots;
 }
 
 }  // namespace art

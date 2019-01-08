@@ -22,6 +22,7 @@
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "base/enums.h"
+#include "base/sdk_version.h"
 #include "class_linker-inl.h"
 #include "common_throws.h"
 #include "dex/dex_file.h"
@@ -32,7 +33,8 @@
 #include "imtable-inl.h"
 #include "indirect_reference_table.h"
 #include "jni/jni_internal.h"
-#include "mirror/array.h"
+#include "mirror/array-alloc-inl.h"
+#include "mirror/class-alloc-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/throwable.h"
@@ -93,8 +95,9 @@ inline ArtMethod* GetResolvedMethod(ArtMethod* outer_method,
       // even going back from boot image methods to the same oat file. However, this is
       // not currently implemented in the compiler. Therefore crossing dex file boundary
       // indicates that the inlined definition is not the same as the one used at runtime.
-      bool target_sdk_pre_p = Runtime::Current()->GetTargetSdkVersion() < 28;
-      LOG(target_sdk_pre_p ? WARNING : FATAL)
+      bool target_sdk_at_least_p =
+          IsSdkVersionSetAndAtLeast(Runtime::Current()->GetTargetSdkVersion(), SdkVersion::kP);
+      LOG(target_sdk_at_least_p ? FATAL : WARNING)
           << "Inlined method resolution crossed dex file boundary: from "
           << method->PrettyMethod()
           << " in " << method->GetDexFile()->GetLocation() << "/"
@@ -191,7 +194,7 @@ inline mirror::Object* AllocObjectFromCode(mirror::Class* klass,
       return nullptr;
     }
     // CheckObjectAlloc can cause thread suspension which means we may now be instrumented.
-    return klass->Alloc</*kInstrumented*/true>(
+    return klass->Alloc</*kInstrumented=*/true>(
         self,
         Runtime::Current()->GetHeap()->GetCurrentAllocator()).Ptr();
   }
@@ -216,7 +219,7 @@ inline mirror::Object* AllocObjectFromCodeResolved(mirror::Class* klass,
     // Pass in false since the object cannot be finalizable.
     // CheckClassInitializedForObjectAlloc can cause thread suspension which means we may now be
     // instrumented.
-    return klass->Alloc</*kInstrumented*/true, false>(self, heap->GetCurrentAllocator()).Ptr();
+    return klass->Alloc</*kInstrumented=*/true, false>(self, heap->GetCurrentAllocator()).Ptr();
   }
   // Pass in false since the object cannot be finalizable.
   return klass->Alloc<kInstrumented, false>(self, allocator_type).Ptr();
@@ -287,11 +290,11 @@ inline ObjPtr<mirror::Array> AllocArrayFromCode(dex::TypeIndex type_idx,
     }
     gc::Heap* heap = Runtime::Current()->GetHeap();
     // CheckArrayAlloc can cause thread suspension which means we may now be instrumented.
-    return mirror::Array::Alloc</*kInstrumented*/true>(self,
-                                                       klass,
-                                                       component_count,
-                                                       klass->GetComponentSizeShift(),
-                                                       heap->GetCurrentAllocator());
+    return mirror::Array::Alloc</*kInstrumented=*/true>(self,
+                                                        klass,
+                                                        component_count,
+                                                        klass->GetComponentSizeShift(),
+                                                        heap->GetCurrentAllocator());
   }
   return mirror::Array::Alloc<kInstrumented>(self, klass, component_count,
                                              klass->GetComponentSizeShift(), allocator_type);

@@ -60,7 +60,6 @@ void* (*Jit::jit_load_)(bool*) = nullptr;
 void (*Jit::jit_unload_)(void*) = nullptr;
 bool (*Jit::jit_compile_method_)(void*, ArtMethod*, Thread*, bool) = nullptr;
 void (*Jit::jit_types_loaded_)(void*, mirror::Class**, size_t count) = nullptr;
-bool Jit::generate_debug_info_ = false;
 
 struct StressModeHelper {
   DECLARE_RUNTIME_DEBUG_FLAG(kSlowMode);
@@ -168,33 +167,38 @@ void Jit::AddTimingLogger(const TimingLogger& logger) {
   cumulative_timings_.AddLogger(logger);
 }
 
-Jit::Jit(JitOptions* options) : options_(options),
-                                cumulative_timings_("JIT timings"),
-                                memory_use_("Memory used for compilation", 16),
-                                lock_("JIT memory use lock") {}
+Jit::Jit(JitCodeCache* code_cache, JitOptions* options)
+    : code_cache_(code_cache),
+      options_(options),
+      cumulative_timings_("JIT timings"),
+      memory_use_("Memory used for compilation", 16),
+      lock_("JIT memory use lock") {}
 
-Jit* Jit::Create(JitOptions* options, std::string* error_msg) {
-  DCHECK(options->UseJitCompilation() || options->GetProfileSaverOptions().IsEnabled());
-  std::unique_ptr<Jit> jit(new Jit(options));
-  if (jit_compiler_handle_ == nullptr && !LoadCompiler(error_msg)) {
+Jit* Jit::Create(JitCodeCache* code_cache, JitOptions* options) {
+  if (jit_load_ == nullptr) {
+    LOG(WARNING) << "Not creating JIT: library not loaded";
     return nullptr;
   }
-  bool code_cache_only_for_profile_data = !options->UseJitCompilation();
-  jit->code_cache_.reset(JitCodeCache::Create(
-      options->GetCodeCacheInitialCapacity(),
-      options->GetCodeCacheMaxCapacity(),
-      jit->generate_debug_info_,
-      code_cache_only_for_profile_data,
-      error_msg));
-  if (jit->GetCodeCache() == nullptr) {
+  bool will_generate_debug_symbols = false;
+  jit_compiler_handle_ = (jit_load_)(&will_generate_debug_symbols);
+  if (jit_compiler_handle_ == nullptr) {
+    LOG(WARNING) << "Not creating JIT: failed to allocate a compiler";
     return nullptr;
   }
+  std::unique_ptr<Jit> jit(new Jit(code_cache, options));
+  jit->generate_debug_info_ = will_generate_debug_symbols;
+
+  // With 'perf', we want a 1-1 mapping between an address and a method.
+  // We aren't able to keep method pointers live during the instrumentation method entry trampoline
+  // so we will just disable jit-gc if we are doing that.
+  code_cache->SetGarbageCollectCode(!jit->generate_debug_info_ &&
+      !Runtime::Current()->GetInstrumentation()->AreExitStubsInstalled());
+
   VLOG(jit) << "JIT created with initial_capacity="
       << PrettySize(options->GetCodeCacheInitialCapacity())
       << ", max_capacity=" << PrettySize(options->GetCodeCacheMaxCapacity())
       << ", compile_threshold=" << options->GetCompileThreshold()
       << ", profile_saver_options=" << options->GetProfileSaverOptions();
-
 
   jit->CreateThreadPool();
 
@@ -239,23 +243,6 @@ bool Jit::LoadCompilerLibrary(std::string* error_msg) {
     *error_msg = "JIT couldn't find jit_types_loaded entry point";
     return false;
   }
-  return true;
-}
-
-bool Jit::LoadCompiler(std::string* error_msg) {
-  if (jit_library_handle_ == nullptr && !LoadCompilerLibrary(error_msg)) {
-    return false;
-  }
-  bool will_generate_debug_symbols = false;
-  VLOG(jit) << "Calling JitLoad interpreter_only="
-      << Runtime::Current()->GetInstrumentation()->InterpretOnly();
-  jit_compiler_handle_ = (jit_load_)(&will_generate_debug_symbols);
-  if (jit_compiler_handle_ == nullptr) {
-    dlclose(jit_library_handle_);
-    *error_msg = "JIT couldn't load compiler";
-    return false;
-  }
-  generate_debug_info_ = will_generate_debug_symbols;
   return true;
 }
 
@@ -347,10 +334,7 @@ void Jit::DeleteThreadPool() {
 void Jit::StartProfileSaver(const std::string& filename,
                             const std::vector<std::string>& code_paths) {
   if (options_->GetSaveProfilingInfo()) {
-    ProfileSaver::Start(options_->GetProfileSaverOptions(),
-                        filename,
-                        code_cache_.get(),
-                        code_paths);
+    ProfileSaver::Start(options_->GetProfileSaverOptions(), filename, code_cache_, code_paths);
   }
 }
 
@@ -599,12 +583,12 @@ class JitCompileTask final : public Task {
   void Run(Thread* self) override {
     ScopedObjectAccess soa(self);
     if (kind_ == kCompile) {
-      Runtime::Current()->GetJit()->CompileMethod(method_, self, /* osr */ false);
+      Runtime::Current()->GetJit()->CompileMethod(method_, self, /* osr= */ false);
     } else if (kind_ == kCompileOsr) {
-      Runtime::Current()->GetJit()->CompileMethod(method_, self, /* osr */ true);
+      Runtime::Current()->GetJit()->CompileMethod(method_, self, /* osr= */ true);
     } else {
       DCHECK(kind_ == kAllocateProfile);
-      if (ProfilingInfo::Create(self, method_, /* retry_allocation */ true)) {
+      if (ProfilingInfo::Create(self, method_, /* retry_allocation= */ true)) {
         VLOG(jit) << "Start profiling " << ArtMethod::PrettyMethod(method_);
       }
     }
@@ -673,7 +657,7 @@ void Jit::AddSamples(Thread* self, ArtMethod* method, uint16_t count, bool with_
   if (LIKELY(!method->IsNative()) && starting_count < WarmMethodThreshold()) {
     if ((new_count >= WarmMethodThreshold()) &&
         (method->GetProfilingInfo(kRuntimePointerSize) == nullptr)) {
-      bool success = ProfilingInfo::Create(self, method, /* retry_allocation */ false);
+      bool success = ProfilingInfo::Create(self, method, /* retry_allocation= */ false);
       if (success) {
         VLOG(jit) << "Start profiling " << method->PrettyMethod();
       }
@@ -741,7 +725,7 @@ void Jit::MethodEntered(Thread* thread, ArtMethod* method) {
     if (np_method->IsCompilable()) {
       if (!np_method->IsNative()) {
         // The compiler requires a ProfilingInfo object for non-native methods.
-        ProfilingInfo::Create(thread, np_method, /* retry_allocation */ true);
+        ProfilingInfo::Create(thread, np_method, /* retry_allocation= */ true);
       }
       JitCompileTask compile_task(method, JitCompileTask::kCompile);
       // Fake being in a runtime thread so that class-load behavior will be the same as normal jit.
@@ -761,7 +745,7 @@ void Jit::MethodEntered(Thread* thread, ArtMethod* method) {
     Runtime::Current()->GetInstrumentation()->UpdateMethodsCode(
         method, profiling_info->GetSavedEntryPoint());
   } else {
-    AddSamples(thread, method, 1, /* with_backedges */false);
+    AddSamples(thread, method, 1, /* with_backedges= */false);
   }
 }
 

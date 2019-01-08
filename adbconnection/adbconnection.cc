@@ -20,9 +20,11 @@
 
 #include "android-base/endian.h"
 #include "android-base/stringprintf.h"
+#include "base/file_utils.h"
 #include "base/logging.h"
 #include "base/macros.h"
 #include "base/mutex.h"
+#include "base/socket_peer_is_trusted.h"
 #include "jni/java_vm_ext.h"
 #include "jni/jni_env_ext.h"
 #include "mirror/throwable.h"
@@ -37,10 +39,6 @@
 #include "fd_transport.h"
 
 #include "poll.h"
-
-#ifdef ART_TARGET_ANDROID
-#include "cutils/sockets.h"
-#endif
 
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -428,11 +426,11 @@ void AdbConnectionState::SendAgentFds(bool require_handshake) {
   cmsg->cmsg_type  = SCM_RIGHTS;
 
   // Duplicate the fds before sending them.
-  android::base::unique_fd read_fd(dup(adb_connection_socket_));
+  android::base::unique_fd read_fd(art::DupCloexec(adb_connection_socket_));
   CHECK_NE(read_fd.get(), -1) << "Failed to dup read_fd_: " << strerror(errno);
-  android::base::unique_fd write_fd(dup(adb_connection_socket_));
+  android::base::unique_fd write_fd(art::DupCloexec(adb_connection_socket_));
   CHECK_NE(write_fd.get(), -1) << "Failed to dup write_fd: " << strerror(errno);
-  android::base::unique_fd write_lock_fd(dup(adb_write_event_fd_));
+  android::base::unique_fd write_lock_fd(art::DupCloexec(adb_write_event_fd_));
   CHECK_NE(write_lock_fd.get(), -1) << "Failed to dup write_lock_fd: " << strerror(errno);
 
   dt_fd_forward::FdSet {
@@ -516,11 +514,7 @@ bool AdbConnectionState::SetupAdbConnection() {
     // the debuggable flag set.
     int ret = connect(sock, &control_addr_.controlAddrPlain, control_addr_len_);
     if (ret == 0) {
-      bool trusted = sock >= 0;
-#ifdef ART_TARGET_ANDROID
-      // Needed for socket_peer_is_trusted.
-      trusted = trusted && socket_peer_is_trusted(sock);
-#endif
+      bool trusted = sock >= 0 && art::SocketPeerIsTrusted(sock);
       if (!trusted) {
         LOG(ERROR) << "adb socket is not trusted. Aborting connection.";
         if (sock >= 0 && shutdown(sock, SHUT_RDWR)) {

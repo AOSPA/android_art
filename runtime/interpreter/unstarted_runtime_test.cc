@@ -30,8 +30,11 @@
 #include "handle.h"
 #include "handle_scope-inl.h"
 #include "interpreter/interpreter_common.h"
+#include "mirror/array-alloc-inl.h"
+#include "mirror/class-alloc-inl.h"
 #include "mirror/class_loader.h"
 #include "mirror/object-inl.h"
+#include "mirror/object_array-alloc-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/string-inl.h"
 #include "runtime.h"
@@ -695,7 +698,7 @@ TEST_F(UnstartedRuntimeTest, Ceil) {
       {  ld2,  ld2 }
   };
 
-  TestCeilFloor(true /* ceil */, self, tmp.get(), test_pairs, arraysize(test_pairs));
+  TestCeilFloor(/* ceil= */ true, self, tmp.get(), test_pairs, arraysize(test_pairs));
 }
 
 TEST_F(UnstartedRuntimeTest, Floor) {
@@ -722,7 +725,7 @@ TEST_F(UnstartedRuntimeTest, Floor) {
       {  ld2,  ld2 }
   };
 
-  TestCeilFloor(false /* floor */, self, tmp.get(), test_pairs, arraysize(test_pairs));
+  TestCeilFloor(/* ceil= */ false, self, tmp.get(), test_pairs, arraysize(test_pairs));
 }
 
 TEST_F(UnstartedRuntimeTest, ToLowerUpper) {

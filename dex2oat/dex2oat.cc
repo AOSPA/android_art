@@ -186,7 +186,8 @@ static std::string StrippedCommandLine() {
 
   // Construct the final output.
   if (command.size() <= 1U) {
-    // It seems only "/system/bin/dex2oat" is left, or not even that. Use a pretty line.
+    // It seems only "/apex/com.android.runtime/bin/dex2oat" is left, or not
+    // even that. Use a pretty line.
     return "Starting dex2oat.";
   }
   return android::base::Join(command, ' ');
@@ -728,16 +729,15 @@ class Dex2Oat final {
 
   void ProcessOptions(ParserOptions* parser_options) {
     compiler_options_->compile_pic_ = true;  // All AOT compilation is PIC.
-    compiler_options_->boot_image_ = !image_filenames_.empty();
-    compiler_options_->app_image_ = app_image_fd_ != -1 || !app_image_file_name_.empty();
-
-    if (IsBootImage() && image_filenames_.size() == 1) {
-      const std::string& boot_image_filename = image_filenames_[0];
-      compiler_options_->core_image_ = CompilerDriver::IsCoreImageFilename(boot_image_filename);
+    DCHECK(compiler_options_->image_type_ == CompilerOptions::ImageType::kNone);
+    if (!image_filenames_.empty()) {
+      compiler_options_->image_type_ = CompilerOptions::ImageType::kBootImage;
     }
-
-    if (IsAppImage() && IsBootImage()) {
-      Usage("Can't have both --image and (--app-image-fd or --app-image-file)");
+    if (app_image_fd_ != -1 || !app_image_file_name_.empty()) {
+      if (compiler_options_->IsBootImage()) {
+        Usage("Can't have both --image and (--app-image-fd or --app-image-file)");
+      }
+      compiler_options_->image_type_ = CompilerOptions::ImageType::kAppImage;
     }
 
     if (oat_filenames_.empty() && oat_fd_ == -1) {
@@ -950,6 +950,9 @@ class Dex2Oat final {
       }
     }
     compiler_options_->passes_to_run_ = passes_to_run_.get();
+    compiler_options_->compiling_with_core_image_ =
+        !boot_image_filename_.empty() &&
+        CompilerDriver::IsCoreImageFilename(boot_image_filename_);
   }
 
   static bool SupportsDeterministicCompilation() {
@@ -1045,8 +1048,8 @@ class Dex2Oat final {
   }
 
   void InsertCompileOptions(int argc, char** argv) {
-    std::ostringstream oss;
     if (!avoid_storing_invocation_) {
+      std::ostringstream oss;
       for (int i = 0; i < argc; ++i) {
         if (i > 0) {
           oss << ' ';
@@ -1054,10 +1057,7 @@ class Dex2Oat final {
         oss << argv[i];
       }
       key_value_store_->Put(OatHeader::kDex2OatCmdLineKey, oss.str());
-      oss.str("");  // Reset.
     }
-    oss << kRuntimeISA;
-    key_value_store_->Put(OatHeader::kDex2OatHostKey, oss.str());
     key_value_store_->Put(
         OatHeader::kDebuggableKey,
         compiler_options_->debuggable_ ? OatHeader::kTrueValue : OatHeader::kFalseValue);
@@ -1513,15 +1513,6 @@ class Dex2Oat final {
         std::vector<gc::space::ImageSpace*> image_spaces =
             Runtime::Current()->GetHeap()->GetBootImageSpaces();
         image_file_location_oat_checksum_ = image_spaces[0]->GetImageHeader().GetOatChecksum();
-        // Store the boot image filename(s).
-        std::vector<std::string> image_filenames;
-        for (const gc::space::ImageSpace* image_space : image_spaces) {
-          image_filenames.push_back(image_space->GetImageFilename());
-        }
-        std::string image_file_location = android::base::Join(image_filenames, ':');
-        if (!image_file_location.empty()) {
-          key_value_store_->Put(OatHeader::kImageLocationKey, image_file_location);
-        }
       } else {
         image_file_location_oat_checksum_ = 0u;
       }
@@ -1608,7 +1599,7 @@ class Dex2Oat final {
     // If we need to downgrade the compiler-filter for size reasons.
     if (!IsBootImage() && IsVeryLarge(dex_files)) {
       // Disable app image to make sure dex2oat unloading is enabled.
-      compiler_options_->DisableAppImage();
+      compiler_options_->image_type_ = CompilerOptions::ImageType::kNone;
 
       // If we need to downgrade the compiler-filter for size reasons, do that early before we read
       // it below for creating verification callbacks.
@@ -1792,14 +1783,14 @@ class Dex2Oat final {
         compiler_options_->no_inline_from_.swap(no_inline_from_dex_files);
       }
     }
+    compiler_options_->profile_compilation_info_ = profile_compilation_info_.get();
 
     driver_.reset(new CompilerDriver(compiler_options_.get(),
                                      verification_results_.get(),
                                      compiler_kind_,
                                      &compiler_options_->image_classes_,
                                      thread_count_,
-                                     swap_fd_,
-                                     profile_compilation_info_.get()));
+                                     swap_fd_));
     if (!IsBootImage()) {
       driver_->SetClasspathDexFiles(class_loader_context_->FlattenOpenedDexFiles());
     }
@@ -1970,7 +1961,6 @@ class Dex2Oat final {
 
       image_writer_.reset(new linker::ImageWriter(*compiler_options_,
                                                   image_base_,
-                                                  IsAppImage(),
                                                   image_storage_mode_,
                                                   oat_filenames_,
                                                   dex_file_oat_index_map_,

@@ -32,6 +32,7 @@
 #include "dex/dex_file_annotations.h"
 #include "dex_cache.h"
 #include "gc/accounting/card_table-inl.h"
+#include "gc/heap-inl.h"
 #include "handle_scope-inl.h"
 #include "subtype_check.h"
 #include "method.h"
@@ -83,7 +84,7 @@ ObjPtr<mirror::Class> Class::GetPrimitiveClass(ObjPtr<mirror::String> name) {
     Thread* self = Thread::Current();
     if (name == nullptr) {
       // Note: ThrowNullPointerException() requires a message which we deliberately want to omit.
-      self->ThrowNewException("Ljava/lang/NullPointerException;", /* msg */ nullptr);
+      self->ThrowNewException("Ljava/lang/NullPointerException;", /* msg= */ nullptr);
     } else {
       self->ThrowNewException("Ljava/lang/ClassNotFoundException;", name->ToModifiedUtf8().c_str());
     }
@@ -426,14 +427,6 @@ bool Class::IsThrowableClass() {
   return GetClassRoot<mirror::Throwable>()->IsAssignableFrom(this);
 }
 
-void Class::SetClassLoader(ObjPtr<ClassLoader> new_class_loader) {
-  if (Runtime::Current()->IsActiveTransaction()) {
-    SetFieldObject<true>(OFFSET_OF_OBJECT_MEMBER(Class, class_loader_), new_class_loader);
-  } else {
-    SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(Class, class_loader_), new_class_loader);
-  }
-}
-
 template <typename SignatureType>
 static inline ArtMethod* FindInterfaceMethodWithSignature(ObjPtr<Class> klass,
                                                           const StringPiece& name,
@@ -629,9 +622,14 @@ ArtMethod* Class::FindClassMethod(ObjPtr<DexCache> dex_cache,
   // If we do not have a dex_cache match, try to find the declared method in this class now.
   if (this_dex_cache != dex_cache && !GetDeclaredMethodsSlice(pointer_size).empty()) {
     DCHECK(name.empty());
-    name = dex_file.StringDataByIdx(method_id.name_idx_);
+    // Avoid string comparisons by comparing the respective unicode lengths first.
+    uint32_t length, other_length;  // UTF16 length.
+    name = dex_file.GetMethodName(method_id, &length);
     for (ArtMethod& method : GetDeclaredMethodsSlice(pointer_size)) {
-      if (method.GetName() == name && method.GetSignature() == signature) {
+      DCHECK_NE(method.GetDexMethodIndex(), dex::kDexNoIndex);
+      const char* other_name = method.GetDexFile()->GetMethodName(
+          method.GetDexMethodIndex(), &other_length);
+      if (length == other_length && name == other_name && signature == method.GetSignature()) {
         return &method;
       }
     }

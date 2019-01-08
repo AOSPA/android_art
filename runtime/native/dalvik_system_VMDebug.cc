@@ -23,6 +23,7 @@
 
 #include "nativehelper/jni_macros.h"
 
+#include "base/file_utils.h"
 #include "base/histogram-inl.h"
 #include "base/time_utils.h"
 #include "class_linker.h"
@@ -37,6 +38,8 @@
 #include "hprof/hprof.h"
 #include "jni/java_vm_ext.h"
 #include "jni/jni_internal.h"
+#include "mirror/array-alloc-inl.h"
+#include "mirror/array-inl.h"
 #include "mirror/class.h"
 #include "mirror/object_array-inl.h"
 #include "native_util.h"
@@ -113,7 +116,7 @@ static void VMDebug_startMethodTracingFd(JNIEnv* env,
     return;
   }
 
-  int fd = dup(originalFd);
+  int fd = DupCloexec(originalFd);
   if (fd < 0) {
     ScopedObjectAccess soa(env);
     soa.Self()->ThrowNewExceptionF("Ljava/lang/RuntimeException;",
@@ -366,7 +369,7 @@ static jobjectArray VMDebug_getInstancesOfClasses(JNIEnv* env,
 
     VariableSizedHandleScope hs2(soa.Self());
     std::vector<Handle<mirror::Object>> raw_instances;
-    heap->GetInstances(hs2, h_class, includeAssignable, /* max_count */ 0, raw_instances);
+    heap->GetInstances(hs2, h_class, includeAssignable, /* max_count= */ 0, raw_instances);
     jobjectArray array = env->NewObjectArray(raw_instances.size(),
                                              WellKnownClasses::java_lang_Object,
                                              nullptr);

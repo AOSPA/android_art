@@ -99,8 +99,7 @@ class CompilerDriver {
                  Compiler::Kind compiler_kind,
                  HashSet<std::string>* image_classes,
                  size_t thread_count,
-                 int swap_fd,
-                 const ProfileCompilationInfo* profile_compilation_info);
+                 int swap_fd);
 
   ~CompilerDriver();
 
@@ -146,54 +145,9 @@ class CompilerDriver {
   bool GetCompiledClass(const ClassReference& ref, ClassStatus* status) const;
 
   CompiledMethod* GetCompiledMethod(MethodReference ref) const;
-  size_t GetNonRelativeLinkerPatchCount() const;
   // Add a compiled method.
   void AddCompiledMethod(const MethodReference& method_ref, CompiledMethod* const compiled_method);
   CompiledMethod* RemoveCompiledMethod(const MethodReference& method_ref);
-
-  void SetRequiresConstructorBarrier(Thread* self,
-                                     const DexFile* dex_file,
-                                     uint16_t class_def_index,
-                                     bool requires)
-      REQUIRES(!requires_constructor_barrier_lock_);
-
-  // Do the <init> methods for this class require a constructor barrier (prior to the return)?
-  // The answer is "yes", if and only if this class has any instance final fields.
-  // (This must not be called for any non-<init> methods; the answer would be "no").
-  //
-  // ---
-  //
-  // JLS 17.5.1 "Semantics of final fields" mandates that all final fields are frozen at the end
-  // of the invoked constructor. The constructor barrier is a conservative implementation means of
-  // enforcing the freezes happen-before the object being constructed is observable by another
-  // thread.
-  //
-  // Note: This question only makes sense for instance constructors;
-  // static constructors (despite possibly having finals) never need
-  // a barrier.
-  //
-  // JLS 12.4.2 "Detailed Initialization Procedure" approximately describes
-  // class initialization as:
-  //
-  //   lock(class.lock)
-  //     class.state = initializing
-  //   unlock(class.lock)
-  //
-  //   invoke <clinit>
-  //
-  //   lock(class.lock)
-  //     class.state = initialized
-  //   unlock(class.lock)              <-- acts as a release
-  //
-  // The last operation in the above example acts as an atomic release
-  // for any stores in <clinit>, which ends up being stricter
-  // than what a constructor barrier needs.
-  //
-  // See also QuasiAtomic::ThreadFenceForConstructor().
-  bool RequiresConstructorBarrier(Thread* self,
-                                  const DexFile* dex_file,
-                                  uint16_t class_def_index)
-      REQUIRES(!requires_constructor_barrier_lock_);
 
   // Resolve compiling method's class. Returns null on failure.
   ObjPtr<mirror::Class> ResolveCompilingMethodsClass(const ScopedObjectAccess& soa,
@@ -225,16 +179,6 @@ class CompilerDriver {
                                             uint16_t field_idx)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Resolve a method. Returns null on failure, including incompatible class change.
-  ArtMethod* ResolveMethod(
-      ScopedObjectAccess& soa,
-      Handle<mirror::DexCache> dex_cache,
-      Handle<mirror::ClassLoader> class_loader,
-      const DexCompilationUnit* mUnit,
-      uint32_t method_idx,
-      InvokeType invoke_type)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
   void ProcessedInstanceField(bool resolved);
   void ProcessedStaticField(bool resolved, bool local);
 
@@ -253,14 +197,6 @@ class CompilerDriver {
   const VerifiedMethod* GetVerifiedMethod(const DexFile* dex_file, uint32_t method_idx) const;
   bool IsSafeCast(const DexCompilationUnit* mUnit, uint32_t dex_pc);
 
-  void SetCompilerContext(void* compiler_context) {
-    compiler_context_ = compiler_context;
-  }
-
-  void* GetCompilerContext() const {
-    return compiler_context_;
-  }
-
   size_t GetThreadCount() const {
     return parallel_thread_count_;
   }
@@ -272,9 +208,6 @@ class CompilerDriver {
   bool DedupeEnabled() const {
     return compiled_method_storage_.DedupeEnabled();
   }
-
-  // Checks whether the provided class should be compiled, i.e., is in classes_to_compile_.
-  bool IsClassToCompile(const char* descriptor) const;
 
   // Checks whether profile guided compilation is enabled and if the method should be compiled
   // according to the profile file.
@@ -308,10 +241,6 @@ class CompilerDriver {
 
   CompiledMethodStorage* GetCompiledMethodStorage() {
     return &compiled_method_storage_;
-  }
-
-  const ProfileCompilationInfo* GetProfileCompilationInfo() const {
-    return profile_compilation_info_;
   }
 
   // Is `boot_image_filename` the name of a core image (small boot
@@ -407,19 +336,17 @@ class CompilerDriver {
   void FreeThreadPools();
   void CheckThreadPools();
 
-  bool RequiresConstructorBarrier(const DexFile& dex_file, uint16_t class_def_idx) const;
+  // Resolve const string literals that are loaded from dex code. If only_startup_strings is
+  // specified, only methods that are marked startup in the profile are resolved.
+  void ResolveConstStrings(const std::vector<const DexFile*>& dex_files,
+                           bool only_startup_strings,
+                           /*inout*/ TimingLogger* timings);
 
   const CompilerOptions* const compiler_options_;
   VerificationResults* const verification_results_;
 
   std::unique_ptr<Compiler> compiler_;
   Compiler::Kind compiler_kind_;
-
-  // All class references that require constructor barriers. If the class reference is not in the
-  // set then the result has not yet been computed.
-  mutable ReaderWriterMutex requires_constructor_barrier_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
-  std::map<ClassReference, bool> requires_constructor_barrier_
-      GUARDED_BY(requires_constructor_barrier_lock_);
 
   // All class references that this compiler has compiled. Indexed by class defs.
   using ClassStateTable = AtomicDexRefMap<ClassReference, ClassStatus>;
@@ -429,13 +356,6 @@ class CompilerDriver {
 
   typedef AtomicDexRefMap<MethodReference, CompiledMethod*> MethodTable;
 
- private:
-  // Resolve const string literals that are loaded from dex code. If only_startup_strings is
-  // specified, only methods that are marked startup in the profile are resolved.
-  void ResolveConstStrings(const std::vector<const DexFile*>& dex_files,
-                           bool only_startup_strings,
-                           /*inout*/ TimingLogger* timings);
-
   // All method references that this compiler has compiled.
   MethodTable compiled_methods_;
 
@@ -444,11 +364,6 @@ class CompilerDriver {
   //       Pass this explicitly to the PreCompile() which should be called directly from
   //       Dex2Oat rather than implicitly by CompileAll().
   HashSet<std::string>* image_classes_;
-
-  // Specifies the classes that will be compiled. Note that if classes_to_compile_ is null,
-  // all classes are eligible for compilation (duplication filters etc. will still apply).
-  // This option may be restricted to the boot image, depending on a flag in the implementation.
-  std::unique_ptr<HashSet<std::string>> classes_to_compile_;
 
   std::atomic<uint32_t> number_of_soft_verifier_failures_;
 
@@ -464,15 +379,7 @@ class CompilerDriver {
   class AOTCompilationStats;
   std::unique_ptr<AOTCompilationStats> stats_;
 
-  typedef void (*CompilerCallbackFn)(CompilerDriver& driver);
-  typedef MutexLock* (*CompilerMutexLockFn)(CompilerDriver& driver);
-
-  void* compiler_context_;
-
   CompiledMethodStorage compiled_method_storage_;
-
-  // Info for profile guided compilation.
-  const ProfileCompilationInfo* const profile_compilation_info_;
 
   size_t max_arena_alloc_;
 

@@ -44,12 +44,15 @@
 #include "hidden_api.h"
 #include "interpreter/interpreter_common.h"
 #include "jvalue-inl.h"
+#include "mirror/array-alloc-inl.h"
 #include "mirror/array-inl.h"
-#include "mirror/class.h"
+#include "mirror/class-alloc-inl.h"
 #include "mirror/field-inl.h"
 #include "mirror/method.h"
 #include "mirror/object-inl.h"
+#include "mirror/object_array-alloc-inl.h"
 #include "mirror/object_array-inl.h"
+#include "mirror/string-alloc-inl.h"
 #include "mirror/string-inl.h"
 #include "nativehelper/scoped_local_ref.h"
 #include "nth_caller_visitor.h"
@@ -179,15 +182,16 @@ static mirror::String* GetClassName(Thread* self, ShadowFrame* shadow_frame, siz
 }
 
 template<typename T>
-static ALWAYS_INLINE bool ShouldBlockAccessToMember(T* member, ShadowFrame* frame)
+static ALWAYS_INLINE bool ShouldDenyAccessToMember(T* member, ShadowFrame* frame)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   // All uses in this file are from reflection
-  constexpr hiddenapi::AccessMethod access_method = hiddenapi::kReflection;
-  return hiddenapi::GetMemberAction(
+  constexpr hiddenapi::AccessMethod access_method = hiddenapi::AccessMethod::kReflection;
+  return hiddenapi::ShouldDenyAccessToMember(
       member,
-      frame->GetMethod()->GetDeclaringClass()->GetClassLoader(),
-      frame->GetMethod()->GetDeclaringClass()->GetDexCache(),
-      access_method) == hiddenapi::kDeny;
+      [&]() REQUIRES_SHARED(Locks::mutator_lock_) {
+        return hiddenapi::AccessContext(frame->GetMethod()->GetDeclaringClass());
+      },
+      access_method);
 }
 
 void UnstartedRuntime::UnstartedClassForNameCommon(Thread* self,
@@ -294,7 +298,7 @@ void UnstartedRuntime::UnstartedClassNewInstance(
   auto* cl = Runtime::Current()->GetClassLinker();
   if (cl->EnsureInitialized(self, h_klass, true, true)) {
     ArtMethod* cons = h_klass->FindConstructor("()V", cl->GetImagePointerSize());
-    if (cons != nullptr && ShouldBlockAccessToMember(cons, shadow_frame)) {
+    if (cons != nullptr && ShouldDenyAccessToMember(cons, shadow_frame)) {
       cons = nullptr;
     }
     if (cons != nullptr) {
@@ -339,7 +343,7 @@ void UnstartedRuntime::UnstartedClassGetDeclaredField(
       }
     }
   }
-  if (found != nullptr && ShouldBlockAccessToMember(found, shadow_frame)) {
+  if (found != nullptr && ShouldDenyAccessToMember(found, shadow_frame)) {
     found = nullptr;
   }
   if (found == nullptr) {
@@ -404,7 +408,7 @@ void UnstartedRuntime::UnstartedClassGetDeclaredMethod(
           self, klass, name, args);
     }
   }
-  if (method != nullptr && ShouldBlockAccessToMember(method->GetArtMethod(), shadow_frame)) {
+  if (method != nullptr && ShouldDenyAccessToMember(method->GetArtMethod(), shadow_frame)) {
     method = nullptr;
   }
   result->SetL(method);
@@ -442,7 +446,7 @@ void UnstartedRuntime::UnstartedClassGetDeclaredConstructor(
     }
   }
   if (constructor != nullptr &&
-      ShouldBlockAccessToMember(constructor->GetArtMethod(), shadow_frame)) {
+      ShouldDenyAccessToMember(constructor->GetArtMethod(), shadow_frame)) {
     constructor = nullptr;
   }
   result->SetL(constructor);
@@ -865,10 +869,10 @@ void UnstartedRuntime::UnstartedSystemArraycopy(
       // checking version, however, does.
       if (Runtime::Current()->IsActiveTransaction()) {
         dst->AssignableCheckingMemcpy<true>(
-            dst_pos, src, src_pos, length, true /* throw_exception */);
+            dst_pos, src, src_pos, length, /* throw_exception= */ true);
       } else {
         dst->AssignableCheckingMemcpy<false>(
-                    dst_pos, src, src_pos, length, true /* throw_exception */);
+            dst_pos, src, src_pos, length, /* throw_exception= */ true);
       }
     }
   } else if (src_type->IsPrimitiveByte()) {
@@ -1478,9 +1482,9 @@ void UnstartedRuntime::UnstartedUnsafeCompareAndSwapObject(
             reinterpret_cast<uint8_t*>(obj) + static_cast<size_t>(offset));
     ReadBarrier::Barrier<
         mirror::Object,
-        /* kIsVolatile */ false,
+        /* kIsVolatile= */ false,
         kWithReadBarrier,
-        /* kAlwaysUpdateField */ true>(
+        /* kAlwaysUpdateField= */ true>(
         obj,
         MemberOffset(offset),
         field_addr);

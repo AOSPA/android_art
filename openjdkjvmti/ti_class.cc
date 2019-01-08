@@ -56,6 +56,7 @@
 #include "handle.h"
 #include "jni/jni_env_ext-inl.h"
 #include "jni/jni_internal.h"
+#include "mirror/array-alloc-inl.h"
 #include "mirror/array-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_ext.h"
@@ -73,6 +74,7 @@
 #include "thread_list.h"
 #include "ti_class_definition.h"
 #include "ti_class_loader-inl.h"
+#include "ti_logging.h"
 #include "ti_phase.h"
 #include "ti_redefine.h"
 #include "transform.h"
@@ -932,8 +934,8 @@ jvmtiError ClassUtil::GetClassLoaderClassDescriptors(jvmtiEnv* env,
     return ERR(ILLEGAL_ARGUMENT);
   } else if (!jnienv->IsInstanceOf(loader,
                                    art::WellKnownClasses::dalvik_system_BaseDexClassLoader)) {
-    LOG(ERROR) << "GetClassLoaderClassDescriptors is only implemented for BootClassPath and "
-               << "dalvik.system.BaseDexClassLoader class loaders";
+    JVMTI_LOG(ERROR, env) << "GetClassLoaderClassDescriptors is only implemented for "
+                          << "BootClassPath and dalvik.system.BaseDexClassLoader class loaders";
     // TODO Possibly return OK With no classes would  be better since these ones cannot have any
     // real classes associated with them.
     return ERR(NOT_IMPLEMENTED);

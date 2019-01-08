@@ -146,7 +146,7 @@ void dumpClass(const DexFile* pDexFile, u4 idx) {
     dumpMethod(pDexFile,
                fileName,
                method.GetIndex(),
-               method.GetRawAccessFlags(),
+               method.GetAccessFlags(),
                method.GetCodeItem(),
                method.GetCodeItemOffset());
   }
@@ -257,7 +257,7 @@ int dexlistDriver(int argc, char** argv) {
 
   // Open alternative output file.
   if (gOptions.outputFileName) {
-    gOutFile = fopen(gOptions.outputFileName, "w");
+    gOutFile = fopen(gOptions.outputFileName, "we");
     if (!gOutFile) {
       PLOG(ERROR) << "Can't open " << gOptions.outputFileName;
       free(gOptions.argCopy);

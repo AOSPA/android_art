@@ -126,17 +126,20 @@ struct WellKnownClasses {
   static jmethodID org_apache_harmony_dalvik_ddmc_DdmServer_dispatch;
 
   static jfieldID dalvik_system_BaseDexClassLoader_pathList;
+  static jfieldID dalvik_system_BaseDexClassLoader_sharedLibraryLoaders;
   static jfieldID dalvik_system_DexFile_cookie;
   static jfieldID dalvik_system_DexFile_fileName;
   static jfieldID dalvik_system_DexPathList_dexElements;
   static jfieldID dalvik_system_DexPathList__Element_dexFile;
   static jfieldID dalvik_system_VMRuntime_nonSdkApiUsageConsumer;
+  static jfieldID java_lang_Thread_parkBlocker;
   static jfieldID java_lang_Thread_daemon;
   static jfieldID java_lang_Thread_group;
   static jfieldID java_lang_Thread_lock;
   static jfieldID java_lang_Thread_name;
   static jfieldID java_lang_Thread_priority;
   static jfieldID java_lang_Thread_nativePeer;
+  static jfieldID java_lang_Thread_unparkedBeforeStart;
   static jfieldID java_lang_ThreadGroup_groups;
   static jfieldID java_lang_ThreadGroup_ngroups;
   static jfieldID java_lang_ThreadGroup_mainThreadGroup;

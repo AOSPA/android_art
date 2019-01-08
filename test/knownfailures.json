@@ -948,6 +948,7 @@
           "685-deoptimizeable",
           "685-shifts",
           "686-get-this",
+          "687-deopt",
           "706-checker-scheduler",
           "707-checker-invalid-profile",
           "714-invoke-custom-lambda-metafactory",
@@ -1025,9 +1026,11 @@
                   "677-fsi2",
                   "678-quickening",
                   "679-locks",
+                  "688-shared-library",
                   "999-redefine-hiddenapi",
                   "1000-non-moving-space-stress",
-                  "1951-monitor-enter-no-suspend"],
+                  "1951-monitor-enter-no-suspend",
+                  "1957-error-ext"],
         "variant": "jvm",
         "description": ["Doesn't run on RI."]
     },
@@ -1108,11 +1111,5 @@
         "tests": ["454-get-vreg", "457-regs"],
         "variant": "baseline",
         "description": ["Tests are expected to fail with baseline."]
-    },
-    {
-        "tests": ["050-sync-test"],
-        "variant": "target & gcstress & debug",
-        "bug": "b/117597114",
-        "description": ["Looks timing dependent"]
     }
 ]

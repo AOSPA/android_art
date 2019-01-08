@@ -29,10 +29,13 @@
 #include "jvalue-inl.h"
 #include "method_handles-inl.h"
 #include "method_handles.h"
+#include "mirror/array-alloc-inl.h"
 #include "mirror/array-inl.h"
 #include "mirror/class.h"
 #include "mirror/emulated_stack_frame.h"
 #include "mirror/method_handle_impl-inl.h"
+#include "mirror/object_array-alloc-inl.h"
+#include "mirror/object_array-inl.h"
 #include "mirror/var_handle.h"
 #include "reflection-inl.h"
 #include "reflection.h"
@@ -48,6 +51,42 @@ namespace interpreter {
 
 void ThrowNullPointerExceptionFromInterpreter() {
   ThrowNullPointerExceptionFromDexPC();
+}
+
+bool CheckStackOverflow(Thread* self, size_t frame_size)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool implicit_check = !Runtime::Current()->ExplicitStackOverflowChecks();
+  uint8_t* stack_end = self->GetStackEndForInterpreter(implicit_check);
+  if (UNLIKELY(__builtin_frame_address(0) < stack_end + frame_size)) {
+    ThrowStackOverflowError(self);
+    return false;
+  }
+  return true;
+}
+
+bool UseFastInterpreterToInterpreterInvoke(ArtMethod* method) {
+  Runtime* runtime = Runtime::Current();
+  const void* quick_code = method->GetEntryPointFromQuickCompiledCode();
+  if (!runtime->GetClassLinker()->IsQuickToInterpreterBridge(quick_code)) {
+    return false;
+  }
+  if (!method->SkipAccessChecks() || method->IsNative() || method->IsProxyMethod()) {
+    return false;
+  }
+  if (method->IsIntrinsic()) {
+    return false;
+  }
+  if (method->GetDeclaringClass()->IsStringClass() && method->IsConstructor()) {
+    return false;
+  }
+  if (method->IsStatic() && !method->GetDeclaringClass()->IsInitialized()) {
+    return false;
+  }
+  ProfilingInfo* profiling_info = method->GetProfilingInfo(kRuntimePointerSize);
+  if ((profiling_info != nullptr) && (profiling_info->GetSavedEntryPoint() != nullptr)) {
+    return false;
+  }
+  return true;
 }
 
 template<FindFieldType find_type, Primitive::Type field_type, bool do_access_check,
@@ -714,12 +753,12 @@ bool DoMethodHandleInvokeExact(Thread* self,
   if (inst->Opcode() == Instruction::INVOKE_POLYMORPHIC) {
     static const bool kIsRange = false;
     return DoMethodHandleInvokeCommon<kIsRange>(
-        self, shadow_frame, true /* is_exact */, inst, inst_data, result);
+        self, shadow_frame, /* invoke_exact= */ true, inst, inst_data, result);
   } else {
     DCHECK_EQ(inst->Opcode(), Instruction::INVOKE_POLYMORPHIC_RANGE);
     static const bool kIsRange = true;
     return DoMethodHandleInvokeCommon<kIsRange>(
-        self, shadow_frame, true /* is_exact */, inst, inst_data, result);
+        self, shadow_frame, /* invoke_exact= */ true, inst, inst_data, result);
   }
 }
 
@@ -731,12 +770,12 @@ bool DoMethodHandleInvoke(Thread* self,
   if (inst->Opcode() == Instruction::INVOKE_POLYMORPHIC) {
     static const bool kIsRange = false;
     return DoMethodHandleInvokeCommon<kIsRange>(
-        self, shadow_frame, false /* is_exact */, inst, inst_data, result);
+        self, shadow_frame, /* invoke_exact= */ false, inst, inst_data, result);
   } else {
     DCHECK_EQ(inst->Opcode(), Instruction::INVOKE_POLYMORPHIC_RANGE);
     static const bool kIsRange = true;
     return DoMethodHandleInvokeCommon<kIsRange>(
-        self, shadow_frame, false /* is_exact */, inst, inst_data, result);
+        self, shadow_frame, /* invoke_exact= */ false, inst, inst_data, result);
   }
 }
 
@@ -1071,7 +1110,7 @@ static bool PackCollectorArrayForBootstrapMethod(Thread* self,
   return true;
 
 #define COLLECT_REFERENCE_ARRAY(T, Type)                                \
-  Handle<mirror::ObjectArray<T>> array =                                \
+  Handle<mirror::ObjectArray<T>> array =                   /* NOLINT */ \
       hs.NewHandle(mirror::ObjectArray<T>::Alloc(self,                  \
                                                  array_type,            \
                                                  array_length));        \

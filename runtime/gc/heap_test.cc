@@ -21,6 +21,7 @@
 #include "handle_scope-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
+#include "mirror/object_array-alloc-inl.h"
 #include "mirror/object_array-inl.h"
 #include "scoped_thread_state_change-inl.h"
 
@@ -37,7 +38,9 @@ class HeapTest : public CommonRuntimeTest {
                                      gc::Heap::kPreferredAllocSpaceBegin,
                                      16 * KB,
                                      PROT_READ,
-                                     /*low_4gb*/ true,
+                                     /*low_4gb=*/ true,
+                                     /*reuse=*/ false,
+                                     /*reservation=*/ nullptr,
                                      &error_msg);
     ASSERT_TRUE(reserved_.IsValid()) << error_msg;
     CommonRuntimeTest::SetUp();
@@ -77,7 +80,7 @@ TEST_F(HeapTest, GarbageCollectClassLinkerInit) {
       }
     }
   }
-  Runtime::Current()->GetHeap()->CollectGarbage(/* clear_soft_references */ false);
+  Runtime::Current()->GetHeap()->CollectGarbage(/* clear_soft_references= */ false);
 }
 
 TEST_F(HeapTest, HeapBitmapCapacityTest) {
@@ -91,7 +94,7 @@ TEST_F(HeapTest, HeapBitmapCapacityTest) {
 }
 
 TEST_F(HeapTest, DumpGCPerformanceOnShutdown) {
-  Runtime::Current()->GetHeap()->CollectGarbage(/* clear_soft_references */ false);
+  Runtime::Current()->GetHeap()->CollectGarbage(/* clear_soft_references= */ false);
   Runtime::Current()->SetDumpGCPerformanceOnShutdown(true);
 }
 
