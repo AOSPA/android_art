@@ -48,7 +48,9 @@
 #include "base/unix_file/fd_file.h"
 #include "base/utils.h"
 #include "dex/art_dex_file_loader.h"
+#include "dex/dex_file.h"
 #include "dex/dex_file_loader.h"
+#include "dex/dex_file_structs.h"
 #include "dex/dex_file_types.h"
 #include "dex/standard_dex_file.h"
 #include "dex/type_lookup_table.h"
@@ -581,9 +583,9 @@ bool OatFileBase::Setup(int zip_fd, const char* abs_dex_location, std::string* e
     const char* dex_file_location_data = reinterpret_cast<const char*>(oat);
     oat += dex_file_location_size;
 
-    std::string dex_file_location = ResolveRelativeEncodedDexLocation(
-        abs_dex_location,
-        std::string(dex_file_location_data, dex_file_location_size));
+    std::string dex_file_location(dex_file_location_data, dex_file_location_size);
+    std::string dex_file_name =
+        ResolveRelativeEncodedDexLocation(abs_dex_location, dex_file_location);
 
     uint32_t dex_file_checksum;
     if (UNLIKELY(!ReadOatDexFileData(*this, &oat, &dex_file_checksum))) {
@@ -638,7 +640,7 @@ bool OatFileBase::Setup(int zip_fd, const char* abs_dex_location, std::string* e
                                            error_msg,
                                            uncompressed_dex_files_.get());
         } else {
-          loaded = dex_file_loader.Open(dex_file_location.c_str(),
+          loaded = dex_file_loader.Open(dex_file_name.c_str(),
                                         dex_file_location,
                                         /*verify=*/ false,
                                         /*verify_checksum=*/ false,
@@ -819,7 +821,7 @@ bool OatFileBase::Setup(int zip_fd, const char* abs_dex_location, std::string* e
         this, header->string_ids_size_, sizeof(GcRoot<mirror::String>), string_bss_mapping);
 
     std::string canonical_location =
-        DexFileLoader::GetDexCanonicalLocation(dex_file_location.c_str());
+        DexFileLoader::GetDexCanonicalLocation(dex_file_name.c_str());
 
     // Create the OatDexFile and add it to the owning container.
     OatDexFile* oat_dex_file = new OatDexFile(this,
@@ -1831,13 +1833,13 @@ OatFile::OatClass OatDexFile::GetOatClass(uint16_t class_def_index) const {
                            reinterpret_cast<const OatMethodOffsets*>(methods_pointer));
 }
 
-const DexFile::ClassDef* OatDexFile::FindClassDef(const DexFile& dex_file,
-                                                  const char* descriptor,
-                                                  size_t hash) {
+const dex::ClassDef* OatDexFile::FindClassDef(const DexFile& dex_file,
+                                              const char* descriptor,
+                                              size_t hash) {
   const OatDexFile* oat_dex_file = dex_file.GetOatDexFile();
   DCHECK_EQ(ComputeModifiedUtf8Hash(descriptor), hash);
   bool used_lookup_table = false;
-  const DexFile::ClassDef* lookup_table_classdef = nullptr;
+  const dex::ClassDef* lookup_table_classdef = nullptr;
   if (LIKELY((oat_dex_file != nullptr) && oat_dex_file->GetTypeLookupTable().Valid())) {
     used_lookup_table = true;
     const uint32_t class_def_idx = oat_dex_file->GetTypeLookupTable().Lookup(descriptor, hash);
@@ -1854,10 +1856,10 @@ const DexFile::ClassDef* OatDexFile::FindClassDef(const DexFile& dex_file,
     DCHECK(!used_lookup_table);
     return nullptr;
   }
-  const DexFile::TypeId* type_id = dex_file.FindTypeId(descriptor);
+  const dex::TypeId* type_id = dex_file.FindTypeId(descriptor);
   if (type_id != nullptr) {
     dex::TypeIndex type_idx = dex_file.GetIndexForTypeId(*type_id);
-    const DexFile::ClassDef* found_class_def = dex_file.FindClassDef(type_idx);
+    const dex::ClassDef* found_class_def = dex_file.FindClassDef(type_idx);
     if (kIsDebugBuild && used_lookup_table) {
       DCHECK_EQ(found_class_def, lookup_table_classdef);
     }

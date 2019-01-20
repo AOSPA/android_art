@@ -135,8 +135,8 @@ TEST_F(ExceptionTest, FindCatchHandler) {
   ASSERT_EQ(2u, accessor.TriesSize());
   ASSERT_NE(0u, accessor.InsnsSizeInCodeUnits());
 
-  const DexFile::TryItem& t0 = accessor.TryItems().begin()[0];
-  const DexFile::TryItem& t1 = accessor.TryItems().begin()[1];
+  const dex::TryItem& t0 = accessor.TryItems().begin()[0];
+  const dex::TryItem& t1 = accessor.TryItems().begin()[1];
   EXPECT_LE(t0.start_addr_, t1.start_addr_);
   {
     CatchHandlerIterator iter(accessor, 4 /* Dex PC in the first try block */);
@@ -187,14 +187,14 @@ TEST_F(ExceptionTest, StackTraceElement) {
   }
 
   fake_stack.push_back(method_g_->GetOatQuickMethodHeader(0)->ToNativeQuickPc(
-      method_g_, kDexPc, /* is_catch_handler */ false));  // return pc
+      method_g_, kDexPc, /* is_for_catch_handler= */ false));  // return pc
 
   // Create/push fake 16byte stack frame for method g
   fake_stack.push_back(reinterpret_cast<uintptr_t>(method_g_));
   fake_stack.push_back(0);
   fake_stack.push_back(0);
   fake_stack.push_back(method_g_->GetOatQuickMethodHeader(0)->ToNativeQuickPc(
-      method_g_, kDexPc, /* is_catch_handler */ false));  // return pc
+      method_g_, kDexPc, /* is_for_catch_handler= */ false));  // return pc
 
   // Create/push fake 16byte stack frame for method f
   fake_stack.push_back(reinterpret_cast<uintptr_t>(method_f_));

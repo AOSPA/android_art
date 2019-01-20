@@ -40,6 +40,7 @@ import java.util.Map;
 public class CovariantReturnTypeHandlerTest extends AnnotationHandlerTestBase {
 
     private static final String ANNOTATION = "Lannotation/Annotation;";
+    private static final String FLAG = "test-flag";
 
     @Before
     public void setup() throws IOException {
@@ -66,17 +67,19 @@ public class CovariantReturnTypeHandlerTest extends AnnotationHandlerTestBase {
                 "  @Annotation(returnType=Integer.class)",
                 "  public String method() {return null;}",
                 "}"));
-        assertThat(mJavac.compile()).isTrue();
+        mJavac.compile();
 
         Map<String, AnnotationHandler> handlerMap =
                 ImmutableMap.of(ANNOTATION,
                         new CovariantReturnTypeHandler(
                                 mConsumer,
-                                ImmutableSet.of("La/b/Class;->method()Ljava/lang/String;")));
+                                ImmutableSet.of("La/b/Class;->method()Ljava/lang/String;"),
+                                FLAG));
         new AnnotationVisitor(mJavac.getCompiledClass("a.b.Class"), mStatus, handlerMap).visit();
 
         assertNoErrors();
-        verify(mConsumer, times(1)).whitelistEntry(eq("La/b/Class;->method()Ljava/lang/Integer;"));
+        verify(mConsumer, times(1)).consume(
+                eq("La/b/Class;->method()Ljava/lang/Integer;"), any(), eq(ImmutableSet.of(FLAG)));
     }
 
     @Test
@@ -88,13 +91,14 @@ public class CovariantReturnTypeHandlerTest extends AnnotationHandlerTestBase {
                 "  @Annotation(returnType=Integer.class)",
                 "  public String method() {return null;}",
                 "}"));
-        assertThat(mJavac.compile()).isTrue();
+        mJavac.compile();
 
         Map<String, AnnotationHandler> handlerMap =
                 ImmutableMap.of(ANNOTATION,
                         new CovariantReturnTypeHandler(
                                 mConsumer,
-                                emptySet()));
+                                emptySet(),
+                                FLAG));
         new AnnotationVisitor(mJavac.getCompiledClass("a.b.Class"), mStatus, handlerMap).visit();
 
         verify(mStatus, atLeastOnce()).error(any(), any());
@@ -109,7 +113,7 @@ public class CovariantReturnTypeHandlerTest extends AnnotationHandlerTestBase {
                 "  @Annotation(returnType=Integer.class)",
                 "  public String method() {return null;}",
                 "}"));
-        assertThat(mJavac.compile()).isTrue();
+        mJavac.compile();
 
         Map<String, AnnotationHandler> handlerMap =
                 ImmutableMap.of(ANNOTATION,
@@ -118,7 +122,8 @@ public class CovariantReturnTypeHandlerTest extends AnnotationHandlerTestBase {
                                 ImmutableSet.of(
                                         "La/b/Class;->method()Ljava/lang/String;",
                                         "La/b/Class;->method()Ljava/lang/Integer;"
-                                )));
+                                ),
+                                FLAG));
         new AnnotationVisitor(mJavac.getCompiledClass("a.b.Class"), mStatus, handlerMap).visit();
 
         verify(mStatus, atLeastOnce()).error(any(), any());
@@ -133,13 +138,14 @@ public class CovariantReturnTypeHandlerTest extends AnnotationHandlerTestBase {
                 "  @Annotation(returnType=Integer.class)",
                 "  public String field;",
                 "}"));
-        assertThat(mJavac.compile()).isTrue();
+        mJavac.compile();
 
         Map<String, AnnotationHandler> handlerMap =
                 ImmutableMap.of(ANNOTATION,
                         new CovariantReturnTypeHandler(
                                 mConsumer,
-                                emptySet()));
+                                emptySet(),
+                                FLAG));
         new AnnotationVisitor(mJavac.getCompiledClass("a.b.Class"), mStatus, handlerMap).visit();
 
         verify(mStatus, atLeastOnce()).error(any(), any());

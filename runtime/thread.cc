@@ -39,6 +39,7 @@
 #include <sstream>
 
 #include "android-base/stringprintf.h"
+#include "android-base/strings.h"
 
 #include "arch/context-inl.h"
 #include "arch/context.h"
@@ -72,6 +73,7 @@
 #include "gc_root.h"
 #include "handle_scope-inl.h"
 #include "indirect_reference_table-inl.h"
+#include "instrumentation.h"
 #include "interpreter/interpreter.h"
 #include "interpreter/mterp/mterp.h"
 #include "interpreter/shadow_frame-inl.h"
@@ -159,6 +161,7 @@ void Thread::SetIsGcMarkingAndUpdateEntrypoints(bool is_marking) {
 }
 
 void Thread::InitTlsEntryPoints() {
+  ScopedTrace trace("InitTlsEntryPoints");
   // Insert a placeholder so we can easily tell if we call an unimplemented entry point.
   uintptr_t* begin = reinterpret_cast<uintptr_t*>(&tlsPtr_.jni_entrypoints);
   uintptr_t* end = reinterpret_cast<uintptr_t*>(
@@ -902,6 +905,8 @@ bool Thread::Init(ThreadList* thread_list, JavaVMExt* java_vm, JNIEnvExt* jni_en
   tlsPtr_.pthread_self = pthread_self();
   CHECK(is_started_);
 
+  ScopedTrace trace("Thread::Init");
+
   SetUpAlternateSignalStack();
   if (!InitStackHwm()) {
     return false;
@@ -911,7 +916,10 @@ bool Thread::Init(ThreadList* thread_list, JavaVMExt* java_vm, JNIEnvExt* jni_en
   RemoveSuspendTrigger();
   InitCardTable();
   InitTid();
-  interpreter::InitInterpreterTls(this);
+  {
+    ScopedTrace trace2("InitInterpreterTls");
+    interpreter::InitInterpreterTls(this);
+  }
 
 #ifdef ART_TARGET_ANDROID
   __get_tls()[TLS_SLOT_ART_THREAD_SELF] = this;
@@ -935,6 +943,7 @@ bool Thread::Init(ThreadList* thread_list, JavaVMExt* java_vm, JNIEnvExt* jni_en
     }
   }
 
+  ScopedTrace trace3("ThreadList::Register");
   thread_list->Register(this);
   return true;
 }
@@ -942,6 +951,7 @@ bool Thread::Init(ThreadList* thread_list, JavaVMExt* java_vm, JNIEnvExt* jni_en
 template <typename PeerAction>
 Thread* Thread::Attach(const char* thread_name, bool as_daemon, PeerAction peer_action) {
   Runtime* runtime = Runtime::Current();
+  ScopedTrace trace("Thread::Attach");
   if (runtime == nullptr) {
     LOG(ERROR) << "Thread attaching to non-existent runtime: " <<
         ((thread_name != nullptr) ? thread_name : "(Unnamed)");
@@ -949,6 +959,7 @@ Thread* Thread::Attach(const char* thread_name, bool as_daemon, PeerAction peer_
   }
   Thread* self;
   {
+    ScopedTrace trace2("Thread birth");
     MutexLock mu(nullptr, *Locks::runtime_shutdown_lock_);
     if (runtime->IsShuttingDownLocked()) {
       LOG(WARNING) << "Thread attaching while runtime is shutting down: " <<
@@ -1250,6 +1261,7 @@ static void GetThreadStack(pthread_t thread,
 }
 
 bool Thread::InitStackHwm() {
+  ScopedTrace trace("InitStackHwm");
   void* read_stack_base;
   size_t read_stack_size;
   size_t read_guard_size;
@@ -1875,8 +1887,9 @@ void Thread::DumpState(std::ostream& os, const Thread* thread, pid_t tid) {
 
   // Grab the scheduler stats for this thread.
   std::string scheduler_stats;
-  if (ReadFileToString(StringPrintf("/proc/self/task/%d/schedstat", tid), &scheduler_stats)) {
-    scheduler_stats.resize(scheduler_stats.size() - 1);  // Lose the trailing '\n'.
+  if (ReadFileToString(StringPrintf("/proc/self/task/%d/schedstat", tid), &scheduler_stats)
+      && !scheduler_stats.empty()) {
+    scheduler_stats = android::base::Trim(scheduler_stats);  // Lose the trailing '\n'.
   } else {
     scheduler_stats = "0 0 0";
   }

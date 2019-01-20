@@ -37,7 +37,7 @@
 RUNTIME_OPTIONS_KEY (Unit,                Zygote)
 RUNTIME_OPTIONS_KEY (Unit,                Help)
 RUNTIME_OPTIONS_KEY (Unit,                ShowVersion)
-RUNTIME_OPTIONS_KEY (std::string,         BootClassPath)
+RUNTIME_OPTIONS_KEY (ParseStringList<':'>,BootClassPath)           // std::vector<std::string>
 RUNTIME_OPTIONS_KEY (ParseStringList<':'>,BootClassPathLocations)  // std::vector<std::string>
 RUNTIME_OPTIONS_KEY (std::string,         ClassPath)
 RUNTIME_OPTIONS_KEY (std::string,         Image)
@@ -64,6 +64,8 @@ RUNTIME_OPTIONS_KEY (MillisecondsToNanoseconds, \
 RUNTIME_OPTIONS_KEY (MillisecondsToNanoseconds, \
                                           ThreadSuspendTimeout,           ThreadList::kDefaultThreadSuspendTimeout)
 RUNTIME_OPTIONS_KEY (Unit,                DumpGCPerformanceOnShutdown)
+RUNTIME_OPTIONS_KEY (Unit,                DumpRegionInfoBeforeGC)
+RUNTIME_OPTIONS_KEY (Unit,                DumpRegionInfoAfterGC)
 RUNTIME_OPTIONS_KEY (Unit,                DumpJITInfoOnShutdown)
 RUNTIME_OPTIONS_KEY (Unit,                IgnoreMaxFootprint)
 RUNTIME_OPTIONS_KEY (Unit,                LowMemoryMode)

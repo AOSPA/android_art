@@ -164,7 +164,8 @@ Instrumentation::Instrumentation()
       have_watched_frame_pop_listeners_(false),
       have_branch_listeners_(false),
       have_exception_handled_listeners_(false),
-      deoptimized_methods_lock_("deoptimized methods lock", kGenericBottomLock),
+      deoptimized_methods_lock_(new ReaderWriterMutex("deoptimized methods lock",
+                                                      kGenericBottomLock)),
       deoptimization_enabled_(false),
       interpreter_handler_table_(kMainHandlerTable),
       quick_alloc_entry_points_instrumentation_counter_(0),
@@ -323,8 +324,9 @@ static void InstrumentationInstallStack(Thread* thread, void* arg)
 
         const InstrumentationStackFrame& frame =
             (*instrumentation_stack_)[instrumentation_stack_depth_];
-        CHECK_EQ(m, frame.method_) << "Expected " << ArtMethod::PrettyMethod(m)
-                                   << ", Found " << ArtMethod::PrettyMethod(frame.method_);
+        CHECK_EQ(m->GetNonObsoleteMethod(), frame.method_->GetNonObsoleteMethod())
+            << "Expected " << ArtMethod::PrettyMethod(m)
+            << ", Found " << ArtMethod::PrettyMethod(frame.method_);
         return_pc = frame.return_pc_;
         if (kVerboseInstrumentation) {
           LOG(INFO) << "Ignoring already instrumented " << frame.Dump();
@@ -470,7 +472,9 @@ static void InstrumentationRestoreStack(Thread* thread, void* arg)
           if (instrumentation_frame.interpreter_entry_) {
             CHECK(m == Runtime::Current()->GetCalleeSaveMethod(CalleeSaveType::kSaveRefsAndArgs));
           } else {
-            CHECK(m == instrumentation_frame.method_) << ArtMethod::PrettyMethod(m);
+            CHECK_EQ(m->GetNonObsoleteMethod(),
+                     instrumentation_frame.method_->GetNonObsoleteMethod())
+                << ArtMethod::PrettyMethod(m);
           }
           SetReturnPc(instrumentation_frame.return_pc_);
           if (instrumentation_->ShouldNotifyMethodEnterExitEvents() &&
@@ -743,7 +747,7 @@ void Instrumentation::ConfigureStubs(const char* key, InstrumentationLevel desir
     // Restore stack only if there is no method currently deoptimized.
     bool empty;
     {
-      ReaderMutexLock mu(self, deoptimized_methods_lock_);
+      ReaderMutexLock mu(self, *GetDeoptimizedMethodsLock());
       empty = IsDeoptimizedMethodsEmpty();  // Avoid lock violation.
     }
     if (empty) {
@@ -931,7 +935,7 @@ void Instrumentation::Deoptimize(ArtMethod* method) {
 
   Thread* self = Thread::Current();
   {
-    WriterMutexLock mu(self, deoptimized_methods_lock_);
+    WriterMutexLock mu(self, *GetDeoptimizedMethodsLock());
     bool has_not_been_deoptimized = AddDeoptimizedMethod(method);
     CHECK(has_not_been_deoptimized) << "Method " << ArtMethod::PrettyMethod(method)
         << " is already deoptimized";
@@ -955,7 +959,7 @@ void Instrumentation::Undeoptimize(ArtMethod* method) {
   Thread* self = Thread::Current();
   bool empty;
   {
-    WriterMutexLock mu(self, deoptimized_methods_lock_);
+    WriterMutexLock mu(self, *GetDeoptimizedMethodsLock());
     bool found_and_erased = RemoveDeoptimizedMethod(method);
     CHECK(found_and_erased) << "Method " << ArtMethod::PrettyMethod(method)
         << " is not deoptimized";
@@ -987,12 +991,12 @@ void Instrumentation::Undeoptimize(ArtMethod* method) {
 
 bool Instrumentation::IsDeoptimized(ArtMethod* method) {
   DCHECK(method != nullptr);
-  ReaderMutexLock mu(Thread::Current(), deoptimized_methods_lock_);
+  ReaderMutexLock mu(Thread::Current(), *GetDeoptimizedMethodsLock());
   return IsDeoptimizedMethod(method);
 }
 
 void Instrumentation::EnableDeoptimization() {
-  ReaderMutexLock mu(Thread::Current(), deoptimized_methods_lock_);
+  ReaderMutexLock mu(Thread::Current(), *GetDeoptimizedMethodsLock());
   CHECK(IsDeoptimizedMethodsEmpty());
   CHECK_EQ(deoptimization_enabled_, false);
   deoptimization_enabled_ = true;
@@ -1009,7 +1013,7 @@ void Instrumentation::DisableDeoptimization(const char* key) {
   while (true) {
     ArtMethod* method;
     {
-      ReaderMutexLock mu(Thread::Current(), deoptimized_methods_lock_);
+      ReaderMutexLock mu(Thread::Current(), *GetDeoptimizedMethodsLock());
       if (IsDeoptimizedMethodsEmpty()) {
         break;
       }

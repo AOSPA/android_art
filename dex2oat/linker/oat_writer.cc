@@ -968,7 +968,7 @@ class OatWriter::InitOatClassesMethodVisitor : public DexMethodVisitor {
     ClassStatus status;
     bool found = writer_->compiler_driver_->GetCompiledClass(class_ref, &status);
     if (!found) {
-      VerificationResults* results = writer_->compiler_driver_->GetVerificationResults();
+      const VerificationResults* results = writer_->compiler_options_.GetVerificationResults();
       if (results != nullptr && results->IsClassRejected(class_ref)) {
         // The oat class status is used only for verification of resolved classes,
         // so use ClassStatus::kErrorResolved whether the class was resolved or unresolved
@@ -1011,7 +1011,7 @@ struct OatWriter::OrderedMethodData {
 
   size_t class_def_index;
   uint32_t access_flags;
-  const DexFile::CodeItem* code_item;
+  const dex::CodeItem* code_item;
 
   // A value of -1 denotes missing debug info
   static constexpr size_t kDebugInfoIdxInvalid = static_cast<size_t>(-1);
@@ -1506,7 +1506,7 @@ class OatWriter::InitImageMethodVisitor : public OatDexMethodVisitor {
       return true;
     }
     ObjPtr<mirror::DexCache> dex_cache = class_linker_->FindDexCache(Thread::Current(), *dex_file);
-    const DexFile::ClassDef& class_def = dex_file->GetClassDef(class_def_index);
+    const dex::ClassDef& class_def = dex_file->GetClassDef(class_def_index);
     ObjPtr<mirror::Class> klass =
         class_linker_->LookupResolvedType(class_def.class_idx_, dex_cache, class_loader_);
     if (klass != nullptr) {
@@ -1585,7 +1585,7 @@ class OatWriter::InitImageMethodVisitor : public OatDexMethodVisitor {
 
   // Check whether current class is image class
   bool IsImageClass() {
-    const DexFile::TypeId& type_id =
+    const dex::TypeId& type_id =
         dex_file_->GetTypeId(dex_file_->GetClassDef(class_def_index_).class_idx_);
     const char* class_descriptor = dex_file_->GetTypeDescriptor(type_id);
     return writer_->GetCompilerOptions().IsImageClass(class_descriptor);
@@ -2808,10 +2808,8 @@ bool OatWriter::CheckOatSize(OutputStream* out, size_t file_offset, size_t relat
   return true;
 }
 
-bool OatWriter::WriteHeader(OutputStream* out, uint32_t boot_image_checksum) {
+bool OatWriter::WriteHeader(OutputStream* out) {
   CHECK(write_state_ == WriteState::kWriteHeader);
-
-  oat_header_->SetBootImageChecksum(boot_image_checksum);
 
   // Update checksum with header data.
   DCHECK_EQ(oat_header_->GetChecksum(), 0u);  // For checksum calculation.

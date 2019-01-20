@@ -36,6 +36,7 @@
 #include "compiler_callbacks.h"
 #include "debug/method_debug_info.h"
 #include "dex/quick_compiler_callbacks.h"
+#include "dex/signature-inl.h"
 #include "driver/compiler_driver.h"
 #include "driver/compiler_options.h"
 #include "gc/space/image_space.h"
@@ -169,10 +170,11 @@ inline void ImageTest::DoCompile(ImageHeader::StorageMode storage_mode,
   {
     // Create a generic tmp file, to be the base of the .art and .oat temporary files.
     ScratchFile location;
-    for (int i = 0; i < static_cast<int>(class_path.size()); ++i) {
-      std::string cur_location =
-          android::base::StringPrintf("%s-%d.art", location.GetFilename().c_str(), i);
-      out_helper.image_locations.push_back(ScratchFile(cur_location));
+    std::vector<std::string> image_locations =
+        gc::space::ImageSpace::ExpandMultiImageLocations(out_helper.dex_file_locations,
+                                                         location.GetFilename() + ".art");
+    for (size_t i = 0u; i != class_path.size(); ++i) {
+      out_helper.image_locations.push_back(ScratchFile(image_locations[i]));
     }
   }
   std::vector<std::string> image_filenames;
@@ -218,17 +220,12 @@ inline void ImageTest::DoCompile(ImageHeader::StorageMode storage_mode,
     {
       jobject class_loader = nullptr;
       TimingLogger timings("ImageTest::WriteRead", false, false);
-      TimingLogger::ScopedTiming t("CompileAll", &timings);
-      SetDexFilesForOatFile(class_path);
-      driver->CompileAll(class_loader, class_path, &timings);
+      CompileAll(class_loader, class_path, &timings);
 
-      t.NewTiming("WriteElf");
+      TimingLogger::ScopedTiming t("WriteElf", &timings);
       SafeMap<std::string, std::string> key_value_store;
       key_value_store.Put(OatHeader::kBootClassPathKey,
-                          gc::space::ImageSpace::GetMultiImageBootClassPath(
-                              out_helper.dex_file_locations,
-                              oat_filenames,
-                              image_filenames));
+                          android::base::Join(out_helper.dex_file_locations, ':'));
 
       std::vector<std::unique_ptr<ElfWriter>> elf_writers;
       std::vector<std::unique_ptr<OatWriter>> oat_writers;
@@ -330,8 +327,7 @@ inline void ImageTest::DoCompile(ImageHeader::StorageMode storage_mode,
           elf_writer->EndDataBimgRelRo(data_bimg_rel_ro);
         }
 
-        bool header_ok = oat_writer->WriteHeader(elf_writer->GetStream(),
-                                                 /*boot_image_checksum=*/ 0u);
+        bool header_ok = oat_writer->WriteHeader(elf_writer->GetStream());
         ASSERT_TRUE(header_ok);
 
         writer->UpdateOatFileHeader(i, oat_writer->GetOatHeader());
@@ -442,6 +438,9 @@ inline void ImageTest::TestWriteRead(ImageHeader::StorageMode storage_mode,
   MemMap::Init();
 
   RuntimeOptions options;
+  options.emplace_back(GetClassPathOption("-Xbootclasspath:", GetLibCoreDexFileNames()), nullptr);
+  options.emplace_back(
+      GetClassPathOption("-Xbootclasspath-locations:", GetLibCoreDexLocations()), nullptr);
   std::string image("-Ximage:");
   image.append(helper.image_locations[0].GetFilename());
   options.push_back(std::make_pair(image.c_str(), static_cast<void*>(nullptr)));
@@ -494,7 +493,7 @@ inline void ImageTest::TestWriteRead(ImageHeader::StorageMode storage_mode,
       CHECK_EQ(kRequestedImageBase, reinterpret_cast<uintptr_t>(image_begin));
     }
     for (size_t j = 0; j < dex->NumClassDefs(); ++j) {
-      const DexFile::ClassDef& class_def = dex->GetClassDef(j);
+      const dex::ClassDef& class_def = dex->GetClassDef(j);
       const char* descriptor = dex->GetClassDescriptor(class_def);
       ObjPtr<mirror::Class> klass = class_linker_->FindSystemClass(soa.Self(), descriptor);
       EXPECT_TRUE(klass != nullptr) << descriptor;

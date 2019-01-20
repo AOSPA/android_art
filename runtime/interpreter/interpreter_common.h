@@ -32,8 +32,8 @@
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "base/enums.h"
+#include "base/locks.h"
 #include "base/macros.h"
-#include "base/mutex.h"
 #include "class_linker-inl.h"
 #include "class_root.h"
 #include "common_dex_operations.h"
@@ -44,7 +44,7 @@
 #include "handle_scope-inl.h"
 #include "interpreter_mterp_impl.h"
 #include "interpreter_switch_impl.h"
-#include "jit/jit.h"
+#include "jit/jit-inl.h"
 #include "mirror/call_site.h"
 #include "mirror/class-inl.h"
 #include "mirror/dex_cache.h"
@@ -621,7 +621,7 @@ void ArtInterpreterToCompiledCodeBridge(Thread* self,
 
 static inline bool IsStringInit(const DexFile* dex_file, uint32_t method_idx)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  const DexFile::MethodId& method_id = dex_file->GetMethodId(method_idx);
+  const dex::MethodId& method_id = dex_file->GetMethodId(method_idx);
   const char* class_name = dex_file->StringByTypeIdx(method_id.class_idx_);
   const char* method_name = dex_file->GetMethodName(method_id);
   // Instead of calling ResolveMethod() which has suspend point and can trigger

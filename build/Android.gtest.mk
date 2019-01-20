@@ -422,6 +422,8 @@ ifneq ($(ART_TEST_ANDROID_ROOT),)
   ART_GTEST_TARGET_ANDROID_ROOT := $(ART_TEST_ANDROID_ROOT)
 endif
 
+ART_GTEST_TARGET_ANDROID_RUNTIME_ROOT := '/apex/com.android.runtime'
+
 # Define a make rule for a target device gtest.
 # $(1): gtest name - the name of the test we're building such as leb128_test.
 # $(2): path relative to $OUT to the test binary
@@ -450,9 +452,7 @@ define define-art-gtest-rule-target
     $$(gtest_exe) \
     $$($(3)TARGET_OUT_SHARED_LIBRARIES)/libjavacore.so \
     $$($(3)TARGET_OUT_SHARED_LIBRARIES)/libopenjdkd.so \
-    $$(TARGET_OUT_JAVA_LIBRARIES)/core-libart-testdex.jar \
-    $$(TARGET_OUT_JAVA_LIBRARIES)/core-oj-testdex.jar \
-    $$(TARGET_OUT_JAVA_LIBRARIES)/core-simple-testdex.jar
+    $$(foreach jar,$$(TARGET_TEST_CORE_JARS),$$(TARGET_OUT_JAVA_LIBRARIES)/$$(jar).jar)
 
   ART_TEST_TARGET_GTEST_DEPENDENCIES += $$(gtest_deps)
 
@@ -472,7 +472,9 @@ $$(gtest_rule): test-art-target-sync
 	$(hide) $(ADB) shell $$(PRIVATE_MAYBE_CHROOT_COMMAND) chmod 755 $$(PRIVATE_TARGET_EXE)
 	$(hide) $$(call ART_TEST_SKIP,$$@) && \
 	  ($(ADB) shell "$$(PRIVATE_MAYBE_CHROOT_COMMAND) env $(GCOV_ENV) LD_LIBRARY_PATH=$(4) \
-	       ANDROID_ROOT=$(ART_GTEST_TARGET_ANDROID_ROOT) $$(PRIVATE_TARGET_EXE) \
+	       ANDROID_ROOT=$(ART_GTEST_TARGET_ANDROID_ROOT) \
+	       ANDROID_RUNTIME_ROOT=$(ART_GTEST_TARGET_ANDROID_RUNTIME_ROOT) \
+	       $$(PRIVATE_TARGET_EXE) \
 	     && touch $$(PRIVATE_GTEST_WITNESS)" \
 	   && ($(ADB) pull $$(PRIVATE_GTEST_WITNESS) /tmp/ && $$(call ART_TEST_PASSED,$$@)) \
 	   || $$(call ART_TEST_FAILED,$$@))
@@ -508,7 +510,8 @@ define define-art-gtest-rule-host
     $$($(3)ART_HOST_OUT_SHARED_LIBRARIES)/libopenjdkd$$(ART_HOST_SHLIB_EXTENSION) \
     $$(gtest_exe) \
     $$(ART_GTEST_$(1)_HOST_DEPS) \
-    $(foreach file,$(ART_GTEST_$(1)_DEX_DEPS),$(ART_TEST_HOST_GTEST_$(file)_DEX))
+    $(foreach file,$(ART_GTEST_$(1)_DEX_DEPS),$(ART_TEST_HOST_GTEST_$(file)_DEX)) \
+    $(HOST_OUT_EXECUTABLES)/timeout_dumper
 
   ART_TEST_HOST_GTEST_DEPENDENCIES += $$(gtest_deps)
 
@@ -521,7 +524,9 @@ $$(gtest_output): .KATI_IMPLICIT_OUTPUTS := $$(gtest_output)-nocache
 $$(gtest_output): NAME := $$(gtest_rule)
 ifeq (,$(SANITIZE_HOST))
 $$(gtest_output): $$(gtest_exe) $$(gtest_deps)
-	$(hide) ($$(call ART_TEST_SKIP,$$(NAME)) && $$< --gtest_output=xml:$$@ && \
+	$(hide) ($$(call ART_TEST_SKIP,$$(NAME)) && \
+		timeout --foreground -k 120s -s SIGRTMIN+2 2400s $(HOST_OUT_EXECUTABLES)/timeout_dumper \
+			$$< --gtest_output=xml:$$@ && \
 		$$(call ART_TEST_PASSED,$$(NAME))) || $$(call ART_TEST_FAILED,$$(NAME))
 else
 # Note: envsetup currently exports ASAN_OPTIONS=detect_leaks=0 to suppress leak detection, as some
@@ -533,7 +538,9 @@ else
 # under ASAN.
 $$(gtest_output): $$(gtest_exe) $$(gtest_deps)
 	$(hide) ($$(call ART_TEST_SKIP,$$(NAME)) && set -o pipefail && \
-		ASAN_OPTIONS=detect_leaks=1 $$< --gtest_output=xml:$$@ 2>&1 | tee $$<.tmp.out >&2 && \
+		ASAN_OPTIONS=detect_leaks=1 timeout --foreground -k 120s -s SIGRTMIN+2 3600s \
+			$(HOST_OUT_EXECUTABLES)/timeout_dumper \
+				$$< --gtest_output=xml:$$@ 2>&1 | tee $$<.tmp.out >&2 && \
 		{ $$(call ART_TEST_PASSED,$$(NAME)) ; rm $$<.tmp.out ; }) || \
 		( grep -q AddressSanitizer $$<.tmp.out && export ANDROID_BUILD_TOP=`pwd` && \
 			{ echo "ABI: 'x86_64'" | cat - $$<.tmp.out | development/scripts/stack | tail -n 3000 ; } ; \
@@ -717,6 +724,7 @@ ART_TEST_TARGET_GTEST$(ART_PHONY_TEST_TARGET_SUFFIX)_RULES :=
 ART_TEST_TARGET_GTEST$(2ND_ART_PHONY_TEST_TARGET_SUFFIX)_RULES :=
 ART_TEST_TARGET_GTEST_RULES :=
 ART_GTEST_TARGET_ANDROID_ROOT :=
+ART_GTEST_TARGET_ANDROID_RUNTIME_ROOT :=
 ART_GTEST_class_linker_test_DEX_DEPS :=
 ART_GTEST_class_table_test_DEX_DEPS :=
 ART_GTEST_compiler_driver_test_DEX_DEPS :=

@@ -103,6 +103,7 @@ namespace art {
 
 using android::base::StringAppendV;
 using android::base::StringPrintf;
+using gc::space::ImageSpace;
 
 static constexpr size_t kDefaultMinDexFilesForSwap = 2;
 static constexpr size_t kDefaultMinDexFileCumulativeSizeForSwap = 20 * MB;
@@ -478,13 +479,12 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("  --compilation-reason=<string>: optional metadata specifying the reason for");
   UsageError("      compiling the apk. If specified, the string will be embedded verbatim in");
   UsageError("      the key value store of the oat file.");
+  UsageError("      Example: --compilation-reason=install");
   UsageError("");
   UsageError("  --resolve-startup-const-strings=true|false: If true, the compiler eagerly");
   UsageError("      resolves strings referenced from const-string of startup methods.");
   UsageError("");
   UsageError("  --max-image-block-size=<size>: Maximum solid block size for compressed images.");
-  UsageError("");
-  UsageError("      Example: --compilation-reason=install");
   UsageError("");
   std::cerr << "See log for usage error information\n";
   exit(EXIT_FAILURE);
@@ -600,8 +600,7 @@ class WatchDog {
         Fatal(StringPrintf("dex2oat did not finish after %" PRId64 " seconds",
                            timeout_in_milliseconds_/1000));
       } else if (rc != 0) {
-        std::string message(StringPrintf("pthread_cond_timedwait failed: %s",
-                                         strerror(errno)));
+        std::string message(StringPrintf("pthread_cond_timedwait failed: %s", strerror(rc)));
         Fatal(message.c_str());
       }
     }
@@ -623,13 +622,13 @@ class Dex2Oat final {
   explicit Dex2Oat(TimingLogger* timings) :
       compiler_kind_(Compiler::kOptimizing),
       // Take the default set of instruction features from the build.
-      boot_image_checksum_(0),
       key_value_store_(nullptr),
       verification_results_(nullptr),
       runtime_(nullptr),
       thread_count_(sysconf(_SC_NPROCESSORS_CONF)),
       start_ns_(NanoTime()),
       start_cputime_ns_(ProcessCpuNanoTime()),
+      strip_(false),
       oat_fd_(-1),
       input_vdex_fd_(-1),
       output_vdex_fd_(-1),
@@ -963,89 +962,22 @@ class Dex2Oat final {
   }
 
   void ExpandOatAndImageFilenames() {
-    std::string base_oat = oat_filenames_[0];
-    size_t last_oat_slash = base_oat.rfind('/');
-    if (last_oat_slash == std::string::npos) {
-      Usage("Unusable boot image oat filename %s", base_oat.c_str());
+    if (image_filenames_[0].rfind('/') == std::string::npos) {
+      Usage("Unusable boot image filename %s", image_filenames_[0].c_str());
     }
-    // We also need to honor path components that were encoded through '@'. Otherwise the loading
-    // code won't be able to find the images.
-    if (base_oat.find('@', last_oat_slash) != std::string::npos) {
-      last_oat_slash = base_oat.rfind('@');
-    }
-    base_oat = base_oat.substr(0, last_oat_slash + 1);
+    image_filenames_ = ImageSpace::ExpandMultiImageLocations(dex_locations_, image_filenames_[0]);
 
-    std::string base_img = image_filenames_[0];
-    size_t last_img_slash = base_img.rfind('/');
-    if (last_img_slash == std::string::npos) {
-      Usage("Unusable boot image filename %s", base_img.c_str());
+    if (oat_filenames_[0].rfind('/') == std::string::npos) {
+      Usage("Unusable boot image oat filename %s", oat_filenames_[0].c_str());
     }
-    // We also need to honor path components that were encoded through '@'. Otherwise the loading
-    // code won't be able to find the images.
-    if (base_img.find('@', last_img_slash) != std::string::npos) {
-      last_img_slash = base_img.rfind('@');
-    }
+    oat_filenames_ = ImageSpace::ExpandMultiImageLocations(dex_locations_, oat_filenames_[0]);
 
-    // Get the prefix, which is the primary image name (without path components). Strip the
-    // extension.
-    std::string prefix = base_img.substr(last_img_slash + 1);
-    if (prefix.rfind('.') != std::string::npos) {
-      prefix = prefix.substr(0, prefix.rfind('.'));
-    }
-    if (!prefix.empty()) {
-      prefix = prefix + "-";
-    }
-
-    base_img = base_img.substr(0, last_img_slash + 1);
-
-    std::string base_symbol_oat;
     if (!oat_unstripped_.empty()) {
-      base_symbol_oat = oat_unstripped_[0];
-      size_t last_symbol_oat_slash = base_symbol_oat.rfind('/');
-      if (last_symbol_oat_slash == std::string::npos) {
-        Usage("Unusable boot image symbol filename %s", base_symbol_oat.c_str());
+      if (oat_unstripped_[0].rfind('/') == std::string::npos) {
+        Usage("Unusable boot image symbol filename %s", oat_unstripped_[0].c_str());
       }
-      base_symbol_oat = base_symbol_oat.substr(0, last_symbol_oat_slash + 1);
+      oat_unstripped_ = ImageSpace::ExpandMultiImageLocations(dex_locations_, oat_unstripped_[0]);
     }
-
-    // Now create the other names. Use a counted loop to skip the first one.
-    for (size_t i = 1; i < dex_locations_.size(); ++i) {
-      // TODO: Make everything properly std::string.
-      std::string image_name = CreateMultiImageName(dex_locations_[i], prefix, ".art");
-      char_backing_storage_.push_front(base_img + image_name);
-      image_filenames_.push_back(char_backing_storage_.front().c_str());
-
-      std::string oat_name = CreateMultiImageName(dex_locations_[i], prefix, ".oat");
-      char_backing_storage_.push_front(base_oat + oat_name);
-      oat_filenames_.push_back(char_backing_storage_.front().c_str());
-
-      if (!base_symbol_oat.empty()) {
-        char_backing_storage_.push_front(base_symbol_oat + oat_name);
-        oat_unstripped_.push_back(char_backing_storage_.front().c_str());
-      }
-    }
-  }
-
-  // Modify the input string in the following way:
-  //   0) Assume input is /a/b/c.d
-  //   1) Strip the path  -> c.d
-  //   2) Inject prefix p -> pc.d
-  //   3) Replace suffix with s if it's "jar"  -> d == "jar" -> pc.s
-  static std::string CreateMultiImageName(std::string in,
-                                          const std::string& prefix,
-                                          const char* replace_suffix) {
-    size_t last_dex_slash = in.rfind('/');
-    if (last_dex_slash != std::string::npos) {
-      in = in.substr(last_dex_slash + 1);
-    }
-    if (!prefix.empty()) {
-      in = prefix + in;
-    }
-    if (android::base::EndsWith(in, ".jar")) {
-      in = in.substr(0, in.length() - strlen(".jar")) +
-          (replace_suffix != nullptr ? replace_suffix : "");
-    }
-    return in;
   }
 
   void InsertCompileOptions(int argc, char** argv) {
@@ -1496,27 +1428,28 @@ class Dex2Oat final {
 
     if (IsBootImage()) {
       // If we're compiling the boot image, store the boot classpath into the Key-Value store.
-      // We need this for the multi-image case.
-      key_value_store_->Put(OatHeader::kBootClassPathKey,
-                            gc::space::ImageSpace::GetMultiImageBootClassPath(dex_locations_,
-                                                                              oat_filenames_,
-                                                                              image_filenames_));
+      // We use this when loading the boot image.
+      key_value_store_->Put(OatHeader::kBootClassPathKey, android::base::Join(dex_locations_, ':'));
     }
 
     if (!IsBootImage()) {
       // When compiling an app, create the runtime early to retrieve
-      // the image location key needed for the oat header.
+      // the boot image checksums needed for the oat header.
       if (!CreateRuntime(std::move(runtime_options))) {
         return dex2oat::ReturnCode::kCreateRuntime;
       }
 
       if (CompilerFilter::DependsOnImageChecksum(compiler_options_->GetCompilerFilter())) {
         TimingLogger::ScopedTiming t3("Loading image checksum", timings_);
-        std::vector<gc::space::ImageSpace*> image_spaces =
-            Runtime::Current()->GetHeap()->GetBootImageSpaces();
-        boot_image_checksum_ = image_spaces[0]->GetImageHeader().GetImageChecksum();
-      } else {
-        boot_image_checksum_ = 0u;
+        Runtime* runtime = Runtime::Current();
+        key_value_store_->Put(OatHeader::kBootClassPathKey,
+                              android::base::Join(runtime->GetBootClassPathLocations(), ':'));
+        std::vector<ImageSpace*> image_spaces = runtime->GetHeap()->GetBootImageSpaces();
+        const std::vector<const DexFile*>& bcp_dex_files =
+            runtime->GetClassLinker()->GetBootClassPath();
+        key_value_store_->Put(
+            OatHeader::kBootClassPathChecksumsKey,
+            gc::space::ImageSpace::GetBootClassPathChecksums(image_spaces, bcp_dex_files));
       }
 
       // Open dex files for class path.
@@ -1788,9 +1721,7 @@ class Dex2Oat final {
     compiler_options_->profile_compilation_info_ = profile_compilation_info_.get();
 
     driver_.reset(new CompilerDriver(compiler_options_.get(),
-                                     verification_results_.get(),
                                      compiler_kind_,
-                                     &compiler_options_->image_classes_,
                                      thread_count_,
                                      swap_fd_));
     if (!IsBootImage()) {
@@ -1862,7 +1793,16 @@ class Dex2Oat final {
                    << soa.Self()->GetException()->Dump();
       }
     }
+    driver_->InitializeThreadPools();
+    driver_->PreCompile(class_loader,
+                        dex_files,
+                        timings_,
+                        &compiler_options_->image_classes_,
+                        verification_results_.get());
+    callbacks_->SetVerificationResults(nullptr);  // Should not be needed anymore.
+    compiler_options_->verification_results_ = verification_results_.get();
     driver_->CompileAll(class_loader, dex_files, timings_);
+    driver_->FreeThreadPools();
     return class_loader;
   }
 
@@ -1945,7 +1885,7 @@ class Dex2Oat final {
     if (IsImage()) {
       if (IsAppImage() && image_base_ == 0) {
         gc::Heap* const heap = Runtime::Current()->GetHeap();
-        for (gc::space::ImageSpace* image_space : heap->GetBootImageSpaces()) {
+        for (ImageSpace* image_space : heap->GetBootImageSpaces()) {
           image_base_ = std::max(image_base_, RoundUp(
               reinterpret_cast<uintptr_t>(image_space->GetImageHeader().GetOatFileEnd()),
               kPageSize));
@@ -2077,7 +2017,7 @@ class Dex2Oat final {
           elf_writer->EndDataBimgRelRo(data_bimg_rel_ro);
         }
 
-        if (!oat_writer->WriteHeader(elf_writer->GetStream(), boot_image_checksum_)) {
+        if (!oat_writer->WriteHeader(elf_writer->GetStream())) {
           LOG(ERROR) << "Failed to write oat header to the ELF file " << oat_file->GetPath();
           return false;
         }
@@ -2708,7 +2648,6 @@ class Dex2Oat final {
   std::unique_ptr<CompilerOptions> compiler_options_;
   Compiler::Kind compiler_kind_;
 
-  uint32_t boot_image_checksum_;
   std::unique_ptr<SafeMap<std::string, std::string> > key_value_store_;
 
   std::unique_ptr<VerificationResults> verification_results_;
