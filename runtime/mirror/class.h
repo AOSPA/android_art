@@ -19,7 +19,6 @@
 
 #include "base/bit_utils.h"
 #include "base/casts.h"
-#include "base/enums.h"
 #include "base/stride_iterator.h"
 #include "class_flags.h"
 #include "class_status.h"
@@ -30,7 +29,6 @@
 #include "object.h"
 #include "object_array.h"
 #include "read_barrier_option.h"
-#include "thread-current-inl.h"
 
 namespace art {
 
@@ -39,6 +37,7 @@ struct ClassDef;
 class TypeList;
 }  // namespace dex
 
+template<typename T> class ArraySlice;
 class ArtField;
 class ArtMethod;
 struct ClassOffsets;
@@ -48,10 +47,11 @@ class ImTable;
 enum InvokeType : uint32_t;
 template <typename Iter> class IterationRange;
 template<typename T> class LengthPrefixedArray;
-template<typename T> class ArraySlice;
+enum class PointerSize : size_t;
 class Signature;
 class StringPiece;
 template<size_t kNumReferences> class PACKED(4) StackHandleScope;
+class Thread;
 
 namespace mirror {
 
@@ -223,17 +223,9 @@ class MANAGED Class final : public Object {
     SetAccessFlags(flags | kAccSkipHiddenapiChecks);
   }
 
-  ALWAYS_INLINE void SetRecursivelyInitialized() REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK_EQ(GetLockOwnerThreadId(), Thread::Current()->GetThreadId());
-    uint32_t flags = GetField32(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_));
-    SetAccessFlags(flags | kAccRecursivelyInitialized);
-  }
+  ALWAYS_INLINE void SetRecursivelyInitialized() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  ALWAYS_INLINE void SetHasDefaultMethods() REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK_EQ(GetLockOwnerThreadId(), Thread::Current()->GetThreadId());
-    uint32_t flags = GetField32(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_));
-    SetAccessFlags(flags | kAccHasDefaultMethod);
-  }
+  ALWAYS_INLINE void SetHasDefaultMethods() REQUIRES_SHARED(Locks::mutator_lock_);
 
   ALWAYS_INLINE void SetFinalizable() REQUIRES_SHARED(Locks::mutator_lock_) {
     uint32_t flags = GetField32(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_));

@@ -17,6 +17,7 @@
 #ifndef ART_RUNTIME_CLASS_LINKER_H_
 #define ART_RUNTIME_CLASS_LINKER_H_
 
+#include <list>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -89,6 +90,7 @@ template<class T> class ObjectLock;
 class Runtime;
 class ScopedObjectAccessAlreadyRunnable;
 template<size_t kNumReferences> class PACKED(4) StackHandleScope;
+class Thread;
 
 enum VisitRootFlags : uint8_t;
 
@@ -685,7 +687,9 @@ class ClassLinker {
 
   // Throw the class initialization failure recorded when first trying to initialize the given
   // class.
-  void ThrowEarlierClassFailure(ObjPtr<mirror::Class> c, bool wrap_in_no_class_def = false)
+  void ThrowEarlierClassFailure(ObjPtr<mirror::Class> c,
+                                bool wrap_in_no_class_def = false,
+                                bool log = false)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_);
 
