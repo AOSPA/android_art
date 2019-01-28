@@ -21,8 +21,10 @@
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "base/dumpable.h"
-#include "base/sdk_version.h"
+#include "class_root.h"
 #include "dex/class_accessor-inl.h"
+#include "dex/dex_file_loader.h"
+#include "mirror/class_ext.h"
 #include "scoped_thread_state_change.h"
 #include "thread-inl.h"
 #include "well_known_classes.h"
@@ -76,21 +78,6 @@ enum AccessContextFlags {
   kAccessDenied  = 1 << 1,
 };
 
-static SdkVersion GetMaxAllowedSdkVersionForApiList(ApiList api_list) {
-  switch (api_list) {
-    case ApiList::kWhitelist:
-    case ApiList::kLightGreylist:
-      return SdkVersion::kMax;
-    case ApiList::kDarkGreylist:
-      return SdkVersion::kO_MR1;
-    case ApiList::kBlacklist:
-      return SdkVersion::kMin;
-    case ApiList::kNoList:
-      LOG(FATAL) << "Unexpected value";
-      UNREACHABLE();
-  }
-}
-
 MemberSignature::MemberSignature(ArtField* field) {
   class_name_ = field->GetDeclaringClass()->GetDescriptor(&tmp_);
   member_name_ = field->GetName();
@@ -106,6 +93,24 @@ MemberSignature::MemberSignature(ArtMethod* method) {
   class_name_ = method->GetDeclaringClass()->GetDescriptor(&tmp_);
   member_name_ = method->GetName();
   type_signature_ = method->GetSignature().ToString();
+  type_ = kMethod;
+}
+
+MemberSignature::MemberSignature(const ClassAccessor::Field& field) {
+  const DexFile& dex_file = field.GetDexFile();
+  const dex::FieldId& field_id = dex_file.GetFieldId(field.GetIndex());
+  class_name_ = dex_file.GetFieldDeclaringClassDescriptor(field_id);
+  member_name_ = dex_file.GetFieldName(field_id);
+  type_signature_ = dex_file.GetFieldTypeDescriptor(field_id);
+  type_ = kField;
+}
+
+MemberSignature::MemberSignature(const ClassAccessor::Method& method) {
+  const DexFile& dex_file = method.GetDexFile();
+  const dex::MethodId& method_id = dex_file.GetMethodId(method.GetIndex());
+  class_name_ = dex_file.GetMethodDeclaringClassDescriptor(method_id);
+  member_name_ = dex_file.GetMethodName(method_id);
+  type_signature_ = dex_file.GetMethodSignature(method_id).ToString();
   type_ = kMethod;
 }
 
@@ -151,6 +156,17 @@ void MemberSignature::Dump(std::ostream& os) const {
 void MemberSignature::WarnAboutAccess(AccessMethod access_method, hiddenapi::ApiList list) {
   LOG(WARNING) << "Accessing hidden " << (type_ == kField ? "field " : "method ")
                << Dumpable<MemberSignature>(*this) << " (" << list << ", " << access_method << ")";
+}
+
+bool MemberSignature::Equals(const MemberSignature& other) {
+  return type_ == other.type_ &&
+         class_name_ == other.class_name_ &&
+         member_name_ == other.member_name_ &&
+         type_signature_ == other.type_signature_;
+}
+
+bool MemberSignature::MemberNameAndTypeMatch(const MemberSignature& other) {
+  return member_name_ == other.member_name_ && type_signature_ == other.type_signature_;
 }
 
 #ifdef ART_TARGET_ANDROID
@@ -254,60 +270,89 @@ static ALWAYS_INLINE void MaybeWhitelistMember(Runtime* runtime, T* member)
 static constexpr uint32_t kNoDexFlags = 0u;
 static constexpr uint32_t kInvalidDexFlags = static_cast<uint32_t>(-1);
 
-uint32_t GetDexFlags(ArtField* field) REQUIRES_SHARED(Locks::mutator_lock_) {
-  ObjPtr<mirror::Class> declaring_class = field->GetDeclaringClass();
-  DCHECK(declaring_class != nullptr) << "Fields always have a declaring class";
-
-  const DexFile::ClassDef* class_def = declaring_class->GetClassDef();
-  if (class_def == nullptr) {
-    return kNoDexFlags;
-  }
-
-  uint32_t flags = kInvalidDexFlags;
-  DCHECK(!AreValidFlags(flags));
-
-  ClassAccessor accessor(declaring_class->GetDexFile(),
-                         *class_def,
-                         /* parse_hiddenapi_class_data= */ true);
-  auto fn_visit = [&](const ClassAccessor::Field& dex_field) {
-    if (dex_field.GetIndex() == field->GetDexFieldIndex()) {
-      flags = dex_field.GetHiddenapiFlags();
-    }
-  };
-  accessor.VisitFields(fn_visit, fn_visit);
-
-  CHECK_NE(flags, kInvalidDexFlags) << "Could not find flags for field " << field->PrettyField();
-  DCHECK(AreValidFlags(flags));
-  return flags;
+static ALWAYS_INLINE uint32_t GetMemberDexIndex(ArtField* field) {
+  return field->GetDexFieldIndex();
 }
 
-uint32_t GetDexFlags(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_) {
-  ObjPtr<mirror::Class> declaring_class = method->GetDeclaringClass();
-  if (declaring_class.IsNull()) {
-    DCHECK(method->IsRuntimeMethod());
-    return kNoDexFlags;
-  }
+static ALWAYS_INLINE uint32_t GetMemberDexIndex(ArtMethod* method)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  // Use the non-obsolete method to avoid DexFile mismatch between
+  // the method index and the declaring class.
+  return method->GetNonObsoleteMethod()->GetDexMethodIndex();
+}
 
-  const DexFile::ClassDef* class_def = declaring_class->GetClassDef();
-  if (class_def == nullptr) {
+static void VisitMembers(const DexFile& dex_file,
+                         const dex::ClassDef& class_def,
+                         const std::function<void(const ClassAccessor::Field&)>& fn_visit) {
+  ClassAccessor accessor(dex_file, class_def, /* parse_hiddenapi_class_data= */ true);
+  accessor.VisitFields(fn_visit, fn_visit);
+}
+
+static void VisitMembers(const DexFile& dex_file,
+                         const dex::ClassDef& class_def,
+                         const std::function<void(const ClassAccessor::Method&)>& fn_visit) {
+  ClassAccessor accessor(dex_file, class_def, /* parse_hiddenapi_class_data= */ true);
+  accessor.VisitMethods(fn_visit, fn_visit);
+}
+
+template<typename T>
+uint32_t GetDexFlags(T* member) REQUIRES_SHARED(Locks::mutator_lock_) {
+  static_assert(std::is_same<T, ArtField>::value || std::is_same<T, ArtMethod>::value);
+  using AccessorType = typename std::conditional<std::is_same<T, ArtField>::value,
+      ClassAccessor::Field, ClassAccessor::Method>::type;
+
+  ObjPtr<mirror::Class> declaring_class = member->GetDeclaringClass();
+  if (declaring_class.IsNull()) {
     return kNoDexFlags;
   }
 
   uint32_t flags = kInvalidDexFlags;
-  DCHECK(!AreValidFlags(flags));
+  DCHECK(!AreValidDexFlags(flags));
 
-  ClassAccessor accessor(declaring_class->GetDexFile(),
-                         *class_def,
-                         /* parse_hiddenapi_class_data= */ true);
-  auto fn_visit = [&](const ClassAccessor::Method& dex_method) {
-    if (dex_method.GetIndex() == method->GetDexMethodIndex()) {
-      flags = dex_method.GetHiddenapiFlags();
+  // Check if the declaring class has ClassExt allocated. If it does, check if
+  // the pre-JVMTI redefine dex file has been set to determine if the declaring
+  // class has been JVMTI-redefined.
+  ObjPtr<mirror::ClassExt> ext(declaring_class->GetExtData());
+  const DexFile* original_dex = ext.IsNull() ? nullptr : ext->GetPreRedefineDexFile();
+  if (LIKELY(original_dex == nullptr)) {
+    // Class is not redefined. Find the class def, iterate over its members and
+    // find the entry corresponding to this `member`.
+    const dex::ClassDef* class_def = declaring_class->GetClassDef();
+    if (class_def == nullptr) {
+      flags = kNoDexFlags;
+    } else {
+      uint32_t member_index = GetMemberDexIndex(member);
+      auto fn_visit = [&](const AccessorType& dex_member) {
+        if (dex_member.GetIndex() == member_index) {
+          flags = dex_member.GetHiddenapiFlags();
+        }
+      };
+      VisitMembers(declaring_class->GetDexFile(), *class_def, fn_visit);
     }
-  };
-  accessor.VisitMethods(fn_visit, fn_visit);
+  } else {
+    // Class was redefined using JVMTI. We have a pointer to the original dex file
+    // and the class def index of this class in that dex file, but the field/method
+    // indices are lost. Iterate over all members of the class def and find the one
+    // corresponding to this `member` by name and type string comparison.
+    // This is obviously very slow, but it is only used when non-exempt code tries
+    // to access a hidden member of a JVMTI-redefined class.
+    uint16_t class_def_idx = ext->GetPreRedefineClassDefIndex();
+    DCHECK_NE(class_def_idx, DexFile::kDexNoIndex16);
+    const dex::ClassDef& original_class_def = original_dex->GetClassDef(class_def_idx);
+    MemberSignature member_signature(member);
+    auto fn_visit = [&](const AccessorType& dex_member) {
+      MemberSignature cur_signature(dex_member);
+      if (member_signature.MemberNameAndTypeMatch(cur_signature)) {
+        DCHECK(member_signature.Equals(cur_signature));
+        flags = dex_member.GetHiddenapiFlags();
+      }
+    };
+    VisitMembers(*original_dex, original_class_def, fn_visit);
+  }
 
-  CHECK_NE(flags, kInvalidDexFlags) << "Could not find flags for method " << method->PrettyMethod();
-  DCHECK(AreValidFlags(flags));
+  CHECK_NE(flags, kInvalidDexFlags) << "Could not find hiddenapi flags for "
+      << Dumpable<MemberSignature>(MemberSignature(member));
+  DCHECK(AreValidDexFlags(flags));
   return flags;
 }
 
@@ -323,7 +368,7 @@ bool ShouldDenyAccessToMemberImpl(T* member,
   const bool deny_access =
       (policy == EnforcementPolicy::kEnabled) &&
       IsSdkVersionSetAndMoreThan(runtime->GetTargetSdkVersion(),
-                                 GetMaxAllowedSdkVersionForApiList(api_list));
+                                 api_list.GetMaxAllowedSdkVersion());
 
   MemberSignature member_signature(member);
 
@@ -368,6 +413,8 @@ bool ShouldDenyAccessToMemberImpl(T* member,
 }
 
 // Need to instantiate this.
+template uint32_t GetDexFlags<ArtField>(ArtField* member);
+template uint32_t GetDexFlags<ArtMethod>(ArtMethod* member);
 template bool ShouldDenyAccessToMemberImpl<ArtField>(ArtField* member,
                                                      hiddenapi::ApiList api_list,
                                                      AccessMethod access_method);

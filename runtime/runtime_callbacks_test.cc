@@ -147,6 +147,8 @@ TEST_F(ThreadLifecycleCallbackRuntimeCallbacksTest, ThreadLifecycleCallbackJava)
   self->TransitionFromSuspendedToRunnable();
   bool started = runtime_->Start();
   ASSERT_TRUE(started);
+  // Make sure the workers are done starting so we don't get callbacks for them.
+  runtime_->WaitForThreadPoolWorkersToStart();
 
   cb_.state = CallbackState::kBase;  // Ignore main thread attach.
 
@@ -255,9 +257,9 @@ class ClassLoadCallbackRuntimeCallbacksTest : public RuntimeCallbacksTest {
                         Handle<mirror::Class> klass ATTRIBUTE_UNUSED,
                         Handle<mirror::ClassLoader> class_loader ATTRIBUTE_UNUSED,
                         const DexFile& initial_dex_file,
-                        const DexFile::ClassDef& initial_class_def ATTRIBUTE_UNUSED,
+                        const dex::ClassDef& initial_class_def ATTRIBUTE_UNUSED,
                         /*out*/DexFile const** final_dex_file ATTRIBUTE_UNUSED,
-                        /*out*/DexFile::ClassDef const** final_class_def ATTRIBUTE_UNUSED) override
+                        /*out*/dex::ClassDef const** final_class_def ATTRIBUTE_UNUSED) override
         REQUIRES_SHARED(Locks::mutator_lock_) {
       const std::string& location = initial_dex_file.GetLocation();
       std::string event =

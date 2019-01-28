@@ -18,6 +18,7 @@
 
 #include "arch/arm64/instruction_set_features_arm64.h"
 #include "base/casts.h"
+#include "driver/compiler_options.h"
 #include "linker/relative_patcher_test.h"
 #include "lock_word.h"
 #include "mirror/array-inl.h"
@@ -175,8 +176,15 @@ class Arm64RelativePatcherTest : public RelativePatcherTest {
                                     /*out*/ std::string* debug_name = nullptr) {
     OptimizingUnitTestHelper helper;
     HGraph* graph = helper.CreateGraph();
-    std::string error_msg;
-    arm64::CodeGeneratorARM64 codegen(graph, *compiler_options_);
+    CompilerOptions compiler_options;
+
+    // Set isa to arm64.
+    compiler_options.instruction_set_ = instruction_set_;
+    compiler_options.instruction_set_features_ =
+        InstructionSetFeatures::FromBitmap(instruction_set_, instruction_set_features_->AsBitmap());
+    CHECK(compiler_options.instruction_set_features_->Equals(instruction_set_features_.get()));
+
+    arm64::CodeGeneratorARM64 codegen(graph, compiler_options);
     ArenaVector<uint8_t> code(helper.GetAllocator()->Adapter());
     codegen.EmitThunkCode(patch, &code, debug_name);
     return std::vector<uint8_t>(code.begin(), code.end());
@@ -567,11 +575,6 @@ class Arm64RelativePatcherTestDefault : public Arm64RelativePatcherTest {
   Arm64RelativePatcherTestDefault() : Arm64RelativePatcherTest("default") { }
 };
 
-class Arm64RelativePatcherTestDenver64 : public Arm64RelativePatcherTest {
- public:
-  Arm64RelativePatcherTestDenver64() : Arm64RelativePatcherTest("denver64") { }
-};
-
 TEST_F(Arm64RelativePatcherTestDefault, CallSelf) {
   const LinkerPatch patches[] = {
       LinkerPatch::RelativeCodePatch(0u, nullptr, 1u),
@@ -826,18 +829,6 @@ TEST_F(Arm64RelativePatcherTestDefault, StringBssEntryLdur) {
       { 0x1234u, 0x1238u });
 }
 
-TEST_F(Arm64RelativePatcherTestDenver64, StringBssEntryLdur) {
-  TestForAdrpOffsets(
-      [&](uint32_t adrp_offset, uint32_t string_entry_offset) {
-        Reset();
-        TestAdrpLdurLdr(adrp_offset,
-                        /*has_thunk=*/ false,
-                        /*bss_begin=*/ 0x12345678u,
-                        string_entry_offset);
-      },
-      { 0x1234u, 0x1238u });
-}
-
 // LDR <Wt>, <label> is always aligned. We should never have to use a fixup.
 TEST_F(Arm64RelativePatcherTestDefault, StringBssEntryWPcRel) {
   TestForAdrpOffsets(
@@ -907,15 +898,6 @@ TEST_F(Arm64RelativePatcherTestDefault, StringReferenceLdur) {
         TestAdrpLdurAdd(adrp_offset, has_thunk, string_offset);
       },
       { 0x12345678u, 0xffffc840u });
-}
-
-TEST_F(Arm64RelativePatcherTestDenver64, StringReferenceLdur) {
-  TestForAdrpOffsets(
-      [&](uint32_t adrp_offset, uint32_t string_offset) {
-        Reset();
-        TestAdrpLdurAdd(adrp_offset, /*has_thunk=*/ false, string_offset);
-      },
-      { 0x12345678u, 0xffffc840U });
 }
 
 TEST_F(Arm64RelativePatcherTestDefault, StringReferenceSubX3X2) {

@@ -296,7 +296,7 @@ class OatSymbolizer final {
                      const DexFile& dex_file,
                      uint32_t class_def_index,
                      uint32_t dex_method_index,
-                     const DexFile::CodeItem* code_item,
+                     const dex::CodeItem* code_item,
                      uint32_t method_access_flags) {
     if ((method_access_flags & kAccAbstract) != 0) {
       // Abstract method, no code.
@@ -472,9 +472,6 @@ class OatDumper {
     DUMP_OAT_HEADER_OFFSET("QUICK TO INTERPRETER BRIDGE",
                            GetQuickToInterpreterBridgeOffset);
 #undef DUMP_OAT_HEADER_OFFSET
-
-    os << "IMAGE FILE LOCATION OAT CHECKSUM:\n";
-    os << StringPrintf("0x%08x\n\n", oat_header.GetImageFileLocationOatChecksum());
 
     // Print the key-value store.
     {
@@ -726,7 +723,7 @@ class OatDumper {
             << "': " << error_msg;
       } else {
         const char* descriptor = m->GetDeclaringClassDescriptor();
-        const DexFile::ClassDef* class_def =
+        const dex::ClassDef* class_def =
             OatDexFile::FindClassDef(*dex_file, descriptor, ComputeModifiedUtf8Hash(descriptor));
         if (class_def != nullptr) {
           uint16_t class_def_index = dex_file->GetIndexForClassDef(*class_def);
@@ -1095,12 +1092,12 @@ class OatDumper {
   static constexpr uint32_t kMaxCodeSize = 100 * 1000;
 
   bool DumpOatMethod(VariableIndentationOutputStream* vios,
-                     const DexFile::ClassDef& class_def,
+                     const dex::ClassDef& class_def,
                      uint32_t class_method_index,
                      const OatFile::OatClass& oat_class,
                      const DexFile& dex_file,
                      uint32_t dex_method_idx,
-                     const DexFile::CodeItem* code_item,
+                     const dex::CodeItem* code_item,
                      uint32_t method_access_flags,
                      bool* addr_found) {
     bool success = true;
@@ -1493,8 +1490,8 @@ class OatDumper {
                                          StackHandleScope<1>* hs,
                                          uint32_t dex_method_idx,
                                          const DexFile* dex_file,
-                                         const DexFile::ClassDef& class_def,
-                                         const DexFile::CodeItem* code_item,
+                                         const dex::ClassDef& class_def,
+                                         const dex::CodeItem* code_item,
                                          uint32_t method_access_flags) {
     if ((method_access_flags & kAccNative) == 0) {
       ScopedObjectAccess soa(Thread::Current());
@@ -1771,26 +1768,24 @@ class ImageDumper {
 
     os << "IMAGE LOCATION: " << image_space_.GetImageLocation() << "\n\n";
 
-    os << "IMAGE BEGIN: " << reinterpret_cast<void*>(image_header_.GetImageBegin()) << "\n\n";
+    os << "IMAGE BEGIN: " << reinterpret_cast<void*>(image_header_.GetImageBegin()) << "\n";
+    os << "IMAGE SIZE: " << image_header_.GetImageSize() << "\n";
+    os << "IMAGE CHECKSUM: " << std::hex << image_header_.GetImageChecksum() << std::dec << "\n\n";
 
-    os << "IMAGE SIZE: " << image_header_.GetImageSize() << "\n\n";
+    os << "OAT CHECKSUM: " << StringPrintf("0x%08x\n\n", image_header_.GetOatChecksum()) << "\n";
+    os << "OAT FILE BEGIN:" << reinterpret_cast<void*>(image_header_.GetOatFileBegin()) << "\n";
+    os << "OAT DATA BEGIN:" << reinterpret_cast<void*>(image_header_.GetOatDataBegin()) << "\n";
+    os << "OAT DATA END:" << reinterpret_cast<void*>(image_header_.GetOatDataEnd()) << "\n";
+    os << "OAT FILE END:" << reinterpret_cast<void*>(image_header_.GetOatFileEnd()) << "\n\n";
+
+    os << "BOOT IMAGE BEGIN: " << reinterpret_cast<void*>(image_header_.GetBootImageBegin())
+        << "\n";
+    os << "BOOT IMAGE SIZE: " << image_header_.GetBootImageSize() << "\n\n";
 
     for (size_t i = 0; i < ImageHeader::kSectionCount; ++i) {
       auto section = static_cast<ImageHeader::ImageSections>(i);
       os << "IMAGE SECTION " << section << ": " << image_header_.GetImageSection(section) << "\n\n";
     }
-
-    os << "OAT CHECKSUM: " << StringPrintf("0x%08x\n\n", image_header_.GetOatChecksum());
-
-    os << "OAT FILE BEGIN:" << reinterpret_cast<void*>(image_header_.GetOatFileBegin()) << "\n\n";
-
-    os << "OAT DATA BEGIN:" << reinterpret_cast<void*>(image_header_.GetOatDataBegin()) << "\n\n";
-
-    os << "OAT DATA END:" << reinterpret_cast<void*>(image_header_.GetOatDataEnd()) << "\n\n";
-
-    os << "OAT FILE END:" << reinterpret_cast<void*>(image_header_.GetOatFileEnd()) << "\n\n";
-
-    os << "PATCH DELTA:" << image_header_.GetPatchDelta() << "\n\n";
 
     {
       os << "ROOTS: " << reinterpret_cast<void*>(image_header_.GetImageRoots().Ptr()) << "\n";
@@ -1938,7 +1933,7 @@ class ImageDumper {
       stats_.file_bytes = file->GetLength();
       // If the image is compressed, adjust to decompressed size.
       size_t uncompressed_size = image_header_.GetImageSize() - sizeof(ImageHeader);
-      if (image_header_.GetStorageMode() == ImageHeader::kStorageModeUncompressed) {
+      if (image_header_.HasCompressedBlock()) {
         DCHECK_EQ(uncompressed_size, data_size) << "Sizes should match for uncompressed image";
       }
       stats_.file_bytes += uncompressed_size - data_size;
@@ -3012,7 +3007,7 @@ class IMTDumper {
       for (uint32_t class_def_index = 0;
            class_def_index != dex_file->NumClassDefs();
            ++class_def_index) {
-        const DexFile::ClassDef& class_def = dex_file->GetClassDef(class_def_index);
+        const dex::ClassDef& class_def = dex_file->GetClassDef(class_def_index);
         const char* descriptor = dex_file->GetClassDescriptor(class_def);
         h_klass.Assign(class_linker->FindClass(self, descriptor, h_class_loader));
         if (h_klass == nullptr) {

@@ -39,10 +39,23 @@ namespace verifier {
 class VerifierDepsTest;
 }  // namespace verifier
 
+namespace linker {
+class Arm64RelativePatcherTest;
+}  // namespace linker
+
 class DexFile;
 enum class InstructionSet;
 class InstructionSetFeatures;
 class ProfileCompilationInfo;
+class VerificationResults;
+class VerifiedMethod;
+
+// Enum for CheckProfileMethodsCompiled. Outside CompilerOptions so it can be forward-declared.
+enum class ProfileMethodsCheck : uint8_t {
+  kNone,
+  kLog,
+  kAbort,
+};
 
 class CompilerOptions final {
  public:
@@ -272,6 +285,16 @@ class CompilerOptions final {
 
   bool IsImageClass(const char* descriptor) const;
 
+  const VerificationResults* GetVerificationResults() const;
+
+  const VerifiedMethod* GetVerifiedMethod(const DexFile* dex_file, uint32_t method_idx) const;
+
+  // Checks if the specified method has been verified without failures. Returns
+  // false if the method is not in the verification results (GetVerificationResults).
+  bool IsMethodVerifiedWithoutFailures(uint32_t method_idx,
+                                       uint16_t class_def_idx,
+                                       const DexFile& dex_file) const;
+
   bool ParseCompilerOptions(const std::vector<std::string>& options,
                             bool ignore_unrecognized,
                             std::string* error_msg);
@@ -324,6 +347,18 @@ class CompilerOptions final {
     return resolve_startup_const_strings_;
   }
 
+  ProfileMethodsCheck CheckProfiledMethodsCompiled() const {
+    return check_profiled_methods_;
+  }
+
+  uint32_t MaxImageBlockSize() const {
+    return max_image_block_size_;
+  }
+
+  void SetMaxImageBlockSize(uint32_t size) {
+    max_image_block_size_ = size;
+  }
+
  private:
   bool ParseDumpInitFailures(const std::string& option, std::string* error_msg);
   void ParseDumpCfgPasses(const StringPiece& option, UsageFn Usage);
@@ -357,6 +392,9 @@ class CompilerOptions final {
   // Image classes, specifies the classes that will be included in the image if creating an image.
   // Must not be empty for real boot image, only for tests pretending to compile boot image.
   HashSet<std::string> image_classes_;
+
+  // Results of AOT verification.
+  const VerificationResults* verification_results_;
 
   ImageType image_type_;
   bool compiling_with_core_image_;
@@ -409,6 +447,13 @@ class CompilerOptions final {
   // profile.
   bool resolve_startup_const_strings_;
 
+  // When running profile-guided compilation, check that methods intended to be compiled end
+  // up compiled and are not punted.
+  ProfileMethodsCheck check_profiled_methods_;
+
+  // Maximum solid block size in the generated image.
+  uint32_t max_image_block_size_;
+
   RegisterAllocator::Strategy register_allocation_strategy_;
 
   // If not null, specifies optimization passes which will be run instead of defaults.
@@ -424,6 +469,7 @@ class CompilerOptions final {
   friend class CommonCompilerTest;
   friend class jit::JitCompiler;
   friend class verifier::VerifierDepsTest;
+  friend class linker::Arm64RelativePatcherTest;
 
   template <class Base>
   friend bool ReadCompilerOptions(Base& map, CompilerOptions* options, std::string* error_msg);

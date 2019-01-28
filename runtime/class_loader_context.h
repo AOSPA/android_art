@@ -89,7 +89,10 @@ class ClassLoaderContext {
   // If the context is empty, this method only creates a single PathClassLoader with the
   // given compilation_sources.
   //
-  // Notes:
+  // Shared libraries found in the chain will be canonicalized based on the dex files they
+  // contain.
+  //
+  // Implementation notes:
   //   1) the objects are not completely set up. Do not use this outside of tests and the compiler.
   //   2) should only be called before the first call to OpenDexFiles().
   jobject CreateClassLoader(const std::vector<const DexFile*>& compilation_sources) const;
@@ -224,12 +227,14 @@ class ClassLoaderContext {
   // of the call.
   void CheckDexFilesOpened(const std::string& calling_method) const;
 
-  // Adds the `class_loader` info to the context.
+  // Creates the `ClassLoaderInfo` representing`class_loader` and attach it to `this`.
   // The dex file present in `dex_elements` array (if not null) will be added at the end of
   // the classpath.
-  bool AddInfoToContextFromClassLoader(ScopedObjectAccessAlreadyRunnable& soa,
-                                       Handle<mirror::ClassLoader> class_loader,
-                                       Handle<mirror::ObjectArray<mirror::Object>> dex_elements)
+  bool CreateInfoFromClassLoader(ScopedObjectAccessAlreadyRunnable& soa,
+                                 Handle<mirror::ClassLoader> class_loader,
+                                 Handle<mirror::ObjectArray<mirror::Object>> dex_elements,
+                                 ClassLoaderInfo* child_info,
+                                 bool is_shared_library)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Encodes the context as a string suitable to be passed to dex2oat or to be added to the

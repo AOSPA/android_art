@@ -77,8 +77,9 @@ void GarbageCollector::RegisterPause(uint64_t nano_length) {
 
 void GarbageCollector::ResetCumulativeStatistics() {
   cumulative_timings_.Reset();
-  total_time_ns_ = 0;
-  total_freed_objects_ = 0;
+  total_thread_cpu_time_ns_ = 0u;
+  total_time_ns_ = 0u;
+  total_freed_objects_ = 0u;
   total_freed_bytes_ = 0;
   MutexLock mu(Thread::Current(), pause_histogram_lock_);
   pause_histogram_.Reset();
@@ -88,12 +89,15 @@ void GarbageCollector::Run(GcCause gc_cause, bool clear_soft_references) {
   ScopedTrace trace(android::base::StringPrintf("%s %s GC", PrettyCause(gc_cause), GetName()));
   Thread* self = Thread::Current();
   uint64_t start_time = NanoTime();
+  uint64_t thread_cpu_start_time = ThreadCpuNanoTime();
+  GetHeap()->CalculatePreGcWeightedAllocatedBytes();
   Iteration* current_iteration = GetCurrentIteration();
   current_iteration->Reset(gc_cause, clear_soft_references);
   // Note transaction mode is single-threaded and there's no asynchronous GC and this flag doesn't
   // change in the middle of a GC.
   is_transaction_active_ = Runtime::Current()->IsActiveTransaction();
   RunPhases();  // Run all the GC phases.
+  GetHeap()->CalculatePostGcWeightedAllocatedBytes();
   // Add the current timings to the cumulative timings.
   cumulative_timings_.AddLogger(*GetTimings());
   // Update cumulative statistics with how many bytes the GC iteration freed.
@@ -102,6 +106,8 @@ void GarbageCollector::Run(GcCause gc_cause, bool clear_soft_references) {
   total_freed_bytes_ += current_iteration->GetFreedBytes() +
       current_iteration->GetFreedLargeObjectBytes();
   uint64_t end_time = NanoTime();
+  uint64_t thread_cpu_end_time = ThreadCpuNanoTime();
+  total_thread_cpu_time_ns_ += thread_cpu_end_time - thread_cpu_start_time;
   current_iteration->SetDurationNs(end_time - start_time);
   if (Locks::mutator_lock_->IsExclusiveHeld(self)) {
     // The entire GC was paused, clear the fake pauses which might be in the pause times and add
@@ -159,8 +165,9 @@ void GarbageCollector::ResetMeasurements() {
     pause_histogram_.Reset();
   }
   cumulative_timings_.Reset();
-  total_time_ns_ = 0;
-  total_freed_objects_ = 0;
+  total_thread_cpu_time_ns_ = 0u;
+  total_time_ns_ = 0u;
+  total_freed_objects_ = 0u;
   total_freed_bytes_ = 0;
 }
 
@@ -229,12 +236,16 @@ void GarbageCollector::DumpPerformanceInfo(std::ostream& os) {
       pause_histogram_.PrintConfidenceIntervals(os, 0.99, cumulative_data);
     }
   }
+  double cpu_seconds = NsToMs(GetTotalCpuTime()) / 1000.0;
   os << GetName() << " total time: " << PrettyDuration(total_ns)
      << " mean time: " << PrettyDuration(total_ns / iterations) << "\n"
      << GetName() << " freed: " << freed_objects
      << " objects with total size " << PrettySize(freed_bytes) << "\n"
      << GetName() << " throughput: " << freed_objects / seconds << "/s / "
-     << PrettySize(freed_bytes / seconds) << "/s\n";
+     << PrettySize(freed_bytes / seconds) << "/s"
+     << "  per cpu-time: "
+     << static_cast<uint64_t>(freed_bytes / cpu_seconds) << "/s / "
+     << PrettySize(freed_bytes / cpu_seconds) << "/s\n";
 }
 
 }  // namespace collector

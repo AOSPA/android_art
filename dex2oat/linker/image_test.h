@@ -36,6 +36,7 @@
 #include "compiler_callbacks.h"
 #include "debug/method_debug_info.h"
 #include "dex/quick_compiler_callbacks.h"
+#include "dex/signature-inl.h"
 #include "driver/compiler_driver.h"
 #include "driver/compiler_options.h"
 #include "gc/space/image_space.h"
@@ -77,9 +78,10 @@ class ImageTest : public CommonCompilerTest {
     CommonCompilerTest::SetUp();
   }
 
-  void TestWriteRead(ImageHeader::StorageMode storage_mode);
+  void TestWriteRead(ImageHeader::StorageMode storage_mode, uint32_t max_image_block_size);
 
   void Compile(ImageHeader::StorageMode storage_mode,
+               uint32_t max_image_block_size,
                /*out*/ CompilationHelper& out_helper,
                const std::string& extra_dex = "",
                const std::initializer_list<std::string>& image_classes = {},
@@ -168,10 +170,11 @@ inline void ImageTest::DoCompile(ImageHeader::StorageMode storage_mode,
   {
     // Create a generic tmp file, to be the base of the .art and .oat temporary files.
     ScratchFile location;
-    for (int i = 0; i < static_cast<int>(class_path.size()); ++i) {
-      std::string cur_location =
-          android::base::StringPrintf("%s-%d.art", location.GetFilename().c_str(), i);
-      out_helper.image_locations.push_back(ScratchFile(cur_location));
+    std::vector<std::string> image_locations =
+        gc::space::ImageSpace::ExpandMultiImageLocations(out_helper.dex_file_locations,
+                                                         location.GetFilename() + ".art");
+    for (size_t i = 0u; i != class_path.size(); ++i) {
+      out_helper.image_locations.push_back(ScratchFile(image_locations[i]));
     }
   }
   std::vector<std::string> image_filenames;
@@ -200,14 +203,6 @@ inline void ImageTest::DoCompile(ImageHeader::StorageMode storage_mode,
   }
 
   std::unordered_map<const DexFile*, size_t> dex_file_to_oat_index_map;
-  std::vector<const char*> oat_filename_vector;
-  for (const std::string& file : oat_filenames) {
-    oat_filename_vector.push_back(file.c_str());
-  }
-  std::vector<const char*> image_filename_vector;
-  for (const std::string& file : image_filenames) {
-    image_filename_vector.push_back(file.c_str());
-  }
   size_t image_idx = 0;
   for (const DexFile* dex_file : class_path) {
     dex_file_to_oat_index_map.emplace(dex_file, image_idx);
@@ -217,28 +212,20 @@ inline void ImageTest::DoCompile(ImageHeader::StorageMode storage_mode,
   std::unique_ptr<ImageWriter> writer(new ImageWriter(*compiler_options_,
                                                       kRequestedImageBase,
                                                       storage_mode,
-                                                      oat_filename_vector,
+                                                      oat_filenames,
                                                       dex_file_to_oat_index_map,
+                                                      /*class_loader=*/ nullptr,
                                                       /*dirty_image_objects=*/ nullptr));
   {
     {
       jobject class_loader = nullptr;
       TimingLogger timings("ImageTest::WriteRead", false, false);
-      TimingLogger::ScopedTiming t("CompileAll", &timings);
-      SetDexFilesForOatFile(class_path);
-      driver->CompileAll(class_loader, class_path, &timings);
+      CompileAll(class_loader, class_path, &timings);
 
-      t.NewTiming("WriteElf");
+      TimingLogger::ScopedTiming t("WriteElf", &timings);
       SafeMap<std::string, std::string> key_value_store;
-      std::vector<const char*> dex_filename_vector;
-      for (size_t i = 0; i < class_path.size(); ++i) {
-        dex_filename_vector.push_back("");
-      }
       key_value_store.Put(OatHeader::kBootClassPathKey,
-                          gc::space::ImageSpace::GetMultiImageBootClassPath(
-                              dex_filename_vector,
-                              oat_filename_vector,
-                              image_filename_vector));
+                          android::base::Join(out_helper.dex_file_locations, ':'));
 
       std::vector<std::unique_ptr<ElfWriter>> elf_writers;
       std::vector<std::unique_ptr<OatWriter>> oat_writers;
@@ -270,7 +257,7 @@ inline void ImageTest::DoCompile(ImageHeader::StorageMode storage_mode,
         bool dex_files_ok = oat_writers[i]->WriteAndOpenDexFiles(
             out_helper.vdex_files[i].GetFile(),
             rodata.back(),
-            &key_value_store,
+            (i == 0u) ? &key_value_store : nullptr,
             /* verify */ false,           // Dex files may be dex-to-dex-ed, don't verify.
             /* update_input_vdex */ false,
             /* copy_dex_files */ CopyOption::kOnlyIfCompressed,
@@ -340,8 +327,7 @@ inline void ImageTest::DoCompile(ImageHeader::StorageMode storage_mode,
           elf_writer->EndDataBimgRelRo(data_bimg_rel_ro);
         }
 
-        bool header_ok = oat_writer->WriteHeader(elf_writer->GetStream(),
-                                                 /* image_file_location_oat_checksum */ 0u);
+        bool header_ok = oat_writer->WriteHeader(elf_writer->GetStream());
         ASSERT_TRUE(header_ok);
 
         writer->UpdateOatFileHeader(i, oat_writer->GetOatHeader());
@@ -355,8 +341,8 @@ inline void ImageTest::DoCompile(ImageHeader::StorageMode storage_mode,
     }
 
     bool success_image = writer->Write(kInvalidFd,
-                                       image_filename_vector,
-                                       oat_filename_vector);
+                                       image_filenames,
+                                       oat_filenames);
     ASSERT_TRUE(success_image);
 
     for (size_t i = 0, size = oat_filenames.size(); i != size; ++i) {
@@ -373,6 +359,7 @@ inline void ImageTest::DoCompile(ImageHeader::StorageMode storage_mode,
 
 inline void ImageTest::Compile(
     ImageHeader::StorageMode storage_mode,
+    uint32_t max_image_block_size,
     CompilationHelper& helper,
     const std::string& extra_dex,
     const std::initializer_list<std::string>& image_classes,
@@ -387,6 +374,7 @@ inline void ImageTest::Compile(
   CreateCompilerDriver();
   // Set inline filter values.
   compiler_options_->SetInlineMaxCodeUnits(CompilerOptions::kDefaultInlineMaxCodeUnits);
+  compiler_options_->SetMaxImageBlockSize(max_image_block_size);
   image_classes_.clear();
   if (!extra_dex.empty()) {
     helper.extra_dex_files = OpenTestDexFiles(extra_dex.c_str());
@@ -410,9 +398,10 @@ inline void ImageTest::Compile(
   }
 }
 
-inline void ImageTest::TestWriteRead(ImageHeader::StorageMode storage_mode) {
+inline void ImageTest::TestWriteRead(ImageHeader::StorageMode storage_mode,
+                                     uint32_t max_image_block_size) {
   CompilationHelper helper;
-  Compile(storage_mode, /*out*/ helper);
+  Compile(storage_mode, max_image_block_size, /*out*/ helper);
   std::vector<uint64_t> image_file_sizes;
   for (ScratchFile& image_file : helper.image_files) {
     std::unique_ptr<File> file(OS::OpenFileForReading(image_file.GetFilename().c_str()));
@@ -449,6 +438,9 @@ inline void ImageTest::TestWriteRead(ImageHeader::StorageMode storage_mode) {
   MemMap::Init();
 
   RuntimeOptions options;
+  options.emplace_back(GetClassPathOption("-Xbootclasspath:", GetLibCoreDexFileNames()), nullptr);
+  options.emplace_back(
+      GetClassPathOption("-Xbootclasspath-locations:", GetLibCoreDexLocations()), nullptr);
   std::string image("-Ximage:");
   image.append(helper.image_locations[0].GetFilename());
   options.push_back(std::make_pair(image.c_str(), static_cast<void*>(nullptr)));
@@ -487,6 +479,10 @@ inline void ImageTest::TestWriteRead(ImageHeader::StorageMode storage_mode) {
     } else if (image_file_size > 16 * KB) {
       // Compressed, file should be smaller than image. Not really valid for small images.
       ASSERT_LE(image_file_size, image_space->GetImageHeader().GetImageSize());
+      // TODO: Actually validate the blocks, this is hard since the blocks are not copied over for
+      // compressed images. Add kPageSize since image_size is rounded up to this.
+      ASSERT_GT(image_space->GetImageHeader().GetBlockCount() * max_image_block_size,
+                image_space->GetImageHeader().GetImageSize() - kPageSize);
     }
 
     image_space->VerifyImageAllocations();
@@ -497,7 +493,7 @@ inline void ImageTest::TestWriteRead(ImageHeader::StorageMode storage_mode) {
       CHECK_EQ(kRequestedImageBase, reinterpret_cast<uintptr_t>(image_begin));
     }
     for (size_t j = 0; j < dex->NumClassDefs(); ++j) {
-      const DexFile::ClassDef& class_def = dex->GetClassDef(j);
+      const dex::ClassDef& class_def = dex->GetClassDef(j);
       const char* descriptor = dex->GetClassDescriptor(class_def);
       ObjPtr<mirror::Class> klass = class_linker_->FindSystemClass(soa.Self(), descriptor);
       EXPECT_TRUE(klass != nullptr) << descriptor;

@@ -27,6 +27,7 @@
 #include "base/bit_vector-inl.h"
 #include "base/file_utils.h"
 #include "base/logging.h"  // For VLOG.
+#include "base/mutex-inl.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "class_linker.h"
@@ -118,9 +119,10 @@ const OatFile* OatFileManager::FindOpenedOatFileFromOatLocationLocked(
 }
 
 std::vector<const OatFile*> OatFileManager::GetBootOatFiles() const {
-  std::vector<const OatFile*> oat_files;
   std::vector<gc::space::ImageSpace*> image_spaces =
       Runtime::Current()->GetHeap()->GetBootImageSpaces();
+  std::vector<const OatFile*> oat_files;
+  oat_files.reserve(image_spaces.size());
   for (gc::space::ImageSpace* image_space : image_spaces) {
     oat_files.push_back(image_space->GetOatFile());
   }
@@ -153,6 +155,7 @@ OatFileManager::~OatFileManager() {
 std::vector<const OatFile*> OatFileManager::RegisterImageOatFiles(
     const std::vector<gc::space::ImageSpace*>& spaces) {
   std::vector<const OatFile*> oat_files;
+  oat_files.reserve(spaces.size());
   for (gc::space::ImageSpace* space : spaces) {
     oat_files.push_back(RegisterOatFile(space->ReleaseOatFile()));
   }
@@ -183,7 +186,7 @@ class TypeIndexInfo {
   static BitVector GenerateTypeIndexes(const DexFile* dex_file) {
     BitVector type_indexes(/*start_bits=*/0, /*expandable=*/true, Allocator::GetMallocAllocator());
     for (uint16_t i = 0; i < dex_file->NumClassDefs(); ++i) {
-      const DexFile::ClassDef& class_def = dex_file->GetClassDef(i);
+      const dex::ClassDef& class_def = dex_file->GetClassDef(i);
       uint16_t type_idx = class_def.class_idx_.index_;
       type_indexes.SetBit(type_idx);
     }
@@ -290,10 +293,12 @@ static bool CheckClassCollision(const OatFile* oat_file,
 
   // Generate type index information for each dex file.
   std::vector<TypeIndexInfo> loaded_types;
+  loaded_types.reserve(dex_files_loaded.size());
   for (const DexFile* dex_file : dex_files_loaded) {
     loaded_types.push_back(TypeIndexInfo(dex_file));
   }
   std::vector<TypeIndexInfo> unloaded_types;
+  unloaded_types.reserve(dex_files_unloaded.size());
   for (const DexFile* dex_file : dex_files_unloaded) {
     unloaded_types.push_back(TypeIndexInfo(dex_file));
   }

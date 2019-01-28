@@ -28,6 +28,7 @@
 #include "debugger.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "interpreter/interpreter.h"
+#include "jit-inl.h"
 #include "jit_code_cache.h"
 #include "jni/java_vm_ext.h"
 #include "mirror/method_handle_impl.h"
@@ -56,15 +57,25 @@ static constexpr size_t kJitSlowStressDefaultCompileThreshold = 2;      // Slow-
 // JIT compiler
 void* Jit::jit_library_handle_ = nullptr;
 void* Jit::jit_compiler_handle_ = nullptr;
-void* (*Jit::jit_load_)(bool*) = nullptr;
+void* (*Jit::jit_load_)(void) = nullptr;
 void (*Jit::jit_unload_)(void*) = nullptr;
-bool (*Jit::jit_compile_method_)(void*, ArtMethod*, Thread*, bool) = nullptr;
+bool (*Jit::jit_compile_method_)(void*, ArtMethod*, Thread*, bool, bool) = nullptr;
 void (*Jit::jit_types_loaded_)(void*, mirror::Class**, size_t count) = nullptr;
+bool (*Jit::jit_generate_debug_info_)(void*) = nullptr;
+void (*Jit::jit_update_options_)(void*) = nullptr;
 
 struct StressModeHelper {
   DECLARE_RUNTIME_DEBUG_FLAG(kSlowMode);
 };
 DEFINE_RUNTIME_DEBUG_FLAG(StressModeHelper, kSlowMode);
+
+uint32_t JitOptions::RoundUpThreshold(uint32_t threshold) {
+  if (threshold > kJitSamplesBatchSize) {
+    threshold = RoundUp(threshold, kJitSamplesBatchSize);
+  }
+  CHECK_LE(threshold, std::numeric_limits<uint16_t>::max());
+  return threshold;
+}
 
 JitOptions* JitOptions::CreateFromRuntimeArguments(const RuntimeArgumentMap& options) {
   auto* jit_options = new JitOptions;
@@ -91,30 +102,25 @@ JitOptions* JitOptions::CreateFromRuntimeArguments(const RuntimeArgumentMap& opt
                    : kJitStressDefaultCompileThreshold)
             : kJitDefaultCompileThreshold;
   }
-  if (jit_options->compile_threshold_ > std::numeric_limits<uint16_t>::max()) {
-    LOG(FATAL) << "Method compilation threshold is above its internal limit.";
-  }
+  jit_options->compile_threshold_ = RoundUpThreshold(jit_options->compile_threshold_);
 
   if (options.Exists(RuntimeArgumentMap::JITWarmupThreshold)) {
     jit_options->warmup_threshold_ = *options.Get(RuntimeArgumentMap::JITWarmupThreshold);
-    if (jit_options->warmup_threshold_ > std::numeric_limits<uint16_t>::max()) {
-      LOG(FATAL) << "Method warmup threshold is above its internal limit.";
-    }
   } else {
     jit_options->warmup_threshold_ = jit_options->compile_threshold_ / 2;
   }
+  jit_options->warmup_threshold_ = RoundUpThreshold(jit_options->warmup_threshold_);
 
   if (options.Exists(RuntimeArgumentMap::JITOsrThreshold)) {
     jit_options->osr_threshold_ = *options.Get(RuntimeArgumentMap::JITOsrThreshold);
-    if (jit_options->osr_threshold_ > std::numeric_limits<uint16_t>::max()) {
-      LOG(FATAL) << "Method on stack replacement threshold is above its internal limit.";
-    }
   } else {
     jit_options->osr_threshold_ = jit_options->compile_threshold_ * 2;
     if (jit_options->osr_threshold_ > std::numeric_limits<uint16_t>::max()) {
-      jit_options->osr_threshold_ = std::numeric_limits<uint16_t>::max();
+      jit_options->osr_threshold_ =
+          RoundDown(std::numeric_limits<uint16_t>::max(), kJitSamplesBatchSize);
     }
   }
+  jit_options->osr_threshold_ = RoundUpThreshold(jit_options->osr_threshold_);
 
   if (options.Exists(RuntimeArgumentMap::JITPriorityThreadWeight)) {
     jit_options->priority_thread_weight_ =
@@ -147,10 +153,6 @@ JitOptions* JitOptions::CreateFromRuntimeArguments(const RuntimeArgumentMap& opt
   return jit_options;
 }
 
-bool Jit::ShouldUsePriorityThreadWeight(Thread* self) {
-  return self->IsJitSensitiveThread() && Runtime::Current()->InJankPerceptibleProcessState();
-}
-
 void Jit::DumpInfo(std::ostream& os) {
   code_cache_->Dump(os);
   cumulative_timings_.Dump(os);
@@ -179,20 +181,21 @@ Jit* Jit::Create(JitCodeCache* code_cache, JitOptions* options) {
     LOG(WARNING) << "Not creating JIT: library not loaded";
     return nullptr;
   }
-  bool will_generate_debug_symbols = false;
-  jit_compiler_handle_ = (jit_load_)(&will_generate_debug_symbols);
+  jit_compiler_handle_ = (jit_load_)();
   if (jit_compiler_handle_ == nullptr) {
     LOG(WARNING) << "Not creating JIT: failed to allocate a compiler";
     return nullptr;
   }
   std::unique_ptr<Jit> jit(new Jit(code_cache, options));
-  jit->generate_debug_info_ = will_generate_debug_symbols;
 
+  // If the code collector is enabled, check if that still holds:
   // With 'perf', we want a 1-1 mapping between an address and a method.
   // We aren't able to keep method pointers live during the instrumentation method entry trampoline
   // so we will just disable jit-gc if we are doing that.
-  code_cache->SetGarbageCollectCode(!jit->generate_debug_info_ &&
-      !Runtime::Current()->GetInstrumentation()->AreExitStubsInstalled());
+  if (code_cache->GetGarbageCollectCode()) {
+    code_cache->SetGarbageCollectCode(!jit_generate_debug_info_(jit_compiler_handle_) &&
+        !Runtime::Current()->GetInstrumentation()->AreExitStubsInstalled());
+  }
 
   VLOG(jit) << "JIT created with initial_capacity="
       << PrettySize(options->GetCodeCacheInitialCapacity())
@@ -200,11 +203,19 @@ Jit* Jit::Create(JitCodeCache* code_cache, JitOptions* options) {
       << ", compile_threshold=" << options->GetCompileThreshold()
       << ", profile_saver_options=" << options->GetProfileSaverOptions();
 
-  jit->CreateThreadPool();
-
   // Notify native debugger about the classes already loaded before the creation of the jit.
   jit->DumpTypeInfoForLoadedTypes(Runtime::Current()->GetClassLinker());
   return jit.release();
+}
+
+template <typename T>
+bool Jit::LoadSymbol(T* address, const char* name, std::string* error_msg) {
+  *address = reinterpret_cast<T>(dlsym(jit_library_handle_, name));
+  if (*address == nullptr) {
+    *error_msg = std::string("JIT couldn't find ") + name + std::string(" entry point");
+    return false;
+  }
+  return true;
 }
 
 bool Jit::LoadCompilerLibrary(std::string* error_msg) {
@@ -216,37 +227,22 @@ bool Jit::LoadCompilerLibrary(std::string* error_msg) {
     *error_msg = oss.str();
     return false;
   }
-  jit_load_ = reinterpret_cast<void* (*)(bool*)>(dlsym(jit_library_handle_, "jit_load"));
-  if (jit_load_ == nullptr) {
+  bool all_resolved = true;
+  all_resolved = all_resolved && LoadSymbol(&jit_load_, "jit_load", error_msg);
+  all_resolved = all_resolved && LoadSymbol(&jit_unload_, "jit_unload", error_msg);
+  all_resolved = all_resolved && LoadSymbol(&jit_compile_method_, "jit_compile_method", error_msg);
+  all_resolved = all_resolved && LoadSymbol(&jit_types_loaded_, "jit_types_loaded", error_msg);
+  all_resolved = all_resolved && LoadSymbol(&jit_update_options_, "jit_update_options", error_msg);
+  all_resolved = all_resolved &&
+      LoadSymbol(&jit_generate_debug_info_, "jit_generate_debug_info", error_msg);
+  if (!all_resolved) {
     dlclose(jit_library_handle_);
-    *error_msg = "JIT couldn't find jit_load entry point";
-    return false;
-  }
-  jit_unload_ = reinterpret_cast<void (*)(void*)>(
-      dlsym(jit_library_handle_, "jit_unload"));
-  if (jit_unload_ == nullptr) {
-    dlclose(jit_library_handle_);
-    *error_msg = "JIT couldn't find jit_unload entry point";
-    return false;
-  }
-  jit_compile_method_ = reinterpret_cast<bool (*)(void*, ArtMethod*, Thread*, bool)>(
-      dlsym(jit_library_handle_, "jit_compile_method"));
-  if (jit_compile_method_ == nullptr) {
-    dlclose(jit_library_handle_);
-    *error_msg = "JIT couldn't find jit_compile_method entry point";
-    return false;
-  }
-  jit_types_loaded_ = reinterpret_cast<void (*)(void*, mirror::Class**, size_t)>(
-      dlsym(jit_library_handle_, "jit_types_loaded"));
-  if (jit_types_loaded_ == nullptr) {
-    dlclose(jit_library_handle_);
-    *error_msg = "JIT couldn't find jit_types_loaded entry point";
     return false;
   }
   return true;
 }
 
-bool Jit::CompileMethod(ArtMethod* method, Thread* self, bool osr) {
+bool Jit::CompileMethod(ArtMethod* method, Thread* self, bool baseline, bool osr) {
   DCHECK(Runtime::Current()->UseJitCompilation());
   DCHECK(!method->IsRuntimeMethod());
 
@@ -276,7 +272,7 @@ bool Jit::CompileMethod(ArtMethod* method, Thread* self, bool osr) {
   VLOG(jit) << "Compiling method "
             << ArtMethod::PrettyMethod(method_to_compile)
             << " osr=" << std::boolalpha << osr;
-  bool success = jit_compile_method_(jit_compiler_handle_, method_to_compile, self, osr);
+  bool success = jit_compile_method_(jit_compiler_handle_, method_to_compile, self, baseline, osr);
   code_cache_->DoneCompiling(method_to_compile, self, osr);
   if (!success) {
     VLOG(jit) << "Failed to compile method "
@@ -295,16 +291,10 @@ bool Jit::CompileMethod(ArtMethod* method, Thread* self, bool osr) {
   return success;
 }
 
-void Jit::CreateThreadPool() {
-  // There is a DCHECK in the 'AddSamples' method to ensure the tread pool
-  // is not null when we instrument.
-
-  // We need peers as we may report the JIT thread, e.g., in the debugger.
-  constexpr bool kJitPoolNeedsPeers = true;
-  thread_pool_.reset(new ThreadPool("Jit thread pool", 1, kJitPoolNeedsPeers));
-
-  thread_pool_->SetPthreadPriority(options_->GetThreadPoolPthreadPriority());
-  Start();
+void Jit::WaitForWorkersToBeCreated() {
+  if (thread_pool_ != nullptr) {
+    thread_pool_->WaitForWorkersToBeCreated();
+  }
 }
 
 void Jit::DeleteThreadPool() {
@@ -375,7 +365,7 @@ void Jit::NewTypeLoadedIfUsingJit(mirror::Class* type) {
     return;
   }
   jit::Jit* jit = Runtime::Current()->GetJit();
-  if (jit->generate_debug_info_) {
+  if (jit_generate_debug_info_(jit->jit_compiler_handle_)) {
     DCHECK(jit->jit_types_loaded_ != nullptr);
     jit->jit_types_loaded_(jit->jit_compiler_handle_, &type, 1);
   }
@@ -390,7 +380,7 @@ void Jit::DumpTypeInfoForLoadedTypes(ClassLinker* linker) {
     std::vector<mirror::Class*> classes_;
   };
 
-  if (generate_debug_info_) {
+  if (jit_generate_debug_info_(jit_compiler_handle_)) {
     ScopedObjectAccess so(Thread::Current());
 
     CollectClasses visitor;
@@ -562,10 +552,11 @@ void Jit::AddMemoryUsage(ArtMethod* method, size_t bytes) {
 
 class JitCompileTask final : public Task {
  public:
-  enum TaskKind {
+  enum class TaskKind {
     kAllocateProfile,
     kCompile,
-    kCompileOsr
+    kCompileBaseline,
+    kCompileOsr,
   };
 
   JitCompileTask(ArtMethod* method, TaskKind kind) : method_(method), kind_(kind) {
@@ -582,14 +573,22 @@ class JitCompileTask final : public Task {
 
   void Run(Thread* self) override {
     ScopedObjectAccess soa(self);
-    if (kind_ == kCompile) {
-      Runtime::Current()->GetJit()->CompileMethod(method_, self, /* osr= */ false);
-    } else if (kind_ == kCompileOsr) {
-      Runtime::Current()->GetJit()->CompileMethod(method_, self, /* osr= */ true);
-    } else {
-      DCHECK(kind_ == kAllocateProfile);
-      if (ProfilingInfo::Create(self, method_, /* retry_allocation= */ true)) {
-        VLOG(jit) << "Start profiling " << ArtMethod::PrettyMethod(method_);
+    switch (kind_) {
+      case TaskKind::kCompile:
+      case TaskKind::kCompileBaseline:
+      case TaskKind::kCompileOsr: {
+        Runtime::Current()->GetJit()->CompileMethod(
+            method_,
+            self,
+            /* baseline= */ (kind_ == TaskKind::kCompileBaseline),
+            /* osr= */ (kind_ == TaskKind::kCompileOsr));
+        break;
+      }
+      case TaskKind::kAllocateProfile: {
+        if (ProfilingInfo::Create(self, method_, /* retry_allocation= */ true)) {
+          VLOG(jit) << "Start profiling " << ArtMethod::PrettyMethod(method_);
+        }
+        break;
       }
     }
     ProfileSaver::NotifyJitActivity();
@@ -606,6 +605,18 @@ class JitCompileTask final : public Task {
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(JitCompileTask);
 };
+
+void Jit::CreateThreadPool() {
+  // There is a DCHECK in the 'AddSamples' method to ensure the tread pool
+  // is not null when we instrument.
+
+  // We need peers as we may report the JIT thread, e.g., in the debugger.
+  constexpr bool kJitPoolNeedsPeers = true;
+  thread_pool_.reset(new ThreadPool("Jit thread pool", 1, kJitPoolNeedsPeers));
+
+  thread_pool_->SetPthreadPriority(options_->GetThreadPoolPthreadPriority());
+  Start();
+}
 
 static bool IgnoreSamplesForMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_) {
   if (method->IsClassInitializer() || !method->IsCompilable()) {
@@ -628,18 +639,24 @@ static bool IgnoreSamplesForMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mut
   return false;
 }
 
-void Jit::AddSamples(Thread* self, ArtMethod* method, uint16_t count, bool with_backedges) {
+bool Jit::MaybeCompileMethod(Thread* self,
+                             ArtMethod* method,
+                             uint32_t old_count,
+                             uint32_t new_count,
+                             bool with_backedges) {
   if (thread_pool_ == nullptr) {
-    // Should only see this when shutting down.
-    DCHECK(Runtime::Current()->IsShuttingDown(self));
-    return;
+    // Should only see this when shutting down, starting up, or in safe mode.
+    DCHECK(Runtime::Current()->IsShuttingDown(self) ||
+           !Runtime::Current()->IsFinishedStarting() ||
+           Runtime::Current()->IsSafeMode());
+    return false;
   }
   if (IgnoreSamplesForMethod(method)) {
-    return;
+    return false;
   }
   if (HotMethodThreshold() == 0) {
     // Tests might request JIT on first use (compiled synchronously in the interpreter).
-    return;
+    return false;
   }
   DCHECK(thread_pool_ != nullptr);
   DCHECK_GT(WarmMethodThreshold(), 0);
@@ -648,15 +665,9 @@ void Jit::AddSamples(Thread* self, ArtMethod* method, uint16_t count, bool with_
   DCHECK_GE(PriorityThreadWeight(), 1);
   DCHECK_LE(PriorityThreadWeight(), HotMethodThreshold());
 
-  uint16_t starting_count = method->GetCounter();
-  if (Jit::ShouldUsePriorityThreadWeight(self)) {
-    count *= PriorityThreadWeight();
-  }
-  uint32_t new_count = starting_count + count;
-  // Note: Native method have no "warm" state or profiling info.
-  if (LIKELY(!method->IsNative()) && starting_count < WarmMethodThreshold()) {
-    if ((new_count >= WarmMethodThreshold()) &&
-        (method->GetProfilingInfo(kRuntimePointerSize) == nullptr)) {
+  if (old_count < WarmMethodThreshold() && new_count >= WarmMethodThreshold()) {
+    // Note: Native method have no "warm" state or profiling info.
+    if (!method->IsNative() && method->GetProfilingInfo(kRuntimePointerSize) == nullptr) {
       bool success = ProfilingInfo::Create(self, method, /* retry_allocation= */ false);
       if (success) {
         VLOG(jit) << "Start profiling " << method->PrettyMethod();
@@ -666,40 +677,37 @@ void Jit::AddSamples(Thread* self, ArtMethod* method, uint16_t count, bool with_
         // Calling ProfilingInfo::Create might put us in a suspended state, which could
         // lead to the thread pool being deleted when we are shutting down.
         DCHECK(Runtime::Current()->IsShuttingDown(self));
-        return;
+        return false;
       }
 
       if (!success) {
         // We failed allocating. Instead of doing the collection on the Java thread, we push
         // an allocation to a compiler thread, that will do the collection.
-        thread_pool_->AddTask(self, new JitCompileTask(method, JitCompileTask::kAllocateProfile));
-      }
-    }
-    // Avoid jumping more than one state at a time.
-    new_count = std::min(new_count, static_cast<uint32_t>(HotMethodThreshold() - 1));
-  } else if (UseJitCompilation()) {
-    if (starting_count < HotMethodThreshold()) {
-      if ((new_count >= HotMethodThreshold()) &&
-          !code_cache_->ContainsPc(method->GetEntryPointFromQuickCompiledCode())) {
-        DCHECK(thread_pool_ != nullptr);
-        thread_pool_->AddTask(self, new JitCompileTask(method, JitCompileTask::kCompile));
-      }
-      // Avoid jumping more than one state at a time.
-      new_count = std::min(new_count, static_cast<uint32_t>(OSRMethodThreshold() - 1));
-    } else if (starting_count < OSRMethodThreshold()) {
-      if (!with_backedges) {
-        // If the samples don't contain any back edge, we don't increment the hotness.
-        return;
-      }
-      DCHECK(!method->IsNative());  // No back edges reported for native methods.
-      if ((new_count >= OSRMethodThreshold()) &&  !code_cache_->IsOsrCompiled(method)) {
-        DCHECK(thread_pool_ != nullptr);
-        thread_pool_->AddTask(self, new JitCompileTask(method, JitCompileTask::kCompileOsr));
+        thread_pool_->AddTask(
+            self, new JitCompileTask(method, JitCompileTask::TaskKind::kAllocateProfile));
       }
     }
   }
-  // Update hotness counter
-  method->SetCounter(new_count);
+  if (UseJitCompilation()) {
+    if (old_count < HotMethodThreshold() && new_count >= HotMethodThreshold()) {
+      if (!code_cache_->ContainsPc(method->GetEntryPointFromQuickCompiledCode())) {
+        DCHECK(thread_pool_ != nullptr);
+        thread_pool_->AddTask(self, new JitCompileTask(method, JitCompileTask::TaskKind::kCompile));
+      }
+    }
+    if (old_count < OSRMethodThreshold() && new_count >= OSRMethodThreshold()) {
+      if (!with_backedges) {
+        return false;
+      }
+      DCHECK(!method->IsNative());  // No back edges reported for native methods.
+      if (!code_cache_->IsOsrCompiled(method)) {
+        DCHECK(thread_pool_ != nullptr);
+        thread_pool_->AddTask(
+            self, new JitCompileTask(method, JitCompileTask::TaskKind::kCompileOsr));
+      }
+    }
+  }
+  return true;
 }
 
 class ScopedSetRuntimeThread {
@@ -727,7 +735,7 @@ void Jit::MethodEntered(Thread* thread, ArtMethod* method) {
         // The compiler requires a ProfilingInfo object for non-native methods.
         ProfilingInfo::Create(thread, np_method, /* retry_allocation= */ true);
       }
-      JitCompileTask compile_task(method, JitCompileTask::kCompile);
+      JitCompileTask compile_task(method, JitCompileTask::TaskKind::kCompile);
       // Fake being in a runtime thread so that class-load behavior will be the same as normal jit.
       ScopedSetRuntimeThread ssrt(thread);
       compile_task.Run(thread);
@@ -793,6 +801,47 @@ ScopedJitSuspend::~ScopedJitSuspend() {
     DCHECK(Runtime::Current()->GetJit()->GetThreadPool() != nullptr);
     Runtime::Current()->GetJit()->Start();
   }
+}
+
+void Jit::PostForkChildAction(bool is_zygote) {
+  if (is_zygote) {
+    // Don't transition if this is for a child zygote.
+    return;
+  }
+  if (Runtime::Current()->IsSafeMode()) {
+    // Delete the thread pool, we are not going to JIT.
+    thread_pool_.reset(nullptr);
+    return;
+  }
+  // At this point, the compiler options have been adjusted to the particular configuration
+  // of the forked child. Parse them again.
+  jit_update_options_(jit_compiler_handle_);
+
+  // Adjust the status of code cache collection: the status from zygote was to not collect.
+  code_cache_->SetGarbageCollectCode(!jit_generate_debug_info_(jit_compiler_handle_) &&
+      !Runtime::Current()->GetInstrumentation()->AreExitStubsInstalled());
+
+  if (thread_pool_ != nullptr) {
+    // Remove potential tasks that have been inherited from the zygote.
+    thread_pool_->RemoveAllTasks(Thread::Current());
+
+    // Resume JIT compilation.
+    thread_pool_->CreateThreads();
+  }
+}
+
+void Jit::PreZygoteFork() {
+  if (thread_pool_ == nullptr) {
+    return;
+  }
+  thread_pool_->DeleteThreads();
+}
+
+void Jit::PostZygoteFork() {
+  if (thread_pool_ == nullptr) {
+    return;
+  }
+  thread_pool_->CreateThreads();
 }
 
 }  // namespace jit

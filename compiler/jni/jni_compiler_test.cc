@@ -1300,15 +1300,15 @@ jint my_gettext(JNIEnv* env, jclass klass, jlong val1, jobject obj1, jlong val2,
   EXPECT_TRUE(env->IsInstanceOf(JniCompilerTest::jobj_, klass));
   EXPECT_TRUE(env->IsSameObject(JniCompilerTest::jobj_, obj1));
   EXPECT_TRUE(env->IsSameObject(JniCompilerTest::jobj_, obj2));
-  EXPECT_EQ(0x12345678ABCDEF88ll, val1);
-  EXPECT_EQ(0x7FEDCBA987654321ll, val2);
+  EXPECT_EQ(0x12345678ABCDEF88LL, val1);
+  EXPECT_EQ(0x7FEDCBA987654321LL, val2);
   return 42;
 }
 
 void JniCompilerTest::GetTextImpl() {
   SetUpForTest(true, "getText", "(JLjava/lang/Object;JLjava/lang/Object;)I",
                CURRENT_JNI_WRAPPER(my_gettext));
-  jint result = env_->CallStaticIntMethod(jklass_, jmethod_, 0x12345678ABCDEF88ll, jobj_,
+  jint result = env_->CallStaticIntMethod(jklass_, jmethod_, 0x12345678ABCDEF88LL, jobj_,
                                           INT64_C(0x7FEDCBA987654321), jobj_);
   EXPECT_EQ(result, 42);
 }
@@ -2196,7 +2196,7 @@ void Java_MyClassNatives_normalNative(JNIEnv*, jclass) {
 // Methods not annotated with anything are not considered "fast native"
 // -- Check that the annotation lookup does not find it.
 void JniCompilerTest::NormalNativeImpl() {
-  SetUpForTest(/* direct */ true,
+  SetUpForTest(/* direct= */ true,
                "normalNative",
                "()V",
                CURRENT_JNI_WRAPPER(Java_MyClassNatives_normalNative));
@@ -2218,7 +2218,7 @@ void Java_MyClassNatives_fastNative(JNIEnv*, jclass) {
 }
 
 void JniCompilerTest::FastNativeImpl() {
-  SetUpForTest(/* direct */ true,
+  SetUpForTest(/* direct= */ true,
                "fastNative",
                "()V",
                CURRENT_JNI_WRAPPER(Java_MyClassNatives_fastNative));
@@ -2241,7 +2241,7 @@ void Java_MyClassNatives_criticalNative() {
 }
 
 void JniCompilerTest::CriticalNativeImpl() {
-  SetUpForTest(/* direct */ true,
+  SetUpForTest(/* direct= */ true,
                // Important: Don't change the "current jni" yet to avoid a method name suffix.
                "criticalNative",
                "()V",

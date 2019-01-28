@@ -58,32 +58,6 @@ static constexpr uint8_t kOpNewMethod = 1U;
 static constexpr uint8_t kOpNewThread = 2U;
 static constexpr uint8_t kOpTraceSummary = 3U;
 
-class BuildStackTraceVisitor : public StackVisitor {
- public:
-  explicit BuildStackTraceVisitor(Thread* thread)
-      : StackVisitor(thread, nullptr, StackVisitor::StackWalkKind::kIncludeInlinedFrames),
-        method_trace_(Trace::AllocStackTrace()) {}
-
-  bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
-    ArtMethod* m = GetMethod();
-    // Ignore runtime frames (in particular callee save).
-    if (!m->IsRuntimeMethod()) {
-      method_trace_->push_back(m);
-    }
-    return true;
-  }
-
-  // Returns a stack trace where the topmost frame corresponds with the first element of the vector.
-  std::vector<ArtMethod*>* GetStackTrace() const {
-    return method_trace_;
-  }
-
- private:
-  std::vector<ArtMethod*>* const method_trace_;
-
-  DISALLOW_COPY_AND_ASSIGN(BuildStackTraceVisitor);
-};
-
 static const char     kTraceTokenChar             = '*';
 static const uint16_t kTraceHeaderLength          = 32;
 static const uint32_t kTraceMagicValue            = 0x574f4c53;
@@ -228,9 +202,19 @@ static void Append8LE(uint8_t* buf, uint64_t val) {
 }
 
 static void GetSample(Thread* thread, void* arg) REQUIRES_SHARED(Locks::mutator_lock_) {
-  BuildStackTraceVisitor build_trace_visitor(thread);
-  build_trace_visitor.WalkStack();
-  std::vector<ArtMethod*>* stack_trace = build_trace_visitor.GetStackTrace();
+  std::vector<ArtMethod*>* const stack_trace = Trace::AllocStackTrace();
+  StackVisitor::WalkStack(
+      [&](const art::StackVisitor* stack_visitor) REQUIRES_SHARED(Locks::mutator_lock_) {
+        ArtMethod* m = stack_visitor->GetMethod();
+        // Ignore runtime frames (in particular callee save).
+        if (!m->IsRuntimeMethod()) {
+          stack_trace->push_back(m);
+        }
+        return true;
+      },
+      thread,
+      /* context= */ nullptr,
+      art::StackVisitor::StackWalkKind::kIncludeInlinedFrames);
   Trace* the_trace = reinterpret_cast<Trace*>(arg);
   the_trace->CompareAndUpdateStackTrace(thread, stack_trace);
 }
@@ -530,106 +514,6 @@ void Trace::Stop() {
 void Trace::Shutdown() {
   if (GetMethodTracingMode() != kTracingInactive) {
     Stop();
-  }
-}
-
-void Trace::Pause() {
-  bool stop_alloc_counting = false;
-  Runtime* runtime = Runtime::Current();
-  Trace* the_trace = nullptr;
-
-  Thread* const self = Thread::Current();
-  pthread_t sampling_pthread = 0U;
-  {
-    MutexLock mu(self, *Locks::trace_lock_);
-    if (the_trace_ == nullptr) {
-      LOG(ERROR) << "Trace pause requested, but no trace currently running";
-      return;
-    } else {
-      the_trace = the_trace_;
-      sampling_pthread = sampling_pthread_;
-    }
-  }
-
-  if (sampling_pthread != 0U) {
-    {
-      MutexLock mu(self, *Locks::trace_lock_);
-      the_trace_ = nullptr;
-    }
-    CHECK_PTHREAD_CALL(pthread_join, (sampling_pthread, nullptr), "sampling thread shutdown");
-    sampling_pthread_ = 0U;
-    {
-      MutexLock mu(self, *Locks::trace_lock_);
-      the_trace_ = the_trace;
-    }
-  }
-
-  if (the_trace != nullptr) {
-    gc::ScopedGCCriticalSection gcs(self,
-                                    gc::kGcCauseInstrumentation,
-                                    gc::kCollectorTypeInstrumentation);
-    ScopedSuspendAll ssa(__FUNCTION__);
-    stop_alloc_counting = (the_trace->flags_ & Trace::kTraceCountAllocs) != 0;
-
-    if (the_trace->trace_mode_ == TraceMode::kSampling) {
-      MutexLock mu(self, *Locks::thread_list_lock_);
-      runtime->GetThreadList()->ForEach(ClearThreadStackTraceAndClockBase, nullptr);
-    } else {
-      runtime->GetInstrumentation()->DisableMethodTracing(kTracerInstrumentationKey);
-      runtime->GetInstrumentation()->RemoveListener(
-          the_trace,
-          instrumentation::Instrumentation::kMethodEntered |
-          instrumentation::Instrumentation::kMethodExited |
-          instrumentation::Instrumentation::kMethodUnwind);
-    }
-  }
-
-  if (stop_alloc_counting) {
-    // Can be racy since SetStatsEnabled is not guarded by any locks.
-    Runtime::Current()->SetStatsEnabled(false);
-  }
-}
-
-void Trace::Resume() {
-  Thread* self = Thread::Current();
-  Trace* the_trace;
-  {
-    MutexLock mu(self, *Locks::trace_lock_);
-    if (the_trace_ == nullptr) {
-      LOG(ERROR) << "No trace to resume (or sampling mode), ignoring this request";
-      return;
-    }
-    the_trace = the_trace_;
-  }
-
-  Runtime* runtime = Runtime::Current();
-
-  // Enable count of allocs if specified in the flags.
-  bool enable_stats = (the_trace->flags_ & kTraceCountAllocs) != 0;
-
-  {
-    gc::ScopedGCCriticalSection gcs(self,
-                                    gc::kGcCauseInstrumentation,
-                                    gc::kCollectorTypeInstrumentation);
-    ScopedSuspendAll ssa(__FUNCTION__);
-
-    // Reenable.
-    if (the_trace->trace_mode_ == TraceMode::kSampling) {
-      CHECK_PTHREAD_CALL(pthread_create, (&sampling_pthread_, nullptr, &RunSamplingThread,
-          reinterpret_cast<void*>(the_trace->interval_us_)), "Sampling profiler thread");
-    } else {
-      runtime->GetInstrumentation()->AddListener(the_trace,
-                                                 instrumentation::Instrumentation::kMethodEntered |
-                                                 instrumentation::Instrumentation::kMethodExited |
-                                                 instrumentation::Instrumentation::kMethodUnwind);
-      // TODO: In full-PIC mode, we don't need to fully deopt.
-      runtime->GetInstrumentation()->EnableMethodTracing(kTracerInstrumentationKey);
-    }
-  }
-
-  // Can't call this when holding the mutator lock.
-  if (enable_stats) {
-    runtime->SetStatsEnabled(true);
   }
 }
 

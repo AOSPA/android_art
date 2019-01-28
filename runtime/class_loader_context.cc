@@ -17,6 +17,7 @@
 #include "class_loader_context.h"
 
 #include <android-base/parseint.h>
+#include <android-base/strings.h>
 
 #include "art_field-inl.h"
 #include "base/casts.h"
@@ -24,11 +25,14 @@
 #include "base/stl_util.h"
 #include "class_linker.h"
 #include "class_loader_utils.h"
+#include "class_root.h"
 #include "dex/art_dex_file_loader.h"
 #include "dex/dex_file.h"
 #include "dex/dex_file_loader.h"
 #include "handle_scope-inl.h"
 #include "jni/jni_internal.h"
+#include "mirror/object_array-alloc-inl.h"
+#include "nativehelper/scoped_local_ref.h"
 #include "oat_file_assistant.h"
 #include "obj_ptr-inl.h"
 #include "runtime.h"
@@ -107,6 +111,39 @@ std::unique_ptr<ClassLoaderContext> ClassLoaderContext::Create(const std::string
   }
 }
 
+static size_t FindMatchingSharedLibraryCloseMarker(const std::string& spec,
+                                                   size_t shared_library_open_index) {
+  // Counter of opened shared library marker we've encountered so far.
+  uint32_t counter = 1;
+  // The index at which we're operating in the loop.
+  uint32_t string_index = shared_library_open_index + 1;
+  size_t shared_library_close = std::string::npos;
+  while (counter != 0) {
+    shared_library_close =
+        spec.find_first_of(kClassLoaderSharedLibraryClosingMark, string_index);
+    size_t shared_library_open =
+        spec.find_first_of(kClassLoaderSharedLibraryOpeningMark, string_index);
+    if (shared_library_close == std::string::npos) {
+      // No matching closing marker. Return an error.
+      break;
+    }
+
+    if ((shared_library_open == std::string::npos) ||
+        (shared_library_close < shared_library_open)) {
+      // We have seen a closing marker. Decrement the counter.
+      --counter;
+      // Move the search index forward.
+      string_index = shared_library_close + 1;
+    } else {
+      // New nested opening marker. Increment the counter and move the search
+      // index after the marker.
+      ++counter;
+      string_index = shared_library_open + 1;
+    }
+  }
+  return shared_library_close;
+}
+
 // The expected format is:
 // "ClassLoaderType1[ClasspathElem1*Checksum1:ClasspathElem2*Checksum2...]{ClassLoaderType2[...]}".
 // The checksum part of the format is expected only if parse_cheksums is true.
@@ -160,7 +197,9 @@ std::unique_ptr<ClassLoaderContext::ClassLoaderInfo> ClassLoaderContext::ParseCl
     }
   }
 
-  if (class_loader_spec[class_loader_spec.length() - 1] == kClassLoaderSharedLibraryClosingMark) {
+  if ((class_loader_spec[class_loader_spec.length() - 1] == kClassLoaderSharedLibraryClosingMark) &&
+      (class_loader_spec[class_loader_spec.length() - 2] != kClassLoaderSharedLibraryOpeningMark)) {
+    // Non-empty list of shared libraries.
     size_t start_index = class_loader_spec.find_first_of(kClassLoaderSharedLibraryOpeningMark);
     if (start_index == std::string::npos) {
       return nullptr;
@@ -168,8 +207,43 @@ std::unique_ptr<ClassLoaderContext::ClassLoaderInfo> ClassLoaderContext::ParseCl
     std::string shared_libraries_spec =
         class_loader_spec.substr(start_index + 1, class_loader_spec.length() - start_index - 2);
     std::vector<std::string> shared_libraries;
-    Split(shared_libraries_spec, kClassLoaderSharedLibrarySeparator, &shared_libraries);
-    for (const std::string& shared_library_spec : shared_libraries) {
+    size_t cursor = 0;
+    while (cursor != shared_libraries_spec.length()) {
+      size_t shared_library_separator =
+          shared_libraries_spec.find_first_of(kClassLoaderSharedLibrarySeparator, cursor);
+      size_t shared_library_open =
+          shared_libraries_spec.find_first_of(kClassLoaderSharedLibraryOpeningMark, cursor);
+      std::string shared_library_spec;
+      if (shared_library_separator == std::string::npos) {
+        // Only one shared library, for example:
+        // PCL[...]
+        shared_library_spec =
+            shared_libraries_spec.substr(cursor, shared_libraries_spec.length() - cursor);
+        cursor = shared_libraries_spec.length();
+      } else if ((shared_library_open == std::string::npos) ||
+                 (shared_library_open > shared_library_separator)) {
+        // We found a shared library without nested shared libraries, for example:
+        // PCL[...]#PCL[...]{...}
+        shared_library_spec =
+            shared_libraries_spec.substr(cursor, shared_library_separator - cursor);
+        cursor = shared_library_separator + 1;
+      } else {
+        // The shared library contains nested shared libraries. Find the matching closing shared
+        // marker for it.
+        size_t closing_marker =
+            FindMatchingSharedLibraryCloseMarker(shared_libraries_spec, shared_library_open);
+        if (closing_marker == std::string::npos) {
+          // No matching closing marker, return an error.
+          return nullptr;
+        }
+        shared_library_spec = shared_libraries_spec.substr(cursor, closing_marker + 1 - cursor);
+        cursor = closing_marker + 1;
+        if (cursor != shared_libraries_spec.length() &&
+            shared_libraries_spec[cursor] == kClassLoaderSharedLibrarySeparator) {
+          // Pass the shared library separator marker.
+          ++cursor;
+        }
+      }
       std::unique_ptr<ClassLoaderInfo> shared_library(
           ParseInternal(shared_library_spec, parse_checksums));
       if (shared_library == nullptr) {
@@ -250,50 +324,24 @@ ClassLoaderContext::ClassLoaderInfo* ClassLoaderContext::ParseInternal(
       // The class loader spec contains shared libraries. Find the matching closing
       // shared library marker for it.
 
-      // Counter of opened shared library marker we've encountered so far.
-      uint32_t counter = 1;
-      // The index at which we're operating in the loop.
-      uint32_t string_index = first_shared_library_open + 1;
-      while (counter != 0) {
-        size_t shared_library_close =
-            remaining.find_first_of(kClassLoaderSharedLibraryClosingMark, string_index);
-        size_t shared_library_open =
-            remaining.find_first_of(kClassLoaderSharedLibraryOpeningMark, string_index);
-        if (shared_library_close == std::string::npos) {
-          // No matching closing market. Return an error.
-          LOG(ERROR) << "Invalid class loader spec: " << class_loader_spec;
-          return nullptr;
-        }
+      uint32_t shared_library_close =
+          FindMatchingSharedLibraryCloseMarker(remaining, first_shared_library_open);
+      if (shared_library_close == std::string::npos) {
+        LOG(ERROR) << "Invalid class loader spec: " << class_loader_spec;
+        return nullptr;
+      }
+      class_loader_spec = remaining.substr(0, shared_library_close + 1);
 
-        if ((shared_library_open == std::string::npos) ||
-            (shared_library_close < shared_library_open)) {
-          // We have seen a closing marker. Decrement the counter.
-          --counter;
-          if (counter == 0) {
-            // Found the matching closing marker.
-            class_loader_spec = remaining.substr(0, shared_library_close + 1);
-
-            // Compute the remaining string to analyze.
-            if (remaining.size() == shared_library_close + 1) {
-              remaining = "";
-            } else if ((remaining.size() == shared_library_close + 2) ||
-                       (remaining.at(shared_library_close + 1) != kClassLoaderSeparator)) {
-              LOG(ERROR) << "Invalid class loader spec: " << class_loader_spec;
-              return nullptr;
-            } else {
-              remaining = remaining.substr(shared_library_close + 2,
-                                           remaining.size() - shared_library_close - 2);
-            }
-          } else {
-            // Move the search index forward.
-            string_index = shared_library_close + 1;
-          }
-        } else {
-          // New nested opening marker. Increment the counter and move the search
-          // index after the marker.
-          ++counter;
-          string_index = shared_library_open + 1;
-        }
+      // Compute the remaining string to analyze.
+      if (remaining.size() == shared_library_close + 1) {
+        remaining = "";
+      } else if ((remaining.size() == shared_library_close + 2) ||
+                 (remaining.at(shared_library_close + 1) != kClassLoaderSeparator)) {
+        LOG(ERROR) << "Invalid class loader spec: " << class_loader_spec;
+        return nullptr;
+      } else {
+        remaining = remaining.substr(shared_library_close + 2,
+                                     remaining.size() - shared_library_close - 2);
       }
     }
 
@@ -304,11 +352,11 @@ ClassLoaderContext::ClassLoaderInfo* ClassLoaderContext::ParseInternal(
       return nullptr;
     }
     if (first == nullptr) {
-      first.reset(info.release());
+      first = std::move(info);
       previous_iteration = first.get();
     } else {
       CHECK(previous_iteration != nullptr);
-      previous_iteration->parent.reset(info.release());
+      previous_iteration->parent = std::move(info);
       previous_iteration = previous_iteration->parent.get();
     }
   }
@@ -571,21 +619,89 @@ static jclass GetClassLoaderClass(ClassLoaderContext::ClassLoaderType type) {
   UNREACHABLE();
 }
 
-static jobject CreateClassLoaderInternal(Thread* self,
-                                         const ClassLoaderContext::ClassLoaderInfo& info)
+static std::string FlattenClasspath(const std::vector<std::string>& classpath) {
+  return android::base::Join(classpath, ':');
+}
+
+static ObjPtr<mirror::ClassLoader> CreateClassLoaderInternal(
+    Thread* self,
+    ScopedObjectAccess& soa,
+    const ClassLoaderContext::ClassLoaderInfo& info,
+    bool for_shared_library,
+    VariableSizedHandleScope& map_scope,
+    std::map<std::string, Handle<mirror::ClassLoader>>& canonicalized_libraries,
+    bool add_compilation_sources,
+    const std::vector<const DexFile*>& compilation_sources)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-  CHECK(info.shared_libraries.empty()) << "Class loader shared library not implemented yet";
-  jobject parent = nullptr;
+  if (for_shared_library) {
+    // Check if the shared library has already been created.
+    auto search = canonicalized_libraries.find(FlattenClasspath(info.classpath));
+    if (search != canonicalized_libraries.end()) {
+      return search->second.Get();
+    }
+  }
+
+  StackHandleScope<3> hs(self);
+  MutableHandle<mirror::ObjectArray<mirror::ClassLoader>> libraries(
+      hs.NewHandle<mirror::ObjectArray<mirror::ClassLoader>>(nullptr));
+
+  if (!info.shared_libraries.empty()) {
+    libraries.Assign(mirror::ObjectArray<mirror::ClassLoader>::Alloc(
+        self,
+        GetClassRoot<mirror::ObjectArray<mirror::ClassLoader>>(),
+        info.shared_libraries.size()));
+    for (uint32_t i = 0; i < info.shared_libraries.size(); ++i) {
+      // We should only add the compilation sources to the first class loader.
+      libraries->Set(i,
+                     CreateClassLoaderInternal(
+                         self,
+                         soa,
+                         *info.shared_libraries[i].get(),
+                         /* for_shared_library= */ true,
+                         map_scope,
+                         canonicalized_libraries,
+                         /* add_compilation_sources= */ false,
+                         compilation_sources));
+    }
+  }
+
+  MutableHandle<mirror::ClassLoader> parent = hs.NewHandle<mirror::ClassLoader>(nullptr);
   if (info.parent != nullptr) {
-    parent = CreateClassLoaderInternal(self, *info.parent.get());
+    // We should only add the compilation sources to the first class loader.
+    parent.Assign(CreateClassLoaderInternal(
+        self,
+        soa,
+        *info.parent.get(),
+        /* for_shared_library= */ false,
+        map_scope,
+        canonicalized_libraries,
+        /* add_compilation_sources= */ false,
+        compilation_sources));
   }
   std::vector<const DexFile*> class_path_files = MakeNonOwningPointerVector(
       info.opened_dex_files);
-  return Runtime::Current()->GetClassLinker()->CreateWellKnownClassLoader(
-      self,
-      class_path_files,
-      GetClassLoaderClass(info.type),
-      parent);
+  if (add_compilation_sources) {
+    // For the first class loader, its classpath comes first, followed by compilation sources.
+    // This ensures that whenever we need to resolve classes from it the classpath elements
+    // come first.
+    class_path_files.insert(class_path_files.end(),
+                            compilation_sources.begin(),
+                            compilation_sources.end());
+  }
+  Handle<mirror::Class> loader_class = hs.NewHandle<mirror::Class>(
+      soa.Decode<mirror::Class>(GetClassLoaderClass(info.type)));
+  ObjPtr<mirror::ClassLoader> loader =
+      Runtime::Current()->GetClassLinker()->CreateWellKnownClassLoader(
+          self,
+          class_path_files,
+          loader_class,
+          parent,
+          libraries);
+  if (for_shared_library) {
+    canonicalized_libraries[FlattenClasspath(info.classpath)] =
+        map_scope.NewHandle<mirror::ClassLoader>(loader);
+  }
+  return loader;
 }
 
 jobject ClassLoaderContext::CreateClassLoader(
@@ -598,30 +714,29 @@ jobject ClassLoaderContext::CreateClassLoader(
   ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
 
   if (class_loader_chain_ == nullptr) {
+    CHECK(special_shared_library_);
     return class_linker->CreatePathClassLoader(self, compilation_sources);
   }
 
-  // Create the class loader of the parent.
-  jobject parent = nullptr;
-  if (class_loader_chain_->parent != nullptr) {
-    parent = CreateClassLoaderInternal(self, *class_loader_chain_->parent.get());
-  }
+  // Create a map of canonicalized shared libraries. As we're holding objects,
+  // we're creating a variable size handle scope to put handles in the map.
+  VariableSizedHandleScope map_scope(self);
+  std::map<std::string, Handle<mirror::ClassLoader>> canonicalized_libraries;
 
-  // We set up all the parents. Move on to create the first class loader.
-  // Its classpath comes first, followed by compilation sources. This ensures that whenever
-  // we need to resolve classes from it the classpath elements come first.
-
-  std::vector<const DexFile*> first_class_loader_classpath = MakeNonOwningPointerVector(
-      class_loader_chain_->opened_dex_files);
-  first_class_loader_classpath.insert(first_class_loader_classpath.end(),
-                                      compilation_sources.begin(),
-                                      compilation_sources.end());
-
-  return class_linker->CreateWellKnownClassLoader(
-      self,
-      first_class_loader_classpath,
-      GetClassLoaderClass(class_loader_chain_->type),
-      parent);
+  // Create the class loader.
+  ObjPtr<mirror::ClassLoader> loader =
+      CreateClassLoaderInternal(self,
+                                soa,
+                                *class_loader_chain_.get(),
+                                /* for_shared_library= */ false,
+                                map_scope,
+                                canonicalized_libraries,
+                                /* add_compilation_sources= */ true,
+                                compilation_sources);
+  // Make it a global ref and return.
+  ScopedLocalRef<jobject> local_ref(
+      soa.Env(), soa.Env()->AddLocalReference<jobject>(loader));
+  return soa.Env()->NewGlobalRef(local_ref.get());
 }
 
 std::vector<const DexFile*> ClassLoaderContext::FlattenOpenedDexFiles() const {
@@ -799,10 +914,12 @@ static bool GetDexFilesFromDexElementsArray(
 // the classpath.
 // This method is recursive (w.r.t. the class loader parent) and will stop once it reaches the
 // BootClassLoader. Note that the class loader chain is expected to be short.
-bool ClassLoaderContext::AddInfoToContextFromClassLoader(
+bool ClassLoaderContext::CreateInfoFromClassLoader(
       ScopedObjectAccessAlreadyRunnable& soa,
       Handle<mirror::ClassLoader> class_loader,
-      Handle<mirror::ObjectArray<mirror::Object>> dex_elements)
+      Handle<mirror::ObjectArray<mirror::Object>> dex_elements,
+      ClassLoaderInfo* child_info,
+      bool is_shared_library)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   if (ClassLinker::IsBootClassLoader(soa, class_loader.Get())) {
     // Nothing to do for the boot class loader as we don't add its dex files to the context.
@@ -837,31 +954,52 @@ bool ClassLoaderContext::AddInfoToContextFromClassLoader(
   }
 
   ClassLoaderInfo* info = new ClassLoaderContext::ClassLoaderInfo(type);
-  if (class_loader_chain_ == nullptr) {
+  // Attach the `ClassLoaderInfo` now, before populating dex files, as only the
+  // `ClassLoaderContext` knows whether these dex files should be deleted or not.
+  if (child_info == nullptr) {
     class_loader_chain_.reset(info);
+  } else if (is_shared_library) {
+    child_info->shared_libraries.push_back(std::unique_ptr<ClassLoaderInfo>(info));
   } else {
-    ClassLoaderInfo* child = class_loader_chain_.get();
-    while (child->parent != nullptr) {
-      child = child->parent.get();
-    }
-    child->parent.reset(info);
+    child_info->parent.reset(info);
   }
 
+  // Now that `info` is in the chain, populate dex files.
   for (const DexFile* dex_file : dex_files_loaded) {
     info->classpath.push_back(dex_file->GetLocation());
     info->checksums.push_back(dex_file->GetLocationChecksum());
     info->opened_dex_files.emplace_back(dex_file);
   }
 
-  // We created the ClassLoaderInfo for the current loader. Move on to its parent.
-
-  StackHandleScope<1> hs(Thread::Current());
-  Handle<mirror::ClassLoader> parent = hs.NewHandle(class_loader->GetParent());
-
   // Note that dex_elements array is null here. The elements are considered to be part of the
   // current class loader and are not passed to the parents.
   ScopedNullHandle<mirror::ObjectArray<mirror::Object>> null_dex_elements;
-  return AddInfoToContextFromClassLoader(soa, parent, null_dex_elements);
+
+  // Add the shared libraries.
+  StackHandleScope<3> hs(Thread::Current());
+  ArtField* field =
+      jni::DecodeArtField(WellKnownClasses::dalvik_system_BaseDexClassLoader_sharedLibraryLoaders);
+  ObjPtr<mirror::Object> raw_shared_libraries = field->GetObject(class_loader.Get());
+  if (raw_shared_libraries != nullptr) {
+    Handle<mirror::ObjectArray<mirror::ClassLoader>> shared_libraries =
+        hs.NewHandle(raw_shared_libraries->AsObjectArray<mirror::ClassLoader>());
+    MutableHandle<mirror::ClassLoader> temp_loader = hs.NewHandle<mirror::ClassLoader>(nullptr);
+    for (int32_t i = 0; i < shared_libraries->GetLength(); ++i) {
+      temp_loader.Assign(shared_libraries->Get(i));
+      if (!CreateInfoFromClassLoader(
+              soa, temp_loader, null_dex_elements, info, /*is_shared_library=*/ true)) {
+        return false;
+      }
+    }
+  }
+
+  // We created the ClassLoaderInfo for the current loader. Move on to its parent.
+  Handle<mirror::ClassLoader> parent = hs.NewHandle(class_loader->GetParent());
+  if (!CreateInfoFromClassLoader(
+          soa, parent, null_dex_elements, info, /*is_shared_library=*/ false)) {
+    return false;
+  }
+  return true;
 }
 
 std::unique_ptr<ClassLoaderContext> ClassLoaderContext::CreateContextForClassLoader(
@@ -875,13 +1013,12 @@ std::unique_ptr<ClassLoaderContext> ClassLoaderContext::CreateContextForClassLoa
       hs.NewHandle(soa.Decode<mirror::ClassLoader>(class_loader));
   Handle<mirror::ObjectArray<mirror::Object>> h_dex_elements =
       hs.NewHandle(soa.Decode<mirror::ObjectArray<mirror::Object>>(dex_elements));
-
   std::unique_ptr<ClassLoaderContext> result(new ClassLoaderContext(/*owns_the_dex_files=*/ false));
-  if (result->AddInfoToContextFromClassLoader(soa, h_class_loader, h_dex_elements)) {
-    return result;
-  } else {
+  if (!result->CreateInfoFromClassLoader(
+          soa, h_class_loader, h_dex_elements, nullptr, /*is_shared_library=*/ false)) {
     return nullptr;
   }
+  return result;
 }
 
 static bool IsAbsoluteLocation(const std::string& location) {
@@ -1015,8 +1152,8 @@ bool ClassLoaderContext::ClassLoaderInfoMatch(
 
   if (info.shared_libraries.size() != expected_info.shared_libraries.size()) {
     LOG(WARNING) << "ClassLoaderContext shared library size mismatch. "
-          << "Expected=" << expected_info.classpath.size()
-          << ", found=" << info.classpath.size()
+          << "Expected=" << expected_info.shared_libraries.size()
+          << ", found=" << info.shared_libraries.size()
           << " (" << context_spec << " | " << EncodeContextForOatFile("") << ")";
     return false;
   }

@@ -1,6 +1,7 @@
 package com.android.class2greylist;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSet;
 
 import org.apache.bcel.classfile.AnnotationEntry;
 import org.apache.bcel.classfile.ElementValuePair;
@@ -20,23 +21,35 @@ import java.util.Set;
  * <p>Methods are also validated against the public API list, to assert that
  * the annotated method is already a public API.
  */
-public class CovariantReturnTypeHandler implements AnnotationHandler {
+public class CovariantReturnTypeHandler extends AnnotationHandler {
 
     private static final String SHORT_NAME = "CovariantReturnType";
     public static final String ANNOTATION_NAME = "Ldalvik/annotation/codegen/CovariantReturnType;";
+    public static final String REPEATED_ANNOTATION_NAME =
+        "Ldalvik/annotation/codegen/CovariantReturnType$CovariantReturnTypes;";
 
     private static final String RETURN_TYPE = "returnType";
 
-    private final GreylistConsumer mConsumer;
+    private final AnnotationConsumer mAnnotationConsumer;
     private final Set<String> mPublicApis;
+    private final String mHiddenapiFlag;
 
-    public CovariantReturnTypeHandler(GreylistConsumer consumer, Set<String> publicApis) {
-        mConsumer = consumer;
+    public CovariantReturnTypeHandler(AnnotationConsumer consumer, Set<String> publicApis,
+            String hiddenapiFlag) {
+        mAnnotationConsumer = consumer;
         mPublicApis = publicApis;
+        mHiddenapiFlag = hiddenapiFlag;
     }
 
     @Override
     public void handleAnnotation(AnnotationEntry annotation, AnnotationContext context) {
+        if (context instanceof AnnotatedClassContext) {
+            return;
+        }
+        handleAnnotation(annotation, (AnnotatedMemberContext) context);
+    }
+
+    private void handleAnnotation(AnnotationEntry annotation, AnnotatedMemberContext context) {
         // Verify that the annotation has been applied to what we expect, and
         // has the right form. Note, this should not strictly be necessary, as
         // the annotation has a target of just 'method' and the property
@@ -74,7 +87,9 @@ public class CovariantReturnTypeHandler implements AnnotationHandler {
                     signature, SHORT_NAME);
             return;
         }
-        mConsumer.whitelistEntry(signature);
+
+        mAnnotationConsumer.consume(signature, stringifyAnnotationProperties(annotation),
+                ImmutableSet.of(mHiddenapiFlag));
     }
 
     private String findReturnType(AnnotationEntry a) {

@@ -29,6 +29,7 @@
 #include "debugger.h"
 #include "hidden_api.h"
 #include "jit/jit.h"
+#include "jit/jit_code_cache.h"
 #include "jni/java_vm_ext.h"
 #include "jni/jni_internal.h"
 #include "native_util.h"
@@ -43,12 +44,6 @@
 #include "thread_list.h"
 #include "trace.h"
 
-#if defined(__linux__)
-#include <sys/prctl.h>
-#endif
-#ifdef __ANDROID__
-#include <cutils/properties.h>
-#endif
 #include <sys/resource.h>
 
 namespace art {
@@ -59,48 +54,6 @@ static bool kAlwaysCollectNonDebuggableClasses =
     RegisterRuntimeDebugFlag(&kAlwaysCollectNonDebuggableClasses);
 
 using android::base::StringPrintf;
-
-static void EnableDebugger() {
-#if defined(__linux__)
-  // To let a non-privileged gdbserver attach to this
-  // process, we must set our dumpable flag.
-  if (prctl(PR_SET_DUMPABLE, 1, 0, 0, 0) == -1) {
-    PLOG(ERROR) << "prctl(PR_SET_DUMPABLE) failed for pid " << getpid();
-  }
-
-  // Even if Yama is on a non-privileged native debugger should
-  // be able to attach to the debuggable app.
-  if (prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0) == -1) {
-    // if Yama is off prctl(PR_SET_PTRACER) returns EINVAL - don't log in this
-    // case since it's expected behaviour.
-    if (errno != EINVAL) {
-      PLOG(ERROR) << "prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY) failed for pid " << getpid();
-    }
-  }
-#endif
-  // We don't want core dumps, though, so set the soft limit on core dump size
-  // to 0 without changing the hard limit.
-  rlimit rl;
-  if (getrlimit(RLIMIT_CORE, &rl) == -1) {
-    PLOG(ERROR) << "getrlimit(RLIMIT_CORE) failed for pid " << getpid();
-  } else {
-#ifdef __ANDROID__
-    char prop_value[PROPERTY_VALUE_MAX];
-    property_get("persist.debug.trace", prop_value, "0");
-    if (prop_value[0] == '1') {
-      LOG(INFO) << "setting RLIM to infinity for process " << getpid();
-      rl.rlim_cur = RLIM_INFINITY;
-    } else {
-      rl.rlim_cur = 0;
-    }
-#else
-    rl.rlim_cur = 0;
-#endif
-    if (setrlimit(RLIMIT_CORE, &rl) == -1) {
-      PLOG(ERROR) << "setrlimit(RLIMIT_CORE) failed for pid " << getpid();
-    }
-  }
-}
 
 class ClassSet {
  public:
@@ -223,9 +176,6 @@ static uint32_t EnableDebugFeatures(uint32_t runtime_flags) {
   }
 
   Dbg::SetJdwpAllowed((runtime_flags & DEBUG_ENABLE_JDWP) != 0);
-  if ((runtime_flags & DEBUG_ENABLE_JDWP) != 0) {
-    EnableDebugger();
-  }
   runtime_flags &= ~DEBUG_ENABLE_JDWP;
 
   const bool safe_mode = (runtime_flags & DEBUG_ENABLE_SAFEMODE) != 0;
@@ -290,13 +240,15 @@ static jlong ZygoteHooks_nativePreFork(JNIEnv* env, jclass) {
 
   runtime->PreZygoteFork();
 
-  if (Trace::GetMethodTracingMode() != TracingMode::kTracingInactive) {
-    // Tracing active, pause it.
-    Trace::Pause();
-  }
-
   // Grab thread before fork potentially makes Thread::pthread_key_self_ unusable.
   return reinterpret_cast<jlong>(ThreadForEnv(env));
+}
+
+static void ZygoteHooks_nativePostZygoteFork(JNIEnv*, jclass) {
+  Runtime* runtime = Runtime::Current();
+  if (runtime->IsZygote()) {
+    runtime->PostZygoteFork();
+  }
 }
 
 static void ZygoteHooks_nativePostForkSystemServer(JNIEnv* env ATTRIBUTE_UNUSED,
@@ -305,7 +257,10 @@ static void ZygoteHooks_nativePostForkSystemServer(JNIEnv* env ATTRIBUTE_UNUSED,
   // System server has a window where it can create executable pages for this purpose, but this is
   // turned off after this hook. Consequently, the only JIT mode supported is the dual-view JIT
   // where one mapping is R->RW and the other is RX. Single view requires RX->RWX->RX.
-  Runtime::Current()->CreateJitCodeCache(/*rwx_memory_allowed=*/false);
+  if (Runtime::Current()->GetJit() != nullptr) {
+    Runtime::Current()->GetJit()->GetCodeCache()->PostForkChildAction(
+        /* is_system_server= */ true, /* is_zygote= */ false);
+  }
 }
 
 static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
@@ -345,6 +300,15 @@ static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
   }
 
   Runtime::Current()->GetHeap()->PostForkChildAction(thread);
+  if (Runtime::Current()->GetJit() != nullptr) {
+    if (!is_system_server) {
+      // System server already called the JIT cache post fork action in `nativePostForkSystemServer`.
+      Runtime::Current()->GetJit()->GetCodeCache()->PostForkChildAction(
+          /* is_system_server= */ false, is_zygote);
+    }
+    // This must be called after EnableDebugFeatures.
+    Runtime::Current()->GetJit()->PostForkChildAction(is_zygote);
+  }
 
   // Update tracing.
   if (Trace::GetMethodTracingMode() != TracingMode::kTracingInactive) {
@@ -441,6 +405,7 @@ static void ZygoteHooks_stopZygoteNoThreadCreation(JNIEnv* env ATTRIBUTE_UNUSED,
 
 static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(ZygoteHooks, nativePreFork, "()J"),
+  NATIVE_METHOD(ZygoteHooks, nativePostZygoteFork, "()V"),
   NATIVE_METHOD(ZygoteHooks, nativePostForkSystemServer, "()V"),
   NATIVE_METHOD(ZygoteHooks, nativePostForkChild, "(JIZZLjava/lang/String;)V"),
   NATIVE_METHOD(ZygoteHooks, startZygoteNoThreadCreation, "()V"),

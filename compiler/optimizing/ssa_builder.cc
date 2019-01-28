@@ -18,6 +18,7 @@
 
 #include "base/arena_bit_vector.h"
 #include "base/bit_vector-inl.h"
+#include "base/logging.h"
 #include "data_type-inl.h"
 #include "dex/bytecode_utils.h"
 #include "mirror/class-inl.h"
@@ -390,7 +391,7 @@ bool SsaBuilder::FixAmbiguousArrayOps() {
           // succeed in code validated by the verifier.
           HInstruction* equivalent = GetFloatOrDoubleEquivalent(value, array_type);
           DCHECK(equivalent != nullptr);
-          aset->ReplaceInput(equivalent, /* input_index */ 2);
+          aset->ReplaceInput(equivalent, /* index= */ 2);
           if (equivalent->IsPhi()) {
             // Returned equivalent is a phi which may not have had its inputs
             // replaced yet. We need to run primitive type propagation on it.
@@ -524,7 +525,7 @@ GraphAnalysisResult SsaBuilder::BuildSsa() {
                            class_loader_,
                            dex_cache_,
                            handles_,
-                           /* is_first_run */ true).Run();
+                           /* is_first_run= */ true).Run();
 
   // HInstructionBuilder duplicated ArrayGet instructions with ambiguous type
   // (int/float or long/double) and marked ArraySets with ambiguous input type.

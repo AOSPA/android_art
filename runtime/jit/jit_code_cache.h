@@ -71,6 +71,7 @@ template<class T> class ObjectArray;
 
 namespace jit {
 
+class MarkCodeClosure;
 class ScopedCodeCacheWrite;
 
 // Alignment in bits that will suit all architectures.
@@ -89,10 +90,9 @@ class JitCodeCache {
 
   // Create the code cache with a code + data capacity equal to "capacity", error message is passed
   // in the out arg error_msg.
-  static JitCodeCache* Create(size_t initial_capacity,
-                              size_t max_capacity,
-                              bool used_only_for_profile_data,
+  static JitCodeCache* Create(bool used_only_for_profile_data,
                               bool rwx_memory_allowed,
+                              bool is_zygote,
                               std::string* error_msg);
   ~JitCodeCache();
 
@@ -262,14 +262,17 @@ class JitCodeCache {
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  void PostForkChildAction(bool is_system_server, bool is_zygote);
+
  private:
-  // Take ownership of maps.
-  JitCodeCache(MemMap&& data_pages,
-               MemMap&& exec_pages,
-               MemMap&& non_exec_pages,
-               size_t initial_data_capacity,
-               size_t initial_exec_capacity,
-               size_t max_capacity);
+  JitCodeCache();
+
+  void InitializeState(size_t initial_capacity, size_t max_capacity) REQUIRES(lock_);
+
+  bool InitializeMappings(bool rwx_memory_allowed, bool is_zygote, std::string* error_msg)
+      REQUIRES(lock_);
+
+  void InitializeSpaces() REQUIRES(lock_);
 
   // Internal version of 'CommitCode' that will not retry if the
   // allocation fails. Return null if the allocation fails.
@@ -385,6 +388,14 @@ class JitCodeCache {
 
   const MemMap* GetUpdatableCodeMapping() const;
 
+  bool IsInZygoteDataSpace(const void* ptr) const {
+    return zygote_data_pages_.HasAddress(ptr);
+  }
+
+  bool IsInZygoteExecSpace(const void* ptr) const {
+    return zygote_exec_pages_.HasAddress(ptr);
+  }
+
   bool IsWeakAccessEnabled(Thread* self) const;
   void WaitUntilInlineCacheAccessible(Thread* self)
       REQUIRES(!lock_)
@@ -420,6 +431,9 @@ class JitCodeCache {
   SafeMap<ArtMethod*, const void*> osr_code_map_ GUARDED_BY(lock_);
   // ProfilingInfo objects we have allocated.
   std::vector<ProfilingInfo*> profiling_infos_ GUARDED_BY(lock_);
+
+  // The initial capacity in bytes this code cache starts with.
+  size_t initial_capacity_ GUARDED_BY(lock_);
 
   // The maximum capacity in bytes this code cache can go to.
   size_t max_capacity_ GUARDED_BY(lock_);
@@ -471,10 +485,20 @@ class JitCodeCache {
   // Condition to wait on for accessing inline caches.
   ConditionVariable inline_cache_cond_ GUARDED_BY(lock_);
 
+  // Mem map which holds zygote data (stack maps and profiling info).
+  MemMap zygote_data_pages_;
+  // Mem map which holds zygote code and has executable permission.
+  MemMap zygote_exec_pages_;
+  // The opaque mspace for allocating zygote data.
+  void* zygote_data_mspace_ GUARDED_BY(lock_);
+  // The opaque mspace for allocating zygote code.
+  void* zygote_exec_mspace_ GUARDED_BY(lock_);
+
   friend class art::JitJniStubTestHelper;
   friend class ScopedCodeCacheWrite;
+  friend class MarkCodeClosure;
 
-  DISALLOW_IMPLICIT_CONSTRUCTORS(JitCodeCache);
+  DISALLOW_COPY_AND_ASSIGN(JitCodeCache);
 };
 
 }  // namespace jit

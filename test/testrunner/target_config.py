@@ -331,10 +331,17 @@ target_config = {
     },
     'art-linux-bionic-x64': {
         'build': '{ANDROID_BUILD_TOP}/art/tools/build_linux_bionic_tests.sh {MAKE_OPTIONS}',
-        # Currently failing on the build-bots due to some library search path issue.
-        # 'run-test': ['--run-test-option=--bionic',
-        #              '--host',
-        #              '--64',
-        #              '--no-build-dependencies'],
+        'run-test': ['--run-test-option=--bionic',
+                     '--host',
+                     '--64',
+                     '--no-build-dependencies'],
+    },
+    'art-linux-bionic-x64-zipapex': {
+        'build': '{ANDROID_BUILD_TOP}/art/tools/build_linux_bionic_tests.sh {MAKE_OPTIONS} com.android.runtime.host',
+        'run-test': ['--run-test-option=--bionic',
+                     "--run-test-option='--runtime-zipapex {SOONG_OUT_DIR}/host/linux_bionic-x86/apex/com.android.runtime.host.zipapex'",
+                     '--host',
+                     '--64',
+                     '--no-build-dependencies'],
     },
 }

@@ -20,7 +20,6 @@
 #include <jni.h>
 
 #include "dex/dex_file_types.h"
-#include "dex/hidden_api_access_flags.h"
 #include "dex/modifiers.h"
 #include "dex/primitive.h"
 #include "gc_root.h"
@@ -35,6 +34,7 @@ class ScopedObjectAccessAlreadyRunnable;
 
 namespace mirror {
 class Class;
+class ClassLoader;
 class DexCache;
 class Object;
 class String;
@@ -44,6 +44,8 @@ class ArtField final {
  public:
   template<ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   ObjPtr<mirror::Class> GetDeclaringClass() REQUIRES_SHARED(Locks::mutator_lock_);
+
+  mirror::ClassLoader* GetClassLoader() REQUIRES_SHARED(Locks::mutator_lock_);
 
   void SetDeclaringClass(ObjPtr<mirror::Class> new_declaring_class)
       REQUIRES_SHARED(Locks::mutator_lock_);

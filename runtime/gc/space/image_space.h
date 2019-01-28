@@ -24,6 +24,8 @@
 
 namespace art {
 
+template <typename T> class ArrayRef;
+class DexFile;
 class OatFile;
 
 namespace gc {
@@ -39,9 +41,11 @@ class ImageSpace : public MemMapSpace {
   // Load boot image spaces from a primary image file for a specified instruction set.
   //
   // On successful return, the loaded spaces are added to boot_image_spaces (which must be
-  // empty on entry) and oat_file_end is updated with the (page-aligned) end of the last
-  // oat file.
+  // empty on entry) and `extra_reservation` is set to the requested reservation located
+  // after the end of the last loaded oat file.
   static bool LoadBootImage(
+      const std::vector<std::string>& boot_class_path,
+      const std::vector<std::string>& boot_class_path_locations,
       const std::string& image_location,
       const InstructionSet image_isa,
       size_t extra_reservation_size,
@@ -122,15 +126,23 @@ class ImageSpace : public MemMapSpace {
                                 bool* has_data,
                                 bool *is_global_cache);
 
-  // Use the input image filename to adapt the names in the given boot classpath to establish
-  // complete locations for secondary images.
-  static void ExtractMultiImageLocations(const std::string& input_image_file_name,
-                                        const std::string& boot_classpath,
-                                        std::vector<std::string>* image_filenames);
+  // Returns the checksums for the boot image and extra boot class path dex files,
+  // based on the boot class path, image location and ISA (may differ from the ISA of an
+  // initialized Runtime). The boot image and dex files do not need to be loaded in memory.
+  static std::string GetBootClassPathChecksums(const std::vector<std::string>& boot_class_path,
+                                               const std::string& image_location,
+                                               InstructionSet image_isa,
+                                               /*out*/std::string* error_msg);
 
-  static std::string GetMultiImageBootClassPath(const std::vector<const char*>& dex_locations,
-                                                const std::vector<const char*>& oat_filenames,
-                                                const std::vector<const char*>& image_filenames);
+  // Returns the checksums for the boot image and extra boot class path dex files,
+  // based on the boot image and boot class path dex files loaded in memory.
+  static std::string GetBootClassPathChecksums(const std::vector<ImageSpace*>& image_spaces,
+                                               const std::vector<const DexFile*>& boot_class_path);
+
+  // Expand a single image location to multi-image locations based on the dex locations.
+  static std::vector<std::string> ExpandMultiImageLocations(
+      const std::vector<std::string>& dex_locations,
+      const std::string& image_location);
 
   // Returns true if the dex checksums in the given oat file match the
   // checksums of the original dex files on disk. This is intended to be used
@@ -191,8 +203,21 @@ class ImageSpace : public MemMapSpace {
   friend class Space;
 
  private:
-  class Loader;
+  // Internal overload that takes ArrayRef<> instead of vector<>.
+  static std::vector<std::string> ExpandMultiImageLocations(
+      ArrayRef<const std::string> dex_locations,
+      const std::string& image_location);
+
   class BootImageLoader;
+  template <typename ReferenceVisitor>
+  class ClassTableVisitor;
+  class Loader;
+  template <typename PatchObjectVisitor>
+  class PatchArtFieldVisitor;
+  template <PointerSize kPointerSize, typename PatchObjectVisitor, typename PatchCodeVisitor>
+  class PatchArtMethodVisitor;
+  template <PointerSize kPointerSize, typename ReferenceVisitor>
+  class PatchObjectVisitor;
 
   DISALLOW_COPY_AND_ASSIGN(ImageSpace);
 };

@@ -473,7 +473,7 @@ void DexToDexCompiler::CompilationState::CompileInvokeVirtual(Instruction* inst,
           method_idx,
           unit_.GetDexCache(),
           unit_.GetClassLoader(),
-          /* referrer */ nullptr,
+          /* referrer= */ nullptr,
           kVirtual);
 
   if (UNLIKELY(resolved_method == nullptr)) {
@@ -505,7 +505,7 @@ void DexToDexCompiler::CompilationState::CompileInvokeVirtual(Instruction* inst,
 }
 
 CompiledMethod* DexToDexCompiler::CompileMethod(
-    const DexFile::CodeItem* code_item,
+    const dex::CodeItem* code_item,
     uint32_t access_flags,
     InvokeType invoke_type ATTRIBUTE_UNUSED,
     uint16_t class_def_idx,
@@ -528,7 +528,7 @@ CompiledMethod* DexToDexCompiler::CompileMethod(
       class_def_idx,
       method_idx,
       access_flags,
-      driver_->GetVerifiedMethod(&dex_file, method_idx),
+      driver_->GetCompilerOptions().GetVerifiedMethod(&dex_file, method_idx),
       hs.NewHandle(class_linker->FindDexCache(soa.Self(), dex_file)));
 
   std::vector<uint8_t> quicken_data;
@@ -614,7 +614,7 @@ CompiledMethod* DexToDexCompiler::CompileMethod(
     instruction_set = InstructionSet::kArm;
   }
   CompiledMethod* ret = CompiledMethod::SwapAllocCompiledMethod(
-      driver_,
+      driver_->GetCompiledMethodStorage(),
       instruction_set,
       ArrayRef<const uint8_t>(),                   // no code
       ArrayRef<const uint8_t>(quicken_data),       // vmap_table
@@ -627,11 +627,11 @@ CompiledMethod* DexToDexCompiler::CompileMethod(
 void DexToDexCompiler::SetDexFiles(const std::vector<const DexFile*>& dex_files) {
   // Record what code items are already seen to detect when multiple methods have the same code
   // item.
-  std::unordered_set<const DexFile::CodeItem*> seen_code_items;
+  std::unordered_set<const dex::CodeItem*> seen_code_items;
   for (const DexFile* dex_file : dex_files) {
     for (ClassAccessor accessor : dex_file->GetClasses()) {
       for (const ClassAccessor::Method& method : accessor.GetMethods()) {
-        const DexFile::CodeItem* code_item = method.GetCodeItem();
+        const dex::CodeItem* code_item = method.GetCodeItem();
         // Detect the shared code items.
         if (!seen_code_items.insert(code_item).second) {
           shared_code_items_.insert(code_item);
@@ -646,7 +646,7 @@ void DexToDexCompiler::UnquickenConflictingMethods() {
   MutexLock mu(Thread::Current(), lock_);
   size_t unquicken_count = 0;
   for (const auto& pair : shared_code_item_quicken_info_) {
-    const DexFile::CodeItem* code_item = pair.first;
+    const dex::CodeItem* code_item = pair.first;
     const QuickenState& state = pair.second;
     CHECK_GE(state.methods_.size(), 1u);
     if (state.conflict_) {
@@ -665,7 +665,8 @@ void DexToDexCompiler::UnquickenConflictingMethods() {
           // There is up to one compiled method for each method ref. Releasing it leaves the
           // deduped data intact, this means its safe to do even when other threads might be
           // compiling.
-          CompiledMethod::ReleaseSwapAllocatedCompiledMethod(driver_, method);
+          CompiledMethod::ReleaseSwapAllocatedCompiledMethod(driver_->GetCompiledMethodStorage(),
+                                                             method);
         }
       }
     }

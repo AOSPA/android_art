@@ -19,8 +19,8 @@
 
 #include "art_field.h"
 #include "art_method.h"
-#include "base/mutex.h"
-#include "dex/hidden_api_access_flags.h"
+#include "base/hiddenapi_flags.h"
+#include "base/locks.h"
 #include "intrinsics_enum.h"
 #include "mirror/class-inl.h"
 #include "reflection.h"
@@ -137,8 +137,13 @@ class MemberSignature {
  public:
   explicit MemberSignature(ArtField* field) REQUIRES_SHARED(Locks::mutator_lock_);
   explicit MemberSignature(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
+  explicit MemberSignature(const ClassAccessor::Field& field);
+  explicit MemberSignature(const ClassAccessor::Method& method);
 
   void Dump(std::ostream& os) const;
+
+  bool Equals(const MemberSignature& other);
+  bool MemberNameAndTypeMatch(const MemberSignature& other);
 
   // Performs prefix match on this member. Since the full member signature is
   // composed of several parts, we match each part in turn (rather than
@@ -160,11 +165,8 @@ class MemberSignature {
 
 // Locates hiddenapi flags for `field` in the corresponding dex file.
 // NB: This is an O(N) operation, linear with the number of members in the class def.
-uint32_t GetDexFlags(ArtField* field) REQUIRES_SHARED(Locks::mutator_lock_);
-
-// Locates hiddenapi flags for `method` in the corresponding dex file.
-// NB: This is an O(N) operation, linear with the number of members in the class def.
-uint32_t GetDexFlags(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
+template<typename T>
+uint32_t GetDexFlags(T* member) REQUIRES_SHARED(Locks::mutator_lock_);
 
 template<typename T>
 bool ShouldDenyAccessToMemberImpl(T* member, ApiList api_list, AccessMethod access_method)
@@ -177,10 +179,10 @@ ALWAYS_INLINE inline uint32_t CreateRuntimeFlags(const ClassAccessor::BaseItem& 
   uint32_t runtime_flags = 0u;
 
   uint32_t dex_flags = member.GetHiddenapiFlags();
-  DCHECK(AreValidFlags(dex_flags));
+  DCHECK(AreValidDexFlags(dex_flags));
 
-  ApiList api_list = static_cast<hiddenapi::ApiList>(dex_flags);
-  if (api_list == ApiList::kWhitelist) {
+  ApiList api_list = ApiList::FromDexFlags(dex_flags);
+  if (api_list == ApiList::Whitelist()) {
     runtime_flags |= kAccPublicApi;
   }
 
@@ -233,6 +235,8 @@ ALWAYS_INLINE inline uint32_t GetRuntimeFlags(ArtMethod* method)
       case Intrinsics::kUnsafeStoreFence:
       case Intrinsics::kUnsafeFullFence:
       case Intrinsics::kCRC32Update:
+      case Intrinsics::kCRC32UpdateBytes:
+      case Intrinsics::kCRC32UpdateByteBuffer:
       case Intrinsics::kStringNewStringFromBytes:
       case Intrinsics::kStringNewStringFromChars:
       case Intrinsics::kStringNewStringFromString:
@@ -316,7 +320,7 @@ inline bool ShouldDenyAccessToMember(T* member,
   // Decode hidden API access flags from the dex file.
   // This is an O(N) operation scaling with the number of fields/methods
   // in the class. Only do this on slow path and only do it once.
-  ApiList api_list = static_cast<hiddenapi::ApiList>(detail::GetDexFlags(member));
+  ApiList api_list = ApiList::FromDexFlags(detail::GetDexFlags(member));
 
   // Member is hidden and caller is not exempted. Enter slow path.
   return detail::ShouldDenyAccessToMemberImpl(member, api_list, access_method);

@@ -272,10 +272,10 @@ void IntrinsicLocationsBuilderARM64::VisitDoubleLongBitsToDouble(HInvoke* invoke
 }
 
 void IntrinsicCodeGeneratorARM64::VisitDoubleDoubleToRawLongBits(HInvoke* invoke) {
-  MoveFPToInt(invoke->GetLocations(), /* is64bit */ true, GetVIXLAssembler());
+  MoveFPToInt(invoke->GetLocations(), /* is64bit= */ true, GetVIXLAssembler());
 }
 void IntrinsicCodeGeneratorARM64::VisitDoubleLongBitsToDouble(HInvoke* invoke) {
-  MoveIntToFP(invoke->GetLocations(), /* is64bit */ true, GetVIXLAssembler());
+  MoveIntToFP(invoke->GetLocations(), /* is64bit= */ true, GetVIXLAssembler());
 }
 
 void IntrinsicLocationsBuilderARM64::VisitFloatFloatToRawIntBits(HInvoke* invoke) {
@@ -286,10 +286,10 @@ void IntrinsicLocationsBuilderARM64::VisitFloatIntBitsToFloat(HInvoke* invoke) {
 }
 
 void IntrinsicCodeGeneratorARM64::VisitFloatFloatToRawIntBits(HInvoke* invoke) {
-  MoveFPToInt(invoke->GetLocations(), /* is64bit */ false, GetVIXLAssembler());
+  MoveFPToInt(invoke->GetLocations(), /* is64bit= */ false, GetVIXLAssembler());
 }
 void IntrinsicCodeGeneratorARM64::VisitFloatIntBitsToFloat(HInvoke* invoke) {
-  MoveIntToFP(invoke->GetLocations(), /* is64bit */ false, GetVIXLAssembler());
+  MoveIntToFP(invoke->GetLocations(), /* is64bit= */ false, GetVIXLAssembler());
 }
 
 static void CreateIntToIntLocations(ArenaAllocator* allocator, HInvoke* invoke) {
@@ -618,7 +618,7 @@ void IntrinsicLocationsBuilderARM64::VisitMathRoundDouble(HInvoke* invoke) {
 }
 
 void IntrinsicCodeGeneratorARM64::VisitMathRoundDouble(HInvoke* invoke) {
-  GenMathRound(invoke, /* is_double */ true, GetVIXLAssembler());
+  GenMathRound(invoke, /* is_double= */ true, GetVIXLAssembler());
 }
 
 void IntrinsicLocationsBuilderARM64::VisitMathRoundFloat(HInvoke* invoke) {
@@ -626,7 +626,7 @@ void IntrinsicLocationsBuilderARM64::VisitMathRoundFloat(HInvoke* invoke) {
 }
 
 void IntrinsicCodeGeneratorARM64::VisitMathRoundFloat(HInvoke* invoke) {
-  GenMathRound(invoke, /* is_double */ false, GetVIXLAssembler());
+  GenMathRound(invoke, /* is_double= */ false, GetVIXLAssembler());
 }
 
 void IntrinsicLocationsBuilderARM64::VisitMemoryPeekByte(HInvoke* invoke) {
@@ -752,13 +752,13 @@ static void GenUnsafeGet(HInvoke* invoke,
                                                    trg_loc,
                                                    base,
                                                    MemOperand(temp.X()),
-                                                   /* needs_null_check */ false,
+                                                   /* needs_null_check= */ false,
                                                    is_volatile);
   } else {
     // Other cases.
     MemOperand mem_op(base.X(), offset);
     if (is_volatile) {
-      codegen->LoadAcquire(invoke, trg, mem_op, /* needs_null_check */ true);
+      codegen->LoadAcquire(invoke, trg, mem_op, /* needs_null_check= */ true);
     } else {
       codegen->Load(type, trg, mem_op);
     }
@@ -813,22 +813,22 @@ void IntrinsicLocationsBuilderARM64::VisitUnsafeGetObjectVolatile(HInvoke* invok
 }
 
 void IntrinsicCodeGeneratorARM64::VisitUnsafeGet(HInvoke* invoke) {
-  GenUnsafeGet(invoke, DataType::Type::kInt32, /* is_volatile */ false, codegen_);
+  GenUnsafeGet(invoke, DataType::Type::kInt32, /* is_volatile= */ false, codegen_);
 }
 void IntrinsicCodeGeneratorARM64::VisitUnsafeGetVolatile(HInvoke* invoke) {
-  GenUnsafeGet(invoke, DataType::Type::kInt32, /* is_volatile */ true, codegen_);
+  GenUnsafeGet(invoke, DataType::Type::kInt32, /* is_volatile= */ true, codegen_);
 }
 void IntrinsicCodeGeneratorARM64::VisitUnsafeGetLong(HInvoke* invoke) {
-  GenUnsafeGet(invoke, DataType::Type::kInt64, /* is_volatile */ false, codegen_);
+  GenUnsafeGet(invoke, DataType::Type::kInt64, /* is_volatile= */ false, codegen_);
 }
 void IntrinsicCodeGeneratorARM64::VisitUnsafeGetLongVolatile(HInvoke* invoke) {
-  GenUnsafeGet(invoke, DataType::Type::kInt64, /* is_volatile */ true, codegen_);
+  GenUnsafeGet(invoke, DataType::Type::kInt64, /* is_volatile= */ true, codegen_);
 }
 void IntrinsicCodeGeneratorARM64::VisitUnsafeGetObject(HInvoke* invoke) {
-  GenUnsafeGet(invoke, DataType::Type::kReference, /* is_volatile */ false, codegen_);
+  GenUnsafeGet(invoke, DataType::Type::kReference, /* is_volatile= */ false, codegen_);
 }
 void IntrinsicCodeGeneratorARM64::VisitUnsafeGetObjectVolatile(HInvoke* invoke) {
-  GenUnsafeGet(invoke, DataType::Type::kReference, /* is_volatile */ true, codegen_);
+  GenUnsafeGet(invoke, DataType::Type::kReference, /* is_volatile= */ true, codegen_);
 }
 
 static void CreateIntIntIntIntToVoid(ArenaAllocator* allocator, HInvoke* invoke) {
@@ -896,7 +896,7 @@ static void GenUnsafePut(HInvoke* invoke,
     }
 
     if (is_volatile || is_ordered) {
-      codegen->StoreRelease(invoke, type, source, mem_op, /* needs_null_check */ false);
+      codegen->StoreRelease(invoke, type, source, mem_op, /* needs_null_check= */ false);
     } else {
       codegen->Store(type, source, mem_op);
     }
@@ -911,64 +911,64 @@ static void GenUnsafePut(HInvoke* invoke,
 void IntrinsicCodeGeneratorARM64::VisitUnsafePut(HInvoke* invoke) {
   GenUnsafePut(invoke,
                DataType::Type::kInt32,
-               /* is_volatile */ false,
-               /* is_ordered */ false,
+               /* is_volatile= */ false,
+               /* is_ordered= */ false,
                codegen_);
 }
 void IntrinsicCodeGeneratorARM64::VisitUnsafePutOrdered(HInvoke* invoke) {
   GenUnsafePut(invoke,
                DataType::Type::kInt32,
-               /* is_volatile */ false,
-               /* is_ordered */ true,
+               /* is_volatile= */ false,
+               /* is_ordered= */ true,
                codegen_);
 }
 void IntrinsicCodeGeneratorARM64::VisitUnsafePutVolatile(HInvoke* invoke) {
   GenUnsafePut(invoke,
                DataType::Type::kInt32,
-               /* is_volatile */ true,
-               /* is_ordered */ false,
+               /* is_volatile= */ true,
+               /* is_ordered= */ false,
                codegen_);
 }
 void IntrinsicCodeGeneratorARM64::VisitUnsafePutObject(HInvoke* invoke) {
   GenUnsafePut(invoke,
                DataType::Type::kReference,
-               /* is_volatile */ false,
-               /* is_ordered */ false,
+               /* is_volatile= */ false,
+               /* is_ordered= */ false,
                codegen_);
 }
 void IntrinsicCodeGeneratorARM64::VisitUnsafePutObjectOrdered(HInvoke* invoke) {
   GenUnsafePut(invoke,
                DataType::Type::kReference,
-               /* is_volatile */ false,
-               /* is_ordered */ true,
+               /* is_volatile= */ false,
+               /* is_ordered= */ true,
                codegen_);
 }
 void IntrinsicCodeGeneratorARM64::VisitUnsafePutObjectVolatile(HInvoke* invoke) {
   GenUnsafePut(invoke,
                DataType::Type::kReference,
-               /* is_volatile */ true,
-               /* is_ordered */ false,
+               /* is_volatile= */ true,
+               /* is_ordered= */ false,
                codegen_);
 }
 void IntrinsicCodeGeneratorARM64::VisitUnsafePutLong(HInvoke* invoke) {
   GenUnsafePut(invoke,
                DataType::Type::kInt64,
-               /* is_volatile */ false,
-               /* is_ordered */ false,
+               /* is_volatile= */ false,
+               /* is_ordered= */ false,
                codegen_);
 }
 void IntrinsicCodeGeneratorARM64::VisitUnsafePutLongOrdered(HInvoke* invoke) {
   GenUnsafePut(invoke,
                DataType::Type::kInt64,
-               /* is_volatile */ false,
-               /* is_ordered */ true,
+               /* is_volatile= */ false,
+               /* is_ordered= */ true,
                codegen_);
 }
 void IntrinsicCodeGeneratorARM64::VisitUnsafePutLongVolatile(HInvoke* invoke) {
   GenUnsafePut(invoke,
                DataType::Type::kInt64,
-               /* is_volatile */ true,
-               /* is_ordered */ false,
+               /* is_volatile= */ true,
+               /* is_ordered= */ false,
                codegen_);
 }
 
@@ -1638,7 +1638,7 @@ void IntrinsicLocationsBuilderARM64::VisitStringIndexOf(HInvoke* invoke) {
 }
 
 void IntrinsicCodeGeneratorARM64::VisitStringIndexOf(HInvoke* invoke) {
-  GenerateVisitStringIndexOf(invoke, GetVIXLAssembler(), codegen_, /* start_at_zero */ true);
+  GenerateVisitStringIndexOf(invoke, GetVIXLAssembler(), codegen_, /* start_at_zero= */ true);
 }
 
 void IntrinsicLocationsBuilderARM64::VisitStringIndexOfAfter(HInvoke* invoke) {
@@ -1654,7 +1654,7 @@ void IntrinsicLocationsBuilderARM64::VisitStringIndexOfAfter(HInvoke* invoke) {
 }
 
 void IntrinsicCodeGeneratorARM64::VisitStringIndexOfAfter(HInvoke* invoke) {
-  GenerateVisitStringIndexOf(invoke, GetVIXLAssembler(), codegen_, /* start_at_zero */ false);
+  GenerateVisitStringIndexOf(invoke, GetVIXLAssembler(), codegen_, /* start_at_zero= */ false);
 }
 
 void IntrinsicLocationsBuilderARM64::VisitStringNewStringFromBytes(HInvoke* invoke) {
@@ -2456,8 +2456,8 @@ void IntrinsicCodeGeneratorARM64::VisitSystemArrayCopy(HInvoke* invoke) {
                                                           src.W(),
                                                           class_offset,
                                                           temp3_loc,
-                                                          /* needs_null_check */ false,
-                                                          /* use_load_acquire */ false);
+                                                          /* needs_null_check= */ false,
+                                                          /* use_load_acquire= */ false);
           // Bail out if the source is not a non primitive array.
           // /* HeapReference<Class> */ temp1 = temp1->component_type_
           codegen_->GenerateFieldLoadWithBakerReadBarrier(invoke,
@@ -2465,8 +2465,8 @@ void IntrinsicCodeGeneratorARM64::VisitSystemArrayCopy(HInvoke* invoke) {
                                                           temp1,
                                                           component_offset,
                                                           temp3_loc,
-                                                          /* needs_null_check */ false,
-                                                          /* use_load_acquire */ false);
+                                                          /* needs_null_check= */ false,
+                                                          /* use_load_acquire= */ false);
           __ Cbz(temp1, intrinsic_slow_path->GetEntryLabel());
           // If heap poisoning is enabled, `temp1` has been unpoisoned
           // by the the previous call to GenerateFieldLoadWithBakerReadBarrier.
@@ -2482,8 +2482,8 @@ void IntrinsicCodeGeneratorARM64::VisitSystemArrayCopy(HInvoke* invoke) {
                                                         dest.W(),
                                                         class_offset,
                                                         temp3_loc,
-                                                        /* needs_null_check */ false,
-                                                        /* use_load_acquire */ false);
+                                                        /* needs_null_check= */ false,
+                                                        /* use_load_acquire= */ false);
 
         if (!optimizations.GetDestinationIsNonPrimitiveArray()) {
           // Bail out if the destination is not a non primitive array.
@@ -2499,8 +2499,8 @@ void IntrinsicCodeGeneratorARM64::VisitSystemArrayCopy(HInvoke* invoke) {
                                                           temp1,
                                                           component_offset,
                                                           temp3_loc,
-                                                          /* needs_null_check */ false,
-                                                          /* use_load_acquire */ false);
+                                                          /* needs_null_check= */ false,
+                                                          /* use_load_acquire= */ false);
           __ Cbz(temp2, intrinsic_slow_path->GetEntryLabel());
           // If heap poisoning is enabled, `temp2` has been unpoisoned
           // by the the previous call to GenerateFieldLoadWithBakerReadBarrier.
@@ -2518,8 +2518,8 @@ void IntrinsicCodeGeneratorARM64::VisitSystemArrayCopy(HInvoke* invoke) {
                                                         src.W(),
                                                         class_offset,
                                                         temp3_loc,
-                                                        /* needs_null_check */ false,
-                                                        /* use_load_acquire */ false);
+                                                        /* needs_null_check= */ false,
+                                                        /* use_load_acquire= */ false);
         // Note: if heap poisoning is on, we are comparing two unpoisoned references here.
         __ Cmp(temp1, temp2);
 
@@ -2532,8 +2532,8 @@ void IntrinsicCodeGeneratorARM64::VisitSystemArrayCopy(HInvoke* invoke) {
                                                           temp1,
                                                           component_offset,
                                                           temp3_loc,
-                                                          /* needs_null_check */ false,
-                                                          /* use_load_acquire */ false);
+                                                          /* needs_null_check= */ false,
+                                                          /* use_load_acquire= */ false);
           // /* HeapReference<Class> */ temp1 = temp1->super_class_
           // We do not need to emit a read barrier for the following
           // heap reference load, as `temp1` is only used in a
@@ -2616,16 +2616,16 @@ void IntrinsicCodeGeneratorARM64::VisitSystemArrayCopy(HInvoke* invoke) {
                                                         src.W(),
                                                         class_offset,
                                                         temp3_loc,
-                                                        /* needs_null_check */ false,
-                                                        /* use_load_acquire */ false);
+                                                        /* needs_null_check= */ false,
+                                                        /* use_load_acquire= */ false);
         // /* HeapReference<Class> */ temp2 = temp1->component_type_
         codegen_->GenerateFieldLoadWithBakerReadBarrier(invoke,
                                                         temp2_loc,
                                                         temp1,
                                                         component_offset,
                                                         temp3_loc,
-                                                        /* needs_null_check */ false,
-                                                        /* use_load_acquire */ false);
+                                                        /* needs_null_check= */ false,
+                                                        /* use_load_acquire= */ false);
         __ Cbz(temp2, intrinsic_slow_path->GetEntryLabel());
         // If heap poisoning is enabled, `temp2` has been unpoisoned
         // by the the previous call to GenerateFieldLoadWithBakerReadBarrier.
@@ -2779,7 +2779,7 @@ void IntrinsicCodeGeneratorARM64::VisitSystemArrayCopy(HInvoke* invoke) {
   }
 
   // We only need one card marking on the destination array.
-  codegen_->MarkGCCard(dest.W(), Register(), /* value_can_be_null */ false);
+  codegen_->MarkGCCard(dest.W(), Register(), /* value_can_be_null= */ false);
 
   __ Bind(intrinsic_slow_path->GetExitLabel());
 }
@@ -2812,7 +2812,7 @@ void IntrinsicLocationsBuilderARM64::VisitFloatIsInfinite(HInvoke* invoke) {
 }
 
 void IntrinsicCodeGeneratorARM64::VisitFloatIsInfinite(HInvoke* invoke) {
-  GenIsInfinite(invoke->GetLocations(), /* is64bit */ false, GetVIXLAssembler());
+  GenIsInfinite(invoke->GetLocations(), /* is64bit= */ false, GetVIXLAssembler());
 }
 
 void IntrinsicLocationsBuilderARM64::VisitDoubleIsInfinite(HInvoke* invoke) {
@@ -2820,7 +2820,7 @@ void IntrinsicLocationsBuilderARM64::VisitDoubleIsInfinite(HInvoke* invoke) {
 }
 
 void IntrinsicCodeGeneratorARM64::VisitDoubleIsInfinite(HInvoke* invoke) {
-  GenIsInfinite(invoke->GetLocations(), /* is64bit */ true, GetVIXLAssembler());
+  GenIsInfinite(invoke->GetLocations(), /* is64bit= */ true, GetVIXLAssembler());
 }
 
 void IntrinsicLocationsBuilderARM64::VisitIntegerValueOf(HInvoke* invoke) {
@@ -2927,7 +2927,7 @@ void IntrinsicLocationsBuilderARM64::VisitCRC32Update(HInvoke* invoke) {
 
   locations->SetInAt(0, Location::RequiresRegister());
   locations->SetInAt(1, Location::RequiresRegister());
-  locations->SetOut(Location::RequiresRegister());
+  locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
 }
 
 // Lower the invoke of CRC32.update(int crc, int b).
@@ -2945,9 +2945,220 @@ void IntrinsicCodeGeneratorARM64::VisitCRC32Update(HInvoke* invoke) {
   //   result = crc32_for_byte(crc, b)
   //   crc = ~result
   // It is directly lowered to three instructions.
+
+  UseScratchRegisterScope temps(masm);
+  Register tmp = temps.AcquireSameSizeAs(out);
+
+  __ Mvn(tmp, crc);
+  __ Crc32b(tmp, tmp, val);
+  __ Mvn(out, tmp);
+}
+
+// Generate code using CRC32 instructions which calculates
+// a CRC32 value of a byte.
+//
+// Parameters:
+//   masm   - VIXL macro assembler
+//   crc    - a register holding an initial CRC value
+//   ptr    - a register holding a memory address of bytes
+//   length - a register holding a number of bytes to process
+//   out    - a register to put a result of calculation
+static void GenerateCodeForCalculationCRC32ValueOfBytes(MacroAssembler* masm,
+                                                        const Register& crc,
+                                                        const Register& ptr,
+                                                        const Register& length,
+                                                        const Register& out) {
+  // The algorithm of CRC32 of bytes is:
+  //   crc = ~crc
+  //   process a few first bytes to make the array 8-byte aligned
+  //   while array has 8 bytes do:
+  //     crc = crc32_of_8bytes(crc, 8_bytes(array))
+  //   if array has 4 bytes:
+  //     crc = crc32_of_4bytes(crc, 4_bytes(array))
+  //   if array has 2 bytes:
+  //     crc = crc32_of_2bytes(crc, 2_bytes(array))
+  //   if array has a byte:
+  //     crc = crc32_of_byte(crc, 1_byte(array))
+  //   crc = ~crc
+
+  vixl::aarch64::Label loop, done;
+  vixl::aarch64::Label process_4bytes, process_2bytes, process_1byte;
+  vixl::aarch64::Label aligned2, aligned4, aligned8;
+
+  // Use VIXL scratch registers as the VIXL macro assembler won't use them in
+  // instructions below.
+  UseScratchRegisterScope temps(masm);
+  Register len = temps.AcquireW();
+  Register array_elem = temps.AcquireW();
+
   __ Mvn(out, crc);
-  __ Crc32b(out, out, val);
+  __ Mov(len, length);
+
+  __ Tbz(ptr, 0, &aligned2);
+  __ Subs(len, len, 1);
+  __ B(&done, lo);
+  __ Ldrb(array_elem, MemOperand(ptr, 1, PostIndex));
+  __ Crc32b(out, out, array_elem);
+
+  __ Bind(&aligned2);
+  __ Tbz(ptr, 1, &aligned4);
+  __ Subs(len, len, 2);
+  __ B(&process_1byte, lo);
+  __ Ldrh(array_elem, MemOperand(ptr, 2, PostIndex));
+  __ Crc32h(out, out, array_elem);
+
+  __ Bind(&aligned4);
+  __ Tbz(ptr, 2, &aligned8);
+  __ Subs(len, len, 4);
+  __ B(&process_2bytes, lo);
+  __ Ldr(array_elem, MemOperand(ptr, 4, PostIndex));
+  __ Crc32w(out, out, array_elem);
+
+  __ Bind(&aligned8);
+  __ Subs(len, len, 8);
+  // If len < 8 go to process data by 4 bytes, 2 bytes and a byte.
+  __ B(&process_4bytes, lo);
+
+  // The main loop processing data by 8 bytes.
+  __ Bind(&loop);
+  __ Ldr(array_elem.X(), MemOperand(ptr, 8, PostIndex));
+  __ Subs(len, len, 8);
+  __ Crc32x(out, out, array_elem.X());
+  // if len >= 8, process the next 8 bytes.
+  __ B(&loop, hs);
+
+  // Process the data which is less than 8 bytes.
+  // The code generated below works with values of len
+  // which come in the range [-8, 0].
+  // The first three bits are used to detect whether 4 bytes or 2 bytes or
+  // a byte can be processed.
+  // The checking order is from bit 2 to bit 0:
+  //  bit 2 is set: at least 4 bytes available
+  //  bit 1 is set: at least 2 bytes available
+  //  bit 0 is set: at least a byte available
+  __ Bind(&process_4bytes);
+  // Goto process_2bytes if less than four bytes available
+  __ Tbz(len, 2, &process_2bytes);
+  __ Ldr(array_elem, MemOperand(ptr, 4, PostIndex));
+  __ Crc32w(out, out, array_elem);
+
+  __ Bind(&process_2bytes);
+  // Goto process_1bytes if less than two bytes available
+  __ Tbz(len, 1, &process_1byte);
+  __ Ldrh(array_elem, MemOperand(ptr, 2, PostIndex));
+  __ Crc32h(out, out, array_elem);
+
+  __ Bind(&process_1byte);
+  // Goto done if no bytes available
+  __ Tbz(len, 0, &done);
+  __ Ldrb(array_elem, MemOperand(ptr));
+  __ Crc32b(out, out, array_elem);
+
+  __ Bind(&done);
   __ Mvn(out, out);
+}
+
+// The threshold for sizes of arrays to use the library provided implementation
+// of CRC32.updateBytes instead of the intrinsic.
+static constexpr int32_t kCRC32UpdateBytesThreshold = 64 * 1024;
+
+void IntrinsicLocationsBuilderARM64::VisitCRC32UpdateBytes(HInvoke* invoke) {
+  if (!codegen_->GetInstructionSetFeatures().HasCRC()) {
+    return;
+  }
+
+  LocationSummary* locations =
+      new (allocator_) LocationSummary(invoke,
+                                       LocationSummary::kCallOnSlowPath,
+                                       kIntrinsified);
+
+  locations->SetInAt(0, Location::RequiresRegister());
+  locations->SetInAt(1, Location::RequiresRegister());
+  locations->SetInAt(2, Location::RegisterOrConstant(invoke->InputAt(2)));
+  locations->SetInAt(3, Location::RequiresRegister());
+  locations->AddTemp(Location::RequiresRegister());
+  locations->SetOut(Location::RequiresRegister());
+}
+
+// Lower the invoke of CRC32.updateBytes(int crc, byte[] b, int off, int len)
+//
+// Note: The intrinsic is not used if len exceeds a threshold.
+void IntrinsicCodeGeneratorARM64::VisitCRC32UpdateBytes(HInvoke* invoke) {
+  DCHECK(codegen_->GetInstructionSetFeatures().HasCRC());
+
+  auto masm = GetVIXLAssembler();
+  auto locations = invoke->GetLocations();
+
+  auto slow_path =
+    new (codegen_->GetScopedAllocator()) IntrinsicSlowPathARM64(invoke);
+  codegen_->AddSlowPath(slow_path);
+
+  Register length = WRegisterFrom(locations->InAt(3));
+  __ Cmp(length, kCRC32UpdateBytesThreshold);
+  __ B(slow_path->GetEntryLabel(), hi);
+
+  const uint32_t array_data_offset =
+      mirror::Array::DataOffset(Primitive::kPrimByte).Uint32Value();
+  Register ptr = XRegisterFrom(locations->GetTemp(0));
+  Register array = XRegisterFrom(locations->InAt(1));
+  auto offset = locations->InAt(2);
+  if (offset.IsConstant()) {
+    int32_t offset_value = offset.GetConstant()->AsIntConstant()->GetValue();
+    __ Add(ptr, array, array_data_offset + offset_value);
+  } else {
+    __ Add(ptr, array, array_data_offset);
+    __ Add(ptr, ptr, XRegisterFrom(offset));
+  }
+
+  Register crc = WRegisterFrom(locations->InAt(0));
+  Register out = WRegisterFrom(locations->Out());
+
+  GenerateCodeForCalculationCRC32ValueOfBytes(masm, crc, ptr, length, out);
+
+  __ Bind(slow_path->GetExitLabel());
+}
+
+void IntrinsicLocationsBuilderARM64::VisitCRC32UpdateByteBuffer(HInvoke* invoke) {
+  if (!codegen_->GetInstructionSetFeatures().HasCRC()) {
+    return;
+  }
+
+  LocationSummary* locations =
+      new (allocator_) LocationSummary(invoke,
+                                       LocationSummary::kNoCall,
+                                       kIntrinsified);
+
+  locations->SetInAt(0, Location::RequiresRegister());
+  locations->SetInAt(1, Location::RequiresRegister());
+  locations->SetInAt(2, Location::RequiresRegister());
+  locations->SetInAt(3, Location::RequiresRegister());
+  locations->AddTemp(Location::RequiresRegister());
+  locations->SetOut(Location::RequiresRegister());
+}
+
+// Lower the invoke of CRC32.updateByteBuffer(int crc, long addr, int off, int len)
+//
+// There is no need to generate code checking if addr is 0.
+// The method updateByteBuffer is a private method of java.util.zip.CRC32.
+// This guarantees no calls outside of the CRC32 class.
+// An address of DirectBuffer is always passed to the call of updateByteBuffer.
+// It might be an implementation of an empty DirectBuffer which can use a zero
+// address but it must have the length to be zero. The current generated code
+// correctly works with the zero length.
+void IntrinsicCodeGeneratorARM64::VisitCRC32UpdateByteBuffer(HInvoke* invoke) {
+  DCHECK(codegen_->GetInstructionSetFeatures().HasCRC());
+
+  auto masm = GetVIXLAssembler();
+  auto locations = invoke->GetLocations();
+
+  Register addr = XRegisterFrom(locations->InAt(1));
+  Register ptr = XRegisterFrom(locations->GetTemp(0));
+  __ Add(ptr, addr, XRegisterFrom(locations->InAt(2)));
+
+  Register crc = WRegisterFrom(locations->InAt(0));
+  Register length = WRegisterFrom(locations->InAt(3));
+  Register out = WRegisterFrom(locations->Out());
+  GenerateCodeForCalculationCRC32ValueOfBytes(masm, crc, ptr, length, out);
 }
 
 UNIMPLEMENTED_INTRINSIC(ARM64, ReferenceGetReferent)

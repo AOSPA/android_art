@@ -21,7 +21,6 @@
 
 #include "art_field.h"
 #include "base/callee_save_type.h"
-#include "base/utils.h"
 #include "class_linker-inl.h"
 #include "common_throws.h"
 #include "dex/code_item_accessors-inl.h"
@@ -31,6 +30,7 @@
 #include "dex/invoke_type.h"
 #include "dex/primitive.h"
 #include "gc_root-inl.h"
+#include "imtable-inl.h"
 #include "intrinsics_enum.h"
 #include "jit/profiling_info.h"
 #include "mirror/class-inl.h"
@@ -43,7 +43,6 @@
 #include "quick/quick_method_frame_info.h"
 #include "read_barrier-inl.h"
 #include "runtime-inl.h"
-#include "scoped_thread_state_change-inl.h"
 #include "thread-current-inl.h"
 
 namespace art {
@@ -224,11 +223,11 @@ inline const char* ArtMethod::GetName() {
 
 inline ObjPtr<mirror::String> ArtMethod::ResolveNameString() {
   DCHECK(!IsProxyMethod());
-  const DexFile::MethodId& method_id = GetDexFile()->GetMethodId(GetDexMethodIndex());
+  const dex::MethodId& method_id = GetDexFile()->GetMethodId(GetDexMethodIndex());
   return Runtime::Current()->GetClassLinker()->ResolveString(method_id.name_idx_, this);
 }
 
-inline const DexFile::CodeItem* ArtMethod::GetCodeItem() {
+inline const dex::CodeItem* ArtMethod::GetCodeItem() {
   return GetDexFile()->GetCodeItem(GetCodeItemOffset());
 }
 
@@ -245,16 +244,16 @@ inline int32_t ArtMethod::GetLineNumFromDexPC(uint32_t dex_pc) {
   return annotations::GetLineNumFromPC(GetDexFile(), this, dex_pc);
 }
 
-inline const DexFile::ProtoId& ArtMethod::GetPrototype() {
+inline const dex::ProtoId& ArtMethod::GetPrototype() {
   DCHECK(!IsProxyMethod());
   const DexFile* dex_file = GetDexFile();
   return dex_file->GetMethodPrototype(dex_file->GetMethodId(GetDexMethodIndex()));
 }
 
-inline const DexFile::TypeList* ArtMethod::GetParameterTypeList() {
+inline const dex::TypeList* ArtMethod::GetParameterTypeList() {
   DCHECK(!IsProxyMethod());
   const DexFile* dex_file = GetDexFile();
-  const DexFile::ProtoId& proto = dex_file->GetMethodPrototype(
+  const dex::ProtoId& proto = dex_file->GetMethodPrototype(
       dex_file->GetMethodId(GetDexMethodIndex()));
   return dex_file->GetProtoParameters(proto);
 }
@@ -273,7 +272,7 @@ inline uint16_t ArtMethod::GetClassDefIndex() {
   }
 }
 
-inline const DexFile::ClassDef& ArtMethod::GetClassDef() {
+inline const dex::ClassDef& ArtMethod::GetClassDef() {
   DCHECK(!IsProxyMethod());
   return GetDexFile()->GetClassDef(GetClassDefIndex());
 }
@@ -344,8 +343,8 @@ inline ArtMethod* ArtMethod::GetInterfaceMethodIfProxy(PointerSize pointer_size)
 inline dex::TypeIndex ArtMethod::GetReturnTypeIndex() {
   DCHECK(!IsProxyMethod());
   const DexFile* dex_file = GetDexFile();
-  const DexFile::MethodId& method_id = dex_file->GetMethodId(GetDexMethodIndex());
-  const DexFile::ProtoId& proto_id = dex_file->GetMethodPrototype(method_id);
+  const dex::MethodId& method_id = dex_file->GetMethodId(GetDexMethodIndex());
+  const dex::ProtoId& proto_id = dex_file->GetMethodPrototype(method_id);
   return proto_id.return_type_idx_;
 }
 
@@ -419,6 +418,31 @@ inline CodeItemDataAccessor ArtMethod::DexInstructionData() {
 
 inline CodeItemDebugInfoAccessor ArtMethod::DexInstructionDebugInfo() {
   return CodeItemDebugInfoAccessor(*GetDexFile(), GetCodeItem(), GetDexMethodIndex());
+}
+
+inline void ArtMethod::SetCounter(int16_t hotness_count) {
+  DCHECK(!IsAbstract()) << PrettyMethod();
+  hotness_count_ = hotness_count;
+}
+
+inline uint16_t ArtMethod::GetCounter() {
+  DCHECK(!IsAbstract()) << PrettyMethod();
+  return hotness_count_;
+}
+
+inline uint32_t ArtMethod::GetImtIndex() {
+  if (LIKELY(IsAbstract() && imt_index_ != 0)) {
+    uint16_t imt_index = ~imt_index_;
+    DCHECK_EQ(imt_index, ImTable::GetImtIndex(this)) << PrettyMethod();
+    return imt_index;
+  } else {
+    return ImTable::GetImtIndex(this);
+  }
+}
+
+inline void ArtMethod::CalculateAndSetImtIndex() {
+  DCHECK(IsAbstract()) << PrettyMethod();
+  imt_index_ = ~ImTable::GetImtIndex(this);
 }
 
 }  // namespace art

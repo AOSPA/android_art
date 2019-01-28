@@ -19,6 +19,7 @@
 #include <lz4.h>
 #include <lz4hc.h>
 #include <sys/stat.h>
+#include <zlib.h>
 
 #include <memory>
 #include <numeric>
@@ -31,6 +32,7 @@
 #include "base/enums.h"
 #include "base/globals.h"
 #include "base/logging.h"  // For VLOG.
+#include "base/stl_util.h"
 #include "base/unix_file/fd_file.h"
 #include "class_linker-inl.h"
 #include "class_root.h"
@@ -145,9 +147,31 @@ static ArrayRef<const uint8_t> MaybeCompressData(ArrayRef<const uint8_t> source,
 // Separate objects into multiple bins to optimize dirty memory use.
 static constexpr bool kBinObjects = true;
 
-ObjPtr<mirror::ClassLoader> ImageWriter::GetClassLoader() {
-  CHECK_EQ(class_loaders_.size(), compiler_options_.IsAppImage() ? 1u : 0u);
-  return compiler_options_.IsAppImage() ? *class_loaders_.begin() : nullptr;
+ObjPtr<mirror::ClassLoader> ImageWriter::GetAppClassLoader() const
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  return compiler_options_.IsAppImage()
+      ? ObjPtr<mirror::ClassLoader>::DownCast(Thread::Current()->DecodeJObject(app_class_loader_))
+      : nullptr;
+}
+
+bool ImageWriter::IsImageObject(ObjPtr<mirror::Object> obj) const {
+  // For boot image, we keep all objects remaining after the GC in PrepareImageAddressSpace().
+  if (compiler_options_.IsBootImage()) {
+    return true;
+  }
+  // Objects already in the boot image do not belong to the image being written.
+  if (IsInBootImage(obj.Ptr())) {
+    return false;
+  }
+  // DexCaches for the boot class path components that are not a part of the boot image
+  // cannot be garbage collected in PrepareImageAddressSpace() but we do not want to
+  // include them in the app image. So make sure we include only the app DexCaches.
+  if (obj->IsDexCache() &&
+      !ContainsElement(compiler_options_.GetDexFilesForOatFile(),
+                       obj->AsDexCache()->GetDexFile())) {
+    return false;
+  }
+  return true;
 }
 
 // Return true if an object is already in an image space.
@@ -434,7 +458,7 @@ std::vector<ImageWriter::HeapReferencePointerInfo> ImageWriter::CollectStringRef
    */
   heap->VisitObjects([this, &visitor](ObjPtr<mirror::Object> object)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (!IsInBootImage(object.Ptr())) {
+    if (IsImageObject(object)) {
       visitor.SetObject(object);
 
       if (object->IsDexCache()) {
@@ -606,9 +630,61 @@ bool ImageWriter::IsValidAppImageStringReference(ObjPtr<mirror::Object> referred
          referred_obj->IsString();
 }
 
+// Helper class that erases the image file if it isn't properly flushed and closed.
+class ImageWriter::ImageFileGuard {
+ public:
+  ImageFileGuard() noexcept = default;
+  ImageFileGuard(ImageFileGuard&& other) noexcept = default;
+  ImageFileGuard& operator=(ImageFileGuard&& other) noexcept = default;
+
+  ~ImageFileGuard() {
+    if (image_file_ != nullptr) {
+      // Failure, erase the image file.
+      image_file_->Erase();
+    }
+  }
+
+  void reset(File* image_file) {
+    image_file_.reset(image_file);
+  }
+
+  bool operator==(std::nullptr_t) {
+    return image_file_ == nullptr;
+  }
+
+  bool operator!=(std::nullptr_t) {
+    return image_file_ != nullptr;
+  }
+
+  File* operator->() const {
+    return image_file_.get();
+  }
+
+  bool WriteHeaderAndClose(const std::string& image_filename, const ImageHeader* image_header) {
+    // The header is uncompressed since it contains whether the image is compressed or not.
+    if (!image_file_->PwriteFully(image_header, sizeof(ImageHeader), 0)) {
+      PLOG(ERROR) << "Failed to write image file header " << image_filename;
+      return false;
+    }
+
+    // FlushCloseOrErase() takes care of erasing, so the destructor does not need
+    // to do that whether the FlushCloseOrErase() succeeds or fails.
+    std::unique_ptr<File> image_file = std::move(image_file_);
+    if (image_file->FlushCloseOrErase() != 0) {
+      PLOG(ERROR) << "Failed to flush and close image file " << image_filename;
+      return false;
+    }
+
+    return true;
+  }
+
+ private:
+  std::unique_ptr<File> image_file_;
+};
+
 bool ImageWriter::Write(int image_fd,
-                        const std::vector<const char*>& image_filenames,
-                        const std::vector<const char*>& oat_filenames) {
+                        const std::vector<std::string>& image_filenames,
+                        const std::vector<std::string>& oat_filenames) {
   // If image_fd or oat_fd are not kInvalidFd then we may have empty strings in image_filenames or
   // oat_filenames.
   CHECK(!image_filenames.empty());
@@ -622,10 +698,10 @@ bool ImageWriter::Write(int image_fd,
   {
     // Preload deterministic contents to the dex cache arrays we're going to write.
     ScopedObjectAccess soa(self);
-    ObjPtr<mirror::ClassLoader> class_loader = GetClassLoader();
+    ObjPtr<mirror::ClassLoader> class_loader = GetAppClassLoader();
     std::vector<ObjPtr<mirror::DexCache>> dex_caches = FindDexCaches(self);
     for (ObjPtr<mirror::DexCache> dex_cache : dex_caches) {
-      if (IsInBootImage(dex_cache.Ptr())) {
+      if (!IsImageObject(dex_cache)) {
         continue;  // Boot image DexCache is not written to the app image.
       }
       PreloadDexCache(dex_cache, class_loader);
@@ -651,12 +727,20 @@ bool ImageWriter::Write(int image_fd,
     CopyMetadata();
   }
 
+  // Primary image header shall be written last for two reasons. First, this ensures
+  // that we shall not end up with a valid primary image and invalid secondary image.
+  // Second, its checksum shall include the checksums of the secondary images (XORed).
+  // This way only the primary image checksum needs to be checked to determine whether
+  // any of the images or oat files are out of date. (Oat file checksums are included
+  // in the image checksum calculation.)
+  ImageHeader* primary_header = reinterpret_cast<ImageHeader*>(image_infos_[0].image_.Begin());
+  ImageFileGuard primary_image_file;
   for (size_t i = 0; i < image_filenames.size(); ++i) {
-    const char* image_filename = image_filenames[i];
+    const std::string& image_filename = image_filenames[i];
     ImageInfo& image_info = GetImageInfo(i);
-    std::unique_ptr<File> image_file;
+    ImageFileGuard image_file;
     if (image_fd != kInvalidFd) {
-      if (strlen(image_filename) == 0u) {
+      if (image_filename.empty()) {
         image_file.reset(new File(image_fd, unix_file::kCheckSafeUsage));
         // Empty the file in case it already exists.
         if (image_file != nullptr) {
@@ -667,7 +751,7 @@ bool ImageWriter::Write(int image_fd,
         LOG(ERROR) << "image fd " << image_fd << " name " << image_filename;
       }
     } else {
-      image_file.reset(OS::CreateEmptyFile(image_filename));
+      image_file.reset(OS::CreateEmptyFile(image_filename.c_str()));
     }
 
     if (image_file == nullptr) {
@@ -677,67 +761,119 @@ bool ImageWriter::Write(int image_fd,
 
     if (!compiler_options_.IsAppImage() && fchmod(image_file->Fd(), 0644) != 0) {
       PLOG(ERROR) << "Failed to make image file world readable: " << image_filename;
-      image_file->Erase();
       return EXIT_FAILURE;
     }
 
     // Image data size excludes the bitmap and the header.
     ImageHeader* const image_header = reinterpret_cast<ImageHeader*>(image_info.image_.Begin());
-    ArrayRef<const uint8_t> raw_image_data(image_info.image_.Begin() + sizeof(ImageHeader),
-                                           image_header->GetImageSize() - sizeof(ImageHeader));
 
-    CHECK_EQ(image_header->storage_mode_, image_storage_mode_);
-    std::vector<uint8_t> compressed_data;
-    ArrayRef<const uint8_t> image_data =
-        MaybeCompressData(raw_image_data, image_storage_mode_, &compressed_data);
+    // Block sources (from the image).
+    const bool is_compressed = image_storage_mode_ != ImageHeader::kStorageModeUncompressed;
+    std::vector<std::pair<uint32_t, uint32_t>> block_sources;
+    std::vector<ImageHeader::Block> blocks;
 
-    // Write out the image + fields + methods.
-    if (!image_file->PwriteFully(image_data.data(), image_data.size(), sizeof(ImageHeader))) {
-      PLOG(ERROR) << "Failed to write image file data " << image_filename;
-      image_file->Erase();
-      return false;
+    // Add a set of solid blocks such that no block is larger than the maximum size. A solid block
+    // is a block that must be decompressed all at once.
+    auto add_blocks = [&](uint32_t offset, uint32_t size) {
+      while (size != 0u) {
+        const uint32_t cur_size = std::min(size, compiler_options_.MaxImageBlockSize());
+        block_sources.emplace_back(offset, cur_size);
+        offset += cur_size;
+        size -= cur_size;
+      }
+    };
+
+    add_blocks(sizeof(ImageHeader), image_header->GetImageSize() - sizeof(ImageHeader));
+
+    // Checksum of compressed image data and header.
+    uint32_t image_checksum = adler32(0L, Z_NULL, 0);
+    image_checksum = adler32(image_checksum,
+                             reinterpret_cast<const uint8_t*>(image_header),
+                             sizeof(ImageHeader));
+    // Copy and compress blocks.
+    size_t out_offset = sizeof(ImageHeader);
+    for (const std::pair<uint32_t, uint32_t> block : block_sources) {
+      ArrayRef<const uint8_t> raw_image_data(image_info.image_.Begin() + block.first,
+                                             block.second);
+      std::vector<uint8_t> compressed_data;
+      ArrayRef<const uint8_t> image_data =
+          MaybeCompressData(raw_image_data, image_storage_mode_, &compressed_data);
+
+      if (!is_compressed) {
+        // For uncompressed, preserve alignment since the image will be directly mapped.
+        out_offset = block.first;
+      }
+
+      // Fill in the compressed location of the block.
+      blocks.emplace_back(ImageHeader::Block(
+          image_storage_mode_,
+          /*data_offset=*/ out_offset,
+          /*data_size=*/ image_data.size(),
+          /*image_offset=*/ block.first,
+          /*image_size=*/ block.second));
+
+      // Write out the image + fields + methods.
+      if (!image_file->PwriteFully(image_data.data(), image_data.size(), out_offset)) {
+        PLOG(ERROR) << "Failed to write image file data " << image_filename;
+        image_file->Erase();
+        return false;
+      }
+      out_offset += image_data.size();
+      image_checksum = adler32(image_checksum, image_data.data(), image_data.size());
     }
 
-    // Write out the image bitmap at the page aligned start of the image end, also uncompressed for
-    // convenience.
-    const ImageSection& bitmap_section = image_header->GetImageBitmapSection();
+    // Write the block metadata directly after the image sections.
+    // Note: This is not part of the mapped image and is not preserved after decompressing, it's
+    // only used for image loading. For this reason, only write it out for compressed images.
+    if (is_compressed) {
+      // Align up since the compressed data is not necessarily aligned.
+      out_offset = RoundUp(out_offset, alignof(ImageHeader::Block));
+      CHECK(!blocks.empty());
+      const size_t blocks_bytes = blocks.size() * sizeof(blocks[0]);
+      if (!image_file->PwriteFully(&blocks[0], blocks_bytes, out_offset)) {
+        PLOG(ERROR) << "Failed to write image blocks " << image_filename;
+        image_file->Erase();
+        return false;
+      }
+      image_header->blocks_offset_ = out_offset;
+      image_header->blocks_count_ = blocks.size();
+      out_offset += blocks_bytes;
+    }
+
+    // Data size includes everything except the bitmap.
+    image_header->data_size_ = out_offset - sizeof(ImageHeader);
+
+    // Update and write the bitmap section. Note that the bitmap section is relative to the
+    // possibly compressed image.
+    ImageSection& bitmap_section = image_header->GetImageSection(ImageHeader::kSectionImageBitmap);
     // Align up since data size may be unaligned if the image is compressed.
-    size_t bitmap_position_in_file = RoundUp(sizeof(ImageHeader) + image_data.size(), kPageSize);
-    if (image_storage_mode_ == ImageHeader::kDefaultStorageMode) {
-      CHECK_EQ(bitmap_position_in_file, bitmap_section.Offset());
-    }
+    out_offset = RoundUp(out_offset, kPageSize);
+    bitmap_section = ImageSection(out_offset, bitmap_section.Size());
+
     if (!image_file->PwriteFully(image_info.image_bitmap_->Begin(),
                                  bitmap_section.Size(),
-                                 bitmap_position_in_file)) {
+                                 bitmap_section.Offset())) {
       PLOG(ERROR) << "Failed to write image file bitmap " << image_filename;
-      image_file->Erase();
       return false;
     }
 
     int err = image_file->Flush();
     if (err < 0) {
       PLOG(ERROR) << "Failed to flush image file " << image_filename << " with result " << err;
-      image_file->Erase();
       return false;
     }
 
-    // Write header last in case the compiler gets killed in the middle of image writing.
-    // We do not want to have a corrupted image with a valid header.
-    // The header is uncompressed since it contains whether the image is compressed or not.
-    image_header->data_size_ = image_data.size();
-    if (!image_file->PwriteFully(reinterpret_cast<char*>(image_info.image_.Begin()),
-                                 sizeof(ImageHeader),
-                                 0)) {
-      PLOG(ERROR) << "Failed to write image file header " << image_filename;
-      image_file->Erase();
-      return false;
-    }
+    // Calculate the image checksum of the remaining data.
+    image_checksum = adler32(image_checksum,
+                             reinterpret_cast<const uint8_t*>(image_info.image_bitmap_->Begin()),
+                             bitmap_section.Size());
+    image_header->SetImageChecksum(image_checksum);
 
     if (VLOG_IS_ON(compiler)) {
-      size_t separately_written_section_size = bitmap_section.Size() + sizeof(ImageHeader);
-
-      size_t total_uncompressed_size = raw_image_data.size() + separately_written_section_size,
-             total_compressed_size   = image_data.size() + separately_written_section_size;
+      const size_t separately_written_section_size = bitmap_section.Size();
+      const size_t total_uncompressed_size = image_info.image_size_ +
+          separately_written_section_size;
+      const size_t total_compressed_size = out_offset + separately_written_section_size;
 
       VLOG(compiler) << "Dex2Oat:uncompressedImageSize = " << total_uncompressed_size;
       if (total_uncompressed_size != total_compressed_size) {
@@ -745,14 +881,27 @@ bool ImageWriter::Write(int image_fd,
       }
     }
 
-    CHECK_EQ(bitmap_position_in_file + bitmap_section.Size(),
-             static_cast<size_t>(image_file->GetLength()));
+    CHECK_EQ(bitmap_section.End(), static_cast<size_t>(image_file->GetLength()))
+        << "Bitmap should be at the end of the file";
 
-    if (image_file->FlushCloseOrErase() != 0) {
-      PLOG(ERROR) << "Failed to flush and close image file " << image_filename;
-      return false;
+    // Write header last in case the compiler gets killed in the middle of image writing.
+    // We do not want to have a corrupted image with a valid header.
+    // Delay the writing of the primary image header until after writing secondary images.
+    if (i == 0u) {
+      primary_image_file = std::move(image_file);
+    } else {
+      if (!image_file.WriteHeaderAndClose(image_filename, image_header)) {
+        return false;
+      }
+      // Update the primary image checksum with the secondary image checksum.
+      primary_header->SetImageChecksum(primary_header->GetImageChecksum() ^ image_checksum);
     }
   }
+  DCHECK(primary_image_file != nullptr);
+  if (!primary_image_file.WriteHeaderAndClose(image_filenames[0], primary_header)) {
+    return false;
+  }
+
   return true;
 }
 
@@ -823,7 +972,7 @@ void ImageWriter::SetImageBinSlot(mirror::Object* object, BinSlot bin_slot) {
         oss << ". Lock owner:" << lw.ThinLockOwner();
       }
       LOG(FATAL) << oss.str();
-      break;
+      UNREACHABLE();
     }
     case LockWord::kUnlocked:
       // No hash, don't need to save it.
@@ -861,7 +1010,7 @@ void ImageWriter::PrepareDexCacheArraySlots() {
   for (const ClassLinker::DexCacheData& data : class_linker->GetDexCachesData()) {
     ObjPtr<mirror::DexCache> dex_cache =
         ObjPtr<mirror::DexCache>::DownCast(self->DecodeJObject(data.weak_root));
-    if (dex_cache == nullptr || IsInBootImage(dex_cache.Ptr())) {
+    if (dex_cache == nullptr || !IsImageObject(dex_cache)) {
       continue;
     }
     const DexFile* dex_file = dex_cache->GetDexFile();
@@ -1400,27 +1549,15 @@ class ImageWriter::PruneClassLoaderClassesVisitor : public ClassLoaderVisitor {
         Runtime::Current()->GetClassLinker()->ClassTableForClassLoader(class_loader);
     class_table->Visit(classes_visitor);
     removed_class_count_ += classes_visitor.Prune();
-
-    // Record app image class loader. The fake boot class loader should not get registered
-    // and we should end up with only one class loader for an app and none for boot image.
-    if (class_loader != nullptr && class_table != nullptr) {
-      DCHECK(class_loader_ == nullptr);
-      class_loader_ = class_loader;
-    }
   }
 
   size_t GetRemovedClassCount() const {
     return removed_class_count_;
   }
 
-  ObjPtr<mirror::ClassLoader> GetClassLoader() const REQUIRES_SHARED(Locks::mutator_lock_) {
-    return class_loader_;
-  }
-
  private:
   ImageWriter* const image_writer_;
   size_t removed_class_count_;
-  ObjPtr<mirror::ClassLoader> class_loader_;
 };
 
 void ImageWriter::VisitClassLoaders(ClassLoaderVisitor* visitor) {
@@ -1449,7 +1586,7 @@ void ImageWriter::PruneDexCache(ObjPtr<mirror::DexCache> dex_cache,
     // Check if the referenced class is in the image. Note that we want to check the referenced
     // class rather than the declaring class to preserve the semantics, i.e. using a MethodId
     // results in resolving the referenced class and that can for example throw OOME.
-    const DexFile::MethodId& method_id = dex_file.GetMethodId(stored_index);
+    const dex::MethodId& method_id = dex_file.GetMethodId(stored_index);
     if (method_id.class_idx_ != last_class_idx) {
       last_class_idx = method_id.class_idx_;
       last_class = class_linker->LookupResolvedType(last_class_idx, dex_cache, class_loader);
@@ -1475,7 +1612,7 @@ void ImageWriter::PruneDexCache(ObjPtr<mirror::DexCache> dex_cache,
     // Check if the referenced class is in the image. Note that we want to check the referenced
     // class rather than the declaring class to preserve the semantics, i.e. using a FieldId
     // results in resolving the referenced class and that can for example throw OOME.
-    const DexFile::FieldId& field_id = dex_file.GetFieldId(stored_index);
+    const dex::FieldId& field_id = dex_file.GetFieldId(stored_index);
     if (field_id.class_idx_ != last_class_idx) {
       last_class_idx = field_id.class_idx_;
       last_class = class_linker->LookupResolvedType(last_class_idx, dex_cache, class_loader);
@@ -1526,7 +1663,7 @@ void ImageWriter::PreloadDexCache(ObjPtr<mirror::DexCache> dex_cache,
     // Check if the referenced class is in the image. Note that we want to check the referenced
     // class rather than the declaring class to preserve the semantics, i.e. using a MethodId
     // results in resolving the referenced class and that can for example throw OOME.
-    const DexFile::MethodId& method_id = dex_file.GetMethodId(i);
+    const dex::MethodId& method_id = dex_file.GetMethodId(i);
     if (method_id.class_idx_ != last_class_idx) {
       last_class_idx = method_id.class_idx_;
       last_class = class_linker->LookupResolvedType(last_class_idx, dex_cache, class_loader);
@@ -1558,7 +1695,7 @@ void ImageWriter::PreloadDexCache(ObjPtr<mirror::DexCache> dex_cache,
     // Check if the referenced class is in the image. Note that we want to check the referenced
     // class rather than the declaring class to preserve the semantics, i.e. using a FieldId
     // results in resolving the referenced class and that can for example throw OOME.
-    const DexFile::FieldId& field_id = dex_file.GetFieldId(i);
+    const dex::FieldId& field_id = dex_file.GetFieldId(i);
     if (field_id.class_idx_ != last_class_idx) {
       last_class_idx = field_id.class_idx_;
       last_class = class_linker->LookupResolvedType(last_class_idx, dex_cache, class_loader);
@@ -1631,13 +1768,10 @@ void ImageWriter::PruneNonImageClasses() {
   });
 
   // Remove the undesired classes from the class roots.
-  ObjPtr<mirror::ClassLoader> class_loader;
   {
     PruneClassLoaderClassesVisitor class_loader_visitor(this);
     VisitClassLoaders(&class_loader_visitor);
     VLOG(compiler) << "Pruned " << class_loader_visitor.GetRemovedClassCount() << " classes";
-    class_loader = class_loader_visitor.GetClassLoader();
-    DCHECK_EQ(class_loader != nullptr, compiler_options_.IsAppImage());
   }
 
   // Clear references to removed classes from the DexCaches.
@@ -1645,7 +1779,8 @@ void ImageWriter::PruneNonImageClasses() {
   for (ObjPtr<mirror::DexCache> dex_cache : dex_caches) {
     // Pass the class loader associated with the DexCache. This can either be
     // the app's `class_loader` or `nullptr` if boot class loader.
-    PruneDexCache(dex_cache, IsInBootImage(dex_cache.Ptr()) ? nullptr : class_loader);
+    bool is_app_image_dex_cache = compiler_options_.IsAppImage() && IsImageObject(dex_cache);
+    PruneDexCache(dex_cache, is_app_image_dex_cache ? GetAppClassLoader() : nullptr);
   }
 
   // Drop the array class cache in the ClassLinker, as these are roots holding those classes live.
@@ -1743,7 +1878,7 @@ ObjPtr<mirror::ObjectArray<mirror::Object>> ImageWriter::CollectDexCaches(Thread
         continue;
       }
       const DexFile* dex_file = dex_cache->GetDexFile();
-      if (!IsInBootImage(dex_cache.Ptr())) {
+      if (IsImageObject(dex_cache)) {
         dex_cache_count += image_dex_files.find(dex_file) != image_dex_files.end() ? 1u : 0u;
       }
     }
@@ -1762,7 +1897,7 @@ ObjPtr<mirror::ObjectArray<mirror::Object>> ImageWriter::CollectDexCaches(Thread
         continue;
       }
       const DexFile* dex_file = dex_cache->GetDexFile();
-      if (!IsInBootImage(dex_cache.Ptr())) {
+      if (IsImageObject(dex_cache)) {
         non_image_dex_caches += image_dex_files.find(dex_file) != image_dex_files.end() ? 1u : 0u;
       }
     }
@@ -1776,7 +1911,7 @@ ObjPtr<mirror::ObjectArray<mirror::Object>> ImageWriter::CollectDexCaches(Thread
         continue;
       }
       const DexFile* dex_file = dex_cache->GetDexFile();
-      if (!IsInBootImage(dex_cache.Ptr()) &&
+      if (IsImageObject(dex_cache) &&
           image_dex_files.find(dex_file) != image_dex_files.end()) {
         dex_caches->Set<false>(i, dex_cache.Ptr());
         ++i;
@@ -1829,7 +1964,7 @@ ObjPtr<ObjectArray<Object>> ImageWriter::CreateImageRoots(
 mirror::Object* ImageWriter::TryAssignBinSlot(WorkStack& work_stack,
                                               mirror::Object* obj,
                                               size_t oat_index) {
-  if (obj == nullptr || IsInBootImage(obj)) {
+  if (obj == nullptr || !IsImageObject(obj)) {
     // Object is null or already in the image, there is no work to do.
     return obj;
   }
@@ -1964,18 +2099,17 @@ mirror::Object* ImageWriter::TryAssignBinSlot(WorkStack& work_stack,
       }
     } else if (obj->IsClassLoader()) {
       // Register the class loader if it has a class table.
-      // The fake boot class loader should not get registered and we should end up with only one
-      // class loader.
+      // The fake boot class loader should not get registered.
       mirror::ClassLoader* class_loader = obj->AsClassLoader();
       if (class_loader->GetClassTable() != nullptr) {
         DCHECK(compiler_options_.IsAppImage());
-        DCHECK(class_loaders_.empty());
-        class_loaders_.insert(class_loader);
-        ImageInfo& image_info = GetImageInfo(oat_index);
-        // Note: Avoid locking to prevent lock order violations from root visiting;
-        // image_info.class_table_ table is only accessed from the image writer
-        // and class_loader->GetClassTable() is iterated but not modified.
-        image_info.class_table_->CopyWithoutLocks(*class_loader->GetClassTable());
+        if (class_loader == GetAppClassLoader()) {
+          ImageInfo& image_info = GetImageInfo(oat_index);
+          // Note: Avoid locking to prevent lock order violations from root visiting;
+          // image_info.class_table_ table is only accessed from the image writer
+          // and class_loader->GetClassTable() is iterated but not modified.
+          image_info.class_table_->CopyWithoutLocks(*class_loader->GetClassTable());
+        }
       }
     }
     AssignImageBinSlot(obj, oat_index);
@@ -2253,17 +2387,15 @@ void ImageWriter::CalculateNewObjectOffsets() {
     ProcessWorkStack(&work_stack);
 
     // Store the class loader in the class roots.
-    CHECK_EQ(class_loaders_.size(), 1u);
     CHECK_EQ(image_roots.size(), 1u);
-    CHECK(*class_loaders_.begin() != nullptr);
-    image_roots[0]->Set<false>(ImageHeader::kAppImageClassLoader, *class_loaders_.begin());
+    image_roots[0]->Set<false>(ImageHeader::kAppImageClassLoader, GetAppClassLoader());
   }
 
   // Verify that all objects have assigned image bin slots.
   {
     auto ensure_bin_slots_assigned = [&](mirror::Object* obj)
         REQUIRES_SHARED(Locks::mutator_lock_) {
-      if (!Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(obj)) {
+      if (IsImageObject(obj)) {
         CHECK(IsImageBinSlotAssigned(obj)) << mirror::Object::PrettyTypeOf(obj) << " " << obj;
       }
     };
@@ -2334,7 +2466,7 @@ void ImageWriter::CalculateNewObjectOffsets() {
   {
     auto unbin_objects_into_offset = [&](mirror::Object* obj)
         REQUIRES_SHARED(Locks::mutator_lock_) {
-      if (!IsInBootImage(obj)) {
+      if (IsImageObject(obj)) {
         UnbinObjectsIntoOffset(obj);
       }
     };
@@ -2473,6 +2605,23 @@ void ImageWriter::CreateHeader(size_t oat_index) {
   const uint8_t* oat_file_end = oat_file_begin + image_info.oat_loaded_size_;
   const uint8_t* oat_data_end = image_info.oat_data_begin_ + image_info.oat_size_;
 
+  uint32_t image_reservation_size = image_info.image_size_;
+  DCHECK_ALIGNED(image_reservation_size, kPageSize);
+  uint32_t component_count = 1u;
+  if (!compiler_options_.IsAppImage()) {
+    if (oat_index == 0u) {
+      const ImageInfo& last_info = image_infos_.back();
+      const uint8_t* end = last_info.oat_file_begin_ + last_info.oat_loaded_size_;
+      DCHECK_ALIGNED(image_info.image_begin_, kPageSize);
+      image_reservation_size =
+          dchecked_integral_cast<uint32_t>(RoundUp(end - image_info.image_begin_, kPageSize));
+      component_count = image_infos_.size();
+    } else {
+      image_reservation_size = 0u;
+      component_count = 0u;
+    }
+  }
+
   // Create the image sections.
   auto section_info_pair = image_info.CreateImageSections();
   const size_t image_end = section_info_pair.first;
@@ -2509,6 +2658,8 @@ void ImageWriter::CreateHeader(size_t oat_index) {
   // Create the header, leave 0 for data size since we will fill this in as we are writing the
   // image.
   new (image_info.image_.Begin()) ImageHeader(
+      image_reservation_size,
+      component_count,
       PointerToLowMemUInt32(image_info.image_begin_),
       image_end,
       sections.data(),
@@ -2519,12 +2670,8 @@ void ImageWriter::CreateHeader(size_t oat_index) {
       PointerToLowMemUInt32(oat_data_end),
       PointerToLowMemUInt32(oat_file_end),
       boot_image_begin,
-      boot_image_end - boot_image_begin,
-      boot_oat_begin,
-      boot_oat_end - boot_oat_begin,
-      static_cast<uint32_t>(target_ptr_size_),
-      image_storage_mode_,
-      /*data_size*/0u);
+      boot_oat_end - boot_image_begin,
+      static_cast<uint32_t>(target_ptr_size_));
 }
 
 ArtMethod* ImageWriter::GetImageMethodAddress(ArtMethod* method) {
@@ -2784,7 +2931,7 @@ void ImageWriter::FixupPointerArray(mirror::Object* dst,
 }
 
 void ImageWriter::CopyAndFixupObject(Object* obj) {
-  if (IsInBootImage(obj)) {
+  if (!IsImageObject(obj)) {
     return;
   }
   size_t offset = GetImageOffset(obj);
@@ -3347,11 +3494,14 @@ void ImageWriter::UpdateOatFileLayout(size_t oat_index,
                                       size_t oat_loaded_size,
                                       size_t oat_data_offset,
                                       size_t oat_data_size) {
+  DCHECK_GE(oat_loaded_size, oat_data_offset);
+  DCHECK_GE(oat_loaded_size - oat_data_offset, oat_data_size);
+
   const uint8_t* images_end = image_infos_.back().image_begin_ + image_infos_.back().image_size_;
+  DCHECK(images_end != nullptr);  // Image space must be ready.
   for (const ImageInfo& info : image_infos_) {
     DCHECK_LE(info.image_begin_ + info.image_size_, images_end);
   }
-  DCHECK(images_end != nullptr);  // Image space must be ready.
 
   ImageInfo& cur_image_info = GetImageInfo(oat_index);
   cur_image_info.oat_file_begin_ = images_end + cur_image_info.oat_offset_;
@@ -3399,8 +3549,9 @@ ImageWriter::ImageWriter(
     const CompilerOptions& compiler_options,
     uintptr_t image_begin,
     ImageHeader::StorageMode image_storage_mode,
-    const std::vector<const char*>& oat_filenames,
+    const std::vector<std::string>& oat_filenames,
     const std::unordered_map<const DexFile*, size_t>& dex_file_oat_index_map,
+    jobject class_loader,
     const HashSet<std::string>* dirty_image_objects)
     : compiler_options_(compiler_options),
       global_image_begin_(reinterpret_cast<uint8_t*>(image_begin)),
@@ -3409,6 +3560,7 @@ ImageWriter::ImageWriter(
       image_infos_(oat_filenames.size()),
       dirty_methods_(0u),
       clean_methods_(0u),
+      app_class_loader_(class_loader),
       boot_image_live_objects_(nullptr),
       image_storage_mode_(image_storage_mode),
       oat_filenames_(oat_filenames),

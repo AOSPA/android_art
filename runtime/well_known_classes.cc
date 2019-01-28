@@ -48,6 +48,7 @@ jclass WellKnownClasses::dalvik_system_DexFile;
 jclass WellKnownClasses::dalvik_system_DexPathList;
 jclass WellKnownClasses::dalvik_system_DexPathList__Element;
 jclass WellKnownClasses::dalvik_system_EmulatedStackFrame;
+jclass WellKnownClasses::dalvik_system_InMemoryDexClassLoader;
 jclass WellKnownClasses::dalvik_system_PathClassLoader;
 jclass WellKnownClasses::dalvik_system_VMRuntime;
 jclass WellKnownClasses::java_lang_annotation_Annotation__array;
@@ -276,7 +277,7 @@ ArtMethod* WellKnownClasses::StringInitToStringFactory(ArtMethod* string_init) {
       STRING_INIT_LIST(TO_STRING_FACTORY)
   #undef TO_STRING_FACTORY
   LOG(FATAL) << "Could not find StringFactory method for String.<init>";
-  return nullptr;
+  UNREACHABLE();
 }
 
 uint32_t WellKnownClasses::StringInitToEntryPoint(ArtMethod* string_init) {
@@ -288,7 +289,7 @@ uint32_t WellKnownClasses::StringInitToEntryPoint(ArtMethod* string_init) {
       STRING_INIT_LIST(TO_ENTRY_POINT)
   #undef TO_ENTRY_POINT
   LOG(FATAL) << "Could not find StringFactory method for String.<init>";
-  return 0;
+  UNREACHABLE();
 }
 #undef STRING_INIT_LIST
 
@@ -306,6 +307,7 @@ void WellKnownClasses::Init(JNIEnv* env) {
   dalvik_system_DexPathList = CacheClass(env, "dalvik/system/DexPathList");
   dalvik_system_DexPathList__Element = CacheClass(env, "dalvik/system/DexPathList$Element");
   dalvik_system_EmulatedStackFrame = CacheClass(env, "dalvik/system/EmulatedStackFrame");
+  dalvik_system_InMemoryDexClassLoader = CacheClass(env, "dalvik/system/InMemoryDexClassLoader");
   dalvik_system_PathClassLoader = CacheClass(env, "dalvik/system/PathClassLoader");
   dalvik_system_VMRuntime = CacheClass(env, "dalvik/system/VMRuntime");
 

@@ -61,6 +61,7 @@
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_exception_helpers.h"
 #include "dex/dex_file_loader.h"
+#include "dex/signature-inl.h"
 #include "dex/utf.h"
 #include "entrypoints/entrypoint_utils.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
@@ -210,6 +211,22 @@ static void HandleEarlierVerifyError(Thread* self,
     self->SetException(obj->AsThrowable());
   }
   self->AssertPendingException();
+}
+
+// Ensures that methods have the kAccSkipAccessChecks bit set. We use the
+// kAccVerificationAttempted bit on the class access flags to determine whether this has been done
+// before.
+template <bool kNeedsVerified = false>
+static void EnsureSkipAccessChecksMethods(Handle<mirror::Class> klass, PointerSize pointer_size)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (kNeedsVerified) {
+    // To not fail access-flags access checks, push a minimal state.
+    mirror::Class::SetStatus(klass, ClassStatus::kVerified, Thread::Current());
+  }
+  if (!klass->WasVerificationAttempted()) {
+    klass->SetSkipAccessChecksFlagOnAllMethods(pointer_size);
+    klass->SetVerificationAttempted();
+  }
 }
 
 void ClassLinker::ThrowEarlierClassFailure(ObjPtr<mirror::Class> c, bool wrap_in_no_class_def) {
@@ -798,6 +815,8 @@ bool ClassLinker::InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> b
                FindSystemClass(self, "Ljava/lang/StackTraceElement;"));
   SetClassRoot(ClassRoot::kJavaLangStackTraceElementArrayClass,
                FindSystemClass(self, "[Ljava/lang/StackTraceElement;"));
+  SetClassRoot(ClassRoot::kJavaLangClassLoaderArrayClass,
+               FindSystemClass(self, "[Ljava/lang/ClassLoader;"));
 
   // Create conflict tables that depend on the class linker.
   runtime->FixupConflictTables();
@@ -1035,13 +1054,15 @@ bool ClassLinker::InitFromBootImage(std::string* error_msg) {
   runtime->SetSentinel(heap->AllocNonMovableObject<true>(
       self, java_lang_Object, java_lang_Object->GetObjectSize(), VoidFunctor()));
 
-  for (gc::space::ImageSpace* image_space : spaces) {
+  const std::vector<std::string>& boot_class_path_locations = runtime->GetBootClassPathLocations();
+  CHECK_LE(spaces.size(), boot_class_path_locations.size());
+  for (size_t i = 0u, size = spaces.size(); i != size; ++i) {
     // Boot class loader, use a null handle.
     std::vector<std::unique_ptr<const DexFile>> dex_files;
-    if (!AddImageSpace(image_space,
+    if (!AddImageSpace(spaces[i],
                        ScopedNullHandle<mirror::ClassLoader>(),
-                       /*dex_elements=*/nullptr,
-                       /*dex_location=*/nullptr,
+                       /*dex_elements=*/ nullptr,
+                       /*dex_location=*/ boot_class_path_locations[i].c_str(),
                        /*out*/&dex_files,
                        error_msg)) {
       return false;
@@ -1058,6 +1079,15 @@ bool ClassLinker::InitFromBootImage(std::string* error_msg) {
 
   VLOG(startup) << __FUNCTION__ << " exiting";
   return true;
+}
+
+void ClassLinker::AddExtraBootDexFiles(
+    Thread* self,
+    std::vector<std::unique_ptr<const DexFile>>&& additional_dex_files) {
+  for (std::unique_ptr<const DexFile>& dex_file : additional_dex_files) {
+    AppendToBootClassPath(self, *dex_file);
+    boot_dex_files_.push_back(std::move(dex_file));
+  }
 }
 
 bool ClassLinker::IsBootClassLoader(ScopedObjectAccessAlreadyRunnable& soa,
@@ -1092,51 +1122,165 @@ static bool GetDexPathListElementName(ObjPtr<mirror::Object> element,
   return false;
 }
 
-static bool FlattenPathClassLoader(ObjPtr<mirror::ClassLoader> class_loader,
-                                   std::list<ObjPtr<mirror::String>>* out_dex_file_names,
-                                   std::string* error_msg)
+static bool GetDexFileNames(ScopedObjectAccessUnchecked& soa,
+                            ObjPtr<mirror::ClassLoader> class_loader,
+                            /*out*/std::list<ObjPtr<mirror::String>>* dex_files,
+                            /*out*/std::string* error_msg)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  DCHECK(out_dex_file_names != nullptr);
-  DCHECK(error_msg != nullptr);
-  ScopedObjectAccessUnchecked soa(Thread::Current());
   StackHandleScope<1> hs(soa.Self());
   Handle<mirror::ClassLoader> handle(hs.NewHandle(class_loader));
-  while (!ClassLinker::IsBootClassLoader(soa, class_loader)) {
-    if (soa.Decode<mirror::Class>(WellKnownClasses::dalvik_system_PathClassLoader) !=
-        class_loader->GetClass()) {
-      *error_msg = StringPrintf("Unknown class loader type %s",
-                                class_loader->PrettyTypeOf().c_str());
-      // Unsupported class loader.
+  // Get element names. Sets error to true on failure.
+  auto add_element_names = [&](ObjPtr<mirror::Object> element, bool* error)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (element == nullptr) {
+      *error_msg = "Null dex element";
+      *error = true;  // Null element is a critical error.
+      return false;   // Had an error, stop the visit.
+    }
+    ObjPtr<mirror::String> name;
+    if (!GetDexPathListElementName(element, &name)) {
+      *error_msg = "Invalid dex path list element";
+      *error = true;   // Invalid element, make it a critical error.
+      return false;    // Stop the visit.
+    }
+    if (name != nullptr) {
+      dex_files->push_front(name);
+    }
+    return true;  // Continue with the next Element.
+  };
+  bool error = VisitClassLoaderDexElements(soa,
+                                           handle,
+                                           add_element_names,
+                                           /*defaultReturn=*/ false);
+  return !error;
+}
+
+static bool CompareClassLoaderTypes(ScopedObjectAccessUnchecked& soa,
+                                    ObjPtr<mirror::ClassLoader> image_class_loader,
+                                    ObjPtr<mirror::ClassLoader> class_loader,
+                                    std::string* error_msg)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (ClassLinker::IsBootClassLoader(soa, class_loader)) {
+    if (!ClassLinker::IsBootClassLoader(soa, image_class_loader)) {
+      *error_msg = "Hierarchies don't match";
       return false;
     }
-    // Get element names. Sets error to true on failure.
-    auto add_element_names = [&](ObjPtr<mirror::Object> element, bool* error)
-        REQUIRES_SHARED(Locks::mutator_lock_) {
-      if (element == nullptr) {
-        *error_msg = "Null dex element";
-        *error = true;  // Null element is a critical error.
-        return false;   // Had an error, stop the visit.
-      }
-      ObjPtr<mirror::String> name;
-      if (!GetDexPathListElementName(element, &name)) {
-        *error_msg = "Invalid dex path list element";
-        *error = false;  // Invalid element is not a critical error.
-        return false;    // Stop the visit.
-      }
-      if (name != nullptr) {
-        out_dex_file_names->push_front(name);
-      }
-      return true;  // Continue with the next Element.
-    };
-    bool error = VisitClassLoaderDexElements(soa,
-                                             handle,
-                                             add_element_names,
-                                             /* defaultReturn= */ false);
-    if (error) {
-      // An error occurred during DexPathList Element visiting.
+  } else if (ClassLinker::IsBootClassLoader(soa, image_class_loader)) {
+    *error_msg = "Hierarchies don't match";
+    return false;
+  } else if (class_loader->GetClass() != image_class_loader->GetClass()) {
+    *error_msg = StringPrintf("Class loader types don't match %s and %s",
+                              image_class_loader->PrettyTypeOf().c_str(),
+                              class_loader->PrettyTypeOf().c_str());
+    return false;
+  } else if (soa.Decode<mirror::Class>(WellKnownClasses::dalvik_system_PathClassLoader) !=
+      class_loader->GetClass()) {
+    *error_msg = StringPrintf("Unknown class loader type %s",
+                              class_loader->PrettyTypeOf().c_str());
+    // Unsupported class loader.
+    return false;
+  }
+  return true;
+}
+
+static bool CompareDexFiles(const std::list<ObjPtr<mirror::String>>& image_dex_files,
+                            const std::list<ObjPtr<mirror::String>>& loader_dex_files,
+                            std::string* error_msg)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool equal = (image_dex_files.size() == loader_dex_files.size()) &&
+      std::equal(image_dex_files.begin(),
+                 image_dex_files.end(),
+                 loader_dex_files.begin(),
+                 [](ObjPtr<mirror::String> lhs, ObjPtr<mirror::String> rhs)
+                     REQUIRES_SHARED(Locks::mutator_lock_) {
+                   return lhs->Equals(rhs);
+                 });
+  if (!equal) {
+    VLOG(image) << "Image dex files " << image_dex_files.size();
+    for (ObjPtr<mirror::String> name : image_dex_files) {
+      VLOG(image) << name->ToModifiedUtf8();
+    }
+    VLOG(image) << "Loader dex files " << loader_dex_files.size();
+    for (ObjPtr<mirror::String> name : loader_dex_files) {
+      VLOG(image) << name->ToModifiedUtf8();
+    }
+    *error_msg = "Mismatch in dex files";
+  }
+  return equal;
+}
+
+static bool CompareClassLoaders(ScopedObjectAccessUnchecked& soa,
+                                ObjPtr<mirror::ClassLoader> image_class_loader,
+                                ObjPtr<mirror::ClassLoader> class_loader,
+                                bool check_dex_file_names,
+                                std::string* error_msg)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (!CompareClassLoaderTypes(soa, image_class_loader, class_loader, error_msg)) {
+    return false;
+  }
+
+  if (ClassLinker::IsBootClassLoader(soa, class_loader)) {
+    // No need to check further.
+    return true;
+  }
+
+  if (check_dex_file_names) {
+    std::list<ObjPtr<mirror::String>> image_dex_files;
+    if (!GetDexFileNames(soa, image_class_loader, &image_dex_files, error_msg)) {
       return false;
     }
-    class_loader = class_loader->GetParent();
+
+    std::list<ObjPtr<mirror::String>> loader_dex_files;
+    if (!GetDexFileNames(soa, class_loader, &loader_dex_files, error_msg)) {
+      return false;
+    }
+
+    if (!CompareDexFiles(image_dex_files, loader_dex_files, error_msg)) {
+      return false;
+    }
+  }
+
+  ArtField* field =
+      jni::DecodeArtField(WellKnownClasses::dalvik_system_BaseDexClassLoader_sharedLibraryLoaders);
+  ObjPtr<mirror::Object> shared_libraries_image_loader = field->GetObject(image_class_loader.Ptr());
+  ObjPtr<mirror::Object> shared_libraries_loader = field->GetObject(class_loader.Ptr());
+  if (shared_libraries_image_loader == nullptr) {
+    if (shared_libraries_loader != nullptr) {
+      *error_msg = "Mismatch in shared libraries";
+      return false;
+    }
+  } else if (shared_libraries_loader == nullptr) {
+    *error_msg = "Mismatch in shared libraries";
+    return false;
+  } else {
+    ObjPtr<mirror::ObjectArray<mirror::ClassLoader>> array1 =
+        shared_libraries_image_loader->AsObjectArray<mirror::ClassLoader>();
+    ObjPtr<mirror::ObjectArray<mirror::ClassLoader>> array2 =
+        shared_libraries_loader->AsObjectArray<mirror::ClassLoader>();
+    if (array1->GetLength() != array2->GetLength()) {
+      *error_msg = "Mismatch in number of shared libraries";
+      return false;
+    }
+
+    for (int32_t i = 0; i < array1->GetLength(); ++i) {
+      // Do a full comparison of the class loaders, including comparing their dex files.
+      if (!CompareClassLoaders(soa,
+                               array1->Get(i),
+                               array2->Get(i),
+                               /*check_dex_file_names=*/ true,
+                               error_msg)) {
+        return false;
+      }
+    }
+  }
+
+  // Do a full comparison of the class loaders, including comparing their dex files.
+  if (!CompareClassLoaders(soa,
+                           image_class_loader->GetParent(),
+                           class_loader->GetParent(),
+                           /*check_dex_file_names=*/ true,
+                           error_msg)) {
+    return false;
   }
   return true;
 }
@@ -1865,13 +2009,7 @@ bool ClassLinker::AddImageSpace(
     std::string dex_file_location(dex_cache->GetLocation()->ToModifiedUtf8());
     // TODO: Only store qualified paths.
     // If non qualified, qualify it.
-    if (dex_file_location.find('/') == std::string::npos) {
-      std::string dex_location_path = dex_location;
-      const size_t pos = dex_location_path.find_last_of('/');
-      CHECK_NE(pos, std::string::npos);
-      dex_location_path = dex_location_path.substr(0, pos + 1);  // Keep trailing '/'
-      dex_file_location = dex_location_path + dex_file_location;
-    }
+    dex_file_location = OatFile::ResolveRelativeEncodedDexLocation(dex_location, dex_file_location);
     std::unique_ptr<const DexFile> dex_file = OpenOatDexFile(oat_file,
                                                              dex_file_location.c_str(),
                                                              error_msg);
@@ -1905,11 +2043,12 @@ bool ClassLinker::AddImageSpace(
 
   if (app_image) {
     ScopedObjectAccessUnchecked soa(Thread::Current());
+    ScopedAssertNoThreadSuspension sants("Checking app image", soa.Self());
     // Check that the class loader resolves the same way as the ones in the image.
     // Image class loader [A][B][C][image dex files]
     // Class loader = [???][dex_elements][image dex files]
     // Need to ensure that [???][dex_elements] == [A][B][C].
-    // For each class loader, PathClassLoader, the laoder checks the parent first. Also the logic
+    // For each class loader, PathClassLoader, the loader checks the parent first. Also the logic
     // for PathClassLoader does this by looping through the array of dex files. To ensure they
     // resolve the same way, simply flatten the hierarchy in the way the resolution order would be,
     // and check that the dex file names are the same.
@@ -1917,21 +2056,12 @@ bool ClassLinker::AddImageSpace(
       *error_msg = "Unexpected BootClassLoader in app image";
       return false;
     }
-    std::list<ObjPtr<mirror::String>> image_dex_file_names;
-    std::string temp_error_msg;
-    if (!FlattenPathClassLoader(image_class_loader.Get(), &image_dex_file_names, &temp_error_msg)) {
-      *error_msg = StringPrintf("Failed to flatten image class loader hierarchy '%s'",
-                                temp_error_msg.c_str());
-      return false;
-    }
-    std::list<ObjPtr<mirror::String>> loader_dex_file_names;
-    if (!FlattenPathClassLoader(class_loader.Get(), &loader_dex_file_names, &temp_error_msg)) {
-      *error_msg = StringPrintf("Failed to flatten class loader hierarchy '%s'",
-                                temp_error_msg.c_str());
-      return false;
-    }
-    // Add the temporary dex path list elements at the end.
+    // The dex files of `class_loader` are not setup yet, so we cannot do a full comparison
+    // of `class_loader` and `image_class_loader` in `CompareClassLoaders`. Therefore, we
+    // special case the comparison of dex files of the two class loaders, but then do full
+    // comparisons for their shared libraries and parent.
     auto elements = soa.Decode<mirror::ObjectArray<mirror::Object>>(dex_elements);
+    std::list<ObjPtr<mirror::String>> loader_dex_file_names;
     for (size_t i = 0, num_elems = elements->GetLength(); i < num_elems; ++i) {
       ObjPtr<mirror::Object> element = elements->GetWithoutChecks(i);
       if (element != nullptr) {
@@ -1942,31 +2072,29 @@ bool ClassLinker::AddImageSpace(
         }
       }
     }
-    // Ignore the number of image dex files since we are adding those to the class loader anyways.
-    CHECK_GE(static_cast<size_t>(image_dex_file_names.size()),
-             static_cast<size_t>(dex_caches->GetLength()));
-    size_t image_count = image_dex_file_names.size() - dex_caches->GetLength();
-    // Check that the dex file names match.
-    bool equal = image_count == loader_dex_file_names.size();
-    if (equal) {
-      auto it1 = image_dex_file_names.begin();
-      auto it2 = loader_dex_file_names.begin();
-      for (size_t i = 0; equal && i < image_count; ++i, ++it1, ++it2) {
-        equal = equal && (*it1)->Equals(*it2);
-      }
+    std::string temp_error_msg;
+    std::list<ObjPtr<mirror::String>> image_dex_file_names;
+    bool success = GetDexFileNames(
+        soa, image_class_loader.Get(), &image_dex_file_names, &temp_error_msg);
+    if (success) {
+      // Ignore the number of image dex files since we are adding those to the class loader anyways.
+      CHECK_GE(static_cast<size_t>(image_dex_file_names.size()),
+               static_cast<size_t>(dex_caches->GetLength()));
+      size_t image_count = image_dex_file_names.size() - dex_caches->GetLength();
+      image_dex_file_names.resize(image_count);
+      success = success && CompareDexFiles(image_dex_file_names,
+                                           loader_dex_file_names,
+                                           &temp_error_msg);
+      success = success && CompareClassLoaders(soa,
+                                               image_class_loader.Get(),
+                                               class_loader.Get(),
+                                               /*check_dex_file_names=*/ false,
+                                               &temp_error_msg);
     }
-    if (!equal) {
-      VLOG(image) << "Image dex files " << image_dex_file_names.size();
-      for (ObjPtr<mirror::String> name : image_dex_file_names) {
-        VLOG(image) << name->ToModifiedUtf8();
-      }
-      VLOG(image) << "Loader dex files " << loader_dex_file_names.size();
-      for (ObjPtr<mirror::String> name : loader_dex_file_names) {
-        VLOG(image) << name->ToModifiedUtf8();
-      }
-      *error_msg = "Rejecting application image due to class loader mismatch";
-      // Ignore class loader mismatch for now since these would just use possibly incorrect
-      // oat code anyways. The structural class check should be done in the parent.
+    if (!success) {
+      *error_msg = StringPrintf("Rejecting application image due to class loader mismatch: '%s'",
+                               temp_error_msg.c_str());
+      return false;
     }
   }
 
@@ -2501,13 +2629,13 @@ ObjPtr<mirror::Class> ClassLinker::EnsureResolved(Thread* self,
   return klass;
 }
 
-using ClassPathEntry = std::pair<const DexFile*, const DexFile::ClassDef*>;
+using ClassPathEntry = std::pair<const DexFile*, const dex::ClassDef*>;
 
 // Search a collection of DexFiles for a descriptor
 ClassPathEntry FindInClassPath(const char* descriptor,
                                size_t hash, const std::vector<const DexFile*>& class_path) {
   for (const DexFile* dex_file : class_path) {
-    const DexFile::ClassDef* dex_class_def = OatDexFile::FindClassDef(*dex_file, descriptor, hash);
+    const dex::ClassDef* dex_class_def = OatDexFile::FindClassDef(*dex_file, descriptor, hash);
     if (dex_class_def != nullptr) {
       return ClassPathEntry(dex_file, dex_class_def);
     }
@@ -2556,7 +2684,7 @@ bool ClassLinker::FindClassInBaseDexClassLoader(ScopedObjectAccessAlreadyRunnabl
     return true;
   }
 
-  if (IsPathOrDexClassLoader(soa, class_loader)) {
+  if (IsPathOrDexClassLoader(soa, class_loader) || IsInMemoryDexClassLoader(soa, class_loader)) {
     // For regular path or dex class loader the search order is:
     //    - parent
     //    - shared libraries
@@ -2650,13 +2778,14 @@ ObjPtr<mirror::Class> ClassLinker::FindClassInBaseDexClassLoaderClassPath(
     const char* descriptor,
     size_t hash,
     Handle<mirror::ClassLoader> class_loader) {
-  DCHECK(IsPathOrDexClassLoader(soa, class_loader) || IsDelegateLastClassLoader(soa, class_loader))
+  DCHECK(IsPathOrDexClassLoader(soa, class_loader) ||
+         IsInMemoryDexClassLoader(soa, class_loader) ||
+         IsDelegateLastClassLoader(soa, class_loader))
       << "Unexpected class loader for descriptor " << descriptor;
 
   ObjPtr<mirror::Class> ret;
   auto define_class = [&](const DexFile* cp_dex_file) REQUIRES_SHARED(Locks::mutator_lock_) {
-    const DexFile::ClassDef* dex_class_def =
-        OatDexFile::FindClassDef(*cp_dex_file, descriptor, hash);
+    const dex::ClassDef* dex_class_def = OatDexFile::FindClassDef(*cp_dex_file, descriptor, hash);
     if (dex_class_def != nullptr) {
       ObjPtr<mirror::Class> klass = DefineClass(soa.Self(),
                                                 descriptor,
@@ -2856,7 +2985,7 @@ ObjPtr<mirror::Class> ClassLinker::DefineClass(Thread* self,
                                                size_t hash,
                                                Handle<mirror::ClassLoader> class_loader,
                                                const DexFile& dex_file,
-                                               const DexFile::ClassDef& dex_class_def) {
+                                               const dex::ClassDef& dex_class_def) {
   StackHandleScope<3> hs(self);
   auto klass = hs.NewHandle<mirror::Class>(nullptr);
 
@@ -2903,7 +3032,7 @@ ObjPtr<mirror::Class> ClassLinker::DefineClass(Thread* self,
   // Get the real dex file. This will return the input if there aren't any callbacks or they do
   // nothing.
   DexFile const* new_dex_file = nullptr;
-  DexFile::ClassDef const* new_class_def = nullptr;
+  dex::ClassDef const* new_class_def = nullptr;
   // TODO We should ideally figure out some way to move this after we get a lock on the klass so it
   // will only be called once.
   Runtime::Current()->GetRuntimeCallbacks()->ClassPreDefine(descriptor,
@@ -3024,7 +3153,7 @@ ObjPtr<mirror::Class> ClassLinker::DefineClass(Thread* self,
 }
 
 uint32_t ClassLinker::SizeOfClassWithoutEmbeddedTables(const DexFile& dex_file,
-                                                       const DexFile::ClassDef& dex_class_def) {
+                                                       const dex::ClassDef& dex_class_def) {
   size_t num_ref = 0;
   size_t num_8 = 0;
   size_t num_16 = 0;
@@ -3042,7 +3171,7 @@ uint32_t ClassLinker::SizeOfClassWithoutEmbeddedTables(const DexFile& dex_file,
       continue;
     }
     last_field_idx = field_idx;
-    const DexFile::FieldId& field_id = dex_file.GetFieldId(field_idx);
+    const dex::FieldId& field_id = dex_file.GetFieldId(field_idx);
     const char* descriptor = dex_file.GetFieldTypeDescriptor(field_id);
     char c = descriptor[0];
     switch (c) {
@@ -3145,7 +3274,7 @@ bool ClassLinker::ShouldUseInterpreterEntrypoint(ArtMethod* method, const void* 
     return (jit == nullptr) || !jit->GetCodeCache()->ContainsPc(quick_code);
   }
 
-  if (runtime->IsNativeDebuggableZygoteOK()) {
+  if (runtime->IsNativeDebuggable()) {
     DCHECK(runtime->UseJitCompilation() && runtime->GetJit()->JitAtFirstUse());
     // If we are doing native debugging, ignore application's AOT code,
     // since we want to JIT it (at first use) with extra stackmaps for native
@@ -3271,7 +3400,7 @@ static void LinkCode(ClassLinker* class_linker,
 }
 
 void ClassLinker::SetupClass(const DexFile& dex_file,
-                             const DexFile::ClassDef& dex_class_def,
+                             const dex::ClassDef& dex_class_def,
                              Handle<mirror::Class> klass,
                              ObjPtr<mirror::ClassLoader> class_loader) {
   CHECK(klass != nullptr);
@@ -3352,7 +3481,7 @@ LinearAlloc* ClassLinker::GetOrCreateAllocatorForClassLoader(ObjPtr<mirror::Clas
 
 void ClassLinker::LoadClass(Thread* self,
                             const DexFile& dex_file,
-                            const DexFile::ClassDef& dex_class_def,
+                            const dex::ClassDef& dex_class_def,
                             Handle<mirror::Class> klass) {
   ClassAccessor accessor(dex_file,
                          dex_class_def,
@@ -3477,7 +3606,7 @@ void ClassLinker::LoadMethod(const DexFile& dex_file,
                              Handle<mirror::Class> klass,
                              ArtMethod* dst) {
   const uint32_t dex_method_idx = method.GetIndex();
-  const DexFile::MethodId& method_id = dex_file.GetMethodId(dex_method_idx);
+  const dex::MethodId& method_id = dex_file.GetMethodId(dex_method_idx);
   const char* method_name = dex_file.StringDataByIdx(method_id.name_idx_);
 
   ScopedAssertNoThreadSuspension ants("LoadMethod");
@@ -3528,6 +3657,10 @@ void ClassLinker::LoadMethod(const DexFile& dex_file,
         dex_file, dst->GetClassDef(), dex_method_idx);
   }
   dst->SetAccessFlags(access_flags);
+  // Must be done after SetAccessFlags since IsAbstract depends on it.
+  if (klass->IsInterface() && dst->IsAbstract()) {
+    dst->CalculateAndSetImtIndex();
+  }
 }
 
 void ClassLinker::AppendToBootClassPath(Thread* self, const DexFile& dex_file) {
@@ -3623,8 +3756,7 @@ void ClassLinker::RegisterDexFileLocked(const DexFile& dex_file,
   data.weak_root = dex_cache_jweak;
   data.dex_file = dex_cache->GetDexFile();
   data.class_table = ClassTableForClassLoader(class_loader);
-  AddNativeDebugInfoForDex(self, ArrayRef<const uint8_t>(data.dex_file->Begin(),
-                                                         data.dex_file->Size()));
+  AddNativeDebugInfoForDex(self, data.dex_file);
   DCHECK(data.class_table != nullptr);
   // Make sure to hold the dex cache live in the class table. This case happens for the boot class
   // path dex caches without an image.
@@ -3834,6 +3966,7 @@ ObjPtr<mirror::Class> ClassLinker::CreatePrimitiveClass(Thread* self, Primitive:
   h_class->SetAccessFlags(kAccPublic | kAccFinal | kAccAbstract);
   h_class->SetPrimitiveType(type);
   h_class->SetIfTable(GetClassRoot<mirror::Object>(this)->GetIfTable());
+  EnsureSkipAccessChecksMethods</* kNeedsVerified= */ true>(h_class, image_pointer_size_);
   mirror::Class::SetStatus(h_class, ClassStatus::kInitialized, self);
   const char* descriptor = Primitive::Descriptor(type);
   ObjPtr<mirror::Class> existing = InsertClass(descriptor,
@@ -3981,6 +4114,7 @@ ObjPtr<mirror::Class> ClassLinker::CreateArrayClass(Thread* self,
   new_class->PopulateEmbeddedVTable(image_pointer_size_);
   ImTable* object_imt = java_lang_Object->GetImt(image_pointer_size_);
   new_class->SetImt(object_imt, image_pointer_size_);
+  EnsureSkipAccessChecksMethods</* kNeedsVerified= */ true>(new_class, image_pointer_size_);
   mirror::Class::SetStatus(new_class, ClassStatus::kInitialized, self);
   // don't need to set new_class->SetObjectSize(..)
   // because Object::SizeOf delegates to Array::SizeOf
@@ -4011,6 +4145,8 @@ ObjPtr<mirror::Class> ClassLinker::CreateArrayClass(Thread* self,
   // and remove "interface".
   access_flags |= kAccAbstract | kAccFinal;
   access_flags &= ~kAccInterface;
+  // Arrays are access-checks-clean and preverified.
+  access_flags |= kAccVerificationAttempted;
 
   new_class->SetAccessFlags(access_flags);
 
@@ -4243,17 +4379,6 @@ bool ClassLinker::AttemptSupertypeVerification(Thread* self,
   ObjectLock<mirror::Class> super_lock(self, klass);
   mirror::Class::SetStatus(klass, ClassStatus::kErrorResolved, self);
   return false;
-}
-
-// Ensures that methods have the kAccSkipAccessChecks bit set. We use the
-// kAccVerificationAttempted bit on the class access flags to determine whether this has been done
-// before.
-static void EnsureSkipAccessChecksMethods(Handle<mirror::Class> klass, PointerSize pointer_size)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  if (!klass->WasVerificationAttempted()) {
-    klass->SetSkipAccessChecksFlagOnAllMethods(pointer_size);
-    klass->SetVerificationAttempted();
-  }
 }
 
 verifier::FailureKind ClassLinker::VerifyClass(
@@ -4732,6 +4857,7 @@ ObjPtr<mirror::Class> ClassLinker::CreateProxyClass(ScopedObjectAccessAlreadyRun
   {
     // Lock on klass is released. Lock new class object.
     ObjectLock<mirror::Class> initialization_lock(self, klass);
+    EnsureSkipAccessChecksMethods(klass, image_pointer_size_);
     mirror::Class::SetStatus(klass, ClassStatus::kInitialized, self);
   }
 
@@ -4861,7 +4987,7 @@ bool ClassLinker::CanWeInitializeClass(ObjPtr<mirror::Class> klass, bool can_ini
     }
     // Check if there are encoded static values needing initialization.
     if (klass->NumStaticFields() != 0) {
-      const DexFile::ClassDef* dex_class_def = klass->GetClassDef();
+      const dex::ClassDef* dex_class_def = klass->GetClassDef();
       DCHECK(dex_class_def != nullptr);
       if (dex_class_def->static_values_off_ != 0) {
         return false;
@@ -5078,7 +5204,7 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
 
   const size_t num_static_fields = klass->NumStaticFields();
   if (num_static_fields > 0) {
-    const DexFile::ClassDef* dex_class_def = klass->GetClassDef();
+    const dex::ClassDef* dex_class_def = klass->GetClassDef();
     CHECK(dex_class_def != nullptr);
     StackHandleScope<3> hs(self);
     Handle<mirror::ClassLoader> class_loader(hs.NewHandle(klass->GetClassLoader()));
@@ -5287,8 +5413,8 @@ static void ThrowSignatureCheckResolveReturnTypeException(Handle<mirror::Class> 
   DCHECK(Thread::Current()->IsExceptionPending());
   DCHECK(!m->IsProxyMethod());
   const DexFile* dex_file = m->GetDexFile();
-  const DexFile::MethodId& method_id = dex_file->GetMethodId(m->GetDexMethodIndex());
-  const DexFile::ProtoId& proto_id = dex_file->GetMethodPrototype(method_id);
+  const dex::MethodId& method_id = dex_file->GetMethodId(m->GetDexMethodIndex());
+  const dex::ProtoId& proto_id = dex_file->GetMethodPrototype(method_id);
   dex::TypeIndex return_type_idx = proto_id.return_type_idx_;
   std::string return_type = dex_file->PrettyType(return_type_idx);
   std::string class_loader = mirror::Object::PrettyTypeOf(m->GetDeclaringClass()->GetClassLoader());
@@ -5366,8 +5492,8 @@ static bool HasSameSignatureWithDifferentClassLoaders(Thread* self,
       return false;
     }
   }
-  const DexFile::TypeList* types1 = method1->GetParameterTypeList();
-  const DexFile::TypeList* types2 = method2->GetParameterTypeList();
+  const dex::TypeList* types1 = method1->GetParameterTypeList();
+  const dex::TypeList* types2 = method2->GetParameterTypeList();
   if (types1 == nullptr) {
     if (types2 != nullptr && types2->Size() != 0) {
       ThrowSignatureMismatch(klass, super_klass, method1,
@@ -5482,8 +5608,7 @@ bool ClassLinker::EnsureInitialized(Thread* self,
   DCHECK(c != nullptr);
 
   if (c->IsInitialized()) {
-    EnsureSkipAccessChecksMethods(c, image_pointer_size_);
-    self->AssertNoPendingException();
+    DCHECK(c->WasVerificationAttempted()) << c->PrettyClassAndClassLoader();
     return true;
   }
   // SubtypeCheckInfo::Initialized must happen-before any new-instance for that type.
@@ -5727,7 +5852,7 @@ bool ClassLinker::LinkClass(Thread* self,
 
 bool ClassLinker::LoadSuperAndInterfaces(Handle<mirror::Class> klass, const DexFile& dex_file) {
   CHECK_EQ(ClassStatus::kIdx, klass->GetStatus());
-  const DexFile::ClassDef& class_def = dex_file.GetClassDef(klass->GetDexClassDefIndex());
+  const dex::ClassDef& class_def = dex_file.GetClassDef(klass->GetDexClassDefIndex());
   dex::TypeIndex super_class_idx = class_def.superclass_idx_;
   if (super_class_idx.IsValid()) {
     // Check that a class does not inherit from itself directly.
@@ -5758,7 +5883,7 @@ bool ClassLinker::LoadSuperAndInterfaces(Handle<mirror::Class> klass, const DexF
     CHECK(super_class->IsResolved());
     klass->SetSuperClass(super_class);
   }
-  const DexFile::TypeList* interfaces = dex_file.GetInterfacesList(class_def);
+  const dex::TypeList* interfaces = dex_file.GetInterfacesList(class_def);
   if (interfaces != nullptr) {
     for (size_t i = 0; i < interfaces->Size(); i++) {
       dex::TypeIndex idx = interfaces->GetTypeItem(i).type_idx_;
@@ -5902,7 +6027,7 @@ class MethodNameAndSignatureComparator final : public ValueObject {
       REQUIRES_SHARED(Locks::mutator_lock_) {
     DCHECK(!other->IsProxyMethod()) << other->PrettyMethod();
     const DexFile* other_dex_file = other->GetDexFile();
-    const DexFile::MethodId& other_mid = other_dex_file->GetMethodId(other->GetDexMethodIndex());
+    const dex::MethodId& other_mid = other_dex_file->GetMethodId(other->GetDexMethodIndex());
     if (dex_file_ == other_dex_file) {
       return mid_->name_idx_ == other_mid.name_idx_ && mid_->proto_idx_ == other_mid.proto_idx_;
     }
@@ -5920,7 +6045,7 @@ class MethodNameAndSignatureComparator final : public ValueObject {
   // Dex file for the method to compare against.
   const DexFile* const dex_file_;
   // MethodId for the method to compare against.
-  const DexFile::MethodId* const mid_;
+  const dex::MethodId* const mid_;
   // Lazily computed name from the dex file's strings.
   const char* name_;
   // Lazily computed name length.
@@ -6617,7 +6742,7 @@ void ClassLinker::FillIMTFromIfTable(ObjPtr<mirror::IfTable> if_table,
       // or interface methods in the IMT here they will not create extra conflicts since we compare
       // names and signatures in SetIMTRef.
       ArtMethod* interface_method = interface->GetVirtualMethod(j, image_pointer_size_);
-      const uint32_t imt_index = ImTable::GetImtIndex(interface_method);
+      const uint32_t imt_index = interface_method->GetImtIndex();
 
       // There is only any conflicts if all of the interface methods for an IMT slot don't have
       // the same implementation method, keep track of this to avoid creating a conflict table in
@@ -6671,7 +6796,7 @@ void ClassLinker::FillIMTFromIfTable(ObjPtr<mirror::IfTable> if_table,
         }
         DCHECK(implementation_method != nullptr);
         ArtMethod* interface_method = interface->GetVirtualMethod(j, image_pointer_size_);
-        const uint32_t imt_index = ImTable::GetImtIndex(interface_method);
+        const uint32_t imt_index = interface_method->GetImtIndex();
         if (!imt[imt_index]->IsRuntimeMethod() ||
             imt[imt_index] == unimplemented_method ||
             imt[imt_index] == imt_conflict_method) {
@@ -7597,7 +7722,7 @@ bool ClassLinker::LinkInterfaceMethods(
         auto* interface_method = iftable->GetInterface(i)->GetVirtualMethod(j, image_pointer_size_);
         MethodNameAndSignatureComparator interface_name_comparator(
             interface_method->GetInterfaceMethodIfProxy(image_pointer_size_));
-        uint32_t imt_index = ImTable::GetImtIndex(interface_method);
+        uint32_t imt_index = interface_method->GetImtIndex();
         ArtMethod** imt_ptr = &out_imt[imt_index];
         // For each method listed in the interface's method list, find the
         // matching method in our class's method list.  We want to favor the
@@ -8074,13 +8199,21 @@ ObjPtr<mirror::Class> ClassLinker::DoLookupResolvedType(dex::TypeIndex type_idx,
   return type;
 }
 
-ObjPtr<mirror::Class> ClassLinker::DoResolveType(dex::TypeIndex type_idx,
-                                                 ObjPtr<mirror::Class> referrer) {
+template <typename T>
+ObjPtr<mirror::Class> ClassLinker::DoResolveType(dex::TypeIndex type_idx, T referrer) {
   StackHandleScope<2> hs(Thread::Current());
   Handle<mirror::DexCache> dex_cache(hs.NewHandle(referrer->GetDexCache()));
   Handle<mirror::ClassLoader> class_loader(hs.NewHandle(referrer->GetClassLoader()));
   return DoResolveType(type_idx, dex_cache, class_loader);
 }
+
+// Instantiate the above.
+template ObjPtr<mirror::Class> ClassLinker::DoResolveType(dex::TypeIndex type_idx,
+                                                          ArtField* referrer);
+template ObjPtr<mirror::Class> ClassLinker::DoResolveType(dex::TypeIndex type_idx,
+                                                          ArtMethod* referrer);
+template ObjPtr<mirror::Class> ClassLinker::DoResolveType(dex::TypeIndex type_idx,
+                                                          ObjPtr<mirror::Class> referrer);
 
 ObjPtr<mirror::Class> ClassLinker::DoResolveType(dex::TypeIndex type_idx,
                                                  Handle<mirror::DexCache> dex_cache,
@@ -8203,7 +8336,7 @@ ArtMethod* ClassLinker::ResolveMethod(uint32_t method_idx,
     return resolved;
   }
   const DexFile& dex_file = *dex_cache->GetDexFile();
-  const DexFile::MethodId& method_id = dex_file.GetMethodId(method_idx);
+  const dex::MethodId& method_id = dex_file.GetMethodId(method_idx);
   ObjPtr<mirror::Class> klass = nullptr;
   if (valid_dex_cache_method) {
     // We have a valid method from the DexCache but we need to perform ICCE and IAE checks.
@@ -8284,7 +8417,7 @@ ArtMethod* ClassLinker::ResolveMethodWithoutInvokeType(uint32_t method_idx,
     return resolved;
   }
   // Fail, get the declaring class.
-  const DexFile::MethodId& method_id = dex_cache->GetDexFile()->GetMethodId(method_idx);
+  const dex::MethodId& method_id = dex_cache->GetDexFile()->GetMethodId(method_idx);
   ObjPtr<mirror::Class> klass = ResolveType(method_id.class_idx_, dex_cache, class_loader);
   if (klass == nullptr) {
     Thread::Current()->AssertPendingException();
@@ -8310,7 +8443,7 @@ ArtField* ClassLinker::LookupResolvedField(uint32_t field_idx,
                                            ObjPtr<mirror::ClassLoader> class_loader,
                                            bool is_static) {
   const DexFile& dex_file = *dex_cache->GetDexFile();
-  const DexFile::FieldId& field_id = dex_file.GetFieldId(field_idx);
+  const dex::FieldId& field_id = dex_file.GetFieldId(field_idx);
   ObjPtr<mirror::Class> klass = dex_cache->GetResolvedType(field_id.class_idx_);
   if (klass == nullptr) {
     klass = LookupResolvedType(field_id.class_idx_, dex_cache, class_loader);
@@ -8335,7 +8468,7 @@ ArtField* ClassLinker::ResolveField(uint32_t field_idx,
     return resolved;
   }
   const DexFile& dex_file = *dex_cache->GetDexFile();
-  const DexFile::FieldId& field_id = dex_file.GetFieldId(field_idx);
+  const dex::FieldId& field_id = dex_file.GetFieldId(field_idx);
   ObjPtr<mirror::Class> klass = ResolveType(field_id.class_idx_, dex_cache, class_loader);
   if (klass == nullptr) {
     DCHECK(Thread::Current()->IsExceptionPending());
@@ -8361,7 +8494,7 @@ ArtField* ClassLinker::ResolveFieldJLS(uint32_t field_idx,
     return resolved;
   }
   const DexFile& dex_file = *dex_cache->GetDexFile();
-  const DexFile::FieldId& field_id = dex_file.GetFieldId(field_idx);
+  const dex::FieldId& field_id = dex_file.GetFieldId(field_idx);
   ObjPtr<mirror::Class> klass = ResolveType(field_id.class_idx_, dex_cache, class_loader);
   if (klass == nullptr) {
     DCHECK(Thread::Current()->IsExceptionPending());
@@ -8390,7 +8523,7 @@ ArtField* ClassLinker::FindResolvedField(ObjPtr<mirror::Class> klass,
                        : klass->FindInstanceField(dex_cache, field_idx);
 
   if (resolved == nullptr) {
-    const DexFile::FieldId& field_id = dex_file.GetFieldId(field_idx);
+    const dex::FieldId& field_id = dex_file.GetFieldId(field_idx);
     const char* name = dex_file.GetFieldName(field_id);
     const char* type = dex_file.GetFieldTypeDescriptor(field_id);
     resolved = is_static ? mirror::Class::FindStaticField(self, klass, name, type)
@@ -8418,7 +8551,7 @@ ArtField* ClassLinker::FindResolvedFieldJLS(ObjPtr<mirror::Class> klass,
   ArtField* resolved = nullptr;
   Thread* self = Thread::Current();
   const DexFile& dex_file = *dex_cache->GetDexFile();
-  const DexFile::FieldId& field_id = dex_file.GetFieldId(field_idx);
+  const dex::FieldId& field_id = dex_file.GetFieldId(field_idx);
 
   const char* name = dex_file.GetFieldName(field_id);
   const char* type = dex_file.GetFieldTypeDescriptor(field_id);
@@ -8455,7 +8588,7 @@ ObjPtr<mirror::MethodType> ClassLinker::ResolveMethodType(
 
   // First resolve the return type.
   const DexFile& dex_file = *dex_cache->GetDexFile();
-  const DexFile::ProtoId& proto_id = dex_file.GetProtoId(proto_idx);
+  const dex::ProtoId& proto_id = dex_file.GetProtoId(proto_idx);
   Handle<mirror::Class> return_type(hs.NewHandle(
       ResolveType(proto_id.return_type_idx_, dex_cache, class_loader)));
   if (return_type == nullptr) {
@@ -8511,7 +8644,7 @@ ObjPtr<mirror::MethodType> ClassLinker::ResolveMethodType(Thread* self,
 
 mirror::MethodHandle* ClassLinker::ResolveMethodHandleForField(
     Thread* self,
-    const DexFile::MethodHandleItem& method_handle,
+    const dex::MethodHandleItem& method_handle,
     ArtMethod* referrer) {
   DexFile::MethodHandleType handle_type =
       static_cast<DexFile::MethodHandleType>(method_handle.method_handle_type_);
@@ -8639,7 +8772,7 @@ mirror::MethodHandle* ClassLinker::ResolveMethodHandleForField(
 
 mirror::MethodHandle* ClassLinker::ResolveMethodHandleForMethod(
     Thread* self,
-    const DexFile::MethodHandleItem& method_handle,
+    const dex::MethodHandleItem& method_handle,
     ArtMethod* referrer) {
   DexFile::MethodHandleType handle_type =
       static_cast<DexFile::MethodHandleType>(method_handle.method_handle_type_);
@@ -8762,7 +8895,7 @@ mirror::MethodHandle* ClassLinker::ResolveMethodHandleForMethod(
   }
 
   const DexFile* dex_file = referrer->GetDexFile();
-  const DexFile::MethodId& method_id = dex_file->GetMethodId(method_handle.field_or_method_idx_);
+  const dex::MethodId& method_id = dex_file->GetMethodId(method_handle.field_or_method_idx_);
   int32_t index = 0;
   if (receiver_count != 0) {
     // Insert receiver. Use the class identified in the method handle rather than the declaring
@@ -8774,7 +8907,7 @@ mirror::MethodHandle* ClassLinker::ResolveMethodHandleForMethod(
     method_params->Set(index++, receiver_class);
   }
 
-  const DexFile::ProtoId& proto_id = dex_file->GetProtoId(method_id.proto_idx_);
+  const dex::ProtoId& proto_id = dex_file->GetProtoId(method_id.proto_idx_);
   DexFileParameterIterator it(*dex_file, proto_id);
   while (it.HasNext()) {
     DCHECK_LT(index, num_params);
@@ -8818,7 +8951,7 @@ ObjPtr<mirror::MethodHandle> ClassLinker::ResolveMethodHandle(Thread* self,
                                                               ArtMethod* referrer)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   const DexFile* const dex_file = referrer->GetDexFile();
-  const DexFile::MethodHandleItem& method_handle = dex_file->GetMethodHandle(method_handle_idx);
+  const dex::MethodHandleItem& method_handle = dex_file->GetMethodHandle(method_handle_idx);
   switch (static_cast<DexFile::MethodHandleType>(method_handle.method_handle_type_)) {
     case DexFile::MethodHandleType::kStaticPut:
     case DexFile::MethodHandleType::kStaticGet:
@@ -8994,21 +9127,14 @@ void ClassLinker::AllocAndSetPrimitiveArrayClassRoot(Thread* self,
   CheckSystemClass(self, primitive_array_class, descriptor);
 }
 
-jobject ClassLinker::CreateWellKnownClassLoader(Thread* self,
-                                                const std::vector<const DexFile*>& dex_files,
-                                                jclass loader_class,
-                                                jobject parent_loader) {
-  CHECK(self->GetJniEnv()->IsSameObject(loader_class,
-                                        WellKnownClasses::dalvik_system_PathClassLoader) ||
-        self->GetJniEnv()->IsSameObject(loader_class,
-                                        WellKnownClasses::dalvik_system_DelegateLastClassLoader));
+ObjPtr<mirror::ClassLoader> ClassLinker::CreateWellKnownClassLoader(
+    Thread* self,
+    const std::vector<const DexFile*>& dex_files,
+    Handle<mirror::Class> loader_class,
+    Handle<mirror::ClassLoader> parent_loader,
+    Handle<mirror::ObjectArray<mirror::ClassLoader>> shared_libraries) {
 
-  // SOAAlreadyRunnable is protected, and we need something to add a global reference.
-  // We could move the jobject to the callers, but all call-sites do this...
-  ScopedObjectAccessUnchecked soa(self);
-
-  // For now, create a libcore-level DexFile for each ART DexFile. This "explodes" multidex.
-  StackHandleScope<6> hs(self);
+  StackHandleScope<5> hs(self);
 
   ArtField* dex_elements_field =
       jni::DecodeArtField(WellKnownClasses::dalvik_system_DexPathList_dexElements);
@@ -9098,8 +9224,8 @@ jobject ClassLinker::CreateWellKnownClassLoader(Thread* self,
   }
 
   // Create the class loader..
-  Handle<mirror::Class> h_loader_class = hs.NewHandle(soa.Decode<mirror::Class>(loader_class));
-  Handle<mirror::Object> h_class_loader = hs.NewHandle(h_loader_class->AllocObject(self));
+  Handle<mirror::ClassLoader> h_class_loader = hs.NewHandle<mirror::ClassLoader>(
+      ObjPtr<mirror::ClassLoader>::DownCast(loader_class->AllocObject(self)));
   DCHECK(h_class_loader != nullptr);
   // Set DexPathList.
   ArtField* path_list_field =
@@ -9115,15 +9241,57 @@ jobject ClassLinker::CreateWellKnownClassLoader(Thread* self,
                                "parent",
                                "Ljava/lang/ClassLoader;");
   DCHECK(parent_field != nullptr);
+  if (parent_loader.Get() == nullptr) {
+    ScopedObjectAccessUnchecked soa(self);
+    ObjPtr<mirror::Object> boot_loader(soa.Decode<mirror::Class>(
+        WellKnownClasses::java_lang_BootClassLoader)->AllocObject(self));
+    parent_field->SetObject<false>(h_class_loader.Get(), boot_loader);
+  } else {
+    parent_field->SetObject<false>(h_class_loader.Get(), parent_loader.Get());
+  }
 
-  ObjPtr<mirror::Object> parent = (parent_loader != nullptr)
-      ? soa.Decode<mirror::ClassLoader>(parent_loader)
-      : soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader)->AllocObject(self);
-  parent_field->SetObject<false>(h_class_loader.Get(), parent);
+  ArtField* shared_libraries_field =
+      jni::DecodeArtField(WellKnownClasses::dalvik_system_BaseDexClassLoader_sharedLibraryLoaders);
+  DCHECK(shared_libraries_field != nullptr);
+  shared_libraries_field->SetObject<false>(h_class_loader.Get(), shared_libraries.Get());
+
+  return h_class_loader.Get();
+}
+
+jobject ClassLinker::CreateWellKnownClassLoader(Thread* self,
+                                                const std::vector<const DexFile*>& dex_files,
+                                                jclass loader_class,
+                                                jobject parent_loader,
+                                                jobject shared_libraries) {
+  CHECK(self->GetJniEnv()->IsSameObject(loader_class,
+                                        WellKnownClasses::dalvik_system_PathClassLoader) ||
+        self->GetJniEnv()->IsSameObject(loader_class,
+                                        WellKnownClasses::dalvik_system_DelegateLastClassLoader));
+
+  // SOAAlreadyRunnable is protected, and we need something to add a global reference.
+  // We could move the jobject to the callers, but all call-sites do this...
+  ScopedObjectAccessUnchecked soa(self);
+
+  // For now, create a libcore-level DexFile for each ART DexFile. This "explodes" multidex.
+  StackHandleScope<4> hs(self);
+
+  Handle<mirror::Class> h_loader_class =
+      hs.NewHandle<mirror::Class>(soa.Decode<mirror::Class>(loader_class));
+  Handle<mirror::ClassLoader> h_parent =
+      hs.NewHandle<mirror::ClassLoader>(soa.Decode<mirror::ClassLoader>(parent_loader));
+  Handle<mirror::ObjectArray<mirror::ClassLoader>> h_shared_libraries =
+      hs.NewHandle(soa.Decode<mirror::ObjectArray<mirror::ClassLoader>>(shared_libraries));
+
+  ObjPtr<mirror::ClassLoader> loader = CreateWellKnownClassLoader(
+      self,
+      dex_files,
+      h_loader_class,
+      h_parent,
+      h_shared_libraries);
 
   // Make it a global ref and return.
   ScopedLocalRef<jobject> local_ref(
-      soa.Env(), soa.Env()->AddLocalReference<jobject>(h_class_loader.Get()));
+      soa.Env(), soa.Env()->AddLocalReference<jobject>(loader));
   return soa.Env()->NewGlobalRef(local_ref.get());
 }
 

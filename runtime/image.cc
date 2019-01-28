@@ -16,6 +16,9 @@
 
 #include "image.h"
 
+#include <lz4.h>
+#include <sstream>
+
 #include "base/bit_utils.h"
 #include "base/length_prefixed_array.h"
 #include "base/utils.h"
@@ -26,9 +29,11 @@
 namespace art {
 
 const uint8_t ImageHeader::kImageMagic[] = { 'a', 'r', 't', '\n' };
-const uint8_t ImageHeader::kImageVersion[] = { '0', '6', '7', '\0' };  // Added CRC32 intrinsic
+const uint8_t ImageHeader::kImageVersion[] = { '0', '7', '4', '\0' };  // CRC32UpdateBB intrinsic
 
-ImageHeader::ImageHeader(uint32_t image_begin,
+ImageHeader::ImageHeader(uint32_t image_reservation_size,
+                         uint32_t component_count,
+                         uint32_t image_begin,
                          uint32_t image_size,
                          ImageSection* sections,
                          uint32_t image_roots,
@@ -39,13 +44,12 @@ ImageHeader::ImageHeader(uint32_t image_begin,
                          uint32_t oat_file_end,
                          uint32_t boot_image_begin,
                          uint32_t boot_image_size,
-                         uint32_t boot_oat_begin,
-                         uint32_t boot_oat_size,
-                         uint32_t pointer_size,
-                         StorageMode storage_mode,
-                         size_t data_size)
-  : image_begin_(image_begin),
+                         uint32_t pointer_size)
+  : image_reservation_size_(image_reservation_size),
+    component_count_(component_count),
+    image_begin_(image_begin),
     image_size_(image_size),
+    image_checksum_(0u),
     oat_checksum_(oat_checksum),
     oat_file_begin_(oat_file_begin),
     oat_data_begin_(oat_data_begin),
@@ -53,13 +57,8 @@ ImageHeader::ImageHeader(uint32_t image_begin,
     oat_file_end_(oat_file_end),
     boot_image_begin_(boot_image_begin),
     boot_image_size_(boot_image_size),
-    boot_oat_begin_(boot_oat_begin),
-    boot_oat_size_(boot_oat_size),
-    patch_delta_(0),
     image_roots_(image_roots),
-    pointer_size_(pointer_size),
-    storage_mode_(storage_mode),
-    data_size_(data_size) {
+    pointer_size_(pointer_size) {
   CHECK_EQ(image_begin, RoundUp(image_begin, kPageSize));
   CHECK_EQ(oat_file_begin, RoundUp(oat_file_begin, kPageSize));
   CHECK_EQ(oat_data_begin, RoundUp(oat_data_begin, kPageSize));
@@ -79,7 +78,6 @@ void ImageHeader::RelocateImage(int64_t delta) {
   oat_data_begin_ += delta;
   oat_data_end_ += delta;
   oat_file_end_ += delta;
-  patch_delta_ += delta;
   RelocateImageObjects(delta);
   RelocateImageMethods(delta);
 }
@@ -102,6 +100,9 @@ bool ImageHeader::IsValid() const {
   if (memcmp(version_, kImageVersion, sizeof(kImageVersion)) != 0) {
     return false;
   }
+  if (!IsAligned<kPageSize>(image_reservation_size_)) {
+    return false;
+  }
   // Unsigned so wraparound is well defined.
   if (image_begin_ >= image_begin_ + image_size_) {
     return false;
@@ -113,9 +114,6 @@ bool ImageHeader::IsValid() const {
     return false;
   }
   if (oat_file_begin_ >= oat_data_begin_) {
-    return false;
-  }
-  if (!IsAligned<kPageSize>(patch_delta_)) {
     return false;
   }
   return true;
@@ -150,6 +148,36 @@ void ImageHeader::VisitObjects(ObjectVisitor* visitor,
 
 PointerSize ImageHeader::GetPointerSize() const {
   return ConvertToPointerSize(pointer_size_);
+}
+
+bool ImageHeader::Block::Decompress(uint8_t* out_ptr,
+                                    const uint8_t* in_ptr,
+                                    std::string* error_msg) const {
+  switch (storage_mode_) {
+    case kStorageModeUncompressed: {
+      CHECK_EQ(image_size_, data_size_);
+      memcpy(out_ptr + image_offset_, in_ptr + data_offset_, data_size_);
+      break;
+    }
+    case kStorageModeLZ4:
+    case kStorageModeLZ4HC: {
+      // LZ4HC and LZ4 have same internal format, both use LZ4_decompress.
+      const size_t decompressed_size = LZ4_decompress_safe(
+          reinterpret_cast<const char*>(in_ptr) + data_offset_,
+          reinterpret_cast<char*>(out_ptr) + image_offset_,
+          data_size_,
+          image_size_);
+      CHECK_EQ(decompressed_size, image_size_);
+      break;
+    }
+    default: {
+      if (error_msg != nullptr) {
+        *error_msg = (std::ostringstream() << "Invalid image format " << storage_mode_).str();
+      }
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace art

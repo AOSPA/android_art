@@ -99,13 +99,28 @@ const UnalignedDexFileHeader* AsUnalignedDexFileHeader(const uint8_t* raw_data) 
   return reinterpret_cast<const UnalignedDexFileHeader*>(raw_data);
 }
 
-class ChecksumUpdatingOutputStream : public OutputStream {
+inline uint32_t CodeAlignmentSize(uint32_t header_offset, const CompiledMethod& compiled_method) {
+  // We want to align the code rather than the preheader.
+  uint32_t unaligned_code_offset = header_offset + sizeof(OatQuickMethodHeader);
+  uint32_t aligned_code_offset =  compiled_method.AlignCode(unaligned_code_offset);
+  return aligned_code_offset - unaligned_code_offset;
+}
+
+}  // anonymous namespace
+
+class OatWriter::ChecksumUpdatingOutputStream : public OutputStream {
  public:
-  ChecksumUpdatingOutputStream(OutputStream* out, OatHeader* oat_header)
-      : OutputStream(out->GetLocation()), out_(out), oat_header_(oat_header) { }
+  ChecksumUpdatingOutputStream(OutputStream* out, OatWriter* writer)
+      : OutputStream(out->GetLocation()), out_(out), writer_(writer) { }
 
   bool WriteFully(const void* buffer, size_t byte_count) override {
-    oat_header_->UpdateChecksum(buffer, byte_count);
+    if (buffer != nullptr) {
+      const uint8_t* bytes = reinterpret_cast<const uint8_t*>(buffer);
+      uint32_t old_checksum = writer_->oat_checksum_;
+      writer_->oat_checksum_ = adler32(old_checksum, bytes, byte_count);
+    } else {
+      DCHECK_EQ(0U, byte_count);
+    }
     return out_->WriteFully(buffer, byte_count);
   }
 
@@ -119,17 +134,8 @@ class ChecksumUpdatingOutputStream : public OutputStream {
 
  private:
   OutputStream* const out_;
-  OatHeader* const oat_header_;
+  OatWriter* const writer_;
 };
-
-inline uint32_t CodeAlignmentSize(uint32_t header_offset, const CompiledMethod& compiled_method) {
-  // We want to align the code rather than the preheader.
-  uint32_t unaligned_code_offset = header_offset + sizeof(OatQuickMethodHeader);
-  uint32_t aligned_code_offset =  compiled_method.AlignCode(unaligned_code_offset);
-  return aligned_code_offset - unaligned_code_offset;
-}
-
-}  // anonymous namespace
 
 // Defines the location of the raw dex file to write.
 class OatWriter::DexFileSource {
@@ -379,6 +385,7 @@ OatWriter::OatWriter(const CompilerOptions& compiler_options,
     vdex_dex_shared_data_offset_(0u),
     vdex_verifier_deps_offset_(0u),
     vdex_quickening_info_offset_(0u),
+    oat_checksum_(adler32(0L, Z_NULL, 0)),
     code_size_(0u),
     oat_size_(0u),
     data_bimg_rel_ro_start_(0u),
@@ -675,7 +682,7 @@ bool OatWriter::WriteAndOpenDexFiles(
   oat_size_ = InitOatHeader(dchecked_integral_cast<uint32_t>(oat_dex_files_.size()),
                             key_value_store);
 
-  ChecksumUpdatingOutputStream checksum_updating_rodata(oat_rodata, oat_header_.get());
+  ChecksumUpdatingOutputStream checksum_updating_rodata(oat_rodata, this);
 
   std::unique_ptr<BufferedOutputStream> vdex_out =
       std::make_unique<BufferedOutputStream>(std::make_unique<FileOutputStream>(vdex_file));
@@ -961,7 +968,7 @@ class OatWriter::InitOatClassesMethodVisitor : public DexMethodVisitor {
     ClassStatus status;
     bool found = writer_->compiler_driver_->GetCompiledClass(class_ref, &status);
     if (!found) {
-      VerificationResults* results = writer_->compiler_driver_->GetVerificationResults();
+      const VerificationResults* results = writer_->compiler_options_.GetVerificationResults();
       if (results != nullptr && results->IsClassRejected(class_ref)) {
         // The oat class status is used only for verification of resolved classes,
         // so use ClassStatus::kErrorResolved whether the class was resolved or unresolved
@@ -1004,7 +1011,7 @@ struct OatWriter::OrderedMethodData {
 
   size_t class_def_index;
   uint32_t access_flags;
-  const DexFile::CodeItem* code_item;
+  const dex::CodeItem* code_item;
 
   // A value of -1 denotes missing debug info
   static constexpr size_t kDebugInfoIdxInvalid = static_cast<size_t>(-1);
@@ -1482,7 +1489,7 @@ class OatWriter::InitImageMethodVisitor : public OatDexMethodVisitor {
                          const std::vector<const DexFile*>* dex_files)
       : OatDexMethodVisitor(writer, offset),
         pointer_size_(GetInstructionSetPointerSize(writer_->compiler_options_.GetInstructionSet())),
-        class_loader_(writer->HasImage() ? writer->image_writer_->GetClassLoader() : nullptr),
+        class_loader_(writer->HasImage() ? writer->image_writer_->GetAppClassLoader() : nullptr),
         dex_files_(dex_files),
         class_linker_(Runtime::Current()->GetClassLinker()) {}
 
@@ -1499,7 +1506,7 @@ class OatWriter::InitImageMethodVisitor : public OatDexMethodVisitor {
       return true;
     }
     ObjPtr<mirror::DexCache> dex_cache = class_linker_->FindDexCache(Thread::Current(), *dex_file);
-    const DexFile::ClassDef& class_def = dex_file->GetClassDef(class_def_index);
+    const dex::ClassDef& class_def = dex_file->GetClassDef(class_def_index);
     ObjPtr<mirror::Class> klass =
         class_linker_->LookupResolvedType(class_def.class_idx_, dex_cache, class_loader_);
     if (klass != nullptr) {
@@ -1578,7 +1585,7 @@ class OatWriter::InitImageMethodVisitor : public OatDexMethodVisitor {
 
   // Check whether current class is image class
   bool IsImageClass() {
-    const DexFile::TypeId& type_id =
+    const dex::TypeId& type_id =
         dex_file_->GetTypeId(dex_file_->GetClassDef(class_def_index_).class_idx_);
     const char* class_descriptor = dex_file_->GetTypeDescriptor(type_id);
     return writer_->GetCompilerOptions().IsImageClass(class_descriptor);
@@ -1623,7 +1630,7 @@ class OatWriter::WriteCodeMethodVisitor : public OrderedMethodVisitor {
         offset_(relative_offset),
         dex_file_(nullptr),
         pointer_size_(GetInstructionSetPointerSize(writer_->compiler_options_.GetInstructionSet())),
-        class_loader_(writer->HasImage() ? writer->image_writer_->GetClassLoader() : nullptr),
+        class_loader_(writer->HasImage() ? writer->image_writer_->GetAppClassLoader() : nullptr),
         out_(out),
         file_offset_(file_offset),
         class_linker_(Runtime::Current()->GetClassLinker()),
@@ -2264,6 +2271,7 @@ size_t OatWriter::InitOatCodeDexFiles(size_t offset) {
   }
 
   if (HasImage()) {
+    ScopedAssertNoThreadSuspension sants("Init image method visitor", Thread::Current());
     InitImageMethodVisitor image_visitor(this, offset, dex_files_);
     success = VisitDexMethods(&image_visitor);
     image_visitor.Postprocess();
@@ -2349,7 +2357,7 @@ bool OatWriter::WriteRodata(OutputStream* out) {
   size_t relative_offset = current_offset - file_offset;
 
   // Wrap out to update checksum with each write.
-  ChecksumUpdatingOutputStream checksum_updating_out(out, oat_header_.get());
+  ChecksumUpdatingOutputStream checksum_updating_out(out, this);
   out = &checksum_updating_out;
 
   relative_offset = WriteClassOffsets(out, file_offset, relative_offset);
@@ -2658,7 +2666,7 @@ bool OatWriter::WriteCode(OutputStream* out) {
   CHECK(write_state_ == WriteState::kWriteText);
 
   // Wrap out to update checksum with each write.
-  ChecksumUpdatingOutputStream checksum_updating_out(out, oat_header_.get());
+  ChecksumUpdatingOutputStream checksum_updating_out(out, this);
   out = &checksum_updating_out;
 
   SetMultiOatRelativePatcherAdjustment();
@@ -2694,7 +2702,7 @@ bool OatWriter::WriteDataBimgRelRo(OutputStream* out) {
   CHECK(write_state_ == WriteState::kWriteDataBimgRelRo);
 
   // Wrap out to update checksum with each write.
-  ChecksumUpdatingOutputStream checksum_updating_out(out, oat_header_.get());
+  ChecksumUpdatingOutputStream checksum_updating_out(out, this);
   out = &checksum_updating_out;
 
   const size_t file_offset = oat_data_offset_;
@@ -2800,11 +2808,16 @@ bool OatWriter::CheckOatSize(OutputStream* out, size_t file_offset, size_t relat
   return true;
 }
 
-bool OatWriter::WriteHeader(OutputStream* out, uint32_t image_file_location_oat_checksum) {
+bool OatWriter::WriteHeader(OutputStream* out) {
   CHECK(write_state_ == WriteState::kWriteHeader);
 
-  oat_header_->SetImageFileLocationOatChecksum(image_file_location_oat_checksum);
-  oat_header_->UpdateChecksumWithHeaderData();
+  // Update checksum with header data.
+  DCHECK_EQ(oat_header_->GetChecksum(), 0u);  // For checksum calculation.
+  const uint8_t* header_begin = reinterpret_cast<const uint8_t*>(oat_header_.get());
+  const uint8_t* header_end = oat_header_->GetKeyValueStore() + oat_header_->GetKeyValueStoreSize();
+  uint32_t old_checksum = oat_checksum_;
+  oat_checksum_ = adler32(old_checksum, header_begin, header_end - header_begin);
+  oat_header_->SetChecksum(oat_checksum_);
 
   const size_t file_offset = oat_data_offset_;
 
@@ -3667,7 +3680,7 @@ bool OatWriter::OpenDexFiles(
     for (OatDexFile& oat_dex_file : oat_dex_files_) {
       std::string error_msg;
       maps.emplace_back(oat_dex_file.source_.GetZipEntry()->MapDirectlyOrExtract(
-          oat_dex_file.dex_file_location_data_, "zipped dex", &error_msg));
+          oat_dex_file.dex_file_location_data_, "zipped dex", &error_msg, alignof(DexFile)));
       MemMap* map = &maps.back();
       if (!map->IsValid()) {
         LOG(ERROR) << error_msg;

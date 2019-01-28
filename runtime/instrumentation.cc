@@ -18,6 +18,8 @@
 
 #include <sstream>
 
+#include <android-base/logging.h>
+
 #include "arch/context.h"
 #include "art_field-inl.h"
 #include "art_method-inl.h"
@@ -162,7 +164,8 @@ Instrumentation::Instrumentation()
       have_watched_frame_pop_listeners_(false),
       have_branch_listeners_(false),
       have_exception_handled_listeners_(false),
-      deoptimized_methods_lock_("deoptimized methods lock", kGenericBottomLock),
+      deoptimized_methods_lock_(new ReaderWriterMutex("deoptimized methods lock",
+                                                      kGenericBottomLock)),
       deoptimization_enabled_(false),
       interpreter_handler_table_(kMainHandlerTable),
       quick_alloc_entry_points_instrumentation_counter_(0),
@@ -321,8 +324,9 @@ static void InstrumentationInstallStack(Thread* thread, void* arg)
 
         const InstrumentationStackFrame& frame =
             (*instrumentation_stack_)[instrumentation_stack_depth_];
-        CHECK_EQ(m, frame.method_) << "Expected " << ArtMethod::PrettyMethod(m)
-                                   << ", Found " << ArtMethod::PrettyMethod(frame.method_);
+        CHECK_EQ(m->GetNonObsoleteMethod(), frame.method_->GetNonObsoleteMethod())
+            << "Expected " << ArtMethod::PrettyMethod(m)
+            << ", Found " << ArtMethod::PrettyMethod(frame.method_);
         return_pc = frame.return_pc_;
         if (kVerboseInstrumentation) {
           LOG(INFO) << "Ignoring already instrumented " << frame.Dump();
@@ -468,7 +472,9 @@ static void InstrumentationRestoreStack(Thread* thread, void* arg)
           if (instrumentation_frame.interpreter_entry_) {
             CHECK(m == Runtime::Current()->GetCalleeSaveMethod(CalleeSaveType::kSaveRefsAndArgs));
           } else {
-            CHECK(m == instrumentation_frame.method_) << ArtMethod::PrettyMethod(m);
+            CHECK_EQ(m->GetNonObsoleteMethod(),
+                     instrumentation_frame.method_->GetNonObsoleteMethod())
+                << ArtMethod::PrettyMethod(m);
           }
           SetReturnPc(instrumentation_frame.return_pc_);
           if (instrumentation_->ShouldNotifyMethodEnterExitEvents() &&
@@ -741,7 +747,7 @@ void Instrumentation::ConfigureStubs(const char* key, InstrumentationLevel desir
     // Restore stack only if there is no method currently deoptimized.
     bool empty;
     {
-      ReaderMutexLock mu(self, deoptimized_methods_lock_);
+      ReaderMutexLock mu(self, *GetDeoptimizedMethodsLock());
       empty = IsDeoptimizedMethodsEmpty();  // Avoid lock violation.
     }
     if (empty) {
@@ -929,7 +935,7 @@ void Instrumentation::Deoptimize(ArtMethod* method) {
 
   Thread* self = Thread::Current();
   {
-    WriterMutexLock mu(self, deoptimized_methods_lock_);
+    WriterMutexLock mu(self, *GetDeoptimizedMethodsLock());
     bool has_not_been_deoptimized = AddDeoptimizedMethod(method);
     CHECK(has_not_been_deoptimized) << "Method " << ArtMethod::PrettyMethod(method)
         << " is already deoptimized";
@@ -953,7 +959,7 @@ void Instrumentation::Undeoptimize(ArtMethod* method) {
   Thread* self = Thread::Current();
   bool empty;
   {
-    WriterMutexLock mu(self, deoptimized_methods_lock_);
+    WriterMutexLock mu(self, *GetDeoptimizedMethodsLock());
     bool found_and_erased = RemoveDeoptimizedMethod(method);
     CHECK(found_and_erased) << "Method " << ArtMethod::PrettyMethod(method)
         << " is not deoptimized";
@@ -985,12 +991,12 @@ void Instrumentation::Undeoptimize(ArtMethod* method) {
 
 bool Instrumentation::IsDeoptimized(ArtMethod* method) {
   DCHECK(method != nullptr);
-  ReaderMutexLock mu(Thread::Current(), deoptimized_methods_lock_);
+  ReaderMutexLock mu(Thread::Current(), *GetDeoptimizedMethodsLock());
   return IsDeoptimizedMethod(method);
 }
 
 void Instrumentation::EnableDeoptimization() {
-  ReaderMutexLock mu(Thread::Current(), deoptimized_methods_lock_);
+  ReaderMutexLock mu(Thread::Current(), *GetDeoptimizedMethodsLock());
   CHECK(IsDeoptimizedMethodsEmpty());
   CHECK_EQ(deoptimization_enabled_, false);
   deoptimization_enabled_ = true;
@@ -1007,7 +1013,7 @@ void Instrumentation::DisableDeoptimization(const char* key) {
   while (true) {
     ArtMethod* method;
     {
-      ReaderMutexLock mu(Thread::Current(), deoptimized_methods_lock_);
+      ReaderMutexLock mu(Thread::Current(), *GetDeoptimizedMethodsLock());
       if (IsDeoptimizedMethodsEmpty()) {
         break;
       }
@@ -1355,65 +1361,66 @@ DeoptimizationMethodType Instrumentation::GetDeoptimizationMethodType(ArtMethod*
 }
 
 // Try to get the shorty of a runtime method if it's an invocation stub.
-struct RuntimeMethodShortyVisitor : public StackVisitor {
-  explicit RuntimeMethodShortyVisitor(Thread* thread)
-      : StackVisitor(thread, nullptr, StackVisitor::StackWalkKind::kIncludeInlinedFrames),
-        shorty('V') {}
-
-  static uint16_t GetMethodIndexOfInvoke(ArtMethod* caller,
-                                         const Instruction& inst,
-                                         uint32_t dex_pc)
-        REQUIRES_SHARED(Locks::mutator_lock_) {
-    switch (inst.Opcode()) {
-      case Instruction::INVOKE_VIRTUAL_RANGE_QUICK:
-      case Instruction::INVOKE_VIRTUAL_QUICK: {
-        uint16_t method_idx = caller->GetIndexFromQuickening(dex_pc);
-        CHECK_NE(method_idx, DexFile::kDexNoIndex16);
-        return method_idx;
-      }
-      default: {
-        return inst.VRegB();
-      }
-    }
-  }
-
-  bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
-    ArtMethod* m = GetMethod();
-    if (m == nullptr || m->IsRuntimeMethod()) {
-      return true;
-    }
-    // The first Java method.
-    if (m->IsNative()) {
-      // Use JNI method's shorty for the jni stub.
-      shorty = m->GetShorty()[0];
-    } else if (m->IsProxyMethod()) {
-      // Proxy method just invokes its proxied method via
-      // art_quick_proxy_invoke_handler.
-      shorty = m->GetInterfaceMethodIfProxy(kRuntimePointerSize)->GetShorty()[0];
-    } else {
-      const Instruction& instr = m->DexInstructions().InstructionAt(GetDexPc());
-      if (instr.IsInvoke()) {
-        uint16_t method_index = GetMethodIndexOfInvoke(m, instr, GetDexPc());
-        const DexFile* dex_file = m->GetDexFile();
-        if (interpreter::IsStringInit(dex_file, method_index)) {
-          // Invoking string init constructor is turned into invoking
-          // StringFactory.newStringFromChars() which returns a string.
-          shorty = 'L';
-        } else {
-          shorty = dex_file->GetMethodShorty(method_index)[0];
+static char GetRuntimeMethodShorty(Thread* thread) REQUIRES_SHARED(Locks::mutator_lock_) {
+  char shorty = 'V';
+  StackVisitor::WalkStack(
+      [&shorty](const art::StackVisitor* stack_visitor) REQUIRES_SHARED(Locks::mutator_lock_) {
+        ArtMethod* m = stack_visitor->GetMethod();
+        if (m == nullptr || m->IsRuntimeMethod()) {
+          return true;
         }
-      } else {
-        // It could be that a non-invoke opcode invokes a stub, which in turn
-        // invokes Java code. In such cases, we should never expect a return
-        // value from the stub.
-      }
-    }
-    // Stop stack walking since we've seen a Java frame.
-    return false;
-  }
+        // The first Java method.
+        if (m->IsNative()) {
+          // Use JNI method's shorty for the jni stub.
+          shorty = m->GetShorty()[0];
+        } else if (m->IsProxyMethod()) {
+          // Proxy method just invokes its proxied method via
+          // art_quick_proxy_invoke_handler.
+          shorty = m->GetInterfaceMethodIfProxy(kRuntimePointerSize)->GetShorty()[0];
+        } else {
+          const Instruction& instr = m->DexInstructions().InstructionAt(stack_visitor->GetDexPc());
+          if (instr.IsInvoke()) {
+            auto get_method_index_fn = [](ArtMethod* caller,
+                                          const Instruction& inst,
+                                          uint32_t dex_pc)
+                REQUIRES_SHARED(Locks::mutator_lock_) {
+              switch (inst.Opcode()) {
+                case Instruction::INVOKE_VIRTUAL_RANGE_QUICK:
+                case Instruction::INVOKE_VIRTUAL_QUICK: {
+                  uint16_t method_idx = caller->GetIndexFromQuickening(dex_pc);
+                  CHECK_NE(method_idx, DexFile::kDexNoIndex16);
+                  return method_idx;
+                }
+                default: {
+                  return static_cast<uint16_t>(inst.VRegB());
+                }
+              }
+            };
 
-  char shorty;
-};
+            uint16_t method_index = get_method_index_fn(m, instr, stack_visitor->GetDexPc());
+            const DexFile* dex_file = m->GetDexFile();
+            if (interpreter::IsStringInit(dex_file, method_index)) {
+              // Invoking string init constructor is turned into invoking
+              // StringFactory.newStringFromChars() which returns a string.
+              shorty = 'L';
+            } else {
+              shorty = dex_file->GetMethodShorty(method_index)[0];
+            }
+
+          } else {
+            // It could be that a non-invoke opcode invokes a stub, which in turn
+            // invokes Java code. In such cases, we should never expect a return
+            // value from the stub.
+          }
+        }
+        // Stop stack walking since we've seen a Java frame.
+        return false;
+      },
+      thread,
+      /* context= */ nullptr,
+      art::StackVisitor::StackWalkKind::kIncludeInlinedFrames);
+  return shorty;
+}
 
 TwoWordReturn Instrumentation::PopInstrumentationStackFrame(Thread* self,
                                                             uintptr_t* return_pc,
@@ -1447,9 +1454,7 @@ TwoWordReturn Instrumentation::PopInstrumentationStackFrame(Thread* self,
       // for clinit, we need to pass return results to the caller.
       // We need the correct shorty to decide whether we need to pass the return
       // result for deoptimization below.
-      RuntimeMethodShortyVisitor visitor(self);
-      visitor.WalkStack();
-      return_shorty = visitor.shorty;
+      return_shorty = GetRuntimeMethodShorty(self);
     } else {
       // Some runtime methods such as allocations, unresolved field getters, etc.
       // have return value. We don't need to set return_value since MethodExitEvent()

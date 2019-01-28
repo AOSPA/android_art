@@ -155,7 +155,7 @@ class OptimizingUnitTestHelper {
     void* aligned_data = GetAllocator()->Alloc(code_item_size);
     memcpy(aligned_data, &data[0], code_item_size);
     CHECK_ALIGNED(aligned_data, StandardDexFile::CodeItem::kAlignment);
-    const DexFile::CodeItem* code_item = reinterpret_cast<const DexFile::CodeItem*>(aligned_data);
+    const dex::CodeItem* code_item = reinterpret_cast<const dex::CodeItem*>(aligned_data);
 
     {
       ScopedObjectAccess soa(Thread::Current());
@@ -165,13 +165,13 @@ class OptimizingUnitTestHelper {
       const DexCompilationUnit* dex_compilation_unit =
           new (graph->GetAllocator()) DexCompilationUnit(
               handles_->NewHandle<mirror::ClassLoader>(nullptr),
-              /* class_linker */ nullptr,
+              /* class_linker= */ nullptr,
               graph->GetDexFile(),
               code_item,
-              /* class_def_index */ DexFile::kDexNoIndex16,
-              /* method_idx */ dex::kDexNoIndex,
-              /* access_flags */ 0u,
-              /* verified_method */ nullptr,
+              /* class_def_index= */ DexFile::kDexNoIndex16,
+              /* method_idx= */ dex::kDexNoIndex,
+              /* access_flags= */ 0u,
+              /* verified_method= */ nullptr,
               handles_->NewHandle<mirror::DexCache>(nullptr));
       CodeItemDebugInfoAccessor accessor(graph->GetDexFile(), code_item, /*dex_method_idx*/ 0u);
       HGraphBuilder builder(graph, dex_compilation_unit, accessor, handles_.get(), return_type);

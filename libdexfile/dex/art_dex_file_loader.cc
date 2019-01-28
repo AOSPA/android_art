@@ -16,7 +16,6 @@
 
 #include "art_dex_file_loader.h"
 
-#include <sys/mman.h>  // For the PROT_* and MAP_* constants.
 #include <sys/stat.h>
 
 #include "android-base/stringprintf.h"
@@ -24,6 +23,7 @@
 #include "base/file_magic.h"
 #include "base/file_utils.h"
 #include "base/mem_map.h"
+#include "base/mman.h"  // For the PROT_* and MAP_* constants.
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "base/unix_file/fd_file.h"
@@ -156,14 +156,16 @@ bool ArtDexFileLoader::GetMultiDexChecksums(const char* filename,
   return false;
 }
 
-std::unique_ptr<const DexFile> ArtDexFileLoader::Open(const uint8_t* base,
-                                                      size_t size,
-                                                      const std::string& location,
-                                                      uint32_t location_checksum,
-                                                      const OatDexFile* oat_dex_file,
-                                                      bool verify,
-                                                      bool verify_checksum,
-                                                      std::string* error_msg) const {
+std::unique_ptr<const DexFile> ArtDexFileLoader::Open(
+    const uint8_t* base,
+    size_t size,
+    const std::string& location,
+    uint32_t location_checksum,
+    const OatDexFile* oat_dex_file,
+    bool verify,
+    bool verify_checksum,
+    std::string* error_msg,
+    std::unique_ptr<DexFileContainer> container) const {
   ScopedTrace trace(std::string("Open dex file from RAM ") + location);
   return OpenCommon(base,
                     size,
@@ -175,7 +177,7 @@ std::unique_ptr<const DexFile> ArtDexFileLoader::Open(const uint8_t* base,
                     verify,
                     verify_checksum,
                     error_msg,
-                    /*container=*/ nullptr,
+                    std::move(container),
                     /*verify_result=*/ nullptr);
 }
 
