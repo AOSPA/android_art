@@ -58,7 +58,7 @@ function boot_classpath_arg {
 # Note: This must start with the CORE_IMG_JARS in Android.common_path.mk
 # because that's what we use for compiling the core.art image.
 # It may contain additional modules from TEST_CORE_JARS.
-BOOT_CLASSPATH_JARS="core-oj core-libart core-simple okhttp bouncycastle apache-xml conscrypt"
+BOOT_CLASSPATH_JARS="core-oj core-libart okhttp bouncycastle apache-xml conscrypt"
 
 vm_args=""
 art="$android_root/bin/art"
@@ -124,6 +124,11 @@ while true; do
     device_dir=""
     # Vogar knows which VM to use on host.
     vm_command=""
+    shift
+  elif [[ "$1" == "--mode=device" ]]; then
+    # Remove the --mode=device from the arguments and replace it with --mode=device_testdex
+    args=${args/$1}
+    args="$args --mode=device_testdex"
     shift
   elif [[ "$1" == "--mode=jvm" ]]; then
     mode="ri"

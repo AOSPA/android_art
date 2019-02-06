@@ -28,41 +28,30 @@ bionic_native_shared_libs = [
 bionic_binaries_both = [
     "linker",
 ]
-// - Fake library that avoids namespace issues and gives some warnings for nosy apps.
-art_runtime_fake_native_shared_libs = [
-     // FIXME: Does not work as-is, because `libart_fake` is defined in libart_fake/Android.mk,
-     // and because a module defined in a Blueprint file cannot depend on a module defined in a
-     // Makefile. To support `libart_fake` as a dependency of this APEX module, we can either
-     // (probably in that order of preference):
-     // a. translate that logic into Blueprint; or
-     // b. write the whole Android Runtime APEX generation logic in Android.mk; or
-     // c. introduce an `art_apex` module type extending the `apex` module type and write the
-     //    corresponding Go logic to handle this extra dependency.
-     //"libart_fake",
-]
 // - Debug variants (binaries for which a 32-bit version is preferred).
-//   FIXME: These modules are optional (the built product can decide to include them or not).
-//   Should they be moved to another APEX file?
 art_runtime_debug_binaries_prefer32 = [
     "dex2oatd",
     "dexoptanalyzerd",
     "profmand",
 ]
+// - Debug variants (libraries).
 art_runtime_debug_native_shared_libs = [
     "libartd",
     "libartd-compiler",
-    "libopenjdkd",
     "libopenjdkjvmd",
     "libopenjdkjvmtid",
     "libadbconnectiond",
-    "libjavacrypto",
+]
+libcore_debug_native_shared_libs = [
+    "libopenjdkd",
 ]
 
-// Files associated with bionic / managed core library time zone APIs.
-art_runtime_time_zone_prebuilts = [
+// Data files associated with bionic / managed core library APIs.
+art_runtime_data_file_prebuilts = [
     "apex_tz_version",
     "apex_tzdata",
     "apex_tzlookup.xml",
+    "apex_icu.dat",
 ]
 
 // Modules listed in LOCAL_REQUIRED_MODULES for module art-tools in art/Android.mk.
@@ -72,13 +61,15 @@ art_tools_common_binaries = [
     "dexlist",
 ]
 
-art_tools_device_binaries = [
+// Device-only modules listed in LOCAL_REQUIRED_MODULES for module art-tools in art/Android.mk.
+art_tools_device_only_binaries = [
+    // oatdump cannot link with host linux_bionic due to not using clang lld;
+    // TODO: Make it work with clang lld.
     "oatdump",
 ]
 
 // Host-only modules listed in LOCAL_REQUIRED_MODULES for module art-tools in art/Android.mk.
-// TODO: Include these modules in the future "host APEX".
-art_tools_host_binaries = [
+art_tools_host_only_binaries = [
     // FIXME: Does not work as-is, because `ahat` is defined in tools/ahat/Android.mk
     // (same issue as for `libart_fake` above).
     //"ahat",
@@ -86,7 +77,13 @@ art_tools_host_binaries = [
     // ...
 ]
 
-art_tools_binaries = art_tools_common_binaries + art_tools_device_binaries
+art_tools_device_binaries = art_tools_common_binaries + art_tools_device_only_binaries
+art_tools_host_binaries = art_tools_common_binaries + art_tools_host_only_binaries
+
+// (Some) Libcore native libraries.
+libcore_native_shared_libs = [
+    "libopenjdk",
+]
 
 apex_key {
     name: "com.android.runtime.key",
@@ -112,8 +109,8 @@ apex {
     compile_multilib: "both",
     manifest: "manifest.json",
     native_shared_libs: art_runtime_base_native_shared_libs
-        + art_runtime_fake_native_shared_libs
-        + bionic_native_shared_libs,
+        + bionic_native_shared_libs
+        + libcore_native_shared_libs,
     multilib: {
         both: {
             // TODO: Add logic to create a `dalvikvm` symlink to `dalvikvm32` or `dalvikvm64`
@@ -128,7 +125,7 @@ apex {
             binaries: [],
         }
     },
-    prebuilts: art_runtime_time_zone_prebuilts
+    prebuilts: art_runtime_data_file_prebuilts
         + ["com.android.runtime.ld.config.txt"],
     key: "com.android.runtime.key",
 }
@@ -141,9 +138,10 @@ apex {
     compile_multilib: "both",
     manifest: "manifest.json",
     native_shared_libs: art_runtime_base_native_shared_libs
-        + art_runtime_fake_native_shared_libs
         + art_runtime_debug_native_shared_libs
-        + bionic_native_shared_libs,
+        + bionic_native_shared_libs
+        + libcore_native_shared_libs
+        + libcore_debug_native_shared_libs,
     multilib: {
         both: {
             // TODO: Add logic to create a `dalvikvm` symlink to `dalvikvm32` or `dalvikvm64`
@@ -156,10 +154,10 @@ apex {
                 + art_runtime_debug_binaries_prefer32,
         },
         first: {
-            binaries: art_tools_binaries,
+            binaries: art_tools_device_binaries,
         }
     },
-    prebuilts: art_runtime_time_zone_prebuilts
+    prebuilts: art_runtime_data_file_prebuilts
         + ["com.android.runtime.ld.config.txt"],
     key: "com.android.runtime.key",
 }
@@ -177,8 +175,9 @@ art_apex {
     device_supported: false,
     manifest: "manifest.json",
     native_shared_libs: art_runtime_base_native_shared_libs
-        + art_runtime_fake_native_shared_libs
-        + art_runtime_debug_native_shared_libs,
+        + art_runtime_debug_native_shared_libs
+        + libcore_native_shared_libs
+        + libcore_debug_native_shared_libs,
     multilib: {
         both: {
             // TODO: Add logic to create a `dalvikvm` symlink to `dalvikvm32` or `dalvikvm64`
@@ -186,8 +185,7 @@ art_apex {
             binaries: art_runtime_base_binaries_both,
         },
         first: {
-            // TODO: oatdump cannot link with host linux_bionic due to not using clang ld
-            binaries: art_tools_common_binaries
+            binaries: art_tools_host_binaries
                 + art_runtime_base_binaries_prefer32
                 + art_runtime_debug_binaries_prefer32,
         }

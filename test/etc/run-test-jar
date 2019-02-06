@@ -22,7 +22,8 @@ WITH_AGENT=()
 DEBUGGER_AGENT=""
 WRAP_DEBUGGER_AGENT="n"
 DEV_MODE="n"
-DEX2OAT=""
+DEX2OAT_NDEBUG_BINARY="dex2oat"
+DEX2OAT_DEBUG_BINARY="dex2oatd"
 EXPERIMENTAL=""
 FALSE_BIN="false"
 FLAGS=""
@@ -227,6 +228,11 @@ while true; do
         shift
         USE_ZIPAPEX="y"
         ZIPAPEX_LOC="$1"
+        # TODO (b/119942078): Currently apex does not support
+        # symlink_preferred_arch so we will not have a dex2oatd to execute and
+        # need to manually provide
+        # dex2oatd64.
+        DEX2OAT_DEBUG_BINARY="dex2oatd64"
         shift
     elif [ "x$1" = "x--no-prebuild" ]; then
         PREBUILD="n"
@@ -318,6 +324,10 @@ while true; do
     elif [ "x$1" = "x--android-root" ]; then
         shift
         ANDROID_ROOT="$1"
+        shift
+    elif [ "x$1" = "x--android-runtime-root" ]; then
+        shift
+        ANDROID_RUNTIME_ROOT="$1"
         shift
     elif [ "x$1" = "x--instruction-set-features" ]; then
         shift
@@ -552,7 +562,7 @@ fi
 # Note: This must start with the CORE_IMG_JARS in Android.common_path.mk
 # because that's what we use for compiling the core.art image.
 # It may contain additional modules from TEST_CORE_JARS.
-bpath_modules="core-oj core-libart core-simple okhttp bouncycastle apache-xml conscrypt"
+bpath_modules="core-oj core-libart okhttp bouncycastle apache-xml conscrypt"
 if [ "${HOST}" = "y" ]; then
     framework="${ANDROID_HOST_OUT}/framework"
     if [ "${ANDROID_HOST_OUT:0:${#ANDROID_BUILD_TOP}+1}" = "${ANDROID_BUILD_TOP}/" ]; then
@@ -785,9 +795,9 @@ if [ "$PREBUILD" = "y" ]; then
     app_image="--base=0x4000 --app-image-file=$DEX_LOCATION/oat/$ISA/$TEST_NAME.art"
   fi
 
-  dex2oat_binary=dex2oatd
+  dex2oat_binary=${DEX2OAT_DEBUG_BINARY}
   if  [[ "$TEST_IS_NDEBUG" = "y" ]]; then
-    dex2oat_binary=dex2oat
+    dex2oat_binary=${DEX2OAT_NDEBUG_BINARY}
   fi
   dex2oat_cmdline="$INVOKE_WITH $BIN_DIR/$dex2oat_binary \
                       $COMPILE_FLAGS \

@@ -35,12 +35,8 @@
 #include <atomic>
 #include <unordered_map>
 
-#include "jni.h"
-#include "jvmti.h"
-
 #include "base/mutex.h"
 #include "runtime_callbacks.h"
-#include "ti_breakpoint.h"
 
 namespace art {
 class ArtMethod;
@@ -107,7 +103,7 @@ class DeoptManager {
 
   void FinishSetup()
       REQUIRES(!deoptimization_status_lock_, !art::Roles::uninterruptible_)
-      REQUIRES_SHARED(art::Locks::mutator_lock_);
+      REQUIRES(art::Locks::mutator_lock_);
 
   static DeoptManager* Get();
 

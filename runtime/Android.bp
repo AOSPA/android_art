@@ -396,8 +396,10 @@ libart_cc_defaults {
         "libnativeloader",
         "libbacktrace",
         "liblog",
-        // For atrace, properties, ashmem, set_sched_policy.
+        // For atrace, properties, ashmem.
         "libcutils",
+        // For set_sched_policy.
+        "libprocessgroup",
         // For common macros.
         "libbase",
     ],
@@ -462,6 +464,7 @@ gensrcs {
     cmd: "$(location generate_operator_out) art/runtime $(in) > $(out)",
     tools: ["generate_operator_out"],
     srcs: [
+        "base/callee_save_type.h",
         "base/locks.h",
         "class_loader_context.h",
         "class_status.h",

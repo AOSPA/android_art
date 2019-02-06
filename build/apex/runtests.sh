@@ -17,6 +17,11 @@
 
 # Run Android Runtime APEX tests.
 
+# Status of whole test script.
+exit_status=0
+# Status of current test suite.
+test_status=0
+
 function say {
   echo "$0: $*"
 }
@@ -107,32 +112,42 @@ function maybe_list_apex_contents {
   fi
 }
 
+function fail_check {
+  echo "$0: FAILED: $*"
+  test_status=1
+  exit_status=1
+}
+
+function check_file {
+  [[ -f "$mount_point/$1" ]] || fail_check "Cannot find file '$1' in mounted image"
+}
+
 function check_binary {
-  [[ -x "$mount_point/bin/$1" ]] || die "Cannot find binary '$1' in mounted image"
+  [[ -x "$mount_point/bin/$1" ]] || fail_check "Cannot find binary '$1' in mounted image"
 }
 
 function check_multilib_binary {
   # TODO: Use $TARGET_ARCH (e.g. check whether it is "arm" or "arm64") to improve
   # the precision of this test?
   [[ -x "$mount_point/bin/${1}32" ]] || [[ -x "$mount_point/bin/${1}64" ]] \
-    || die "Cannot find binary '$1' in mounted image"
+    || fail_check "Cannot find binary '$1' in mounted image"
 }
 
 function check_binary_symlink {
-  [[ -h "$mount_point/bin/$1" ]] || die "Cannot find symbolic link '$1' in mounted image"
+  [[ -h "$mount_point/bin/$1" ]] || fail_check "Cannot find symbolic link '$1' in mounted image"
 }
 
 function check_library {
   # TODO: Use $TARGET_ARCH (e.g. check whether it is "arm" or "arm64") to improve
   # the precision of this test?
   [[ -f "$mount_point/lib/$1" ]] || [[ -f "$mount_point/lib64/$1" ]] \
-    || die "Cannot find library '$1' in mounted image"
+    || fail_check "Cannot find library '$1' in mounted image"
 }
 
 # Check contents of APEX payload located in `$mount_point`.
 function check_release_contents {
-  # Check that the mounted image contains a manifest.
-  [[ -f "$mount_point/apex_manifest.json" ]] || die "no manifest"
+  # Check that the mounted image contains an APEX manifest.
+  check_file apex_manifest.json
 
   # Check that the mounted image contains ART base binaries.
   check_multilib_binary dalvikvm
@@ -146,18 +161,20 @@ function check_release_contents {
   # TODO: Check for it when it is also built for host.
   : check_binary oatdump
 
-  # Check that the mounted image contains ART libraries.
+  # Check that the mounted image contains Android Runtime libraries.
   check_library libart-compiler.so
+  check_library libart-dexlayout.so
   check_library libart.so
+  check_library libartbase.so
+  check_library libdexfile.so
   check_library libopenjdkjvm.so
   check_library libopenjdkjvmti.so
-  check_library libadbconnection.so
-  # TODO: Should we check for these libraries too, even if they are not explicitly
-  # listed as dependencies in the Android Runtime APEX module rule?
-  check_library libartbase.so
-  check_library libart-dexlayout.so
-  check_library libdexfile.so
   check_library libprofile.so
+  # Check that the mounted image contains Android Core libraries.
+  check_library libjavacrypto.so
+  check_library libopenjdk.so
+  # Check that the mounted image contains additional required libraries.
+  check_library libadbconnection.so
 
   # TODO: Should we check for other libraries, such as:
   #
@@ -186,19 +203,19 @@ function check_debug_contents {
   check_binary dexoptanalyzerd
   check_binary profmand
 
-  # Check that the mounted image contains ART debug libraries.
+  # Check that the mounted image contains Android Runtime debug libraries.
+  check_library libartbased.so
   check_library libartd-compiler.so
+  check_library libartd-dexlayout.so
   check_library libartd.so
-  check_library libopenjdkd.so
+  check_library libdexfiled.so
   check_library libopenjdkjvmd.so
   check_library libopenjdkjvmtid.so
-  check_library libadbconnectiond.so
-  # TODO: Should we check for these libraries too, even if they are not explicitly
-  # listed as dependencies in the Android Runtime APEX module rule?
-  check_library libdexfiled.so
-  check_library libartbased.so
-  check_library libartd-dexlayout.so
   check_library libprofiled.so
+  # Check that the mounted image contains Android Core debug libraries.
+  check_library libopenjdkd.so
+  # Check that the mounted image contains additional required debug libraries.
+  check_library libadbconnectiond.so
 }
 
 # Testing target (device) APEX packages.
@@ -249,6 +266,7 @@ function setup_target_apex {
 # -----------------------------------------------------------
 
 apex_module="com.android.runtime.release"
+test_status=0
 
 say "Processing APEX package $apex_module"
 
@@ -274,13 +292,14 @@ check_release_contents
 trap - EXIT
 cleanup_target
 
-say "$apex_module tests passed"
+[[ "$test_status" = 0 ]] && say "$apex_module tests passed"
 echo
 
 # Testing debug APEX package (com.android.runtime.debug).
 # -------------------------------------------------------
 
 apex_module="com.android.runtime.debug"
+test_status=0
 
 say "Processing APEX package $apex_module"
 
@@ -310,7 +329,7 @@ check_library libart-disassembler.so
 trap - EXIT
 cleanup_target
 
-say "$apex_module tests passed"
+[[ "$test_status" = 0 ]] && say "$apex_module tests passed"
 echo
 
 
@@ -351,6 +370,7 @@ function setup_host_apex {
 }
 
 apex_module="com.android.runtime.host"
+test_status=0
 
 say "Processing APEX package $apex_module"
 
@@ -377,7 +397,8 @@ check_debug_contents
 trap - EXIT
 cleanup_host
 
-say "$apex_module tests passed"
+[[ "$test_status" = 0 ]] && say "$apex_module tests passed"
 
+[[ "$exit_status" = 0 ]] && say "All Android Runtime APEX tests passed"
 
-say "All Android Runtime APEX tests passed"
+exit $exit_status

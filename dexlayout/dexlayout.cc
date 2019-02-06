@@ -24,7 +24,6 @@
 
 #include <inttypes.h>
 #include <stdio.h>
-#include <sys/mman.h>  // For the PROT_* and MAP_* constants.
 
 #include <iostream>
 #include <memory>
@@ -36,6 +35,7 @@
 #include "base/logging.h"  // For VLOG_IS_ON.
 #include "base/hiddenapi_flags.h"
 #include "base/mem_map.h"
+#include "base/mman.h"  // For the PROT_* and MAP_* constants.
 #include "base/os.h"
 #include "base/utils.h"
 #include "dex/art_dex_file_loader.h"
@@ -224,7 +224,9 @@ static char* CreateAccessFlagStr(uint32_t flags, AccessFor for_what) {
 }
 
 static std::string GetHiddenapiFlagStr(uint32_t hiddenapi_flags) {
-  std::string api_list(hiddenapi::ApiList::FromDexFlags(hiddenapi_flags).GetName());
+  std::stringstream ss;
+  hiddenapi::ApiList(hiddenapi_flags).Dump(ss);
+  std::string api_list = ss.str();
   std::transform(api_list.begin(), api_list.end(), api_list.begin(), ::toupper);
   return api_list;
 }

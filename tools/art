@@ -199,6 +199,7 @@ function run_dex2oat() {
     # (see run_art function)
     verbose_run ANDROID_DATA=$ANDROID_DATA                    \
           ANDROID_ROOT=$ANDROID_ROOT                          \
+          ANDROID_RUNTIME_ROOT=$ANDROID_RUNTIME_ROOT          \
           LD_LIBRARY_PATH=$LD_LIBRARY_PATH                    \
           PATH=$ANDROID_ROOT/bin:$PATH                        \
           LD_USE_LOAD_BIAS=1                                  \
@@ -222,6 +223,8 @@ function run_dex2oat() {
 # -Xcompiler-options arguments are stored in DEX2OAT_FLAGS array
 # -cp argument is split by ':' and stored in DEX2OAT_CLASSPATH
 # -Ximage argument is stored in DEX2OAT_BOOT_IMAGE
+# -Xbootclasspath argument is stored in DEX2OAT_BCP
+# -Xbootclasspath-locations argument is stored in DEX2OAT_BCP_LOCS
 function extract_dex2oat_flags() {
   while [ $# -gt 0 ]; do
     case $1 in
@@ -233,6 +236,16 @@ function extract_dex2oat_flags() {
         DEX2OAT_BOOT_IMAGE=$1
         # Remove '-Ximage:' from the argument.
         DEX2OAT_BOOT_IMAGE=${DEX2OAT_BOOT_IMAGE##-Ximage:}
+        ;;
+      -Xbootclasspath:*)
+        DEX2OAT_BCP=$1
+        # Remove '-Xbootclasspath:' from the argument.
+        DEX2OAT_BCP=${DEX2OAT_BCP##-Xbootclasspath:}
+        ;;
+      -Xbootclasspath-locations:*)
+        DEX2OAT_BCP_LOCS=$1
+        # Remove '-Xbootclasspath-locations:' from the argument.
+        DEX2OAT_BCP_LOCS=${DEX2OAT_BCP_LOCS##-Xbootclasspath-locations:}
         ;;
       -cp)
         # Reset any previously parsed classpath, just like dalvikvm
@@ -386,8 +399,42 @@ while [ -h "$PROG_NAME" ]; do
 done
 
 PROG_DIR="$(cd "${PROG_NAME%/*}" ; pwd -P)"
-ANDROID_ROOT=$PROG_DIR/..
-ANDROID_RUNTIME_ROOT=$ANDROID_ROOT/com.android.runtime
+ANDROID_ROOT="$(cd $PROG_DIR/..; pwd -P)"
+
+# If ANDROID_RUNTIME_ROOT is not set, try to detect whether we are running on
+# target or host and set that environment variable to the usual default value.
+if [ -z "$ANDROID_RUNTIME_ROOT" ]; then
+  # This script is used on host and target (device). However, the (expected)
+  # default value `ANDROID_RUNTIME_ROOT` is not the same on host and target:
+  # - on host, `ANDROID_RUNTIME_ROOT` is expected to be "$ANDROID_ROOT/com.android.apex";
+  # - on target, `ANDROID_RUNTIME_ROOT` is expected to be "$ANDROID_ROOT/../apex/com.android.apex".
+  #
+  # We use the presence/absence of the `$ANDROID_ROOT/../apex` directory to
+  # determine whether we are on target or host (this is brittle, but simple).
+  if [ -d "$ANDROID_ROOT/../apex" ]; then
+    # Target case.
+    #
+    # We should be setting `ANDROID_RUNTIME_ROOT` to
+    # "$ANDROID_ROOT/../apex/com.android.runtime" here. However, the Runtime APEX
+    # is not (yet) supported by the ART Buildbot setup (see b/121117762); and yet
+    # ICU code depends on `ANDROID_RUNTIME_ROOT` to find ICU .dat files.
+    #
+    # As a temporary workaround, we:
+    # - make the ART Buildbot build script (art/tools/buildbot-build.sh) also
+    #   generate the ICU .dat files in `/system/etc/icu` on device (these files
+    #   are normally only put in the Runtime APEX on device);
+    # - set `ANDROID_RUNTIME_ROOT` to `$ANDROID_ROOT` (i.e. "/system") here.
+    #
+    # TODO(b/121117762): Set `ANDROID_RUNTIME_ROOT` to
+    # "$ANDROID_ROOT/../apex/com.android.runtime" when the Runtime APEX is fully
+    # supported on the ART Buildbot and Golem.
+    ANDROID_RUNTIME_ROOT=$ANDROID_ROOT
+  else
+    # Host case.
+    ANDROID_RUNTIME_ROOT="$ANDROID_ROOT/com.android.runtime"
+  fi
+fi
+
 ART_BINARY_PATH=$ANDROID_ROOT/bin/$ART_BINARY
 
 if [ ! -x "$ART_BINARY_PATH" ]; then
@@ -422,7 +469,7 @@ ISA=$(LD_LIBRARY_PATH=$LD_LIBRARY_PATH $ART_BINARY_PATH -showversion | (read art
 # Extract the dex2oat flags from the list of arguments.
 # -Xcompiler-options arguments are stored in DEX2OAT_FLAGS array
 # -cp argument is split by ':' and stored in DEX2OAT_CLASSPATH
-# -Ximage argument is stored in DEX2OAT_BOOTIMAGE
+# -Ximage argument is stored in DEX2OAT_BOOT_IMAGE
 extract_dex2oat_flags "$@"
 
 # If ANDROID_DATA is the system ANDROID_DATA or is not set, use our own,
@@ -437,6 +484,55 @@ if [ "$ANDROID_DATA" = "/data" ] || [ "$ANDROID_DATA" = "" ]; then
   fi
   mkdir -p "$ANDROID_DATA"
   DELETE_ANDROID_DATA="yes"
+fi
+
+if [[ "$DEX2OAT_BCP" = "" && "$DEX2OAT_BCP_LOCS" != "" ]]; then
+  echo "Cannot use -Xbootclasspath-locations without -Xbootclasspath"
+  exit 1
+fi
+
+if [[ "$DEX2OAT_BOOT_IMAGE" = *core*.art && "$DEX2OAT_BCP" = "" ]]; then
+  # Note: This must start with the CORE_IMG_JARS in Android.common_path.mk
+  # because that's what we use for compiling the core.art image.
+  # It may contain additional modules from TEST_CORE_JARS.
+  core_jars_list="core-oj core-libart okhttp bouncycastle apache-xml conscrypt"
+  core_jars_suffix=
+  if [[ -e $ANDROID_ROOT/framework/core-oj-hostdex.jar ]]; then
+    core_jars_suffix=-hostdex
+    core_locations_dir=$ANDROID_ROOT/framework
+    prefix=$PWD/
+    if [[ ${core_locations_dir:0:${#prefix}} = $prefix ]]; then
+      core_locations_dir="${core_locations_dir##$prefix}"
+    fi
+  elif [[ -e $ANDROID_ROOT/framework/core-oj-testdex.jar ]]; then
+    core_jars_suffix=-testdex
+    core_locations_dir=/system/framework
+  fi
+  if [[ $core_jars_suffix != "" ]]; then
+    boot_separator=""
+    for boot_module in ${core_jars_list}; do
+      DEX_FILENAME="$boot_module$core_jars_suffix.jar"
+      DEX2OAT_BCP+="$boot_separator$ANDROID_ROOT/framework/${DEX_FILENAME}"
+      DEX2OAT_BCP_LOCS+="$boot_separator$core_locations_dir/${DEX_FILENAME}"
+      boot_separator=":"
+    done
+    if [ "$VERBOSE" = "yes" ]; then
+      echo "Using predefined -Xbootclasspath for image $DEX2OAT_BOOT_IMAGE:"
+      echo DEX2OAT_BOOT_IMAGE=$DEX2OAT_BOOT_IMAGE
+      echo DEX2OAT_BCP=$DEX2OAT_BCP
+      echo DEX2OAT_BCP_LOCS=$DEX2OAT_BCP_LOCS
+    fi
+  fi
+fi
+
+if [ "$DEX2OAT_BCP" != "" ]; then
+  EXTRA_OPTIONS+=("-Xbootclasspath:$DEX2OAT_BCP")
+  DEX2OAT_FLAGS+=("--runtime-arg" "-Xbootclasspath:$DEX2OAT_BCP")
+  if [ "$DEX2OAT_BCP_LOCS" != "" ]; then
+    EXTRA_OPTIONS+=("-Xbootclasspath-locations:$DEX2OAT_BCP_LOCS")
+    DEX2OAT_FLAGS+=("--runtime-arg" \
+                    "-Xbootclasspath-locations:$DEX2OAT_BCP_LOCS")
+  fi
 fi
 
 if [ "$PERF" != "" ]; then
