@@ -38,6 +38,7 @@ GTEST_DEX_DIRECTORIES := \
   GetMethodSignature \
   HiddenApi \
   HiddenApiSignatures \
+  HiddenApiStubs \
   ImageLayoutA \
   ImageLayoutB \
   IMTA \
@@ -188,7 +189,7 @@ ART_GTEST_dexlayout_test_DEX_DEPS := ManyMethods
 ART_GTEST_dex2oat_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) ManyMethods Statics VerifierDeps MainUncompressed EmptyUncompressed StringLiterals
 ART_GTEST_dex2oat_image_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) Statics VerifierDeps
 ART_GTEST_exception_test_DEX_DEPS := ExceptionHandle
-ART_GTEST_hiddenapi_test_DEX_DEPS := HiddenApi
+ART_GTEST_hiddenapi_test_DEX_DEPS := HiddenApi HiddenApiStubs
 ART_GTEST_hidden_api_test_DEX_DEPS := HiddenApiSignatures
 ART_GTEST_image_test_DEX_DEPS := ImageLayoutA ImageLayoutB DefaultMethods VerifySoftFailDuringClinit
 ART_GTEST_imtable_test_DEX_DEPS := IMTA IMTB
@@ -198,7 +199,7 @@ ART_GTEST_jni_internal_test_DEX_DEPS := AllFields StaticLeafMethods MyClassNativ
 ART_GTEST_oat_file_assistant_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS)
 ART_GTEST_dexoptanalyzer_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS)
 ART_GTEST_image_space_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS)
-ART_GTEST_oat_file_test_DEX_DEPS := Main MultiDex MainUncompressed MultiDexUncompressed
+ART_GTEST_oat_file_test_DEX_DEPS := Main MultiDex MainUncompressed MultiDexUncompressed MainStripped Nested MultiDexModifiedSecondary
 ART_GTEST_oat_test_DEX_DEPS := Main
 ART_GTEST_oat_writer_test_DEX_DEPS := Main
 ART_GTEST_object_test_DEX_DEPS := ProtoCompare ProtoCompare2 StaticsFromCode XandY
@@ -216,6 +217,7 @@ ART_GTEST_heap_verification_test_DEX_DEPS := ProtoCompare ProtoCompare2 StaticsF
 ART_GTEST_verifier_deps_test_DEX_DEPS := VerifierDeps VerifierDepsMulti MultiDex
 ART_GTEST_dex_to_dex_decompiler_test_DEX_DEPS := VerifierDeps DexToDexDecompiler
 ART_GTEST_oatdump_app_test_DEX_DEPS := ProfileTestMultiDex
+ART_GTEST_oatdump_test_DEX_DEPS := ProfileTestMultiDex
 
 # The elf writer test has dependencies on core.oat.
 ART_GTEST_elf_writer_test_HOST_DEPS := $(HOST_CORE_IMAGE_DEFAULT_64) $(HOST_CORE_IMAGE_DEFAULT_32)
@@ -383,6 +385,7 @@ ART_TEST_MODULES := \
     art_hiddenapi_tests \
     art_imgdiag_tests \
     art_libartbase_tests \
+    art_libartpalette_tests \
     art_libdexfile_external_tests \
     art_libdexfile_support_tests \
     art_libdexfile_tests \

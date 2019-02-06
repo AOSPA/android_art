@@ -828,6 +828,29 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* allocator,
   }
 
   CodeItemDebugInfoAccessor code_item_accessor(dex_file, code_item, method_idx);
+
+  bool dead_reference_safe;
+  ArrayRef<const uint8_t> interpreter_metadata;
+  // For AOT compilation, we may not get a method, for example if its class is erroneous,
+  // possibly due to an unavailable superclass.  JIT should always have a method.
+  DCHECK(Runtime::Current()->IsAotCompiler() || method != nullptr);
+  if (method != nullptr) {
+    const dex::ClassDef* containing_class;
+    {
+      ScopedObjectAccess soa(Thread::Current());
+      containing_class = &method->GetClassDef();
+      interpreter_metadata = method->GetQuickenedInfo();
+    }
+    // MethodContainsRSensitiveAccess is currently slow, but HasDeadReferenceSafeAnnotation()
+    // is currently rarely true.
+    dead_reference_safe =
+        annotations::HasDeadReferenceSafeAnnotation(dex_file, *containing_class)
+        && !annotations::MethodContainsRSensitiveAccess(dex_file, *containing_class, method_idx);
+  } else {
+    // If we could not resolve the class, conservatively assume it's dead-reference unsafe.
+    dead_reference_safe = false;
+  }
+
   HGraph* graph = new (allocator) HGraph(
       allocator,
       arena_stack,
@@ -835,17 +858,12 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* allocator,
       method_idx,
       compiler_options.GetInstructionSet(),
       kInvalidInvokeType,
+      dead_reference_safe,
       compiler_driver->GetCompilerOptions().GetDebuggable(),
-      osr);
+      /* osr= */ osr);
 
-  ArrayRef<const uint8_t> interpreter_metadata;
-  // For AOT compilation, we may not get a method, for example if its class is erroneous.
-  // JIT should always have a method.
-  DCHECK(Runtime::Current()->IsAotCompiler() || method != nullptr);
   if (method != nullptr) {
     graph->SetArtMethod(method);
-    ScopedObjectAccess soa(Thread::Current());
-    interpreter_metadata = method->GetQuickenedInfo();
   }
 
   std::unique_ptr<CodeGenerator> codegen(
@@ -963,6 +981,7 @@ CodeGenerator* OptimizingCompiler::TryCompileIntrinsic(
       method_idx,
       compiler_options.GetInstructionSet(),
       kInvalidInvokeType,
+      /* dead_reference_safe= */ true,  // Intrinsics don't affect dead reference safety.
       compiler_options.GetDebuggable(),
       /* osr= */ false);
 
@@ -1460,22 +1479,27 @@ void OptimizingCompiler::GenerateJitDebugInfo(ArtMethod* method ATTRIBUTE_UNUSED
                                               const debug::MethodDebugInfo& info) {
   const CompilerOptions& compiler_options = GetCompilerDriver()->GetCompilerOptions();
   DCHECK(compiler_options.GenerateAnyDebugInfo());
+  TimingLogger logger("Generate JIT debug info logger", true, VLOG_IS_ON(jit));
+  {
+    TimingLogger::ScopedTiming st("Generate JIT debug info", &logger);
 
-  // If both flags are passed, generate full debug info.
-  const bool mini_debug_info = !compiler_options.GetGenerateDebugInfo();
+    // If both flags are passed, generate full debug info.
+    const bool mini_debug_info = !compiler_options.GetGenerateDebugInfo();
 
-  // Create entry for the single method that we just compiled.
-  std::vector<uint8_t> elf_file = debug::MakeElfFileForJIT(
-      compiler_options.GetInstructionSet(),
-      compiler_options.GetInstructionSetFeatures(),
-      mini_debug_info,
-      info);
-  AddNativeDebugInfoForJit(Thread::Current(),
-                           reinterpret_cast<const void*>(info.code_address),
-                           elf_file,
-                           debug::PackElfFileForJIT,
-                           compiler_options.GetInstructionSet(),
-                           compiler_options.GetInstructionSetFeatures());
+    // Create entry for the single method that we just compiled.
+    std::vector<uint8_t> elf_file = debug::MakeElfFileForJIT(
+        compiler_options.GetInstructionSet(),
+        compiler_options.GetInstructionSetFeatures(),
+        mini_debug_info,
+        info);
+    AddNativeDebugInfoForJit(Thread::Current(),
+                             reinterpret_cast<const void*>(info.code_address),
+                             elf_file,
+                             debug::PackElfFileForJIT,
+                             compiler_options.GetInstructionSet(),
+                             compiler_options.GetInstructionSetFeatures());
+  }
+  Runtime::Current()->GetJit()->AddTimingLogger(logger);
 }
 
 }  // namespace art

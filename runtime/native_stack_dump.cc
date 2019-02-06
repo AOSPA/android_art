@@ -50,7 +50,9 @@
 #include "base/os.h"
 #include "base/unix_file/fd_file.h"
 #include "base/utils.h"
+#include "class_linker.h"
 #include "oat_quick_method_header.h"
+#include "runtime.h"
 #include "thread-current-inl.h"
 
 #endif
@@ -62,6 +64,18 @@ namespace art {
 using android::base::StringPrintf;
 
 static constexpr bool kUseAddr2line = !kIsTargetBuild;
+
+std::string FindAddr2line() {
+  if (!kIsTargetBuild) {
+    constexpr const char* kAddr2linePrebuiltPath =
+      "/prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8/bin/x86_64-linux-addr2line";
+    const char* env_value = getenv("ANDROID_BUILD_TOP");
+    if (env_value != nullptr) {
+      return std::string(env_value) + kAddr2linePrebuiltPath;
+    }
+  }
+  return std::string("/usr/bin/addr2line");
+}
 
 ALWAYS_INLINE
 static inline void WritePrefix(std::ostream& os, const char* prefix, bool odd) {
@@ -232,8 +246,9 @@ static void Addr2line(const std::string& map_src,
     }
     pipe->reset();  // Close early.
 
+    std::string addr2linePath = FindAddr2line();
     const char* args[7] = {
-        "/usr/bin/addr2line",
+        addr2linePath.c_str(),
         "--functions",
         "--inlines",
         "--demangle",
@@ -274,11 +289,17 @@ static bool RunCommand(const std::string& cmd) {
 }
 
 static bool PcIsWithinQuickCode(ArtMethod* method, uintptr_t pc) NO_THREAD_SAFETY_ANALYSIS {
-  uintptr_t code = reinterpret_cast<uintptr_t>(EntryPointToCodePointer(
-      method->GetEntryPointFromQuickCompiledCode()));
-  if (code == 0) {
+  const void* entry_point = method->GetEntryPointFromQuickCompiledCode();
+  if (entry_point == nullptr) {
     return pc == 0;
   }
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+  if (class_linker->IsQuickGenericJniStub(entry_point) ||
+      class_linker->IsQuickResolutionStub(entry_point) ||
+      class_linker->IsQuickToInterpreterBridge(entry_point)) {
+    return false;
+  }
+  uintptr_t code = reinterpret_cast<uintptr_t>(EntryPointToCodePointer(entry_point));
   uintptr_t code_size = reinterpret_cast<const OatQuickMethodHeader*>(code)[-1].GetCodeSize();
   return code <= pc && pc <= (code + code_size);
 }
@@ -314,7 +335,7 @@ void DumpNativeStack(std::ostream& os,
   if (kUseAddr2line) {
     // Try to run it to see whether we have it. Push an argument so that it doesn't assume a.out
     // and print to stderr.
-    use_addr2line = (gAborting > 0) && RunCommand("addr2line -h");
+    use_addr2line = (gAborting > 0) && RunCommand(FindAddr2line() + " -h");
   } else {
     use_addr2line = false;
   }
