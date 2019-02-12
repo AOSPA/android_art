@@ -18,7 +18,6 @@ art_runtime_base_native_shared_libs = [
     "libopenjdkjvm",
     "libopenjdkjvmti",
     "libadbconnection",
-    "libjavacrypto",
 ]
 bionic_native_shared_libs = [
     "libc",
@@ -30,10 +29,16 @@ bionic_binaries_both = [
 ]
 // - Debug variants (binaries for which a 32-bit version is preferred).
 art_runtime_debug_binaries_prefer32 = [
-    "dex2oatd",
     "dexoptanalyzerd",
     "profmand",
 ]
+art_runtime_debug_binaries_prefer32_device = [
+    "dex2oatd",
+]
+art_runtime_debug_binaries_both_host = [
+    "dex2oatd",
+]
+
 // - Debug variants (libraries).
 art_runtime_debug_native_shared_libs = [
     "libartd",
@@ -80,9 +85,22 @@ art_tools_host_only_binaries = [
 art_tools_device_binaries = art_tools_common_binaries + art_tools_device_only_binaries
 art_tools_host_binaries = art_tools_common_binaries + art_tools_host_only_binaries
 
-// (Some) Libcore native libraries.
+// Libcore native libraries.
 libcore_native_shared_libs = [
+    "libjavacore",
     "libopenjdk",
+    "libexpat",
+    "libz",
+    "libziparchive"
+]
+
+// Java libraries
+libcore_target_java_libs = [
+    "core-oj",
+    "core-libart",
+    "okhttp",
+    "bouncycastle",
+    "apache-xml",
 ]
 
 apex_key {
@@ -108,6 +126,7 @@ apex {
     name: "com.android.runtime.release",
     compile_multilib: "both",
     manifest: "manifest.json",
+    java_libs: libcore_target_java_libs,
     native_shared_libs: art_runtime_base_native_shared_libs
         + bionic_native_shared_libs
         + libcore_native_shared_libs,
@@ -137,6 +156,7 @@ apex {
     name: "com.android.runtime.debug",
     compile_multilib: "both",
     manifest: "manifest.json",
+    java_libs: libcore_target_java_libs,
     native_shared_libs: art_runtime_base_native_shared_libs
         + art_runtime_debug_native_shared_libs
         + bionic_native_shared_libs
@@ -151,7 +171,8 @@ apex {
         },
         prefer32: {
             binaries: art_runtime_base_binaries_prefer32
-                + art_runtime_debug_binaries_prefer32,
+                + art_runtime_debug_binaries_prefer32
+                + art_runtime_debug_binaries_prefer32_device,
         },
         first: {
             binaries: art_tools_device_binaries,
@@ -174,6 +195,8 @@ art_apex {
     host_supported: true,
     device_supported: false,
     manifest: "manifest.json",
+    java_libs: libcore_target_java_libs,
+    ignore_system_library_special_case: true,
     native_shared_libs: art_runtime_base_native_shared_libs
         + art_runtime_debug_native_shared_libs
         + libcore_native_shared_libs
@@ -182,7 +205,8 @@ art_apex {
         both: {
             // TODO: Add logic to create a `dalvikvm` symlink to `dalvikvm32` or `dalvikvm64`
             // (see `symlink_preferred_arch` in art/dalvikvm/Android.bp).
-            binaries: art_runtime_base_binaries_both,
+            binaries: art_runtime_base_binaries_both
+                + art_runtime_debug_binaries_both_host,
         },
         first: {
             binaries: art_tools_host_binaries
@@ -194,6 +218,15 @@ art_apex {
     target: {
         darwin: {
             enabled: false,
+        },
+        linux_bionic: {
+            enabled: true,
+            multilib: {
+                both: {
+                    native_shared_libs: bionic_native_shared_libs,
+                    binaries: bionic_binaries_both,
+                }
+            }
         },
     },
 }
