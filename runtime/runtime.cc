@@ -42,6 +42,7 @@
 #include "aot_class_linker.h"
 #include "arch/arm/registers_arm.h"
 #include "arch/arm64/registers_arm64.h"
+#include "arch/context.h"
 #include "arch/instruction_set_features.h"
 #include "arch/mips/registers_mips.h"
 #include "arch/mips64/registers_mips64.h"
@@ -272,6 +273,7 @@ Runtime::Runtime()
       is_low_memory_mode_(false),
       safe_mode_(false),
       hidden_api_policy_(hiddenapi::EnforcementPolicy::kDisabled),
+      core_platform_api_policy_(hiddenapi::EnforcementPolicy::kJustWarn),
       dedupe_hidden_api_warnings_(true),
       hidden_api_access_event_log_rate_(0),
       dump_native_stack_on_sig_quit_(true),
@@ -323,7 +325,6 @@ Runtime::~Runtime() {
 
   if (dump_gc_performance_on_shutdown_) {
     heap_->CalculatePreGcWeightedAllocatedBytes();
-    heap_->CalculatePostGcWeightedAllocatedBytes();
     uint64_t process_cpu_end_time = ProcessCpuNanoTime();
     ScopedLogSeverity sls(LogSeverity::INFO);
     // This can't be called from the Heap destructor below because it
@@ -340,8 +341,12 @@ Runtime::~Runtime() {
         << "\n";
     double pre_gc_weighted_allocated_bytes =
         heap_->GetPreGcWeightedAllocatedBytes() / process_cpu_time;
+    // Here we don't use process_cpu_time for normalization, because VM shutdown is not a real
+    // GC. Both numerator and denominator take into account until the end of the last GC,
+    // instead of the whole process life time like pre_gc_weighted_allocated_bytes.
     double post_gc_weighted_allocated_bytes =
-        heap_->GetPostGcWeightedAllocatedBytes() / process_cpu_time;
+        heap_->GetPostGcWeightedAllocatedBytes() /
+          (heap_->GetPostGCLastProcessCpuTime() - heap_->GetProcessCpuStartTime());
 
     LOG_STREAM(INFO) << "Average bytes allocated at GC start, weighted by CPU time between GCs: "
         << static_cast<uint64_t>(pre_gc_weighted_allocated_bytes)
@@ -1472,6 +1477,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     if (IsJavaDebuggable()) {
       // Now that we have loaded the boot image, deoptimize its methods if we are running
       // debuggable, as the code may have been compiled non-debuggable.
+      ScopedThreadSuspension sts(self, ThreadState::kNative);
+      ScopedSuspendAll ssa(__FUNCTION__);
       DeoptimizeBootImage();
     }
   } else {
@@ -1571,10 +1578,14 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // Runtime initialization is largely done now.
   // We load plugins first since that can modify the runtime state slightly.
   // Load all plugins
-  for (auto& plugin : plugins_) {
-    std::string err;
-    if (!plugin.Load(&err)) {
-      LOG(FATAL) << plugin << " failed to load: " << err;
+  {
+    // The init method of plugins expect the state of the thread to be non runnable.
+    ScopedThreadSuspension sts(self, ThreadState::kNative);
+    for (auto& plugin : plugins_) {
+      std::string err;
+      if (!plugin.Load(&err)) {
+        LOG(FATAL) << plugin << " failed to load: " << err;
+      }
     }
   }
 
@@ -1736,7 +1747,7 @@ void Runtime::InitNativeMethods() {
   // libcore can't because it's the library that implements System.loadLibrary!
   {
     std::string error_msg;
-    if (!java_vm_->LoadNativeLibrary(env, "libjavacore.so", nullptr, &error_msg)) {
+    if (!java_vm_->LoadNativeLibrary(env, "libjavacore.so", nullptr, nullptr, &error_msg)) {
       LOG(FATAL) << "LoadNativeLibrary failed for \"libjavacore.so\": " << error_msg;
     }
   }
@@ -1745,7 +1756,7 @@ void Runtime::InitNativeMethods() {
                                                 ? "libopenjdkd.so"
                                                 : "libopenjdk.so";
     std::string error_msg;
-    if (!java_vm_->LoadNativeLibrary(env, kOpenJdkLibrary, nullptr, &error_msg)) {
+    if (!java_vm_->LoadNativeLibrary(env, kOpenJdkLibrary, nullptr, nullptr, &error_msg)) {
       LOG(FATAL) << "LoadNativeLibrary failed for \"" << kOpenJdkLibrary << "\": " << error_msg;
     }
   }
@@ -2647,6 +2658,7 @@ class UpdateEntryPointsClassVisitor : public ClassVisitor {
       : instrumentation_(instrumentation) {}
 
   bool operator()(ObjPtr<mirror::Class> klass) override REQUIRES(Locks::mutator_lock_) {
+    DCHECK(Locks::mutator_lock_->IsExclusiveHeld(Thread::Current()));
     auto pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
     for (auto& m : klass->GetMethods(pointer_size)) {
       const void* code = m.GetEntryPointFromQuickCompiledCode();
@@ -2673,9 +2685,13 @@ void Runtime::DeoptimizeBootImage() {
   // we patch entry points of methods in boot image to interpreter bridge, as
   // boot image code may be AOT compiled as not debuggable.
   if (!GetInstrumentation()->IsForcedInterpretOnly()) {
-    ScopedObjectAccess soa(Thread::Current());
     UpdateEntryPointsClassVisitor visitor(GetInstrumentation());
     GetClassLinker()->VisitClasses(&visitor);
+    jit::Jit* jit = GetJit();
+    if (jit != nullptr) {
+      // Code JITted by the zygote is not compiled debuggable.
+      jit->GetCodeCache()->ClearEntryPointsInZygoteExecSpace();
+    }
   }
 }
 

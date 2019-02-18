@@ -24,6 +24,7 @@ cc_defaults {
         "base/arena_allocator.cc",
         "base/arena_bit_vector.cc",
         "base/bit_vector.cc",
+        "base/enums.cc",
         "base/file_magic.cc",
         "base/file_utils.cc",
         "base/hex_dump.cc",
@@ -64,6 +65,7 @@ cc_defaults {
                 // For common macros.
                 "libbase",
             ],
+            export_shared_lib_headers: ["libbase"],
             // Exclude the version script from Darwin host since it's not
             // supported by the linker there. That means ASan checks on Darwin
             // might trigger ODR violations.
@@ -82,12 +84,16 @@ cc_defaults {
                 // For common macros.
                 "libbase",
             ],
+            export_shared_lib_headers: ["libbase"],
         },
         linux_glibc: {
             version_script: "libartbase.map",
         },
         windows: {
             version_script: "libartbase.map",
+            srcs: [
+                "base/mem_map_windows.cc",
+            ],
             static_libs: [
                 "libziparchive",
                 "libz",
@@ -97,6 +103,7 @@ cc_defaults {
                 // For common macros.
                 "libbase",
             ],
+            export_static_lib_headers: ["libbase"],
             cflags: ["-Wno-thread-safety"],
         },
     },
@@ -115,7 +122,6 @@ cc_defaults {
     // ART's macros.h depends on libbase's macros.h.
     // Note: runtime_options.h depends on cmdline. But we don't really want to export this
     //       generically. dex2oat takes care of it itself.
-    export_shared_lib_headers: ["libbase"],
 }
 
 cc_defaults {
@@ -148,7 +154,6 @@ gensrcs {
     srcs: [
         "arch/instruction_set.h",
         "base/allocator.h",
-        "base/callee_save_type.h",
         "base/unix_file/fd_file.h",
     ],
     output_extension: "operator_out.cc",

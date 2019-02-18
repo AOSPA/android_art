@@ -87,9 +87,10 @@ class SharedLibrary {
       self->GetJniEnv()->DeleteWeakGlobalRef(class_loader_);
     }
 
-    std::string error_msg;
+    char* error_msg = nullptr;
     if (!android::CloseNativeLibrary(handle_, needs_native_bridge_, &error_msg)) {
       LOG(WARNING) << "Error while unloading native library \"" << path_ << "\": " << error_msg;
+      android::NativeLoaderFreeErrorMessage(error_msg);
     }
   }
 
@@ -856,6 +857,7 @@ void JavaVMExt::UnloadNativeLibraries() {
 bool JavaVMExt::LoadNativeLibrary(JNIEnv* env,
                                   const std::string& path,
                                   jobject class_loader,
+                                  jclass caller_class,
                                   std::string* error_msg) {
   error_msg->clear();
 
@@ -871,6 +873,7 @@ bool JavaVMExt::LoadNativeLibrary(JNIEnv* env,
     library = libraries_->Get(path);
   }
   void* class_loader_allocator = nullptr;
+  std::string caller_location;
   {
     ScopedObjectAccess soa(env);
     // As the incoming class loader is reachable/alive during the call of this function,
@@ -881,6 +884,13 @@ bool JavaVMExt::LoadNativeLibrary(JNIEnv* env,
     if (class_linker->IsBootClassLoader(soa, loader.Ptr())) {
       loader = nullptr;
       class_loader = nullptr;
+      if (caller_class != nullptr) {
+        ObjPtr<mirror::Class> caller = soa.Decode<mirror::Class>(caller_class);
+        ObjPtr<mirror::DexCache> dex_cache = caller->GetDexCache();
+        if (dex_cache != nullptr) {
+          caller_location = dex_cache->GetLocation()->ToModifiedUtf8();
+        }
+      }
     }
 
     class_loader_allocator = class_linker->GetAllocatorForClassLoader(loader.Ptr());
@@ -962,17 +972,21 @@ bool JavaVMExt::LoadNativeLibrary(JNIEnv* env,
   Locks::mutator_lock_->AssertNotHeld(self);
   const char* path_str = path.empty() ? nullptr : path.c_str();
   bool needs_native_bridge = false;
-  void* handle = android::OpenNativeLibrary(env,
-                                            runtime_->GetTargetSdkVersion(),
-                                            path_str,
-                                            class_loader,
-                                            library_path.get(),
-                                            &needs_native_bridge,
-                                            error_msg);
-
+  char* nativeloader_error_msg = nullptr;
+  void* handle = android::OpenNativeLibrary(
+      env,
+      runtime_->GetTargetSdkVersion(),
+      path_str,
+      class_loader,
+      (caller_location.empty() ? nullptr : caller_location.c_str()),
+      library_path.get(),
+      &needs_native_bridge,
+      &nativeloader_error_msg);
   VLOG(jni) << "[Call to dlopen(\"" << path << "\", RTLD_NOW) returned " << handle << "]";
 
   if (handle == nullptr) {
+    *error_msg = nativeloader_error_msg;
+    android::NativeLoaderFreeErrorMessage(nativeloader_error_msg);
     VLOG(jni) << "dlopen(\"" << path << "\", RTLD_NOW) failed: " << *error_msg;
     return false;
   }
