@@ -1240,6 +1240,10 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
             kExtraDefaultHeapGrowthMultiplier;
   }
   XGcOption xgc_option = runtime_options.GetOrDefault(Opt::GcOption);
+
+  // Generational CC collection is currently only compatible with Baker read barriers.
+  bool use_generational_cc = kUseBakerReadBarrier && xgc_option.generational_cc;
+
   heap_ = new gc::Heap(runtime_options.GetOrDefault(Opt::MemoryInitialSize),
                        runtime_options.GetOrDefault(Opt::HeapGrowthLimit),
                        runtime_options.GetOrDefault(Opt::HeapMinFree),
@@ -1274,6 +1278,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        xgc_option.gcstress_,
                        xgc_option.measure_,
                        runtime_options.GetOrDefault(Opt::EnableHSpaceCompactForOOM),
+                       use_generational_cc,
                        runtime_options.GetOrDefault(Opt::HSpaceCompactForOOMMinIntervalsMs),
                        runtime_options.Exists(Opt::DumpRegionInfoBeforeGC),
                        runtime_options.Exists(Opt::DumpRegionInfoAfterGC));
@@ -1747,7 +1752,8 @@ void Runtime::InitNativeMethods() {
   // libcore can't because it's the library that implements System.loadLibrary!
   {
     std::string error_msg;
-    if (!java_vm_->LoadNativeLibrary(env, "libjavacore.so", nullptr, nullptr, &error_msg)) {
+    if (!java_vm_->LoadNativeLibrary(
+          env, "libjavacore.so", nullptr, WellKnownClasses::java_lang_Object, &error_msg)) {
       LOG(FATAL) << "LoadNativeLibrary failed for \"libjavacore.so\": " << error_msg;
     }
   }
@@ -1756,7 +1762,8 @@ void Runtime::InitNativeMethods() {
                                                 ? "libopenjdkd.so"
                                                 : "libopenjdk.so";
     std::string error_msg;
-    if (!java_vm_->LoadNativeLibrary(env, kOpenJdkLibrary, nullptr, nullptr, &error_msg)) {
+    if (!java_vm_->LoadNativeLibrary(
+          env, kOpenJdkLibrary, nullptr, WellKnownClasses::java_lang_Object, &error_msg)) {
       LOG(FATAL) << "LoadNativeLibrary failed for \"" << kOpenJdkLibrary << "\": " << error_msg;
     }
   }

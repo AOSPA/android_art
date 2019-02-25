@@ -45,11 +45,13 @@ inline EnforcementPolicy EnforcementPolicyFromInt(int api_policy_int) {
   return static_cast<EnforcementPolicy>(api_policy_int);
 }
 
+// Hidden API access method
+// Thist must be kept in sync with VMRuntime.HiddenApiUsageLogger.ACCESS_METHOD_*
 enum class AccessMethod {
-  kNone,  // internal test that does not correspond to an actual access by app
-  kReflection,
-  kJNI,
-  kLinking,
+  kNone = 0,  // internal test that does not correspond to an actual access by app
+  kReflection = 1,
+  kJNI = 2,
+  kLinking = 3,
 };
 
 // Represents the API domain of a caller/callee.
@@ -104,8 +106,8 @@ class AccessContext {
 
     Domain dex_domain = dex_file->GetHiddenapiDomain();
     if (class_loader.IsNull() && dex_domain == Domain::kApplication) {
-      LOG(WARNING) << "DexFile " << dex_file->GetLocation() << " is in boot classpath "
-                   << "but is assigned untrusted domain";
+      // LOG(WARNING) << "DexFile " << dex_file->GetLocation() << " is in boot classpath "
+      //              << "but is assigned untrusted domain";
       dex_domain = Domain::kPlatform;
     }
     return dex_domain;
@@ -352,7 +354,7 @@ ALWAYS_INLINE inline uint32_t GetRuntimeFlags(ArtMethod* method)
 // This function might print warnings into the log if the member is hidden.
 template<typename T>
 inline bool ShouldDenyAccessToMember(T* member,
-                                     std::function<AccessContext()> fn_get_access_context,
+                                     const std::function<AccessContext()>& fn_get_access_context,
                                      AccessMethod access_method)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   DCHECK(member != nullptr);
@@ -415,7 +417,7 @@ inline bool ShouldDenyAccessToMember(T* member,
       }
 
       // Access checks are not disabled, report the violation.
-      detail::MaybeReportCorePlatformApiViolation(member, caller_context, access_method);
+      // detail::MaybeReportCorePlatformApiViolation(member, caller_context, access_method);
 
       // Deny access if the policy is enabled.
       return policy == EnforcementPolicy::kEnabled;
