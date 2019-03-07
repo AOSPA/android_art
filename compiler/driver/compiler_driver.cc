@@ -17,12 +17,14 @@
 #include "compiler_driver.h"
 
 #include <unistd.h>
-#include <unordered_set>
-#include <vector>
 
 #ifndef __APPLE__
 #include <malloc.h>  // For mallinfo
 #endif
+
+#include <string_view>
+#include <unordered_set>
+#include <vector>
 
 #include "android-base/logging.h"
 #include "android-base/strings.h"
@@ -35,6 +37,7 @@
 #include "base/enums.h"
 #include "base/logging.h"  // For VLOG
 #include "base/stl_util.h"
+#include "base/string_view_cpp20.h"
 #include "base/systrace.h"
 #include "base/time_utils.h"
 #include "base/timing_logger.h"
@@ -1154,7 +1157,7 @@ static void MaybeAddToImageClasses(Thread* self,
   const PointerSize pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
   while (!klass->IsObjectClass()) {
     const char* descriptor = klass->GetDescriptor(&temp);
-    if (image_classes->find(StringPiece(descriptor)) != image_classes->end()) {
+    if (image_classes->find(std::string_view(descriptor)) != image_classes->end()) {
       break;  // Previously inserted.
     }
     image_classes->insert(descriptor);
@@ -1236,7 +1239,7 @@ class ClinitImageUpdate {
 
     bool operator()(ObjPtr<mirror::Class> klass) override REQUIRES_SHARED(Locks::mutator_lock_) {
       std::string temp;
-      StringPiece name(klass->GetDescriptor(&temp));
+      std::string_view name(klass->GetDescriptor(&temp));
       auto it = data_->image_class_descriptors_->find(name);
       if (it != data_->image_class_descriptors_->end()) {
         if (LIKELY(klass->IsResolved())) {
@@ -1765,42 +1768,6 @@ static void LoadAndUpdateStatus(const ClassAccessor& accessor,
   }
 }
 
-// Returns true if any of the given dex files define a class from the boot classpath.
-static bool DexFilesRedefineBootClasses(
-    const std::vector<const DexFile*>& dex_files,
-    TimingLogger* timings) {
-  TimingLogger::ScopedTiming t("Fast Verify: Boot Class Redefinition Check", timings);
-
-  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  Thread* self = Thread::Current();
-  ScopedObjectAccess soa(self);
-
-  bool foundRedefinition = false;
-  for (const DexFile* dex_file : dex_files) {
-    for (ClassAccessor accessor : dex_file->GetClasses()) {
-      const char* descriptor = accessor.GetDescriptor();
-      StackHandleScope<1> hs_class(self);
-      Handle<mirror::Class> klass =
-          hs_class.NewHandle(class_linker->FindSystemClass(self, descriptor));
-      if (klass == nullptr) {
-        self->ClearException();
-      } else {
-        LOG(WARNING) << "Redefinition of boot class " << descriptor
-            << " App dex file: " <<  accessor.GetDexFile().GetLocation()
-            << " Boot dex file: " << klass->GetDexFile().GetLocation();
-        foundRedefinition = true;
-        if (!VLOG_IS_ON(verifier)) {
-          // If we are not in verbose mode, return early.
-          // Otherwise continue and log all the collisions for easier debugging.
-          return true;
-        }
-      }
-    }
-  }
-
-  return foundRedefinition;
-}
-
 bool CompilerDriver::FastVerify(jobject jclass_loader,
                                 const std::vector<const DexFile*>& dex_files,
                                 TimingLogger* timings,
@@ -1813,21 +1780,14 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
   }
   TimingLogger::ScopedTiming t("Fast Verify", timings);
 
-  // We cannot do fast verification if the app redefines classes from the boot classpath.
-  // Vdex does not record resolution chains for boot classes and we might wrongfully
-  // resolve a class to the app when it should have been resolved to the boot classpath
-  // (e.g. if we verified against the SDK and the app redefines a boot class which is not
-  // in the SDK.)
-  if (DexFilesRedefineBootClasses(dex_files, timings)) {
-    LOG(WARNING) << "Found redefinition of boot classes. Not doing fast verification.";
-    return false;
-  }
-
   ScopedObjectAccess soa(Thread::Current());
   StackHandleScope<2> hs(soa.Self());
   Handle<mirror::ClassLoader> class_loader(
       hs.NewHandle(soa.Decode<mirror::ClassLoader>(jclass_loader)));
-  if (!verifier_deps->ValidateDependencies(class_loader, soa.Self())) {
+  std::string error_msg;
+
+  if (!verifier_deps->ValidateDependencies(class_loader, soa.Self(), &error_msg)) {
+    LOG(WARNING) << "Fast verification failed: " << error_msg;
     return false;
   }
 
@@ -1925,10 +1885,10 @@ void CompilerDriver::Verify(jobject jclass_loader,
     // Merge all VerifierDeps into the main one.
     verifier::VerifierDeps* verifier_deps = Thread::Current()->GetVerifierDeps();
     for (ThreadPoolWorker* worker : parallel_thread_pool_->GetWorkers()) {
-      verifier::VerifierDeps* thread_deps = worker->GetThread()->GetVerifierDeps();
-      worker->GetThread()->SetVerifierDeps(nullptr);
-      verifier_deps->MergeWith(*thread_deps, GetCompilerOptions().GetDexFilesForOatFile());
-      delete thread_deps;
+      std::unique_ptr<verifier::VerifierDeps> thread_deps(worker->GetThread()->GetVerifierDeps());
+      worker->GetThread()->SetVerifierDeps(nullptr);  // We just took ownership.
+      verifier_deps->MergeWith(std::move(thread_deps),
+                               GetCompilerOptions().GetDexFilesForOatFile());
     }
     Thread::Current()->SetVerifierDeps(nullptr);
   }
@@ -2226,7 +2186,7 @@ class InitializeClassVisitor : public CompilationVisitor {
             // We need to initialize static fields, we only do this for image classes that aren't
             // marked with the $NoPreloadHolder (which implies this should not be initialized
             // early).
-            can_init_static_fields = !StringPiece(descriptor).ends_with("$NoPreloadHolder;");
+            can_init_static_fields = !EndsWith(std::string_view(descriptor), "$NoPreloadHolder;");
           } else {
             CHECK(is_app_image);
             // The boot image case doesn't need to recursively initialize the dependencies with

@@ -25,6 +25,7 @@
 #include <memory>
 #include <queue>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -1448,6 +1449,7 @@ class AppImageLoadingHelper {
 
   static void UpdateInternStrings(
       gc::space::ImageSpace* space,
+      bool use_preresolved_strings,
       const SafeMap<mirror::String*, mirror::String*>& intern_remap)
       REQUIRES_SHARED(Locks::mutator_lock_);
 };
@@ -1463,8 +1465,10 @@ void AppImageLoadingHelper::Update(
   ScopedTrace app_image_timing("AppImage:Updating");
 
   Thread* const self = Thread::Current();
-  gc::Heap* const heap = Runtime::Current()->GetHeap();
+  Runtime* const runtime = Runtime::Current();
+  gc::Heap* const heap = runtime->GetHeap();
   const ImageHeader& header = space->GetImageHeader();
+  bool load_app_image_startup_cache = runtime->LoadAppImageStartupCache();
   {
     // Register dex caches with the class loader.
     WriterMutexLock mu(self, *Locks::classlinker_classes_lock_);
@@ -1476,6 +1480,10 @@ void AppImageLoadingHelper::Update(
         WriterMutexLock mu2(self, *Locks::dex_lock_);
         CHECK(!class_linker->FindDexCacheDataLocked(*dex_file).IsValid());
         class_linker->RegisterDexFileLocked(*dex_file, dex_cache, class_loader.Get());
+      }
+
+      if (!load_app_image_startup_cache) {
+        dex_cache->ClearPreResolvedStrings();
       }
 
       if (kIsDebugBuild) {
@@ -1544,11 +1552,13 @@ void AppImageLoadingHelper::Update(
 
 void AppImageLoadingHelper::UpdateInternStrings(
     gc::space::ImageSpace* space,
+    bool use_preresolved_strings,
     const SafeMap<mirror::String*, mirror::String*>& intern_remap) {
   const uint8_t* target_base = space->Begin();
   const ImageSection& sro_section =
       space->GetImageHeader().GetImageStringReferenceOffsetsSection();
   const size_t num_string_offsets = sro_section.Size() / sizeof(AppImageReferenceOffsetInfo);
+  InternTable* const intern_table = Runtime::Current()->GetInternTable();
 
   VLOG(image)
       << "ClassLinker:AppImage:InternStrings:imageStringReferenceOffsetCount = "
@@ -1581,24 +1591,29 @@ void AppImageLoadingHelper::UpdateInternStrings(
         WriteBarrier::ForEveryFieldWrite(dex_cache);
         dex_cache->GetStrings()[string_index].store(
             mirror::StringDexCachePair(it->second, source.index));
+      } else if (!use_preresolved_strings) {
+        dex_cache->GetStrings()[string_index].store(
+            mirror::StringDexCachePair(intern_table->InternStrong(referred_string), source.index));
       }
     } else if (HasDexCachePreResolvedStringNativeRefTag(base_offset)) {
-      base_offset = ClearDexCacheNativeRefTags(base_offset);
-      DCHECK_ALIGNED(base_offset, 2);
+      if (use_preresolved_strings) {
+        base_offset = ClearDexCacheNativeRefTags(base_offset);
+        DCHECK_ALIGNED(base_offset, 2);
 
-      ObjPtr<mirror::DexCache> dex_cache =
-          reinterpret_cast<mirror::DexCache*>(space->Begin() + base_offset);
-      uint32_t string_index = sro_base[offset_index].second;
+        ObjPtr<mirror::DexCache> dex_cache =
+            reinterpret_cast<mirror::DexCache*>(space->Begin() + base_offset);
+        uint32_t string_index = sro_base[offset_index].second;
 
-      ObjPtr<mirror::String> referred_string =
-          dex_cache->GetPreResolvedStrings()[string_index].Read();
-      DCHECK(referred_string != nullptr);
+        ObjPtr<mirror::String> referred_string =
+            dex_cache->GetPreResolvedStrings()[string_index].Read();
+        DCHECK(referred_string != nullptr);
 
-      auto it = intern_remap.find(referred_string.Ptr());
-      if (it != intern_remap.end()) {
-        // Because we are not using a helper function we need to mark the GC card manually.
-        WriteBarrier::ForEveryFieldWrite(dex_cache);
-        dex_cache->GetPreResolvedStrings()[string_index] = GcRoot<mirror::String>(it->second);
+        auto it = intern_remap.find(referred_string.Ptr());
+        if (it != intern_remap.end()) {
+          // Because we are not using a helper function we need to mark the GC card manually.
+          WriteBarrier::ForEveryFieldWrite(dex_cache);
+          dex_cache->GetPreResolvedStrings()[string_index] = GcRoot<mirror::String>(it->second);
+        }
       }
     } else {
       uint32_t raw_member_offset = sro_base[offset_index].second;
@@ -1621,6 +1636,13 @@ void AppImageLoadingHelper::UpdateInternStrings(
                                 /* kCheckTransaction= */ false,
                                 kVerifyNone,
                                 /* kIsVolatile= */ false>(member_offset, it->second);
+      } else if (!use_preresolved_strings) {
+        obj_ptr->SetFieldObject</* kTransactionActive= */ false,
+                                /* kCheckTransaction= */ false,
+                                kVerifyNone,
+                                /* kIsVolatile= */ false>(
+            member_offset,
+            intern_table->InternStrong(referred_string));
       }
     }
   }
@@ -1631,13 +1653,16 @@ void AppImageLoadingHelper::HandleAppImageStrings(gc::space::ImageSpace* space) 
   // the strings they point to.
   ScopedTrace timing("AppImage:InternString");
 
-  InternTable* const intern_table = Runtime::Current()->GetInternTable();
+  Runtime* const runtime = Runtime::Current();
+  InternTable* const intern_table = runtime->GetInternTable();
+
+  const bool load_startup_cache = runtime->LoadAppImageStartupCache();
 
   // Add the intern table, removing any conflicts. For conflicts, store the new address in a map
   // for faster lookup.
   // TODO: Optimize with a bitmap or bloom filter
   SafeMap<mirror::String*, mirror::String*> intern_remap;
-  intern_table->AddImageStringsToTable(space, [&](InternTable::UnorderedSet& interns)
+  auto func = [&](InternTable::UnorderedSet& interns)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(Locks::intern_table_lock_) {
     const size_t non_boot_image_strings = intern_table->CountInterns(
@@ -1680,14 +1705,23 @@ void AppImageLoadingHelper::HandleAppImageStrings(gc::space::ImageSpace* space) 
         CHECK(intern_table->LookupStrongLocked(string) == nullptr) << string->ToModifiedUtf8();
       }
     }
-  });
+  };
 
-  VLOG(image) << "AppImage:conflictingInternStrings = " << intern_remap.size();
+  bool update_intern_strings;
+  if (load_startup_cache) {
+    // Only add the intern table if we are using the startup cache. Otherwise,
+    // UpdateInternStrings adds the strings to the intern table.
+    intern_table->AddImageStringsToTable(space, func);
+    update_intern_strings = kIsDebugBuild || !intern_remap.empty();
+    VLOG(image) << "AppImage:conflictingInternStrings = " << intern_remap.size();
+  } else {
+    update_intern_strings = true;
+  }
 
   // For debug builds, always run the code below to get coverage.
-  if (kIsDebugBuild || !intern_remap.empty()) {
+  if (update_intern_strings) {
     // Slow path case is when there are conflicting intern strings to fix up.
-    UpdateInternStrings(space, intern_remap);
+    UpdateInternStrings(space, /*use_preresolved_strings=*/ load_startup_cache, intern_remap);
   }
 }
 
@@ -3727,32 +3761,7 @@ void ClassLinker::RegisterDexFileLocked(const DexFile& dex_file,
     }
   }
   if (initialize_oat_file_data) {
-    // Initialize the .data.bimg.rel.ro section.
-    if (!oat_file->GetBootImageRelocations().empty()) {
-      uint8_t* reloc_begin = const_cast<uint8_t*>(oat_file->DataBimgRelRoBegin());
-      CheckedCall(mprotect,
-                  "un-protect boot image relocations",
-                  reloc_begin,
-                  oat_file->DataBimgRelRoSize(),
-                  PROT_READ | PROT_WRITE);
-      uint32_t boot_image_begin = dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(
-          Runtime::Current()->GetHeap()->GetBootImageSpaces().front()->Begin()));
-      for (const uint32_t& relocation : oat_file->GetBootImageRelocations()) {
-        const_cast<uint32_t&>(relocation) += boot_image_begin;
-      }
-      CheckedCall(mprotect,
-                  "protect boot image relocations",
-                  reloc_begin,
-                  oat_file->DataBimgRelRoSize(),
-                  PROT_READ);
-    }
-
-    // Initialize the .bss section.
-    // TODO: Pre-initialize from boot/app image?
-    ArtMethod* resolution_method = Runtime::Current()->GetResolutionMethod();
-    for (ArtMethod*& entry : oat_file->GetBssMethods()) {
-      entry = resolution_method;
-    }
+    oat_file->InitializeRelocations();
   }
   jweak dex_cache_jweak = vm->AddWeakGlobalRef(self, dex_cache);
   dex_cache->SetDexFile(&dex_file);
@@ -7040,11 +7049,13 @@ static ArtMethod* FindSameNameAndSignature(MethodNameAndSignatureComparator& cmp
   return FindSameNameAndSignature(cmp, rest...);
 }
 
+namespace {
+
 // Check that all vtable entries are present in this class's virtuals or are the same as a
 // superclasses vtable entry.
-static void CheckClassOwnsVTableEntries(Thread* self,
-                                        Handle<mirror::Class> klass,
-                                        PointerSize pointer_size)
+void CheckClassOwnsVTableEntries(Thread* self,
+                                 Handle<mirror::Class> klass,
+                                 PointerSize pointer_size)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   StackHandleScope<2> hs(self);
   Handle<mirror::PointerArray> check_vtable(hs.NewHandle(klass->GetVTableDuringLinking()));
@@ -7074,38 +7085,174 @@ static void CheckClassOwnsVTableEntries(Thread* self,
 
 // Check to make sure the vtable does not have duplicates. Duplicates could cause problems when a
 // method is overridden in a subclass.
-static void CheckVTableHasNoDuplicates(Thread* self,
-                                       Handle<mirror::Class> klass,
-                                       PointerSize pointer_size)
+template <PointerSize kPointerSize>
+void CheckVTableHasNoDuplicates(Thread* self, Handle<mirror::Class> klass)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   StackHandleScope<1> hs(self);
   Handle<mirror::PointerArray> vtable(hs.NewHandle(klass->GetVTableDuringLinking()));
   int32_t num_entries = vtable->GetLength();
-  for (int32_t i = 0; i < num_entries; i++) {
-    ArtMethod* vtable_entry = vtable->GetElementPtrSize<ArtMethod*>(i, pointer_size);
-    // Don't bother if we cannot 'see' the vtable entry (i.e. it is a package-private member maybe).
+
+  // Observations:
+  //   * The older implementation was O(n^2) and got too expensive for apps with larger classes.
+  //   * Many classes do not override Object functions (e.g., equals/hashCode/toString). Thus,
+  //     for many classes outside of libcore a cross-dexfile check has to be run anyways.
+  //   * In the cross-dexfile case, with the O(n^2), in the best case O(n) cross checks would have
+  //     to be done. It is thus OK in a single-pass algorithm to read all data, anyways.
+  //   * The single-pass algorithm will trade memory for speed, but that is OK.
+
+  CHECK_GT(num_entries, 0);
+
+  auto log_fn = [&vtable, &klass](int32_t i, int32_t j) REQUIRES_SHARED(Locks::mutator_lock_) {
+    ArtMethod* m1 = vtable->GetElementPtrSize<ArtMethod*, kPointerSize>(i);
+    ArtMethod* m2 = vtable->GetElementPtrSize<ArtMethod*, kPointerSize>(j);
+    LOG(WARNING) << "vtable entries " << i << " and " << j << " are identical for "
+                 << klass->PrettyClass() << " in method " << m1->PrettyMethod()
+                << " (0x" << std::hex << reinterpret_cast<uintptr_t>(m2) << ") and "
+                << m2->PrettyMethod() << "  (0x" << std::hex
+                << reinterpret_cast<uintptr_t>(m2) << ")";
+  };
+  struct BaseHashType {
+    static size_t HashCombine(size_t seed, size_t val) {
+      return seed ^ (val + 0x9e3779b9 + (seed << 6) + (seed >> 2));
+    }
+  };
+
+  // Check assuming all entries come from the same dex file.
+  {
+    // Find the first interesting method and its dex file.
+    int32_t start = 0;
+    for (; start < num_entries; ++start) {
+      ArtMethod* vtable_entry = vtable->GetElementPtrSize<ArtMethod*, kPointerSize>(start);
+      // Don't bother if we cannot 'see' the vtable entry (i.e. it is a package-private member
+      // maybe).
+      if (!klass->CanAccessMember(vtable_entry->GetDeclaringClass(),
+                                  vtable_entry->GetAccessFlags())) {
+        continue;
+      }
+      break;
+    }
+    if (start == num_entries) {
+      return;
+    }
+    const DexFile* dex_file =
+        vtable->GetElementPtrSize<ArtMethod*, kPointerSize>(start)->
+            GetInterfaceMethodIfProxy(kPointerSize)->GetDexFile();
+
+    // Helper function to avoid logging if we have to run the cross-file checks.
+    auto check_fn = [&](bool log_warn) REQUIRES_SHARED(Locks::mutator_lock_) {
+      // Use a map to store seen entries, as the storage space is too large for a bitvector.
+      using PairType = std::pair<uint32_t, uint16_t>;
+      struct PairHash : BaseHashType {
+        size_t operator()(const PairType& key) const {
+          return BaseHashType::HashCombine(BaseHashType::HashCombine(0, key.first), key.second);
+        }
+      };
+      std::unordered_map<PairType, int32_t, PairHash> seen;
+      seen.reserve(2 * num_entries);
+      bool need_slow_path = false;
+      bool found_dup = false;
+      for (int i = start; i < num_entries; ++i) {
+        // Can use Unchecked here as the start loop already ensured that the arrays are correct
+        // wrt/ kPointerSize.
+        ArtMethod* vtable_entry = vtable->GetElementPtrSizeUnchecked<ArtMethod*, kPointerSize>(i);
+        if (!klass->CanAccessMember(vtable_entry->GetDeclaringClass(),
+                                    vtable_entry->GetAccessFlags())) {
+          continue;
+        }
+        ArtMethod* m = vtable_entry->GetInterfaceMethodIfProxy(kPointerSize);
+        if (dex_file != m->GetDexFile()) {
+          need_slow_path = true;
+          break;
+        }
+        const dex::MethodId* m_mid = &dex_file->GetMethodId(m->GetDexMethodIndex());
+        PairType pair = std::make_pair(m_mid->name_idx_.index_, m_mid->proto_idx_.index_);
+        auto it = seen.find(pair);
+        if (it != seen.end()) {
+          found_dup = true;
+          if (log_warn) {
+            log_fn(it->second, i);
+          }
+        } else {
+          seen.emplace(pair, i);
+        }
+      }
+      return std::make_pair(need_slow_path, found_dup);
+    };
+    std::pair<bool, bool> result = check_fn(/* log_warn= */ false);
+    if (!result.first) {
+      if (result.second) {
+        check_fn(/* log_warn= */ true);
+      }
+      return;
+    }
+  }
+
+  // Need to check across dex files.
+  struct Entry {
+    size_t cached_hash = 0;
+    const char* name = nullptr;
+    Signature signature = Signature::NoSignature();
+    uint32_t name_len = 0;
+
+    Entry(const DexFile* dex_file, const dex::MethodId& mid)
+        : name(dex_file->StringDataAndUtf16LengthByIdx(mid.name_idx_, &name_len)),
+          signature(dex_file->GetMethodSignature(mid)) {
+    }
+
+    bool operator==(const Entry& other) const {
+      if (name_len != other.name_len || strcmp(name, other.name) != 0) {
+        return false;
+      }
+      return signature == other.signature;
+    }
+  };
+  struct EntryHash {
+    size_t operator()(const Entry& key) const {
+      return key.cached_hash;
+    }
+  };
+  std::unordered_map<Entry, int32_t, EntryHash> map;
+  for (int32_t i = 0; i < num_entries; ++i) {
+    // Can use Unchecked here as the first loop already ensured that the arrays are correct
+    // wrt/ kPointerSize.
+    ArtMethod* vtable_entry = vtable->GetElementPtrSizeUnchecked<ArtMethod*, kPointerSize>(i);
+    // Don't bother if we cannot 'see' the vtable entry (i.e. it is a package-private member
+    // maybe).
     if (!klass->CanAccessMember(vtable_entry->GetDeclaringClass(),
                                 vtable_entry->GetAccessFlags())) {
       continue;
     }
-    MethodNameAndSignatureComparator name_comparator(
-        vtable_entry->GetInterfaceMethodIfProxy(pointer_size));
-    for (int32_t j = i + 1; j < num_entries; j++) {
-      ArtMethod* other_entry = vtable->GetElementPtrSize<ArtMethod*>(j, pointer_size);
-      if (!klass->CanAccessMember(other_entry->GetDeclaringClass(),
-                                  other_entry->GetAccessFlags())) {
-        continue;
-      }
-      if (vtable_entry == other_entry ||
-          name_comparator.HasSameNameAndSignature(
-               other_entry->GetInterfaceMethodIfProxy(pointer_size))) {
-        LOG(WARNING) << "vtable entries " << i << " and " << j << " are identical for "
-                     << klass->PrettyClass() << " in method " << vtable_entry->PrettyMethod()
-                     << " (0x" << std::hex << reinterpret_cast<uintptr_t>(vtable_entry) << ") and "
-                     << other_entry->PrettyMethod() << "  (0x" << std::hex
-                     << reinterpret_cast<uintptr_t>(other_entry) << ")";
-      }
+    ArtMethod* m = vtable_entry->GetInterfaceMethodIfProxy(kPointerSize);
+    const DexFile* dex_file = m->GetDexFile();
+    const dex::MethodId& mid = dex_file->GetMethodId(m->GetDexMethodIndex());
+
+    Entry e(dex_file, mid);
+
+    size_t string_hash = std::hash<std::string_view>()(std::string_view(e.name, e.name_len));
+    size_t sig_hash = std::hash<std::string>()(e.signature.ToString());
+    e.cached_hash = BaseHashType::HashCombine(BaseHashType::HashCombine(0u, string_hash),
+                                              sig_hash);
+
+    auto it = map.find(e);
+    if (it != map.end()) {
+      log_fn(it->second, i);
+    } else {
+      map.emplace(e, i);
     }
+  }
+}
+
+void CheckVTableHasNoDuplicates(Thread* self,
+                                Handle<mirror::Class> klass,
+                                PointerSize pointer_size)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  switch (pointer_size) {
+    case PointerSize::k64:
+      CheckVTableHasNoDuplicates<PointerSize::k64>(self, klass);
+      break;
+    case PointerSize::k32:
+      CheckVTableHasNoDuplicates<PointerSize::k32>(self, klass);
+      break;
   }
 }
 
@@ -7114,6 +7261,8 @@ static void SanityCheckVTable(Thread* self, Handle<mirror::Class> klass, Pointer
   CheckClassOwnsVTableEntries(self, klass, pointer_size);
   CheckVTableHasNoDuplicates(self, klass, pointer_size);
 }
+
+}  // namespace
 
 void ClassLinker::FillImtFromSuperClass(Handle<mirror::Class> klass,
                                         ArtMethod* unimplemented_method,

@@ -13,11 +13,15 @@ art_runtime_base_binaries_prefer32 = [
 ]
 // - Base requirements (libraries).
 art_runtime_base_native_shared_libs = [
+    "libadbconnection",
     "libart",
     "libart-compiler",
+    "libdexfile_external",
+    "libnativebridge",
+    "libnativehelper",
+    "libnativeloader",
     "libopenjdkjvm",
     "libopenjdkjvmti",
-    "libadbconnection",
 ]
 bionic_native_shared_libs = [
     "libc",
@@ -41,11 +45,11 @@ art_runtime_debug_binaries_both_host = [
 
 // - Debug variants (libraries).
 art_runtime_debug_native_shared_libs = [
+    "libadbconnectiond",
     "libartd",
     "libartd-compiler",
     "libopenjdkjvmd",
     "libopenjdkjvmtid",
-    "libadbconnectiond",
 ]
 libcore_debug_native_shared_libs = [
     "libopenjdkd",
@@ -85,7 +89,21 @@ art_tools_host_only_binaries = [
 art_tools_device_binaries = art_tools_common_binaries + art_tools_device_only_binaries
 art_tools_host_binaries = art_tools_common_binaries + art_tools_host_only_binaries
 
-// Libcore native libraries.
+// Libraries needed to use com.android.runtime.host for zipapex run-tests
+art_runtime_host_run_test_libs = [
+    "libartd-disassembler"
+]
+
+// Core Java libraries.
+libcore_java_libs = [
+    "core-oj",
+    "core-libart",
+    "okhttp",
+    "bouncycastle",
+    "apache-xml",
+]
+
+// Native libraries that support the core Java libraries.
 libcore_native_shared_libs = [
     "libjavacore",
     "libopenjdk",
@@ -94,13 +112,12 @@ libcore_native_shared_libs = [
     "libziparchive"
 ]
 
-// Java libraries
-libcore_target_java_libs = [
-    "core-oj",
-    "core-libart",
-    "okhttp",
-    "bouncycastle",
-    "apache-xml",
+// Temporary library includes for b/123591866 as all libraries are moved into the main art-apex.
+art_runtime_libraries_zipapex = [
+    "libnativebridge",
+    "libnativeloader",
+    "libnativehelper",
+    "libcutils",
 ]
 
 apex_key {
@@ -126,7 +143,7 @@ apex {
     name: "com.android.runtime.release",
     compile_multilib: "both",
     manifest: "manifest.json",
-    java_libs: libcore_target_java_libs,
+    java_libs: libcore_java_libs,
     native_shared_libs: art_runtime_base_native_shared_libs
         + bionic_native_shared_libs
         + libcore_native_shared_libs,
@@ -156,7 +173,7 @@ apex {
     name: "com.android.runtime.debug",
     compile_multilib: "both",
     manifest: "manifest.json",
-    java_libs: libcore_target_java_libs,
+    java_libs: libcore_java_libs,
     native_shared_libs: art_runtime_base_native_shared_libs
         + art_runtime_debug_native_shared_libs
         + bionic_native_shared_libs
@@ -188,19 +205,21 @@ apex {
 // because binaries have different multilib classes and 'multilib: {}' isn't
 // supported by target: { ... }.
 // See b/120617876 for more information.
-art_apex {
+art_apex_test {
     name: "com.android.runtime.host",
     compile_multilib: "both",
     payload_type: "zip",
     host_supported: true,
     device_supported: false,
     manifest: "manifest.json",
-    java_libs: libcore_target_java_libs,
+    java_libs: libcore_java_libs,
     ignore_system_library_special_case: true,
     native_shared_libs: art_runtime_base_native_shared_libs
         + art_runtime_debug_native_shared_libs
         + libcore_native_shared_libs
-        + libcore_debug_native_shared_libs,
+        + libcore_debug_native_shared_libs
+        + art_runtime_libraries_zipapex
+        + art_runtime_host_run_test_libs,
     multilib: {
         both: {
             // TODO: Add logic to create a `dalvikvm` symlink to `dalvikvm32` or `dalvikvm64`
@@ -227,6 +246,75 @@ art_apex {
                     binaries: bionic_binaries_both,
                 }
             }
+        },
+    },
+}
+
+python_binary_host {
+    name: "art-apex-tester",
+    srcs: ["art_apex_test.py"],
+    main: "art_apex_test.py",
+    version: {
+        py2: {
+            enabled: false,
+        },
+        py3: {
+            enabled: true,
+        },
+    },
+}
+
+// Genrules so we can run the checker, and empty Java library so that it gets executed.
+
+genrule {
+    name: "art-check-release-apex-gen",
+    srcs: [":com.android.runtime.release"],
+    tools: [
+        "art-apex-tester",
+        "debugfs",
+    ],
+    cmd: "$(location art-apex-tester)"
+              + " --debugfs $(location debugfs)"
+              + " --tmpdir $(genDir)"
+              + " $(in)"
+         + " && touch $(out)",
+    out: ["art-check-release-apex-gen.dummy"],
+}
+cc_prebuilt_binary {
+    name: "art-check-release-apex-gen-fakebin",
+    srcs: [":art-check-release-apex-gen"],
+    host_supported: true,
+    device_supported: false,
+    target: {
+        darwin: {
+            enabled: false,  // No python3.
+        },
+    },
+}
+
+genrule {
+    name: "art-check-debug-apex-gen",
+    srcs: [":com.android.runtime.debug"],
+    tools: [
+        "art-apex-tester",
+        "debugfs",
+    ],
+    cmd: "$(location art-apex-tester)"
+              + " --debugfs $(location debugfs)"
+              + " --tmpdir $(genDir)"
+              + " --debug"
+              + " $(in)"
+         + " && touch $(out)",
+    out: ["art-check-debug-apex-gen.dummy"],
+}
+cc_prebuilt_binary {
+    name: "art-check-debug-apex-gen-fakebin",
+    srcs: [":art-check-debug-apex-gen"],
+    host_supported: true,
+    device_supported: false,
+    target: {
+        darwin: {
+            enabled: false,  // No python3.
         },
     },
 }

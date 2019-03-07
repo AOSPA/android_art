@@ -199,6 +199,7 @@ struct TraceConfig {
 };
 
 namespace {
+
 #ifdef __APPLE__
 inline char** GetEnviron() {
   // When Google Test is built as a framework on MacOS X, the environ variable
@@ -212,6 +213,11 @@ inline char** GetEnviron() {
 extern "C" char** environ;
 inline char** GetEnviron() { return environ; }
 #endif
+
+void CheckConstants() {
+  CHECK_EQ(mirror::Array::kFirstElementOffset, mirror::Array::FirstElementOffset());
+}
+
 }  // namespace
 
 Runtime::Runtime()
@@ -284,6 +290,7 @@ Runtime::Runtime()
       verifier_logging_threshold_ms_(100) {
   static_assert(Runtime::kCalleeSaveSize ==
                     static_cast<uint32_t>(CalleeSaveType::kLastCalleeSaveType), "Unexpected size");
+  CheckConstants();
 
   std::fill(callee_save_methods_, callee_save_methods_ + arraysize(callee_save_methods_), 0u);
   interpreter::CheckInterpreterAsmConstants();
@@ -862,14 +869,21 @@ bool Runtime::Start() {
                             GetInstructionSetString(kRuntimeISA));
   }
 
-  // Send the initialized phase event. Send it before starting daemons, as otherwise
-  // sending thread events becomes complicated.
+  StartDaemonThreads();
+
+  // Make sure the environment is still clean (no lingering local refs from starting daemon
+  // threads).
+  {
+    ScopedObjectAccess soa(self);
+    self->GetJniEnv()->AssertLocalsEmpty();
+  }
+
+  // Send the initialized phase event. Send it after starting the Daemon threads so that agents
+  // cannot delay the daemon threads from starting forever.
   {
     ScopedObjectAccess soa(self);
     callbacks_->NextRuntimePhase(RuntimePhaseCallback::RuntimePhase::kInit);
   }
-
-  StartDaemonThreads();
 
   {
     ScopedObjectAccess soa(self);
@@ -1173,8 +1187,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   compiler_executable_ = runtime_options.ReleaseOrDefault(Opt::Compiler);
   compiler_options_ = runtime_options.ReleaseOrDefault(Opt::CompilerOptions);
-  for (StringPiece option : Runtime::Current()->GetCompilerOptions()) {
-    if (option.starts_with("--debuggable")) {
+  for (const std::string& option : Runtime::Current()->GetCompilerOptions()) {
+    if (option == "--debuggable") {
       SetJavaDebuggable(true);
       break;
     }
@@ -2475,10 +2489,15 @@ void Runtime::AddCurrentRuntimeFeaturesAsDex2OatArguments(std::vector<std::strin
   instruction_set += GetInstructionSetString(kRuntimeISA);
   argv->push_back(instruction_set);
 
-  std::unique_ptr<const InstructionSetFeatures> features(InstructionSetFeatures::FromCppDefines());
-  std::string feature_string("--instruction-set-features=");
-  feature_string += features->GetFeatureString();
-  argv->push_back(feature_string);
+  if (InstructionSetFeatures::IsRuntimeDetectionSupported()) {
+    argv->push_back("--instruction-set-features=runtime");
+  } else {
+    std::unique_ptr<const InstructionSetFeatures> features(
+        InstructionSetFeatures::FromCppDefines());
+    std::string feature_string("--instruction-set-features=");
+    feature_string += features->GetFeatureString();
+    argv->push_back(feature_string);
+  }
 }
 
 void Runtime::CreateJitCodeCache(bool rwx_memory_allowed) {
