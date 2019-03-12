@@ -557,6 +557,7 @@
             "647-jni-get-field-id",
             "674-hiddenapi",
             "690-hiddenapi-same-name-methods",
+            "691-hiddenapi-proxy",
             "944-transform-classloaders",
             "999-redefine-hiddenapi"
         ],
@@ -1088,6 +1089,7 @@
                   "679-locks",
                   "688-shared-library",
                   "690-hiddenapi-same-name-methods",
+                  "691-hiddenapi-proxy",
                   "999-redefine-hiddenapi",
                   "1000-non-moving-space-stress",
                   "1001-app-image-regions",
