@@ -44,14 +44,12 @@ using ElfRuntimeTypes = std::conditional<sizeof(void*) == 4, ElfTypes32, ElfType
 
 template <typename ElfTypes>
 void WriteDebugInfo(linker::ElfBuilder<ElfTypes>* builder,
-                    const DebugInfo& debug_info,
-                    dwarf::CFIFormat cfi_format,
-                    bool write_oat_patches) {
+                    const DebugInfo& debug_info) {
   // Write .strtab and .symtab.
   WriteDebugSymbols(builder, /* mini-debug-info= */ false, debug_info);
 
   // Write .debug_frame.
-  WriteCFISection(builder, debug_info.compiled_methods, cfi_format, write_oat_patches);
+  WriteCFISection(builder, debug_info.compiled_methods);
 
   // Group the methods into compilation units based on class.
   std::unordered_map<const dex::ClassDef*, ElfCompilationUnit> class_to_compilation_unit;
@@ -96,7 +94,7 @@ void WriteDebugInfo(linker::ElfBuilder<ElfTypes>* builder,
     for (auto& compilation_unit : compilation_units) {
       line_writer.WriteCompilationUnit(compilation_unit);
     }
-    line_writer.End(write_oat_patches);
+    line_writer.End();
   }
 
   // Write .debug_info section.
@@ -107,7 +105,7 @@ void WriteDebugInfo(linker::ElfBuilder<ElfTypes>* builder,
       ElfCompilationUnitWriter<ElfTypes> cu_writer(&info_writer);
       cu_writer.Write(compilation_unit);
     }
-    info_writer.End(write_oat_patches);
+    info_writer.End();
   }
 }
 
@@ -137,10 +135,7 @@ static std::vector<uint8_t> MakeMiniDebugInfoInternal(
     WriteDebugSymbols(builder.get(), /* mini-debug-info= */ true, debug_info);
   }
   if (!debug_info.compiled_methods.empty()) {
-    WriteCFISection(builder.get(),
-                    debug_info.compiled_methods,
-                    dwarf::DW_DEBUG_FRAME_FORMAT,
-                    /* write_oat_patches= */ false);
+    WriteCFISection(builder.get(), debug_info.compiled_methods);
   }
   builder->End();
   CHECK(builder->Good());
@@ -199,41 +194,35 @@ std::vector<uint8_t> MakeElfFileForJIT(
     // The compression is great help for multiple methods but it is not worth it for a
     // single method due to the overheads so skip the compression here for performance.
     WriteDebugSymbols(builder.get(), /* mini-debug-info= */ true, debug_info);
-    WriteCFISection(builder.get(),
-                    debug_info.compiled_methods,
-                    dwarf::DW_DEBUG_FRAME_FORMAT,
-                    /* write_oat_patches= */ false);
+    WriteCFISection(builder.get(), debug_info.compiled_methods);
   } else {
-    WriteDebugInfo(builder.get(),
-                   debug_info,
-                   dwarf::DW_DEBUG_FRAME_FORMAT,
-                   /* write_oat_patches= */ false);
+    WriteDebugInfo(builder.get(), debug_info);
   }
   builder->End();
   CHECK(builder->Good());
   // Verify the ELF file by reading it back using the trivial reader.
   if (kIsDebugBuild) {
     using Elf_Sym = typename ElfTypes::Sym;
-    using Elf_Addr = typename ElfTypes::Addr;
     size_t num_syms = 0;
-    size_t num_cfis = 0;
-    ReadElfSymbols<ElfTypes>(
-        buffer.data(),
-        [&](Elf_Sym sym, const char*) {
-          DCHECK_EQ(sym.st_value, method_info.code_address + CompiledMethod::CodeDelta(isa));
-          DCHECK_EQ(sym.st_size, method_info.code_size);
-          num_syms++;
-        },
-        [&](Elf_Addr addr, Elf_Addr size, ArrayRef<const uint8_t> opcodes) {
-          DCHECK_EQ(addr, method_info.code_address);
-          DCHECK_EQ(size, method_info.code_size);
-          DCHECK_GE(opcodes.size(), method_info.cfi.size());
-          DCHECK_EQ(memcmp(opcodes.data(), method_info.cfi.data(), method_info.cfi.size()), 0);
-          num_cfis++;
-        });
+    size_t num_cies = 0;
+    size_t num_fdes = 0;
+    using Reader = ElfDebugReader<ElfTypes>;
+    Reader reader(buffer);
+    reader.VisitFunctionSymbols([&](Elf_Sym sym, const char*) {
+      DCHECK_EQ(sym.st_value, method_info.code_address + CompiledMethod::CodeDelta(isa));
+      DCHECK_EQ(sym.st_size, method_info.code_size);
+      num_syms++;
+    });
+    reader.VisitDebugFrame([&](const Reader::CIE* cie ATTRIBUTE_UNUSED) {
+      num_cies++;
+    }, [&](const Reader::FDE* fde, const Reader::CIE* cie ATTRIBUTE_UNUSED) {
+      DCHECK_EQ(fde->sym_addr, method_info.code_address);
+      DCHECK_EQ(fde->sym_size, method_info.code_size);
+      num_fdes++;
+    });
     DCHECK_EQ(num_syms, 1u);
-    // CFI might be missing. TODO: Ensure we have CFI for all methods.
-    DCHECK_LE(num_cfis, 1u);
+    DCHECK_LE(num_cies, 1u);
+    DCHECK_LE(num_fdes, 1u);
   }
   return buffer;
 }
@@ -242,14 +231,13 @@ std::vector<uint8_t> MakeElfFileForJIT(
 std::vector<uint8_t> PackElfFileForJIT(
     InstructionSet isa,
     const InstructionSetFeatures* features,
-    std::vector<const uint8_t*>& added_elf_files,
+    std::vector<ArrayRef<const uint8_t>>& added_elf_files,
     std::vector<const void*>& removed_symbols,
     /*out*/ size_t* num_symbols) {
   using ElfTypes = ElfRuntimeTypes;
   using Elf_Addr = typename ElfTypes::Addr;
   using Elf_Sym = typename ElfTypes::Sym;
   CHECK_EQ(sizeof(Elf_Addr), static_cast<size_t>(GetInstructionSetPointerSize(isa)));
-  const bool is64bit = Is64BitInstructionSet(isa);
   auto is_removed_symbol = [&removed_symbols](Elf_Addr addr) {
     const void* code_ptr = reinterpret_cast<const void*>(addr);
     return std::binary_search(removed_symbols.begin(), removed_symbols.end(), code_ptr);
@@ -271,39 +259,26 @@ std::vector<uint8_t> PackElfFileForJIT(
     auto* symtab = builder->GetSymTab();
     auto* debug_frame = builder->GetDebugFrame();
     std::deque<Elf_Sym> symbols;
-    std::vector<uint8_t> debug_frame_buffer;
-    WriteCIE(isa, dwarf::DW_DEBUG_FRAME_FORMAT, &debug_frame_buffer);
+
+    using Reader = ElfDebugReader<ElfTypes>;
+    std::deque<Reader> readers;
+    for (ArrayRef<const uint8_t> added_elf_file : added_elf_files) {
+      readers.emplace_back(added_elf_file);
+    }
 
     // Write symbols names. All other data is buffered.
     strtab->Start();
     strtab->Write("");  // strtab should start with empty string.
-    for (const uint8_t* added_elf_file : added_elf_files) {
-      ReadElfSymbols<ElfTypes>(
-          added_elf_file,
-          [&](Elf_Sym sym, const char* name) {
-              if (is_removed_symbol(sym.st_value)) {
-                return;
-              }
-              sym.st_name = strtab->Write(name);
-              symbols.push_back(sym);
-              min_address = std::min<uint64_t>(min_address, sym.st_value);
-              max_address = std::max<uint64_t>(max_address, sym.st_value + sym.st_size);
-          },
-          [&](Elf_Addr addr, Elf_Addr size, ArrayRef<const uint8_t> opcodes) {
-              if (is_removed_symbol(addr)) {
-                return;
-              }
-              WriteFDE(is64bit,
-                       /*section_address=*/ 0,
-                       /*cie_address=*/ 0,
-                       addr,
-                       size,
-                       opcodes,
-                       dwarf::DW_DEBUG_FRAME_FORMAT,
-                       debug_frame_buffer.size(),
-                       &debug_frame_buffer,
-                       /*patch_locations=*/ nullptr);
-          });
+    for (Reader& reader : readers) {
+      reader.VisitFunctionSymbols([&](Elf_Sym sym, const char* name) {
+          if (is_removed_symbol(sym.st_value)) {
+            return;
+          }
+          sym.st_name = strtab->Write(name);
+          symbols.push_back(sym);
+          min_address = std::min<uint64_t>(min_address, sym.st_value);
+          max_address = std::max<uint64_t>(max_address, sym.st_value + sym.st_size);
+      });
     }
     strtab->End();
 
@@ -321,7 +296,22 @@ std::vector<uint8_t> PackElfFileForJIT(
 
     // Add the CFI/unwind section.
     debug_frame->Start();
-    debug_frame->WriteFully(debug_frame_buffer.data(), debug_frame_buffer.size());
+    // ART always produces the same CIE, so we copy the first one and ignore the rest.
+    bool copied_cie = false;
+    for (Reader& reader : readers) {
+      reader.VisitDebugFrame([&](const Reader::CIE* cie) {
+        if (!copied_cie) {
+          debug_frame->WriteFully(cie->data(), cie->size());
+          copied_cie = true;
+        }
+      }, [&](const Reader::FDE* fde, const Reader::CIE* cie ATTRIBUTE_UNUSED) {
+        DCHECK(copied_cie);
+        DCHECK_EQ(fde->cie_pointer, 0);
+        if (!is_removed_symbol(fde->sym_addr)) {
+          debug_frame->WriteFully(fde->data(), fde->size());
+        }
+      });
+    }
     debug_frame->End();
 
     builder->End();
@@ -371,7 +361,7 @@ std::vector<uint8_t> WriteDebugElfFileForClasses(
   info_writer.Start();
   ElfCompilationUnitWriter<ElfTypes> cu_writer(&info_writer);
   cu_writer.Write(types);
-  info_writer.End(/* write_oat_patches= */ false);
+  info_writer.End();
 
   builder->End();
   CHECK(builder->Good());
@@ -381,14 +371,10 @@ std::vector<uint8_t> WriteDebugElfFileForClasses(
 // Explicit instantiations
 template void WriteDebugInfo<ElfTypes32>(
     linker::ElfBuilder<ElfTypes32>* builder,
-    const DebugInfo& debug_info,
-    dwarf::CFIFormat cfi_format,
-    bool write_oat_patches);
+    const DebugInfo& debug_info);
 template void WriteDebugInfo<ElfTypes64>(
     linker::ElfBuilder<ElfTypes64>* builder,
-    const DebugInfo& debug_info,
-    dwarf::CFIFormat cfi_format,
-    bool write_oat_patches);
+    const DebugInfo& debug_info);
 
 }  // namespace debug
 }  // namespace art

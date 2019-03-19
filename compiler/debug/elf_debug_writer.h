@@ -37,9 +37,7 @@ struct MethodDebugInfo;
 template <typename ElfTypes>
 void WriteDebugInfo(
     linker::ElfBuilder<ElfTypes>* builder,
-    const DebugInfo& debug_info,
-    dwarf::CFIFormat cfi_format,
-    bool write_oat_patches);
+    const DebugInfo& debug_info);
 
 std::vector<uint8_t> MakeMiniDebugInfo(
     InstructionSet isa,
@@ -59,7 +57,7 @@ std::vector<uint8_t> MakeElfFileForJIT(
 std::vector<uint8_t> PackElfFileForJIT(
     InstructionSet isa,
     const InstructionSetFeatures* features,
-    std::vector<const uint8_t*>& added_elf_files,
+    std::vector<ArrayRef<const uint8_t>>& added_elf_files,
     std::vector<const void*>& removed_symbols,
     /*out*/ size_t* num_symbols);
 

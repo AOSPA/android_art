@@ -113,12 +113,12 @@ class DexClass : public ClassAccessor {
 
   bool HasSuperclass() const { return dex_file_.IsTypeIndexValid(GetSuperclassIndex()); }
 
-  std::string GetSuperclassDescriptor() const {
+  std::string_view GetSuperclassDescriptor() const {
     return HasSuperclass() ? dex_file_.StringByTypeIdx(GetSuperclassIndex()) : "";
   }
 
-  std::set<std::string> GetInterfaceDescriptors() const {
-    std::set<std::string> list;
+  std::set<std::string_view> GetInterfaceDescriptors() const {
+    std::set<std::string_view> list;
     const dex::TypeList* ifaces = dex_file_.GetInterfacesList(GetClassDef());
     for (uint32_t i = 0; ifaces != nullptr && i < ifaces->Size(); ++i) {
       list.insert(dex_file_.StringByTypeIdx(ifaces->GetTypeItem(i).type_idx_));
@@ -131,24 +131,12 @@ class DexClass : public ClassAccessor {
 
   inline bool Equals(const DexClass& other) const {
     bool equals = strcmp(GetDescriptor(), other.GetDescriptor()) == 0;
+
     if (equals) {
-      // TODO(dbrazdil): Check that methods/fields match as well once b/111116543 is fixed.
-      CHECK_EQ(GetAccessFlags(), other.GetAccessFlags())
-          << "Inconsistent access flags of class " << GetDescriptor() << ": "
-          << "0x" << std::hex << GetAccessFlags() << std::dec << " (" << dex_file_.GetLocation()
-          << ") and 0x" << std::hex << other.GetAccessFlags() << std::dec << " ("
-          << other.dex_file_.GetLocation() << ")";
-      CHECK_EQ(GetSuperclassDescriptor(), other.GetSuperclassDescriptor())
-          << "Inconsistent superclass of class " << GetDescriptor() << ": "
-          << GetSuperclassDescriptor() << " (" << dex_file_.GetLocation()
-          << ") and " << other.GetSuperclassDescriptor() << " (" << other.dex_file_.GetLocation()
-          << ")";
-      CHECK(GetInterfaceDescriptors() == other.GetInterfaceDescriptors())
-          << "Inconsistent set of interfaces of class " << GetDescriptor() << ": "
-          << JoinStringSet(GetInterfaceDescriptors()) << " (" << dex_file_.GetLocation()
-          << ") and " << JoinStringSet(other.GetInterfaceDescriptors()) << " ("
-          << other.dex_file_.GetLocation() << ")";
+      LOG(FATAL) << "Class duplication: " << GetDescriptor() << " in " << dex_file_.GetLocation()
+          << " and " << other.dex_file_.GetLocation();
     }
+
     return equals;
   }
 
@@ -156,7 +144,7 @@ class DexClass : public ClassAccessor {
   uint32_t GetAccessFlags() const { return GetClassDef().access_flags_; }
   bool HasAccessFlags(uint32_t mask) const { return (GetAccessFlags() & mask) == mask; }
 
-  static std::string JoinStringSet(const std::set<std::string>& s) {
+  static std::string JoinStringSet(const std::set<std::string_view>& s) {
     return "{" + ::android::base::Join(std::vector<std::string>(s.begin(), s.end()), ",") + "}";
   }
 };
@@ -209,7 +197,7 @@ class DexMember {
   inline uint32_t GetAccessFlags() const { return item_.GetAccessFlags(); }
   inline uint32_t HasAccessFlags(uint32_t mask) const { return (GetAccessFlags() & mask) == mask; }
 
-  inline std::string GetName() const {
+  inline std::string_view GetName() const {
     return IsMethod() ? item_.GetDexFile().GetMethodName(GetMethodId())
                       : item_.GetDexFile().GetFieldName(GetFieldId());
   }
@@ -508,7 +496,7 @@ class Hierarchy final {
   }
 
  private:
-  HierarchyClass* FindClass(const std::string& descriptor) {
+  HierarchyClass* FindClass(const std::string_view& descriptor) {
     auto it = classes_.find(descriptor);
     if (it == classes_.end()) {
       return nullptr;
@@ -539,7 +527,7 @@ class Hierarchy final {
       CHECK(superclass != nullptr);
       klass.AddExtends(*superclass);
 
-      for (const std::string& iface_desc : dex_klass.GetInterfaceDescriptors()) {
+      for (const std::string_view& iface_desc : dex_klass.GetInterfaceDescriptors()) {
         HierarchyClass* iface = FindClass(iface_desc);
         CHECK(iface != nullptr);
         klass.AddExtends(*iface);
@@ -548,7 +536,7 @@ class Hierarchy final {
   }
 
   ClassPath& classpath_;
-  std::map<std::string, HierarchyClass> classes_;
+  std::map<std::string_view, HierarchyClass> classes_;
 };
 
 // Builder of dex section containing hiddenapi flags.

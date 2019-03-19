@@ -236,8 +236,9 @@
   ]
 },
 {
-  description: "Expected networking failure on host / old systems: we expect 97 (EAFNOSUPPORT), but we get 22 (EINVAL)",
+  description: "Timeout on walleye bots, currenlty on OPM1.171019.019. But test passes on Q, so just mark it fail here.",
   result: EXEC_FAILED,
+  modes: [device_testdex],
   names: [
     "libcore.libcore.io.OsTest#testCrossFamilyBindConnectSendto"
   ]

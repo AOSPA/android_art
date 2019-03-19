@@ -438,8 +438,13 @@ class CodeInfo {
   // Accumulate code info size statistics into the given Stats tree.
   static void CollectSizeStats(const uint8_t* code_info, /*out*/ Stats* parent);
 
+  ALWAYS_INLINE static size_t DecodeCodeSize(const uint8_t* data) {
+    return BitMemoryReader(data).ReadVarint();
+  }
+
   ALWAYS_INLINE static QuickMethodFrameInfo DecodeFrameInfo(const uint8_t* data) {
     BitMemoryReader reader(data);
+    reader.ReadVarint();  // Skip code size.
     return QuickMethodFrameInfo(
         reader.ReadVarint() * kStackAlignment,  // Decode packed_frame_size_ and unpack.
         reader.ReadVarint(),  // core_spill_mask_.
@@ -461,6 +466,7 @@ class CodeInfo {
   // Invokes the callback with member pointer of each header field.
   template<typename Callback>
   ALWAYS_INLINE static void ForEachHeaderField(Callback callback) {
+    callback(&CodeInfo::code_size_);
     callback(&CodeInfo::packed_frame_size_);
     callback(&CodeInfo::core_spill_mask_);
     callback(&CodeInfo::fp_spill_mask_);
@@ -486,6 +492,7 @@ class CodeInfo {
     callback(&CodeInfo::dex_register_catalog_);
   }
 
+  uint32_t code_size_ = 0;  // The size of native PC range.
   uint32_t packed_frame_size_ = 0;  // Frame size in kStackAlignment units.
   uint32_t core_spill_mask_ = 0;
   uint32_t fp_spill_mask_ = 0;

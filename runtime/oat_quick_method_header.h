@@ -31,10 +31,8 @@ class ArtMethod;
 class PACKED(4) OatQuickMethodHeader {
  public:
   OatQuickMethodHeader() = default;
-  OatQuickMethodHeader(uint32_t vmap_table_offset,
-                       uint32_t code_size)
-      : vmap_table_offset_(vmap_table_offset),
-        code_size_(code_size) {
+  OatQuickMethodHeader(uint32_t code_info_offset) : code_info_offset_(code_info_offset) {
+    DCHECK_NE(code_info_offset, 0u);
   }
 
   static OatQuickMethodHeader* FromCodePointer(const void* code_ptr) {
@@ -58,17 +56,17 @@ class PACKED(4) OatQuickMethodHeader {
   }
 
   bool IsOptimized() const {
-    return GetCodeSize() != 0 && vmap_table_offset_ != 0;
+    return true;
   }
 
   const uint8_t* GetOptimizedCodeInfoPtr() const {
-    DCHECK(IsOptimized());
-    return code_ - vmap_table_offset_;
+    DCHECK_NE(code_info_offset_, 0u);
+    return code_ - GetVmapTableOffset();
   }
 
   uint8_t* GetOptimizedCodeInfoPtr() {
-    DCHECK(IsOptimized());
-    return code_ - vmap_table_offset_;
+    DCHECK_NE(code_info_offset_, 0u);
+    return code_ - GetVmapTableOffset();
   }
 
   const uint8_t* GetCode() const {
@@ -76,28 +74,26 @@ class PACKED(4) OatQuickMethodHeader {
   }
 
   uint32_t GetCodeSize() const {
-    return code_size_ & kCodeSizeMask;
-  }
-
-  const uint32_t* GetCodeSizeAddr() const {
-    return &code_size_;
+    return CodeInfo::DecodeCodeSize(GetOptimizedCodeInfoPtr());
   }
 
   uint32_t GetVmapTableOffset() const {
-    return vmap_table_offset_;
+    return code_info_offset_ & kCodeInfoMask;
   }
 
   void SetVmapTableOffset(uint32_t offset) {
-    vmap_table_offset_ = offset;
+    DCHECK(!HasShouldDeoptimizeFlag());
+    code_info_offset_ = offset;
+    DCHECK_EQ(GetVmapTableOffset(), offset);
   }
 
   const uint32_t* GetVmapTableOffsetAddr() const {
-    return &vmap_table_offset_;
+    return &code_info_offset_;
   }
 
   const uint8_t* GetVmapTable() const {
     CHECK(!IsOptimized()) << "Unimplemented vmap table for optimizing compiler";
-    return (vmap_table_offset_ == 0) ? nullptr : code_ - vmap_table_offset_;
+    return (code_info_offset_ == 0) ? nullptr : code_ - code_info_offset_;
   }
 
   bool Contains(uintptr_t pc) const {
@@ -143,23 +139,21 @@ class PACKED(4) OatQuickMethodHeader {
   uint32_t ToDexPc(ArtMethod* method, const uintptr_t pc, bool abort_on_failure = true) const;
 
   void SetHasShouldDeoptimizeFlag() {
-    DCHECK_EQ(code_size_ & kShouldDeoptimizeMask, 0u);
-    code_size_ |= kShouldDeoptimizeMask;
+    DCHECK_EQ(code_info_offset_ & kShouldDeoptimizeMask, 0u);
+    code_info_offset_ |= kShouldDeoptimizeMask;
   }
 
   bool HasShouldDeoptimizeFlag() const {
-    return (code_size_ & kShouldDeoptimizeMask) != 0;
+    return (code_info_offset_ & kShouldDeoptimizeMask) != 0;
   }
 
  private:
   static constexpr uint32_t kShouldDeoptimizeMask = 0x80000000;
-  static constexpr uint32_t kCodeSizeMask = ~kShouldDeoptimizeMask;
+  static constexpr uint32_t kCodeInfoMask = ~kShouldDeoptimizeMask;
 
-  // The offset in bytes from the start of the vmap table to the end of the header.
-  uint32_t vmap_table_offset_ = 0u;
-  // The code size in bytes. The highest bit is used to signify if the compiled
-  // code with the method header has should_deoptimize flag.
-  uint32_t code_size_ = 0u;
+  // The offset in bytes from the start of the code_info to the end of the header.
+  // The highest bit is used to store the should_deoptimize flag.
+  uint32_t code_info_offset_ = 0u;
   // The actual code.
   uint8_t code_[0];
 };
