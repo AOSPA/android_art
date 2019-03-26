@@ -80,8 +80,7 @@ class AccessContext {
   ObjPtr<mirror::Class> GetClass() const { return klass_; }
   const DexFile* GetDexFile() const { return dex_file_; }
   Domain GetDomain() const { return domain_; }
-
-  bool IsUntrustedDomain() const { return domain_ == Domain::kApplication; }
+  bool IsApplicationDomain() const { return domain_ == Domain::kApplication; }
 
   // Returns true if this domain is always allowed to access the domain of `callee`.
   bool CanAlwaysAccess(const AccessContext& callee) const {
@@ -106,8 +105,9 @@ class AccessContext {
 
     Domain dex_domain = dex_file->GetHiddenapiDomain();
     if (class_loader.IsNull() && dex_domain == Domain::kApplication) {
-      // LOG(WARNING) << "DexFile " << dex_file->GetLocation() << " is in boot classpath "
-      //              << "but is assigned untrusted domain";
+      LOG(WARNING) << "DexFile " << dex_file->GetLocation()
+          << " is in boot classpath but is assigned the application domain";
+      dex_file->SetHiddenapiDomain(Domain::kPlatform);
       dex_domain = Domain::kPlatform;
     }
     return dex_domain;
@@ -211,15 +211,25 @@ class MemberSignature {
 template<typename T>
 uint32_t GetDexFlags(T* member) REQUIRES_SHARED(Locks::mutator_lock_);
 
+// Handler of detected core platform API violations. Returns true if access to
+// `member` should be denied.
 template<typename T>
-void MaybeReportCorePlatformApiViolation(T* member,
-                                         const AccessContext& caller_context,
-                                         AccessMethod access_method)
+bool HandleCorePlatformApiViolation(T* member,
+                                    const AccessContext& caller_context,
+                                    AccessMethod access_method,
+                                    EnforcementPolicy policy)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
 template<typename T>
 bool ShouldDenyAccessToMemberImpl(T* member, ApiList api_list, AccessMethod access_method)
     REQUIRES_SHARED(Locks::mutator_lock_);
+
+inline ArtField* GetInterfaceMemberIfProxy(ArtField* field) { return field; }
+
+inline ArtMethod* GetInterfaceMemberIfProxy(ArtMethod* method)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  return method->GetInterfaceMethodIfProxy(kRuntimePointerSize);
+}
 
 }  // namespace detail
 
@@ -358,6 +368,10 @@ inline bool ShouldDenyAccessToMember(T* member,
                                      AccessMethod access_method)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   DCHECK(member != nullptr);
+
+  // Get the runtime flags encoded in member's access flags.
+  // Note: this works for proxy methods because they inherit access flags from their
+  // respective interface methods.
   const uint32_t runtime_flags = GetRuntimeFlags(member);
 
   // Exit early if member is public API. This flag is also set for non-boot class
@@ -373,7 +387,7 @@ inline bool ShouldDenyAccessToMember(T* member,
   const AccessContext callee_context(member->GetDeclaringClass());
 
   // Non-boot classpath callers should have exited early.
-  DCHECK(!callee_context.IsUntrustedDomain());
+  DCHECK(!callee_context.IsApplicationDomain());
 
   // Check if the caller is always allowed to access members in the callee context.
   if (caller_context.CanAlwaysAccess(callee_context)) {
@@ -384,13 +398,16 @@ inline bool ShouldDenyAccessToMember(T* member,
   // not part of core platform API.
   switch (caller_context.GetDomain()) {
     case Domain::kApplication: {
-      DCHECK(!callee_context.IsUntrustedDomain());
+      DCHECK(!callee_context.IsApplicationDomain());
 
       // Exit early if access checks are completely disabled.
       EnforcementPolicy policy = Runtime::Current()->GetHiddenApiEnforcementPolicy();
       if (policy == EnforcementPolicy::kDisabled) {
         return false;
       }
+
+      // If this is a proxy method, look at the interface method instead.
+      member = detail::GetInterfaceMemberIfProxy(member);
 
       // Decode hidden API access flags from the dex file.
       // This is an O(N) operation scaling with the number of fields/methods
@@ -416,11 +433,16 @@ inline bool ShouldDenyAccessToMember(T* member,
         return false;
       }
 
-      // Access checks are not disabled, report the violation.
-      // detail::MaybeReportCorePlatformApiViolation(member, caller_context, access_method);
+      // If this is a proxy method, look at the interface method instead.
+      member = detail::GetInterfaceMemberIfProxy(member);
 
-      // Deny access if the policy is enabled.
-      return policy == EnforcementPolicy::kEnabled;
+      // Access checks are not disabled, report the violation.
+      // This may also add kAccCorePlatformApi to the access flags of `member`
+      // so as to not warn again on next access.
+      return detail::HandleCorePlatformApiViolation(member,
+                                                    caller_context,
+                                                    access_method,
+                                                    policy);
     }
 
     case Domain::kCorePlatform: {
