@@ -190,7 +190,7 @@ ART_GTEST_dex2oat_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEP
 ART_GTEST_dex2oat_image_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) Statics VerifierDeps
 ART_GTEST_exception_test_DEX_DEPS := ExceptionHandle
 ART_GTEST_hiddenapi_test_DEX_DEPS := HiddenApi HiddenApiStubs
-ART_GTEST_hidden_api_test_DEX_DEPS := HiddenApiSignatures
+ART_GTEST_hidden_api_test_DEX_DEPS := HiddenApiSignatures Main MultiDex
 ART_GTEST_image_test_DEX_DEPS := ImageLayoutA ImageLayoutB DefaultMethods VerifySoftFailDuringClinit
 ART_GTEST_imtable_test_DEX_DEPS := IMTA IMTB
 ART_GTEST_instrumentation_test_DEX_DEPS := Instrumentation
@@ -202,6 +202,8 @@ ART_GTEST_image_space_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX
 ART_GTEST_oat_file_test_DEX_DEPS := Main MultiDex MainUncompressed MultiDexUncompressed MainStripped Nested MultiDexModifiedSecondary
 ART_GTEST_oat_test_DEX_DEPS := Main
 ART_GTEST_oat_writer_test_DEX_DEPS := Main
+# two_runtimes_test build off dex2oat_environment_test, which does sanity checks on the following dex files.
+ART_GTEST_two_runtimes_test_DEX_DEPS := Main MainStripped Nested MultiDex MultiDexModifiedSecondary
 ART_GTEST_object_test_DEX_DEPS := ProtoCompare ProtoCompare2 StaticsFromCode XandY
 ART_GTEST_proxy_test_DEX_DEPS := Interfaces
 ART_GTEST_reflection_test_DEX_DEPS := Main NonStaticLeafMethods StaticLeafMethods
@@ -222,6 +224,10 @@ ART_GTEST_oatdump_test_DEX_DEPS := ProfileTestMultiDex
 # The elf writer test has dependencies on core.oat.
 ART_GTEST_elf_writer_test_HOST_DEPS := $(HOST_CORE_IMAGE_DEFAULT_64) $(HOST_CORE_IMAGE_DEFAULT_32)
 ART_GTEST_elf_writer_test_TARGET_DEPS := $(TARGET_CORE_IMAGE_DEFAULT_64) $(TARGET_CORE_IMAGE_DEFAULT_32)
+
+# The two_runtimes_test test has dependencies on core.oat.
+ART_GTEST_two_runtimes_test_HOST_DEPS := $(HOST_CORE_IMAGE_DEFAULT_64) $(HOST_CORE_IMAGE_DEFAULT_32)
+ART_GTEST_two_runtimes_test_TARGET_DEPS := $(TARGET_CORE_IMAGE_DEFAULT_64) $(TARGET_CORE_IMAGE_DEFAULT_32)
 
 ART_GTEST_dex2oat_environment_tests_HOST_DEPS := \
   $(HOST_CORE_IMAGE_optimizing_64) \
@@ -433,6 +439,11 @@ ifneq ($(ART_TEST_ANDROID_RUNTIME_ROOT),)
   ART_GTEST_TARGET_ANDROID_RUNTIME_ROOT := $(ART_TEST_ANDROID_RUNTIME_ROOT)
 endif
 
+ART_GTEST_TARGET_ANDROID_TZDATA_ROOT := '/apex/com.android.tzdata'
+ifneq ($(ART_TEST_ANDROID_TZDATA_ROOT),)
+  ART_GTEST_TARGET_ANDROID_TZDATA_ROOT := $(ART_TEST_ANDROID_TZDATA_ROOT)
+endif
+
 # Define a make rule for a target device gtest.
 # $(1): gtest name - the name of the test we're building such as leb128_test.
 # $(2): path relative to $OUT to the test binary
@@ -483,6 +494,7 @@ $$(gtest_rule): test-art-target-sync
 	  ($(ADB) shell "$$(PRIVATE_MAYBE_CHROOT_COMMAND) env $(GCOV_ENV) LD_LIBRARY_PATH=$(4) \
 	       ANDROID_ROOT=$(ART_GTEST_TARGET_ANDROID_ROOT) \
 	       ANDROID_RUNTIME_ROOT=$(ART_GTEST_TARGET_ANDROID_RUNTIME_ROOT) \
+	       ANDROID_TZDATA_ROOT=$(ART_GTEST_TARGET_ANDROID_TZDATA_ROOT) \
 	       $$(PRIVATE_TARGET_EXE) \
 	     && touch $$(PRIVATE_GTEST_WITNESS)" \
 	   && ($(ADB) pull $$(PRIVATE_GTEST_WITNESS) /tmp/ && $$(call ART_TEST_PASSED,$$@)) \
@@ -734,6 +746,7 @@ ART_TEST_TARGET_GTEST$(2ND_ART_PHONY_TEST_TARGET_SUFFIX)_RULES :=
 ART_TEST_TARGET_GTEST_RULES :=
 ART_GTEST_TARGET_ANDROID_ROOT :=
 ART_GTEST_TARGET_ANDROID_RUNTIME_ROOT :=
+ART_GTEST_TARGET_ANDROID_TZDATA_ROOT :=
 ART_GTEST_class_linker_test_DEX_DEPS :=
 ART_GTEST_class_table_test_DEX_DEPS :=
 ART_GTEST_compiler_driver_test_DEX_DEPS :=

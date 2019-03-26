@@ -112,7 +112,7 @@ class HiddenApiTest : public CommonRuntimeTest {
 
     File fd(file.GetFilename(), O_RDONLY, /* check_usage= */ false);
     if (fd.Fd() == -1) {
-      LOG(FATAL) << "Unable to open file '" << file.GetFilename() << "': " << strerror(errno);
+      PLOG(FATAL) << "Unable to open file '" << file.GetFilename() << "'";
       UNREACHABLE();
     }
 
@@ -133,7 +133,7 @@ class HiddenApiTest : public CommonRuntimeTest {
   std::ofstream OpenStream(const ScratchFile& file) {
     std::ofstream ofs(file.GetFilename(), std::ofstream::out);
     if (ofs.fail()) {
-      LOG(FATAL) << "Open failed for '" << file.GetFilename() << "' " << strerror(errno);
+      PLOG(FATAL) << "Open failed for '" << file.GetFilename() << "'";
       UNREACHABLE();
     }
     return ofs;
@@ -706,7 +706,7 @@ TEST_F(HiddenApiTest, InterfaceMethodImplemented) {
   ScratchFile flags_csv;
   ASSERT_TRUE(RunHiddenapiList(flags_csv));
   auto flags = ReadFlagsCsvFile(flags_csv);
-  ASSERT_EQ(SafeMapGet("LPackageClass;->publicMethod1()V", flags), "whitelist");
+  ASSERT_EQ(SafeMapGet("LPackageClass;->publicMethod1()V", flags), "public-api");
 }
 
 // Test a method declared in PublicInterface, defined in AbstractPackageClass and
@@ -715,7 +715,7 @@ TEST_F(HiddenApiTest, InterfaceMethodImplementedInParent) {
   ScratchFile flags_csv;
   ASSERT_TRUE(RunHiddenapiList(flags_csv));
   auto flags = ReadFlagsCsvFile(flags_csv);
-  ASSERT_EQ(SafeMapGet("LAbstractPackageClass;->publicMethod2()V", flags), "whitelist");
+  ASSERT_EQ(SafeMapGet("LAbstractPackageClass;->publicMethod2()V", flags), "public-api");
 }
 
 }  // namespace art

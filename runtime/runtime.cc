@@ -162,7 +162,7 @@
 #include "trace.h"
 #include "transaction.h"
 #include "vdex_file.h"
-#include "verifier/method_verifier.h"
+#include "verifier/class_verifier.h"
 #include "well_known_classes.h"
 
 #ifdef ART_TARGET_ANDROID
@@ -394,6 +394,7 @@ Runtime::~Runtime() {
                                             WellKnownClasses::java_lang_Daemons_stop);
   }
 
+  // Shutdown any trace running.
   Trace::Shutdown();
 
   // Report death. Clients me require a working thread, still, so do it before GC completes and
@@ -431,6 +432,10 @@ Runtime::~Runtime() {
     thread_list_->ShutDown();
   }
 
+  // We can only unload boot classpath native libraries once all threads are terminated
+  // or suspended.
+  java_vm_->UnloadBootNativeLibraries();
+
   // TODO Maybe do some locking.
   for (auto& agent : agents_) {
     agent->Unload();
@@ -464,7 +469,7 @@ Runtime::~Runtime() {
   delete oat_file_manager_;
   Thread::Shutdown();
   QuasiAtomic::Shutdown();
-  verifier::MethodVerifier::Shutdown();
+  verifier::ClassVerifier::Shutdown();
 
   // Destroy allocators before shutting down the MemMap because they may use it.
   java_vm_.reset();
@@ -1270,6 +1275,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // Generational CC collection is currently only compatible with Baker read barriers.
   bool use_generational_cc = kUseBakerReadBarrier && xgc_option.generational_cc;
 
+  image_space_loading_order_ = runtime_options.GetOrDefault(Opt::ImageSpaceLoadingOrder);
+
   heap_ = new gc::Heap(runtime_options.GetOrDefault(Opt::MemoryInitialSize),
                        runtime_options.GetOrDefault(Opt::HeapGrowthLimit),
                        runtime_options.GetOrDefault(Opt::HeapMinFree),
@@ -1307,7 +1314,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        use_generational_cc,
                        runtime_options.GetOrDefault(Opt::HSpaceCompactForOOMMinIntervalsMs),
                        runtime_options.Exists(Opt::DumpRegionInfoBeforeGC),
-                       runtime_options.Exists(Opt::DumpRegionInfoAfterGC));
+                       runtime_options.Exists(Opt::DumpRegionInfoAfterGC),
+                       image_space_loading_order_);
 
   if (!heap_->HasBootImageSpace() && !allow_dex_file_fallback_) {
     LOG(ERROR) << "Dex file fallback disabled, cannot continue without image.";
@@ -1538,7 +1546,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   CHECK(class_linker_ != nullptr);
 
-  verifier::MethodVerifier::Init();
+  verifier::ClassVerifier::Init();
 
   if (runtime_options.Exists(Opt::MethodTrace)) {
     trace_config_.reset(new TraceConfig());
@@ -1690,7 +1698,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   // Set OnlyUseSystemOatFiles only after boot classpath has been set up.
   if (runtime_options.Exists(Opt::OnlyUseSystemOatFiles)) {
-    oat_file_manager_->SetOnlyUseSystemOatFiles();
+    oat_file_manager_->SetOnlyUseSystemOatFiles(/*assert_no_files_loaded=*/ true);
   }
 
   return true;
@@ -2093,7 +2101,7 @@ void Runtime::VisitNonThreadRoots(RootVisitor* visitor) {
       .VisitRootIfNonNull(visitor, RootInfo(kRootVMInternal));
   pre_allocated_NoClassDefFoundError_.VisitRootIfNonNull(visitor, RootInfo(kRootVMInternal));
   VisitImageRoots(visitor);
-  verifier::MethodVerifier::VisitStaticRoots(visitor);
+  verifier::ClassVerifier::VisitStaticRoots(visitor);
   VisitTransactionRoots(visitor);
 }
 
@@ -2771,6 +2779,75 @@ void Runtime::WaitForThreadPoolWorkersToStart() {
   if (stpu.GetThreadPool() != nullptr) {
     stpu.GetThreadPool()->WaitForWorkersToBeCreated();
   }
+}
+
+void Runtime::NotifyStartupCompleted() {
+  bool expected = false;
+  if (!startup_completed_.compare_exchange_strong(expected, true, std::memory_order_seq_cst)) {
+    // Right now NotifyStartupCompleted will be called up to twice, once from profiler and up to
+    // once externally. For this reason there are no asserts.
+    return;
+  }
+  VLOG(startup) << "Startup completed notified";
+
+  {
+    ScopedTrace trace("Releasing app image spaces metadata");
+    ScopedObjectAccess soa(Thread::Current());
+    for (gc::space::ContinuousSpace* space : GetHeap()->GetContinuousSpaces()) {
+      if (space->IsImageSpace()) {
+        gc::space::ImageSpace* image_space = space->AsImageSpace();
+        if (image_space->GetImageHeader().IsAppImage()) {
+          image_space->DisablePreResolvedStrings();
+        }
+      }
+    }
+    // Request empty checkpoint to make sure no threads are accessing the section when we madvise
+    // it. Avoid using RunEmptyCheckpoint since only one concurrent caller is supported. We could
+    // add a GC critical section here but that may cause significant jank if the GC is running.
+    {
+      class EmptyClosure : public Closure {
+       public:
+        explicit EmptyClosure(Barrier* barrier) : barrier_(barrier) {}
+        void Run(Thread* thread ATTRIBUTE_UNUSED) override {
+          barrier_->Pass(Thread::Current());
+        }
+
+       private:
+        Barrier* const barrier_;
+      };
+      Barrier barrier(0);
+      EmptyClosure closure(&barrier);
+      size_t threads_running_checkpoint = GetThreadList()->RunCheckpoint(&closure);
+      // Now that we have run our checkpoint, move to a suspended state and wait
+      // for other threads to run the checkpoint.
+      Thread* self = Thread::Current();
+      ScopedThreadSuspension sts(self, kSuspended);
+      if (threads_running_checkpoint != 0) {
+        barrier.Increment(self, threads_running_checkpoint);
+      }
+    }
+    for (gc::space::ContinuousSpace* space : GetHeap()->GetContinuousSpaces()) {
+      if (space->IsImageSpace()) {
+        gc::space::ImageSpace* image_space = space->AsImageSpace();
+        if (image_space->GetImageHeader().IsAppImage()) {
+          image_space->ReleaseMetadata();
+        }
+      }
+    }
+  }
+
+  // Notify the profiler saver that startup is now completed.
+  ProfileSaver::NotifyStartupCompleted();
+
+  {
+    // Delete the thread pool used for app image loading startup is completed.
+    ScopedTrace trace2("Delete thread pool");
+    DeleteThreadPool();
+  }
+}
+
+bool Runtime::GetStartupCompleted() const {
+  return startup_completed_.load(std::memory_order_seq_cst);
 }
 
 }  // namespace art
