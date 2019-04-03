@@ -85,8 +85,8 @@ class CommonArtTestImpl {
   CommonArtTestImpl() = default;
   virtual ~CommonArtTestImpl() = default;
 
-  // Set up ANDROID_BUILD_TOP, ANDROID_HOST_OUT, ANDROID_ROOT and ANDROID_RUNTIME_ROOT
-  // environment variables using sensible defaults if not already set.
+  // Set up ANDROID_BUILD_TOP, ANDROID_HOST_OUT, ANDROID_ROOT, ANDROID_RUNTIME_ROOT,
+  // and ANDROID_TZDATA_ROOT environment variables using sensible defaults if not already set.
   static void SetUpAndroidRootEnvVars();
 
   // Set up the ANDROID_DATA environment variable, creating the directory if required.
@@ -185,6 +185,10 @@ class CommonArtTestImpl {
 
   // Open a file (allows reading of framework jars).
   std::vector<std::unique_ptr<const DexFile>> OpenDexFiles(const char* filename);
+
+  // Open a single dex file (aborts if there are more than one).
+  std::unique_ptr<const DexFile> OpenDexFile(const char* filename);
+
   // Open a test file (art-gtest-*.jar).
   std::vector<std::unique_ptr<const DexFile>> OpenTestDexFiles(const char* name);
 

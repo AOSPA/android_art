@@ -205,7 +205,8 @@ Heap::Heap(size_t initial_size,
            bool use_generational_cc,
            uint64_t min_interval_homogeneous_space_compaction_by_oom,
            bool dump_region_info_before_gc,
-           bool dump_region_info_after_gc)
+           bool dump_region_info_after_gc,
+           space::ImageSpaceLoadingOrder image_space_loading_order)
     : non_moving_space_(nullptr),
       rosalloc_space_(nullptr),
       dlmalloc_space_(nullptr),
@@ -370,6 +371,10 @@ Heap::Heap(size_t initial_size,
                                        boot_class_path_locations,
                                        image_file_name,
                                        image_instruction_set,
+                                       image_space_loading_order,
+                                       runtime->ShouldRelocate(),
+                                       /*executable=*/ !runtime->IsAotCompiler(),
+                                       is_zygote,
                                        heap_reservation_size,
                                        &boot_image_spaces,
                                        &heap_reservation)) {
@@ -1422,11 +1427,6 @@ void Heap::Trim(Thread* self) {
   TrimSpaces(self);
   // Trim arenas that may have been used by JIT or verifier.
   runtime->GetArenaPool()->TrimMaps();
-  {
-    // TODO: Move this to a callback called when startup is finished (b/120671223).
-    ScopedTrace trace2("Delete thread pool");
-    runtime->DeleteThreadPool();
-  }
 }
 
 class TrimIndirectReferenceTableClosure : public Closure {

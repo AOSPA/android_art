@@ -21,10 +21,12 @@
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "base/dumpable.h"
+#include "base/file_utils.h"
 #include "class_root.h"
 #include "dex/class_accessor-inl.h"
 #include "dex/dex_file_loader.h"
 #include "mirror/class_ext.h"
+#include "oat_file.h"
 #include "scoped_thread_state_change.h"
 #include "thread-inl.h"
 #include "well_known_classes.h"
@@ -69,6 +71,45 @@ static inline std::ostream& operator<<(std::ostream& os, const AccessContext& va
     os << "<unknown_caller>";
   }
   return os;
+}
+
+static Domain DetermineDomainFromLocation(const std::string& dex_location,
+                                          ObjPtr<mirror::ClassLoader> class_loader) {
+  // If running with APEX, check `path` against known APEX locations.
+  // These checks will be skipped on target buildbots where ANDROID_RUNTIME_ROOT
+  // is set to "/system".
+  if (RuntimeModuleRootDistinctFromAndroidRoot()) {
+    if (LocationIsOnRuntimeModule(dex_location.c_str()) ||
+        LocationIsOnConscryptModule(dex_location.c_str())) {
+      return Domain::kCorePlatform;
+    }
+
+    if (LocationIsOnApex(dex_location.c_str())) {
+      return Domain::kPlatform;
+    }
+  }
+
+  if (LocationIsOnSystemFramework(dex_location.c_str())) {
+    return Domain::kPlatform;
+  }
+
+  if (class_loader.IsNull()) {
+    LOG(WARNING) << "DexFile " << dex_location
+        << " is in boot class path but is not in a known location";
+    return Domain::kPlatform;
+  }
+
+  return Domain::kApplication;
+}
+
+void InitializeDexFileDomain(const DexFile& dex_file, ObjPtr<mirror::ClassLoader> class_loader) {
+  Domain dex_domain = DetermineDomainFromLocation(dex_file.GetLocation(), class_loader);
+
+  // Assign the domain unless a more permissive domain has already been assigned.
+  // This may happen when DexFile is initialized as trusted.
+  if (IsDomainMoreTrustedThan(dex_domain, dex_file.GetHiddenapiDomain())) {
+    dex_file.SetHiddenapiDomain(dex_domain);
+  }
 }
 
 namespace detail {

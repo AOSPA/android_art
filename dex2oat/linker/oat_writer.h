@@ -44,6 +44,7 @@ class CompiledMethod;
 class CompilerDriver;
 class CompilerOptions;
 class DexContainer;
+class OutputStream;
 class ProfileCompilationInfo;
 class TimingLogger;
 class TypeLookupTable;
@@ -62,7 +63,6 @@ namespace linker {
 
 class ImageWriter;
 class MultiOatRelativePatcher;
-class OutputStream;
 
 enum class CopyOption {
   kNever,
@@ -386,6 +386,9 @@ class OatWriter {
 
   // note OatFile does not take ownership of the DexFiles
   const std::vector<const DexFile*>* dex_files_;
+
+  // Whether this is the primary oat file.
+  bool primary_oat_file_;
 
   // Size required for Vdex data structures.
   size_t vdex_size_;

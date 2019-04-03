@@ -133,7 +133,7 @@
 #include "thread_list.h"
 #include "trace.h"
 #include "utils/dex_cache_arrays_layout-inl.h"
-#include "verifier/method_verifier.h"
+#include "verifier/class_verifier.h"
 #include "well_known_classes.h"
 
 namespace art {
@@ -900,7 +900,7 @@ void ClassLinker::FinishInit(Thread* self) {
   // initialize the StackOverflowError class (as it might require running the verifier). Instead,
   // ensure that the class will be initialized.
   if (kMemoryToolIsAvailable && !Runtime::Current()->IsAotCompiler()) {
-    verifier::MethodVerifier::Init();  // Need to prepare the verifier.
+    verifier::ClassVerifier::Init();  // Need to prepare the verifier.
 
     ObjPtr<mirror::Class> soe_klass = FindSystemClass(self, "Ljava/lang/StackOverflowError;");
     if (soe_klass == nullptr || !EnsureInitialized(self, hs.NewHandle(soe_klass), true, true)) {
@@ -927,28 +927,6 @@ void ClassLinker::RunRootClinits(Thread* self) {
   }
 }
 
-// Set image methods' entry point to interpreter.
-class SetInterpreterEntrypointArtMethodVisitor : public ArtMethodVisitor {
- public:
-  explicit SetInterpreterEntrypointArtMethodVisitor(PointerSize image_pointer_size)
-    : image_pointer_size_(image_pointer_size) {}
-
-  void Visit(ArtMethod* method) override REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (kIsDebugBuild && !method->IsRuntimeMethod()) {
-      CHECK(method->GetDeclaringClass() != nullptr);
-    }
-    if (!method->IsNative() && !method->IsRuntimeMethod() && !method->IsResolutionMethod()) {
-      method->SetEntryPointFromQuickCompiledCodePtrSize(GetQuickToInterpreterBridge(),
-                                                        image_pointer_size_);
-    }
-  }
-
- private:
-  const PointerSize image_pointer_size_;
-
-  DISALLOW_COPY_AND_ASSIGN(SetInterpreterEntrypointArtMethodVisitor);
-};
-
 struct TrampolineCheckData {
   const void* quick_resolution_trampoline;
   const void* quick_imt_conflict_trampoline;
@@ -973,7 +951,8 @@ bool ClassLinker::InitFromBootImage(std::string* error_msg) {
     *error_msg = StringPrintf("Invalid image pointer size: %u", pointer_size_unchecked);
     return false;
   }
-  image_pointer_size_ = spaces[0]->GetImageHeader().GetPointerSize();
+  const ImageHeader& image_header = spaces[0]->GetImageHeader();
+  image_pointer_size_ = image_header.GetPointerSize();
   if (!runtime->IsAotCompiler()) {
     // Only the Aot compiler supports having an image with a different pointer size than the
     // runtime. This happens on the host for compiling 32 bit tests since we use a 64 bit libart
@@ -985,6 +964,30 @@ bool ClassLinker::InitFromBootImage(std::string* error_msg) {
       return false;
     }
   }
+  DCHECK(!runtime->HasResolutionMethod());
+  runtime->SetResolutionMethod(image_header.GetImageMethod(ImageHeader::kResolutionMethod));
+  runtime->SetImtConflictMethod(image_header.GetImageMethod(ImageHeader::kImtConflictMethod));
+  runtime->SetImtUnimplementedMethod(
+      image_header.GetImageMethod(ImageHeader::kImtUnimplementedMethod));
+  runtime->SetCalleeSaveMethod(
+      image_header.GetImageMethod(ImageHeader::kSaveAllCalleeSavesMethod),
+      CalleeSaveType::kSaveAllCalleeSaves);
+  runtime->SetCalleeSaveMethod(
+      image_header.GetImageMethod(ImageHeader::kSaveRefsOnlyMethod),
+      CalleeSaveType::kSaveRefsOnly);
+  runtime->SetCalleeSaveMethod(
+      image_header.GetImageMethod(ImageHeader::kSaveRefsAndArgsMethod),
+      CalleeSaveType::kSaveRefsAndArgs);
+  runtime->SetCalleeSaveMethod(
+      image_header.GetImageMethod(ImageHeader::kSaveEverythingMethod),
+      CalleeSaveType::kSaveEverything);
+  runtime->SetCalleeSaveMethod(
+      image_header.GetImageMethod(ImageHeader::kSaveEverythingMethodForClinit),
+      CalleeSaveType::kSaveEverythingForClinit);
+  runtime->SetCalleeSaveMethod(
+      image_header.GetImageMethod(ImageHeader::kSaveEverythingMethodForSuspendCheck),
+      CalleeSaveType::kSaveEverythingForSuspendCheck);
+
   std::vector<const OatFile*> oat_files =
       runtime->GetOatFileManager().RegisterImageOatFiles(spaces);
   DCHECK(!oat_files.empty());
@@ -1309,23 +1312,6 @@ class CHAOnDeleteUpdateClassVisitor {
   const Thread* self_;
 };
 
-class VerifyDeclaringClassVisitor : public ArtMethodVisitor {
- public:
-  VerifyDeclaringClassVisitor() REQUIRES_SHARED(Locks::mutator_lock_, Locks::heap_bitmap_lock_)
-      : live_bitmap_(Runtime::Current()->GetHeap()->GetLiveBitmap()) {}
-
-  void Visit(ArtMethod* method) override
-      REQUIRES_SHARED(Locks::mutator_lock_, Locks::heap_bitmap_lock_) {
-    ObjPtr<mirror::Class> klass = method->GetDeclaringClassUnchecked();
-    if (klass != nullptr) {
-      CHECK(live_bitmap_->Test(klass.Ptr())) << "Image method has unmarked declaring class";
-    }
-  }
-
- private:
-  gc::accounting::HeapBitmap* const live_bitmap_;
-};
-
 /*
  * A class used to ensure that all strings in an AppImage have been properly
  * interned, and is only ever run in debug mode.
@@ -1545,8 +1531,14 @@ void AppImageLoadingHelper::Update(
   if (kVerifyArtMethodDeclaringClasses) {
     ScopedTrace timing("AppImage:VerifyDeclaringClasses");
     ReaderMutexLock rmu(self, *Locks::heap_bitmap_lock_);
-    VerifyDeclaringClassVisitor visitor;
-    header.VisitPackedArtMethods(&visitor, space->Begin(), kRuntimePointerSize);
+    gc::accounting::HeapBitmap* live_bitmap = heap->GetLiveBitmap();
+    header.VisitPackedArtMethods([&](ArtMethod& method)
+        REQUIRES_SHARED(Locks::mutator_lock_, Locks::heap_bitmap_lock_) {
+      ObjPtr<mirror::Class> klass = method.GetDeclaringClassUnchecked();
+      if (klass != nullptr) {
+        CHECK(live_bitmap->Test(klass.Ptr())) << "Image method has unmarked declaring class";
+      }
+    }, space->Begin(), kRuntimePointerSize);
   }
 }
 
@@ -1929,25 +1921,13 @@ static void VerifyAppImage(const ImageHeader& header,
                            const Handle<mirror::ObjectArray<mirror::DexCache> >& dex_caches,
                            ClassTable* class_table, gc::space::ImageSpace* space)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  {
-    class VerifyClassInTableArtMethodVisitor : public ArtMethodVisitor {
-     public:
-      explicit VerifyClassInTableArtMethodVisitor(ClassTable* table) : table_(table) {}
-
-      void Visit(ArtMethod* method) override
-          REQUIRES_SHARED(Locks::mutator_lock_, Locks::classlinker_classes_lock_) {
-        ObjPtr<mirror::Class> klass = method->GetDeclaringClass();
-        if (klass != nullptr && !Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(klass)) {
-          CHECK_EQ(table_->LookupByDescriptor(klass), klass) << mirror::Class::PrettyClass(klass);
-        }
-      }
-
-     private:
-      ClassTable* const table_;
-    };
-    VerifyClassInTableArtMethodVisitor visitor(class_table);
-    header.VisitPackedArtMethods(&visitor, space->Begin(), kRuntimePointerSize);
-  }
+  header.VisitPackedArtMethods([&](ArtMethod& method) REQUIRES_SHARED(Locks::mutator_lock_) {
+    ObjPtr<mirror::Class> klass = method.GetDeclaringClass();
+    if (klass != nullptr && !Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(klass)) {
+      CHECK_EQ(class_table->LookupByDescriptor(klass), klass)
+          << mirror::Class::PrettyClass(klass);
+    }
+  }, space->Begin(), kRuntimePointerSize);
   {
     // Verify that all direct interfaces of classes in the class table are also resolved.
     std::vector<ObjPtr<mirror::Class>> classes;
@@ -2154,8 +2134,16 @@ bool ClassLinker::AddImageSpace(
 
   // Set entry point to interpreter if in InterpretOnly mode.
   if (!runtime->IsAotCompiler() && runtime->GetInstrumentation()->InterpretOnly()) {
-    SetInterpreterEntrypointArtMethodVisitor visitor(image_pointer_size_);
-    header.VisitPackedArtMethods(&visitor, space->Begin(), image_pointer_size_);
+    // Set image methods' entry point to interpreter.
+    header.VisitPackedArtMethods([&](ArtMethod& method) REQUIRES_SHARED(Locks::mutator_lock_) {
+      if (!method.IsRuntimeMethod()) {
+        DCHECK(method.GetDeclaringClass() != nullptr);
+        if (!method.IsNative() && !method.IsResolutionMethod()) {
+          method.SetEntryPointFromQuickCompiledCodePtrSize(GetQuickToInterpreterBridge(),
+                                                            image_pointer_size_);
+        }
+      }
+    }, space->Begin(), image_pointer_size_);
   }
 
   ClassTable* class_table = nullptr;
@@ -3287,7 +3275,8 @@ bool ClassLinker::ShouldUseInterpreterEntrypoint(ArtMethod* method, const void* 
     return true;
   }
 
-  if (Dbg::IsForcedInterpreterNeededForCalling(Thread::Current(), method)) {
+  if (Thread::Current()->IsForceInterpreter() ||
+      Dbg::IsForcedInterpreterNeededForCalling(Thread::Current(), method)) {
     // Force the use of interpreter when it is required by the debugger.
     return true;
   }
@@ -3731,15 +3720,18 @@ void ClassLinker::RegisterDexFileLocked(const DexFile& dex_file,
   const size_t dex_cache_length = dex_cache_location.length();
   CHECK_GT(dex_cache_length, 0u) << dex_file.GetLocation();
   std::string dex_file_location = dex_file.GetLocation();
-  CHECK_GE(dex_file_location.length(), dex_cache_length)
-      << dex_cache_location << " " << dex_file.GetLocation();
-  // Take suffix.
-  const std::string dex_file_suffix = dex_file_location.substr(
-      dex_file_location.length() - dex_cache_length,
-      dex_cache_length);
-  // Example dex_cache location is SettingsProvider.apk and
-  // dex file location is /system/priv-app/SettingsProvider/SettingsProvider.apk
-  CHECK_EQ(dex_cache_location, dex_file_suffix);
+  // The following paths checks don't work on preopt when using boot dex files, where the dex
+  // cache location is the one on device, and the dex_file's location is the one on host.
+  if (!(Runtime::Current()->IsAotCompiler() && class_loader == nullptr && !kIsTargetBuild)) {
+    CHECK_GE(dex_file_location.length(), dex_cache_length)
+        << dex_cache_location << " " << dex_file.GetLocation();
+    const std::string dex_file_suffix = dex_file_location.substr(
+        dex_file_location.length() - dex_cache_length,
+        dex_cache_length);
+    // Example dex_cache location is SettingsProvider.apk and
+    // dex file location is /system/priv-app/SettingsProvider/SettingsProvider.apk
+    CHECK_EQ(dex_cache_location, dex_file_suffix);
+  }
   const OatFile* oat_file =
       (dex_file.GetOatDexFile() != nullptr) ? dex_file.GetOatDexFile()->GetOatFile() : nullptr;
   // Clean up pass to remove null dex caches; null dex caches can occur due to class unloading
@@ -3764,6 +3756,9 @@ void ClassLinker::RegisterDexFileLocked(const DexFile& dex_file,
   if (initialize_oat_file_data) {
     oat_file->InitializeRelocations();
   }
+  // Let hiddenapi assign a domain to the newly registered dex file.
+  hiddenapi::InitializeDexFileDomain(dex_file, class_loader);
+
   jweak dex_cache_jweak = vm->AddWeakGlobalRef(self, dex_cache);
   dex_cache->SetDexFile(&dex_file);
   DexCacheData data;
@@ -4604,13 +4599,13 @@ verifier::FailureKind ClassLinker::PerformClassVerification(Thread* self,
                                                             verifier::HardFailLogMode log_level,
                                                             std::string* error_msg) {
   Runtime* const runtime = Runtime::Current();
-  return verifier::MethodVerifier::VerifyClass(self,
-                                               klass.Get(),
-                                               runtime->GetCompilerCallbacks(),
-                                               runtime->IsAotCompiler(),
-                                               log_level,
-                                               Runtime::Current()->GetTargetSdkVersion(),
-                                               error_msg);
+  return verifier::ClassVerifier::VerifyClass(self,
+                                              klass.Get(),
+                                              runtime->GetCompilerCallbacks(),
+                                              runtime->IsAotCompiler(),
+                                              log_level,
+                                              Runtime::Current()->GetTargetSdkVersion(),
+                                              error_msg);
 }
 
 bool ClassLinker::VerifyClassUsingOatFile(const DexFile& dex_file,
@@ -4773,8 +4768,9 @@ ObjPtr<mirror::Class> ClassLinker::CreateProxyClass(ScopedObjectAccessAlreadyRun
   // Object has an empty iftable, copy it for that reason.
   temp_klass->SetIfTable(GetClassRoot<mirror::Object>(this)->GetIfTable());
   mirror::Class::SetStatus(temp_klass, ClassStatus::kIdx, self);
-  std::string descriptor(GetDescriptorForProxy(temp_klass.Get()));
-  const size_t hash = ComputeModifiedUtf8Hash(descriptor.c_str());
+  std::string storage;
+  const char* descriptor = temp_klass->GetDescriptor(&storage);
+  const size_t hash = ComputeModifiedUtf8Hash(descriptor);
 
   // Needs to be before we insert the class so that the allocator field is set.
   LinearAlloc* const allocator = GetOrCreateAllocatorForClassLoader(temp_klass->GetClassLoader());
@@ -4783,7 +4779,7 @@ ObjPtr<mirror::Class> ClassLinker::CreateProxyClass(ScopedObjectAccessAlreadyRun
   // (ArtField::declaring_class_) are only visited from the class
   // table. There can't be any suspend points between inserting the
   // class and setting the field arrays below.
-  ObjPtr<mirror::Class> existing = InsertClass(descriptor.c_str(), temp_klass.Get(), hash);
+  ObjPtr<mirror::Class> existing = InsertClass(descriptor, temp_klass.Get(), hash);
   CHECK(existing == nullptr);
 
   // Instance fields are inherited, but we add a couple of static fields...
@@ -4855,7 +4851,7 @@ ObjPtr<mirror::Class> ClassLinker::CreateProxyClass(ScopedObjectAccessAlreadyRun
     // The new class will replace the old one in the class table.
     Handle<mirror::ObjectArray<mirror::Class>> h_interfaces(
         hs.NewHandle(soa.Decode<mirror::ObjectArray<mirror::Class>>(interfaces)));
-    if (!LinkClass(self, descriptor.c_str(), temp_klass, h_interfaces, &klass)) {
+    if (!LinkClass(self, descriptor, temp_klass, h_interfaces, &klass)) {
       mirror::Class::SetStatus(temp_klass, ClassStatus::kErrorUnresolved, self);
       return nullptr;
     }
@@ -4916,13 +4912,6 @@ ObjPtr<mirror::Class> ClassLinker::CreateProxyClass(ScopedObjectAccessAlreadyRun
              soa.Decode<mirror::ObjectArray<mirror::ObjectArray<mirror::Class>>>(throws));
   }
   return klass.Get();
-}
-
-std::string ClassLinker::GetDescriptorForProxy(ObjPtr<mirror::Class> proxy_class) {
-  DCHECK(proxy_class->IsProxyClass());
-  ObjPtr<mirror::String> name = proxy_class->GetName();
-  DCHECK(name != nullptr);
-  return DotToDescriptor(name->ToModifiedUtf8().c_str());
 }
 
 void ClassLinker::CreateProxyConstructor(Handle<mirror::Class> klass, ArtMethod* out) {
@@ -9434,7 +9423,9 @@ jobject ClassLinker::CreateWellKnownClassLoader(Thread* self,
   CHECK(self->GetJniEnv()->IsSameObject(loader_class,
                                         WellKnownClasses::dalvik_system_PathClassLoader) ||
         self->GetJniEnv()->IsSameObject(loader_class,
-                                        WellKnownClasses::dalvik_system_DelegateLastClassLoader));
+                                        WellKnownClasses::dalvik_system_DelegateLastClassLoader) ||
+        self->GetJniEnv()->IsSameObject(loader_class,
+                                        WellKnownClasses::dalvik_system_InMemoryDexClassLoader));
 
   // SOAAlreadyRunnable is protected, and we need something to add a global reference.
   // We could move the jobject to the callers, but all call-sites do this...
