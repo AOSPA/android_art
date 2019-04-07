@@ -364,16 +364,18 @@ Runtime::~Runtime() {
         << "\n";
   }
 
+  // Wait for the workers of thread pools to be created since there can't be any
+  // threads attaching during shutdown.
   WaitForThreadPoolWorkersToStart();
-
   if (jit_ != nullptr) {
-    // Wait for the workers to be created since there can't be any threads attaching during
-    // shutdown.
     jit_->WaitForWorkersToBeCreated();
     // Stop the profile saver thread before marking the runtime as shutting down.
     // The saver will try to dump the profiles before being sopped and that
     // requires holding the mutator lock.
     jit_->StopProfileSaver();
+  }
+  if (oat_file_manager_ != nullptr) {
+    oat_file_manager_->WaitForWorkersToBeCreated();
   }
 
   {
@@ -419,6 +421,9 @@ Runtime::~Runtime() {
     // JIT compiler threads.
     jit_->DeleteThreadPool();
   }
+  if (oat_file_manager_ != nullptr) {
+    oat_file_manager_->DeleteThreadPool();
+  }
   DeleteThreadPool();
   CHECK(thread_pool_ == nullptr);
 
@@ -431,10 +436,6 @@ Runtime::~Runtime() {
     ScopedTrace trace2("Delete thread list");
     thread_list_->ShutDown();
   }
-
-  // We can only unload boot classpath native libraries once all threads are terminated
-  // or suspended.
-  java_vm_->UnloadBootNativeLibraries();
 
   // TODO Maybe do some locking.
   for (auto& agent : agents_) {
@@ -589,9 +590,12 @@ void Runtime::Abort(const char* msg) {
 #endif
   }
 
-  // Ensure that we don't have multiple threads trying to abort at once,
-  // which would result in significantly worse diagnostics.
-  MutexLock mu(Thread::Current(), *Locks::abort_lock_);
+  {
+    // Ensure that we don't have multiple threads trying to abort at once,
+    // which would result in significantly worse diagnostics.
+    ScopedThreadStateChange tsc(Thread::Current(), kNativeForAbort);
+    Locks::abort_lock_->ExclusiveLock(Thread::Current());
+  }
 
   // Get any pending output out of the way.
   fflush(nullptr);
@@ -1212,6 +1216,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   }
   image_compiler_options_ = runtime_options.ReleaseOrDefault(Opt::ImageCompilerOptions);
 
+  finalizer_timeout_ms_ = runtime_options.GetOrDefault(Opt::FinalizerTimeoutMs);
   max_spins_before_thin_lock_inflation_ =
       runtime_options.GetOrDefault(Opt::MaxSpinsBeforeThinLockInflation);
 
@@ -1697,8 +1702,9 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   VLOG(startup) << "Runtime::Init exiting";
 
   // Set OnlyUseSystemOatFiles only after boot classpath has been set up.
-  if (runtime_options.Exists(Opt::OnlyUseSystemOatFiles)) {
-    oat_file_manager_->SetOnlyUseSystemOatFiles(/*assert_no_files_loaded=*/ true);
+  if (is_zygote_ || runtime_options.Exists(Opt::OnlyUseSystemOatFiles)) {
+    oat_file_manager_->SetOnlyUseSystemOatFiles(/*enforce=*/ true,
+                                                /*assert_no_files_loaded=*/ true);
   }
 
   return true;

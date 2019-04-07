@@ -361,14 +361,19 @@ endif
 
 LOCAL_MODULE := com.android.runtime
 LOCAL_REQUIRED_MODULES := $(TARGET_RUNTIME_APEX)
-ifneq ($(HOST_OS),darwin)
-  LOCAL_REQUIRED_MODULES += $(APEX_TEST_MODULE)
-endif
 LOCAL_REQUIRED_MODULES += art_apex_boot_integrity
 
 # Clear locally used variable.
 art_target_include_debug_build :=
 
+include $(BUILD_PHONY_PACKAGE)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := com.android.runtime
+LOCAL_IS_HOST_MODULE := true
+ifneq ($(HOST_OS),darwin)
+  LOCAL_REQUIRED_MODULES += $(APEX_TEST_MODULE)
+endif
 include $(BUILD_PHONY_PACKAGE)
 
 # Create canonical name -> file name symlink in the symbol directory
@@ -441,18 +446,27 @@ endif
 
 include $(BUILD_PHONY_PACKAGE)
 
-# The art-tools package depends on helpers and tools that are useful for developers and on-device
-# investigations.
+# The art-tools package depends on helpers and tools that are useful for developers. Similar
+# dependencies exist for the APEX builds for these tools (see build/apex/Android.bp).
 
 include $(CLEAR_VARS)
 LOCAL_MODULE := art-tools
+LOCAL_IS_HOST_MODULE := true
 LOCAL_REQUIRED_MODULES := \
     ahat \
-    dexdiag \
     dexdump \
-    dexlist \
     hprof-conv \
+
+# A subset of the tools are disabled when HOST_PREFER_32_BIT is defined as make reports that
+# they are not supported on host (b/129323791). This is likely due to art_apex disabling host
+# APEX builds when HOST_PREFER_32_BIT is set (b/120617876).
+ifneq ($(HOST_PREFER_32_BIT),true)
+LOCAL_REQUIRED_MODULES += \
+    dexdiag \
+    dexlist \
     oatdump \
+
+endif
 
 include $(BUILD_PHONY_PACKAGE)
 
@@ -520,15 +534,39 @@ PRIVATE_RUNTIME_DEPENDENCY_LIBS := \
   lib64/libdexfile_external.so \
   lib/libnativeloader.so \
   lib64/libnativeloader.so \
+  lib/libandroidio.so \
+  lib64/libandroidio.so \
 
+# Copy some libraries into `$(TARGET_OUT)/lib(64)` (the
+# `/system/lib(64)` directory to be sync'd to the target) for ART testing
+# purposes:
+# - Bionic bootstrap libraries, copied from
+#   `$(TARGET_OUT)/lib(64)/bootstrap` (the `/system/lib(64)/bootstrap`
+#   directory to be sync'd to the target);
+# - Some libraries which are part of the Runtime APEX; if the product
+#   to build uses flattened APEXes, these libraries are copied from
+#   `$(TARGET_OUT)/apex/com.android.runtime.debug` (the flattened
+#   (Debug) Runtime APEX directory to be sync'd to the target);
+#   otherwise, they are copied from
+#   `$(TARGET_OUT)/../apex/com.android.runtime.debug` (the local
+#   directory under the build tree containing the (Debug) Runtime APEX
+#   artifacts, which is not sync'd to the target).
+#
+# TODO(b/121117762): Remove this when the ART Buildbot and Golem have
+# full support for the Runtime APEX.
 .PHONY: standalone-apex-files
 standalone-apex-files: libc.bootstrap libdl.bootstrap libm.bootstrap linker com.android.runtime.debug
 	for f in $(PRIVATE_BIONIC_FILES); do \
 	  tf=$(TARGET_OUT)/$$f; \
 	  if [ -f $$tf ]; then cp -f $$tf $$(echo $$tf | sed 's,bootstrap/,,'); fi; \
 	done
+	if [ "x$(TARGET_FLATTEN_APEX)" = xtrue ]; then \
+	  runtime_apex_orig_dir=$(TARGET_OUT)/apex/com.android.runtime.debug; \
+	else \
+	  runtime_apex_orig_dir=$(TARGET_OUT)/../apex/com.android.runtime.debug; \
+	fi; \
 	for f in $(PRIVATE_RUNTIME_DEPENDENCY_LIBS); do \
-	  tf=$(TARGET_OUT)/../apex/com.android.runtime.debug/$$f; \
+	  tf="$$runtime_apex_orig_dir/$$f"; \
 	  if [ -f $$tf ]; then cp -f $$tf $(TARGET_OUT)/$$f; fi; \
 	done
 
