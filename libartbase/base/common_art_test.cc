@@ -158,6 +158,17 @@ void CommonArtTestImpl::SetUpAndroidRootEnvVars() {
       setenv("ANDROID_RUNTIME_ROOT", android_runtime_root.c_str(), 1);
     }
 
+    // Environment variable ANDROID_TZDATA_ROOT is set on the device, but not
+    // necessarily on the host. It needs to be set so that various libraries
+    // like icu4c can find their data files.
+    const char* android_tzdata_root_from_env = getenv("ANDROID_TZDATA_ROOT");
+    if (android_tzdata_root_from_env == nullptr) {
+      // Use ${ANDROID_HOST_OUT}/com.android.tzdata for ANDROID_TZDATA_ROOT.
+      std::string android_tzdata_root = android_host_out_from_env;
+      android_tzdata_root += "/com.android.tzdata";
+      setenv("ANDROID_TZDATA_ROOT", android_tzdata_root.c_str(), 1);
+    }
+
     setenv("LD_LIBRARY_PATH", ":", 0);  // Required by java.lang.System.<clinit>.
   }
 }
@@ -430,15 +441,19 @@ std::vector<std::unique_ptr<const DexFile>> CommonArtTestImpl::OpenDexFiles(cons
   return dex_files;
 }
 
+std::unique_ptr<const DexFile> CommonArtTestImpl::OpenDexFile(const char* filename) {
+  std::vector<std::unique_ptr<const DexFile>> dex_files(OpenDexFiles(filename));
+  CHECK_EQ(dex_files.size(), 1u) << "Expected only one dex file";
+  return std::move(dex_files[0]);
+}
+
 std::vector<std::unique_ptr<const DexFile>> CommonArtTestImpl::OpenTestDexFiles(
     const char* name) {
   return OpenDexFiles(GetTestDexFileName(name).c_str());
 }
 
 std::unique_ptr<const DexFile> CommonArtTestImpl::OpenTestDexFile(const char* name) {
-  std::vector<std::unique_ptr<const DexFile>> vector = OpenTestDexFiles(name);
-  EXPECT_EQ(1U, vector.size());
-  return std::move(vector[0]);
+  return OpenDexFile(GetTestDexFileName(name).c_str());
 }
 
 std::string CommonArtTestImpl::GetCoreFileLocation(const char* suffix) {

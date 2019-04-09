@@ -34,6 +34,7 @@
 #include "deoptimization_kind.h"
 #include "dex/dex_file_types.h"
 #include "experimental_flags.h"
+#include "gc/space/image_space_loading_order.h"
 #include "gc_root.h"
 #include "instrumentation.h"
 #include "jdwp_provider.h"
@@ -775,6 +776,10 @@ class Runtime {
     dump_gc_performance_on_shutdown_ = value;
   }
 
+  bool GetDumpGCPerformanceOnShutdown() const {
+    return dump_gc_performance_on_shutdown_;
+  }
+
   void IncrementDeoptimizationCount(DeoptimizationKind kind) {
     DCHECK_LE(kind, DeoptimizationKind::kLast);
     deoptimization_counts_[static_cast<size_t>(kind)]++;
@@ -834,6 +839,17 @@ class Runtime {
 
   void SetLoadAppImageStartupCacheEnabled(bool enabled) {
     load_app_image_startup_cache_ = enabled;
+  }
+
+  // Notify the runtime that application startup is considered completed. Only has effect for the
+  // first call.
+  void NotifyStartupCompleted();
+
+  // Return true if startup is already completed.
+  bool GetStartupCompleted() const;
+
+  gc::space::ImageSpaceLoadingOrder GetImageSpaceLoadingOrder() const {
+    return image_space_loading_order_;
   }
 
  private:
@@ -1160,6 +1176,12 @@ class Runtime {
   uint32_t verifier_logging_threshold_ms_;
 
   bool load_app_image_startup_cache_ = false;
+
+  // If startup has completed, must happen at most once.
+  std::atomic<bool> startup_completed_ = false;
+
+  gc::space::ImageSpaceLoadingOrder image_space_loading_order_ =
+      gc::space::ImageSpaceLoadingOrder::kSystemFirst;
 
   // Note: See comments on GetFaultMessage.
   friend std::string GetFaultMessageForAbortLogging();
