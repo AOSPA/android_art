@@ -28,6 +28,7 @@
 #include "base/utils.h"
 #include "class_root.h"
 #include "debugger.h"
+#include "dex/type_lookup_table.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "interpreter/interpreter.h"
 #include "jit-inl.h"
@@ -35,6 +36,7 @@
 #include "jni/java_vm_ext.h"
 #include "mirror/method_handle_impl.h"
 #include "mirror/var_handle.h"
+#include "oat_file.h"
 #include "oat_file_manager.h"
 #include "oat_quick_method_header.h"
 #include "profile/profile_compilation_info.h"
@@ -687,6 +689,14 @@ void Jit::AddNonAotBootMethodsToQueue(Thread* self) {
       // The runtime module jars are already preopted.
       continue;
     }
+    // To speed up class lookups, generate a type lookup table for
+    // the dex file.
+    DCHECK(dex_file->GetOatDexFile() == nullptr);
+    TypeLookupTable type_lookup_table = TypeLookupTable::Create(*dex_file);
+    type_lookup_tables_.push_back(
+          std::make_unique<art::OatDexFile>(std::move(type_lookup_table)));
+    dex_file->SetOatDexFile(type_lookup_tables_.back().get());
+
     std::set<dex::TypeIndex> class_types;
     std::set<uint16_t> all_methods;
     if (!profile_info.GetClassesAndMethods(*dex_file,
@@ -712,18 +722,23 @@ void Jit::AddNonAotBootMethodsToQueue(Thread* self) {
         continue;
       }
       const void* entry_point = method->GetEntryPointFromQuickCompiledCode();
-      // TODO: if the entry point is the resolution stub, we should not update the
-      // entrypoint as we rely on the stub for doing the class initialization. Because
-      // we currently have no place to safely store the compiled code, we just don't
-      // compile it for now.
       if (class_linker->IsQuickToInterpreterBridge(entry_point) ||
-          class_linker->IsQuickGenericJniStub(entry_point)) {
+          class_linker->IsQuickGenericJniStub(entry_point) ||
+          class_linker->IsQuickResolutionStub(entry_point)) {
         if (!method->IsNative()) {
           // The compiler requires a ProfilingInfo object for non-native methods.
           ProfilingInfo::Create(self, method, /* retry_allocation= */ true);
         }
-        thread_pool_->AddTask(self,
-            new JitCompileTask(method, JitCompileTask::TaskKind::kCompile));
+        // Special case ZygoteServer class so that it gets compiled before the
+        // zygote enters it. This avoids needing to do OSR during app startup.
+        // TODO: have a profile instead.
+        if (method->GetDeclaringClass()->DescriptorEquals(
+                "Lcom/android/internal/os/ZygoteServer;")) {
+          CompileMethod(method, self, /* baseline= */ false, /* osr= */ false);
+        } else {
+          thread_pool_->AddTask(self,
+              new JitCompileTask(method, JitCompileTask::TaskKind::kCompile));
+        }
       }
     }
   }
