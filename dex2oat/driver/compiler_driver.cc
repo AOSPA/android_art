@@ -930,6 +930,14 @@ void CompilerDriver::PreCompile(jobject class_loader,
 }
 
 bool CompilerDriver::ShouldCompileBasedOnProfile(const MethodReference& method_ref) const {
+  // If compiling the apex image, filter out methods not in an apex file (the profile used
+  // for boot classpath is the same between the apex image and the boot image, so it includes
+  /// framewkro methods).
+  if (compiler_options_->IsApexBootImage() &&
+      !android::base::StartsWith(method_ref.dex_file->GetLocation(), "/apex")) {
+    return false;
+  }
+
   // Profile compilation info may be null if no profile is passed.
   if (!CompilerFilter::DependsOnProfile(compiler_options_->GetCompilerFilter())) {
     // Use the compiler filter instead of the presence of profile_compilation_info_ since
@@ -950,6 +958,7 @@ bool CompilerDriver::ShouldCompileBasedOnProfile(const MethodReference& method_r
     LOG(INFO) << "[ProfileGuidedCompilation] "
         << (result ? "Compiled" : "Skipped") << " method:" << method_ref.PrettyMethod(true);
   }
+
   return result;
 }
 
@@ -2145,6 +2154,9 @@ class InitializeClassVisitor : public CompilationVisitor {
             InitializeDependencies(klass, class_loader, soa.Self());
         if (!is_app_image || (is_app_image && is_superclass_initialized)) {
           manager_->GetClassLinker()->EnsureInitialized(soa.Self(), klass, false, true);
+          // It's OK to clear the exception here since the compiler is supposed to be fault
+          // tolerant and will silently not initialize classes that have exceptions.
+          soa.Self()->ClearException();
         }
         // Otherwise it's in app image but superclasses can't be initialized, no need to proceed.
         old_status = klass->GetStatus();
@@ -2189,6 +2201,7 @@ class InitializeClassVisitor : public CompilationVisitor {
             Runtime* const runtime = Runtime::Current();
             // Run the class initializer in transaction mode.
             runtime->EnterTransactionMode(is_app_image, klass.Get());
+
             bool success = manager_->GetClassLinker()->EnsureInitialized(soa.Self(), klass, true,
                                                                          true);
             // TODO we detach transaction from runtime to indicate we quit the transactional
@@ -2236,6 +2249,11 @@ class InitializeClassVisitor : public CompilationVisitor {
             }
           }
         }
+        // Clear exception in case EnsureInitialized has caused one in the code above.
+        // It's OK to clear the exception here since the compiler is supposed to be fault
+        // tolerant and will silently not initialize classes that have exceptions.
+        soa.Self()->ClearException();
+
         // If the class still isn't initialized, at least try some checks that initialization
         // would do so they can be skipped at runtime.
         if (!klass->IsInitialized() &&
