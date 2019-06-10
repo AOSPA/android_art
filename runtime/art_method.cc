@@ -593,7 +593,8 @@ const OatQuickMethodHeader* ArtMethod::GetOatQuickMethodHeader(uintptr_t pc) {
   // Check whether the current entry point contains this pc.
   if (!class_linker->IsQuickGenericJniStub(existing_entry_point) &&
       !class_linker->IsQuickResolutionStub(existing_entry_point) &&
-      !class_linker->IsQuickToInterpreterBridge(existing_entry_point)) {
+      !class_linker->IsQuickToInterpreterBridge(existing_entry_point) &&
+      existing_entry_point != GetQuickInstrumentationEntryPoint()) {
     OatQuickMethodHeader* method_header =
         OatQuickMethodHeader::FromEntryPoint(existing_entry_point);
 
@@ -836,6 +837,29 @@ std::string ArtMethod::JniLongName() {
   long_name += MangleForJni(signature);
 
   return long_name;
+}
+
+const char* ArtMethod::GetRuntimeMethodName() {
+  Runtime* const runtime = Runtime::Current();
+  if (this == runtime->GetResolutionMethod()) {
+    return "<runtime internal resolution method>";
+  } else if (this == runtime->GetImtConflictMethod()) {
+    return "<runtime internal imt conflict method>";
+  } else if (this == runtime->GetCalleeSaveMethod(CalleeSaveType::kSaveAllCalleeSaves)) {
+    return "<runtime internal callee-save all registers method>";
+  } else if (this == runtime->GetCalleeSaveMethod(CalleeSaveType::kSaveRefsOnly)) {
+    return "<runtime internal callee-save reference registers method>";
+  } else if (this == runtime->GetCalleeSaveMethod(CalleeSaveType::kSaveRefsAndArgs)) {
+    return "<runtime internal callee-save reference and argument registers method>";
+  } else if (this == runtime->GetCalleeSaveMethod(CalleeSaveType::kSaveEverything)) {
+    return "<runtime internal save-every-register method>";
+  } else if (this == runtime->GetCalleeSaveMethod(CalleeSaveType::kSaveEverythingForClinit)) {
+    return "<runtime internal save-every-register method for clinit>";
+  } else if (this == runtime->GetCalleeSaveMethod(CalleeSaveType::kSaveEverythingForSuspendCheck)) {
+    return "<runtime internal save-every-register method for suspend check>";
+  } else {
+    return "<unknown runtime internal method>";
+  }
 }
 
 // AssertSharedHeld doesn't work in GetAccessFlags, so use a NO_THREAD_SAFETY_ANALYSIS helper.
