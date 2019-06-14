@@ -1047,8 +1047,7 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
     }
     // FlushInstructionCache() flushes both data and instruction caches lines. The cacheline range
     // flushed is for the executable mapping of the code just added.
-    uint8_t* x_memory = reinterpret_cast<uint8_t*>(method_header);
-    FlushInstructionCache(x_memory, x_memory + total_size);
+    FlushInstructionCache(code_ptr, code_ptr + code_size);
 
     // Ensure CPU instruction pipelines are flushed for all cores. This is necessary for
     // correctness as code may still be in instruction pipelines despite the i-cache flush. It is
@@ -2157,12 +2156,10 @@ void JitCodeCache::InvalidateCompiledCodeFor(ArtMethod* method,
   }
 }
 
-uint8_t* JitCodeCache::AllocateCode(size_t allocation_size) {
-  // Each allocation should be on its own set of cache lines. The allocation must be large enough
-  // for header, code, and any padding.
-  uint8_t* result = reinterpret_cast<uint8_t*>(
-      mspace_memalign(exec_mspace_, kJitCodeAlignment, allocation_size));
+uint8_t* JitCodeCache::AllocateCode(size_t code_size) {
   size_t alignment = GetInstructionSetAlignment(kRuntimeISA);
+  uint8_t* result = reinterpret_cast<uint8_t*>(
+      mspace_memalign(exec_mspace_, alignment, code_size));
   size_t header_size = RoundUp(sizeof(OatQuickMethodHeader), alignment);
   // Ensure the header ends up at expected instruction alignment.
   DCHECK_ALIGNED_PARAM(reinterpret_cast<uintptr_t>(result + header_size), alignment);

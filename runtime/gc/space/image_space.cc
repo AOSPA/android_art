@@ -926,8 +926,7 @@ class ImageSpace::Loader {
                               int fd,
                               TimingLogger* logger,
                               /*inout*/MemMap* image_reservation,
-                              /*out*/std::string* error_msg)
-        REQUIRES_SHARED(Locks::mutator_lock_) {
+                              /*out*/std::string* error_msg) {
     TimingLogger::ScopedTiming timing("MapImageFile", logger);
     std::string temp_error_msg;
     const bool is_compressed = image_header.HasCompressedBlock();
@@ -996,8 +995,6 @@ class ImageSpace::Loader {
       }
       if (use_parallel) {
         ScopedTrace trace("Waiting for workers");
-        // Go to native since we don't want to suspend while holding the mutator lock.
-        ScopedThreadSuspension sts(Thread::Current(), kNative);
         pool->Wait(self, true, false);
       }
       const uint64_t time = NanoTime() - start;
