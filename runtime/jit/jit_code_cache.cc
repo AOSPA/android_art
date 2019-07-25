@@ -645,8 +645,19 @@ bool JitCodeCache::WaitForPotentialCollectionToComplete(Thread* self) {
   return in_collection;
 }
 
+static size_t GetJitCodeAlignment() {
+  if (kRuntimeISA == InstructionSet::kArm || kRuntimeISA == InstructionSet::kThumb2) {
+    // Some devices with 32-bit ARM kernels need additional JIT code alignment when using dual
+    // view JIT (b/132205399). The alignment returned here coincides with the typical ARM d-cache
+    // line (though the value should be probed ideally). Both the method header and code in the
+    // cache are aligned to this size. Anything less than 64-bytes exhibits the problem.
+    return 64;
+  }
+  return GetInstructionSetAlignment(kRuntimeISA);
+}
+
 static uintptr_t FromCodeToAllocation(const void* code) {
-  size_t alignment = GetInstructionSetAlignment(kRuntimeISA);
+  size_t alignment = GetJitCodeAlignment();
   return reinterpret_cast<uintptr_t>(code) - RoundUp(sizeof(OatQuickMethodHeader), alignment);
 }
 
@@ -981,6 +992,7 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
   }
 
   OatQuickMethodHeader* method_header = nullptr;
+  uint8_t* nox_memory = nullptr;
   uint8_t* code_ptr = nullptr;
 
   MutexLock mu(self, lock_);
@@ -990,14 +1002,14 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
   {
     ScopedCodeCacheWrite scc(this);
 
-    size_t alignment = GetInstructionSetAlignment(kRuntimeISA);
+    size_t alignment = GetJitCodeAlignment();
     // Ensure the header ends up at expected instruction alignment.
     size_t header_size = RoundUp(sizeof(OatQuickMethodHeader), alignment);
     size_t total_size = header_size + code_size;
 
     // AllocateCode allocates memory in non-executable region for alignment header and code. The
     // header size may include alignment padding.
-    uint8_t* nox_memory = AllocateCode(total_size);
+    nox_memory = AllocateCode(total_size);
     if (nox_memory == nullptr) {
       return nullptr;
     }
@@ -1041,13 +1053,25 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
     // For reference, this behavior is caused by this commit:
     // https://android.googlesource.com/kernel/msm/+/3fbe6bc28a6b9939d0650f2f17eb5216c719950c
     //
+    bool cache_flush_success = true;
     if (HasDualCodeMapping()) {
       // Flush the data cache lines associated with the non-executable copy of the code just added.
-      FlushDataCache(nox_memory, nox_memory + total_size);
+      cache_flush_success = FlushCpuCaches(nox_memory, nox_memory + total_size);
     }
-    // FlushInstructionCache() flushes both data and instruction caches lines. The cacheline range
-    // flushed is for the executable mapping of the code just added.
-    FlushInstructionCache(code_ptr, code_ptr + code_size);
+
+    // Invalidate i-cache for the executable mapping.
+    if (cache_flush_success) {
+      uint8_t* x_memory = reinterpret_cast<uint8_t*>(FromCodeToAllocation(code_ptr));
+      cache_flush_success = FlushCpuCaches(x_memory, x_memory + total_size);
+    }
+
+    // If flushing the cache has failed, reject the allocation because we can't guarantee
+    // correctness of the instructions present in the processor caches.
+    if (!cache_flush_success) {
+      PLOG(ERROR) << "Cache flush failed for JIT code, code not committed.";
+      FreeCode(nox_memory);
+      return nullptr;
+    }
 
     // Ensure CPU instruction pipelines are flushed for all cores. This is necessary for
     // correctness as code may still be in instruction pipelines despite the i-cache flush. It is
@@ -1115,7 +1139,13 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
       FillRootTable(roots_data, roots);
       {
         // Flush data cache, as compiled code references literals in it.
-        FlushDataCache(roots_data, roots_data + data_size);
+        // TODO(oth): establish whether this is necessary.
+        if (!FlushCpuCaches(roots_data, roots_data + data_size)) {
+          PLOG(ERROR) << "Cache flush failed for JIT data, code not committed.";
+          ScopedCodeCacheWrite scc(this);
+          FreeCode(nox_memory);
+          return nullptr;
+        }
       }
       method_code_map_.Put(code_ptr, method);
       if (osr) {
@@ -2156,10 +2186,12 @@ void JitCodeCache::InvalidateCompiledCodeFor(ArtMethod* method,
   }
 }
 
-uint8_t* JitCodeCache::AllocateCode(size_t code_size) {
-  size_t alignment = GetInstructionSetAlignment(kRuntimeISA);
+uint8_t* JitCodeCache::AllocateCode(size_t allocation_size) {
+  // Each allocation should be on its own set of cache lines. The allocation must be large enough
+  // for header, code, and any padding.
+  size_t alignment = GetJitCodeAlignment();
   uint8_t* result = reinterpret_cast<uint8_t*>(
-      mspace_memalign(exec_mspace_, alignment, code_size));
+      mspace_memalign(exec_mspace_, alignment, allocation_size));
   size_t header_size = RoundUp(sizeof(OatQuickMethodHeader), alignment);
   // Ensure the header ends up at expected instruction alignment.
   DCHECK_ALIGNED_PARAM(reinterpret_cast<uintptr_t>(result + header_size), alignment);
