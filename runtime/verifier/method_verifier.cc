@@ -63,6 +63,7 @@
 #include "scoped_thread_state_change-inl.h"
 #include "stack.h"
 #include "vdex_file.h"
+#include "verifier/method_verifier.h"
 #include "verifier_compiler_binding.h"
 #include "verifier_deps.h"
 
@@ -152,6 +153,7 @@ class MethodVerifier final : public ::art::verifier::MethodVerifier {
                  bool need_precise_constants,
                  bool verify_to_dump,
                  bool allow_thread_suspension,
+                 bool fill_register_lines_,
                  uint32_t api_level)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -630,6 +632,9 @@ class MethodVerifier final : public ::art::verifier::MethodVerifier {
   // Note: this flag is only valid once Verify() has started.
   bool is_constructor_;
 
+  // Whether to attempt to fill all register lines for (ex) debugger use.
+  bool fill_register_lines_;
+
   // API level, for dependent checks. Note: we do not use '0' for unset here, to simplify checks.
   // Instead, unset level should correspond to max().
   const uint32_t api_level_;
@@ -695,6 +700,7 @@ MethodVerifier<kVerifierDebug>::MethodVerifier(Thread* self,
                                                bool need_precise_constants,
                                                bool verify_to_dump,
                                                bool allow_thread_suspension,
+                                               bool fill_register_lines,
                                                uint32_t api_level)
     : art::verifier::MethodVerifier(self,
                                     dex_file,
@@ -716,6 +722,7 @@ MethodVerifier<kVerifierDebug>::MethodVerifier(Thread* self,
       verify_to_dump_(verify_to_dump),
       allow_thread_suspension_(allow_thread_suspension),
       is_constructor_(false),
+      fill_register_lines_(fill_register_lines),
       api_level_(api_level == 0 ? std::numeric_limits<uint32_t>::max() : api_level) {
 }
 
@@ -1578,7 +1585,7 @@ bool MethodVerifier<kVerifierDebug>::VerifyCodeFlow() {
   const uint16_t registers_size = code_item_accessor_.RegistersSize();
 
   /* Create and initialize table holding register status */
-  reg_table_.Init(kTrackCompilerInterestPoints,
+  reg_table_.Init(fill_register_lines_ ? kTrackRegsAll : kTrackCompilerInterestPoints,
                   insn_flags_.get(),
                   code_item_accessor_.InsnsSizeInCodeUnits(),
                   registers_size,
@@ -4692,6 +4699,12 @@ ArtField* MethodVerifier<kVerifierDebug>::GetStaticField(int field_idx) {
 
 template <bool kVerifierDebug>
 ArtField* MethodVerifier<kVerifierDebug>::GetInstanceField(const RegType& obj_type, int field_idx) {
+  if (!obj_type.IsZeroOrNull() && !obj_type.IsReferenceTypes()) {
+    // Trying to read a field from something that isn't a reference.
+    Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "instance field access on object that has "
+        << "non-reference type " << obj_type;
+    return nullptr;
+  }
   const dex::FieldId& field_id = dex_file_->GetFieldId(field_idx);
   // Check access to class.
   const RegType& klass_type = ResolveClass<CheckAccess::kYes>(field_id.class_idx_);
@@ -4725,11 +4738,6 @@ ArtField* MethodVerifier<kVerifierDebug>::GetInstanceField(const RegType& obj_ty
   } else if (obj_type.IsZeroOrNull()) {
     // Cannot infer and check type, however, access will cause null pointer exception.
     // Fall through into a few last soft failure checks below.
-  } else if (!obj_type.IsReferenceTypes()) {
-    // Trying to read a field from something that isn't a reference.
-    Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "instance field access on object that has "
-                                      << "non-reference type " << obj_type;
-    return nullptr;
   } else {
     std::string temp;
     ObjPtr<mirror::Class> klass = field->GetDeclaringClass();
@@ -5199,6 +5207,7 @@ MethodVerifier::FailureData MethodVerifier::VerifyMethod(Thread* self,
                                                 need_precise_constants,
                                                 /* verify to dump */ false,
                                                 /* allow_thread_suspension= */ true,
+                                                /* fill_register_lines= */ false,
                                                 api_level);
   if (verifier.Verify()) {
     // Verification completed, however failures may be pending that didn't cause the verification
@@ -5309,13 +5318,54 @@ MethodVerifier::FailureData MethodVerifier::VerifyMethod(Thread* self,
   if (kTimeVerifyMethod) {
     uint64_t duration_ns = NanoTime() - start_ns;
     if (duration_ns > MsToNs(Runtime::Current()->GetVerifierLoggingThresholdMs())) {
+      double bytecodes_per_second =
+          verifier.code_item_accessor_.InsnsSizeInCodeUnits() / (duration_ns * 1e-9);
       LOG(WARNING) << "Verification of " << dex_file->PrettyMethod(method_idx)
                    << " took " << PrettyDuration(duration_ns)
-                   << (impl::IsLargeMethod(verifier.CodeItem()) ? " (large method)" : "");
+                   << (impl::IsLargeMethod(verifier.CodeItem()) ? " (large method)" : "")
+                   << " (" << StringPrintf("%.2f", bytecodes_per_second) << " bytecodes/s)";
     }
   }
   result.types = verifier.encountered_failure_types_;
   return result;
+}
+
+MethodVerifier* MethodVerifier::CalculateVerificationInfo(
+      Thread* self,
+      ArtMethod* method,
+      Handle<mirror::DexCache> dex_cache,
+      Handle<mirror::ClassLoader> class_loader) {
+  std::unique_ptr<impl::MethodVerifier<false>> verifier(
+      new impl::MethodVerifier<false>(self,
+                                      method->GetDexFile(),
+                                      dex_cache,
+                                      class_loader,
+                                      *method->GetDeclaringClass()->GetClassDef(),
+                                      method->GetCodeItem(),
+                                      method->GetDexMethodIndex(),
+                                      method,
+                                      method->GetAccessFlags(),
+                                      /* can_load_classes= */ false,
+                                      /* allow_soft_failures= */ true,
+                                      /* need_precise_constants= */ true,
+                                      /* verify_to_dump= */ false,
+                                      /* allow_thread_suspension= */ false,
+                                      /* fill_register_lines= */ true,
+                                      // Just use the verifier at the current skd-version.
+                                      // This might affect what soft-verifier errors are reported.
+                                      // Callers can then filter out relevant errors if needed.
+                                      Runtime::Current()->GetTargetSdkVersion()));
+  verifier->Verify();
+  if (VLOG_IS_ON(verifier)) {
+    verifier->DumpFailures(VLOG_STREAM(verifier));
+    VLOG(verifier) << verifier->info_messages_.str();
+    verifier->Dump(VLOG_STREAM(verifier));
+  }
+  if (verifier->have_pending_hard_failure_) {
+    return nullptr;
+  } else {
+    return verifier.release();
+  }
 }
 
 MethodVerifier* MethodVerifier::VerifyMethodAndDump(Thread* self,
@@ -5344,6 +5394,7 @@ MethodVerifier* MethodVerifier::VerifyMethodAndDump(Thread* self,
       /* need_precise_constants= */ true,
       /* verify_to_dump= */ true,
       /* allow_thread_suspension= */ true,
+      /* fill_register_lines= */ false,
       api_level);
   verifier->Verify();
   verifier->DumpFailures(vios->Stream());
@@ -5381,6 +5432,7 @@ void MethodVerifier::FindLocksAtDexPc(
                                        /* need_precise_constants= */ false,
                                        /* verify_to_dump= */ false,
                                        /* allow_thread_suspension= */ false,
+                                       /* fill_register_lines= */ false,
                                        api_level);
   verifier.interesting_dex_pc_ = dex_pc;
   verifier.monitor_enter_dex_pcs_ = monitor_enter_dex_pcs;
@@ -5416,6 +5468,7 @@ MethodVerifier* MethodVerifier::CreateVerifier(Thread* self,
                                          need_precise_constants,
                                          verify_to_dump,
                                          allow_thread_suspension,
+                                         /* fill_register_lines= */ false,
                                          api_level);
 }
 

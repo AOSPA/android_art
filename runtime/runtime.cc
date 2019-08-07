@@ -784,8 +784,10 @@ std::string Runtime::GetCompilerExecutable() const {
   if (!compiler_executable_.empty()) {
     return compiler_executable_;
   }
-  std::string compiler_executable(GetAndroidRoot());
-  compiler_executable += (kIsDebugBuild ? "/bin/dex2oatd" : "/bin/dex2oat");
+  std::string compiler_executable = GetAndroidRuntimeBinDir() + "/dex2oat";
+  if (kIsDebugBuild) {
+    compiler_executable += 'd';
+  }
   return compiler_executable;
 }
 
@@ -1101,7 +1103,7 @@ static inline void CreatePreAllocatedException(Thread* self,
   CHECK(klass != nullptr);
   gc::AllocatorType allocator_type = runtime->GetHeap()->GetCurrentAllocator();
   ObjPtr<mirror::Throwable> exception_object = ObjPtr<mirror::Throwable>::DownCast(
-      klass->Alloc</* kIsInstrumented= */ true>(self, allocator_type));
+      klass->Alloc(self, allocator_type));
   CHECK(exception_object != nullptr);
   *exception = GcRoot<mirror::Throwable>(exception_object);
   // Initialize the "detailMessage" field.
@@ -1311,6 +1313,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        runtime_options.GetOrDefault(Opt::HeapMaxFree),
                        runtime_options.GetOrDefault(Opt::HeapTargetUtilization),
                        foreground_heap_growth_multiplier,
+                       runtime_options.GetOrDefault(Opt::StopForNativeAllocs),
                        runtime_options.GetOrDefault(Opt::MemoryMaximumSize),
                        runtime_options.GetOrDefault(Opt::NonMovingSpaceCapacity),
                        GetBootClassPath(),

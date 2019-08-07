@@ -45,15 +45,13 @@ cc_defaults {
                 "libz",
             ],
             shared_libs: [
-                 // For MemMap.
-                 "libartbase",
-                 "libartpalette",
-                 "liblog",
-                 // For common macros.
-                 "libbase",
+                // For MemMap.
+                "libartpalette",
+                "liblog",
+                // For common macros.
+                "libbase",
             ],
             export_shared_lib_headers: [
-                "libartbase",
                 "libbase",
             ],
         },
@@ -61,15 +59,13 @@ cc_defaults {
             shared_libs: [
                 "libziparchive",
                 "libz",
-                 // For MemMap.
-                 "libartbase",
-                 "libartpalette",
-                 "liblog",
-                 // For common macros.
-                 "libbase",
+                // For MemMap.
+                "libartpalette",
+                "liblog",
+                // For common macros.
+                "libbase",
             ],
             export_shared_lib_headers: [
-                "libartbase",
                 "libbase",
             ],
         },
@@ -77,15 +73,13 @@ cc_defaults {
             static_libs: [
                 "libziparchive",
                 "libz",
-                 // For MemMap.
-                 "libartbase",
-                 "libartpalette",
-                 "liblog",
-                 // For common macros.
-                 "libbase",
+                // For MemMap.
+                "libartpalette",
+                "liblog",
+                // For common macros.
+                "libbase",
             ],
             export_static_lib_headers: [
-                "libartbase",
                 "libbase",
             ],
             cflags: ["-Wno-thread-safety"],
@@ -150,11 +144,33 @@ art_cc_library {
         keep_symbols: true,
     },
     target: {
+        android: {
+            shared_libs: [
+                "libartbase",
+            ],
+            export_shared_lib_headers: [
+                "libartbase",
+            ],
+        },
+        not_windows: {
+            shared_libs: [
+                "libartbase",
+            ],
+            export_shared_lib_headers: [
+                "libartbase",
+            ],
+        },
         windows: {
             enabled: true,
             shared: {
                 enabled: false,
             },
+            static_libs: [
+                "libartbase",
+            ],
+            export_static_lib_headers: [
+                "libartbase",
+            ],
         },
     },
 }
@@ -166,11 +182,33 @@ art_cc_library {
         "libdexfile_defaults",
     ],
     target: {
+        android: {
+            shared_libs: [
+                "libartbased",
+            ],
+            export_shared_lib_headers: [
+                "libartbased",
+            ],
+        },
+        not_windows: {
+            shared_libs: [
+                "libartbased",
+            ],
+            export_shared_lib_headers: [
+                "libartbased",
+            ],
+        },
         windows: {
             enabled: true,
             shared: {
                 enabled: false,
             },
+            static_libs: [
+                "libartbased",
+            ],
+            export_static_lib_headers: [
+                "libartbased",
+            ],
         },
     },
 }
@@ -200,9 +238,6 @@ art_cc_test {
         "libbacktrace",
         "libziparchive",
     ],
-    include_dirs: [
-        "external/zlib",
-    ],
 }
 
 cc_library_headers {
@@ -221,8 +256,8 @@ cc_library_headers {
     },
 }
 
-cc_library {
-    name: "libdexfile_external",
+cc_defaults {
+    name: "libdexfile_external-defaults",
     host_supported: true,
     srcs: [
         "external/dex_file_ext.cc",
@@ -230,19 +265,49 @@ cc_library {
     header_libs: ["libdexfile_external_headers"],
     shared_libs: [
         "libbase",
-        "libdexfile",
     ],
-
     stubs: {
         symbol_file: "external/libdexfile_external.map.txt",
         versions: ["1"],
     },
 }
 
+cc_library {
+    name: "libdexfile_external",
+    defaults: [
+        "art_defaults",
+        "libdexfile_external-defaults",
+    ],
+    target: {
+        darwin: {
+            enabled: true,
+        },
+    },
+    shared_libs: [
+        "libdexfile",
+    ],
+}
+
+cc_library {
+    name: "libdexfiled_external",
+    defaults: [
+        "art_debug_defaults",
+        "libdexfile_external-defaults",
+    ],
+    target: {
+        darwin: {
+            enabled: true,
+        },
+    },
+    shared_libs: [
+        "libdexfiled",
+    ],
+}
+
 art_cc_test {
     name: "art_libdexfile_external_tests",
     host_supported: true,
-    test_per_src: true,  // For consistency with other ART gtests.
+    test_per_src: true, // For consistency with other ART gtests.
     srcs: [
         "external/dex_file_ext_c_test.c",
     ],

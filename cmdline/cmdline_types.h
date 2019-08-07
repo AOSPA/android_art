@@ -412,8 +412,6 @@ static gc::CollectorType ParseCollectorType(const std::string& option) {
     return gc::kCollectorTypeCMS;
   } else if (option == "SS") {
     return gc::kCollectorTypeSS;
-  } else if (option == "GSS") {
-    return gc::kCollectorTypeGSS;
   } else if (option == "CC") {
     return gc::kCollectorTypeCC;
   } else {
@@ -567,6 +565,8 @@ struct CmdlineType<LogVerbosity> : CmdlineTypeParser<LogVerbosity> {
         log_verbosity.gc = true;
       } else if (verbose_options[j] == "heap") {
         log_verbosity.heap = true;
+      } else if (verbose_options[j] == "interpreter") {
+        log_verbosity.interpreter = true;
       } else if (verbose_options[j] == "jdwp") {
         log_verbosity.jdwp = true;
       } else if (verbose_options[j] == "jit") {

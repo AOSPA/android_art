@@ -2468,6 +2468,17 @@ ENTRY art_quick_indexof
 #endif
 END art_quick_indexof
 
+    .extern artStringBuilderAppend
+ENTRY art_quick_string_builder_append
+    SETUP_SAVE_REFS_ONLY_FRAME          // save callee saves in case of GC
+    add    x1, sp, #(FRAME_SIZE_SAVE_REFS_ONLY + __SIZEOF_POINTER__)  // pass args
+    mov    x2, xSELF                    // pass Thread::Current
+    bl     artStringBuilderAppend       // (uint32_t, const unit32_t*, Thread*)
+    RESTORE_SAVE_REFS_ONLY_FRAME
+    REFRESH_MARKING_REGISTER
+    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+END art_quick_string_builder_append
+
     /*
      * Create a function `name` calling the ReadBarrier::Mark routine,
      * getting its argument and returning its result through W register
@@ -2798,8 +2809,7 @@ READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg29, w29, x29
      *   art_quick_read_barrier_mark_introspection_gc_roots:
      *     GC root entrypoint code.
      */
-    .balign 512
-ENTRY art_quick_read_barrier_mark_introspection
+ENTRY_ALIGNED art_quick_read_barrier_mark_introspection, 512
     // At this point, IP0 contains the reference, IP1 can be freely used.
     // For heap poisoning, the reference is poisoned, so unpoison it first.
     UNPOISON_HEAP_REF wIP0

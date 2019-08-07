@@ -217,7 +217,7 @@ bool DoIGetQuick(ShadowFrame& shadow_frame, const Instruction* inst, uint16_t in
     // Save obj in case the instrumentation event has thread suspension.
     HandleWrapperObjPtr<mirror::Object> h = hs.NewHandleWrapper(&obj);
     instrumentation->FieldReadEvent(self,
-                                    obj.Ptr(),
+                                    obj,
                                     shadow_frame.GetMethod(),
                                     shadow_frame.GetDexPC(),
                                     f);
@@ -405,7 +405,7 @@ bool DoIPutQuick(const ShadowFrame& shadow_frame, const Instruction* inst, uint1
     HandleWrapper<mirror::Object> ret(hs.NewHandleWrapper<mirror::Object>(
         field_type == Primitive::kPrimNot ? field_value.GetGCRoot() : &fake_root));
     instrumentation->FieldWriteEvent(self,
-                                     obj.Ptr(),
+                                     obj,
                                      shadow_frame.GetMethod(),
                                      shadow_frame.GetDexPC(),
                                      f,
@@ -1799,7 +1799,7 @@ bool DoFilledNewArray(const Instruction* inst,
     }
     return false;
   }
-  ObjPtr<mirror::Object> new_array = mirror::Array::Alloc<true>(
+  ObjPtr<mirror::Object> new_array = mirror::Array::Alloc(
       self,
       array_class,
       length,

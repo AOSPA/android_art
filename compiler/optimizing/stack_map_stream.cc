@@ -52,6 +52,15 @@ void StackMapStream::BeginMethod(size_t frame_size_in_bytes,
   core_spill_mask_ = core_spill_mask;
   fp_spill_mask_ = fp_spill_mask;
   num_dex_registers_ = num_dex_registers;
+
+  if (kVerifyStackMaps) {
+    dchecks_.emplace_back([=](const CodeInfo& code_info) {
+      DCHECK_EQ(code_info.packed_frame_size_, frame_size_in_bytes / kStackAlignment);
+      DCHECK_EQ(code_info.core_spill_mask_, core_spill_mask);
+      DCHECK_EQ(code_info.fp_spill_mask_, fp_spill_mask);
+      DCHECK_EQ(code_info.number_of_dex_registers_, num_dex_registers);
+    });
+  }
 }
 
 void StackMapStream::EndMethod() {
@@ -175,6 +184,7 @@ void StackMapStream::BeginInlineInfoEntry(ArtMethod* method,
   in_inline_info_ = true;
   DCHECK_EQ(expected_num_dex_registers_, current_dex_registers_.size());
 
+  flags_ |= CodeInfo::kHasInlineInfo;
   expected_num_dex_registers_ += num_dex_registers;
 
   BitTableBuilder<InlineInfo>::Entry entry;
@@ -296,6 +306,7 @@ ScopedArenaVector<uint8_t> StackMapStream::Encode() {
 
   ScopedArenaVector<uint8_t> buffer(allocator_->Adapter(kArenaAllocStackMapStream));
   BitMemoryWriter<ScopedArenaVector<uint8_t>> out(&buffer);
+  out.WriteVarint(flags_);
   out.WriteVarint(packed_frame_size_);
   out.WriteVarint(core_spill_mask_);
   out.WriteVarint(fp_spill_mask_);

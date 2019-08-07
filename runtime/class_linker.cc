@@ -37,6 +37,7 @@
 #include "art_method-inl.h"
 #include "base/arena_allocator.h"
 #include "base/casts.h"
+#include "base/file_utils.h"
 #include "base/leb128.h"
 #include "base/logging.h"
 #include "base/os.h"
@@ -8456,8 +8457,8 @@ ObjPtr<mirror::Class> ClassLinker::DoLookupResolvedType(dex::TypeIndex type_idx,
   return type;
 }
 
-template <typename T>
-ObjPtr<mirror::Class> ClassLinker::DoResolveType(dex::TypeIndex type_idx, T referrer) {
+template <typename RefType>
+ObjPtr<mirror::Class> ClassLinker::DoResolveType(dex::TypeIndex type_idx, RefType referrer) {
   StackHandleScope<2> hs(Thread::Current());
   Handle<mirror::DexCache> dex_cache(hs.NewHandle(referrer->GetDexCache()));
   Handle<mirror::ClassLoader> class_loader(hs.NewHandle(referrer->GetClassLoader()));

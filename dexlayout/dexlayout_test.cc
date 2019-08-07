@@ -21,9 +21,9 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "base/common_art_test.h"
 #include "base/unix_file/fd_file.h"
 #include "base/utils.h"
-#include "common_runtime_test.h"
 #include "dex/art_dex_file_loader.h"
 #include "dex/base64_test_util.h"
 #include "dex/class_accessor-inl.h"
@@ -250,18 +250,17 @@ static void WriteFileBase64(const char* base64, const char* location) {
   }
 }
 
-class DexLayoutTest : public CommonRuntimeTest {
+class DexLayoutTest : public CommonArtTest {
  protected:
   std::string GetDexLayoutPath() {
-    return GetTestAndroidRoot() + "/bin/dexlayoutd";
+    return GetAndroidRuntimeBinDir() + "/dexlayoutd";
   }
 
   // Runs FullPlainOutput test.
   bool FullPlainOutputExec(std::string* error_msg) {
-    // TODO: dexdump2 -> dexdump ?
     ScratchFile dexdump_output;
     const std::string& dexdump_filename = dexdump_output.GetFilename();
-    std::string dexdump = GetTestAndroidRoot() + "/bin/dexdump2";
+    std::string dexdump = GetAndroidRuntimeBinDir() + "/dexdump";
     EXPECT_TRUE(OS::FileExists(dexdump.c_str())) << dexdump << " should be a valid file path";
 
     ScratchFile dexlayout_output;

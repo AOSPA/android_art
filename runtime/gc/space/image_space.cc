@@ -1229,13 +1229,13 @@ class ImageSpace::Loader {
           ClassTable::ClassSet temp_set(data, /*make_copy_of_data=*/ false, &read_count);
           for (ClassTable::TableSlot& slot : temp_set) {
             slot.VisitRoot(class_table_visitor);
-            mirror::Class* klass = slot.Read<kWithoutReadBarrier>();
-            if (!app_image_objects.InDest(klass)) {
+            ObjPtr<mirror::Class> klass = slot.Read<kWithoutReadBarrier>();
+            if (!app_image_objects.InDest(klass.Ptr())) {
               continue;
             }
-            const bool already_marked = visited_bitmap->Set(klass);
+            const bool already_marked = visited_bitmap->Set(klass.Ptr());
             CHECK(!already_marked) << "App image class already visited";
-            patch_object_visitor.VisitClass(klass);
+            patch_object_visitor.VisitClass(klass.Ptr());
             // Then patch the non-embedded vtable and iftable.
             ObjPtr<mirror::PointerArray> vtable =
                 klass->GetVTable<kVerifyNone, kWithoutReadBarrier>();
@@ -1309,7 +1309,7 @@ class ImageSpace::Loader {
             method.SetEntryPointFromQuickCompiledCodePtrSize(new_code, kPointerSize);
           }
         } else {
-          method.UpdateObjectsForImageRelocation(forward_object);
+          patch_object_visitor.PatchGcRoot(&method.DeclaringClassRoot());
           method.UpdateEntrypoints(forward_code, kPointerSize);
         }
       }, target_base, kPointerSize);
@@ -1319,7 +1319,8 @@ class ImageSpace::Loader {
         // Only touches objects in the app image, no need for mutator lock.
         TimingLogger::ScopedTiming timing("Fixup fields", &logger);
         image_header.VisitPackedArtFields([&](ArtField& field) NO_THREAD_SAFETY_ANALYSIS {
-          field.UpdateObjects(forward_object);
+          patch_object_visitor.template PatchGcRoot</*kMayBeNull=*/ false>(
+              &field.DeclaringClassRoot());
         }, target_base);
       }
       {
@@ -1625,10 +1626,10 @@ class ImageSpace::BootImageLoader {
         ClassTableVisitor class_table_visitor(relocate_visitor);
         for (ClassTable::TableSlot& slot : temp_set) {
           slot.VisitRoot(class_table_visitor);
-          mirror::Class* klass = slot.Read<kWithoutReadBarrier>();
+          ObjPtr<mirror::Class> klass = slot.Read<kWithoutReadBarrier>();
           DCHECK(klass != nullptr);
-          patched_objects->Set(klass);
-          patch_object_visitor.VisitClass(klass);
+          patched_objects->Set(klass.Ptr());
+          patch_object_visitor.VisitClass(klass.Ptr());
           if (kIsDebugBuild) {
             mirror::Class* class_class = klass->GetClass<kVerifyNone, kWithoutReadBarrier>();
             if (dcheck_class_class == nullptr) {
@@ -2047,10 +2048,17 @@ bool ImageSpace::LoadBootImage(
   };
 
   auto try_load_from_system = [&]() {
-    return try_load_from(&BootImageLoader::HasSystem, &BootImageLoader::LoadFromSystem, false);
+    // Validate the oat files if the loading order checks data first. Otherwise assume system
+    // integrity.
+    return try_load_from(&BootImageLoader::HasSystem,
+                         &BootImageLoader::LoadFromSystem,
+                         /*validate_oat_file=*/ order != ImageSpaceLoadingOrder::kSystemFirst);
   };
   auto try_load_from_cache = [&]() {
-    return try_load_from(&BootImageLoader::HasCache, &BootImageLoader::LoadFromDalvikCache, true);
+    // Always validate oat files from the dalvik cache.
+    return try_load_from(&BootImageLoader::HasCache,
+                         &BootImageLoader::LoadFromDalvikCache,
+                         /*validate_oat_file=*/ true);
   };
 
   auto invoke_sequentially = [](auto first, auto second) {

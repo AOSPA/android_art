@@ -2215,6 +2215,17 @@ ENTRY art_quick_l2f
     pop   {pc}
 END art_quick_l2f
 
+    .extern artStringBuilderAppend
+ENTRY art_quick_string_builder_append
+    SETUP_SAVE_REFS_ONLY_FRAME r2       @ save callee saves in case of GC
+    add    r1, sp, #(FRAME_SIZE_SAVE_REFS_ONLY + __SIZEOF_POINTER__)  @ pass args
+    mov    r2, rSELF                    @ pass Thread::Current
+    bl     artStringBuilderAppend       @ (uint32_t, const unit32_t*, Thread*)
+    RESTORE_SAVE_REFS_ONLY_FRAME
+    REFRESH_MARKING_REGISTER
+    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+END art_quick_string_builder_append
+
 .macro CONDITIONAL_CBZ reg, reg_if, dest
 .ifc \reg, \reg_if
     cbz \reg, \dest
@@ -2628,8 +2639,7 @@ art_quick_read_barrier_mark_introspection_gc_roots\label_suffix:
      *     (6 bytes). Loads the return register and jumps to the runtime call.
      */
 #if defined(USE_READ_BARRIER) && defined(USE_BAKER_READ_BARRIER)
-    .balign 512
-ENTRY art_quick_read_barrier_mark_introspection
+ENTRY_ALIGNED art_quick_read_barrier_mark_introspection, 512
     // At this point, IP contains the reference, rMR is clobbered by the thunk
     // and can be freely used as it will be set back to 1 before returning.
     // For heap poisoning, the reference is poisoned, so unpoison it first.

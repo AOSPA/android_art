@@ -24,6 +24,7 @@
 #include "base/array_slice.h"
 #include "base/iteration_range.h"
 #include "base/length_prefixed_array.h"
+#include "base/stride_iterator.h"
 #include "base/utils.h"
 #include "class_linker.h"
 #include "class_loader.h"
@@ -845,7 +846,10 @@ inline bool Class::DescriptorEquals(const char* match) {
       return false;
     }
     ++match;
-    klass = klass->GetComponentType();
+    // No read barrier needed, we're reading a chain of constant references for comparison
+    // with null. Then we follow up below with reading constant references to read constant
+    // primitive data in both proxy and non-proxy paths. See ReadBarrierOption.
+    klass = klass->GetComponentType<kDefaultVerifyFlags, kWithoutReadBarrier>();
   }
   if (klass->IsPrimitive()) {
     return strcmp(Primitive::Descriptor(klass->GetPrimitiveType()), match) == 0;

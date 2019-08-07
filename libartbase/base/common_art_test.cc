@@ -20,7 +20,11 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <cstdio>
+#include <filesystem>
+#include "android-base/file.h"
+#include "android-base/logging.h"
 #include "nativehelper/scoped_local_ref.h"
 
 #include "android-base/stringprintf.h"
@@ -126,11 +130,33 @@ void CommonArtTestImpl::SetUpAndroidRootEnvVars() {
     if (android_host_out_from_env == nullptr) {
       // Not set by build server, so default to the usual value of
       // ANDROID_HOST_OUT.
-      std::string android_host_out = android_build_top_from_env;
+      std::string android_host_out;
 #if defined(__linux__)
-      android_host_out += "/out/host/linux-x86";
+      // Fallback
+      android_host_out = std::string(android_build_top_from_env) + "/out/host/linux-x86";
+      // Look at how we were invoked
+      std::string argv;
+      if (android::base::ReadFileToString("/proc/self/cmdline", &argv)) {
+        // /proc/self/cmdline is the programs 'argv' with elements delimited by '\0'.
+        std::string cmdpath(argv.substr(0, argv.find('\0')));
+        std::filesystem::path path(cmdpath);
+        // If the path is relative then prepend the android_build_top_from_env to it
+        if (path.is_relative()) {
+          path = std::filesystem::path(android_build_top_from_env).append(cmdpath);
+          DCHECK(path.is_absolute()) << path;
+        }
+        // Walk up until we find the linux-x86 directory or we hit the root directory.
+        while (path.has_parent_path() && path.parent_path() != path &&
+               path.filename() != std::filesystem::path("linux-x86")) {
+          path = path.parent_path();
+        }
+        // If we found a linux-x86 directory path is now android_host_out
+        if (path.filename() == std::filesystem::path("linux-x86")) {
+          android_host_out = path.string();
+        }
+      }
 #elif defined(__APPLE__)
-      android_host_out += "/out/host/darwin-x86";
+      android_host_out = std::string(android_build_top_from_env) + "/out/host/darwin-x86";
 #else
 #error unsupported OS
 #endif
@@ -322,14 +348,7 @@ void CommonArtTestImpl::TearDown() {
 }
 
 static std::string GetDexFileName(const std::string& jar_prefix, bool host) {
-  std::string path;
-  if (host) {
-    const char* host_dir = getenv("ANDROID_HOST_OUT");
-    CHECK(host_dir != nullptr);
-    path = host_dir;
-  } else {
-    path = GetAndroidRoot();
-  }
+  std::string path = GetAndroidRoot();
 
   std::string suffix = host
       ? "-hostdex"                 // The host version.
@@ -400,15 +419,6 @@ std::string CommonArtTestImpl::GetClassPathOption(const char* option,
   return option + android::base::Join(class_path, ':');
 }
 
-std::string CommonArtTestImpl::GetTestAndroidRoot() {
-  if (IsHost()) {
-    const char* host_dir = getenv("ANDROID_HOST_OUT");
-    CHECK(host_dir != nullptr);
-    return host_dir;
-  }
-  return GetAndroidRoot();
-}
-
 // Check that for target builds we have ART_TARGET_NATIVETEST_DIR set.
 #ifdef ART_TARGET
 #ifndef ART_TARGET_NATIVETEST_DIR
@@ -424,8 +434,7 @@ std::string CommonArtTestImpl::GetTestDexFileName(const char* name) const {
   CHECK(name != nullptr);
   std::string filename;
   if (IsHost()) {
-    filename += getenv("ANDROID_HOST_OUT");
-    filename += "/framework/";
+    filename += GetAndroidRoot() + "/framework/";
   } else {
     filename += ART_TARGET_NATIVETEST_DIR_STRING;
   }
@@ -475,9 +484,8 @@ std::string CommonArtTestImpl::GetCoreFileLocation(const char* suffix) {
 
   std::string location;
   if (IsHost()) {
-    const char* host_dir = getenv("ANDROID_HOST_OUT");
-    CHECK(host_dir != nullptr);
-    location = StringPrintf("%s/framework/core.%s", host_dir, suffix);
+    std::string host_dir = GetAndroidRoot();
+    location = StringPrintf("%s/framework/core.%s", host_dir.c_str(), suffix);
   } else {
     location = StringPrintf("/data/art-test/core.%s", suffix);
   }
