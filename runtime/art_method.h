@@ -28,12 +28,9 @@
 #include "base/enums.h"
 #include "base/macros.h"
 #include "base/runtime_debug.h"
-#include "dex/code_item_accessors.h"
 #include "dex/dex_file_structs.h"
-#include "dex/dex_instruction_iterator.h"
 #include "dex/modifiers.h"
 #include "dex/primitive.h"
-#include "dex/signature.h"
 #include "gc_root.h"
 #include "obj_ptr.h"
 #include "offsets.h"
@@ -41,6 +38,9 @@
 
 namespace art {
 
+class CodeItemDataAccessor;
+class CodeItemDebugInfoAccessor;
+class CodeItemInstructionAccessor;
 class DexFile;
 template<class T> class Handle;
 class ImtConflictTable;
@@ -50,6 +50,7 @@ class OatQuickMethodHeader;
 class ProfilingInfo;
 class ScopedObjectAccessAlreadyRunnable;
 class ShadowFrame;
+class Signature;
 
 namespace mirror {
 class Array;
@@ -691,12 +692,6 @@ class ArtMethod final {
       REQUIRES_SHARED(Locks::mutator_lock_);
   // Returns the JNI native function name for the overloaded method 'm'.
   std::string JniLongName()
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Update heap objects and non-entrypoint pointers by the passed in visitor for image relocation.
-  // Does not use read barrier.
-  template <typename Visitor>
-  ALWAYS_INLINE void UpdateObjectsForImageRelocation(const Visitor& visitor)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Update entry points by passing them through the visitor.

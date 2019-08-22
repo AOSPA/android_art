@@ -124,34 +124,34 @@ endif
 
 ifdef ART_TEST_HOST_GTEST_Main_DEX
 $(ART_TEST_HOST_GTEST_EmptyUncompressed_DEX):
-	touch $(dir $@)classes.dex
-	zip -j -qD -X -0 $@ $(dir $@)classes.dex
-	rm $(dir $@)classes.dex
+	touch $@_classes.dex
+	zip -j -qD -X -0 $@ $@_classes.dex
+	rm $@_classes.dex
 endif
 
 ifdef ART_TEST_TARGET_GTEST_Main_DEX
 $(ART_TEST_TARGET_GTEST_EmptyUncompressed_DEX):
-	touch $(dir $@)classes.dex
-	zip -j -qD -X -0 $@ $(dir $@)classes.dex
-	rm $(dir $@)classes.dex
+	touch $@_classes.dex
+	zip -j -qD -X -0 $@ $@_classes.dex
+	rm $@_classes.dex
 endif
 
 ifdef ART_TEST_HOST_GTEST_Main_DEX
 $(ART_TEST_HOST_GTEST_EmptyUncompressedAligned_DEX): $(ZIPALIGN)
-	touch $(dir $@)classes.dex
-	zip -j -0 $(dir $@)temp.zip $(dir $@)classes.dex
-	$(ZIPALIGN) -f -v 4 $(dir $@)temp.zip $@
-	rm $(dir $@)classes.dex
-	rm $(dir $@)temp.zip
+	touch $@_classes.dex
+	zip -j -0 $@_temp.zip $@_classes.dex
+	$(ZIPALIGN) -f 4 $@_temp.zip $@
+	rm $@_classes.dex
+	rm $@_temp.zip
 endif
 
 ifdef ART_TEST_TARGET_GTEST_Main_DEX
 $(ART_TEST_TARGET_GTEST_EmptyUncompressedAligned_DEX): $(ZIPALIGN)
-	touch $(dir $@)classes.dex
-	zip -j -0 $(dir $@)temp.zip $(dir $@)classes.dex
-	$(ZIPALIGN) -f -v 4 $(dir $@)temp.zip $@
-	rm $(dir $@)classes.dex
-	rm $(dir $@)temp.zip
+	touch $@_classes.dex
+	zip -j -0 $@_temp.zip $@_classes.dex
+	$(ZIPALIGN) -f 4 $@_temp.zip $@
+	rm $@_classes.dex
+	rm $@_temp.zip
 endif
 
 ifdef ART_TEST_HOST_GTEST_MultiDex_DEX
@@ -313,11 +313,11 @@ ART_GTEST_dexdiag_test_TARGET_DEPS := $(TARGET_OUT_EXECUTABLES)/dexdiag
 ART_GTEST_dexdump_test_HOST_DEPS := \
   $(HOST_CORE_IMAGE_DEFAULT_64) \
   $(HOST_CORE_IMAGE_DEFAULT_32) \
-  $(HOST_OUT_EXECUTABLES)/dexdump2
+  $(HOST_OUT_EXECUTABLES)/dexdump
 ART_GTEST_dexdump_test_TARGET_DEPS := \
   $(TARGET_CORE_IMAGE_DEFAULT_64) \
   $(TARGET_CORE_IMAGE_DEFAULT_32) \
-  $(TARGET_OUT_EXECUTABLES)/dexdump2
+  $(TARGET_OUT_EXECUTABLES)/dexdump
 
 # The dexanalyze test requires an image and the dexanalyze utility.
 ART_GTEST_dexanalyze_test_HOST_DEPS := \
@@ -335,12 +335,12 @@ ART_GTEST_dexlayout_test_HOST_DEPS := \
   $(HOST_CORE_IMAGE_DEFAULT_64) \
   $(HOST_CORE_IMAGE_DEFAULT_32) \
   $(HOST_OUT_EXECUTABLES)/dexlayoutd \
-  $(HOST_OUT_EXECUTABLES)/dexdump2
+  $(HOST_OUT_EXECUTABLES)/dexdump
 ART_GTEST_dexlayout_test_TARGET_DEPS := \
   $(TARGET_CORE_IMAGE_DEFAULT_64) \
   $(TARGET_CORE_IMAGE_DEFAULT_32) \
   $(TARGET_OUT_EXECUTABLES)/dexlayoutd \
-  $(TARGET_OUT_EXECUTABLES)/dexdump2
+  $(TARGET_OUT_EXECUTABLES)/dexdump
 
 # The dexlist test requires an image and the dexlist utility.
 ART_GTEST_dexlist_test_HOST_DEPS := \
@@ -376,19 +376,19 @@ ART_GTEST_oatdump_test_HOST_DEPS := \
   $(HOST_CORE_IMAGE_DEFAULT_32) \
   $(HOST_OUT_EXECUTABLES)/oatdumpd \
   $(HOST_OUT_EXECUTABLES)/oatdumpds \
-  $(HOST_OUT_EXECUTABLES)/dexdump2
+  $(HOST_OUT_EXECUTABLES)/dexdump \
+  $(HOST_OUT_EXECUTABLES)/dex2oatd \
+  $(HOST_OUT_EXECUTABLES)/dex2oatds
 ART_GTEST_oatdump_test_TARGET_DEPS := \
   $(TARGET_CORE_IMAGE_DEFAULT_64) \
   $(TARGET_CORE_IMAGE_DEFAULT_32) \
   $(TARGET_OUT_EXECUTABLES)/oatdumpd \
-  $(TARGET_OUT_EXECUTABLES)/dexdump2
+  $(TARGET_OUT_EXECUTABLES)/dexdump \
+  $(TARGET_OUT_EXECUTABLES)/dex2oatd
 ART_GTEST_oatdump_image_test_HOST_DEPS := $(ART_GTEST_oatdump_test_HOST_DEPS)
 ART_GTEST_oatdump_image_test_TARGET_DEPS := $(ART_GTEST_oatdump_test_TARGET_DEPS)
-ART_GTEST_oatdump_app_test_HOST_DEPS := $(ART_GTEST_oatdump_test_HOST_DEPS) \
-  $(HOST_OUT_EXECUTABLES)/dex2oatd \
-  $(HOST_OUT_EXECUTABLES)/dex2oatds
-ART_GTEST_oatdump_app_test_TARGET_DEPS := $(ART_GTEST_oatdump_test_TARGET_DEPS) \
-  $(TARGET_OUT_EXECUTABLES)/dex2oatd
+ART_GTEST_oatdump_app_test_HOST_DEPS := $(ART_GTEST_oatdump_test_HOST_DEPS)
+ART_GTEST_oatdump_app_test_TARGET_DEPS := $(ART_GTEST_oatdump_test_TARGET_DEPS)
 
 # Profile assistant tests requires profman utility.
 ART_GTEST_profile_assistant_test_HOST_DEPS := $(HOST_OUT_EXECUTABLES)/profmand

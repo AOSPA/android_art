@@ -35,6 +35,7 @@
 #include <list>
 #include <sstream>
 
+#include "android-base/file.h"
 #include "android-base/stringprintf.h"
 #include "android-base/strings.h"
 
@@ -1773,7 +1774,8 @@ static std::string GetSchedulerGroupName(pid_t tid) {
   // 1:cpuacct,cpu:/
   // We want the third field from the line whose second field contains the "cpu" token.
   std::string cgroup_file;
-  if (!ReadFileToString(StringPrintf("/proc/self/task/%d/cgroup", tid), &cgroup_file)) {
+  if (!android::base::ReadFileToString(StringPrintf("/proc/self/task/%d/cgroup", tid),
+                                       &cgroup_file)) {
     return "";
   }
   std::vector<std::string> cgroup_lines;
@@ -1906,7 +1908,8 @@ void Thread::DumpState(std::ostream& os, const Thread* thread, pid_t tid) {
 
   // Grab the scheduler stats for this thread.
   std::string scheduler_stats;
-  if (ReadFileToString(StringPrintf("/proc/self/task/%d/schedstat", tid), &scheduler_stats)
+  if (android::base::ReadFileToString(StringPrintf("/proc/self/task/%d/schedstat", tid),
+                                      &scheduler_stats)
       && !scheduler_stats.empty()) {
     scheduler_stats = android::base::Trim(scheduler_stats);  // Lose the trailing '\n'.
   } else {
@@ -3544,7 +3547,7 @@ void Thread::QuickDeliverException() {
     // Instrumentation may cause GC so keep the exception object safe.
     StackHandleScope<1> hs(this);
     HandleWrapperObjPtr<mirror::Throwable> h_exception(hs.NewHandleWrapper(&exception));
-    instrumentation->ExceptionThrownEvent(this, exception.Ptr());
+    instrumentation->ExceptionThrownEvent(this, exception);
   }
   // Does instrumentation need to deoptimize the stack or otherwise go to interpreter for something?
   // Note: we do this *after* reporting the exception to instrumentation in case it now requires

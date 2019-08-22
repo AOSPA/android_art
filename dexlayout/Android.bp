@@ -29,29 +29,20 @@ art_cc_defaults {
     target: {
         android: {
             shared_libs: [
-                "libartbase",
                 "libartpalette",
-                "libdexfile",
-                "libprofile",
                 "libbase",
             ],
         },
         not_windows: {
             shared_libs: [
-                "libartbase",
                 "libartpalette",
-                "libdexfile",
-                "libprofile",
                 "libbase",
             ],
         },
         windows: {
             cflags: ["-Wno-thread-safety"],
             static_libs: [
-                "libartbase",
                 "libartpalette",
-                "libdexfile",
-                "libprofile",
                 "libbase",
             ],
         },
@@ -76,14 +67,31 @@ art_cc_library {
     target: {
         android: {
             lto: {
-                 thin: true,
+                thin: true,
             },
+            shared_libs: [
+                "libartbase",
+                "libdexfile",
+                "libprofile",
+            ],
+        },
+        not_windows: {
+            shared_libs: [
+                "libartbase",
+                "libdexfile",
+                "libprofile",
+            ],
         },
         windows: {
             enabled: true,
             shared: {
                 enabled: false,
             },
+            static_libs: [
+                "libartbase",
+                "libdexfile",
+                "libprofile",
+            ],
         },
     },
 }
@@ -102,14 +110,32 @@ cc_defaults {
 art_cc_library {
     name: "libartd-dexlayout",
     defaults: [
-      "libart-dexlayout-defaults",
-      "art_debug_defaults",
+        "libart-dexlayout-defaults",
+        "art_debug_defaults",
     ],
-    shared_libs: [
-        "libdexfiled",
-        "libartbased",
-        "libprofiled",
-    ],
+    target: {
+        android: {
+            shared_libs: [
+                "libartbased",
+                "libdexfiled",
+                "libprofiled",
+            ],
+        },
+        not_windows: {
+            shared_libs: [
+                "libartbased",
+                "libdexfiled",
+                "libprofiled",
+            ],
+        },
+        windows: {
+            static_libs: [
+                "libartbased",
+                "libdexfiled",
+                "libprofiled",
+            ],
+        },
+    },
 }
 
 cc_defaults {

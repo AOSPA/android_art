@@ -29,6 +29,7 @@
 #include "dex/dex_file_types.h"
 #include "dex/invoke_type.h"
 #include "dex/primitive.h"
+#include "dex/signature.h"
 #include "gc_root-inl.h"
 #include "imtable-inl.h"
 #include "intrinsics_enum.h"
@@ -371,15 +372,6 @@ void ArtMethod::VisitRoots(RootVisitorType& visitor, PointerSize pointer_size) {
       DCHECK(interface_method != nullptr);
       interface_method->VisitRoots(visitor, pointer_size);
     }
-  }
-}
-
-template <typename Visitor>
-inline void ArtMethod::UpdateObjectsForImageRelocation(const Visitor& visitor) {
-  ObjPtr<mirror::Class> old_class = GetDeclaringClassUnchecked<kWithoutReadBarrier>();
-  ObjPtr<mirror::Class> new_class = visitor(old_class.Ptr());
-  if (old_class != new_class) {
-    SetDeclaringClass(new_class);
   }
 }
 

@@ -27,6 +27,7 @@
 namespace art {
 
 class DexFile;
+class Mutex;
 class Thread;
 
 // This method is declared in the compiler library.
@@ -36,6 +37,7 @@ typedef std::vector<uint8_t> PackElfFileForJITFunction(
     const InstructionSetFeatures* features,
     std::vector<ArrayRef<const uint8_t>>& added_elf_files,
     std::vector<const void*>& removed_symbols,
+    bool compress,
     /*out*/ size_t* num_symbols);
 
 // Notify native tools (e.g. libunwind) that DEX file has been opened.
@@ -46,6 +48,8 @@ void RemoveNativeDebugInfoForDex(Thread* self, const DexFile* dexfile);
 
 // Notify native tools (e.g. libunwind) that JIT has compiled a new method.
 // The method will make copy of the passed ELF file (to shrink it to the minimum size).
+// If packing function is provided, ELF files can be merged to save space
+// (however, the merging drops advanced gdb debug-info as it is too complex).
 void AddNativeDebugInfoForJit(Thread* self,
                               const void* code_ptr,
                               const std::vector<uint8_t>& symfile,
@@ -58,6 +62,11 @@ void RemoveNativeDebugInfoForJit(Thread* self, const void* code_ptr);
 
 // Returns approximate memory used by debug info for JIT code.
 size_t GetJitMiniDebugInfoMemUsage();
+
+// Get the lock which protects the native debug info.
+// Used only in tests to unwind while the JIT thread is running.
+// TODO: Unwinding should be race-free. Remove this.
+Mutex* GetNativeDebugInfoLock();
 
 }  // namespace art
 

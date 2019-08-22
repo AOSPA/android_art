@@ -438,12 +438,15 @@ class CodeInfo {
   // Accumulate code info size statistics into the given Stats tree.
   static void CollectSizeStats(const uint8_t* code_info, /*out*/ Stats* parent);
 
-  ALWAYS_INLINE static QuickMethodFrameInfo DecodeFrameInfo(const uint8_t* data) {
-    BitMemoryReader reader(data);
-    return QuickMethodFrameInfo(
-        reader.ReadVarint() * kStackAlignment,  // Decode packed_frame_size_ and unpack.
-        reader.ReadVarint(),  // core_spill_mask_.
-        reader.ReadVarint());  // fp_spill_mask_.
+  ALWAYS_INLINE static bool HasInlineInfo(const uint8_t* code_info_data) {
+    return (*code_info_data & kHasInlineInfo) != 0;
+  }
+
+  ALWAYS_INLINE static QuickMethodFrameInfo DecodeFrameInfo(const uint8_t* code_info_data) {
+    BitMemoryReader reader(code_info_data);
+    uint32_t header[4];  // flags, packed_frame_size, core_spill_mask, fp_spill_mask.
+    reader.ReadVarints(header);
+    return QuickMethodFrameInfo(header[1] * kStackAlignment, header[2], header[3]);
   }
 
  private:
@@ -461,6 +464,7 @@ class CodeInfo {
   // Invokes the callback with member pointer of each header field.
   template<typename Callback>
   ALWAYS_INLINE static void ForEachHeaderField(Callback callback) {
+    callback(&CodeInfo::flags_);
     callback(&CodeInfo::packed_frame_size_);
     callback(&CodeInfo::core_spill_mask_);
     callback(&CodeInfo::fp_spill_mask_);
@@ -486,6 +490,11 @@ class CodeInfo {
     callback(&CodeInfo::dex_register_catalog_);
   }
 
+  enum Flags {
+    kHasInlineInfo = 1 << 0,
+  };
+
+  uint32_t flags_ = 0;
   uint32_t packed_frame_size_ = 0;  // Frame size in kStackAlignment units.
   uint32_t core_spill_mask_ = 0;
   uint32_t fp_spill_mask_ = 0;
@@ -499,6 +508,8 @@ class CodeInfo {
   BitTable<DexRegisterMapInfo> dex_register_maps_;
   BitTable<DexRegisterInfo> dex_register_catalog_;
   uint32_t size_in_bits_ = 0;
+
+  friend class StackMapStream;
 };
 
 #undef ELEMENT_BYTE_OFFSET_AFTER

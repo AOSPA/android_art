@@ -73,6 +73,7 @@ cc_defaults {
         },
         not_windows: {
             srcs: [
+                "base/globals_unix.cc",
                 "base/mem_map_unix.cc",
             ],
             shared_libs: [
@@ -107,7 +108,7 @@ cc_defaults {
             cflags: ["-Wno-thread-safety"],
         },
         darwin: {
-            enabled: true,  // for libdexfile.
+            enabled: true, // for libdexfile.
         },
     },
     generated_sources: ["art_libartbase_operator_srcs"],
@@ -221,6 +222,12 @@ art_cc_library {
     header_libs: [
         "libnativehelper_header_only",
     ],
+    static: {
+        whole_static_libs: ["libc++fs"],
+    },
+    shared: {
+        static_libs: ["libc++fs"],
+    },
 }
 
 art_cc_test {

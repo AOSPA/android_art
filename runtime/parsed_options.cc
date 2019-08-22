@@ -138,6 +138,9 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-XX:NonMovingSpaceCapacity=_")
           .WithType<MemoryKiB>()
           .IntoKey(M::NonMovingSpaceCapacity)
+      .Define("-XX:StopForNativeAllocs=_")
+          .WithType<MemoryKiB>()
+          .IntoKey(M::StopForNativeAllocs)
       .Define("-XX:HeapTargetUtilization=_")
           .WithType<double>().WithRange(0.1, 0.9)
           .IntoKey(M::HeapTargetUtilization)
@@ -478,6 +481,7 @@ static void MaybeOverrideVerbosity() {
   //  gLogVerbosity.deopt = true;  // TODO: don't check this in!
   //  gLogVerbosity.gc = true;  // TODO: don't check this in!
   //  gLogVerbosity.heap = true;  // TODO: don't check this in!
+  //  gLogVerbosity.interpreter = true;  // TODO: don't check this in!
   //  gLogVerbosity.jdwp = true;  // TODO: don't check this in!
   //  gLogVerbosity.jit = true;  // TODO: don't check this in!
   //  gLogVerbosity.jni = true;  // TODO: don't check this in!
@@ -577,7 +581,7 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
 
   MaybeOverrideVerbosity();
 
-  SetRuntimeDebugFlagsEnabled(args.Get(M::SlowDebug));
+  SetRuntimeDebugFlagsEnabled(args.GetOrDefault(M::SlowDebug));
 
   // -Xprofile:
   Trace::SetDefaultClockSource(args.GetOrDefault(M::ProfileClock));
@@ -588,7 +592,6 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
 
   {
     // If not set, background collector type defaults to homogeneous compaction.
-    // If foreground is GSS, use GSS as background collector.
     // If not low memory mode, semispace otherwise.
 
     gc::CollectorType background_collector_type_;
@@ -604,12 +607,8 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
     }
 
     if (background_collector_type_ == gc::kCollectorTypeNone) {
-      if (collector_type_ != gc::kCollectorTypeGSS) {
-        background_collector_type_ = low_memory_mode_ ?
-            gc::kCollectorTypeSS : gc::kCollectorTypeHomogeneousSpaceCompact;
-      } else {
-        background_collector_type_ = collector_type_;
-      }
+      background_collector_type_ = low_memory_mode_ ?
+          gc::kCollectorTypeSS : gc::kCollectorTypeHomogeneousSpaceCompact;
     }
 
     args.Set(M::BackgroundGc, BackgroundGcOption { background_collector_type_ });
@@ -744,6 +743,7 @@ void ParsedOptions::Usage(const char* fmt, ...) {
   UsageMessage(stream, "  -XX:BackgroundGC=none\n");
   UsageMessage(stream, "  -XX:LargeObjectSpace={disabled,map,freelist}\n");
   UsageMessage(stream, "  -XX:LargeObjectThreshold=N\n");
+  UsageMessage(stream, "  -XX:StopForNativeAllocs=N\n");
   UsageMessage(stream, "  -XX:DumpNativeStackOnSigQuit=booleanvalue\n");
   UsageMessage(stream, "  -XX:MadviseRandomAccess:booleanvalue\n");
   UsageMessage(stream, "  -XX:SlowDebug={false,true}\n");

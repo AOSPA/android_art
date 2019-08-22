@@ -173,7 +173,7 @@ Instrumentation::Instrumentation()
       can_use_instrumentation_trampolines_(true) {
 }
 
-void Instrumentation::InstallStubsForClass(mirror::Class* klass) {
+void Instrumentation::InstallStubsForClass(ObjPtr<mirror::Class> klass) {
   if (!klass->IsResolved()) {
     // We need the class to be resolved to install/uninstall stubs. Otherwise its methods
     // could not be initialized or linked with regards to class inheritance.
@@ -288,7 +288,10 @@ static void InstrumentationInstallStack(Thread* thread, void* arg)
       }
       if (GetCurrentQuickFrame() == nullptr) {
         bool interpreter_frame = true;
-        InstrumentationStackFrame instrumentation_frame(GetThisObject(), m, 0, GetFrameId(),
+        InstrumentationStackFrame instrumentation_frame(GetThisObject().Ptr(),
+                                                        m,
+                                                        /*return_pc=*/ 0,
+                                                        GetFrameId(),
                                                         interpreter_frame);
         if (kVerboseInstrumentation) {
           LOG(INFO) << "Pushing shadow frame " << instrumentation_frame.Dump();
@@ -352,7 +355,7 @@ static void InstrumentationInstallStack(Thread* thread, void* arg)
           UNREACHABLE();
         }
         InstrumentationStackFrame instrumentation_frame(
-            m->IsRuntimeMethod() ? nullptr : GetThisObject(),
+            m->IsRuntimeMethod() ? nullptr : GetThisObject().Ptr(),
             m,
             return_pc,
             GetFrameId(),    // A runtime method still gets a frame id.
@@ -1192,7 +1195,7 @@ void Instrumentation::MethodExitEventImpl(Thread* thread,
 }
 
 void Instrumentation::MethodUnwindEvent(Thread* thread,
-                                        mirror::Object* this_object,
+                                        ObjPtr<mirror::Object> this_object,
                                         ArtMethod* method,
                                         uint32_t dex_pc) const {
   if (HasMethodUnwindListeners()) {
@@ -1281,7 +1284,7 @@ void Instrumentation::FieldWriteEventImpl(Thread* thread,
 }
 
 void Instrumentation::ExceptionThrownEvent(Thread* thread,
-                                           mirror::Throwable* exception_object) const {
+                                           ObjPtr<mirror::Throwable> exception_object) const {
   Thread* self = Thread::Current();
   StackHandleScope<1> hs(self);
   Handle<mirror::Throwable> h_exception(hs.NewHandle(exception_object));
@@ -1300,7 +1303,7 @@ void Instrumentation::ExceptionThrownEvent(Thread* thread,
 }
 
 void Instrumentation::ExceptionHandledEvent(Thread* thread,
-                                            mirror::Throwable* exception_object) const {
+                                            ObjPtr<mirror::Throwable> exception_object) const {
   Thread* self = Thread::Current();
   StackHandleScope<1> hs(self);
   Handle<mirror::Throwable> h_exception(hs.NewHandle(exception_object));
@@ -1336,9 +1339,11 @@ static void CheckStackDepth(Thread* self, const InstrumentationStackFrame& instr
   }
 }
 
-void Instrumentation::PushInstrumentationStackFrame(Thread* self, mirror::Object* this_object,
+void Instrumentation::PushInstrumentationStackFrame(Thread* self,
+                                                    ObjPtr<mirror::Object> this_object,
                                                     ArtMethod* method,
-                                                    uintptr_t lr, bool interpreter_entry) {
+                                                    uintptr_t lr,
+                                                    bool interpreter_entry) {
   DCHECK(!self->IsExceptionPending());
   std::deque<instrumentation::InstrumentationStackFrame>* stack = self->GetInstrumentationStack();
   if (kVerboseInstrumentation) {
@@ -1511,8 +1516,8 @@ TwoWordReturn Instrumentation::PopInstrumentationStackFrame(Thread* self,
   // TODO: improve the dex pc information here, requires knowledge of current PC as opposed to
   //       return_pc.
   uint32_t dex_pc = dex::kDexNoIndex;
-  mirror::Object* this_object = instrumentation_frame.this_object_;
   if (!method->IsRuntimeMethod() && !instrumentation_frame.interpreter_entry_) {
+    ObjPtr<mirror::Object> this_object = instrumentation_frame.this_object_;
     MethodExitEvent(self, this_object, instrumentation_frame.method_, dex_pc, return_value);
   }
 

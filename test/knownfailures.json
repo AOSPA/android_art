@@ -19,13 +19,6 @@
     },
     {
         "tests": "080-oom-fragmentation",
-        "description": ["Disable 080-oom-fragmentation for GSS GC due to lack of",
-                        "support for allocations larger than 32MB."],
-        "env_vars": {"ART_DEFAULT_GC_TYPE": "GSS"},
-        "bug": "http://b/33795328"
-    },
-    {
-        "tests": "080-oom-fragmentation",
         "description": ["Disable 080-oom-fragmentation for CC collector in debug mode",
                         "because of potential fragmentation caused by the region space's",
                         "cyclic region allocation (which is enabled in debug mode)."],
@@ -784,6 +777,18 @@
         "description": ["Requires zip, which isn't available on device"]
     },
     {
+        "tests": [
+          "1965-get-set-local-primitive-no-tables",
+          "1966-get-set-local-objects-no-table"
+        ],
+        "variant": "jvm",
+        "bug": "133241695",
+        "description": [
+          "The RI is wildly inconsistent about how it handles Get/SetLocalVariable when classes ",
+          "lack debug info."
+        ]
+    },
+    {
         "tests": ["683-clinit-inline-static-invoke"],
         "variant": "jvm",
         "description": ["Uses android-specific boot image class."]
@@ -1189,15 +1194,6 @@
         "env_vars": {"SANITIZE_HOST": "address"},
         "bug": "b/112993554",
         "description": ["Timeout with ASan and interp-ac on 32-bit host (x86)."]
-    },
-    {
-        "tests": ["980-redefine-object"],
-        "description": ["This test appears to be unusally flaky on no-image + jit. The cause of ",
-                        "this flakiness is unknown but appears to be related to the ",
-                        "jit-compilation of JNI bridges. Until more investigation is done we skip ",
-                        "this test."],
-        "bug": "http://b/73333076",
-        "variant": "no-image & jit"
     },
     {
         "tests": ["454-get-vreg", "457-regs"],
