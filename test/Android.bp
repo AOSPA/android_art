@@ -224,6 +224,7 @@ art_cc_defaults {
         "ti-agent/test_env.cc",
         "ti-agent/breakpoint_helper.cc",
         "ti-agent/common_helper.cc",
+        "ti-agent/early_return_helper.cc",
         "ti-agent/frame_pop_helper.cc",
         "ti-agent/locals_helper.cc",
         "ti-agent/monitors_helper.cc",
@@ -293,14 +294,19 @@ art_cc_defaults {
         "1951-monitor-enter-no-suspend/raw_monitor.cc",
         "1953-pop-frame/pop_frame.cc",
         "1957-error-ext/lasterror.cc",
+        // TODO Renumber
         "1962-multi-thread-events/multi_thread_events.cc",
         "1963-add-to-dex-classloader-in-memory/add_to_loader.cc",
+        "1968-force-early-return/force_early_return.cc",
+        "1969-force-early-return-void/force_early_return_void.cc",
+        "1970-force-early-return-long/force_early_return_long.cc",
+        "1974-resize-array/resize_array.cc",
     ],
     // Use NDK-compatible headers for ctstiagent.
     header_libs: [
         "libopenjdkjvmti_headers",
     ],
-    include_dirs: ["art/test/ti-agent"],
+    local_include_dirs: ["ti-agent"],
 }
 
 art_cc_defaults {
@@ -379,14 +385,13 @@ cc_library_static {
     ],
     sdk_version: "current",
     stl: "c++_static",
-    include_dirs: [
+    header_libs: [
+        "jni_headers",
         // This is needed to resolve the base/ header file in libdexfile. Unfortunately there are
         // many problems with how we export headers that are making doing this the 'right' way
         // difficult.
         // TODO: move those headers to art/ rather than under runtime.
-        "art/runtime",
-        // NDK headers aren't available in platform NDK builds.
-        "libnativehelper/include_jni",
+        "libart_runtime_headers_ndk",
     ],
     export_include_dirs: ["ti-agent"],
 }
@@ -474,6 +479,7 @@ cc_defaults {
         "167-visit-locks/visit_locks.cc",
         "169-threadgroup-jni/jni_daemon_thread.cc",
         "172-app-image-twice/debug_print_class.cc",
+        "177-visibly-initialized-deadlock/visibly_initialized.cc",
         "1945-proxy-method-arguments/get_args.cc",
         "203-multi-checkpoint/multi_checkpoint.cc",
         "305-other-fault-handler/fault_handler.cc",
@@ -500,11 +506,13 @@ cc_defaults {
         "674-hiddenapi/hiddenapi.cc",
         "692-vdex-inmem-loader/vdex_inmem_loader.cc",
         "708-jit-cache-churn/jit.cc",
+        "720-thread-priority/thread_priority.cc",
         "800-smali/jni.cc",
         "909-attach-agent/disallow_debugging.cc",
         "1001-app-image-regions/app_image_regions.cc",
         "1002-notify-startup/startup_interface.cc",
         "1947-breakpoint-redefine-deopt/check_deopt.cc",
+        "1972-jni-id-swap-indices/jni_id.cc",
         "common/runtime_state.cc",
         "common/stack_inspect.cc",
     ],
@@ -687,6 +695,10 @@ filegroup {
         "1953-pop-frame/src/art/Test1953.java",
         "1958-transform-try-jit/src/art/Test1958.java",
         "1962-multi-thread-events/src/art/Test1962.java",
+        // TODO Renumber
+        // "1962-force-early-return/src/art/Test1962.java",
+        // "1963-force-early-return-void/src/art/Test1963.java",
+        // "1964-force-early-return-long/src/art/Test1964.java",
     ],
 }
 

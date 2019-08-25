@@ -1,4 +1,5 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 
 # Copyright (C) 2019 The Android Open Source Project
 #
@@ -26,16 +27,26 @@ import zipfile
 
 logging.basicConfig(format='%(message)s')
 
+# Architectures supported by APEX packages.
+archs = ["arm", "arm64", "x86", "x86_64"]
+# Directory containing ART tests within a Runtime APEX (if the package includes
+# any). ART test executables are installed in `bin/art/<arch>`. Segregating
+# tests by architecture is useful on devices supporting more than one
+# architecture, as it permits testing all of them using a single Runtime APEX
+# package.
+art_test_dir = 'bin/art'
 
 class FSObject:
-  def __init__(self, name, is_dir, is_exec, is_symlink):
+  def __init__(self, name, is_dir, is_exec, is_symlink, size):
     self.name = name
     self.is_dir = is_dir
     self.is_exec = is_exec
     self.is_symlink = is_symlink
+    self.size = size
 
   def __str__(self):
-    return '%s(dir=%r,exec=%r,symlink=%r)' % (self.name, self.is_dir, self.is_exec, self.is_symlink)
+    return '%s(dir=%r,exec=%r,symlink=%r,size=%d)' \
+             % (self.name, self.is_dir, self.is_exec, self.is_symlink, self.size)
 
 
 class TargetApexProvider:
@@ -97,6 +108,9 @@ class TargetApexProvider:
         continue
       bits = comps[2]
       name = comps[5]
+      size_str = comps[6]
+      # Use a negative value as an indicator of undefined/unknown size.
+      size = int(size_str) if size_str != '' else -1
       if len(bits) != 6:
         logging.warning('Dont understand bits \'%s\'', bits)
         continue
@@ -107,7 +121,36 @@ class TargetApexProvider:
 
       is_exec = is_exec_bit(bits[3]) and is_exec_bit(bits[4]) and is_exec_bit(bits[5])
       is_symlink = bits[1] == '2'
-      apex_map[name] = FSObject(name, is_dir, is_exec, is_symlink)
+      apex_map[name] = FSObject(name, is_dir, is_exec, is_symlink, size)
+    self._folder_cache[apex_dir] = apex_map
+    return apex_map
+
+
+class TargetFlattenedApexProvider:
+  def __init__(self, apex):
+    self._folder_cache = {}
+    self._apex = apex
+
+  def get(self, path):
+    apex_dir, name = os.path.split(path)
+    if not apex_dir:
+      apex_dir = '.'
+    apex_map = self.read_dir(apex_dir)
+    return apex_map[name] if name in apex_map else None
+
+  def read_dir(self, apex_dir):
+    if apex_dir in self._folder_cache:
+      return self._folder_cache[apex_dir]
+    apex_map = {}
+    dirname = os.path.join(self._apex, apex_dir)
+    if os.path.exists(dirname):
+      for basename in os.listdir(dirname):
+        filepath = os.path.join(dirname, basename)
+        is_dir = os.path.isdir(filepath)
+        is_exec = os.access(filepath, os.X_OK)
+        is_symlink = os.path.islink(filepath)
+        size = os.path.getsize(filepath)
+        apex_map[basename] = FSObject(basename, is_dir, is_exec, is_symlink, size)
     self._folder_cache[apex_dir] = apex_map
     return apex_map
 
@@ -115,7 +158,7 @@ class TargetApexProvider:
 class HostApexProvider:
   def __init__(self, apex, tmpdir):
     self._tmpdir = tmpdir
-    self.folder_cache = {}
+    self._folder_cache = {}
     self._payload = os.path.join(self._tmpdir, 'apex_payload.zip')
     # Extract payload to tmpdir.
     apex_zip = zipfile.ZipFile(apex)
@@ -134,12 +177,12 @@ class HostApexProvider:
     return apex_map[name] if name in apex_map else None
 
   def read_dir(self, apex_dir):
-    if apex_dir in self.folder_cache:
-      return self.folder_cache[apex_dir]
-    if not self.folder_cache:
+    if apex_dir in self._folder_cache:
+      return self._folder_cache[apex_dir]
+    if not self._folder_cache:
       self.parse_zip()
-    if apex_dir in self.folder_cache:
-      return self.folder_cache[apex_dir]
+    if apex_dir in self._folder_cache:
+      return self._folder_cache[apex_dir]
     return {}
 
   def parse_zip(self):
@@ -163,20 +206,23 @@ class HostApexProvider:
         apex_dir, base = os.path.split(path)
         # TODO: If directories are stored, base will be empty.
 
-        if apex_dir not in self.folder_cache:
-          self.folder_cache[apex_dir] = {}
-        dir_map = self.folder_cache[apex_dir]
+        if apex_dir not in self._folder_cache:
+          self._folder_cache[apex_dir] = {}
+        dir_map = self._folder_cache[apex_dir]
         if base not in dir_map:
           if is_zipinfo:
             bits = (zipinfo.external_attr >> 16) & 0xFFFF
             is_dir = get_octal(bits, 4) == 4
             is_symlink = get_octal(bits, 4) == 2
             is_exec = bits_is_exec(bits)
+            size = zipinfo.file_size
           else:
             is_exec = False  # Seems we can't get this easily?
             is_symlink = False
             is_dir = True
-          dir_map[base] = FSObject(base, is_dir, is_exec, is_symlink)
+            # Use a negative value as an indicator of undefined/unknown size.
+            size = -1
+          dir_map[base] = FSObject(base, is_dir, is_exec, is_symlink, size)
         is_zipinfo = False
         path = apex_dir
 
@@ -233,6 +279,28 @@ class Checker:
       self.fail('%s is not a symlink', path)
     self._expected_file_globs.add(path)
 
+  def check_art_test_executable(self, filename):
+    # This is a simplistic implementation, as we declare victory as soon as the
+    # test binary is found for one of the supported (not built) architectures.
+    # Ideally we would propagate the built architectures from the build system
+    # to this script and require test binaries for all of them to be present.
+    # Note that this behavior is not specific to this method: there are other
+    # places in this script where we rely on this simplified strategy.
+    #
+    # TODO: Implement the suggestion above (here and in other places in this
+    # script).
+    test_found = False
+    for arch in archs:
+      test_path = '%s/%s/%s' % (art_test_dir, arch, filename)
+      test_is_file, _ = self.is_file(test_path)
+      if test_is_file:
+        test_found = True
+        self._expected_file_globs.add(test_path)
+        if not self._provider.get(test_path).is_exec:
+          self.fail('%s is not executable', test_path)
+    if not test_found:
+      self.fail('ART test binary missing: %s', filename)
+
   def check_single_library(self, filename):
     lib_path = 'lib/%s' % filename
     lib64_path = 'lib64/%s' % filename
@@ -250,6 +318,10 @@ class Checker:
 
   def ignore_path(self, path_glob):
     self._expected_file_globs.add(path_glob)
+
+  def check_optional_art_test_executable(self, filename):
+    for arch in archs:
+      self.ignore_path('%s/%s/%s' % (art_test_dir, arch, filename))
 
   def check_no_superfluous_files(self, dir_path):
     paths = []
@@ -398,6 +470,7 @@ class ReleaseChecker:
     # Check java libraries for Managed Core Library.
     self._checker.check_java_library('apache-xml')
     self._checker.check_java_library('bouncycastle')
+    self._checker.check_java_library('core-icu4j')
     self._checker.check_java_library('core-libart')
     self._checker.check_java_library('core-oj')
     self._checker.check_java_library('okhttp')
@@ -521,9 +594,14 @@ class DebugChecker:
   def run(self):
     # Check binaries for ART.
     self._checker.check_executable('dexdiag')
+    self._checker.check_executable('dexanalyze')
+    self._checker.check_executable('dexlayout')
+    self._checker.check_symlinked_multilib_executable('imgdiag')
 
     # Check debug binaries for ART.
+    self._checker.check_executable('dexlayoutd')
     self._checker.check_executable('dexoptanalyzerd')
+    self._checker.check_symlinked_multilib_executable('imgdiagd')
     self._checker.check_executable('profmand')
 
     # Check internal libraries for ART.
@@ -574,6 +652,267 @@ class DebugTargetChecker:
     self._checker.check_prefer64_library('libprocinfo')
 
 
+class TestingTargetChecker:
+  def __init__(self, checker):
+    self._checker = checker
+
+  def __str__(self):
+    return 'Testing (Target) Checker'
+
+  def run(self):
+    # Check cmdline tests.
+    self._checker.check_optional_art_test_executable('cmdline_parser_test')
+
+    # Check compiler tests.
+    self._checker.check_art_test_executable('atomic_dex_ref_map_test')
+    self._checker.check_art_test_executable('bounds_check_elimination_test')
+    self._checker.check_art_test_executable('codegen_test')
+    self._checker.check_art_test_executable('compiled_method_storage_test')
+    self._checker.check_art_test_executable('data_type_test')
+    self._checker.check_art_test_executable('dedupe_set_test')
+    self._checker.check_art_test_executable('dominator_test')
+    self._checker.check_art_test_executable('dwarf_test')
+    self._checker.check_art_test_executable('exception_test')
+    self._checker.check_art_test_executable('find_loops_test')
+    self._checker.check_art_test_executable('graph_checker_test')
+    self._checker.check_art_test_executable('graph_test')
+    self._checker.check_art_test_executable('gvn_test')
+    self._checker.check_art_test_executable('induction_var_analysis_test')
+    self._checker.check_art_test_executable('induction_var_range_test')
+    self._checker.check_art_test_executable('jni_cfi_test')
+    self._checker.check_art_test_executable('jni_compiler_test')
+    self._checker.check_art_test_executable('licm_test')
+    self._checker.check_art_test_executable('linker_patch_test')
+    self._checker.check_art_test_executable('live_interval_test')
+    self._checker.check_art_test_executable('load_store_analysis_test')
+    self._checker.check_art_test_executable('loop_optimization_test')
+    self._checker.check_art_test_executable('nodes_test')
+    self._checker.check_art_test_executable('nodes_vector_test')
+    self._checker.check_art_test_executable('optimizing_cfi_test')
+    self._checker.check_art_test_executable('output_stream_test')
+    self._checker.check_art_test_executable('parallel_move_test')
+    self._checker.check_art_test_executable('pretty_printer_test')
+    self._checker.check_art_test_executable('reference_type_propagation_test')
+    self._checker.check_art_test_executable('scheduler_test')
+    self._checker.check_art_test_executable('select_generator_test')
+    self._checker.check_art_test_executable('side_effects_test')
+    self._checker.check_art_test_executable('src_map_elem_test')
+    self._checker.check_art_test_executable('ssa_liveness_analysis_test')
+    self._checker.check_art_test_executable('ssa_test')
+    self._checker.check_art_test_executable('stack_map_test')
+    self._checker.check_art_test_executable('superblock_cloner_test')
+    self._checker.check_art_test_executable('suspend_check_test')
+    self._checker.check_art_test_executable('swap_space_test')
+    # These tests depend on a specific code generator and are conditionally included.
+    self._checker.check_optional_art_test_executable('constant_folding_test')
+    self._checker.check_optional_art_test_executable('dead_code_elimination_test')
+    self._checker.check_optional_art_test_executable('linearize_test')
+    self._checker.check_optional_art_test_executable('live_ranges_test')
+    self._checker.check_optional_art_test_executable('liveness_test')
+    self._checker.check_optional_art_test_executable('managed_register_arm64_test')
+    self._checker.check_optional_art_test_executable('managed_register_arm_test')
+    self._checker.check_optional_art_test_executable('managed_register_mips64_test')
+    self._checker.check_optional_art_test_executable('managed_register_x86_64_test')
+    self._checker.check_optional_art_test_executable('managed_register_x86_test')
+    self._checker.check_optional_art_test_executable('register_allocator_test')
+
+    # Check dex2oat tests.
+    self._checker.check_art_test_executable('compiler_driver_test')
+    self._checker.check_art_test_executable('dex2oat_image_test')
+    self._checker.check_art_test_executable('dex2oat_test')
+    self._checker.check_art_test_executable('dex_to_dex_decompiler_test')
+    self._checker.check_art_test_executable('elf_writer_test')
+    self._checker.check_art_test_executable('image_test')
+    self._checker.check_art_test_executable('image_write_read_test')
+    self._checker.check_art_test_executable('index_bss_mapping_encoder_test')
+    self._checker.check_art_test_executable('multi_oat_relative_patcher_test')
+    self._checker.check_art_test_executable('oat_writer_test')
+    self._checker.check_art_test_executable('verifier_deps_test')
+    # These tests depend on a specific code generator and are conditionally included.
+    self._checker.check_optional_art_test_executable('relative_patcher_arm64_test')
+    self._checker.check_optional_art_test_executable('relative_patcher_mips32r6_test')
+    self._checker.check_optional_art_test_executable('relative_patcher_mips64_test')
+    self._checker.check_optional_art_test_executable('relative_patcher_mips_test')
+    self._checker.check_optional_art_test_executable('relative_patcher_thumb2_test')
+    self._checker.check_optional_art_test_executable('relative_patcher_x86_64_test')
+    self._checker.check_optional_art_test_executable('relative_patcher_x86_test')
+
+    # Check dexanalyze tests.
+    self._checker.check_optional_art_test_executable('dexanalyze_test')
+
+    # Check dexdiag tests.
+    self._checker.check_optional_art_test_executable('dexdiag_test')
+
+    # Check dexdump tests.
+    self._checker.check_art_test_executable('dexdump_test')
+
+    # Check dexlayout tests.
+    self._checker.check_optional_art_test_executable('dexlayout_test')
+
+    # Check dexlist tests.
+    self._checker.check_art_test_executable('dexlist_test')
+
+    # Check dexoptanalyzer tests.
+    self._checker.check_art_test_executable('dexoptanalyzer_test')
+
+    # Check imgdiag tests.
+    self._checker.check_art_test_executable('imgdiag_test')
+
+    # Check libartbase tests.
+    self._checker.check_art_test_executable('arena_allocator_test')
+    self._checker.check_art_test_executable('bit_field_test')
+    self._checker.check_art_test_executable('bit_memory_region_test')
+    self._checker.check_art_test_executable('bit_string_test')
+    self._checker.check_art_test_executable('bit_struct_test')
+    self._checker.check_art_test_executable('bit_table_test')
+    self._checker.check_art_test_executable('bit_utils_test')
+    self._checker.check_art_test_executable('bit_vector_test')
+    self._checker.check_art_test_executable('fd_file_test')
+    self._checker.check_art_test_executable('file_utils_test')
+    self._checker.check_art_test_executable('hash_set_test')
+    self._checker.check_art_test_executable('hex_dump_test')
+    self._checker.check_art_test_executable('histogram_test')
+    self._checker.check_art_test_executable('indenter_test')
+    self._checker.check_art_test_executable('instruction_set_test')
+    self._checker.check_art_test_executable('intrusive_forward_list_test')
+    self._checker.check_art_test_executable('leb128_test')
+    self._checker.check_art_test_executable('logging_test')
+    self._checker.check_art_test_executable('mem_map_test')
+    self._checker.check_art_test_executable('membarrier_test')
+    self._checker.check_art_test_executable('memfd_test')
+    self._checker.check_art_test_executable('memory_region_test')
+    self._checker.check_art_test_executable('memory_type_table_test')
+    self._checker.check_art_test_executable('safe_copy_test')
+    self._checker.check_art_test_executable('scoped_flock_test')
+    self._checker.check_art_test_executable('time_utils_test')
+    self._checker.check_art_test_executable('transform_array_ref_test')
+    self._checker.check_art_test_executable('transform_iterator_test')
+    self._checker.check_art_test_executable('utils_test')
+    self._checker.check_art_test_executable('variant_map_test')
+    self._checker.check_art_test_executable('zip_archive_test')
+
+    # Check libartpalette tests.
+    self._checker.check_art_test_executable('palette_test')
+
+    # Check libdexfile tests.
+    self._checker.check_art_test_executable('art_dex_file_loader_test')
+    self._checker.check_art_test_executable('art_libdexfile_support_tests')
+    self._checker.check_art_test_executable('class_accessor_test')
+    self._checker.check_art_test_executable('code_item_accessors_test')
+    self._checker.check_art_test_executable('compact_dex_file_test')
+    self._checker.check_art_test_executable('compact_offset_table_test')
+    self._checker.check_art_test_executable('descriptors_names_test')
+    self._checker.check_art_test_executable('dex_file_loader_test')
+    self._checker.check_art_test_executable('dex_file_verifier_test')
+    self._checker.check_art_test_executable('dex_instruction_test')
+    self._checker.check_art_test_executable('primitive_test')
+    self._checker.check_art_test_executable('string_reference_test')
+    self._checker.check_art_test_executable('test_dex_file_builder_test')
+    self._checker.check_art_test_executable('type_lookup_table_test')
+    self._checker.check_art_test_executable('utf_test')
+
+    # Check libprofile tests.
+    self._checker.check_optional_art_test_executable('profile_boot_info_test')
+    self._checker.check_optional_art_test_executable('profile_compilation_info_test')
+
+    # Check oatdump tests.
+    self._checker.check_art_test_executable('oatdump_app_test')
+    self._checker.check_art_test_executable('oatdump_image_test')
+    self._checker.check_art_test_executable('oatdump_test')
+
+    # Check profman tests.
+    self._checker.check_art_test_executable('profile_assistant_test')
+
+    # Check runtime compiler tests.
+    self._checker.check_art_test_executable('module_exclusion_test')
+    self._checker.check_art_test_executable('reflection_test')
+
+    # Check runtime tests.
+    self._checker.check_art_test_executable('arch_test')
+    self._checker.check_art_test_executable('barrier_test')
+    self._checker.check_art_test_executable('card_table_test')
+    self._checker.check_art_test_executable('cha_test')
+    self._checker.check_art_test_executable('class_linker_test')
+    self._checker.check_art_test_executable('class_loader_context_test')
+    self._checker.check_art_test_executable('class_table_test')
+    self._checker.check_art_test_executable('compiler_filter_test')
+    self._checker.check_art_test_executable('dex_cache_test')
+    self._checker.check_art_test_executable('dlmalloc_space_random_test')
+    self._checker.check_art_test_executable('dlmalloc_space_static_test')
+    self._checker.check_art_test_executable('entrypoints_order_test')
+    self._checker.check_art_test_executable('exec_utils_test')
+    self._checker.check_art_test_executable('gtest_test')
+    self._checker.check_art_test_executable('handle_scope_test')
+    self._checker.check_art_test_executable('heap_test')
+    self._checker.check_art_test_executable('heap_verification_test')
+    self._checker.check_art_test_executable('hidden_api_test')
+    self._checker.check_art_test_executable('image_space_test')
+    self._checker.check_art_test_executable('immune_spaces_test')
+    self._checker.check_art_test_executable('imtable_test')
+    self._checker.check_art_test_executable('indirect_reference_table_test')
+    self._checker.check_art_test_executable('instruction_set_features_arm64_test')
+    self._checker.check_art_test_executable('instruction_set_features_arm_test')
+    self._checker.check_art_test_executable('instruction_set_features_mips64_test')
+    self._checker.check_art_test_executable('instruction_set_features_mips_test')
+    self._checker.check_art_test_executable('instruction_set_features_test')
+    self._checker.check_art_test_executable('instruction_set_features_x86_64_test')
+    self._checker.check_art_test_executable('instruction_set_features_x86_test')
+    self._checker.check_art_test_executable('instrumentation_test')
+    self._checker.check_art_test_executable('intern_table_test')
+    self._checker.check_art_test_executable('java_vm_ext_test')
+    self._checker.check_art_test_executable('jdwp_options_test')
+    self._checker.check_art_test_executable('jit_memory_region_test')
+    self._checker.check_art_test_executable('jni_internal_test')
+    self._checker.check_art_test_executable('large_object_space_test')
+    self._checker.check_art_test_executable('math_entrypoints_test')
+    self._checker.check_art_test_executable('memcmp16_test')
+    self._checker.check_art_test_executable('method_handles_test')
+    self._checker.check_art_test_executable('method_type_test')
+    self._checker.check_art_test_executable('method_verifier_test')
+    self._checker.check_art_test_executable('mod_union_table_test')
+    self._checker.check_art_test_executable('monitor_pool_test')
+    self._checker.check_art_test_executable('monitor_test')
+    self._checker.check_art_test_executable('mutex_test')
+    self._checker.check_art_test_executable('oat_file_assistant_test')
+    self._checker.check_art_test_executable('oat_file_test')
+    self._checker.check_art_test_executable('object_test')
+    self._checker.check_art_test_executable('parsed_options_test')
+    self._checker.check_art_test_executable('prebuilt_tools_test')
+    self._checker.check_art_test_executable('profiling_info_test')
+    self._checker.check_art_test_executable('proxy_test')
+    self._checker.check_art_test_executable('quick_trampoline_entrypoints_test')
+    self._checker.check_art_test_executable('reference_queue_test')
+    self._checker.check_art_test_executable('reference_table_test')
+    self._checker.check_art_test_executable('reg_type_test')
+    self._checker.check_art_test_executable('rosalloc_space_random_test')
+    self._checker.check_art_test_executable('rosalloc_space_static_test')
+    self._checker.check_art_test_executable('runtime_callbacks_test')
+    self._checker.check_art_test_executable('runtime_test')
+    self._checker.check_art_test_executable('safe_math_test')
+    self._checker.check_art_test_executable('space_bitmap_test')
+    self._checker.check_art_test_executable('space_create_test')
+    self._checker.check_art_test_executable('stub_test')
+    self._checker.check_art_test_executable('subtype_check_info_test')
+    self._checker.check_art_test_executable('subtype_check_test')
+    self._checker.check_art_test_executable('system_weak_test')
+    self._checker.check_art_test_executable('task_processor_test')
+    self._checker.check_art_test_executable('thread_pool_test')
+    self._checker.check_art_test_executable('timing_logger_test')
+    self._checker.check_art_test_executable('transaction_test')
+    self._checker.check_art_test_executable('two_runtimes_test')
+    self._checker.check_art_test_executable('unstarted_runtime_test')
+    self._checker.check_art_test_executable('var_handle_test')
+    self._checker.check_art_test_executable('vdex_file_test')
+
+    # Check sigchainlib tests.
+    self._checker.check_art_test_executable('sigchain_test')
+
+    # Check ART test (internal) libraries.
+    self._checker.check_native_library('libart-gtest')
+    self._checker.check_native_library('libartd-disassembler')
+    self._checker.check_native_library('libartd-simulator-container')
+
+
 class NoSuperfluousBinariesChecker:
   def __init__(self, checker):
     self._checker = checker
@@ -600,33 +939,55 @@ class NoSuperfluousLibrariesChecker:
     self._checker.check_no_superfluous_files('lib64/bionic')
 
 
+class NoSuperfluousArtTestsChecker:
+  def __init__(self, checker):
+    self._checker = checker
+
+  def __str__(self):
+    return 'No superfluous ART tests checker'
+
+  def run(self):
+    for arch in archs:
+      self._checker.check_no_superfluous_files('%s/%s' % (art_test_dir, arch))
+
+
 class List:
-  def __init__(self, provider):
+  def __init__(self, provider, print_size=False):
     self._provider = provider
-    self._path = ''
+    self._print_size = print_size
 
   def print_list(self):
-    apex_map = self._provider.read_dir(self._path)
-    if apex_map is None:
-      return
-    apex_map = dict(apex_map)
-    if '.' in apex_map:
-      del apex_map['.']
-    if '..' in apex_map:
-      del apex_map['..']
-    for (_, val) in sorted(apex_map.items()):
-      self._path = os.path.join(self._path, val.name)
-      print(self._path)
-      if val.is_dir:
-        self.print_list()
+
+    def print_list_rec(path):
+      apex_map = self._provider.read_dir(path)
+      if apex_map is None:
+        return
+      apex_map = dict(apex_map)
+      if '.' in apex_map:
+        del apex_map['.']
+      if '..' in apex_map:
+        del apex_map['..']
+      for (_, val) in sorted(apex_map.items()):
+        val_path = os.path.join(path, val.name)
+        if self._print_size:
+          if val.size < 0:
+            print('[    n/a    ]  %s' % val_path)
+          else:
+            print('[%11d]  %s' % (val.size, val_path))
+        else:
+          print(val_path)
+        if val.is_dir:
+          print_list_rec(val_path)
+
+    print_list_rec('')
 
 
 class Tree:
-  def __init__(self, provider, title):
+  def __init__(self, provider, title, print_size=False):
     print('%s' % title)
     self._provider = provider
-    self._path = ''
     self._has_next_list = []
+    self._print_size = print_size
 
   @staticmethod
   def get_vertical(has_next_list):
@@ -640,44 +1001,67 @@ class Tree:
     return '└── ' if last else '├── '
 
   def print_tree(self):
-    apex_map = self._provider.read_dir(self._path)
-    if apex_map is None:
-      return
-    apex_map = dict(apex_map)
-    if '.' in apex_map:
-      del apex_map['.']
-    if '..' in apex_map:
-      del apex_map['..']
-    key_list = list(sorted(apex_map.keys()))
-    for i, key in enumerate(key_list):
-      prev = self.get_vertical(self._has_next_list)
-      last = self.get_last_vertical(i == len(key_list) - 1)
-      val = apex_map[key]
-      print('%s%s%s' % (prev, last, val.name))
-      if val.is_dir:
-        self._has_next_list.append(i < len(key_list) - 1)
-        saved_dir = self._path
-        self._path = os.path.join(self._path, val.name)
-        self.print_tree()
-        self._path = saved_dir
-        self._has_next_list.pop()
+
+    def print_tree_rec(path):
+      apex_map = self._provider.read_dir(path)
+      if apex_map is None:
+        return
+      apex_map = dict(apex_map)
+      if '.' in apex_map:
+        del apex_map['.']
+      if '..' in apex_map:
+        del apex_map['..']
+      key_list = list(sorted(apex_map.keys()))
+      for i, key in enumerate(key_list):
+        prev = self.get_vertical(self._has_next_list)
+        last = self.get_last_vertical(i == len(key_list) - 1)
+        val = apex_map[key]
+        if self._print_size:
+          if val.size < 0:
+            print('%s%s[    n/a    ]  %s' % (prev, last, val.name))
+          else:
+            print('%s%s[%11d]  %s' % (prev, last, val.size, val.name))
+        else:
+          print('%s%s%s' % (prev, last, val.name))
+        if val.is_dir:
+          self._has_next_list.append(i < len(key_list) - 1)
+          val_path = os.path.join(path, val.name)
+          print_tree_rec(val_path)
+          self._has_next_list.pop()
+
+    print_tree_rec('')
 
 
 # Note: do not sys.exit early, for __del__ cleanup.
 def art_apex_test_main(test_args):
+  if test_args.host and test_args.flattened:
+    logging.error("Both of --host and --flattened set")
+    return 1
   if test_args.tree and test_args.debug:
     logging.error("Both of --tree and --debug set")
+    return 1
+  if test_args.tree and test_args.testing:
+    logging.error("Both of --tree and --testing set")
     return 1
   if test_args.list and test_args.debug:
     logging.error("Both of --list and --debug set")
     return 1
+  if test_args.list and test_args.testing:
+    logging.error("Both of --list and --testing set")
+    return 1
   if test_args.list and test_args.tree:
     logging.error("Both of --list and --tree set")
     return 1
-  if not test_args.tmpdir:
+  if test_args.size and not (test_args.list or test_args.tree):
+    logging.error("--size set but neither --list nor --tree set")
+    return 1
+  if test_args.host and test_args.testing:
+    logging.error("Both of --host and --testing set")
+    return 1
+  if not test_args.flattened and not test_args.tmpdir:
     logging.error("Need a tmpdir.")
     return 1
-  if not test_args.host and not test_args.debugfs:
+  if not test_args.flattened and not test_args.host and not test_args.debugfs:
     logging.error("Need debugfs.")
     return 1
   if test_args.bitness not in ['32', '64', 'multilib', 'auto']:
@@ -687,16 +1071,19 @@ def art_apex_test_main(test_args):
     if test_args.host:
       apex_provider = HostApexProvider(test_args.apex, test_args.tmpdir)
     else:
-      apex_provider = TargetApexProvider(test_args.apex, test_args.tmpdir, test_args.debugfs)
+      if test_args.flattened:
+        apex_provider = TargetFlattenedApexProvider(test_args.apex)
+      else:
+        apex_provider = TargetApexProvider(test_args.apex, test_args.tmpdir, test_args.debugfs)
   except (zipfile.BadZipFile, zipfile.LargeZipFile) as e:
     logging.error('Failed to create provider: %s', e)
     return 1
 
   if test_args.tree:
-    Tree(apex_provider, test_args.apex).print_tree()
+    Tree(apex_provider, test_args.apex, test_args.size).print_tree()
     return 0
   if test_args.list:
-    List(apex_provider).print_list()
+    List(apex_provider, test_args.size).print_list()
     return 0
 
   checkers = []
@@ -715,7 +1102,7 @@ def art_apex_test_main(test_args):
       test_args.bitness = '64'
     else:
       logging.error('  Could not detect bitness, neither lib nor lib64 contained.')
-      print('%s' % apex_provider.folder_cache)
+      List(apex_provider).print_list()
       return 1
 
   if test_args.bitness == '32':
@@ -731,13 +1118,16 @@ def art_apex_test_main(test_args):
     checkers.append(ReleaseHostChecker(base_checker))
   else:
     checkers.append(ReleaseTargetChecker(base_checker))
-  if test_args.debug:
+  if test_args.debug or test_args.testing:
     checkers.append(DebugChecker(base_checker))
-  if test_args.debug and not test_args.host:
-    checkers.append(DebugTargetChecker(base_checker))
+    if not test_args.host:
+      checkers.append(DebugTargetChecker(base_checker))
+  if test_args.testing:
+    checkers.append(TestingTargetChecker(base_checker))
 
   # These checkers must be last.
   checkers.append(NoSuperfluousBinariesChecker(base_checker))
+  checkers.append(NoSuperfluousArtTestsChecker(base_checker))
   if not test_args.host:
     # We only care about superfluous libraries on target, where their absence
     # can be vital to ensure they get picked up from the right package.
@@ -782,8 +1172,9 @@ def art_apex_test_default(test_parser):
 
   # TODO: Add host support
   configs = [
-    {'name': 'com.android.runtime.release', 'debug': False, 'host': False},
-    {'name': 'com.android.runtime.debug', 'debug': True, 'host': False},
+    {'name': 'com.android.runtime.release', 'debug': False, 'testing': False, 'host': False},
+    {'name': 'com.android.runtime.debug',   'debug': True,  'testing': False, 'host': False},
+    {'name': 'com.android.runtime.testing', 'debug': False, 'testing': True,  'host': False},
   ]
 
   for config in configs:
@@ -795,6 +1186,7 @@ def art_apex_test_default(test_parser):
       logging.error("Cannot find APEX %s. Please build it first.", test_args.apex)
       continue
     test_args.debug = config['debug']
+    test_args.testing = config['testing']
     test_args.host = config['host']
     failed = art_apex_test_main(test_args) != 0
 
@@ -809,10 +1201,14 @@ if __name__ == "__main__":
 
   parser.add_argument('--host', help='Check as host apex', action='store_true')
 
+  parser.add_argument('--flattened', help='Check as flattened (target) apex', action='store_true')
+
   parser.add_argument('--debug', help='Check as debug apex', action='store_true')
+  parser.add_argument('--testing', help='Check as testing apex', action='store_true')
 
   parser.add_argument('--list', help='List all files', action='store_true')
   parser.add_argument('--tree', help='Print directory tree', action='store_true')
+  parser.add_argument('--size', help='Print file sizes', action='store_true')
 
   parser.add_argument('--tmpdir', help='Directory for temp files')
   parser.add_argument('--debugfs', help='Path to debugfs')

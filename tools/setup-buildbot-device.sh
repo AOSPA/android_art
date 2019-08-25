@@ -17,7 +17,9 @@
 # The work does by this script is (mostly) undone by tools/teardown-buildbot-device.sh.
 # Make sure to keep these files in sync.
 
+red='\033[0;31m'
 green='\033[0;32m'
+yellow='\033[0;33m'
 nc='\033[0m'
 
 if [ "$1" = --verbose ]; then
@@ -65,21 +67,6 @@ echo -e "${green}Setting local loopback${nc}"
 adb shell ifconfig lo up
 $verbose && adb shell ifconfig
 
-# Ensure netd is running, as otherwise the logcat would be spammed
-# with the following messages on devices running Android O:
-#
-#   E NetdConnector: Communications error: java.io.IOException: No such file or directory
-#   E mDnsConnector: Communications error: java.io.IOException: No such file or directory
-#
-# Netd was initially disabled as an attempt to solve issues with
-# network-related libcore and JDWP tests failing on devices running
-# Android O (MR1) (see b/74725685). These tests are currently
-# disabled. When a better solution has been found, we should remove
-# the following lines.
-echo -e "${green}Turning on netd${nc}"
-adb shell start netd
-$verbose && adb shell getprop init.svc.netd
-
 if $verbose; then
   echo -e "${green}List properties${nc}"
   adb shell getprop
@@ -120,6 +107,9 @@ else
   for i in $processes; do adb shell kill -9 $i; done
 fi
 
+# Chroot environment.
+# ===================
+
 if [[ -n "$ART_TEST_CHROOT" ]]; then
   # Prepare the chroot dir.
   echo -e "${green}Prepare the chroot dir in $ART_TEST_CHROOT${nc}"
@@ -134,8 +124,9 @@ if [[ -n "$ART_TEST_CHROOT" ]]; then
   # This is required to have Android system properties work from the chroot.
   # Notes:
   # - In Android N, only '/property_contexts' is expected.
-  # - In Android O, property_context files are expected under /system and /vendor.
-  # (See bionic/libc/bionic/system_properties.cpp for more information.)
+  # - In Android O+, property_context files are expected under /system and /vendor.
+  # (See bionic/libc/bionic/system_properties.cpp or
+  # bionic/libc/system_properties/contexts_split.cpp for more information.)
   property_context_files="/property_contexts \
     /system/etc/selinux/plat_property_contexts \
     /vendor/etc/selinux/nonplat_property_context \
@@ -154,7 +145,7 @@ if [[ -n "$ART_TEST_CHROOT" ]]; then
 
   # Populate /etc in chroot with required files.
   adb shell mkdir -p "$ART_TEST_CHROOT/system/etc"
-  adb shell "cd $ART_TEST_CHROOT && ln -s system/etc etc"
+  adb shell "cd $ART_TEST_CHROOT && ln -sf system/etc etc"
 
   # Provide /proc in chroot.
   adb shell mkdir -p "$ART_TEST_CHROOT/proc"
@@ -174,8 +165,6 @@ if [[ -n "$ART_TEST_CHROOT" ]]; then
   adb shell mount | grep -q "^tmpfs on $ART_TEST_CHROOT/dev type tmpfs " \
     || adb shell mount -o bind /dev "$ART_TEST_CHROOT/dev"
 
-  # Create /apex tmpfs in chroot.
+  # Create /apex directory in chroot.
   adb shell mkdir -p "$ART_TEST_CHROOT/apex"
-  adb shell mount | grep -q "^tmpfs on $ART_TEST_CHROOT/apex type tmpfs " \
-    || adb shell mount -t tmpfs -o nodev,noexec,nosuid tmpfs "$ART_TEST_CHROOT/apex"
 fi

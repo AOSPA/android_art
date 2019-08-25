@@ -97,14 +97,14 @@ class ImageSpace : public MemMapSpace {
     return image_location_;
   }
 
-  accounting::ContinuousSpaceBitmap* GetLiveBitmap() const override {
-    return live_bitmap_.get();
+  accounting::ContinuousSpaceBitmap* GetLiveBitmap() override {
+    return &live_bitmap_;
   }
 
-  accounting::ContinuousSpaceBitmap* GetMarkBitmap() const override {
+  accounting::ContinuousSpaceBitmap* GetMarkBitmap() override {
     // ImageSpaces have the same bitmap for both live and marked. This helps reduce the number of
     // special cases to test against.
-    return live_bitmap_.get();
+    return &live_bitmap_;
   }
 
   void Dump(std::ostream& os) const override;
@@ -131,6 +131,11 @@ class ImageSpace : public MemMapSpace {
                                 bool* dalvik_cache_exists,
                                 bool* has_data,
                                 bool *is_global_cache);
+
+  // The leading character in an image checksum part of boot class path checkums.
+  static constexpr char kImageChecksumPrefix = 'i';
+  // The leading character in a dex file checksum part of boot class path checkums.
+  static constexpr char kDexFileChecksumPrefix = 'd';
 
   // Returns the checksums for the boot image and extra boot class path dex files,
   // based on the boot class path, image location and ISA (may differ from the ISA of an
@@ -191,12 +196,12 @@ class ImageSpace : public MemMapSpace {
 
   static Atomic<uint32_t> bitmap_index_;
 
-  std::unique_ptr<accounting::ContinuousSpaceBitmap> live_bitmap_;
+  accounting::ContinuousSpaceBitmap live_bitmap_;
 
   ImageSpace(const std::string& name,
              const char* image_location,
              MemMap&& mem_map,
-             std::unique_ptr<accounting::ContinuousSpaceBitmap> live_bitmap,
+             accounting::ContinuousSpaceBitmap&& live_bitmap,
              uint8_t* end);
 
   // The OatFile associated with the image during early startup to

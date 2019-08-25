@@ -21,6 +21,7 @@
 
 namespace openjdkjvmti {
 
+class EventHandler;
 class ObjectTagTable;
 
 class HeapUtil {
@@ -64,6 +65,8 @@ class HeapUtil {
 
 class HeapExtensions {
  public:
+  static void Register(EventHandler* eh);
+
   static jvmtiError JNICALL GetObjectHeapId(jvmtiEnv* env, jlong tag, jint* heap_id, ...);
   static jvmtiError JNICALL GetHeapName(jvmtiEnv* env, jint heap_id, char** heap_name, ...);
 
@@ -72,6 +75,11 @@ class HeapExtensions {
                                                   jclass klass,
                                                   const jvmtiHeapCallbacks* callbacks,
                                                   const void* user_data);
+
+  static jvmtiError JNICALL ChangeArraySize(jvmtiEnv* env, jobject arr, jsize new_size);
+
+ private:
+  static EventHandler* gEventHandler;
 };
 
 }  // namespace openjdkjvmti

@@ -162,7 +162,7 @@ class Heap {
   static constexpr uint32_t kNotifyNativeInterval = 32;
 #else
   // Some host mallinfo() implementations are slow. And memory is less scarce.
-  static constexpr uint32_t kNotifyNativeInterval = 128;
+  static constexpr uint32_t kNotifyNativeInterval = 512;
 #endif
 
   // RegisterNativeAllocation checks immediately whether GC is needed if size exceeds the
@@ -223,7 +223,7 @@ class Heap {
   ~Heap();
 
   // Allocates and initializes storage for an object instance.
-  template <bool kInstrumented, typename PreFenceVisitor>
+  template <bool kInstrumented = true, typename PreFenceVisitor>
   mirror::Object* AllocObject(Thread* self,
                               ObjPtr<mirror::Class> klass,
                               size_t num_bytes,
@@ -233,14 +233,14 @@ class Heap {
                !*pending_task_lock_,
                !*backtrace_lock_,
                !Roles::uninterruptible_) {
-    return AllocObjectWithAllocator<kInstrumented, true>(self,
-                                                         klass,
-                                                         num_bytes,
-                                                         GetCurrentAllocator(),
-                                                         pre_fence_visitor);
+    return AllocObjectWithAllocator<kInstrumented>(self,
+                                                   klass,
+                                                   num_bytes,
+                                                   GetCurrentAllocator(),
+                                                   pre_fence_visitor);
   }
 
-  template <bool kInstrumented, typename PreFenceVisitor>
+  template <bool kInstrumented = true, typename PreFenceVisitor>
   mirror::Object* AllocNonMovableObject(Thread* self,
                                         ObjPtr<mirror::Class> klass,
                                         size_t num_bytes,
@@ -250,14 +250,14 @@ class Heap {
                !*pending_task_lock_,
                !*backtrace_lock_,
                !Roles::uninterruptible_) {
-    return AllocObjectWithAllocator<kInstrumented, true>(self,
-                                                         klass,
-                                                         num_bytes,
-                                                         GetCurrentNonMovingAllocator(),
-                                                         pre_fence_visitor);
+    return AllocObjectWithAllocator<kInstrumented>(self,
+                                                   klass,
+                                                   num_bytes,
+                                                   GetCurrentNonMovingAllocator(),
+                                                   pre_fence_visitor);
   }
 
-  template <bool kInstrumented, bool kCheckLargeObject, typename PreFenceVisitor>
+  template <bool kInstrumented = true, bool kCheckLargeObject = true, typename PreFenceVisitor>
   ALWAYS_INLINE mirror::Object* AllocObjectWithAllocator(Thread* self,
                                                          ObjPtr<mirror::Class> klass,
                                                          size_t byte_count,
@@ -684,10 +684,20 @@ class Heap {
   bool IsInBootImageOatFile(const void* p) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void GetBootImagesSize(uint32_t* boot_image_begin,
-                         uint32_t* boot_image_end,
-                         uint32_t* boot_oat_begin,
-                         uint32_t* boot_oat_end);
+  // Get the start address of the boot images if any; otherwise returns 0.
+  uint32_t GetBootImagesStartAddress() const {
+    return boot_images_start_address_;
+  }
+
+  // Get the size of all boot images, including the heap and oat areas.
+  uint32_t GetBootImagesSize() const {
+    return boot_images_size_;
+  }
+
+  // Check if a pointer points to a boot image.
+  bool IsBootImageAddress(const void* p) const {
+    return reinterpret_cast<uintptr_t>(p) - boot_images_start_address_ < boot_images_size_;
+  }
 
   space::DlMallocSpace* GetDlMallocSpace() const {
     return dlmalloc_space_;
@@ -891,6 +901,8 @@ class Heap {
   const Verification* GetVerification() const;
 
   void PostForkChildAction(Thread* self);
+
+  void TraceHeapSize(size_t heap_size);
 
  private:
   class ConcurrentGCTask;
@@ -1169,8 +1181,6 @@ class Heap {
   }
 
   ALWAYS_INLINE void IncrementNumberOfBytesFreedRevoke(size_t freed_bytes_revoke);
-
-  void TraceHeapSize(size_t heap_size);
 
   // Remove a vlog code from heap-inl.h which is transitively included in half the world.
   static void VlogHeapGrowth(size_t max_allowed_footprint, size_t new_footprint, size_t alloc_size);
@@ -1551,6 +1561,10 @@ class Heap {
 
   // Boot image spaces.
   std::vector<space::ImageSpace*> boot_image_spaces_;
+
+  // Boot image address range. Includes images and oat files.
+  uint32_t boot_images_start_address_;
+  uint32_t boot_images_size_;
 
   // An installed allocation listener.
   Atomic<AllocationListener*> alloc_listener_;

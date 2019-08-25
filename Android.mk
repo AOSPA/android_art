@@ -72,13 +72,7 @@ ART_HOST_DEPENDENCIES += $(ART_HOST_SHARED_LIBRARY_DEBUG_DEPENDENCIES)
 endif
 
 ART_TARGET_DEPENDENCIES := \
-  $(ART_TARGET_EXECUTABLES) \
-  $(ART_TARGET_DEX_DEPENDENCIES) \
-  $(ART_TARGET_SHARED_LIBRARY_DEPENDENCIES)
-
-ifeq ($(ART_BUILD_TARGET_DEBUG),true)
-ART_TARGET_DEPENDENCIES += $(ART_TARGET_SHARED_LIBRARY_DEBUG_DEPENDENCIES)
-endif
+  $(ART_TARGET_DEX_DEPENDENCIES)
 
 ########################################################################
 # test rules
@@ -322,16 +316,19 @@ endif
 
 include $(CLEAR_VARS)
 
-# The Android Runtime APEX comes in two flavors:
+# The Android Runtime APEX comes in three flavors:
 # - the release module (`com.android.runtime.release`), containing
 #   only "release" artifacts;
 # - the debug module (`com.android.runtime.debug`), containing both
-#   "release" and "debug" artifacts, as well as additional tools.
+#   "release" and "debug" artifacts, as well as additional tools;
+# - the testing module (`com.android.runtime.testing`), containing
+#   both "release" and "debug" artifacts, as well as additional tools
+#   and ART gtests).
 #
 # The Android Runtime APEX module (`com.android.runtime`) is an
-# "alias" for one of the previous modules. By default, "user" build
-# variants contain the release module, while "userdebug" and "eng"
-# build variant contain the debug module. However, if
+# "alias" for either the release or the debug module. By default,
+# "user" build variants contain the release module, while "userdebug"
+# and "eng" build variants contain the debug module. However, if
 # `PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD` is defined, it overrides
 # the previous logic:
 # - if `PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD` is set to `false`, the
@@ -349,11 +346,11 @@ endif
 ifeq (true,$(art_target_include_debug_build))
   # Module with both release and debug variants, as well as
   # additional tools.
-  TARGET_RUNTIME_APEX := com.android.runtime.debug
+  TARGET_RUNTIME_APEX := $(DEBUG_RUNTIME_APEX)
   APEX_TEST_MODULE := art-check-debug-apex-gen-fakebin
 else
   # Release module (without debug variants nor tools).
-  TARGET_RUNTIME_APEX := com.android.runtime.release
+  TARGET_RUNTIME_APEX := $(RELEASE_RUNTIME_APEX)
   APEX_TEST_MODULE := art-check-release-apex-gen-fakebin
 endif
 
@@ -384,6 +381,13 @@ include $(BUILD_PHONY_PACKAGE)
 # Note that installation of the symlink is triggered by the apex_manifest.json
 # file which is the file that is guaranteed to be created regardless of the
 # value of TARGET_FLATTEN_APEX.
+#
+# b/132413565: Also, when TARGET_FLATTEN_APEX, an empty directory
+# /system/apex/com.android.runtime is created. After the entire
+# /system/apex is mounted on /apex, the flattened runtime APEX
+# (either com.android.runtime.debug or *.release) is mounted on the empty
+# directory so that the APEX is accessible via the canonical path
+# /apex/com.android.runtime
 ifeq ($(TARGET_FLATTEN_APEX),true)
 runtime_apex_manifest_file := $(PRODUCT_OUT)/system/apex/$(TARGET_RUNTIME_APEX)/apex_manifest.json
 else
@@ -396,6 +400,9 @@ $(runtime_apex_manifest_file): PRIVATE_LINK_NAME := $(TARGET_OUT_UNSTRIPPED)/ape
 $(runtime_apex_symlink_timestamp):
 	$(hide) mkdir -p $(dir $(PRIVATE_LINK_NAME))
 	$(hide) ln -sf $(TARGET_RUNTIME_APEX) $(PRIVATE_LINK_NAME)
+ifeq ($(TARGET_FLATTEN_APEX),true)
+	$(hide) mkdir -p $(TARGET_OUT)/apex/com.android.runtime
+endif
 	$(hide) touch $@
 
 runtime_apex_manifest_file :=
@@ -541,6 +548,11 @@ PRIVATE_RUNTIME_DEPENDENCY_LIBS := \
   lib/libandroidio.so \
   lib64/libandroidio.so \
 
+# Generate copies of Bionic bootstrap artifacts and Runtime APEX
+# libraries in the `system` (TARGET_OUT) directory. This is dangerous
+# as these files could inadvertently stay in this directory and be
+# included in a system image.
+#
 # Copy some libraries into `$(TARGET_OUT)/lib(64)` (the
 # `/system/lib(64)` directory to be sync'd to the target) for ART testing
 # purposes:
@@ -556,18 +568,20 @@ PRIVATE_RUNTIME_DEPENDENCY_LIBS := \
 #   directory under the build tree containing the (Debug) Runtime APEX
 #   artifacts, which is not sync'd to the target).
 #
-# TODO(b/121117762, b/129332183): Remove this when the ART Buildbot
-# and Golem have full support for the Runtime APEX.
+# This target is only used by Golem now.
+#
+# TODO(b/129332183): Remove this when Golem has full support for the
+# Runtime APEX.
 .PHONY: standalone-apex-files
-standalone-apex-files: libc.bootstrap libdl.bootstrap libm.bootstrap linker com.android.runtime.debug
+standalone-apex-files: libc.bootstrap libdl.bootstrap libm.bootstrap linker $(DEBUG_RUNTIME_APEX)
 	for f in $(PRIVATE_BIONIC_FILES); do \
 	  tf=$(TARGET_OUT)/$$f; \
 	  if [ -f $$tf ]; then cp -f $$tf $$(echo $$tf | sed 's,bootstrap/,,'); fi; \
 	done
 	if [ "x$(TARGET_FLATTEN_APEX)" = xtrue ]; then \
-	  runtime_apex_orig_dir=$(TARGET_OUT)/apex/com.android.runtime.debug; \
+	  runtime_apex_orig_dir=$(TARGET_OUT)/apex/$(DEBUG_RUNTIME_APEX); \
 	else \
-	  runtime_apex_orig_dir=$(TARGET_OUT)/../apex/com.android.runtime.debug; \
+	  runtime_apex_orig_dir=$(TARGET_OUT)/../apex/$(DEBUG_RUNTIME_APEX); \
 	fi; \
 	for f in $(PRIVATE_RUNTIME_DEPENDENCY_LIBS); do \
 	  tf="$$runtime_apex_orig_dir/$$f"; \
@@ -586,22 +600,34 @@ standalone-apex-files: libc.bootstrap libdl.bootstrap libm.bootstrap linker com.
 # the Runtime APEX. This is a temporary change needed until Golem
 # fully supports the Runtime APEX.
 #
-# TODO(b/121117762, b/129332183): Remove this when the ART Buildbot
-# and Golem have full support for the Runtime APEX.
+# TODO(b/129332183): Remove this when Golem has full support for the
+# Runtime APEX.
 
 # Also include:
-# - a copy of the ICU .dat prebuilt files in /system/etc/icu on target
-#   (see module `icu-data-art-test`); and
-# - a copy of the timezones prebuilt files in /system/etc/tz on
-#   target, (see modules `tzdata-art-test`, `tzlookup.xml-art-test`,
-#   and `tz_version-art-test`)
-# so that they can be found even if the Runtime APEX is not available,
+# - a copy of the ICU prebuilt .dat file in /system/etc/icu on target
+#   (see module `icu-data-art-test-i18n`); and
+# so that it can be found even if the Runtime APEX is not available,
 # by setting the environment variable `ART_TEST_ANDROID_RUNTIME_ROOT`
-# to "/system" on device. This is a temporary change needed until
-# Golem fully supports the Runtime APEX.
+# to "/system" on device. This is a temporary change needed
+# until Golem fully supports the Runtime APEX.
 #
-# TODO(b/121117762, b/129332183): Remove this when the ART Buildbot
-# and Golem have full support for the Runtime APEX.
+# TODO(b/129332183): Remove this when Golem has full support for the
+# Runtime APEX.
+
+# Also include:
+# - a copy of the time zone data prebuilt files in
+#   /system/etc/tzdata_module/etc/tz and /system/etc/tzdata_module/etc/icu
+#   on target, (see modules `tzdata-art-test-tzdata`,
+#   `tzlookup.xml-art-test-tzdata`, and `tz_version-art-test-tzdata`, and
+#   `icu_overlay-art-test-tzdata`)
+# so that they can be found even if the Time Zone Data APEX is not available,
+# by setting the environment variable `ART_TEST_ANDROID_TZDATA_ROOT`
+# to "/system/etc/tzdata_module" on device. This is a temporary change needed
+# until Golem fully supports the Time Zone Data APEX.
+#
+# TODO(b/129332183): Remove this when Golem has full support for the
+# Runtime APEX (and TZ Data APEX).
+
 ART_TARGET_SHARED_LIBRARY_BENCHMARK := $(TARGET_OUT_SHARED_LIBRARIES)/libartbenchmark.so
 build-art-target-golem: dex2oat dalvikvm linker libstdc++ \
                         $(TARGET_OUT_EXECUTABLES)/art \
@@ -612,8 +638,9 @@ build-art-target-golem: dex2oat dalvikvm linker libstdc++ \
                         $(TARGET_CORE_IMG_OUT_BASE).art \
                         $(TARGET_CORE_IMG_OUT_BASE)-interpreter.art \
                         libc.bootstrap libdl.bootstrap libm.bootstrap \
-                        icu-data-art-test \
-                        tzdata-art-test tzlookup.xml-art-test tz_version-art-test \
+                        icu-data-art-test-i18n \
+                        tzdata-art-test-tzdata tzlookup.xml-art-test-tzdata \
+                        tz_version-art-test-tzdata icu_overlay-art-test-tzdata \
                         standalone-apex-files
 	# remove debug libraries from public.libraries.txt because golem builds
 	# won't have it.

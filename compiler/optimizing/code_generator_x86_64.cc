@@ -999,7 +999,7 @@ void CodeGeneratorX86_64::GenerateStaticOrDirectCall(
       callee_method = invoke->GetLocations()->InAt(invoke->GetSpecialInputIndex());
       break;
     case HInvokeStaticOrDirect::MethodLoadKind::kBootImageLinkTimePcRelative:
-      DCHECK(GetCompilerOptions().IsBootImage());
+      DCHECK(GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension());
       __ leal(temp.AsRegister<CpuRegister>(),
               Address::Absolute(kDummy32BitOffset, /* no_rip= */ false));
       RecordBootImageMethodPatch(invoke);
@@ -1015,6 +1015,7 @@ void CodeGeneratorX86_64::GenerateStaticOrDirectCall(
       __ movq(temp.AsRegister<CpuRegister>(),
               Address::Absolute(kDummy32BitOffset, /* no_rip= */ false));
       RecordMethodBssEntryPatch(invoke);
+      // No need for memory fence, thanks to the x86-64 memory model.
       break;
     }
     case HInvokeStaticOrDirect::MethodLoadKind::kJitDirectAddress:
@@ -1076,13 +1077,13 @@ void CodeGeneratorX86_64::GenerateVirtualCall(
 }
 
 void CodeGeneratorX86_64::RecordBootImageIntrinsicPatch(uint32_t intrinsic_data) {
-  boot_image_intrinsic_patches_.emplace_back(/* target_dex_file= */ nullptr, intrinsic_data);
-  __ Bind(&boot_image_intrinsic_patches_.back().label);
+  boot_image_other_patches_.emplace_back(/* target_dex_file= */ nullptr, intrinsic_data);
+  __ Bind(&boot_image_other_patches_.back().label);
 }
 
 void CodeGeneratorX86_64::RecordBootImageRelRoPatch(uint32_t boot_image_offset) {
-  boot_image_method_patches_.emplace_back(/* target_dex_file= */ nullptr, boot_image_offset);
-  __ Bind(&boot_image_method_patches_.back().label);
+  boot_image_other_patches_.emplace_back(/* target_dex_file= */ nullptr, boot_image_offset);
+  __ Bind(&boot_image_other_patches_.back().label);
 }
 
 void CodeGeneratorX86_64::RecordBootImageMethodPatch(HInvokeStaticOrDirect* invoke) {
@@ -1190,23 +1191,26 @@ void CodeGeneratorX86_64::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* li
       type_bss_entry_patches_.size() +
       boot_image_string_patches_.size() +
       string_bss_entry_patches_.size() +
-      boot_image_intrinsic_patches_.size();
+      boot_image_other_patches_.size();
   linker_patches->reserve(size);
-  if (GetCompilerOptions().IsBootImage()) {
+  if (GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension()) {
     EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeMethodPatch>(
         boot_image_method_patches_, linker_patches);
     EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeTypePatch>(
         boot_image_type_patches_, linker_patches);
     EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeStringPatch>(
         boot_image_string_patches_, linker_patches);
-    EmitPcRelativeLinkerPatches<NoDexFileAdapter<linker::LinkerPatch::IntrinsicReferencePatch>>(
-        boot_image_intrinsic_patches_, linker_patches);
   } else {
-    EmitPcRelativeLinkerPatches<NoDexFileAdapter<linker::LinkerPatch::DataBimgRelRoPatch>>(
-        boot_image_method_patches_, linker_patches);
+    DCHECK(boot_image_method_patches_.empty());
     DCHECK(boot_image_type_patches_.empty());
     DCHECK(boot_image_string_patches_.empty());
-    DCHECK(boot_image_intrinsic_patches_.empty());
+  }
+  if (GetCompilerOptions().IsBootImage()) {
+    EmitPcRelativeLinkerPatches<NoDexFileAdapter<linker::LinkerPatch::IntrinsicReferencePatch>>(
+        boot_image_other_patches_, linker_patches);
+  } else {
+    EmitPcRelativeLinkerPatches<NoDexFileAdapter<linker::LinkerPatch::DataBimgRelRoPatch>>(
+        boot_image_other_patches_, linker_patches);
   }
   EmitPcRelativeLinkerPatches<linker::LinkerPatch::MethodBssEntryPatch>(
       method_bss_entry_patches_, linker_patches);
@@ -1245,7 +1249,7 @@ size_t CodeGeneratorX86_64::SaveFloatingPointRegister(size_t stack_index, uint32
   } else {
     __ movsd(Address(CpuRegister(RSP), stack_index), XmmRegister(reg_id));
   }
-  return GetFloatingPointSpillSlotSize();
+  return GetSlowPathFPWidth();
 }
 
 size_t CodeGeneratorX86_64::RestoreFloatingPointRegister(size_t stack_index, uint32_t reg_id) {
@@ -1254,7 +1258,7 @@ size_t CodeGeneratorX86_64::RestoreFloatingPointRegister(size_t stack_index, uin
   } else {
     __ movsd(XmmRegister(reg_id), Address(CpuRegister(RSP), stack_index));
   }
-  return GetFloatingPointSpillSlotSize();
+  return GetSlowPathFPWidth();
 }
 
 void CodeGeneratorX86_64::InvokeRuntime(QuickEntrypointEnum entrypoint,
@@ -1308,7 +1312,7 @@ CodeGeneratorX86_64::CodeGeneratorX86_64(HGraph* graph,
         type_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
         boot_image_string_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
         string_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
-        boot_image_intrinsic_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+        boot_image_other_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
         jit_string_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
         jit_class_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
         fixups_to_jump_tables_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)) {
@@ -1373,7 +1377,7 @@ void CodeGeneratorX86_64::GenerateFrameEntry() {
   __ subq(CpuRegister(RSP), Immediate(adjust));
   __ cfi().AdjustCFAOffset(adjust);
   uint32_t xmm_spill_location = GetFpuSpillStart();
-  size_t xmm_spill_slot_size = GetFloatingPointSpillSlotSize();
+  size_t xmm_spill_slot_size = GetCalleePreservedFPWidth();
 
   for (int i = arraysize(kFpuCalleeSaves) - 1; i >= 0; --i) {
     if (allocated_registers_.ContainsFloatingPointRegister(kFpuCalleeSaves[i])) {
@@ -1401,7 +1405,7 @@ void CodeGeneratorX86_64::GenerateFrameExit() {
   __ cfi().RememberState();
   if (!HasEmptyFrame()) {
     uint32_t xmm_spill_location = GetFpuSpillStart();
-    size_t xmm_spill_slot_size = GetFloatingPointSpillSlotSize();
+    size_t xmm_spill_slot_size = GetCalleePreservedFPWidth();
     for (size_t i = 0; i < arraysize(kFpuCalleeSaves); ++i) {
       if (allocated_registers_.ContainsFloatingPointRegister(kFpuCalleeSaves[i])) {
         int offset = xmm_spill_location + (xmm_spill_slot_size * i);
@@ -5833,13 +5837,12 @@ void InstructionCodeGeneratorX86_64::GenerateClassInitializationCheck(
   constexpr size_t status_lsb_position = SubtypeCheckBits::BitStructSizeOf();
   const size_t status_byte_offset =
       mirror::Class::StatusOffset().SizeValue() + (status_lsb_position / kBitsPerByte);
-  constexpr uint32_t shifted_initialized_value =
-      enum_cast<uint32_t>(ClassStatus::kInitialized) << (status_lsb_position % kBitsPerByte);
+  constexpr uint32_t shifted_visibly_initialized_value =
+      enum_cast<uint32_t>(ClassStatus::kVisiblyInitialized) << (status_lsb_position % kBitsPerByte);
 
-  __ cmpb(Address(class_reg,  status_byte_offset), Immediate(shifted_initialized_value));
+  __ cmpb(Address(class_reg,  status_byte_offset), Immediate(shifted_visibly_initialized_value));
   __ j(kBelow, slow_path->GetEntryLabel());
   __ Bind(slow_path->GetExitLabel());
-  // No need for memory fence, thanks to the x86-64 memory model.
 }
 
 void InstructionCodeGeneratorX86_64::GenerateBitstringTypeCheckCompare(HTypeCheckInstruction* check,
@@ -5963,7 +5966,8 @@ void InstructionCodeGeneratorX86_64::VisitLoadClass(HLoadClass* cls) NO_THREAD_S
       break;
     }
     case HLoadClass::LoadKind::kBootImageLinkTimePcRelative:
-      DCHECK(codegen_->GetCompilerOptions().IsBootImage());
+      DCHECK(codegen_->GetCompilerOptions().IsBootImage() ||
+             codegen_->GetCompilerOptions().IsBootImageExtension());
       DCHECK_EQ(read_barrier_option, kWithoutReadBarrier);
       __ leal(out, Address::Absolute(CodeGeneratorX86_64::kDummy32BitOffset, /* no_rip= */ false));
       codegen_->RecordBootImageTypePatch(cls);
@@ -5980,6 +5984,7 @@ void InstructionCodeGeneratorX86_64::VisitLoadClass(HLoadClass* cls) NO_THREAD_S
       Label* fixup_label = codegen_->NewTypeBssEntryPatch(cls);
       // /* GcRoot<mirror::Class> */ out = *address  /* PC-relative */
       GenerateGcRootFieldLoad(cls, out_loc, address, fixup_label, read_barrier_option);
+      // No need for memory fence, thanks to the x86-64 memory model.
       generate_null_check = true;
       break;
     }
@@ -6116,7 +6121,8 @@ void InstructionCodeGeneratorX86_64::VisitLoadString(HLoadString* load) NO_THREA
 
   switch (load->GetLoadKind()) {
     case HLoadString::LoadKind::kBootImageLinkTimePcRelative: {
-      DCHECK(codegen_->GetCompilerOptions().IsBootImage());
+      DCHECK(codegen_->GetCompilerOptions().IsBootImage() ||
+             codegen_->GetCompilerOptions().IsBootImageExtension());
       __ leal(out, Address::Absolute(CodeGeneratorX86_64::kDummy32BitOffset, /* no_rip= */ false));
       codegen_->RecordBootImageStringPatch(load);
       return;
@@ -6133,6 +6139,7 @@ void InstructionCodeGeneratorX86_64::VisitLoadString(HLoadString* load) NO_THREA
       Label* fixup_label = codegen_->NewStringBssEntryPatch(load);
       // /* GcRoot<mirror::Class> */ out = *address  /* PC-relative */
       GenerateGcRootFieldLoad(load, out_loc, address, fixup_label, kCompilerReadBarrierOption);
+      // No need for memory fence, thanks to the x86-64 memory model.
       SlowPathCode* slow_path = new (codegen_->GetScopedAllocator()) LoadStringSlowPathX86_64(load);
       codegen_->AddSlowPath(slow_path);
       __ testl(out, out);
@@ -7659,6 +7666,22 @@ void CodeGeneratorX86_64::EmitJitRootPatches(uint8_t* code, const uint8_t* roots
     uint64_t index_in_table = GetJitClassRootIndex(type_reference);
     PatchJitRootUse(code, roots_data, info, index_in_table);
   }
+}
+
+bool LocationsBuilderX86_64::CpuHasAvxFeatureFlag() {
+  return codegen_->GetInstructionSetFeatures().HasAVX();
+}
+
+bool LocationsBuilderX86_64::CpuHasAvx2FeatureFlag() {
+  return codegen_->GetInstructionSetFeatures().HasAVX2();
+}
+
+bool InstructionCodeGeneratorX86_64::CpuHasAvxFeatureFlag() {
+  return codegen_->GetInstructionSetFeatures().HasAVX();
+}
+
+bool InstructionCodeGeneratorX86_64::CpuHasAvx2FeatureFlag() {
+  return codegen_->GetInstructionSetFeatures().HasAVX2();
 }
 
 #undef __

@@ -131,6 +131,9 @@ ConditionVariable* Thread::resume_cond_ = nullptr;
 const size_t Thread::kStackOverflowImplicitCheckSize = GetStackOverflowReservedBytes(kRuntimeISA);
 bool (*Thread::is_sensitive_thread_hook_)() = nullptr;
 Thread* Thread::jit_sensitive_thread_ = nullptr;
+#ifndef __BIONIC__
+thread_local Thread* Thread::self_tls_ = nullptr;
+#endif
 
 static constexpr bool kVerifyImageObjectsMarked = kIsDebugBuild;
 
@@ -933,10 +936,11 @@ bool Thread::Init(ThreadList* thread_list, JavaVMExt* java_vm, JNIEnvExt* jni_en
     interpreter::InitInterpreterTls(this);
   }
 
-#ifdef ART_TARGET_ANDROID
+#ifdef __BIONIC__
   __get_tls()[TLS_SLOT_ART_THREAD_SELF] = this;
 #else
   CHECK_PTHREAD_CALL(pthread_setspecific, (Thread::pthread_key_self_, this), "attach self");
+  Thread::self_tls_ = this;
 #endif
   DCHECK_EQ(Thread::Current(), this);
 
@@ -1835,8 +1839,11 @@ void Thread::DumpState(std::ostream& os, const Thread* thread, pid_t tid) {
           group_name_field->GetObject(thread_group)->AsString();
       group_name = (group_name_string != nullptr) ? group_name_string->ToModifiedUtf8() : "<null>";
     }
+  } else if (thread != nullptr) {
+    priority = thread->GetNativePriority();
   } else {
-    priority = GetNativePriority();
+    PaletteStatus status = PaletteSchedGetPriority(tid, &priority);
+    CHECK(status == PaletteStatus::kOkay || status == PaletteStatus::kCheckErrno);
   }
 
   std::string scheduler_group_name(GetSchedulerGroupName(tid));
@@ -2141,23 +2148,12 @@ void Thread::DumpJavaStack(std::ostream& os, bool check_suspended, bool dump_loc
   // assumption that there is no exception pending on entry. Thus, stash any pending exception.
   // Thread::Current() instead of this in case a thread is dumping the stack of another suspended
   // thread.
-  StackHandleScope<1> scope(Thread::Current());
-  Handle<mirror::Throwable> exc;
-  bool have_exception = false;
-  if (IsExceptionPending()) {
-    exc = scope.NewHandle(GetException());
-    const_cast<Thread*>(this)->ClearException();
-    have_exception = true;
-  }
+  ScopedExceptionStorage ses(Thread::Current());
 
   std::unique_ptr<Context> context(Context::Create());
   StackDumpVisitor dumper(os, const_cast<Thread*>(this), context.get(),
                           !tls32_.throwing_OutOfMemoryError, check_suspended, dump_locks);
   dumper.WalkStack();
-
-  if (have_exception) {
-    const_cast<Thread*>(this)->SetException(exc.Get());
-  }
 }
 
 void Thread::DumpStack(std::ostream& os,
@@ -2198,10 +2194,11 @@ void Thread::ThreadExitCallback(void* arg) {
     LOG(WARNING) << "Native thread exiting without having called DetachCurrentThread (maybe it's "
         "going to use a pthread_key_create destructor?): " << *self;
     CHECK(is_started_);
-#ifdef ART_TARGET_ANDROID
+#ifdef __BIONIC__
     __get_tls()[TLS_SLOT_ART_THREAD_SELF] = self;
 #else
     CHECK_PTHREAD_CALL(pthread_setspecific, (Thread::pthread_key_self_, self), "reattach self");
+    Thread::self_tls_ = self;
 #endif
     self->tls32_.thread_exit_check_count = 1;
   } else {
@@ -2232,6 +2229,9 @@ void Thread::Startup() {
   if (pthread_getspecific(pthread_key_self_) != nullptr) {
     LOG(FATAL) << "Newly-created pthread TLS slot is not nullptr";
   }
+#ifndef __BIONIC__
+  CHECK(Thread::self_tls_ == nullptr);
+#endif
 }
 
 void Thread::FinishStartup() {
@@ -3284,7 +3284,7 @@ void Thread::ThrowNewWrappedException(const char* exception_class_descriptor,
       ++i;
     }
     ScopedLocalRef<jobject> ref(soa.Env(), soa.AddLocalReference<jobject>(exception.Get()));
-    InvokeWithJValues(soa, ref.get(), jni::EncodeArtMethod(exception_init_method), jv_args);
+    InvokeWithJValues(soa, ref.get(), exception_init_method, jv_args);
     if (LIKELY(!IsExceptionPending())) {
       SetException(exception.Get());
     }
@@ -3559,8 +3559,8 @@ void Thread::QuickDeliverException() {
   // instrumentation trampolines (for example with DDMS tracing). That forces us to do deopt later
   // and see every frame being popped. We don't need to handle it any differently.
   ShadowFrame* cf;
-  bool force_deopt;
-  {
+  bool force_deopt = false;
+  if (Runtime::Current()->AreNonStandardExitsEnabled() || kIsDebugBuild) {
     NthCallerVisitor visitor(this, 0, false);
     visitor.WalkStack();
     cf = visitor.GetCurrentShadowFrame();
@@ -3570,16 +3570,16 @@ void Thread::QuickDeliverException() {
     bool force_frame_pop = cf != nullptr && cf->GetForcePopFrame();
     bool force_retry_instr = cf != nullptr && cf->GetForceRetryInstruction();
     if (kIsDebugBuild && force_frame_pop) {
+      DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
       NthCallerVisitor penultimate_visitor(this, 1, false);
       penultimate_visitor.WalkStack();
       ShadowFrame* penultimate_frame = penultimate_visitor.GetCurrentShadowFrame();
       if (penultimate_frame == nullptr) {
         penultimate_frame = FindDebuggerShadowFrame(penultimate_visitor.GetFrameId());
       }
-      DCHECK(penultimate_frame != nullptr &&
-             penultimate_frame->GetForceRetryInstruction())
-          << "Force pop frame without retry instruction found. penultimate frame is null: "
-          << (penultimate_frame == nullptr ? "true" : "false");
+    }
+    if (force_retry_instr) {
+      DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
     }
     force_deopt = force_frame_pop || force_retry_instr;
   }
@@ -3708,7 +3708,6 @@ class ReferenceMapVisitor : public StackVisitor {
     VisitDeclaringClass(m);
     DCHECK(m != nullptr);
     size_t num_regs = shadow_frame->NumberOfVRegs();
-    DCHECK(m->IsNative() || shadow_frame->HasReferenceArray());
     // handle scope for JNI or References for interpreter.
     for (size_t reg = 0; reg < num_regs; ++reg) {
       mirror::Object* ref = shadow_frame->GetVRegReference(reg);
@@ -3781,9 +3780,9 @@ class ReferenceMapVisitor : public StackVisitor {
       StackReference<mirror::Object>* vreg_base =
           reinterpret_cast<StackReference<mirror::Object>*>(cur_quick_frame);
       uintptr_t native_pc_offset = method_header->NativeQuickPcOffset(GetCurrentQuickFramePc());
-      CodeInfo code_info(method_header, kPrecise
-          ? CodeInfo::DecodeFlags::AllTables  // We will need dex register maps.
-          : CodeInfo::DecodeFlags::GcMasksOnly);
+      CodeInfo code_info = kPrecise
+          ? CodeInfo(method_header)  // We will need dex register maps.
+          : CodeInfo::DecodeGcMasksOnly(method_header);
       StackMap map = code_info.GetStackMapForNativePcOffset(native_pc_offset);
       DCHECK(map.IsValid());
 
@@ -3889,6 +3888,7 @@ class ReferenceMapVisitor : public StackVisitor {
             code_info(_code_info),
             dex_register_map(code_info.GetDexRegisterMapOf(map)),
             visitor(_visitor) {
+        DCHECK_EQ(dex_register_map.size(), number_of_dex_registers);
       }
 
       // TODO: If necessary, we should consider caching a reverse map instead of the linear
@@ -4269,15 +4269,13 @@ void Thread::ReleaseLongJumpContextInternal() {
 }
 
 void Thread::SetNativePriority(int new_priority) {
-  // ART tests on JVM can reach this code path, use tid = 0 as shorthand for current thread.
-  PaletteStatus status = PaletteSchedSetPriority(0, new_priority);
+  PaletteStatus status = PaletteSchedSetPriority(GetTid(), new_priority);
   CHECK(status == PaletteStatus::kOkay || status == PaletteStatus::kCheckErrno);
 }
 
-int Thread::GetNativePriority() {
+int Thread::GetNativePriority() const {
   int priority = 0;
-  // ART tests on JVM can reach this code path, use tid = 0 as shorthand for current thread.
-  PaletteStatus status = PaletteSchedGetPriority(0, &priority);
+  PaletteStatus status = PaletteSchedGetPriority(GetTid(), &priority);
   CHECK(status == PaletteStatus::kOkay || status == PaletteStatus::kCheckErrno);
   return priority;
 }
@@ -4288,6 +4286,26 @@ bool Thread::IsSystemDaemon() const {
   }
   return jni::DecodeArtField(
       WellKnownClasses::java_lang_Thread_systemDaemon)->GetBoolean(GetPeer());
+}
+
+ScopedExceptionStorage::ScopedExceptionStorage(art::Thread* self)
+    : self_(self), hs_(self_), excp_(hs_.NewHandle<art::mirror::Throwable>(self_->GetException())) {
+  self_->ClearException();
+}
+
+void ScopedExceptionStorage::SuppressOldException(const char* message) {
+  CHECK(self_->IsExceptionPending()) << *self_;
+  ObjPtr<mirror::Throwable> old_suppressed(excp_.Get());
+  excp_.Assign(self_->GetException());
+  LOG(WARNING) << message << "Suppressing old exception: " << old_suppressed->Dump();
+  self_->ClearException();
+}
+
+ScopedExceptionStorage::~ScopedExceptionStorage() {
+  CHECK(!self_->IsExceptionPending()) << *self_;
+  if (!excp_.IsNull()) {
+    self_->SetException(excp_.Get());
+  }
 }
 
 }  // namespace art

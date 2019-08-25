@@ -33,9 +33,14 @@ namespace.runtime.visible = true
 # Keep in sync with the "runtime" namespace in system/core/rootdir/etc/ld.config*.txt.
 namespace.runtime.search.paths = /apex/com.android.runtime/${LIB}
 namespace.runtime.asan.search.paths = /apex/com.android.runtime/${LIB}
+# JVMTI libraries used in ART testing are located under /data; dalvikvm
+# has to be able to dlopen them.
+# TODO(b/129534335): Move this to the linker configuration of the Test
+# Runtime APEX when it is available.
+namespace.runtime.permitted.paths = /data
 # odex files are in /system/framework. dalvikvm has to be able to dlopen the
 # files for CTS.
-namespace.runtime.permitted.paths = /system/framework
+namespace.runtime.permitted.paths += /system/framework
 namespace.runtime.links = platform
 # Need allow_all_shared_libs because libart.so can dlopen oat files in
 # /system/framework and /data.
@@ -68,7 +73,7 @@ namespace.platform.links = runtime
 namespace.platform.link.runtime.shared_libs  = libandroidicu.so
 namespace.platform.link.runtime.shared_libs += libdexfile_external.so
 namespace.platform.link.runtime.shared_libs += libdexfiled_external.so
-# libicuuc.so and libicui18n.so are kept for app compat reason. http://b/130788466
+# TODO(b/120786417 or b/134659294): libicuuc.so and libicui18n.so are kept for app compat.
 namespace.platform.link.runtime.shared_libs += libicui18n.so
 namespace.platform.link.runtime.shared_libs += libicuuc.so
 namespace.platform.link.runtime.shared_libs += libnativebridge.so

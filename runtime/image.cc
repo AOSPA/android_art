@@ -29,7 +29,7 @@
 namespace art {
 
 const uint8_t ImageHeader::kImageMagic[] = { 'a', 'r', 't', '\n' };
-const uint8_t ImageHeader::kImageVersion[] = { '0', '7', '6', '\0' };  // SBAppend simplification.
+const uint8_t ImageHeader::kImageVersion[] = { '0', '7', '8', '\0' };  // FP16ToFloat intrinsic
 
 ImageHeader::ImageHeader(uint32_t image_reservation_size,
                          uint32_t component_count,
@@ -72,22 +72,22 @@ ImageHeader::ImageHeader(uint32_t image_reservation_size,
   std::copy_n(sections, kSectionCount, sections_);
 }
 
-void ImageHeader::RelocateImage(int64_t delta) {
-  CHECK_ALIGNED(delta, kPageSize) << " patch delta must be page aligned";
+void ImageHeader::RelocateImageReferences(int64_t delta) {
+  CHECK_ALIGNED(delta, kPageSize) << "relocation delta must be page aligned";
   oat_file_begin_ += delta;
   oat_data_begin_ += delta;
   oat_data_end_ += delta;
   oat_file_end_ += delta;
-  RelocateImageObjects(delta);
-  RelocateImageMethods(delta);
-}
-
-void ImageHeader::RelocateImageObjects(int64_t delta) {
   image_begin_ += delta;
   image_roots_ += delta;
 }
 
-void ImageHeader::RelocateImageMethods(int64_t delta) {
+void ImageHeader::RelocateBootImageReferences(int64_t delta) {
+  CHECK_ALIGNED(delta, kPageSize) << "relocation delta must be page aligned";
+  DCHECK_EQ(boot_image_begin_ != 0u, boot_image_size_ != 0u);
+  if (boot_image_begin_ != 0u) {
+    boot_image_begin_ += delta;
+  }
   for (size_t i = 0; i < kImageMethodsCount; ++i) {
     image_methods_[i] += delta;
   }

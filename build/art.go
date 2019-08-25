@@ -283,6 +283,24 @@ func testInstall(ctx android.InstallHookContext) {
 var artTestMutex sync.Mutex
 
 func init() {
+	artModuleTypes := []string{
+		"art_cc_library",
+		"art_cc_library_static",
+		"art_cc_binary",
+		"art_cc_test",
+		"art_cc_test_library",
+		"art_cc_defaults",
+		"libart_cc_defaults",
+		"libart_static_cc_defaults",
+		"art_global_defaults",
+		"art_debug_defaults",
+		"art_apex_test",
+	}
+	android.AddNeverAllowRules(
+		android.NeverAllow().
+			NotIn("art", "external/vixl").
+			ModuleType(artModuleTypes...))
+
 	android.RegisterModuleType("art_cc_library", artLibrary)
 	android.RegisterModuleType("art_cc_library_static", artStaticLibrary)
 	android.RegisterModuleType("art_cc_binary", artBinary)
@@ -300,10 +318,10 @@ func init() {
 	// changes this to 'prefer32' on all host binaries. Since HOST_PREFER_32_BIT is
 	// only used for testing we can just disable the module.
 	// See b/120617876 for more information.
-	android.RegisterModuleType("art_apex_test", artTestApexBundleFactory)
+	android.RegisterModuleType("art_apex_test_host", artHostTestApexBundleFactory)
 }
 
-func artTestApexBundleFactory() android.Module {
+func artHostTestApexBundleFactory() android.Module {
 	module := apex.ApexBundleFactory( /*testApex*/ true)
 	android.AddLoadHook(module, func(ctx android.LoadHookContext) {
 		if envTrue(ctx, "HOST_PREFER_32_BIT") {

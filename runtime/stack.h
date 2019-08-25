@@ -17,6 +17,7 @@
 #ifndef ART_RUNTIME_STACK_H_
 #define ART_RUNTIME_STACK_H_
 
+#include <optional>
 #include <stdint.h>
 #include <string>
 
@@ -223,7 +224,12 @@ class StackVisitor {
   bool GetNextMethodAndDexPc(ArtMethod** next_method, uint32_t* next_dex_pc)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  bool GetVReg(ArtMethod* m, uint16_t vreg, VRegKind kind, uint32_t* val) const
+  bool GetVReg(ArtMethod* m,
+               uint16_t vreg,
+               VRegKind kind,
+               uint32_t* val,
+               std::optional<DexRegisterLocation> location =
+                   std::optional<DexRegisterLocation>()) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool GetVRegPair(ArtMethod* m, uint16_t vreg, VRegKind kind_lo, VRegKind kind_hi,
@@ -330,6 +336,8 @@ class StackVisitor {
                                     VRegKind kind_lo, VRegKind kind_hi,
                                     uint64_t* val) const
       REQUIRES_SHARED(Locks::mutator_lock_);
+  bool GetVRegFromOptimizedCode(DexRegisterLocation location, VRegKind kind, uint32_t* val) const
+      REQUIRES_SHARED(Locks::mutator_lock_);
   bool GetRegisterPairIfAccessible(uint32_t reg_lo, uint32_t reg_hi, VRegKind kind_lo,
                                    uint64_t* val) const
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -338,6 +346,9 @@ class StackVisitor {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void SanityCheckFrame() const REQUIRES_SHARED(Locks::mutator_lock_);
+
+  ALWAYS_INLINE CodeInfo* GetCurrentInlineInfo() const;
+  ALWAYS_INLINE StackMap* GetCurrentStackMap() const;
 
   Thread* const thread_;
   const StackWalkKind walk_kind_;
@@ -351,8 +362,13 @@ class StackVisitor {
   size_t cur_depth_;
   // Current inlined frames of the method we are currently at.
   // We keep poping frames from the end as we visit the frames.
-  CodeInfo current_code_info_;
   BitTableRange<InlineInfo> current_inline_frames_;
+
+  // Cache the most recently decoded inline info data.
+  // The 'current_inline_frames_' refers to this data, so we need to keep it alive anyway.
+  // Marked mutable since the cache fields are updated from const getters.
+  mutable std::pair<const OatQuickMethodHeader*, CodeInfo> cur_inline_info_;
+  mutable std::pair<uintptr_t, StackMap> cur_stack_map_;
 
  protected:
   Context* const context_;

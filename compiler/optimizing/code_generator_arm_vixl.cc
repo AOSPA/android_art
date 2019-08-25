@@ -47,7 +47,6 @@ namespace vixl32 = vixl::aarch32;
 using namespace vixl32;  // NOLINT(build/namespaces)
 
 using helpers::DRegisterFrom;
-using helpers::DWARFReg;
 using helpers::HighRegisterFrom;
 using helpers::InputDRegisterAt;
 using helpers::InputOperandAt;
@@ -1862,7 +1861,7 @@ CodeGeneratorARMVIXL::CodeGeneratorARMVIXL(HGraph* graph,
       type_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       boot_image_string_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       string_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
-      boot_image_intrinsic_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+      boot_image_other_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       call_entrypoint_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       baker_read_barrier_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       uint32_literals_(std::less<uint32_t>(),
@@ -2061,10 +2060,10 @@ InstructionCodeGeneratorARMVIXL::InstructionCodeGeneratorARMVIXL(HGraph* graph,
 
 void CodeGeneratorARMVIXL::ComputeSpillMask() {
   core_spill_mask_ = allocated_registers_.GetCoreRegisters() & core_callee_save_mask_;
-  DCHECK_NE(core_spill_mask_, 0u) << "At least the return address register must be saved";
-  // There is no easy instruction to restore just the PC on thumb2. We spill and
-  // restore another arbitrary register.
-  core_spill_mask_ |= (1 << kCoreAlwaysSpillRegister.GetCode());
+  DCHECK_NE(core_spill_mask_ & (1u << kLrCode), 0u)
+      << "At least the return address register must be saved";
+  // 16-bit PUSH/POP (T1) can save/restore just the LR/PC.
+  DCHECK(GetVIXLAssembler()->IsUsingT32());
   fpu_spill_mask_ = allocated_registers_.GetFloatingPointRegisters() & fpu_callee_save_mask_;
   // We use vpush and vpop for saving and restoring floating point registers, which take
   // a SRegister and the number of registers to save/restore after that SRegister. We
@@ -2126,32 +2125,66 @@ void CodeGeneratorARMVIXL::GenerateFrameEntry() {
     RecordPcInfo(nullptr, 0);
   }
 
-  __ Push(RegisterList(core_spill_mask_));
-  GetAssembler()->cfi().AdjustCFAOffset(kArmWordSize * POPCOUNT(core_spill_mask_));
-  GetAssembler()->cfi().RelOffsetForMany(DWARFReg(kMethodRegister),
-                                         0,
-                                         core_spill_mask_,
-                                         kArmWordSize);
-  if (fpu_spill_mask_ != 0) {
-    uint32_t first = LeastSignificantBit(fpu_spill_mask_);
+  uint32_t frame_size = GetFrameSize();
+  uint32_t core_spills_offset = frame_size - GetCoreSpillSize();
+  uint32_t fp_spills_offset = frame_size - FrameEntrySpillSize();
+  if ((fpu_spill_mask_ == 0u || IsPowerOfTwo(fpu_spill_mask_)) &&
+      core_spills_offset <= 3u * kArmWordSize) {
+    // Do a single PUSH for core registers including the method and up to two
+    // filler registers. Then store the single FP spill if any.
+    // (The worst case is when the method is not required and we actually
+    // store 3 extra registers but they are stored in the same properly
+    // aligned 16-byte chunk where we're already writing anyway.)
+    DCHECK_EQ(kMethodRegister.GetCode(), 0u);
+    uint32_t extra_regs = MaxInt<uint32_t>(core_spills_offset / kArmWordSize);
+    DCHECK_LT(MostSignificantBit(extra_regs), LeastSignificantBit(core_spill_mask_));
+    __ Push(RegisterList(core_spill_mask_ | extra_regs));
+    GetAssembler()->cfi().AdjustCFAOffset(frame_size);
+    GetAssembler()->cfi().RelOffsetForMany(DWARFReg(kMethodRegister),
+                                           core_spills_offset,
+                                           core_spill_mask_,
+                                           kArmWordSize);
+    if (fpu_spill_mask_ != 0u) {
+      DCHECK(IsPowerOfTwo(fpu_spill_mask_));
+      vixl::aarch32::SRegister sreg(LeastSignificantBit(fpu_spill_mask_));
+      GetAssembler()->StoreSToOffset(sreg, sp, fp_spills_offset);
+      GetAssembler()->cfi().RelOffset(DWARFReg(sreg), /*offset=*/ fp_spills_offset);
+    }
+  } else {
+    __ Push(RegisterList(core_spill_mask_));
+    GetAssembler()->cfi().AdjustCFAOffset(kArmWordSize * POPCOUNT(core_spill_mask_));
+    GetAssembler()->cfi().RelOffsetForMany(DWARFReg(kMethodRegister),
+                                           /*offset=*/ 0,
+                                           core_spill_mask_,
+                                           kArmWordSize);
+    if (fpu_spill_mask_ != 0) {
+      uint32_t first = LeastSignificantBit(fpu_spill_mask_);
 
-    // Check that list is contiguous.
-    DCHECK_EQ(fpu_spill_mask_ >> CTZ(fpu_spill_mask_), ~0u >> (32 - POPCOUNT(fpu_spill_mask_)));
+      // Check that list is contiguous.
+      DCHECK_EQ(fpu_spill_mask_ >> CTZ(fpu_spill_mask_), ~0u >> (32 - POPCOUNT(fpu_spill_mask_)));
 
-    __ Vpush(SRegisterList(vixl32::SRegister(first), POPCOUNT(fpu_spill_mask_)));
-    GetAssembler()->cfi().AdjustCFAOffset(kArmWordSize * POPCOUNT(fpu_spill_mask_));
-    GetAssembler()->cfi().RelOffsetForMany(DWARFReg(s0), 0, fpu_spill_mask_, kArmWordSize);
-  }
+      __ Vpush(SRegisterList(vixl32::SRegister(first), POPCOUNT(fpu_spill_mask_)));
+      GetAssembler()->cfi().AdjustCFAOffset(kArmWordSize * POPCOUNT(fpu_spill_mask_));
+      GetAssembler()->cfi().RelOffsetForMany(DWARFReg(s0),
+                                             /*offset=*/ 0,
+                                             fpu_spill_mask_,
+                                             kArmWordSize);
+    }
 
-  int adjust = GetFrameSize() - FrameEntrySpillSize();
-  __ Sub(sp, sp, adjust);
-  GetAssembler()->cfi().AdjustCFAOffset(adjust);
-
-  // Save the current method if we need it. Note that we do not
-  // do this in HCurrentMethod, as the instruction might have been removed
-  // in the SSA graph.
-  if (RequiresCurrentMethod()) {
-    GetAssembler()->StoreToOffset(kStoreWord, kMethodRegister, sp, 0);
+    // Adjust SP and save the current method if we need it. Note that we do
+    // not save the method in HCurrentMethod, as the instruction might have
+    // been removed in the SSA graph.
+    if (RequiresCurrentMethod() && fp_spills_offset <= 3 * kArmWordSize) {
+      DCHECK_EQ(kMethodRegister.GetCode(), 0u);
+      __ Push(RegisterList(MaxInt<uint32_t>(fp_spills_offset / kArmWordSize)));
+      GetAssembler()->cfi().AdjustCFAOffset(fp_spills_offset);
+    } else {
+      __ Sub(sp, sp, dchecked_integral_cast<int32_t>(fp_spills_offset));
+      GetAssembler()->cfi().AdjustCFAOffset(fp_spills_offset);
+      if (RequiresCurrentMethod()) {
+        GetAssembler()->StoreToOffset(kStoreWord, kMethodRegister, sp, 0);
+      }
+    }
   }
 
   if (GetGraph()->HasShouldDeoptimizeFlag()) {
@@ -2170,27 +2203,55 @@ void CodeGeneratorARMVIXL::GenerateFrameExit() {
     __ Bx(lr);
     return;
   }
-  GetAssembler()->cfi().RememberState();
-  int adjust = GetFrameSize() - FrameEntrySpillSize();
-  __ Add(sp, sp, adjust);
-  GetAssembler()->cfi().AdjustCFAOffset(-adjust);
-  if (fpu_spill_mask_ != 0) {
-    uint32_t first = LeastSignificantBit(fpu_spill_mask_);
 
-    // Check that list is contiguous.
-    DCHECK_EQ(fpu_spill_mask_ >> CTZ(fpu_spill_mask_), ~0u >> (32 - POPCOUNT(fpu_spill_mask_)));
-
-    __ Vpop(SRegisterList(vixl32::SRegister(first), POPCOUNT(fpu_spill_mask_)));
-    GetAssembler()->cfi().AdjustCFAOffset(
-        -static_cast<int>(kArmWordSize) * POPCOUNT(fpu_spill_mask_));
-    GetAssembler()->cfi().RestoreMany(DWARFReg(vixl32::SRegister(0)), fpu_spill_mask_);
-  }
   // Pop LR into PC to return.
   DCHECK_NE(core_spill_mask_ & (1 << kLrCode), 0U);
   uint32_t pop_mask = (core_spill_mask_ & (~(1 << kLrCode))) | 1 << kPcCode;
-  __ Pop(RegisterList(pop_mask));
-  GetAssembler()->cfi().RestoreState();
-  GetAssembler()->cfi().DefCFAOffset(GetFrameSize());
+
+  uint32_t frame_size = GetFrameSize();
+  uint32_t core_spills_offset = frame_size - GetCoreSpillSize();
+  uint32_t fp_spills_offset = frame_size - FrameEntrySpillSize();
+  if ((fpu_spill_mask_ == 0u || IsPowerOfTwo(fpu_spill_mask_)) &&
+      // r4 is blocked by TestCodeGeneratorARMVIXL used by some tests.
+      core_spills_offset <= (blocked_core_registers_[r4.GetCode()] ? 2u : 3u) * kArmWordSize) {
+    // Load the FP spill if any and then do a single POP including the method
+    // and up to two filler registers. If we have no FP spills, this also has
+    // the advantage that we do not need to emit CFI directives.
+    if (fpu_spill_mask_ != 0u) {
+      DCHECK(IsPowerOfTwo(fpu_spill_mask_));
+      vixl::aarch32::SRegister sreg(LeastSignificantBit(fpu_spill_mask_));
+      GetAssembler()->cfi().RememberState();
+      GetAssembler()->LoadSFromOffset(sreg, sp, fp_spills_offset);
+      GetAssembler()->cfi().Restore(DWARFReg(sreg));
+    }
+    // Clobber registers r2-r4 as they are caller-save in ART managed ABI and
+    // never hold the return value.
+    uint32_t extra_regs = MaxInt<uint32_t>(core_spills_offset / kArmWordSize) << r2.GetCode();
+    DCHECK_EQ(extra_regs & kCoreCalleeSaves.GetList(), 0u);
+    DCHECK_LT(MostSignificantBit(extra_regs), LeastSignificantBit(pop_mask));
+    __ Pop(RegisterList(pop_mask | extra_regs));
+    if (fpu_spill_mask_ != 0u) {
+      GetAssembler()->cfi().RestoreState();
+    }
+  } else {
+    GetAssembler()->cfi().RememberState();
+    __ Add(sp, sp, fp_spills_offset);
+    GetAssembler()->cfi().AdjustCFAOffset(-dchecked_integral_cast<int32_t>(fp_spills_offset));
+    if (fpu_spill_mask_ != 0) {
+      uint32_t first = LeastSignificantBit(fpu_spill_mask_);
+
+      // Check that list is contiguous.
+      DCHECK_EQ(fpu_spill_mask_ >> CTZ(fpu_spill_mask_), ~0u >> (32 - POPCOUNT(fpu_spill_mask_)));
+
+      __ Vpop(SRegisterList(vixl32::SRegister(first), POPCOUNT(fpu_spill_mask_)));
+      GetAssembler()->cfi().AdjustCFAOffset(
+          -static_cast<int>(kArmWordSize) * POPCOUNT(fpu_spill_mask_));
+      GetAssembler()->cfi().RestoreMany(DWARFReg(vixl32::SRegister(0)), fpu_spill_mask_);
+    }
+    __ Pop(RegisterList(pop_mask));
+    GetAssembler()->cfi().RestoreState();
+    GetAssembler()->cfi().DefCFAOffset(GetFrameSize());
+  }
 }
 
 void CodeGeneratorARMVIXL::Bind(HBasicBlock* block) {
@@ -7015,7 +7076,8 @@ void InstructionCodeGeneratorARMVIXL::VisitLoadClass(HLoadClass* cls) NO_THREAD_
       break;
     }
     case HLoadClass::LoadKind::kBootImageLinkTimePcRelative: {
-      DCHECK(codegen_->GetCompilerOptions().IsBootImage());
+      DCHECK(codegen_->GetCompilerOptions().IsBootImage() ||
+             codegen_->GetCompilerOptions().IsBootImageExtension());
       DCHECK_EQ(read_barrier_option, kWithoutReadBarrier);
       CodeGeneratorARMVIXL::PcRelativePatchInfo* labels =
           codegen_->NewBootImageTypePatch(cls->GetDexFile(), cls->GetTypeIndex());
@@ -7034,6 +7096,7 @@ void InstructionCodeGeneratorARMVIXL::VisitLoadClass(HLoadClass* cls) NO_THREAD_
       CodeGeneratorARMVIXL::PcRelativePatchInfo* labels =
           codegen_->NewTypeBssEntryPatch(cls->GetDexFile(), cls->GetTypeIndex());
       codegen_->EmitMovwMovtPlaceholder(labels, out);
+      // All aligned loads are implicitly atomic consume operations on ARM.
       codegen_->GenerateGcRootFieldLoad(cls, out_loc, out, /* offset= */ 0, read_barrier_option);
       generate_null_check = true;
       break;
@@ -7120,17 +7183,13 @@ void InstructionCodeGeneratorARMVIXL::GenerateClassInitializationCheck(
   UseScratchRegisterScope temps(GetVIXLAssembler());
   vixl32::Register temp = temps.Acquire();
   constexpr size_t status_lsb_position = SubtypeCheckBits::BitStructSizeOf();
-  const size_t status_byte_offset =
-      mirror::Class::StatusOffset().SizeValue() + (status_lsb_position / kBitsPerByte);
-  constexpr uint32_t shifted_initialized_value =
-      enum_cast<uint32_t>(ClassStatus::kInitialized) << (status_lsb_position % kBitsPerByte);
+  constexpr uint32_t shifted_visibly_initialized_value =
+      enum_cast<uint32_t>(ClassStatus::kVisiblyInitialized) << status_lsb_position;
 
-  GetAssembler()->LoadFromOffset(kLoadUnsignedByte, temp, class_reg, status_byte_offset);
-  __ Cmp(temp, shifted_initialized_value);
+  const size_t status_offset = mirror::Class::StatusOffset().SizeValue();
+  GetAssembler()->LoadFromOffset(kLoadWord, temp, class_reg, status_offset);
+  __ Cmp(temp, shifted_visibly_initialized_value);
   __ B(lo, slow_path->GetEntryLabel());
-  // Even if the initialized flag is set, we may be in a situation where caches are not synced
-  // properly. Therefore, we do a memory fence.
-  __ Dmb(ISH);
   __ Bind(slow_path->GetExitLabel());
 }
 
@@ -7242,7 +7301,8 @@ void InstructionCodeGeneratorARMVIXL::VisitLoadString(HLoadString* load) NO_THRE
 
   switch (load_kind) {
     case HLoadString::LoadKind::kBootImageLinkTimePcRelative: {
-      DCHECK(codegen_->GetCompilerOptions().IsBootImage());
+      DCHECK(codegen_->GetCompilerOptions().IsBootImage() ||
+             codegen_->GetCompilerOptions().IsBootImageExtension());
       CodeGeneratorARMVIXL::PcRelativePatchInfo* labels =
           codegen_->NewBootImageStringPatch(load->GetDexFile(), load->GetStringIndex());
       codegen_->EmitMovwMovtPlaceholder(labels, out);
@@ -7260,6 +7320,7 @@ void InstructionCodeGeneratorARMVIXL::VisitLoadString(HLoadString* load) NO_THRE
       CodeGeneratorARMVIXL::PcRelativePatchInfo* labels =
           codegen_->NewStringBssEntryPatch(load->GetDexFile(), load->GetStringIndex());
       codegen_->EmitMovwMovtPlaceholder(labels, out);
+      // All aligned loads are implicitly atomic consume operations on ARM.
       codegen_->GenerateGcRootFieldLoad(
           load, out_loc, out, /* offset= */ 0, kCompilerReadBarrierOption);
       LoadStringSlowPathARMVIXL* slow_path =
@@ -8711,7 +8772,7 @@ void CodeGeneratorARMVIXL::GenerateStaticOrDirectCall(
       callee_method = invoke->GetLocations()->InAt(invoke->GetSpecialInputIndex());
       break;
     case HInvokeStaticOrDirect::MethodLoadKind::kBootImageLinkTimePcRelative: {
-      DCHECK(GetCompilerOptions().IsBootImage());
+      DCHECK(GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension());
       PcRelativePatchInfo* labels = NewBootImageMethodPatch(invoke->GetTargetMethod());
       vixl32::Register temp_reg = RegisterFrom(temp);
       EmitMovwMovtPlaceholder(labels, temp_reg);
@@ -8730,6 +8791,7 @@ void CodeGeneratorARMVIXL::GenerateStaticOrDirectCall(
           MethodReference(&GetGraph()->GetDexFile(), invoke->GetDexMethodIndex()));
       vixl32::Register temp_reg = RegisterFrom(temp);
       EmitMovwMovtPlaceholder(labels, temp_reg);
+      // All aligned loads are implicitly atomic consume operations on ARM.
       GetAssembler()->LoadFromOffset(kLoadWord, temp_reg, temp_reg, /* offset*/ 0);
       break;
     }
@@ -8827,14 +8889,14 @@ void CodeGeneratorARMVIXL::GenerateVirtualCall(
 
 CodeGeneratorARMVIXL::PcRelativePatchInfo* CodeGeneratorARMVIXL::NewBootImageIntrinsicPatch(
     uint32_t intrinsic_data) {
-  return NewPcRelativePatch(/* dex_file= */ nullptr, intrinsic_data, &boot_image_intrinsic_patches_);
+  return NewPcRelativePatch(/* dex_file= */ nullptr, intrinsic_data, &boot_image_other_patches_);
 }
 
 CodeGeneratorARMVIXL::PcRelativePatchInfo* CodeGeneratorARMVIXL::NewBootImageRelRoPatch(
     uint32_t boot_image_offset) {
   return NewPcRelativePatch(/* dex_file= */ nullptr,
                             boot_image_offset,
-                            &boot_image_method_patches_);
+                            &boot_image_other_patches_);
 }
 
 CodeGeneratorARMVIXL::PcRelativePatchInfo* CodeGeneratorARMVIXL::NewBootImageMethodPatch(
@@ -9007,25 +9069,28 @@ void CodeGeneratorARMVIXL::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* l
       /* MOVW+MOVT for each entry */ 2u * type_bss_entry_patches_.size() +
       /* MOVW+MOVT for each entry */ 2u * boot_image_string_patches_.size() +
       /* MOVW+MOVT for each entry */ 2u * string_bss_entry_patches_.size() +
-      /* MOVW+MOVT for each entry */ 2u * boot_image_intrinsic_patches_.size() +
+      /* MOVW+MOVT for each entry */ 2u * boot_image_other_patches_.size() +
       call_entrypoint_patches_.size() +
       baker_read_barrier_patches_.size();
   linker_patches->reserve(size);
-  if (GetCompilerOptions().IsBootImage()) {
+  if (GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension()) {
     EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeMethodPatch>(
         boot_image_method_patches_, linker_patches);
     EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeTypePatch>(
         boot_image_type_patches_, linker_patches);
     EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeStringPatch>(
         boot_image_string_patches_, linker_patches);
-    EmitPcRelativeLinkerPatches<NoDexFileAdapter<linker::LinkerPatch::IntrinsicReferencePatch>>(
-        boot_image_intrinsic_patches_, linker_patches);
   } else {
-    EmitPcRelativeLinkerPatches<NoDexFileAdapter<linker::LinkerPatch::DataBimgRelRoPatch>>(
-        boot_image_method_patches_, linker_patches);
+    DCHECK(boot_image_method_patches_.empty());
     DCHECK(boot_image_type_patches_.empty());
     DCHECK(boot_image_string_patches_.empty());
-    DCHECK(boot_image_intrinsic_patches_.empty());
+  }
+  if (GetCompilerOptions().IsBootImage()) {
+    EmitPcRelativeLinkerPatches<NoDexFileAdapter<linker::LinkerPatch::IntrinsicReferencePatch>>(
+        boot_image_other_patches_, linker_patches);
+  } else {
+    EmitPcRelativeLinkerPatches<NoDexFileAdapter<linker::LinkerPatch::DataBimgRelRoPatch>>(
+        boot_image_other_patches_, linker_patches);
   }
   EmitPcRelativeLinkerPatches<linker::LinkerPatch::MethodBssEntryPatch>(
       method_bss_entry_patches_, linker_patches);

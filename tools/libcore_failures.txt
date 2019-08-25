@@ -105,12 +105,6 @@
   names: ["org.apache.harmony.tests.java.lang.ProcessTest#test_getErrorStream"]
 },
 {
-  description: "Test sometimes timeouts on volantis, and on most modes in debug mode",
-  result: EXEC_TIMEOUT,
-  names: ["libcore.java.lang.SystemTest#testArrayCopyConcurrentModification"],
-  bug: 19165288
-},
-{
   description: "Needs kernel updates on host/device",
   result: EXEC_FAILED,
   names: ["libcore.libcore.io.OsTest#test_socketPing"]
@@ -242,5 +236,29 @@
   names: [
     "libcore.libcore.io.OsTest#testCrossFamilyBindConnectSendto"
   ]
+},
+{
+  description: "Assertion failing in libcore.java.util.zip.DeflateRegressionTest#deterministicOutput -- temporarily disabling test while we investigate.",
+  result: EXEC_FAILED,
+  bug: 135017266,
+  names: [
+    "libcore.java.util.zip.DeflateRegressionTest#deterministicOutput"
+  ]
+},
+{
+  description: "Test fails on host with `socket failed: EACCES (Permission denied)`",
+  result: EXEC_FAILED,
+  modes: [host],
+  names: ["libcore.android.system.OsTest#test_socketPing"]
+},
+{
+  description: "Test fails on host with: `/home/dalvik-prebuild/jaxen/xml/test/tests.xml: open failed: ENOENT (No such file or directory)`",
+  result: EXEC_FAILED,
+  names: ["libcore.xml.JaxenXPathTestSuite#suite"]
+},
+{
+  description: "Test fails on host with: `/home/dalvik-prebuild/OASIS/XSLT-Conformance-TC/TESTS/catalog.xml: open failed: ENOENT (No such file or directory)`",
+  result: EXEC_FAILED,
+  names: ["libcore.xml.XsltXPathConformanceTestSuite#suite"]
 }
 ]

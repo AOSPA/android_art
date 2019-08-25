@@ -125,8 +125,8 @@ RegionSpace::RegionSpace(const std::string& name, MemMap&& mem_map, bool use_gen
   for (size_t i = 0; i < num_regions_; ++i, region_addr += kRegionSize) {
     regions_[i].Init(i, region_addr, region_addr + kRegionSize);
   }
-  mark_bitmap_.reset(
-      accounting::ContinuousSpaceBitmap::Create("region space live bitmap", Begin(), Capacity()));
+  mark_bitmap_ =
+      accounting::ContinuousSpaceBitmap::Create("region space live bitmap", Begin(), Capacity());
   if (kIsDebugBuild) {
     CHECK_EQ(regions_[0].Begin(), Begin());
     for (size_t i = 0; i < num_regions_; ++i) {
@@ -977,6 +977,11 @@ void RegionSpace::Region::Clear(bool zero_and_release_pages) {
   thread_ = nullptr;
 }
 
+void RegionSpace::TraceHeapSize() {
+  Heap* heap = Runtime::Current()->GetHeap();
+  heap->TraceHeapSize(heap->GetBytesAllocated() + EvacBytes());
+}
+
 RegionSpace::Region* RegionSpace::AllocateRegion(bool for_evac) {
   if (!for_evac && (num_non_free_regions_ + 1) * 2 > num_regions_) {
     return nullptr;
@@ -998,6 +1003,7 @@ RegionSpace::Region* RegionSpace::AllocateRegion(bool for_evac) {
       }
       if (for_evac) {
         ++num_evac_regions_;
+        TraceHeapSize();
         // Evac doesn't count as newly allocated.
       } else {
         r->SetNewlyAllocated();
