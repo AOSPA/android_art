@@ -371,8 +371,10 @@ include $(BUILD_PHONY_PACKAGE)
 include $(CLEAR_VARS)
 LOCAL_MODULE := com.android.runtime
 LOCAL_IS_HOST_MODULE := true
+ifneq ($(DISABLE_APEX_TEST_MODULE),true)
 ifneq ($(HOST_OS),darwin)
   LOCAL_REQUIRED_MODULES += $(APEX_TEST_MODULE)
+endif
 endif
 include $(BUILD_PHONY_PACKAGE)
 
