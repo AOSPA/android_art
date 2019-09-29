@@ -19,17 +19,18 @@ include art/build/Android.common_test.mk
 
 # Dependencies for actually running a run-test.
 TEST_ART_RUN_TEST_DEPENDENCIES := \
+  $(HOST_OUT_EXECUTABLES)/dx \
   $(HOST_OUT_EXECUTABLES)/d8 \
   $(HOST_OUT_EXECUTABLES)/d8-compat-dx \
   $(HOST_OUT_EXECUTABLES)/hiddenapi \
   $(HOST_OUT_EXECUTABLES)/jasmin \
   $(HOST_OUT_EXECUTABLES)/smali
 
-# We need the Testing Runtime APEX (which is a superset of the Release
-# and Debug Runtime APEXes) -- which contains dex2oat, dalvikvm, their
+# We need the ART Testing APEX (which is a superset of the Release
+# and Debug APEXes) -- which contains dex2oat, dalvikvm, their
 # dependencies and ART gtests -- on the target, as well as the core
 # images (all images as we sync only once).
-ART_TEST_TARGET_RUN_TEST_DEPENDENCIES := $(TESTING_RUNTIME_APEX) $(TARGET_CORE_IMG_OUTS)
+ART_TEST_TARGET_RUN_TEST_DEPENDENCIES := $(TESTING_ART_APEX) $(TARGET_CORE_IMG_OUTS)
 
 # Also need libartagent.
 ART_TEST_TARGET_RUN_TEST_DEPENDENCIES += libartagent-target libartagentd-target
@@ -45,6 +46,9 @@ ART_TEST_TARGET_RUN_TEST_DEPENDENCIES += libarttest-target libarttestd-target
 
 # Also need libnativebridgetest.
 ART_TEST_TARGET_RUN_TEST_DEPENDENCIES += libnativebridgetest-target libnativebridgetestd-target
+
+# Also need signal_dumper.
+ART_TEST_TARGET_RUN_TEST_DEPENDENCIES += signal_dumper-target
 
 ART_TEST_TARGET_RUN_TEST_DEPENDENCIES += \
   $(foreach jar,$(TARGET_TEST_CORE_JARS),$(TARGET_OUT_JAVA_LIBRARIES)/$(jar).jar)

@@ -123,8 +123,7 @@ extern "C" JitCompilerInterface* jit_load() {
   return jit_compiler;
 }
 
-void JitCompiler::TypesLoaded(mirror::Class** types, size_t count)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
+void JitCompiler::TypesLoaded(mirror::Class** types, size_t count) {
   const CompilerOptions& compiler_options = GetCompilerOptions();
   if (compiler_options.GetGenerateDebugInfo()) {
     InstructionSet isa = compiler_options.GetInstructionSet();
@@ -134,6 +133,7 @@ void JitCompiler::TypesLoaded(mirror::Class** types, size_t count)
         debug::WriteDebugElfFileForClasses(isa, features, types_array);
 
     // NB: Don't allow packing since it would remove non-backtrace data.
+    MutexLock mu(Thread::Current(), *Locks::jit_lock_);
     AddNativeDebugInfoForJit(/*code_ptr=*/ nullptr, elf_file, /*allow_packing=*/ false);
   }
 }
@@ -142,7 +142,7 @@ bool JitCompiler::GenerateDebugInfo() {
   return GetCompilerOptions().GetGenerateDebugInfo();
 }
 
-std::vector<uint8_t> JitCompiler::PackElfFileForJIT(ArrayRef<JITCodeEntry*> elf_files,
+std::vector<uint8_t> JitCompiler::PackElfFileForJIT(ArrayRef<const JITCodeEntry*> elf_files,
                                                     ArrayRef<const void*> removed_symbols,
                                                     bool compress,
                                                     /*out*/ size_t* num_symbols) {

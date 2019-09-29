@@ -124,10 +124,6 @@ class JitOptions {
     profile_saver_options_.SetWaitForJitNotificationsToSave(value);
   }
 
-  void SetProfileAOTCode(bool value) {
-    profile_saver_options_.SetProfileAOTCode(value);
-  }
-
   void SetJitAtFirstUse() {
     use_jit_compilation_ = true;
     compile_threshold_ = 0;
@@ -177,7 +173,7 @@ class JitCompilerInterface {
   virtual bool GenerateDebugInfo() = 0;
   virtual void ParseCompilerOptions() = 0;
 
-  virtual std::vector<uint8_t> PackElfFileForJIT(ArrayRef<JITCodeEntry*> elf_files,
+  virtual std::vector<uint8_t> PackElfFileForJIT(ArrayRef<const JITCodeEntry*> elf_files,
                                                  ArrayRef<const void*> removed_symbols,
                                                  bool compress,
                                                  /*out*/ size_t* num_symbols) = 0;

@@ -73,7 +73,7 @@ class ProfileCompilationInfo {
  public:
   static const uint8_t kProfileMagic[];
   static const uint8_t kProfileVersion[];
-  static const uint8_t kProfileVersionWithCounters[];
+  static const uint8_t kProfileVersionForBootImage[];
   static const char kDexMetadataProfileEntry[];
 
   static constexpr size_t kProfileVersionSize = 4;
@@ -83,25 +83,25 @@ class ProfileCompilationInfo {
   // This is exposed as public in order to make it available to dex2oat compilations
   // (see compiler/optimizing/inliner.cc).
 
-  // A dex location together with its checksum.
+  // A profile reference to the dex file (profile key, dex checksum and number of methods).
   struct DexReference {
     DexReference() : dex_checksum(0), num_method_ids(0) {}
 
-    DexReference(const std::string& location, uint32_t checksum, uint32_t num_methods)
-        : dex_location(location), dex_checksum(checksum), num_method_ids(num_methods) {}
+    DexReference(const std::string& key, uint32_t checksum, uint32_t num_methods)
+        : profile_key(key), dex_checksum(checksum), num_method_ids(num_methods) {}
 
     bool operator==(const DexReference& other) const {
       return dex_checksum == other.dex_checksum &&
-          dex_location == other.dex_location &&
+          profile_key == other.profile_key &&
           num_method_ids == other.num_method_ids;
     }
 
     bool MatchesDex(const DexFile* dex_file) const {
       return dex_checksum == dex_file->GetLocationChecksum() &&
-           dex_location == GetProfileDexFileKey(dex_file->GetLocation());
+           profile_key == GetProfileDexFileBaseKey(dex_file->GetLocation());
     }
 
-    std::string dex_location;
+    std::string profile_key;
     uint32_t dex_checksum;
     uint32_t num_method_ids;
   };
@@ -181,9 +181,26 @@ class ProfileCompilationInfo {
   class MethodHotness {
    public:
     enum Flag {
-      kFlagHot = 0x1,
-      kFlagStartup = 0x2,
-      kFlagPostStartup = 0x4,
+      kFlagFirst = 1 << 0,
+      kFlagHot = 1 << 0,
+      kFlagStartup = 1 << 1,
+      kFlagPostStartup = 1 << 2,
+      kFlagLastRegular = 1 << 2,
+      kFlagAmStartup = 1 << 3,
+      kFlagAmPostStartup = 1 << 4,
+      kFlagBoot = 1 << 5,
+      kFlagPostBoot = 1 << 6,
+      kFlagForeground = 1 << 7,
+      kFlagBackground = 1 << 8,
+      // The startup bins captured the relative order of when a method become hot. There are 8
+      // total bins supported and each hot method will have at least one bit set. If the profile was
+      // merged multiple times more than one bit may be set as a given method may become hot at
+      // various times during subsequent executions.
+      // The granularity of the bins is unspecified (i.e. the runtime is free to change the
+      // values it uses - this may be 100ms, 200ms etc...).
+      kFlagStartupBin = 1 << 9,
+      kFlagStartupMaxBin = 1 << 16,
+      kFlagLastBoot = 1 << 16,
     };
 
     bool IsHot() const {
@@ -202,8 +219,12 @@ class ProfileCompilationInfo {
       flags_ |= flag;
     }
 
-    uint8_t GetFlags() const {
+    uint32_t GetFlags() const {
       return flags_;
+    }
+
+    bool HasFlagSet(MethodHotness::Flag flag) {
+      return (flags_ & flag ) != 0;
     }
 
     bool IsInProfile() const {
@@ -212,7 +233,7 @@ class ProfileCompilationInfo {
 
    private:
     const InlineCacheMap* inline_cache_map_ = nullptr;
-    uint8_t flags_ = 0;
+    uint32_t flags_ = 0;
 
     const InlineCacheMap* GetInlineCacheMap() const {
       return inline_cache_map_;
@@ -241,7 +262,9 @@ class ProfileCompilationInfo {
 
   // Public methods to create, extend or query the profile.
   ProfileCompilationInfo();
+  explicit ProfileCompilationInfo(bool for_boot_image);
   explicit ProfileCompilationInfo(ArenaPool* arena_pool);
+  ProfileCompilationInfo(ArenaPool* arena_pool, bool for_boot_image);
 
   ~ProfileCompilationInfo();
 
@@ -393,6 +416,9 @@ class ProfileCompilationInfo {
                             /*out*/std::set<uint16_t>* startup_method_set,
                             /*out*/std::set<uint16_t>* post_startup_method_method_set) const;
 
+  // Returns true iff both profiles have the same version.
+  bool SameVersion(const ProfileCompilationInfo& other) const;
+
   // Perform an equality test with the `other` profile information.
   bool Equals(const ProfileCompilationInfo& other);
 
@@ -401,7 +427,12 @@ class ProfileCompilationInfo {
       const std::vector<const DexFile*>& dex_files_) const;
 
   // Return the profile key associated with the given dex location.
-  static std::string GetProfileDexFileKey(const std::string& dex_location);
+  std::string GetProfileDexFileKey(const std::string& dex_location) const;
+  // Return the base profile key associated with the given dex location. The base profile key
+  // is solely constructed based on the dex location (as opposed to the one produced by
+  // GetProfileDexFileKey which may include additional metadata like architecture or source
+  // package name)
+  static std::string GetProfileDexFileBaseKey(const std::string& dex_location);
 
   // Generate a test profile which will contain a percentage of the total maximum
   // number of methods and classes (method_ratio and class_ratio).
@@ -455,19 +486,7 @@ class ProfileCompilationInfo {
   void PrepareForAggregationCounters();
 
   // Returns true if the profile is configured to store aggregation counters.
-  bool StoresAggregationCounters() const;
-
-  // Returns the aggregation counter for the given method.
-  // Returns -1 if the method is not in the profile.
-  // CHECKs that the profile is configured to store aggregations counters.
-  int32_t GetMethodAggregationCounter(const MethodReference& method_ref) const;
-  // Returns the aggregation counter for the given class.
-  // Returns -1 if the class is not in the profile.
-  // CHECKs that the profile is configured to store aggregations counters.
-  int32_t GetClassAggregationCounter(const TypeReference& type_ref) const;
-  // Returns the number of times the profile was merged.
-  // CHECKs that the profile is configured to store aggregations counters.
-  uint16_t GetAggregationCounter() const;
+  bool IsForBootImage() const;
 
   // Return the version of this profile.
   const uint8_t* GetVersion() const;
@@ -481,9 +500,6 @@ class ProfileCompilationInfo {
     kProfileLoadSuccess
   };
 
-  const uint32_t kProfileSizeWarningThresholdInBytes = 500000U;
-  const uint32_t kProfileSizeErrorThresholdInBytes = 1000000U;
-
   // Internal representation of the profile information belonging to a dex file.
   // Note that we could do without profile_key (the key used to encode the dex
   // file in the profile) and profile_index (the index of the dex file in the
@@ -496,7 +512,7 @@ class ProfileCompilationInfo {
                 uint32_t location_checksum,
                 uint16_t index,
                 uint32_t num_methods,
-                bool store_aggregation_counters)
+                bool for_boot_image)
         : allocator_(allocator),
           profile_key(key),
           profile_index(index),
@@ -505,24 +521,27 @@ class ProfileCompilationInfo {
           class_set(std::less<dex::TypeIndex>(), allocator->Adapter(kArenaAllocProfile)),
           num_method_ids(num_methods),
           bitmap_storage(allocator->Adapter(kArenaAllocProfile)),
-          method_counters(allocator->Adapter(kArenaAllocProfile)),
-          class_counters(allocator->Adapter(kArenaAllocProfile)) {
-      bitmap_storage.resize(ComputeBitmapStorage(num_method_ids));
+          is_for_boot_image(for_boot_image) {
+      bitmap_storage.resize(ComputeBitmapStorage(is_for_boot_image, num_method_ids));
       if (!bitmap_storage.empty()) {
         method_bitmap =
             BitMemoryRegion(MemoryRegion(
-                &bitmap_storage[0], bitmap_storage.size()), 0, ComputeBitmapBits(num_method_ids));
-      }
-      if (store_aggregation_counters) {
-        PrepareForAggregationCounters();
+                &bitmap_storage[0],
+                bitmap_storage.size()),
+                0,
+                ComputeBitmapBits(is_for_boot_image, num_method_ids));
       }
     }
 
-    static size_t ComputeBitmapBits(uint32_t num_method_ids) {
-      return num_method_ids * kBitmapIndexCount;
+    static size_t ComputeBitmapBits(bool is_for_boot_image, uint32_t num_method_ids) {
+      size_t flag_bitmap_index = FlagBitmapIndex(is_for_boot_image
+          ? MethodHotness::kFlagLastBoot
+          : MethodHotness::kFlagLastRegular);
+      return num_method_ids * (flag_bitmap_index + 1);
     }
-    static size_t ComputeBitmapStorage(uint32_t num_method_ids) {
-      return RoundUp(ComputeBitmapBits(num_method_ids), kBitsPerByte) / kBitsPerByte;
+    static size_t ComputeBitmapStorage(bool is_for_boot_image, uint32_t num_method_ids) {
+      return RoundUp(ComputeBitmapBits(is_for_boot_image, num_method_ids), kBitsPerByte) /
+          kBitsPerByte;
     }
 
     bool operator==(const DexFileData& other) const {
@@ -530,9 +549,7 @@ class ProfileCompilationInfo {
           num_method_ids == other.num_method_ids &&
           method_map == other.method_map &&
           class_set == other.class_set &&
-          (BitMemoryRegion::Compare(method_bitmap, other.method_bitmap) == 0) &&
-          class_counters == other.class_counters &&
-          method_counters == other.method_counters;
+          (BitMemoryRegion::Compare(method_bitmap, other.method_bitmap) == 0);
     }
 
     // Mark a method as executed at least once.
@@ -547,12 +564,6 @@ class ProfileCompilationInfo {
 
     void SetMethodHotness(size_t index, MethodHotness::Flag flags);
     MethodHotness GetHotnessInfo(uint32_t dex_method_index) const;
-    void PrepareForAggregationCounters();
-
-    int32_t GetMethodAggregationCounter(uint16_t method_index) const;
-    int32_t GetClassAggregationCounter(uint16_t type_index) const;
-
-    uint16_t GetNumMethodCounters() const;
 
     bool ContainsClass(const dex::TypeIndex type_index) const;
 
@@ -576,25 +587,11 @@ class ProfileCompilationInfo {
     uint32_t num_method_ids;
     ArenaVector<uint8_t> bitmap_storage;
     BitMemoryRegion method_bitmap;
-    ArenaVector<uint16_t> method_counters;
-    ArenaVector<uint16_t> class_counters;
+    bool is_for_boot_image;
 
    private:
-    enum BitmapIndex {
-      kBitmapIndexStartup,
-      kBitmapIndexPostStartup,
-      kBitmapIndexCount,
-    };
-
-    size_t MethodBitIndex(bool startup, size_t index) const {
-      DCHECK_LT(index, num_method_ids);
-      // The format is [startup bitmap][post startup bitmap]
-      // This compresses better than ([startup bit][post statup bit])*
-
-      return index + (startup
-          ? kBitmapIndexStartup * num_method_ids
-          : kBitmapIndexPostStartup * num_method_ids);
-    }
+    size_t MethodFlagBitmapIndex(MethodHotness::Flag flag, size_t method_index) const;
+    static size_t FlagBitmapIndex(MethodHotness::Flag flag);
   };
 
   // Return the profile data for the given profile key or null if the dex location
@@ -619,7 +616,7 @@ class ProfileCompilationInfo {
                  MethodHotness::Flag flags);
 
   // Add a class index to the profile.
-  bool AddClassIndex(const std::string& dex_location,
+  bool AddClassIndex(const std::string& profile_key,
                      uint32_t checksum,
                      dex::TypeIndex type_idx,
                      uint32_t num_method_ids);
@@ -660,7 +657,7 @@ class ProfileCompilationInfo {
 
   // The information present in the header of each profile line.
   struct ProfileLineHeader {
-    std::string dex_location;
+    std::string profile_key;
     uint16_t class_set_size;
     uint32_t method_region_size_bytes;
     uint32_t checksum;
@@ -808,11 +805,6 @@ class ProfileCompilationInfo {
                    const SafeMap<uint8_t, uint8_t>& dex_profile_index_remap,
                    /*out*/std::string* error);
 
-  // Read the aggregation counters from the buffer.
-  bool ReadAggregationCounters(SafeBuffer& buffer,
-                               DexFileData& dex_data,
-                               /*out*/std::string* error);
-
   // The method generates mapping of profile indices while merging a new profile
   // data into current data. It returns true, if the mapping was successful.
   bool RemapProfileIndex(const std::vector<ProfileLineHeader>& profile_line_headers,
@@ -847,6 +839,11 @@ class ProfileCompilationInfo {
   // Initializes the profile version to the desired one.
   void InitProfileVersionInternal(const uint8_t version[]);
 
+  // Returns the threshold size (in bytes) which will triggers save/load warnings.
+  size_t GetSizeWarningThresholdBytes() const;
+  // Returns the threshold size (in bytes) which will cause save/load failures.
+  size_t GetSizeErrorThresholdBytes() const;
+
   friend class ProfileCompilationInfoTest;
   friend class CompilerDriverProfileTest;
   friend class ProfileAssistantTest;
@@ -866,12 +863,7 @@ class ProfileCompilationInfo {
   ArenaSafeMap<const std::string, uint8_t> profile_key_map_;
 
   // The version of the profile.
-  // This may change if a "normal" profile is transformed to keep track
-  // of aggregation counters.
   uint8_t version_[kProfileVersionSize];
-
-  // Stored only when the profile is configured to keep track of aggregation counters.
-  uint16_t aggregation_count_;
 };
 
 }  // namespace art

@@ -32,6 +32,10 @@ namespace art {
 using Hotness = ProfileCompilationInfo::MethodHotness;
 
 static constexpr size_t kMaxMethodIds = 65535;
+static uint32_t kMaxHotnessFlagBootIndex =
+    WhichPowerOf2(static_cast<uint32_t>(Hotness::kFlagLastBoot));
+static uint32_t kMaxHotnessFlagRegularIndex =
+    WhichPowerOf2(static_cast<uint32_t>(Hotness::kFlagLastRegular));
 
 class ProfileCompilationInfoTest : public CommonArtTest {
  public:
@@ -185,6 +189,56 @@ class ProfileCompilationInfoTest : public CommonArtTest {
 
   bool IsEmpty(const ProfileCompilationInfo& info) {
     return info.IsEmpty();
+  }
+
+  void SizeStressTest(bool random) {
+    ProfileCompilationInfo boot_profile(/*for_boot_image*/ true);
+    ProfileCompilationInfo reg_profile(/*for_boot_image*/ false);
+
+    static constexpr size_t kNumDexFiles = 5;
+    static constexpr size_t kNumMethods = 1 << 16;
+    static constexpr size_t kChecksum = 1234;
+    static const std::string kDex = "dex";
+
+    std::srand(0);
+    // Set a few flags on a 2 different methods in each of the profile.
+    for (uint32_t dex_index = 0; dex_index < kNumDexFiles; dex_index++) {
+      for (uint32_t method_idx = 0; method_idx < kNumMethods; method_idx++) {
+        for (uint32_t flag_index = 0; flag_index <= kMaxHotnessFlagBootIndex; flag_index++) {
+          if (!random || rand() % 2 == 0) {
+            ASSERT_TRUE(boot_profile.AddMethodIndex(
+                static_cast<Hotness::Flag>(1 << flag_index),
+                kDex + std::to_string(dex_index),
+                kChecksum + dex_index,
+                method_idx,
+                kNumMethods));
+          }
+        }
+        for (uint32_t flag_index = 0; flag_index <= kMaxHotnessFlagRegularIndex; flag_index++) {
+          if (!random || rand() % 2 == 0) {
+            ASSERT_TRUE(reg_profile.AddMethodIndex(
+                static_cast<Hotness::Flag>(1 << flag_index),
+                kDex + std::to_string(dex_index),
+                kChecksum + dex_index,
+                method_idx,
+                kNumMethods));
+          }
+        }
+      }
+    }
+
+    ScratchFile boot_file;
+    ScratchFile reg_file;
+
+    ASSERT_TRUE(boot_profile.Save(GetFd(boot_file)));
+    ASSERT_TRUE(reg_profile.Save(GetFd(reg_file)));
+    ASSERT_TRUE(boot_file.GetFile()->ResetOffset());
+    ASSERT_TRUE(reg_file.GetFile()->ResetOffset());
+
+    ProfileCompilationInfo loaded_boot;
+    ProfileCompilationInfo loaded_reg;
+    ASSERT_TRUE(loaded_boot.Load(GetFd(boot_file)));
+    ASSERT_TRUE(loaded_reg.Load(GetFd(reg_file)));
   }
 
   // Cannot sizeof the actual arrays so hard code the values here.
@@ -1141,180 +1195,160 @@ TEST_F(ProfileCompilationInfoTest, ClearDataAndSave) {
   ASSERT_TRUE(loaded_info.Equals(info));
 }
 
-TEST_F(ProfileCompilationInfoTest, PrepareForAggregationCounters) {
+TEST_F(ProfileCompilationInfoTest, InitProfiles) {
   ProfileCompilationInfo info;
   ASSERT_EQ(
       memcmp(info.GetVersion(),
              ProfileCompilationInfo::kProfileVersion,
              ProfileCompilationInfo::kProfileVersionSize),
       0);
+  ASSERT_FALSE(info.IsForBootImage());
 
-  info.PrepareForAggregationCounters();
+  ProfileCompilationInfo info1(/*for_boot_image=*/ true);
 
   ASSERT_EQ(
-      memcmp(info.GetVersion(),
-             ProfileCompilationInfo::kProfileVersionWithCounters,
+      memcmp(info1.GetVersion(),
+             ProfileCompilationInfo::kProfileVersionForBootImage,
              ProfileCompilationInfo::kProfileVersionSize),
       0);
-  ASSERT_TRUE(info.StoresAggregationCounters());
-  ASSERT_EQ(info.GetAggregationCounter(), 0);
+  ASSERT_TRUE(info1.IsForBootImage());
 }
 
-TEST_F(ProfileCompilationInfoTest, MergeWithAggregationCounters) {
-  ProfileCompilationInfo info1;
-  info1.PrepareForAggregationCounters();
-
-  ProfileCompilationInfo info2;
-  ProfileCompilationInfo info3;
-
-  std::unique_ptr<const DexFile> dex(OpenTestDexFile("ManyMethods"));
-  std::string location = dex->GetLocation();
-  int checksum = dex->GetLocationChecksum();
-
-  AddMethod(location, checksum, /* method_idx= */ 1, &info1);
-
-  AddMethod(location, checksum, /* method_idx= */ 2, &info1);
-  AddMethod(location, checksum, /* method_idx= */ 2, &info2);
-
-  info1.AddMethodIndex(Hotness::kFlagStartup, location, checksum, 3, kMaxMethodIds);
-  info2.AddMethodIndex(Hotness::kFlagPostStartup, location, checksum, 3, kMaxMethodIds);
-  info3.AddMethodIndex(Hotness::kFlagStartup, location, checksum, 3, kMaxMethodIds);
-
-  AddMethod(location, checksum, /* method_idx= */ 6, &info2);
-  AddMethod(location, checksum, /* method_idx= */ 6, &info3);
-
-  AddClass(location, checksum, dex::TypeIndex(10), &info1);
-
-  AddClass(location, checksum, dex::TypeIndex(20), &info1);
-  AddClass(location, checksum, dex::TypeIndex(20), &info2);
-
-  AddClass(location, checksum, dex::TypeIndex(30), &info1);
-  AddClass(location, checksum, dex::TypeIndex(30), &info2);
-  AddClass(location, checksum, dex::TypeIndex(30), &info3);
-
-  ASSERT_EQ(info1.GetAggregationCounter(), 0);
-  info1.MergeWith(info2);
-  ASSERT_EQ(info1.GetAggregationCounter(), 1);
-  info1.MergeWith(info3);
-  ASSERT_EQ(info1.GetAggregationCounter(), 2);
-
-  ASSERT_EQ(0, info1.GetMethodAggregationCounter(MethodReference(dex.get(), 1)));
-  ASSERT_EQ(1, info1.GetMethodAggregationCounter(MethodReference(dex.get(), 2)));
-  ASSERT_EQ(2, info1.GetMethodAggregationCounter(MethodReference(dex.get(), 3)));
-  ASSERT_EQ(1, info1.GetMethodAggregationCounter(MethodReference(dex.get(), 6)));
-
-  ASSERT_EQ(0, info1.GetClassAggregationCounter(TypeReference(dex.get(), dex::TypeIndex(10))));
-  ASSERT_EQ(1, info1.GetClassAggregationCounter(TypeReference(dex.get(), dex::TypeIndex(20))));
-  ASSERT_EQ(2, info1.GetClassAggregationCounter(TypeReference(dex.get(), dex::TypeIndex(30))));
-
-  // Check methods that do not exists.
-  ASSERT_EQ(-1, info1.GetMethodAggregationCounter(MethodReference(dex.get(), 4)));
-  ASSERT_EQ(-1, info1.GetClassAggregationCounter(TypeReference(dex.get(), dex::TypeIndex(40))));
+TEST_F(ProfileCompilationInfoTest, VersionEquality) {
+  ProfileCompilationInfo info(/*for_boot_image=*/ false);
+  ProfileCompilationInfo info1(/*for_boot_image=*/ true);
+  ASSERT_FALSE(info.Equals(info1));
 }
 
-TEST_F(ProfileCompilationInfoTest, SaveAndLoadAggregationCounters) {
-  ProfileCompilationInfo info1;
-  info1.PrepareForAggregationCounters();
+TEST_F(ProfileCompilationInfoTest, AllMethodFlags) {
+  ProfileCompilationInfo info(/*for_boot_image*/ true);
 
-  ProfileCompilationInfo info2;
-  ProfileCompilationInfo info3;
+  static constexpr size_t kNumMethods = 1000;
+  static constexpr size_t kChecksum1 = 1234;
+  static const std::string kDex1 = "dex1";
 
-  std::unique_ptr<const DexFile> dex(OpenTestDexFile("ManyMethods"));
-  std::string location = dex->GetLocation();
-  int checksum = dex->GetLocationChecksum();
+  for (uint32_t index = 0; index <= kMaxHotnessFlagBootIndex; index++) {
+    info.AddMethodIndex(static_cast<Hotness::Flag>(1 << index), kDex1, kChecksum1, index, kNumMethods);
+  }
 
-  AddMethod(location, checksum, /* method_idx= */ 1, &info1);
+  auto run_test = [](const ProfileCompilationInfo& info) {
+    for (uint32_t index = 0; index <= kMaxHotnessFlagBootIndex; index++) {
+      EXPECT_TRUE(info.GetMethodHotness(kDex1, kChecksum1, index).IsInProfile());
+      EXPECT_TRUE(info.GetMethodHotness(kDex1, kChecksum1, index)
+          .HasFlagSet(static_cast<Hotness::Flag>(1 << index))) << index << " "
+            << info.GetMethodHotness(kDex1, kChecksum1, index).GetFlags();
+    }
+  };
+  run_test(info);
 
-  AddMethod(location, checksum, /* method_idx= */ 2, &info1);
-  AddMethod(location, checksum, /* method_idx= */ 2, &info2);
-
-  info1.AddMethodIndex(Hotness::kFlagStartup, location, checksum, 3, kMaxMethodIds);
-  info2.AddMethodIndex(Hotness::kFlagPostStartup, location, checksum, 3, kMaxMethodIds);
-  info3.AddMethodIndex(Hotness::kFlagStartup, location, checksum, 3, kMaxMethodIds);
-
-  AddMethod(location, checksum, /* method_idx= */ 6, &info2);
-  AddMethod(location, checksum, /* method_idx= */ 6, &info3);
-
-  AddClass(location, checksum, dex::TypeIndex(10), &info1);
-
-  AddClass(location, checksum, dex::TypeIndex(20), &info1);
-  AddClass(location, checksum, dex::TypeIndex(20), &info2);
-
-  AddClass(location, checksum, dex::TypeIndex(30), &info1);
-  AddClass(location, checksum, dex::TypeIndex(30), &info2);
-  AddClass(location, checksum, dex::TypeIndex(30), &info3);
-
-  info1.MergeWith(info2);
-  info1.MergeWith(info3);
-
+  // Save the profile.
   ScratchFile profile;
+  ASSERT_TRUE(info.Save(GetFd(profile)));
+  ASSERT_EQ(0, profile.GetFile()->Flush());
+  ASSERT_TRUE(profile.GetFile()->ResetOffset());
 
+  // Load the profile and make sure we can read the data and it matches what we expect.
+  ProfileCompilationInfo loaded_info;
+  ASSERT_TRUE(loaded_info.Load(GetFd(profile)));
+  run_test(loaded_info);
+}
+
+TEST_F(ProfileCompilationInfoTest, AllMethodFlagsOnOneMethod) {
+  ProfileCompilationInfo info(/*for_boot_image*/ true);
+
+  static constexpr size_t kNumMethods = 1000;
+  static constexpr size_t kChecksum1 = 1234;
+  static const std::string kDex1 = "dex1";
+
+  // Set all flags on a single method.
+  for (uint32_t index = 0; index <= kMaxHotnessFlagBootIndex; index++) {
+    info.AddMethodIndex(static_cast<Hotness::Flag>(1 << index), kDex1, kChecksum1, 0, kNumMethods);
+  }
+
+  auto run_test = [](const ProfileCompilationInfo& info) {
+    for (uint32_t index = 0; index <= kMaxHotnessFlagBootIndex; index++) {
+      EXPECT_TRUE(info.GetMethodHotness(kDex1, kChecksum1, 0).IsInProfile());
+      EXPECT_TRUE(info.GetMethodHotness(kDex1, kChecksum1, 0)
+          .HasFlagSet(static_cast<Hotness::Flag>(1 << 0)));
+    }
+  };
+  run_test(info);
+
+  // Save the profile.
+  ScratchFile profile;
+  ASSERT_TRUE(info.Save(GetFd(profile)));
+  ASSERT_EQ(0, profile.GetFile()->Flush());
+  ASSERT_TRUE(profile.GetFile()->ResetOffset());
+
+  // Load the profile and make sure we can read the data and it matches what we expect.
+  ProfileCompilationInfo loaded_info;
+  ASSERT_TRUE(loaded_info.Load(GetFd(profile)));
+  run_test(loaded_info);
+}
+
+
+TEST_F(ProfileCompilationInfoTest, MethodFlagsMerge) {
+  ProfileCompilationInfo info1(/*for_boot_image*/ true);
+  ProfileCompilationInfo info2(/*for_boot_image*/ true);
+
+  static constexpr size_t kNumMethods = 1000;
+  static constexpr size_t kChecksum1 = 1234;
+  static const std::string kDex1 = "dex1";
+
+  // Set a few flags on a 2 different methods in each of the profile.
+  for (uint32_t index = 0; index <= kMaxHotnessFlagBootIndex / 4; index++) {
+    info1.AddMethodIndex(static_cast<Hotness::Flag>(1 << index), kDex1, kChecksum1, 0, kNumMethods);
+    info2.AddMethodIndex(static_cast<Hotness::Flag>(1 << index), kDex1, kChecksum1, 1, kNumMethods);
+  }
+
+  // Set a few more flags on the same methods but reverse the profiles.
+  for (uint32_t index = kMaxHotnessFlagBootIndex / 4 + 1; index <= kMaxHotnessFlagBootIndex / 2; index++) {
+    info2.AddMethodIndex(static_cast<Hotness::Flag>(1 << index), kDex1, kChecksum1, 0, kNumMethods);
+    info1.AddMethodIndex(static_cast<Hotness::Flag>(1 << index), kDex1, kChecksum1, 1, kNumMethods);
+  }
+
+  ASSERT_TRUE(info1.MergeWith(info2));
+
+  auto run_test = [](const ProfileCompilationInfo& info) {
+    // Assert that the flags were merged correctly for both methods.
+    for (uint32_t index = 0; index <= kMaxHotnessFlagBootIndex / 2; index++) {
+      EXPECT_TRUE(info.GetMethodHotness(kDex1, kChecksum1, 0).IsInProfile());
+      EXPECT_TRUE(info.GetMethodHotness(kDex1, kChecksum1, 0)
+          .HasFlagSet(static_cast<Hotness::Flag>(1 << 0)));
+
+      EXPECT_TRUE(info.GetMethodHotness(kDex1, kChecksum1, 1).IsInProfile());
+      EXPECT_TRUE(info.GetMethodHotness(kDex1, kChecksum1, 1)
+          .HasFlagSet(static_cast<Hotness::Flag>(1 << index)));
+    }
+
+    // Assert that no extra flags were added.
+    for (uint32_t index = kMaxHotnessFlagBootIndex / 2 + 1; index <= kMaxHotnessFlagBootIndex; index++) {
+      EXPECT_FALSE(info.GetMethodHotness(kDex1, kChecksum1, 0)
+          .HasFlagSet(static_cast<Hotness::Flag>(1 << index)));
+      EXPECT_FALSE(info.GetMethodHotness(kDex1, kChecksum1, 1)
+          .HasFlagSet(static_cast<Hotness::Flag>(1 << index)));
+    }
+  };
+
+  run_test(info1);
+
+  // Save the profile.
+  ScratchFile profile;
   ASSERT_TRUE(info1.Save(GetFd(profile)));
   ASSERT_EQ(0, profile.GetFile()->Flush());
-
-  // Check that we get back what we saved.
-  ProfileCompilationInfo loaded_info;
-  loaded_info.PrepareForAggregationCounters();
   ASSERT_TRUE(profile.GetFile()->ResetOffset());
-  ASSERT_TRUE(loaded_info.Load(GetFd(profile)));
-  ASSERT_TRUE(loaded_info.Equals(info1));
 
-  ASSERT_EQ(2, loaded_info.GetAggregationCounter());
-
-  ASSERT_EQ(0, loaded_info.GetMethodAggregationCounter(MethodReference(dex.get(), 1)));
-  ASSERT_EQ(1, loaded_info.GetMethodAggregationCounter(MethodReference(dex.get(), 2)));
-  ASSERT_EQ(2, loaded_info.GetMethodAggregationCounter(MethodReference(dex.get(), 3)));
-  ASSERT_EQ(1, loaded_info.GetMethodAggregationCounter(MethodReference(dex.get(), 6)));
-
-  ASSERT_EQ(0, loaded_info.GetClassAggregationCounter(TypeReference(dex.get(), dex::TypeIndex(10))));
-  ASSERT_EQ(1, loaded_info.GetClassAggregationCounter(TypeReference(dex.get(), dex::TypeIndex(20))));
-  ASSERT_EQ(2, loaded_info.GetClassAggregationCounter(TypeReference(dex.get(), dex::TypeIndex(30))));
-}
-
-TEST_F(ProfileCompilationInfoTest, MergeTwoWithAggregationCounters) {
-  ProfileCompilationInfo info1;
-  info1.PrepareForAggregationCounters();
-
-  ProfileCompilationInfo info2;
-
-  std::unique_ptr<const DexFile> dex(OpenTestDexFile("ManyMethods"));
-  std::string location = dex->GetLocation();
-  int checksum = dex->GetLocationChecksum();
-
-  AddMethod(location, checksum, /* method_idx= */ 1, &info1);
-
-  AddMethod(location, checksum, /* method_idx= */ 2, &info1);
-  AddMethod(location, checksum, /* method_idx= */ 2, &info2);
-
-  AddClass(location, checksum, dex::TypeIndex(20), &info1);
-
-  AddClass(location, checksum, dex::TypeIndex(10), &info1);
-  AddClass(location, checksum, dex::TypeIndex(10), &info2);
-
-  info1.MergeWith(info2);
-  info1.MergeWith(info2);
-  ASSERT_EQ(2, info1.GetAggregationCounter());
-
-  // Save and load the profile to create a copy of the data
-  ScratchFile profile;
-  info1.Save(GetFd(profile));
-  ASSERT_EQ(0, profile.GetFile()->Flush());
-
+  // Load the profile and make sure we can read the data and it matches what we expect.
   ProfileCompilationInfo loaded_info;
-  loaded_info.PrepareForAggregationCounters();
-  profile.GetFile()->ResetOffset();
-  loaded_info.Load(GetFd(profile));
-
-  // Merge the data
-  info1.MergeWith(loaded_info);
-
-  ASSERT_EQ(4, info1.GetAggregationCounter());
-
-  ASSERT_EQ(0, info1.GetMethodAggregationCounter(MethodReference(dex.get(), 1)));
-  ASSERT_EQ(4, info1.GetMethodAggregationCounter(MethodReference(dex.get(), 2)));
-
-  ASSERT_EQ(4, info1.GetClassAggregationCounter(TypeReference(dex.get(), dex::TypeIndex(10))));
-  ASSERT_EQ(0, info1.GetClassAggregationCounter(TypeReference(dex.get(), dex::TypeIndex(20))));
+  ASSERT_TRUE(loaded_info.Load(GetFd(profile)));
+  run_test(loaded_info);
 }
 
+TEST_F(ProfileCompilationInfoTest, SizeStressTestAllIn) {
+  SizeStressTest(/*random=*/ false);
+}
+
+TEST_F(ProfileCompilationInfoTest, SizeStressTestAllInRandom) {
+  SizeStressTest(/*random=*/ true);
+}
 }  // namespace art

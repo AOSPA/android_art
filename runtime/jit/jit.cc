@@ -54,10 +54,24 @@ namespace jit {
 
 static constexpr bool kEnableOnStackReplacement = true;
 
+// Maximum permitted threshold value.
+static constexpr uint32_t kJitMaxThreshold = std::numeric_limits<uint16_t>::max();
+
 // Different compilation threshold constants. These can be overridden on the command line.
-static constexpr size_t kJitDefaultCompileThreshold           = 10000;  // Non-debug default.
-static constexpr size_t kJitStressDefaultCompileThreshold     = 100;    // Fast-debug build.
-static constexpr size_t kJitSlowStressDefaultCompileThreshold = 2;      // Slow-debug build.
+
+// Non-debug default
+static constexpr uint32_t kJitDefaultCompileThreshold = 20 * kJitSamplesBatchSize;
+// Fast-debug build.
+static constexpr uint32_t kJitStressDefaultCompileThreshold = 2 * kJitSamplesBatchSize;
+// Slow-debug build.
+static constexpr uint32_t kJitSlowStressDefaultCompileThreshold = 2;
+
+// Different warm-up threshold constants. These default to the equivalent compile thresholds divided
+// by 2, but can be overridden at the command-line.
+static constexpr uint32_t kJitDefaultWarmUpThreshold = kJitDefaultCompileThreshold / 2;
+static constexpr uint32_t kJitStressDefaultWarmUpThreshold = kJitStressDefaultCompileThreshold / 2;
+static constexpr uint32_t kJitSlowStressDefaultWarmUpThreshold =
+    kJitSlowStressDefaultCompileThreshold / 2;
 
 DEFINE_RUNTIME_DEBUG_FLAG(Jit, kSlowMode);
 
@@ -65,14 +79,6 @@ DEFINE_RUNTIME_DEBUG_FLAG(Jit, kSlowMode);
 void* Jit::jit_library_handle_ = nullptr;
 JitCompilerInterface* Jit::jit_compiler_ = nullptr;
 JitCompilerInterface* (*Jit::jit_load_)(void) = nullptr;
-
-uint32_t JitOptions::RoundUpThreshold(uint32_t threshold) {
-  if (!Jit::kSlowMode) {
-    threshold = RoundUp(threshold, kJitSamplesBatchSize);
-  }
-  CHECK_LE(threshold, std::numeric_limits<uint16_t>::max());
-  return threshold;
-}
 
 JitOptions* JitOptions::CreateFromRuntimeArguments(const RuntimeArgumentMap& options) {
   auto* jit_options = new JitOptions;
@@ -89,35 +95,66 @@ JitOptions* JitOptions::CreateFromRuntimeArguments(const RuntimeArgumentMap& opt
   jit_options->thread_pool_pthread_priority_ =
       options.GetOrDefault(RuntimeArgumentMap::JITPoolThreadPthreadPriority);
 
+  // Set default compile threshold to aide with sanity checking defaults.
+  jit_options->compile_threshold_ =
+      kIsDebugBuild
+      ? (Jit::kSlowMode
+         ? kJitSlowStressDefaultCompileThreshold
+         : kJitStressDefaultCompileThreshold)
+      : kJitDefaultCompileThreshold;
+
+  // When not running in slow-mode, thresholds are quantized to kJitSamplesbatchsize.
+  const uint32_t kJitThresholdStep = Jit::kSlowMode ? 1u : kJitSamplesBatchSize;
+
+  // Set default warm-up threshold to aide with sanity checking defaults.
+  jit_options->warmup_threshold_ =
+      kIsDebugBuild ? (Jit::kSlowMode
+                       ? kJitSlowStressDefaultWarmUpThreshold
+                       : kJitStressDefaultWarmUpThreshold)
+      : kJitDefaultWarmUpThreshold;
+
+  // Warmup threshold should be less than compile threshold (so long as compile threshold is not
+  // zero == JIT-on-first-use).
+  DCHECK_LT(jit_options->warmup_threshold_, jit_options->compile_threshold_);
+  DCHECK_EQ(RoundUp(jit_options->warmup_threshold_, kJitThresholdStep),
+            jit_options->warmup_threshold_);
+
   if (options.Exists(RuntimeArgumentMap::JITCompileThreshold)) {
     jit_options->compile_threshold_ = *options.Get(RuntimeArgumentMap::JITCompileThreshold);
-  } else {
-    jit_options->compile_threshold_ =
-        kIsDebugBuild
-            ? (Jit::kSlowMode
-                   ? kJitSlowStressDefaultCompileThreshold
-                   : kJitStressDefaultCompileThreshold)
-            : kJitDefaultCompileThreshold;
   }
-  jit_options->compile_threshold_ = RoundUpThreshold(jit_options->compile_threshold_);
+  jit_options->compile_threshold_ = RoundUp(jit_options->compile_threshold_, kJitThresholdStep);
 
   if (options.Exists(RuntimeArgumentMap::JITWarmupThreshold)) {
     jit_options->warmup_threshold_ = *options.Get(RuntimeArgumentMap::JITWarmupThreshold);
-  } else {
-    jit_options->warmup_threshold_ = jit_options->compile_threshold_ / 2;
   }
-  jit_options->warmup_threshold_ = RoundUpThreshold(jit_options->warmup_threshold_);
+  jit_options->warmup_threshold_ = RoundUp(jit_options->warmup_threshold_, kJitThresholdStep);
 
   if (options.Exists(RuntimeArgumentMap::JITOsrThreshold)) {
     jit_options->osr_threshold_ = *options.Get(RuntimeArgumentMap::JITOsrThreshold);
   } else {
     jit_options->osr_threshold_ = jit_options->compile_threshold_ * 2;
-    if (jit_options->osr_threshold_ > std::numeric_limits<uint16_t>::max()) {
+    if (jit_options->osr_threshold_ > kJitMaxThreshold) {
       jit_options->osr_threshold_ =
-          RoundDown(std::numeric_limits<uint16_t>::max(), kJitSamplesBatchSize);
+          RoundDown(kJitMaxThreshold, kJitThresholdStep);
     }
   }
-  jit_options->osr_threshold_ = RoundUpThreshold(jit_options->osr_threshold_);
+  jit_options->osr_threshold_ = RoundUp(jit_options->osr_threshold_, kJitThresholdStep);
+
+  // Enforce ordering constraints between thresholds if not jit-on-first-use (when the compile
+  // threshold is 0).
+  if (jit_options->compile_threshold_ != 0) {
+    // Clamp thresholds such that OSR > compile > warm-up (see Jit::MaybeCompileMethod).
+    jit_options->osr_threshold_ = std::clamp(jit_options->osr_threshold_,
+                                             2u * kJitThresholdStep,
+                                             RoundDown(kJitMaxThreshold, kJitThresholdStep));
+    jit_options->compile_threshold_ = std::clamp(jit_options->compile_threshold_,
+                                                 kJitThresholdStep,
+                                                 jit_options->osr_threshold_ - kJitThresholdStep);
+    jit_options->warmup_threshold_ =
+        std::clamp(jit_options->warmup_threshold_,
+                   0u,
+                   jit_options->compile_threshold_ - kJitThresholdStep);
+  }
 
   if (options.Exists(RuntimeArgumentMap::JITPriorityThreadWeight)) {
     jit_options->priority_thread_weight_ =
@@ -626,6 +663,33 @@ static std::string GetBootProfileFile(const std::string& profile) {
   return ReplaceFileExtension(profile, "bprof");
 }
 
+/**
+ * A JIT task to madvise DONTNEED dex files after we're done compiling methods.
+ */
+class JitMadviseDontNeedTask final : public SelfDeletingTask {
+ public:
+  explicit JitMadviseDontNeedTask(const std::vector<const DexFile*>& dex_files)
+      : dex_files_(dex_files) {}
+
+  void Run(Thread* self ATTRIBUTE_UNUSED) override {
+    for (const DexFile* dex_file : dex_files_) {
+      if (IsAddressKnownBackedByFileOrShared(dex_file->Begin())) {
+        int result = madvise(const_cast<uint8_t*>(AlignDown(dex_file->Begin(), kPageSize)),
+                             RoundUp(dex_file->Size(), kPageSize),
+                             MADV_DONTNEED);
+        if (result == -1) {
+          PLOG(WARNING) << "Madvise failed";
+        }
+      }
+    }
+  }
+
+ private:
+  std::vector<const DexFile*> dex_files_;
+
+  DISALLOW_COPY_AND_ASSIGN(JitMadviseDontNeedTask);
+};
+
 class ZygoteTask final : public Task {
  public:
   ZygoteTask() {}
@@ -696,14 +760,16 @@ class JitProfileTask final : public Task {
     std::string profile = GetProfileFile(dex_files_[0]->GetLocation());
     std::string boot_profile = GetBootProfileFile(profile);
 
-    Runtime::Current()->GetJit()->CompileMethodsFromBootProfile(
+    Jit* jit = Runtime::Current()->GetJit();
+
+    jit->CompileMethodsFromBootProfile(
         self,
         dex_files_,
         boot_profile,
         loader,
         /* add_to_queue= */ false);
 
-    Runtime::Current()->GetJit()->CompileMethodsFromProfile(
+    jit->CompileMethodsFromProfile(
         self,
         dex_files_,
         profile,
@@ -913,6 +979,16 @@ uint32_t Jit::CompileMethodsFromProfile(
         ++added_to_queue;
       }
     }
+  }
+
+  // Add a madvise task to release dex file pages once all compilation is done.
+  JitMadviseDontNeedTask* task = new JitMadviseDontNeedTask(dex_files);
+  MutexLock mu(Thread::Current(), boot_completed_lock_);
+  if (!boot_completed_) {
+    tasks_after_boot_.push_back(task);
+  } else {
+    DCHECK(tasks_after_boot_.empty());
+    thread_pool_->AddTask(self, task);
   }
   return added_to_queue;
 }
@@ -1146,6 +1222,8 @@ void Jit::PreZygoteFork() {
     return;
   }
   thread_pool_->DeleteThreads();
+
+  NativeDebugInfoPreFork();
 }
 
 void Jit::PostZygoteFork() {
@@ -1153,6 +1231,8 @@ void Jit::PostZygoteFork() {
     return;
   }
   thread_pool_->CreateThreads();
+
+  NativeDebugInfoPostFork();
 }
 
 void Jit::BootCompleted() {
