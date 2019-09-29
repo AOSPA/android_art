@@ -110,10 +110,6 @@ const char* image_methods_descriptions_[] = {
 const char* image_roots_descriptions_[] = {
   "kDexCaches",
   "kClassRoots",
-  "kOomeWhenThrowingException",
-  "kOomeWhenThrowingOome",
-  "kOomeWhenHandlingStackOverflow",
-  "kNoClassDefFoundError",
   "kSpecialRoots",
 };
 
@@ -1972,7 +1968,7 @@ class ImageDumper {
       stats_.file_bytes = file->GetLength();
       // If the image is compressed, adjust to decompressed size.
       size_t uncompressed_size = image_header_.GetImageSize() - sizeof(ImageHeader);
-      if (image_header_.HasCompressedBlock()) {
+      if (!image_header_.HasCompressedBlock()) {
         DCHECK_EQ(uncompressed_size, data_size) << "Sizes should match for uncompressed image";
       }
       stats_.file_bytes += uncompressed_size - data_size;
@@ -2786,12 +2782,14 @@ static int DumpImages(Runtime* runtime, OatDumperOptions* options, std::ostream*
     if (space == nullptr) {
       LOG(ERROR) << "Failed to open app image " << options->app_image_ << " with error "
                  << error_msg;
+      return EXIT_FAILURE;
     }
     // Open dex files for the image.
     std::vector<std::unique_ptr<const DexFile>> dex_files;
     if (!runtime->GetClassLinker()->OpenImageDexFiles(space.get(), &dex_files, &error_msg)) {
       LOG(ERROR) << "Failed to open app image dex files " << options->app_image_ << " with error "
                  << error_msg;
+      return EXIT_FAILURE;
     }
     // Dump the actual image.
     int result = DumpImage(space.get(), options, os);

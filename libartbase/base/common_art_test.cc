@@ -173,9 +173,20 @@ void CommonArtTestImpl::SetUpAndroidRootEnvVars() {
       android_root_from_env = getenv("ANDROID_ROOT");
     }
 
+    // Environment variable ANDROID_I18N_ROOT is set on the device, but not
+    // necessarily on the host. It needs to be set so that various libraries
+    // like libcore / icu4j / icu4c can find their data files.
+    const char* android_i18n_root_from_env = getenv("ANDROID_I18N_ROOT");
+    if (android_i18n_root_from_env == nullptr) {
+      // Use ${ANDROID_I18N_OUT}/com.android.i18n for ANDROID_I18N_ROOT.
+      std::string android_i18n_root = android_host_out_from_env;
+      android_i18n_root += "/com.android.i18n";
+      setenv("ANDROID_I18N_ROOT", android_i18n_root.c_str(), 1);
+    }
+
     // Environment variable ANDROID_RUNTIME_ROOT is set on the device, but not
     // necessarily on the host. It needs to be set so that various libraries
-    // like icu4c can find their data files.
+    // like libcore / icu4j / icu4c can find their data files.
     const char* android_runtime_root_from_env = getenv("ANDROID_RUNTIME_ROOT");
     if (android_runtime_root_from_env == nullptr) {
       // Use ${ANDROID_HOST_OUT}/com.android.runtime for ANDROID_RUNTIME_ROOT.
@@ -186,7 +197,7 @@ void CommonArtTestImpl::SetUpAndroidRootEnvVars() {
 
     // Environment variable ANDROID_TZDATA_ROOT is set on the device, but not
     // necessarily on the host. It needs to be set so that various libraries
-    // like icu4c can find their data files.
+    // like libcore / icu4j / icu4c can find their data files.
     const char* android_tzdata_root_from_env = getenv("ANDROID_TZDATA_ROOT");
     if (android_tzdata_root_from_env == nullptr) {
       // Use ${ANDROID_HOST_OUT}/com.android.tzdata for ANDROID_TZDATA_ROOT.
@@ -225,6 +236,11 @@ void CommonArtTestImpl::SetUp() {
   dalvik_cache_.append("/dalvik-cache");
   int mkdir_result = mkdir(dalvik_cache_.c_str(), 0700);
   ASSERT_EQ(mkdir_result, 0);
+
+  static bool gSlowDebugTestFlag = false;
+  RegisterRuntimeDebugFlag(&gSlowDebugTestFlag);
+  SetRuntimeDebugFlagsEnabled(true);
+  CHECK(gSlowDebugTestFlag);
 }
 
 void CommonArtTestImpl::TearDownAndroidDataDir(const std::string& android_data,
@@ -365,6 +381,7 @@ std::vector<std::string> CommonArtTestImpl::GetLibCoreModuleNames() const {
       // CORE_IMG_JARS modules.
       "core-oj",
       "core-libart",
+      "core-icu4j",
       "okhttp",
       "bouncycastle",
       "apache-xml",

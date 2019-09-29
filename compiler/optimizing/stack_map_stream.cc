@@ -81,7 +81,8 @@ void StackMapStream::BeginStackMapEntry(uint32_t dex_pc,
                                         uint32_t native_pc_offset,
                                         uint32_t register_mask,
                                         BitVector* stack_mask,
-                                        StackMap::Kind kind) {
+                                        StackMap::Kind kind,
+                                        bool needs_vreg_info) {
   DCHECK(in_method_) << "Call BeginMethod first";
   DCHECK(!in_stack_map_) << "Mismatched Begin/End calls";
   in_stack_map_ = true;
@@ -114,7 +115,7 @@ void StackMapStream::BeginStackMapEntry(uint32_t dex_pc,
   lazy_stack_masks_.push_back(stack_mask);
   current_inline_infos_.clear();
   current_dex_registers_.clear();
-  expected_num_dex_registers_ = num_dex_registers_;
+  expected_num_dex_registers_ = needs_vreg_info  ? num_dex_registers_ : 0u;
 
   if (kVerifyStackMaps) {
     size_t stack_map_index = stack_maps_.size();
@@ -184,7 +185,6 @@ void StackMapStream::BeginInlineInfoEntry(ArtMethod* method,
   in_inline_info_ = true;
   DCHECK_EQ(expected_num_dex_registers_, current_dex_registers_.size());
 
-  flags_ |= CodeInfo::kHasInlineInfo;
   expected_num_dex_registers_ += num_dex_registers;
 
   BitTableBuilder<InlineInfo>::Entry entry;
@@ -294,35 +294,38 @@ void StackMapStream::CreateDexRegisterMap() {
   }
 }
 
-template<typename Writer, typename Builder>
-ALWAYS_INLINE static void EncodeTable(Writer& out, const Builder& bit_table) {
-  out.WriteBit(false);  // Is not deduped.
-  bit_table.Encode(out);
-}
-
 ScopedArenaVector<uint8_t> StackMapStream::Encode() {
   DCHECK(in_stack_map_ == false) << "Mismatched Begin/End calls";
   DCHECK(in_inline_info_ == false) << "Mismatched Begin/End calls";
 
+  uint32_t flags = (inline_infos_.size() > 0) ? CodeInfo::kHasInlineInfo : 0;
+  uint32_t bit_table_flags = 0;
+  ForEachBitTable([&bit_table_flags](size_t i, auto bit_table) {
+    if (bit_table->size() != 0) {  // Record which bit-tables are stored.
+      bit_table_flags |= 1 << i;
+    }
+  });
+
   ScopedArenaVector<uint8_t> buffer(allocator_->Adapter(kArenaAllocStackMapStream));
   BitMemoryWriter<ScopedArenaVector<uint8_t>> out(&buffer);
-  out.WriteVarint(flags_);
-  out.WriteVarint(packed_frame_size_);
-  out.WriteVarint(core_spill_mask_);
-  out.WriteVarint(fp_spill_mask_);
-  out.WriteVarint(num_dex_registers_);
-  EncodeTable(out, stack_maps_);
-  EncodeTable(out, register_masks_);
-  EncodeTable(out, stack_masks_);
-  EncodeTable(out, inline_infos_);
-  EncodeTable(out, method_infos_);
-  EncodeTable(out, dex_register_masks_);
-  EncodeTable(out, dex_register_maps_);
-  EncodeTable(out, dex_register_catalog_);
+  out.WriteInterleavedVarints(std::array<uint32_t, CodeInfo::kNumHeaders>{
+    flags,
+    packed_frame_size_,
+    core_spill_mask_,
+    fp_spill_mask_,
+    num_dex_registers_,
+    bit_table_flags,
+  });
+  ForEachBitTable([&out](size_t, auto bit_table) {
+    if (bit_table->size() != 0) {  // Skip empty bit-tables.
+      bit_table->Encode(out);
+    }
+  });
 
   // Verify that we can load the CodeInfo and check some essentials.
-  CodeInfo code_info(buffer.data());
-  CHECK_EQ(code_info.Size(), buffer.size());
+  size_t number_of_read_bits;
+  CodeInfo code_info(buffer.data(), &number_of_read_bits);
+  CHECK_EQ(number_of_read_bits, out.NumberOfWrittenBits());
   CHECK_EQ(code_info.GetNumberOfStackMaps(), stack_maps_.size());
 
   // Verify all written data (usually only in debug builds).

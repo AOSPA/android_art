@@ -150,6 +150,7 @@ enum {
                                      | (1 << 13),
   PROFILE_SYSTEM_SERVER              = 1 << 14,
   USE_APP_IMAGE_STARTUP_CACHE        = 1 << 16,
+  DEBUG_IGNORE_APP_SIGNAL_HANDLER    = 1 << 17,
 
   // bits to shift (flags & HIDDEN_API_ENFORCEMENT_POLICY_MASK) by to get a value
   // corresponding to hiddenapi::EnforcementPolicy
@@ -235,6 +236,11 @@ static uint32_t EnableDebugFeatures(uint32_t runtime_flags) {
     runtime_flags &= ~DEBUG_GENERATE_DEBUG_INFO;
   }
 
+  if ((runtime_flags & DEBUG_IGNORE_APP_SIGNAL_HANDLER) != 0) {
+    runtime->SetSignalHookDebuggable(true);
+    runtime_flags &= ~DEBUG_IGNORE_APP_SIGNAL_HANDLER;
+  }
+
   return runtime_flags;
 }
 
@@ -249,15 +255,15 @@ static jlong ZygoteHooks_nativePreFork(JNIEnv* env, jclass) {
 }
 
 static void ZygoteHooks_nativePostZygoteFork(JNIEnv*, jclass) {
-  Runtime* runtime = Runtime::Current();
-  if (runtime->IsZygote()) {
-    runtime->PostZygoteFork();
-  }
+  Runtime::Current()->PostZygoteFork();
 }
 
 static void ZygoteHooks_nativePostForkSystemServer(JNIEnv* env ATTRIBUTE_UNUSED,
                                                    jclass klass ATTRIBUTE_UNUSED) {
-  Runtime::Current()->SetSystemServer(true);
+  // Set the runtime state as the first thing, in case JIT and other services
+  // start querying it.
+  Runtime::Current()->SetAsSystemServer();
+
   // This JIT code cache for system server is created whilst the runtime is still single threaded.
   // System server has a window where it can create executable pages for this purpose, but this is
   // turned off after this hook. Consequently, the only JIT mode supported is the dual-view JIT
@@ -280,6 +286,9 @@ static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
                                             jboolean is_zygote,
                                             jstring instruction_set) {
   DCHECK(!(is_system_server && is_zygote));
+  // Set the runtime state as the first thing, in case JIT and other services
+  // start querying it.
+  Runtime::Current()->SetAsZygoteChild(is_system_server, is_zygote);
 
   Thread* thread = reinterpret_cast<Thread*>(token);
   // Our system thread ID, etc, has changed so reset Thread state.

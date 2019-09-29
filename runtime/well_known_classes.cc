@@ -28,13 +28,16 @@
 #include "entrypoints/quick/quick_entrypoints_enum.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "hidden_api.h"
+#include "hidden_api_jni.h"
 #include "jni/jni_internal.h"
+#include "jni_id_type.h"
 #include "mirror/class.h"
 #include "mirror/throwable.h"
 #include "nativehelper/scoped_local_ref.h"
 #include "obj_ptr-inl.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
+#include "scoped_thread_state_change.h"
 #include "thread-current-inl.h"
 
 namespace art {
@@ -61,6 +64,7 @@ jclass WellKnownClasses::java_lang_IllegalAccessError;
 jclass WellKnownClasses::java_lang_NoClassDefFoundError;
 jclass WellKnownClasses::java_lang_Object;
 jclass WellKnownClasses::java_lang_OutOfMemoryError;
+jclass WellKnownClasses::java_lang_reflect_InvocationTargetException;
 jclass WellKnownClasses::java_lang_reflect_Parameter;
 jclass WellKnownClasses::java_lang_reflect_Parameter__array;
 jclass WellKnownClasses::java_lang_reflect_Proxy;
@@ -101,6 +105,7 @@ jmethodID WellKnownClasses::java_lang_invoke_MethodHandles_Lookup_findConstructo
 jmethodID WellKnownClasses::java_lang_Long_valueOf;
 jmethodID WellKnownClasses::java_lang_ref_FinalizerReference_add;
 jmethodID WellKnownClasses::java_lang_ref_ReferenceQueue_add;
+jmethodID WellKnownClasses::java_lang_reflect_InvocationTargetException_init;
 jmethodID WellKnownClasses::java_lang_reflect_Parameter_init;
 jmethodID WellKnownClasses::java_lang_reflect_Proxy_init;
 jmethodID WellKnownClasses::java_lang_reflect_Proxy_invoke;
@@ -170,8 +175,18 @@ static jclass CacheClass(JNIEnv* env, const char* jni_class_name) {
 
 static jfieldID CacheField(JNIEnv* env, jclass c, bool is_static,
                            const char* name, const char* signature) {
-  jfieldID fid = is_static ? env->GetStaticFieldID(c, name, signature) :
-      env->GetFieldID(c, name, signature);
+  jfieldID fid;
+  {
+    ScopedObjectAccess soa(env);
+    hiddenapi::ScopedCorePlatformApiCheck scpac;
+    if (Runtime::Current()->GetJniIdType() != JniIdType::kSwapablePointer) {
+      fid = jni::EncodeArtField</*kEnableIndexIds*/ true>(
+          FindFieldJNI(soa, c, name, signature, is_static));
+    } else {
+      fid = jni::EncodeArtField</*kEnableIndexIds*/ false>(
+          FindFieldJNI(soa, c, name, signature, is_static));
+    }
+  }
   if (fid == nullptr) {
     ScopedObjectAccess soa(env);
     if (soa.Self()->IsExceptionPending()) {
@@ -187,8 +202,18 @@ static jfieldID CacheField(JNIEnv* env, jclass c, bool is_static,
 
 static jmethodID CacheMethod(JNIEnv* env, jclass c, bool is_static,
                              const char* name, const char* signature) {
-  jmethodID mid = is_static ? env->GetStaticMethodID(c, name, signature) :
-      env->GetMethodID(c, name, signature);
+  jmethodID mid;
+  {
+    ScopedObjectAccess soa(env);
+    hiddenapi::ScopedCorePlatformApiCheck scpac;
+    if (Runtime::Current()->GetJniIdType() != JniIdType::kSwapablePointer) {
+      mid = jni::EncodeArtMethod</*kEnableIndexIds*/ true>(
+          FindMethodJNI(soa, c, name, signature, is_static));
+    } else {
+      mid = jni::EncodeArtMethod</*kEnableIndexIds*/ false>(
+          FindMethodJNI(soa, c, name, signature, is_static));
+    }
+  }
   if (mid == nullptr) {
     ScopedObjectAccess soa(env);
     if (soa.Self()->IsExceptionPending()) {
@@ -324,6 +349,7 @@ void WellKnownClasses::Init(JNIEnv* env) {
   java_lang_Error = CacheClass(env, "java/lang/Error");
   java_lang_IllegalAccessError = CacheClass(env, "java/lang/IllegalAccessError");
   java_lang_NoClassDefFoundError = CacheClass(env, "java/lang/NoClassDefFoundError");
+  java_lang_reflect_InvocationTargetException = CacheClass(env, "java/lang/reflect/InvocationTargetException");
   java_lang_reflect_Parameter = CacheClass(env, "java/lang/reflect/Parameter");
   java_lang_reflect_Parameter__array = CacheClass(env, "[Ljava/lang/reflect/Parameter;");
   java_lang_reflect_Proxy = CacheClass(env, "java/lang/reflect/Proxy");
@@ -345,6 +371,13 @@ void WellKnownClasses::Init(JNIEnv* env) {
   org_apache_harmony_dalvik_ddmc_Chunk = CacheClass(env, "org/apache/harmony/dalvik/ddmc/Chunk");
   org_apache_harmony_dalvik_ddmc_DdmServer = CacheClass(env, "org/apache/harmony/dalvik/ddmc/DdmServer");
 
+  InitFieldsAndMethodsOnly(env);
+}
+
+void WellKnownClasses::InitFieldsAndMethodsOnly(JNIEnv* env) {
+  hiddenapi::ScopedHiddenApiEnforcementPolicySetting hiddenapi_exemption(
+      hiddenapi::EnforcementPolicy::kDisabled);
+
   dalvik_system_BaseDexClassLoader_getLdLibraryPath = CacheMethod(env, dalvik_system_BaseDexClassLoader, false, "getLdLibraryPath", "()Ljava/lang/String;");
   dalvik_system_VMRuntime_runFinalization = CacheMethod(env, dalvik_system_VMRuntime, true, "runFinalization", "(J)V");
   dalvik_system_VMRuntime_hiddenApiUsed = CacheMethod(env, dalvik_system_VMRuntime, true, "hiddenApiUsed", "(ILjava/lang/String;Ljava/lang/String;IZ)V");
@@ -360,6 +393,7 @@ void WellKnownClasses::Init(JNIEnv* env) {
   java_lang_ref_FinalizerReference_add = CacheMethod(env, "java/lang/ref/FinalizerReference", true, "add", "(Ljava/lang/Object;)V");
   java_lang_ref_ReferenceQueue_add = CacheMethod(env, "java/lang/ref/ReferenceQueue", true, "add", "(Ljava/lang/ref/Reference;)V");
 
+  java_lang_reflect_InvocationTargetException_init = CacheMethod(env, java_lang_reflect_InvocationTargetException, false, "<init>", "(Ljava/lang/Throwable;)V");
   java_lang_reflect_Parameter_init = CacheMethod(env, java_lang_reflect_Parameter, false, "<init>", "(Ljava/lang/String;ILjava/lang/reflect/Executable;I)V");
   java_lang_String_charAt = CacheMethod(env, java_lang_String, false, "charAt", "(I)C");
   java_lang_Thread_dispatchUncaughtException = CacheMethod(env, java_lang_Thread, false, "dispatchUncaughtException", "(Ljava/lang/Throwable;)V");
@@ -448,6 +482,11 @@ void WellKnownClasses::LateInit(JNIEnv* env) {
                     "[Ljava/lang/Object;)Ljava/lang/Object;");
 }
 
+void WellKnownClasses::HandleJniIdTypeChange(JNIEnv* env) {
+  WellKnownClasses::InitFieldsAndMethodsOnly(env);
+  WellKnownClasses::LateInit(env);
+}
+
 void WellKnownClasses::Clear() {
   dalvik_annotation_optimization_CriticalNative = nullptr;
   dalvik_annotation_optimization_FastNative = nullptr;
@@ -470,6 +509,7 @@ void WellKnownClasses::Clear() {
   java_lang_NoClassDefFoundError = nullptr;
   java_lang_Object = nullptr;
   java_lang_OutOfMemoryError = nullptr;
+  java_lang_reflect_InvocationTargetException = nullptr;
   java_lang_reflect_Parameter = nullptr;
   java_lang_reflect_Parameter__array = nullptr;
   java_lang_reflect_Proxy = nullptr;
@@ -508,6 +548,7 @@ void WellKnownClasses::Clear() {
   java_lang_Long_valueOf = nullptr;
   java_lang_ref_FinalizerReference_add = nullptr;
   java_lang_ref_ReferenceQueue_add = nullptr;
+  java_lang_reflect_InvocationTargetException_init = nullptr;
   java_lang_reflect_Parameter_init = nullptr;
   java_lang_reflect_Proxy_init = nullptr;
   java_lang_reflect_Proxy_invoke = nullptr;

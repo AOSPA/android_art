@@ -49,7 +49,7 @@ bionic_native_shared_libs = [
     "libdl",
 ]
 
-bionic_native_shared_libs_device = [
+bionic_native_device_only_shared_libs = [
     // ... and their internal dependencies
     // These are available only on device
     "libc_malloc_debug",
@@ -81,14 +81,6 @@ art_runtime_debug_native_shared_libs = [
     "libopenjdkjvmtid",
 ]
 
-// Data files associated with bionic / managed core library APIs.
-art_runtime_data_file_prebuilts = [
-    "apex_tz_version",
-    "apex_tzdata",
-    "apex_tzlookup.xml",
-    "apex_icu.dat",
-]
-
 // Tools common to both device APEX and host APEX. Derived from art-tools in art/Android.mk.
 art_tools_common_binaries = [
     "dexdump",
@@ -97,7 +89,15 @@ art_tools_common_binaries = [
 
 // Tools common to both device and host debug APEXes.
 art_tools_debug_binaries = [
+    "dexanalyze",
     "dexdiag",
+    "dexlayout",
+    "dexlayoutd",
+]
+
+art_tools_debug_binaries_both = [
+    "imgdiag",
+    "imgdiagd",
 ]
 
 // Tools exclusively for the device APEX derived from art-tools in art/Android.mk.
@@ -130,6 +130,7 @@ art_runtime_host_run_test_libs = [
 libcore_java_libs = [
     "core-oj",
     "core-libart",
+    "core-icu4j",
     "okhttp",
     "bouncycastle",
     "apache-xml",
@@ -183,13 +184,18 @@ apex_key {
 }
 
 android_app_certificate {
+    name: "com.android.runtime.release.certificate",
+    certificate: "com.android.runtime.release",
+}
+
+android_app_certificate {
     name: "com.android.runtime.debug.certificate",
     certificate: "com.android.runtime.debug",
 }
 
 android_app_certificate {
-    name: "com.android.runtime.release.certificate",
-    certificate: "com.android.runtime.release",
+    name: "com.android.runtime.testing.certificate",
+    certificate: "com.android.runtime.testing",
 }
 
 prebuilt_etc {
@@ -199,6 +205,7 @@ prebuilt_etc {
     installable: false,
 }
 
+// Default values shared by device Runtime APEXes.
 apex_defaults {
     name: "com.android.runtime-defaults",
     compile_multilib: "both",
@@ -206,6 +213,7 @@ apex_defaults {
     java_libs: libcore_java_libs,
     native_shared_libs: art_runtime_base_native_shared_libs +
         bionic_native_shared_libs +
+        bionic_native_device_only_shared_libs +
         libcore_native_device_only_shared_libs +
         libcore_native_shared_libs,
     multilib: {
@@ -228,32 +236,24 @@ apex_defaults {
         "art_preinstall_hook_system_server",
         "art_prepostinstall_utils",
     ],
-    prebuilts: art_runtime_data_file_prebuilts +
-        ["com.android.runtime.ld.config.txt"],
+    prebuilts: ["com.android.runtime.ld.config.txt"],
     key: "com.android.runtime.key",
-    required: ["art_apex_boot_integrity"],
+    required: [
+        "art_apex_boot_integrity",
+        "com.android.i18n",
+    ],
 }
 
-// Release version of the Runtime APEX module (not containing debug
-// variants nor tools), included in user builds. Also used for
-// storage-constrained devices in userdebug and eng builds.
-apex {
-    name: "com.android.runtime.release",
-    defaults: ["com.android.runtime-defaults"],
-    native_shared_libs: bionic_native_shared_libs_device,
-    certificate: ":com.android.runtime.release.certificate",
-}
-
-// "Debug" version of the Runtime APEX module (containing both release and
-// debug variants, as well as additional tools), included in userdebug and
-// eng build.
-apex {
-    name: "com.android.runtime.debug",
+// Default values shared by (device) Debug and Testing Runtime APEXes.
+apex_defaults {
+    name: "com.android.runtime-dev-defaults",
     defaults: ["com.android.runtime-defaults"],
     native_shared_libs: art_runtime_debug_native_shared_libs +
-        libcore_debug_native_shared_libs +
-        bionic_native_shared_libs_device,
+        libcore_debug_native_shared_libs,
     multilib: {
+        both: {
+            binaries: art_tools_debug_binaries_both,
+        },
         prefer32: {
             binaries: art_runtime_debug_binaries_prefer32 +
                 art_runtime_debug_binaries_prefer32_device,
@@ -263,15 +263,67 @@ apex {
                 art_tools_debug_device_only_binaries,
         },
     },
+}
+
+// Release version of the Runtime APEX module (not containing debug
+// variants nor tools), included in user builds. Also used for
+// storage-constrained devices in userdebug and eng builds.
+apex {
+    name: "com.android.runtime.release",
+    defaults: ["com.android.runtime-defaults"],
+    certificate: ":com.android.runtime.release.certificate",
+}
+
+// "Debug" version of the Runtime APEX module (containing both release and
+// debug variants, as well as additional tools), included in userdebug and
+// eng build.
+apex {
+    name: "com.android.runtime.debug",
+    defaults: ["com.android.runtime-dev-defaults"],
     certificate: ":com.android.runtime.debug.certificate",
 }
 
-// TODO: Do this better. art_apex will disable host builds when
+// ART gtests with dependencies on internal Runtime APEX libraries.
+art_gtests = [
+    "art_cmdline_tests",
+    "art_compiler_tests",
+    "art_dex2oat_tests",
+    "art_dexanalyze_tests",
+    "art_dexdiag_tests",
+    "art_dexdump_tests",
+    "art_dexlayout_tests",
+    "art_dexlist_tests",
+    "art_dexoptanalyzer_tests",
+    "art_imgdiag_tests",
+    "art_libartbase_tests",
+    "art_libartpalette_tests",
+    "art_libdexfile_tests",
+    "art_libdexfile_support_tests",
+    "art_libprofile_tests",
+    "art_oatdump_tests",
+    "art_profman_tests",
+    "art_runtime_compiler_tests",
+    "art_runtime_tests",
+    "art_sigchain_tests",
+]
+
+// "Testing" version of the Runtime APEX module (containing both release
+// and debug variants, additional tools, and ART gtests), for testing
+// purposes only.
+apex_test {
+    name: "com.android.runtime.testing",
+    defaults: ["com.android.runtime-dev-defaults"],
+    file_contexts: "com.android.runtime.debug",
+    certificate: ":com.android.runtime.testing.certificate",
+    tests: art_gtests,
+}
+
+// TODO: Do this better. art_apex_test_host will disable host builds when
 // HOST_PREFER_32_BIT is set. We cannot simply use com.android.runtime.debug
 // because binaries have different multilib classes and 'multilib: {}' isn't
 // supported by target: { ... }.
 // See b/120617876 for more information.
-art_apex_test {
+art_apex_test_host {
     name: "com.android.runtime.host",
     compile_multilib: "both",
     payload_type: "zip",
@@ -289,7 +341,8 @@ art_apex_test {
     multilib: {
         both: {
             binaries: art_runtime_base_binaries_both +
-                art_runtime_debug_binaries_both_host,
+                art_runtime_debug_binaries_both_host +
+                art_tools_debug_binaries_both,
         },
         first: {
             binaries: art_tools_common_binaries + // Host APEX is always debug.
@@ -322,34 +375,32 @@ python_binary_host {
     main: "art_apex_test.py",
     version: {
         py2: {
-            enabled: false,
+            enabled: true,
         },
         py3: {
-            enabled: true,
+            enabled: false,
         },
     },
 }
 
 // Genrules so we can run the checker, and empty Java library so that it gets executed.
 
-genrule {
-    name: "art-check-release-apex-gen",
-    srcs: [":com.android.runtime.release"],
+art_check_apex_gen_stem = "$(location art-apex-tester)" +
+    " --debugfs $(location debugfs)" +
+    " --tmpdir $(genDir)"
+
+// The non-flattened APEXes are always checked, as they are always generated
+// (even when APEX flattening is enabled).
+genrule_defaults {
+    name: "art-check-apex-gen-defaults",
     tools: [
         "art-apex-tester",
         "debugfs",
     ],
-    cmd: "$(location art-apex-tester)" +
-        " --debugfs $(location debugfs)" +
-        " --tmpdir $(genDir)" +
-        " $(in)" +
-        " && touch $(out)",
-    out: ["art-check-release-apex-gen.dummy"],
 }
 
-cc_prebuilt_binary {
-    name: "art-check-release-apex-gen-fakebin",
-    srcs: [":art-check-release-apex-gen"],
+cc_defaults {
+    name: "art-check-apex-gen-fakebin-defaults",
     host_supported: true,
     device_supported: false,
     target: {
@@ -360,15 +411,26 @@ cc_prebuilt_binary {
 }
 
 genrule {
+    name: "art-check-release-apex-gen",
+    defaults: ["art-check-apex-gen-defaults"],
+    srcs: [":com.android.runtime.release"],
+    cmd: art_check_apex_gen_stem +
+        " $(in)" +
+        " && touch $(out)",
+    out: ["art-check-release-apex-gen.dummy"],
+}
+
+cc_prebuilt_binary {
+    name: "art-check-release-apex-gen-fakebin",
+    defaults: ["art-check-apex-gen-fakebin-defaults"],
+    srcs: [":art-check-release-apex-gen"],
+}
+
+genrule {
     name: "art-check-debug-apex-gen",
+    defaults: ["art-check-apex-gen-defaults"],
     srcs: [":com.android.runtime.debug"],
-    tools: [
-        "art-apex-tester",
-        "debugfs",
-    ],
-    cmd: "$(location art-apex-tester)" +
-        " --debugfs $(location debugfs)" +
-        " --tmpdir $(genDir)" +
+    cmd: art_check_apex_gen_stem +
         " --debug" +
         " $(in)" +
         " && touch $(out)",
@@ -377,14 +439,25 @@ genrule {
 
 cc_prebuilt_binary {
     name: "art-check-debug-apex-gen-fakebin",
+    defaults: ["art-check-apex-gen-fakebin-defaults"],
     srcs: [":art-check-debug-apex-gen"],
-    host_supported: true,
-    device_supported: false,
-    target: {
-        darwin: {
-            enabled: false, // No python3.
-        },
-    },
+}
+
+genrule {
+    name: "art-check-testing-apex-gen",
+    defaults: ["art-check-apex-gen-defaults"],
+    srcs: [":com.android.runtime.testing"],
+    cmd: art_check_apex_gen_stem +
+        " --testing" +
+        " $(in)" +
+        " && touch $(out)",
+    out: ["art-check-testing-apex-gen.dummy"],
+}
+
+cc_prebuilt_binary {
+    name: "art-check-testing-apex-gen-fakebin",
+    defaults: ["art-check-apex-gen-fakebin-defaults"],
+    srcs: [":art-check-testing-apex-gen"],
 }
 
 // Pre-install scripts.

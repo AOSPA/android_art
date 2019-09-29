@@ -927,6 +927,7 @@ public class Test1953 {
         (thr) -> setupSuspendMethodEvent(nativeCallerMethod, /*enter*/ false, thr),
         SuspendEvents::clearSuspendMethodEvent);
 
+
     final Object lock2 = new Object();
     synchronized (lock2) {}
     System.out.println("Test stopped with monitor in enclosing frame.");

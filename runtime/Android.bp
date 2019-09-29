@@ -87,6 +87,7 @@ libart_cc_defaults {
         "gc/task_processor.cc",
         "gc/verification.cc",
         "hidden_api.cc",
+        "hidden_api_jni.cc",
         "hprof/hprof.cc",
         "image.cc",
         "index_bss_mapping.cc",
@@ -115,11 +116,13 @@ libart_cc_defaults {
         "jit/debugger_interface.cc",
         "jit/jit.cc",
         "jit/jit_code_cache.cc",
+        "jit/jit_memory_region.cc",
         "jit/profiling_info.cc",
         "jit/profile_saver.cc",
         "jni/check_jni.cc",
         "jni/java_vm_ext.cc",
         "jni/jni_env_ext.cc",
+        "jni/jni_id_manager.cc",
         "jni/jni_internal.cc",
         "linear_alloc.cc",
         "managed_stack.cc",
@@ -383,9 +386,6 @@ libart_cc_defaults {
     generated_headers: ["cpp-define-generator-asm-support"],
     // export our headers so the libart-gtest targets can use it as well.
     export_generated_headers: ["cpp-define-generator-asm-support"],
-    include_dirs: [
-        "art/sigchainlib",
-    ],
     header_libs: [
         "art_cmdlineparser_headers",
         "cpp-define-generator-definitions",
@@ -402,13 +402,8 @@ libart_cc_defaults {
         // For common macros.
         "libbase",
         "libunwindstack",
+        "libsigchain",
     ],
-    static: {
-        static_libs: ["libsigchain_dummy"],
-    },
-    shared: {
-        shared_libs: ["libsigchain"],
-    },
     export_include_dirs: ["."],
     // ART's macros.h depends on libbase's macros.h.
     // Note: runtime_options.h depends on cmdline. But we don't really want to export this
@@ -486,6 +481,7 @@ gensrcs {
         "jdwp_provider.h",
         "jdwp/jdwp.h",
         "jdwp/jdwp_constants.h",
+        "jni_id_type.h",
         "lock_word.h",
         "oat.h",
         "object_callbacks.h",
@@ -632,6 +628,7 @@ art_cc_test {
         "interpreter/safe_math_test.cc",
         "interpreter/unstarted_runtime_test.cc",
         "jdwp/jdwp_options_test.cc",
+        "jit/jit_memory_region_test.cc",
         "jit/profiling_info_test.cc",
         "jni/java_vm_ext_test.cc",
         "jni/jni_internal_test.cc",
@@ -683,9 +680,10 @@ art_cc_test {
 }
 
 cc_library_headers {
-    name: "libart_runtime_headers",
+    name: "libart_runtime_headers_ndk",
     host_supported: true,
     export_include_dirs: ["."],
+    sdk_version: "current",
 }
 
 genrule {

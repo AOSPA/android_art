@@ -122,6 +122,8 @@ void CommonRuntimeTestImpl::SetUp() {
   options.push_back(std::make_pair("-Xcheck:jni", nullptr));
   options.push_back(std::make_pair(min_heap_string, nullptr));
   options.push_back(std::make_pair(max_heap_string, nullptr));
+
+  // Technically this is redundant w/ common_art_test, but still check.
   options.push_back(std::make_pair("-XX:SlowDebug=true", nullptr));
   static bool gSlowDebugTestFlag = false;
   RegisterRuntimeDebugFlag(&gSlowDebugTestFlag);
@@ -431,6 +433,43 @@ bool CommonRuntimeTestImpl::StartDex2OatCommandLine(/*out*/std::vector<std::stri
   return true;
 }
 
+std::string CommonRuntimeTestImpl::GetImageDirectory() {
+  if (IsHost()) {
+    const char* host_dir = getenv("ANDROID_HOST_OUT");
+    CHECK(host_dir != nullptr);
+    return std::string(host_dir) + "/framework";
+  } else {
+    return std::string("/data/art-test");
+  }
+}
+
+std::string CommonRuntimeTestImpl::GetImageLocation() {
+  return GetImageDirectory() + "/core.art";
+}
+
+std::string CommonRuntimeTestImpl::GetSystemImageFile() {
+  return GetImageDirectory() + "/" + GetInstructionSetString(kRuntimeISA) + "/core.art";
+}
+
+void CommonRuntimeTestImpl::EnterTransactionMode() {
+  CHECK(!Runtime::Current()->IsActiveTransaction());
+  Runtime::Current()->EnterTransactionMode(/*strict=*/ false, /*root=*/ nullptr);
+}
+
+void CommonRuntimeTestImpl::ExitTransactionMode() {
+  Runtime::Current()->ExitTransactionMode();
+  CHECK(!Runtime::Current()->IsActiveTransaction());
+}
+
+void CommonRuntimeTestImpl::RollbackAndExitTransactionMode() {
+  Runtime::Current()->RollbackAndExitTransactionMode();
+  CHECK(!Runtime::Current()->IsActiveTransaction());
+}
+
+bool CommonRuntimeTestImpl::IsTransactionAborted() {
+  return Runtime::Current()->IsTransactionAborted();
+}
+
 CheckJniAbortCatcher::CheckJniAbortCatcher() : vm_(Runtime::Current()->GetJavaVM()) {
   vm_->SetCheckJniAbortHook(Hook, &actual_);
 }
@@ -463,7 +502,6 @@ void CheckJniAbortCatcher::Hook(void* data, const std::string& reason) {
 extern "C"
 __attribute__((visibility("default"))) __attribute__((weak))
 void ArtTestGlobalInit() {
-  LOG(ERROR) << "ArtTestGlobalInit in common_runtime_test";
 }
 
 int main(int argc, char **argv) {

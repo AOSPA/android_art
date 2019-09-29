@@ -33,6 +33,7 @@
 #include "base/value_object.h"
 #include "entrypoints/jni/jni_entrypoints.h"
 #include "entrypoints/quick/quick_entrypoints.h"
+#include "handle.h"
 #include "handle_scope.h"
 #include "interpreter/interpreter_cache.h"
 #include "jvalue.h"
@@ -375,12 +376,12 @@ class Thread {
   void SetNativePriority(int newPriority);
 
   /*
-   * Returns the thread priority for the current thread by querying the system.
+   * Returns the priority of this thread by querying the system.
    * This is useful when attaching a thread through JNI.
    *
    * Returns a value from 1 to 10 (compatible with java.lang.Thread values).
    */
-  static int GetNativePriority();
+  int GetNativePriority() const;
 
   // Guaranteed to be non-zero.
   uint32_t GetThreadId() const {
@@ -963,6 +964,14 @@ class Thread {
     is_runtime_thread_ = is_runtime_thread;
   }
 
+  uint32_t CorePlatformApiCookie() {
+    return core_platform_api_cookie_;
+  }
+
+  void SetCorePlatformApiCookie(uint32_t cookie) {
+    core_platform_api_cookie_ = cookie;
+  }
+
   // Returns true if the thread is allowed to load java classes.
   bool CanLoadClasses() const;
 
@@ -1220,6 +1229,15 @@ class Thread {
     return tls32_.force_interpreter_count != 0;
   }
 
+  bool IncrementMakeVisiblyInitializedCounter() {
+    tls32_.make_visibly_initialized_counter += 1u;
+    return tls32_.make_visibly_initialized_counter == kMakeVisiblyInitializedCounterTriggerCount;
+  }
+
+  void ClearMakeVisiblyInitializedCounter() {
+    tls32_.make_visibly_initialized_counter = 0u;
+  }
+
   void PushVerifier(verifier::MethodVerifier* verifier);
   void PopVerifier(verifier::MethodVerifier* verifier);
 
@@ -1464,6 +1482,8 @@ class Thread {
   // Stores the jit sensitive thread (which for now is the UI thread).
   static Thread* jit_sensitive_thread_;
 
+  static constexpr uint32_t kMakeVisiblyInitializedCounterTriggerCount = 128;
+
   /***********************************************************************************************/
   // Thread local storage. Fields are grouped by size to enable 32 <-> 64 searching to account for
   // pointer size differences. To encourage shorter encoding, more frequently used values appear
@@ -1475,14 +1495,26 @@ class Thread {
     // to be 4-byte quantities.
     typedef uint32_t bool32_t;
 
-    explicit tls_32bit_sized_values(bool is_daemon) :
-      suspend_count(0), debug_suspend_count(0), thin_lock_thread_id(0), tid(0),
-      daemon(is_daemon), throwing_OutOfMemoryError(false), no_thread_suspension(0),
-      thread_exit_check_count(0), handling_signal_(false),
-      is_transitioning_to_runnable(false), ready_for_debug_invoke(false),
-      debug_method_entry_(false), is_gc_marking(false), weak_ref_access_enabled(true),
-      disable_thread_flip_count(0), user_code_suspend_count(0), force_interpreter_count(0) {
-    }
+    explicit tls_32bit_sized_values(bool is_daemon)
+        : suspend_count(0),
+          debug_suspend_count(0),
+          thin_lock_thread_id(0),
+          tid(0),
+          daemon(is_daemon),
+          throwing_OutOfMemoryError(false),
+          no_thread_suspension(0),
+          thread_exit_check_count(0),
+          handling_signal_(false),
+          is_transitioning_to_runnable(false),
+          ready_for_debug_invoke(false),
+          debug_method_entry_(false),
+          is_gc_marking(false),
+          weak_ref_access_enabled(true),
+          disable_thread_flip_count(0),
+          user_code_suspend_count(0),
+          force_interpreter_count(0),
+          use_mterp(0),
+          make_visibly_initialized_counter(0) {}
 
     union StateAndFlags state_and_flags;
     static_assert(sizeof(union StateAndFlags) == sizeof(int32_t),
@@ -1572,6 +1604,14 @@ class Thread {
     // True if everything is in the ideal state for fast interpretation.
     // False if we need to switch to the C++ interpreter to handle special cases.
     std::atomic<bool32_t> use_mterp;
+
+    // Counter for calls to initialize a class that's initialized but not visibly initialized.
+    // When this reaches kMakeVisiblyInitializedCounterTriggerCount, we call the runtime to
+    // make initialized classes visibly initialized. This is needed because we usually make
+    // classes visibly initialized in batches but we do not want to be stuck with a class
+    // initialized but not visibly initialized for a long time even if no more classes are
+    // being initialized anymore.
+    uint32_t make_visibly_initialized_counter;
   } tls32_;
 
   struct PACKED(8) tls_64bit_sized_values {
@@ -1788,8 +1828,17 @@ class Thread {
   // compiled code or entrypoints.
   SafeMap<std::string, std::unique_ptr<TLSData>> custom_tls_ GUARDED_BY(Locks::custom_tls_lock_);
 
+#ifndef __BIONIC__
+  __attribute__((tls_model("initial-exec")))
+  static thread_local Thread* self_tls_;
+#endif
+
   // True if the thread is some form of runtime thread (ex, GC or JIT).
   bool is_runtime_thread_;
+
+  // Set during execution of JNI methods that get field and method id's as part of determining if
+  // the caller is allowed to access all fields and methods in the Core Platform API.
+  uint32_t core_platform_api_cookie_ = 0;
 
   friend class Dbg;  // For SetStateUnsafe.
   friend class gc::collector::SemiSpace;  // For getting stack traces.
@@ -1894,6 +1943,19 @@ class ThreadLifecycleCallback {
 
   virtual void ThreadStart(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_) = 0;
   virtual void ThreadDeath(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_) = 0;
+};
+
+// Store an exception from the thread and suppress it for the duration of this object.
+class ScopedExceptionStorage {
+ public:
+  explicit ScopedExceptionStorage(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_);
+  void SuppressOldException(const char* message = "") REQUIRES_SHARED(Locks::mutator_lock_);
+  ~ScopedExceptionStorage() REQUIRES_SHARED(Locks::mutator_lock_);
+
+ private:
+  Thread* self_;
+  StackHandleScope<1> hs_;
+  MutableHandle<mirror::Throwable> excp_;
 };
 
 std::ostream& operator<<(std::ostream& os, const Thread& thread);

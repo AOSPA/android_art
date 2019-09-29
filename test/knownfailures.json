@@ -738,9 +738,11 @@
     },
     {
         "tests": "660-clinit",
-        "variant": "no-image | no-prebuild | jvmti-stress | redefine-stress",
+        "variant": "no-image | no-prebuild | jvmti-stress | redefine-stress | interp-ac | debuggable",
         "description": ["Tests <clinit> for app images, which --no-image, --no-prebuild, ",
-                        "and --redefine-stress do not create"]
+                        "and --redefine-stress do not create. Also avoid for ",
+                        "verify-soft-fail (interp-ac) and debuggable since they prevent ",
+                        "initialization."]
     },
     {
         "tests": ["961-default-iface-resolution-gen",
@@ -872,6 +874,7 @@
           "167-visit-locks",
           "168-vmstack-annotated",
           "172-app-image-twice",
+          "177-visibly-initialized-deadlock",
           "201-built-in-except-detail-messages",
           "203-multi-checkpoint",
           "304-method-tracing",
@@ -947,6 +950,7 @@
           "574-irreducible-and-constant-area",
           "575-checker-string-init-alias",
           "580-checker-string-fact-intrinsics",
+          "580-fp16",
           "585-inline-unresolved",
           "586-checker-null-array-get",
           "587-inline-class-error",
@@ -1112,7 +1116,11 @@
                   "1001-app-image-regions",
                   "1339-dead-reference-safe",
                   "1951-monitor-enter-no-suspend",
-                  "1957-error-ext"],
+                  "1957-error-ext",
+                  "1972-jni-id-swap-indices",
+                  "1973-jni-id-swap-pointer",
+                  "1974-resize-array"
+                ],
         "variant": "jvm",
         "description": ["Doesn't run on RI."]
     },

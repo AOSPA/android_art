@@ -167,6 +167,44 @@ static inline bool CareAboutPauseTimes() {
   return Runtime::Current()->InJankPerceptibleProcessState();
 }
 
+static void VerifyBootImagesContiguity(const std::vector<gc::space::ImageSpace*>& image_spaces) {
+  uint32_t boot_image_size = 0u;
+  for (size_t i = 0u, num_spaces = image_spaces.size(); i != num_spaces; ) {
+    const ImageHeader& image_header = image_spaces[i]->GetImageHeader();
+    uint32_t reservation_size = image_header.GetImageReservationSize();
+    uint32_t component_count = image_header.GetComponentCount();
+
+    CHECK_NE(component_count, 0u);
+    CHECK_LE(component_count, num_spaces - i);
+    CHECK_NE(reservation_size, 0u);
+    for (size_t j = 1u; j != image_header.GetComponentCount(); ++j) {
+      CHECK_EQ(image_spaces[i + j]->GetImageHeader().GetComponentCount(), 0u);
+      CHECK_EQ(image_spaces[i + j]->GetImageHeader().GetImageReservationSize(), 0u);
+    }
+
+    // Check the start of the heap.
+    CHECK_EQ(image_spaces[0]->Begin() + boot_image_size, image_spaces[i]->Begin());
+    // Check contiguous layout of images and oat files.
+    const uint8_t* current_heap = image_spaces[i]->Begin();
+    const uint8_t* current_oat = image_spaces[i]->GetImageHeader().GetOatFileBegin();
+    for (size_t j = 0u; j != image_header.GetComponentCount(); ++j) {
+      const ImageHeader& current_header = image_spaces[i + j]->GetImageHeader();
+      CHECK_EQ(current_heap, image_spaces[i + j]->Begin());
+      CHECK_EQ(current_oat, current_header.GetOatFileBegin());
+      current_heap += RoundUp(current_header.GetImageSize(), kPageSize);
+      CHECK_GT(current_header.GetOatFileEnd(), current_header.GetOatFileBegin());
+      current_oat = current_header.GetOatFileEnd();
+    }
+    // Check that oat files start at the end of images.
+    CHECK_EQ(current_heap, image_spaces[i]->GetImageHeader().GetOatFileBegin());
+    // Check that the reservation size equals the size of images and oat files.
+    CHECK_EQ(reservation_size, static_cast<size_t>(current_oat - image_spaces[i]->Begin()));
+
+    boot_image_size += reservation_size;
+    i += component_count;
+  }
+}
+
 Heap::Heap(size_t initial_size,
            size_t growth_limit,
            size_t min_free,
@@ -308,7 +346,10 @@ Heap::Heap(size_t initial_size,
       unique_backtrace_count_(0u),
       gc_disabled_for_shutdown_(false),
       dump_region_info_before_gc_(dump_region_info_before_gc),
-      dump_region_info_after_gc_(dump_region_info_after_gc) {
+      dump_region_info_after_gc_(dump_region_info_after_gc),
+      boot_image_spaces_(),
+      boot_images_start_address_(0u),
+      boot_images_size_(0u) {
   if (VLOG_IS_ON(heap) || VLOG_IS_ON(startup)) {
     LOG(INFO) << "Heap() entering";
   }
@@ -386,6 +427,13 @@ Heap::Heap(size_t initial_size,
     for (std::unique_ptr<space::ImageSpace>& space : boot_image_spaces) {
       boot_image_spaces_.push_back(space.get());
       AddSpace(space.release());
+    }
+    boot_images_start_address_ = PointerToLowMemUInt32(boot_image_spaces_.front()->Begin());
+    uint32_t boot_images_end =
+        PointerToLowMemUInt32(boot_image_spaces_.back()->GetImageHeader().GetOatFileEnd());
+    boot_images_size_ = boot_images_end - boot_images_start_address_;
+    if (kIsDebugBuild) {
+      VerifyBootImagesContiguity(boot_image_spaces_);
     }
   } else {
     if (foreground_collector_type_ == kCollectorTypeCC) {
@@ -1957,10 +2005,7 @@ HomogeneousSpaceCompactResult Heap::PerformHomogeneousSpaceCompact() {
   count_requested_homogeneous_space_compaction_++;
   // Store performed homogeneous space compaction at a new request arrival.
   ScopedThreadStateChange tsc(self, kWaitingPerformingGc);
-  // TODO: Clang prebuilt for r316199 produces bogus thread safety analysis warning for holding both
-  // exclusive and shared lock in the same scope. Remove the assertion as a temporary workaround.
-  // http://b/71769596
-  // Locks::mutator_lock_->AssertNotHeld(self);
+  Locks::mutator_lock_->AssertNotHeld(self);
   {
     ScopedThreadStateChange tsc2(self, kWaitingForGcToComplete);
     MutexLock mu(self, *gc_complete_lock_);
@@ -2182,7 +2227,7 @@ void Heap::UnBindBitmaps() {
   for (const auto& space : GetContinuousSpaces()) {
     if (space->IsContinuousMemMapAllocSpace()) {
       space::ContinuousMemMapAllocSpace* alloc_space = space->AsContinuousMemMapAllocSpace();
-      if (alloc_space->HasBoundBitmaps()) {
+      if (alloc_space->GetLiveBitmap() != nullptr && alloc_space->HasBoundBitmaps()) {
         alloc_space->UnBindBitmaps();
       }
     }
@@ -2304,15 +2349,12 @@ void Heap::PreZygoteFork() {
   AddSpace(zygote_space_);
   non_moving_space_->SetFootprintLimit(non_moving_space_->Capacity());
   AddSpace(non_moving_space_);
-  if (kUseBakerReadBarrier && gc::collector::ConcurrentCopying::kGrayDirtyImmuneObjects) {
+  constexpr bool set_mark_bit = kUseBakerReadBarrier
+                                && gc::collector::ConcurrentCopying::kGrayDirtyImmuneObjects;
+  if (set_mark_bit) {
     // Treat all of the objects in the zygote as marked to avoid unnecessary dirty pages. This is
     // safe since we mark all of the objects that may reference non immune objects as gray.
-    zygote_space_->GetLiveBitmap()->VisitMarkedRange(
-        reinterpret_cast<uintptr_t>(zygote_space_->Begin()),
-        reinterpret_cast<uintptr_t>(zygote_space_->Limit()),
-        [](mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_) {
-      CHECK(obj->AtomicSetMarkBit(0, 1));
-    });
+    zygote_space_->SetMarkBitInLiveObjects();
   }
 
   // Create the zygote space mod union table.
@@ -2344,7 +2386,7 @@ void Heap::PreZygoteFork() {
     }
   }
   AddModUnionTable(mod_union_table);
-  large_object_space_->SetAllLargeObjectsAsZygoteObjects(self);
+  large_object_space_->SetAllLargeObjectsAsZygoteObjects(self, set_mark_bit);
   if (collector::SemiSpace::kUseRememberedSet) {
     // Add a new remembered set for the post-zygote non-moving space.
     accounting::RememberedSet* post_zygote_non_moving_space_rem_set =
@@ -2461,10 +2503,7 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
     }
   }
   ScopedThreadStateChange tsc(self, kWaitingPerformingGc);
-  // TODO: Clang prebuilt for r316199 produces bogus thread safety analysis warning for holding both
-  // exclusive and shared lock in the same scope. Remove the assertion as a temporary workaround.
-  // http://b/71769596
-  // Locks::mutator_lock_->AssertNotHeld(self);
+  Locks::mutator_lock_->AssertNotHeld(self);
   if (self->IsHandlingStackOverflow()) {
     // If we are throwing a stack overflow error we probably don't have enough remaining stack
     // space to run the GC.
@@ -3893,9 +3932,8 @@ void Heap::RemoveRememberedSet(space::Space* space) {
 void Heap::ClearMarkedObjects() {
   // Clear all of the spaces' mark bitmaps.
   for (const auto& space : GetContinuousSpaces()) {
-    accounting::ContinuousSpaceBitmap* mark_bitmap = space->GetMarkBitmap();
-    if (space->GetLiveBitmap() != mark_bitmap) {
-      mark_bitmap->Clear();
+    if (space->GetLiveBitmap() != nullptr && !space->HasBoundBitmaps()) {
+      space->GetMarkBitmap()->Clear();
     }
   }
   // Clear the marked objects in the discontinous space object sets.
@@ -3991,50 +4029,23 @@ void Heap::DisableGCForShutdown() {
 }
 
 bool Heap::ObjectIsInBootImageSpace(ObjPtr<mirror::Object> obj) const {
-  for (gc::space::ImageSpace* space : boot_image_spaces_) {
-    if (space->HasAddress(obj.Ptr())) {
-      return true;
-    }
-  }
-  return false;
+  DCHECK_EQ(IsBootImageAddress(obj.Ptr()),
+            any_of(boot_image_spaces_.begin(),
+                   boot_image_spaces_.end(),
+                   [obj](gc::space::ImageSpace* space) REQUIRES_SHARED(Locks::mutator_lock_) {
+                     return space->HasAddress(obj.Ptr());
+                   }));
+  return IsBootImageAddress(obj.Ptr());
 }
 
 bool Heap::IsInBootImageOatFile(const void* p) const {
-  for (gc::space::ImageSpace* space : boot_image_spaces_) {
-    if (space->GetOatFile()->Contains(p)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-void Heap::GetBootImagesSize(uint32_t* boot_image_begin,
-                             uint32_t* boot_image_end,
-                             uint32_t* boot_oat_begin,
-                             uint32_t* boot_oat_end) {
-  DCHECK(boot_image_begin != nullptr);
-  DCHECK(boot_image_end != nullptr);
-  DCHECK(boot_oat_begin != nullptr);
-  DCHECK(boot_oat_end != nullptr);
-  *boot_image_begin = 0u;
-  *boot_image_end = 0u;
-  *boot_oat_begin = 0u;
-  *boot_oat_end = 0u;
-  for (gc::space::ImageSpace* space_ : GetBootImageSpaces()) {
-    const uint32_t image_begin = PointerToLowMemUInt32(space_->Begin());
-    const uint32_t image_size = space_->GetImageHeader().GetImageSize();
-    if (*boot_image_begin == 0 || image_begin < *boot_image_begin) {
-      *boot_image_begin = image_begin;
-    }
-    *boot_image_end = std::max(*boot_image_end, image_begin + image_size);
-    const OatFile* boot_oat_file = space_->GetOatFile();
-    const uint32_t oat_begin = PointerToLowMemUInt32(boot_oat_file->Begin());
-    const uint32_t oat_size = boot_oat_file->Size();
-    if (*boot_oat_begin == 0 || oat_begin < *boot_oat_begin) {
-      *boot_oat_begin = oat_begin;
-    }
-    *boot_oat_end = std::max(*boot_oat_end, oat_begin + oat_size);
-  }
+  DCHECK_EQ(IsBootImageAddress(p),
+            any_of(boot_image_spaces_.begin(),
+                   boot_image_spaces_.end(),
+                   [p](gc::space::ImageSpace* space) REQUIRES_SHARED(Locks::mutator_lock_) {
+                     return space->GetOatFile()->Contains(p);
+                   }));
+  return IsBootImageAddress(p);
 }
 
 void Heap::SetAllocationListener(AllocationListener* l) {

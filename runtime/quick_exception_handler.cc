@@ -301,10 +301,11 @@ void QuickExceptionHandler::SetCatchEnvironmentForOptimizedHandler(StackVisitor*
   StackMap catch_stack_map = code_info.GetCatchStackMapForDexPc(GetHandlerDexPc());
   DCHECK(catch_stack_map.IsValid());
   DexRegisterMap catch_vreg_map = code_info.GetDexRegisterMapOf(catch_stack_map);
+  DCHECK_EQ(catch_vreg_map.size(), number_of_vregs);
+
   if (!catch_vreg_map.HasAnyLiveDexRegisters()) {
     return;
   }
-  DCHECK_EQ(catch_vreg_map.size(), number_of_vregs);
 
   // Find stack map of the throwing instruction.
   StackMap throw_stack_map =
@@ -324,10 +325,12 @@ void QuickExceptionHandler::SetCatchEnvironmentForOptimizedHandler(StackVisitor*
     // Get vreg value from its current location.
     uint32_t vreg_value;
     VRegKind vreg_kind = ToVRegKind(throw_vreg_map[vreg].GetKind());
-    bool get_vreg_success = stack_visitor->GetVReg(stack_visitor->GetMethod(),
-                                                   vreg,
-                                                   vreg_kind,
-                                                   &vreg_value);
+    bool get_vreg_success =
+        stack_visitor->GetVReg(stack_visitor->GetMethod(),
+                               vreg,
+                               vreg_kind,
+                               &vreg_value,
+                               throw_vreg_map[vreg]);
     CHECK(get_vreg_success) << "VReg " << vreg << " was optimized out ("
                             << "method=" << ArtMethod::PrettyMethod(stack_visitor->GetMethod())
                             << ", dex_pc=" << stack_visitor->GetDexPc() << ", "
@@ -478,10 +481,11 @@ class DeoptimizeStackVisitor final : public StackVisitor {
     DexRegisterMap vreg_map = IsInInlinedFrame()
         ? code_info.GetInlineDexRegisterMapOf(stack_map, GetCurrentInlinedFrame())
         : code_info.GetDexRegisterMapOf(stack_map);
+
+    DCHECK_EQ(vreg_map.size(), number_of_vregs);
     if (vreg_map.empty()) {
       return;
     }
-    DCHECK_EQ(vreg_map.size(), number_of_vregs);
 
     for (uint16_t vreg = 0; vreg < number_of_vregs; ++vreg) {
       if (updated_vregs != nullptr && updated_vregs[vreg]) {

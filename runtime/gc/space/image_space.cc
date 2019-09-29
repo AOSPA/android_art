@@ -69,7 +69,7 @@ Atomic<uint32_t> ImageSpace::bitmap_index_(0);
 ImageSpace::ImageSpace(const std::string& image_filename,
                        const char* image_location,
                        MemMap&& mem_map,
-                       std::unique_ptr<accounting::ContinuousSpaceBitmap> live_bitmap,
+                       accounting::ContinuousSpaceBitmap&& live_bitmap,
                        uint8_t* end)
     : MemMapSpace(image_filename,
                   std::move(mem_map),
@@ -80,7 +80,7 @@ ImageSpace::ImageSpace(const std::string& image_filename,
       live_bitmap_(std::move(live_bitmap)),
       oat_file_non_owned_(nullptr),
       image_location_(image_location) {
-  DCHECK(live_bitmap_ != nullptr);
+  DCHECK(live_bitmap_.IsValid());
 }
 
 static int32_t ChooseRelocationOffsetDelta(int32_t min_delta, int32_t max_delta) {
@@ -348,7 +348,7 @@ void ImageSpace::VerifyImageAllocations() {
     CHECK_ALIGNED(current, kObjectAlignment);
     auto* obj = reinterpret_cast<mirror::Object*>(current);
     CHECK(obj->GetClass() != nullptr) << "Image object at address " << obj << " has null class";
-    CHECK(live_bitmap_->Test(obj)) << obj->PrettyTypeOf();
+    CHECK(live_bitmap_.Test(obj)) << obj->PrettyTypeOf();
     if (kUseBakerReadBarrier) {
       obj->AssertReadBarrierState();
     }
@@ -382,6 +382,11 @@ class RelocationRange {
   uintptr_t ToDest(uintptr_t address) const {
     DCHECK(InSource(address));
     return address + Delta();
+  }
+
+  template <typename T>
+  T* ToDest(T* src) const {
+    return reinterpret_cast<T*>(ToDest(reinterpret_cast<uintptr_t>(src)));
   }
 
   // Returns the delta between the dest from the source.
@@ -420,7 +425,8 @@ class ImageSpace::PatchObjectVisitor final {
   explicit PatchObjectVisitor(HeapVisitor heap_visitor, NativeVisitor native_visitor)
       : heap_visitor_(heap_visitor), native_visitor_(native_visitor) {}
 
-  void VisitClass(mirror::Class* klass) REQUIRES_SHARED(Locks::mutator_lock_) {
+  void VisitClass(ObjPtr<mirror::Class> klass, ObjPtr<mirror::Class> class_class)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
     // A mirror::Class object consists of
     //  - instance fields inherited from j.l.Object,
     //  - instance fields inherited from j.l.Class,
@@ -431,16 +437,20 @@ class ImageSpace::PatchObjectVisitor final {
     // fields and the first reference of the subclass due to alignment, it can be filled
     // with smaller fields - but that's not the case for j.l.Object and j.l.Class).
 
-    DCHECK_ALIGNED(klass, kObjectAlignment);
+    DCHECK_ALIGNED(klass.Ptr(), kObjectAlignment);
     static_assert(IsAligned<kHeapReferenceSize>(kObjectAlignment), "Object alignment check.");
     // First, patch the `klass->klass_`, known to be a reference to the j.l.Class.class.
     // This should be the only reference field in j.l.Object and we assert that below.
-    PatchReferenceField</*kMayBeNull=*/ false>(klass, mirror::Object::ClassOffset());
+    DCHECK_EQ(class_class,
+              heap_visitor_(klass->GetClass<kVerifyNone, kWithoutReadBarrier>()));
+    klass->SetFieldObjectWithoutWriteBarrier<
+        /*kTransactionActive=*/ false,
+        /*kCheckTransaction=*/ true,
+        kVerifyNone>(mirror::Object::ClassOffset(), class_class);
     // Then patch the reference instance fields described by j.l.Class.class.
     // Use the sizeof(Object) to determine where these reference fields start;
     // this is the same as `class_class->GetFirstReferenceInstanceFieldOffset()`
     // after patching but the j.l.Class may not have been patched yet.
-    mirror::Class* class_class = klass->GetClass<kVerifyNone, kWithoutReadBarrier>();
     size_t num_reference_instance_fields = class_class->NumReferenceInstanceFields<kVerifyNone>();
     DCHECK_NE(num_reference_instance_fields, 0u);
     static_assert(IsAligned<kHeapReferenceSize>(sizeof(mirror::Object)), "Size alignment check.");
@@ -474,7 +484,7 @@ class ImageSpace::PatchObjectVisitor final {
       }
     }
     // Then patch native pointers.
-    klass->FixupNativePointers<kVerifyNone>(klass, kPointerSize, *this);
+    klass->FixupNativePointers<kVerifyNone>(klass.Ptr(), kPointerSize, *this);
   }
 
   template <typename T>
@@ -866,17 +876,16 @@ class ImageSpace::Loader {
     const ImageSection& image_objects = image_header->GetObjectsSection();
     // We only want the mirror object, not the ArtFields and ArtMethods.
     uint8_t* const image_end = map.Begin() + image_objects.End();
-    std::unique_ptr<accounting::ContinuousSpaceBitmap> bitmap;
+    accounting::ContinuousSpaceBitmap bitmap;
     {
       TimingLogger::ScopedTiming timing("CreateImageBitmap", logger);
-      bitmap.reset(
-          accounting::ContinuousSpaceBitmap::CreateFromMemMap(
-              bitmap_name,
-              std::move(image_bitmap_map),
-              reinterpret_cast<uint8_t*>(map.Begin()),
-              // Make sure the bitmap is aligned to card size instead of just bitmap word size.
-              RoundUp(image_objects.End(), gc::accounting::CardTable::kCardSize)));
-      if (bitmap == nullptr) {
+      bitmap = accounting::ContinuousSpaceBitmap::CreateFromMemMap(
+          bitmap_name,
+          std::move(image_bitmap_map),
+          reinterpret_cast<uint8_t*>(map.Begin()),
+          // Make sure the bitmap is aligned to card size instead of just bitmap word size.
+          RoundUp(image_objects.End(), gc::accounting::CardTable::kCardSize));
+      if (!bitmap.IsValid()) {
         *error_msg = StringPrintf("Could not create bitmap '%s'", bitmap_name.c_str());
         return nullptr;
       }
@@ -1105,15 +1114,10 @@ class ImageSpace::Loader {
     }
 
     // java.lang.ref.Reference visitor.
-    void operator()(ObjPtr<mirror::Class> klass ATTRIBUTE_UNUSED,
-                    ObjPtr<mirror::Reference> ref) const
+    ALWAYS_INLINE void operator()(ObjPtr<mirror::Class> klass, ObjPtr<mirror::Reference> ref) const
         REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(Locks::heap_bitmap_lock_) {
-      mirror::Object* obj = ref->GetReferent<kWithoutReadBarrier>();
-      if (obj != nullptr) {
-        ref->SetFieldObjectWithoutWriteBarrier<false, true, kVerifyNone>(
-            mirror::Reference::ReferentOffset(),
-            forward_(obj));
-      }
+      DCHECK(klass->IsTypeOfReferenceClass());
+      this->operator()(ref, mirror::Reference::ReferentOffset(), /*is_static=*/ false);
     }
 
     void operator()(mirror::Object* obj) const
@@ -1143,21 +1147,13 @@ class ImageSpace::Loader {
                               std::string* error_msg) {
     DCHECK(error_msg != nullptr);
     // Set up sections.
-    uint32_t boot_image_begin = 0;
-    uint32_t boot_image_end = 0;
-    uint32_t boot_oat_begin = 0;
-    uint32_t boot_oat_end = 0;
     gc::Heap* const heap = Runtime::Current()->GetHeap();
-    heap->GetBootImagesSize(&boot_image_begin, &boot_image_end, &boot_oat_begin, &boot_oat_end);
-    if (boot_image_begin == boot_image_end) {
+    uint32_t boot_image_begin = heap->GetBootImagesStartAddress();
+    uint32_t boot_image_size = heap->GetBootImagesSize();
+    if (boot_image_size == 0u) {
       *error_msg = "Can not relocate app image without boot image space";
       return false;
     }
-    if (boot_oat_begin == boot_oat_end) {
-      *error_msg = "Can not relocate app image without boot oat file";
-      return false;
-    }
-    const uint32_t boot_image_size = boot_oat_end - boot_image_begin;
     const uint32_t image_header_boot_image_size = image_header.GetBootImageSize();
     if (boot_image_size != image_header_boot_image_size) {
       *error_msg = StringPrintf("Boot image size %" PRIu64 " does not match expected size %"
@@ -1212,12 +1208,22 @@ class ImageSpace::Loader {
     if (fixup_image) {
       // Two pass approach, fix up all classes first, then fix up non class-objects.
       // The visited bitmap is used to ensure that pointer arrays are not forwarded twice.
-      std::unique_ptr<gc::accounting::ContinuousSpaceBitmap> visited_bitmap(
+      gc::accounting::ContinuousSpaceBitmap visited_bitmap(
           gc::accounting::ContinuousSpaceBitmap::Create("Relocate bitmap",
                                                         target_base,
                                                         image_header.GetImageSize()));
       {
         TimingLogger::ScopedTiming timing("Fixup classes", &logger);
+        ObjPtr<mirror::Class> class_class = [&]() NO_THREAD_SAFETY_ANALYSIS {
+          ObjPtr<mirror::ObjectArray<mirror::Object>> image_roots = app_image_objects.ToDest(
+              image_header.GetImageRoots<kWithoutReadBarrier>().Ptr());
+          int32_t class_roots_index = enum_cast<int32_t>(ImageHeader::kClassRoots);
+          DCHECK_LT(class_roots_index, image_roots->GetLength<kVerifyNone>());
+          ObjPtr<mirror::ObjectArray<mirror::Class>> class_roots =
+              ObjPtr<mirror::ObjectArray<mirror::Class>>::DownCast(boot_image.ToDest(
+                  image_roots->GetWithoutChecks<kVerifyNone>(class_roots_index).Ptr()));
+          return GetClassRoot<mirror::Class, kWithoutReadBarrier>(class_roots);
+        }();
         const auto& class_table_section = image_header.GetClassTableSection();
         if (class_table_section.Size() > 0u) {
           ScopedObjectAccess soa(Thread::Current());
@@ -1233,15 +1239,15 @@ class ImageSpace::Loader {
             if (!app_image_objects.InDest(klass.Ptr())) {
               continue;
             }
-            const bool already_marked = visited_bitmap->Set(klass.Ptr());
+            const bool already_marked = visited_bitmap.Set(klass.Ptr());
             CHECK(!already_marked) << "App image class already visited";
-            patch_object_visitor.VisitClass(klass.Ptr());
+            patch_object_visitor.VisitClass(klass, class_class);
             // Then patch the non-embedded vtable and iftable.
             ObjPtr<mirror::PointerArray> vtable =
                 klass->GetVTable<kVerifyNone, kWithoutReadBarrier>();
             if (vtable != nullptr &&
                 app_image_objects.InDest(vtable.Ptr()) &&
-                !visited_bitmap->Set(vtable.Ptr())) {
+                !visited_bitmap.Set(vtable.Ptr())) {
               patch_object_visitor.VisitPointerArray(vtable);
             }
             ObjPtr<mirror::IfTable> iftable = klass->GetIfTable<kVerifyNone, kWithoutReadBarrier>();
@@ -1256,7 +1262,7 @@ class ImageSpace::Loader {
                   // The iftable has not been patched, so we need to explicitly adjust the pointer.
                   ObjPtr<mirror::PointerArray> ifarray = forward_object(unpatched_ifarray.Ptr());
                   if (app_image_objects.InDest(ifarray.Ptr()) &&
-                      !visited_bitmap->Set(ifarray.Ptr())) {
+                      !visited_bitmap.Set(ifarray.Ptr())) {
                     patch_object_visitor.VisitPointerArray(ifarray);
                   }
                 }
@@ -1273,12 +1279,13 @@ class ImageSpace::Loader {
       // Need to update the image to be at the target base.
       uintptr_t objects_begin = reinterpret_cast<uintptr_t>(target_base + objects_section.Offset());
       uintptr_t objects_end = reinterpret_cast<uintptr_t>(target_base + objects_section.End());
-      FixupObjectVisitor<ForwardObject> fixup_object_visitor(visited_bitmap.get(), forward_object);
+      FixupObjectVisitor<ForwardObject> fixup_object_visitor(&visited_bitmap, forward_object);
       bitmap->VisitMarkedRange(objects_begin, objects_end, fixup_object_visitor);
       // Fixup image roots.
       CHECK(app_image_objects.InSource(reinterpret_cast<uintptr_t>(
           image_header.GetImageRoots<kWithoutReadBarrier>().Ptr())));
-      image_header.RelocateImageObjects(app_image_objects.Delta());
+      image_header.RelocateImageReferences(app_image_objects.Delta());
+      image_header.RelocateBootImageReferences(boot_image.Delta());
       CHECK_EQ(image_header.GetImageBegin(), target_base);
       // Fix up dex cache DexFile pointers.
       ObjPtr<mirror::ObjectArray<mirror::DexCache>> dex_caches =
@@ -1331,8 +1338,6 @@ class ImageSpace::Loader {
         TimingLogger::ScopedTiming timing("Fixup conflict tables", &logger);
         image_header.VisitPackedImtConflictTables(forward_metadata, target_base, kPointerSize);
       }
-      // In the app image case, the image methods are actually in the boot image.
-      image_header.RelocateImageMethods(boot_image.Delta());
       // Fix up the intern table.
       const auto& intern_table_section = image_header.GetInternedStringsSection();
       if (intern_table_section.Size() > 0u) {
@@ -1546,18 +1551,80 @@ class ImageSpace::BootImageLoader {
   }
 
  private:
-  class RelocateVisitor {
+  class SimpleRelocateVisitor {
    public:
-    explicit RelocateVisitor(uint32_t diff) : diff_(diff) {}
+    SimpleRelocateVisitor(uint32_t diff, uint32_t begin, uint32_t size)
+        : diff_(diff), begin_(begin), size_(size) {}
+
+    // Adapter taking the same arguments as SplitRangeRelocateVisitor
+    // to simplify constructing the various visitors in DoRelocateSpaces().
+    SimpleRelocateVisitor(uint32_t base_diff,
+                          uint32_t current_diff,
+                          uint32_t bound,
+                          uint32_t begin,
+                          uint32_t size)
+        : SimpleRelocateVisitor(base_diff, begin, size) {
+      // Check arguments unused by this class.
+      DCHECK_EQ(base_diff, current_diff);
+      DCHECK_EQ(bound, begin);
+    }
 
     template <typename T>
     ALWAYS_INLINE T* operator()(T* src) const {
-      DCHECK(src != nullptr);
-      return reinterpret_cast32<T*>(reinterpret_cast32<uint32_t>(src) + diff_);
+      DCHECK(InSource(src));
+      uint32_t raw_src = reinterpret_cast32<uint32_t>(src);
+      return reinterpret_cast32<T*>(raw_src + diff_);
+    }
+
+    template <typename T>
+    ALWAYS_INLINE bool InSource(T* ptr) const {
+      uint32_t raw_ptr = reinterpret_cast32<uint32_t>(ptr);
+      return raw_ptr - begin_ < size_;
     }
 
    private:
     const uint32_t diff_;
+    const uint32_t begin_;
+    const uint32_t size_;
+  };
+
+  class SplitRangeRelocateVisitor {
+   public:
+    SplitRangeRelocateVisitor(uint32_t base_diff,
+                              uint32_t current_diff,
+                              uint32_t bound,
+                              uint32_t begin,
+                              uint32_t size)
+        : base_diff_(base_diff),
+          current_diff_(current_diff),
+          bound_(bound),
+          begin_(begin),
+          size_(size) {
+      DCHECK_NE(begin_, bound_);
+      // The bound separates the boot image range and the extension range.
+      DCHECK_LT(bound_ - begin_, size_);
+    }
+
+    template <typename T>
+    ALWAYS_INLINE T* operator()(T* src) const {
+      DCHECK(InSource(src));
+      uint32_t raw_src = reinterpret_cast32<uint32_t>(src);
+      uint32_t diff = (raw_src < bound_) ? base_diff_ : current_diff_;
+      return reinterpret_cast32<T*>(raw_src + diff);
+    }
+
+    template <typename T>
+    ALWAYS_INLINE bool InSource(T* ptr) const {
+      uint32_t raw_ptr = reinterpret_cast32<uint32_t>(ptr);
+      return raw_ptr - begin_ < size_;
+    }
+
+   private:
+    const uint32_t base_diff_;
+    const uint32_t current_diff_;
+    const uint32_t bound_;
+    const uint32_t begin_;
+    const uint32_t size_;
   };
 
   static void** PointerAddress(ArtMethod* method, MemberOffset offset) {
@@ -1565,43 +1632,131 @@ class ImageSpace::BootImageLoader {
   }
 
   template <PointerSize kPointerSize>
-  static void DoRelocateSpaces(const std::vector<std::unique_ptr<ImageSpace>>& spaces,
-                               uint32_t diff) REQUIRES_SHARED(Locks::mutator_lock_) {
-    std::unique_ptr<gc::accounting::ContinuousSpaceBitmap> patched_objects(
+  static void DoRelocateSpaces(ArrayRef<const std::unique_ptr<ImageSpace>>& spaces,
+                               int64_t base_diff64) REQUIRES_SHARED(Locks::mutator_lock_) {
+    DCHECK(!spaces.empty());
+    gc::accounting::ContinuousSpaceBitmap patched_objects(
         gc::accounting::ContinuousSpaceBitmap::Create(
             "Marked objects",
             spaces.front()->Begin(),
             spaces.back()->End() - spaces.front()->Begin()));
-    using PatchRelocateVisitor = PatchObjectVisitor<kPointerSize, RelocateVisitor, RelocateVisitor>;
-    RelocateVisitor relocate_visitor(diff);
-    PatchRelocateVisitor patch_object_visitor(relocate_visitor, relocate_visitor);
+    const ImageHeader& base_header = spaces[0]->GetImageHeader();
+    size_t base_component_count = base_header.GetComponentCount();
+    DCHECK_LE(base_component_count, spaces.size());
+    DoRelocateSpaces<kPointerSize, /*kExtension=*/ false>(
+        spaces.SubArray(/*pos=*/ 0u, base_component_count),
+        base_diff64,
+        &patched_objects);
 
-    mirror::Class* dcheck_class_class = nullptr;  // Used only for a DCHECK().
+    for (size_t i = base_component_count, size = spaces.size(); i != size; ) {
+      const ImageHeader& ext_header = spaces[i]->GetImageHeader();
+      size_t ext_component_count = ext_header.GetComponentCount();
+      DCHECK_LE(ext_component_count, size - i);
+      DoRelocateSpaces<kPointerSize, /*kExtension=*/ true>(
+          spaces.SubArray(/*pos=*/ i, ext_component_count),
+          base_diff64,
+          &patched_objects);
+      i += ext_component_count;
+    }
+  }
+
+  template <PointerSize kPointerSize, bool kExtension>
+  static void DoRelocateSpaces(ArrayRef<const std::unique_ptr<ImageSpace>> spaces,
+                               int64_t base_diff64,
+                               gc::accounting::ContinuousSpaceBitmap* patched_objects)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    DCHECK(!spaces.empty());
+    const ImageHeader& first_header = spaces.front()->GetImageHeader();
+    uint32_t image_begin = reinterpret_cast32<uint32_t>(first_header.GetImageBegin());
+    uint32_t image_size = first_header.GetImageReservationSize();
+    DCHECK_NE(image_size, 0u);
+    uint32_t source_begin = kExtension ? first_header.GetBootImageBegin() : image_begin;
+    uint32_t source_size = kExtension ? first_header.GetBootImageSize() + image_size : image_size;
+    if (kExtension) {
+      DCHECK_EQ(first_header.GetBootImageBegin() + first_header.GetBootImageSize(), image_begin);
+    }
+    int64_t current_diff64 = kExtension
+        ? static_cast<int64_t>(reinterpret_cast32<uint32_t>(spaces.front()->Begin())) -
+              static_cast<int64_t>(image_begin)
+        : base_diff64;
+    uint32_t base_diff = static_cast<uint32_t>(base_diff64);
+    uint32_t current_diff = static_cast<uint32_t>(current_diff64);
+
+    // For boot image the main visitor is a SimpleRelocateVisitor. For the boot image extension we
+    // mostly use a SplitRelocationVisitor but some work can still use the SimpleRelocationVisitor.
+    using MainRelocateVisitor = typename std::conditional<
+        kExtension, SplitRangeRelocateVisitor, SimpleRelocateVisitor>::type;
+    SimpleRelocateVisitor simple_relocate_visitor(current_diff, image_begin, image_size);
+    MainRelocateVisitor main_relocate_visitor(
+        base_diff, current_diff, /*bound=*/ image_begin, source_begin, source_size);
+
+    using MainPatchRelocateVisitor =
+        PatchObjectVisitor<kPointerSize, MainRelocateVisitor, MainRelocateVisitor>;
+    using SimplePatchRelocateVisitor =
+        PatchObjectVisitor<kPointerSize, SimpleRelocateVisitor, SimpleRelocateVisitor>;
+    MainPatchRelocateVisitor main_patch_object_visitor(main_relocate_visitor,
+                                                       main_relocate_visitor);
+    SimplePatchRelocateVisitor simple_patch_object_visitor(simple_relocate_visitor,
+                                                           simple_relocate_visitor);
+
+    // Retrieve the Class.class, Method.class and Constructor.class needed in the loops below.
+    ObjPtr<mirror::Class> class_class;
+    ObjPtr<mirror::Class> method_class;
+    ObjPtr<mirror::Class> constructor_class;
+    {
+      ObjPtr<mirror::ObjectArray<mirror::Object>> image_roots =
+          simple_relocate_visitor(first_header.GetImageRoots<kWithoutReadBarrier>().Ptr());
+      DCHECK(!patched_objects->Test(image_roots.Ptr()));
+
+      SimpleRelocateVisitor base_relocate_visitor(
+          base_diff,
+          source_begin,
+          kExtension ? source_size - image_size : image_size);
+      int32_t class_roots_index = enum_cast<int32_t>(ImageHeader::kClassRoots);
+      DCHECK_LT(class_roots_index, image_roots->GetLength<kVerifyNone>());
+      ObjPtr<mirror::ObjectArray<mirror::Class>> class_roots =
+          ObjPtr<mirror::ObjectArray<mirror::Class>>::DownCast(base_relocate_visitor(
+              image_roots->GetWithoutChecks<kVerifyNone>(class_roots_index).Ptr()));
+      if (kExtension) {
+        DCHECK(patched_objects->Test(class_roots.Ptr()));
+        class_class = GetClassRoot<mirror::Class, kWithoutReadBarrier>(class_roots);
+        method_class = GetClassRoot<mirror::Method, kWithoutReadBarrier>(class_roots);
+        constructor_class = GetClassRoot<mirror::Constructor, kWithoutReadBarrier>(class_roots);
+      } else {
+        DCHECK(!patched_objects->Test(class_roots.Ptr()));
+        class_class = simple_relocate_visitor(
+            GetClassRoot<mirror::Class, kWithoutReadBarrier>(class_roots).Ptr());
+        method_class = simple_relocate_visitor(
+            GetClassRoot<mirror::Method, kWithoutReadBarrier>(class_roots).Ptr());
+        constructor_class = simple_relocate_visitor(
+            GetClassRoot<mirror::Constructor, kWithoutReadBarrier>(class_roots).Ptr());
+      }
+    }
+
     for (const std::unique_ptr<ImageSpace>& space : spaces) {
-      // First patch the image header. The `diff` is OK for patching 32-bit fields but
-      // the 64-bit method fields in the ImageHeader may need a negative `delta`.
-      reinterpret_cast<ImageHeader*>(space->Begin())->RelocateImage(
-          (reinterpret_cast32<uint32_t>(space->Begin()) >= -diff)  // Would `begin+diff` overflow?
-              ? -static_cast<int64_t>(-diff) : static_cast<int64_t>(diff));
+      // First patch the image header.
+      reinterpret_cast<ImageHeader*>(space->Begin())->RelocateImageReferences(current_diff64);
+      reinterpret_cast<ImageHeader*>(space->Begin())->RelocateBootImageReferences(base_diff64);
 
       // Patch fields and methods.
       const ImageHeader& image_header = space->GetImageHeader();
       image_header.VisitPackedArtFields([&](ArtField& field) REQUIRES_SHARED(Locks::mutator_lock_) {
-        patch_object_visitor.template PatchGcRoot</*kMayBeNull=*/ false>(
+        // Fields always reference class in the current image.
+        simple_patch_object_visitor.template PatchGcRoot</*kMayBeNull=*/ false>(
             &field.DeclaringClassRoot());
       }, space->Begin());
       image_header.VisitPackedArtMethods([&](ArtMethod& method)
           REQUIRES_SHARED(Locks::mutator_lock_) {
-        patch_object_visitor.PatchGcRoot(&method.DeclaringClassRoot());
+        main_patch_object_visitor.PatchGcRoot(&method.DeclaringClassRoot());
         void** data_address = PointerAddress(&method, ArtMethod::DataOffset(kPointerSize));
-        patch_object_visitor.PatchNativePointer(data_address);
+        main_patch_object_visitor.PatchNativePointer(data_address);
         void** entrypoint_address =
             PointerAddress(&method, ArtMethod::EntryPointFromQuickCompiledCodeOffset(kPointerSize));
-        patch_object_visitor.PatchNativePointer(entrypoint_address);
+        main_patch_object_visitor.PatchNativePointer(entrypoint_address);
       }, space->Begin(), kPointerSize);
       auto method_table_visitor = [&](ArtMethod* method) {
         DCHECK(method != nullptr);
-        return relocate_visitor(method);
+        return main_relocate_visitor(method);
       };
       image_header.VisitPackedImTables(method_table_visitor, space->Begin(), kPointerSize);
       image_header.VisitPackedImtConflictTables(method_table_visitor, space->Begin(), kPointerSize);
@@ -1612,7 +1767,8 @@ class ImageSpace::BootImageLoader {
         size_t read_count;
         InternTable::UnorderedSet temp_set(data, /*make_copy_of_data=*/ false, &read_count);
         for (GcRoot<mirror::String>& slot : temp_set) {
-          patch_object_visitor.template PatchGcRoot</*kMayBeNull=*/ false>(&slot);
+          // The intern table contains only strings in the current image.
+          simple_patch_object_visitor.template PatchGcRoot</*kMayBeNull=*/ false>(&slot);
         }
       }
 
@@ -1623,26 +1779,21 @@ class ImageSpace::BootImageLoader {
         size_t read_count;
         ClassTable::ClassSet temp_set(data, /*make_copy_of_data=*/ false, &read_count);
         DCHECK(!temp_set.empty());
-        ClassTableVisitor class_table_visitor(relocate_visitor);
+        // The class table contains only classes in the current image.
+        ClassTableVisitor class_table_visitor(simple_relocate_visitor);
         for (ClassTable::TableSlot& slot : temp_set) {
           slot.VisitRoot(class_table_visitor);
           ObjPtr<mirror::Class> klass = slot.Read<kWithoutReadBarrier>();
           DCHECK(klass != nullptr);
+          DCHECK(!patched_objects->Test(klass.Ptr()));
           patched_objects->Set(klass.Ptr());
-          patch_object_visitor.VisitClass(klass.Ptr());
-          if (kIsDebugBuild) {
-            mirror::Class* class_class = klass->GetClass<kVerifyNone, kWithoutReadBarrier>();
-            if (dcheck_class_class == nullptr) {
-              dcheck_class_class = class_class;
-            } else {
-              CHECK_EQ(class_class, dcheck_class_class);
-            }
-          }
+          main_patch_object_visitor.VisitClass(klass, class_class);
           // Then patch the non-embedded vtable and iftable.
           ObjPtr<mirror::PointerArray> vtable =
               klass->GetVTable<kVerifyNone, kWithoutReadBarrier>();
-          if (vtable != nullptr && !patched_objects->Set(vtable.Ptr())) {
-            patch_object_visitor.VisitPointerArray(vtable);
+          if ((kExtension ? simple_relocate_visitor.InSource(vtable.Ptr()) : vtable != nullptr) &&
+              !patched_objects->Set(vtable.Ptr())) {
+            main_patch_object_visitor.VisitPointerArray(vtable);
           }
           ObjPtr<mirror::IfTable> iftable = klass->GetIfTable<kVerifyNone, kWithoutReadBarrier>();
           if (iftable != nullptr) {
@@ -1650,11 +1801,13 @@ class ImageSpace::BootImageLoader {
             for (int32_t i = 0; i != ifcount; ++i) {
               ObjPtr<mirror::PointerArray> unpatched_ifarray =
                   iftable->GetMethodArrayOrNull<kVerifyNone, kWithoutReadBarrier>(i);
-              if (unpatched_ifarray != nullptr) {
+              if (kExtension ? simple_relocate_visitor.InSource(unpatched_ifarray.Ptr())
+                             : unpatched_ifarray != nullptr) {
                 // The iftable has not been patched, so we need to explicitly adjust the pointer.
-                ObjPtr<mirror::PointerArray> ifarray = relocate_visitor(unpatched_ifarray.Ptr());
+                ObjPtr<mirror::PointerArray> ifarray =
+                    simple_relocate_visitor(unpatched_ifarray.Ptr());
                 if (!patched_objects->Set(ifarray.Ptr())) {
-                  patch_object_visitor.VisitPointerArray(ifarray);
+                  main_patch_object_visitor.VisitPointerArray(ifarray);
                 }
               }
             }
@@ -1663,30 +1816,7 @@ class ImageSpace::BootImageLoader {
       }
     }
 
-    // Patch class roots now, so that we can recognize mirror::Method and mirror::Constructor.
-    ObjPtr<mirror::Class> method_class;
-    ObjPtr<mirror::Class> constructor_class;
-    {
-      const ImageSpace* space = spaces.front().get();
-      const ImageHeader& image_header = space->GetImageHeader();
-
-      ObjPtr<mirror::ObjectArray<mirror::Object>> image_roots =
-          image_header.GetImageRoots<kWithoutReadBarrier>();
-      patched_objects->Set(image_roots.Ptr());
-      patch_object_visitor.VisitObject(image_roots.Ptr());
-
-      ObjPtr<mirror::ObjectArray<mirror::Class>> class_roots =
-          ObjPtr<mirror::ObjectArray<mirror::Class>>::DownCast(
-              image_header.GetImageRoot<kWithoutReadBarrier>(ImageHeader::kClassRoots));
-      patched_objects->Set(class_roots.Ptr());
-      patch_object_visitor.VisitObject(class_roots.Ptr());
-
-      method_class = GetClassRoot<mirror::Method, kWithoutReadBarrier>(class_roots);
-      constructor_class = GetClassRoot<mirror::Constructor, kWithoutReadBarrier>(class_roots);
-    }
-
-    for (size_t s = 0u, size = spaces.size(); s != size; ++s) {
-      const ImageSpace* space = spaces[s].get();
+    for (const std::unique_ptr<ImageSpace>& space : spaces) {
       const ImageHeader& image_header = space->GetImageHeader();
 
       static_assert(IsAligned<kObjectAlignment>(sizeof(ImageHeader)), "Header alignment check");
@@ -1694,21 +1824,22 @@ class ImageSpace::BootImageLoader {
       DCHECK_ALIGNED(objects_end, kObjectAlignment);
       for (uint32_t pos = sizeof(ImageHeader); pos != objects_end; ) {
         mirror::Object* object = reinterpret_cast<mirror::Object*>(space->Begin() + pos);
+        // Note: use Test() rather than Set() as this is the last time we're checking this object.
         if (!patched_objects->Test(object)) {
           // This is the last pass over objects, so we do not need to Set().
-          patch_object_visitor.VisitObject(object);
+          main_patch_object_visitor.VisitObject(object);
           ObjPtr<mirror::Class> klass = object->GetClass<kVerifyNone, kWithoutReadBarrier>();
           if (klass->IsDexCacheClass<kVerifyNone>()) {
             // Patch dex cache array pointers and elements.
             ObjPtr<mirror::DexCache> dex_cache =
                 object->AsDexCache<kVerifyNone, kWithoutReadBarrier>();
-            patch_object_visitor.VisitDexCacheArrays(dex_cache);
+            main_patch_object_visitor.VisitDexCacheArrays(dex_cache);
           } else if (klass == method_class || klass == constructor_class) {
             // Patch the ArtMethod* in the mirror::Executable subobject.
             ObjPtr<mirror::Executable> as_executable =
                 ObjPtr<mirror::Executable>::DownCast(object);
             ArtMethod* unpatched_method = as_executable->GetArtMethod<kVerifyNone>();
-            ArtMethod* patched_method = relocate_visitor(unpatched_method);
+            ArtMethod* patched_method = main_relocate_visitor(unpatched_method);
             as_executable->SetArtMethod</*kTransactionActive=*/ false,
                                         /*kCheckTransaction=*/ true,
                                         kVerifyNone>(patched_method);
@@ -1725,18 +1856,20 @@ class ImageSpace::BootImageLoader {
     TimingLogger::ScopedTiming timing("MaybeRelocateSpaces", logger);
     ImageSpace* first_space = spaces.front().get();
     const ImageHeader& first_space_header = first_space->GetImageHeader();
-    uint32_t diff =
-        static_cast<uint32_t>(first_space->Begin() - first_space_header.GetImageBegin());
+    int64_t base_diff64 =
+        static_cast<int64_t>(reinterpret_cast32<uint32_t>(first_space->Begin())) -
+        static_cast<int64_t>(reinterpret_cast32<uint32_t>(first_space_header.GetImageBegin()));
     if (!relocate_) {
-      DCHECK_EQ(diff, 0u);
+      DCHECK_EQ(base_diff64, 0);
       return;
     }
 
+    ArrayRef<const std::unique_ptr<ImageSpace>> spaces_ref(spaces);
     PointerSize pointer_size = first_space_header.GetPointerSize();
     if (pointer_size == PointerSize::k64) {
-      DoRelocateSpaces<PointerSize::k64>(spaces, diff);
+      DoRelocateSpaces<PointerSize::k64>(spaces_ref, base_diff64);
     } else {
-      DoRelocateSpaces<PointerSize::k32>(spaces, diff);
+      DoRelocateSpaces<PointerSize::k32>(spaces_ref, base_diff64);
     }
   }
 

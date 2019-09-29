@@ -51,6 +51,7 @@
 #include "dex/dex_file_loader.h"
 #include "dex/dex_file_types.h"
 #include "dex/type_reference.h"
+#include "profile/profile_boot_info.h"
 #include "profile/profile_compilation_info.h"
 #include "profile_assistant.h"
 
@@ -225,6 +226,7 @@ class ProfMan final {
       dump_only_(false),
       dump_classes_and_methods_(false),
       generate_boot_image_profile_(false),
+      generate_boot_profile_(false),
       dump_output_to_fd_(kInvalidFd),
       test_profile_num_dex_(kDefaultTestProfileNumDex),
       test_profile_method_percerntage_(kDefaultTestProfileMethodPercentage),
@@ -268,6 +270,8 @@ class ProfMan final {
         create_profile_from_file_ = std::string(option.substr(strlen("--create-profile-from=")));
       } else if (StartsWith(option, "--dump-output-to-fd=")) {
         ParseUintOption(raw_option, "--dump-output-to-fd=", &dump_output_to_fd_);
+      } else if (option == "--generate-boot-profile") {
+        generate_boot_profile_ = true;
       } else if (option == "--generate-boot-image-profile") {
         generate_boot_image_profile_ = true;
       } else if (StartsWith(option, "--boot-image-class-threshold=")) {
@@ -800,7 +804,8 @@ class ProfMan final {
 
   // Find class klass_descriptor in the given dex_files and store its reference
   // in the out parameter class_ref.
-  // Return true if the definition of the class was found in any of the dex_files.
+  // Return true if the definition or a reference of the class was found in any
+  // of the dex_files.
   bool FindClass(const std::vector<std::unique_ptr<const DexFile>>& dex_files,
                  const std::string& klass_descriptor,
                  /*out*/TypeReference* class_ref) {
@@ -825,14 +830,22 @@ class ProfMan final {
         continue;
       }
       dex::TypeIndex type_index = dex_file->GetIndexForTypeId(*type_id);
+      *class_ref = TypeReference(dex_file, type_index);
+
       if (dex_file->FindClassDef(type_index) == nullptr) {
         // Class is only referenced in the current dex file but not defined in it.
+        // We use its current type reference, but keep looking for its
+        // definition.
+        // Note that array classes fall into that category, as they do not have
+        // a class definition.
         continue;
       }
-      *class_ref = TypeReference(dex_file, type_index);
       return true;
     }
-    return false;
+    // If we arrive here, we haven't found a class definition. If the dex file
+    // of the class reference is not null, then we have found a type reference,
+    // and we return that to the caller.
+    return (class_ref->dex_file != nullptr);
   }
 
   // Find the method specified by method_spec in the class class_ref.
@@ -1065,6 +1078,28 @@ class ProfMan final {
     return true;
   }
 
+  bool ProcessBootLine(const std::vector<std::unique_ptr<const DexFile>>& dex_files,
+                       const std::string& line,
+                       ProfileBootInfo* boot_profiling_info) {
+    const size_t method_sep_index = line.find(kMethodSep, 0);
+    std::string klass_str = line.substr(0, method_sep_index);
+    std::string method_str = line.substr(method_sep_index + kMethodSep.size());
+
+    TypeReference class_ref(/* dex_file= */ nullptr, dex::TypeIndex());
+    if (!FindClass(dex_files, klass_str, &class_ref)) {
+      LOG(WARNING) << "Could not find class: " << klass_str;
+      return false;
+    }
+
+    const uint32_t method_index = FindMethodIndex(class_ref, method_str);
+    if (method_index == dex::kDexNoIndex) {
+      LOG(WARNING) << "Could not find method: " << line;
+      return false;
+    }
+    boot_profiling_info->Add(class_ref.dex_file, method_index);
+    return true;
+  }
+
   int OpenReferenceProfile() const {
     int fd = reference_profile_file_fd_;
     if (!FdIsValid(fd)) {
@@ -1081,6 +1116,54 @@ class ProfMan final {
       }
     }
     return fd;
+  }
+
+  // Create and store a ProfileBootInfo.
+  int CreateBootProfile() {
+    // Validate parameters for this command.
+    if (apk_files_.empty() && apks_fd_.empty()) {
+      Usage("APK files must be specified");
+    }
+    if (dex_locations_.empty()) {
+      Usage("DEX locations must be specified");
+    }
+    if (reference_profile_file_.empty() && !FdIsValid(reference_profile_file_fd_)) {
+      Usage("Reference profile must be specified with --reference-profile-file or "
+            "--reference-profile-file-fd");
+    }
+    if (!profile_files_.empty() || !profile_files_fd_.empty()) {
+      Usage("Profile must be specified with --reference-profile-file or "
+            "--reference-profile-file-fd");
+    }
+    // Open the profile output file if needed.
+    int fd = OpenReferenceProfile();
+    if (!FdIsValid(fd)) {
+        return -1;
+    }
+    // Read the user-specified list of methods.
+    std::unique_ptr<std::vector<std::string>>
+        user_lines(ReadCommentedInputFromFile<std::vector<std::string>>(
+            create_profile_from_file_.c_str(), nullptr));  // No post-processing.
+
+    // Open the dex files to look up classes and methods.
+    std::vector<std::unique_ptr<const DexFile>> dex_files;
+    OpenApkFilesFromLocations(&dex_files);
+
+    // Process the lines one by one and add the successful ones to the profile.
+    ProfileBootInfo info;
+
+    for (const auto& line : *user_lines) {
+      ProcessBootLine(dex_files, line, &info);
+    }
+
+    // Write the profile file.
+    CHECK(info.Save(fd));
+
+    if (close(fd) < 0) {
+      PLOG(WARNING) << "Failed to close descriptor";
+    }
+
+    return 0;
   }
 
   // Creates a profile from a human friendly textual representation.
@@ -1136,11 +1219,16 @@ class ProfMan final {
     return 0;
   }
 
-  bool ShouldCreateBootProfile() const {
+  bool ShouldCreateBootImageProfile() const {
     return generate_boot_image_profile_;
   }
 
-  int CreateBootProfile() {
+  bool ShouldCreateBootProfile() const {
+    return generate_boot_profile_;
+  }
+
+  // Create and store a ProfileCompilationInfo for the boot image.
+  int CreateBootImageProfile() {
     // Open the profile output file.
     const int reference_fd = OpenReferenceProfile();
     if (!FdIsValid(reference_fd)) {
@@ -1323,6 +1411,7 @@ class ProfMan final {
   bool dump_only_;
   bool dump_classes_and_methods_;
   bool generate_boot_image_profile_;
+  bool generate_boot_profile_;
   int dump_output_to_fd_;
   BootImageOptions boot_image_options_;
   std::string test_profile_;
@@ -1355,12 +1444,15 @@ static int profman(int argc, char** argv) {
   if (profman.ShouldOnlyDumpClassesAndMethods()) {
     return profman.DumpClassesAndMethods();
   }
+  if (profman.ShouldCreateBootProfile()) {
+    return profman.CreateBootProfile();
+  }
   if (profman.ShouldCreateProfile()) {
     return profman.CreateProfile();
   }
 
-  if (profman.ShouldCreateBootProfile()) {
-    return profman.CreateBootProfile();
+  if (profman.ShouldCreateBootImageProfile()) {
+    return profman.CreateBootImageProfile();
   }
 
   if (profman.ShouldCopyAndUpdateProfileKey()) {

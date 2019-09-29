@@ -273,9 +273,6 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      Example: --image-format=lz4");
   UsageError("      Default: uncompressed");
   UsageError("");
-  UsageError("  --image-classes=<classname-file>: specifies classes to include in an image.");
-  UsageError("      Example: --image=frameworks/base/preloaded-classes");
-  UsageError("");
   UsageError("  --base=<hex-address>: specifies the base address when creating a boot image.");
   UsageError("      Example: --base=0x50000000");
   UsageError("");
@@ -331,16 +328,6 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      method for compiler filter tuning.");
   UsageError("      Example: --large-method-max=%d", CompilerOptions::kDefaultLargeMethodThreshold);
   UsageError("      Default: %d", CompilerOptions::kDefaultLargeMethodThreshold);
-  UsageError("");
-  UsageError("  --small-method-max=<method-instruction-count>: threshold size for a small");
-  UsageError("      method for compiler filter tuning.");
-  UsageError("      Example: --small-method-max=%d", CompilerOptions::kDefaultSmallMethodThreshold);
-  UsageError("      Default: %d", CompilerOptions::kDefaultSmallMethodThreshold);
-  UsageError("");
-  UsageError("  --tiny-method-max=<method-instruction-count>: threshold size for a tiny");
-  UsageError("      method for compiler filter tuning.");
-  UsageError("      Example: --tiny-method-max=%d", CompilerOptions::kDefaultTinyMethodThreshold);
-  UsageError("      Default: %d", CompilerOptions::kDefaultTinyMethodThreshold);
   UsageError("");
   UsageError("  --num-dex-methods=<method-count>: threshold size for a small dex file for");
   UsageError("      compiler filter tuning. If the input has fewer than this many methods");
@@ -436,6 +423,10 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      existing data (instead of overwriting existing data with new data, which is");
   UsageError("      the default behavior). This option is only meaningful when used with");
   UsageError("      --dump-cfg.");
+  UsageError("");
+  UsageError("  --verbose-methods=<method-names>: Restrict dumped CFG data to methods whose name");
+  UsageError("      contain one of the method names passed as argument");
+  UsageError("      Example: --verbose-methods=toString,hashCode");
   UsageError("");
   UsageError("  --classpath-dir=<directory-path>: directory used to resolve relative class paths.");
   UsageError("");
@@ -668,8 +659,6 @@ class Dex2Oat final {
       dm_fd_(-1),
       zip_fd_(-1),
       image_base_(0U),
-      image_classes_zip_filename_(nullptr),
-      image_classes_filename_(nullptr),
       image_storage_mode_(ImageHeader::kStorageModeUncompressed),
       passes_to_run_filename_(nullptr),
       dirty_image_objects_filename_(nullptr),
@@ -844,18 +833,6 @@ class Dex2Oat final {
       boot_image_filename_ = parser_options->boot_image_filename;
     }
 
-    if (image_classes_filename_ != nullptr && !IsBootImage()) {
-      Usage("--image-classes should only be used with --image");
-    }
-
-    if (image_classes_filename_ != nullptr && !boot_image_filename_.empty()) {
-      Usage("--image-classes should not be used with --boot-image");
-    }
-
-    if (image_classes_zip_filename_ != nullptr && image_classes_filename_ == nullptr) {
-      Usage("--image-classes-zip should be used with --image-classes");
-    }
-
     if (dex_filenames_.empty() && zip_fd_ == -1) {
       Usage("Input must be supplied with either --dex-file or --zip-fd");
     }
@@ -886,7 +863,11 @@ class Dex2Oat final {
 
     if (boot_image_filename_.empty()) {
       if (image_base_ == 0) {
-        Usage("Non-zero --base not specified");
+        Usage("Non-zero --base not specified for boot image");
+      }
+    } else {
+      if (image_base_ != 0) {
+        Usage("Non-zero --base specified for app image or boot image extension");
       }
     }
 
@@ -894,13 +875,6 @@ class Dex2Oat final {
     const bool have_profile_fd = profile_file_fd_ != kInvalidFd;
     if (have_profile_file && have_profile_fd) {
       Usage("Profile file should not be specified with both --profile-file-fd and --profile-file");
-    }
-
-    if (have_profile_file || have_profile_fd) {
-      if (image_classes_filename_ != nullptr ||
-          image_classes_zip_filename_ != nullptr) {
-        Usage("Profile based image creation is not supported with image or compiled classes");
-      }
     }
 
     if (!parser_options->oat_symbols.empty()) {
@@ -963,16 +937,9 @@ class Dex2Oat final {
     // Fill some values into the key-value store for the oat header.
     key_value_store_.reset(new SafeMap<std::string, std::string>());
 
-    // Automatically force determinism for the boot image in a host build if read barriers
-    // are enabled, or if the default GC is CMS or MS. When the default GC is CMS
-    // (Concurrent Mark-Sweep), the GC is switched to a non-concurrent one by passing the
-    // option `-Xgc:nonconcurrent` (see below).
+    // Automatically force determinism for the boot image in a host build.
     if (!kIsTargetBuild && IsBootImage()) {
-      if (SupportsDeterministicCompilation()) {
-        force_determinism_ = true;
-      } else {
-        LOG(WARNING) << "Deterministic compilation is disabled.";
-      }
+      force_determinism_ = true;
     }
     compiler_options_->force_determinism_ = force_determinism_;
 
@@ -988,12 +955,6 @@ class Dex2Oat final {
     compiler_options_->compiling_with_core_image_ =
         !boot_image_filename_.empty() &&
         CompilerOptions::IsCoreImageFilename(boot_image_filename_);
-  }
-
-  static bool SupportsDeterministicCompilation() {
-    return (kUseReadBarrier ||
-            gc::kCollectorTypeDefault == gc::kCollectorTypeCMS ||
-            gc::kCollectorTypeDefault == gc::kCollectorTypeMS);
   }
 
   void ExpandOatAndImageFilenames() {
@@ -1134,8 +1095,6 @@ class Dex2Oat final {
     AssignIfExists(args, M::Watchdog, &parser_options->watch_dog_enabled);
     AssignIfExists(args, M::WatchdogTimeout, &parser_options->watch_dog_timeout_in_ms);
     AssignIfExists(args, M::Threads, &thread_count_);
-    AssignIfExists(args, M::ImageClasses, &image_classes_filename_);
-    AssignIfExists(args, M::ImageClassesZip, &image_classes_zip_filename_);
     AssignIfExists(args, M::Passes, &passes_to_run_filename_);
     AssignIfExists(args, M::BootImage, &parser_options->boot_image_filename);
     AssignIfExists(args, M::AndroidRoot, &android_root_);
@@ -1179,9 +1138,6 @@ class Dex2Oat final {
     AssignIfExists(args, M::CopyDexFiles, &copy_dex_files_);
 
     if (args.Exists(M::ForceDeterminism)) {
-      if (!SupportsDeterministicCompilation()) {
-        Usage("Option --force-determinism requires read barriers or a CMS/MS garbage collector");
-      }
       force_determinism_ = true;
     }
 
@@ -1462,8 +1418,6 @@ class Dex2Oat final {
           LOG(INFO) << "Image class " << s;
         }
       }
-      // Note: If we have a profile, classes previously loaded for the --image-classes
-      // option are overwritten here.
       compiler_options_->image_classes_.swap(image_classes);
     }
   }
@@ -1473,7 +1427,7 @@ class Dex2Oat final {
   dex2oat::ReturnCode Setup() {
     TimingLogger::ScopedTiming t("dex2oat Setup", timings_);
 
-    if (!PrepareImageClasses() || !PrepareDirtyObjects()) {
+    if (!PrepareDirtyObjects()) {
       return dex2oat::ReturnCode::kOther;
     }
 
@@ -1957,23 +1911,12 @@ class Dex2Oat final {
     }
 
     if (IsImage()) {
-      if (IsAppImage() && image_base_ == 0) {
+      if (!IsBootImage()) {
+        DCHECK_EQ(image_base_, 0u);
         gc::Heap* const heap = Runtime::Current()->GetHeap();
-        for (ImageSpace* image_space : heap->GetBootImageSpaces()) {
-          image_base_ = std::max(image_base_, RoundUp(
-              reinterpret_cast<uintptr_t>(image_space->GetImageHeader().GetOatFileEnd()),
-              kPageSize));
-        }
-        // The non moving space is right after the oat file. Put the preferred app image location
-        // right after the non moving space so that we ideally get a continuous immune region for
-        // the GC.
-        // Use the default non moving space capacity since dex2oat does not have a separate non-
-        // moving space. This means the runtime's non moving space space size will be as large
-        // as the growth limit for dex2oat, but smaller in the zygote.
-        const size_t non_moving_space_capacity = gc::Heap::kDefaultNonMovingSpaceCapacity;
-        image_base_ += non_moving_space_capacity;
-        VLOG(compiler) << "App image base=" << reinterpret_cast<void*>(image_base_);
+        image_base_ = heap->GetBootImagesStartAddress() + heap->GetBootImagesSize();
       }
+      VLOG(compiler) << "Image base=" << reinterpret_cast<void*>(image_base_);
 
       image_writer_.reset(new linker::ImageWriter(*compiler_options_,
                                                   image_base_,
@@ -2325,37 +2268,6 @@ class Dex2Oat final {
     return dex_files_size >= very_large_threshold_;
   }
 
-  bool PrepareImageClasses() {
-    // If --image-classes was specified, calculate the full list of classes to include in the image.
-    DCHECK(compiler_options_->image_classes_.empty());
-    if (image_classes_filename_ != nullptr) {
-      std::unique_ptr<HashSet<std::string>> image_classes =
-          ReadClasses(image_classes_zip_filename_, image_classes_filename_, "image");
-      if (image_classes == nullptr) {
-        return false;
-      }
-      compiler_options_->image_classes_.swap(*image_classes);
-    }
-    return true;
-  }
-
-  static std::unique_ptr<HashSet<std::string>> ReadClasses(const char* zip_filename,
-                                                           const char* classes_filename,
-                                                           const char* tag) {
-    std::unique_ptr<HashSet<std::string>> classes;
-    std::string error_msg;
-    if (zip_filename != nullptr) {
-      classes = ReadImageClassesFromZip(zip_filename, classes_filename, &error_msg);
-    } else {
-      classes = ReadImageClassesFromFile(classes_filename);
-    }
-    if (classes == nullptr) {
-      LOG(ERROR) << "Failed to create list of " << tag << " classes from '"
-                 << classes_filename << "': " << error_msg;
-    }
-    return classes;
-  }
-
   bool PrepareDirtyObjects() {
     if (dirty_image_objects_filename_ != nullptr) {
       dirty_image_objects_ = ReadCommentedInputFromFile<HashSet<std::string>>(
@@ -2509,26 +2421,6 @@ class Dex2Oat final {
     raw_options.push_back(std::make_pair("-XX:DisableHSpaceCompactForOOM", nullptr));
 
     if (compiler_options_->IsForceDeterminism()) {
-      // If we're asked to be deterministic, ensure non-concurrent GC for determinism.
-      //
-      // Note that with read barriers, this option is ignored, because Runtime::Init
-      // overrides the foreground GC to be gc::kCollectorTypeCC when instantiating
-      // gc::Heap. This is fine, as concurrent GC requests are not honored in dex2oat,
-      // which uses an unstarted runtime.
-      raw_options.push_back(std::make_pair("-Xgc:nonconcurrent", nullptr));
-
-      // The default LOS implementation (map) is not deterministic. So disable it.
-      raw_options.push_back(std::make_pair("-XX:LargeObjectSpace=disabled", nullptr));
-
-      // We also need to turn off the nonmoving space. For that, we need to disable HSpace
-      // compaction (done above) and ensure that neither foreground nor background collectors
-      // are concurrent.
-      //
-      // Likewise, this option is ignored with read barriers because Runtime::Init
-      // overrides the background GC to be gc::kCollectorTypeCCBackground, but that's
-      // fine too, for the same reason (see above).
-      raw_options.push_back(std::make_pair("-XX:BackgroundGC=nonconcurrent", nullptr));
-
       // To make identity hashcode deterministic, set a known seed.
       mirror::Object::SetHashCodeSeed(987654321U);
     }
@@ -2601,25 +2493,6 @@ class Dex2Oat final {
     image_writer_.reset();
 
     return true;
-  }
-
-  // Reads the class names (java.lang.Object) and returns a set of descriptors (Ljava/lang/Object;)
-  static std::unique_ptr<HashSet<std::string>> ReadImageClassesFromFile(
-      const char* image_classes_filename) {
-    std::function<std::string(const char*)> process = DotToDescriptor;
-    return ReadCommentedInputFromFile<HashSet<std::string>>(image_classes_filename, &process);
-  }
-
-  // Reads the class names (java.lang.Object) and returns a set of descriptors (Ljava/lang/Object;)
-  static std::unique_ptr<HashSet<std::string>> ReadImageClassesFromZip(
-        const char* zip_filename,
-        const char* image_classes_filename,
-        std::string* error_msg) {
-    std::function<std::string(const char*)> process = DotToDescriptor;
-    return ReadCommentedInputFromZip<HashSet<std::string>>(zip_filename,
-                                                           image_classes_filename,
-                                                           &process,
-                                                           error_msg);
   }
 
   // Read lines from the given file, dropping comments and empty lines. Post-process each line with
@@ -2769,8 +2642,6 @@ class Dex2Oat final {
   std::vector<const char*> runtime_args_;
   std::vector<std::string> image_filenames_;
   uintptr_t image_base_;
-  const char* image_classes_zip_filename_;
-  const char* image_classes_filename_;
   ImageHeader::StorageMode image_storage_mode_;
   const char* passes_to_run_filename_;
   const char* dirty_image_objects_filename_;
@@ -2962,6 +2833,8 @@ static dex2oat::ReturnCode Dex2oat(int argc, char** argv) {
   // Parse arguments. Argument mistakes will lead to exit(EXIT_FAILURE) in UsageError.
   dex2oat->ParseArgs(argc, argv);
 
+  art::MemMap::Init();  // For ZipEntry::ExtractToMemMap, vdex and profiles.
+
   // If needed, process profile information for profile guided compilation.
   // This operation involves I/O.
   if (dex2oat->UseProfile()) {
@@ -2971,7 +2844,6 @@ static dex2oat::ReturnCode Dex2oat(int argc, char** argv) {
     }
   }
 
-  art::MemMap::Init();  // For ZipEntry::ExtractToMemMap, and vdex.
 
   // Check early that the result of compilation can be written
   if (!dex2oat->OpenFile()) {
