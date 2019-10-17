@@ -56,6 +56,7 @@ struct LogVerbosity {
   bool systrace_lock_logging;  // Enabled with "-verbose:sys-locks".
   bool agents;
   bool dex;  // Some dex access output etc.
+  bool plugin;  // Used by some plugins.
 };
 
 // Global log verbosity setting, initialized by InitLogging.
@@ -75,7 +76,7 @@ extern void InitLogging(char* argv[], AbortFunction& default_aborter);
 // performed.
 extern const char* GetCmdLine();
 
-// The command used to start the ART runtime, such as "/apex/com.android.runtime/bin/dalvikvm". If
+// The command used to start the ART runtime, such as "/apex/com.android.art/bin/dalvikvm". If
 // InitLogging hasn't been performed then just returns "art".
 extern const char* ProgramInvocationName();
 

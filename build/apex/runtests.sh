@@ -45,7 +45,7 @@ flattened_apex_p=$($ANDROID_BUILD_TOP/build/soong/soong_ui.bash --dumpvar-mode T
   || setup_die
 
 have_debugfs_p=false
-if [ ! $flattened_apex_p ]; then
+if $flattened_apex_p; then :; else
   if [ ! -e "$ANDROID_HOST_OUT/bin/debugfs" ] ; then
     say "Could not find debugfs, building now."
     build/soong/soong_ui.bash --make-mode debugfs-host || die "Cannot build debugfs"
@@ -127,10 +127,10 @@ function fail_check {
 # Test all modules
 
 apex_modules=(
-  "com.android.runtime.release"
-  "com.android.runtime.debug"
-  "com.android.runtime.testing"
-  "com.android.runtime.host"
+  "com.android.art.release"
+  "com.android.art.debug"
+  "com.android.art.testing"
+  "com.android.art.host"
 )
 
 # Build the APEX packages (optional).

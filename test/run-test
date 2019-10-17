@@ -543,7 +543,11 @@ function err_echo() {
 # Cannot use readlink -m, as it does not exist on Mac.
 # Fallback to nuclear option:
 noncanonical_tmp_dir=$tmp_dir
-tmp_dir="`cd $oldwd ; python -c "import os; print os.path.realpath('$tmp_dir')"`"
+tmp_dir="`cd $oldwd ; python -c "import os; import sys; sys.stdout.write(os.path.realpath('$tmp_dir'))"`"
+if [ -z $tmp_dir ] ; then
+  err_echo "Failed to resolve $tmp_dir"
+  exit 1
+fi
 mkdir -p $tmp_dir
 
 # Add thread suspend timeout flag
@@ -811,7 +815,7 @@ if [ "$usage" = "yes" ]; then
         echo "                          (/apex/com.android.i18n by default)."
         echo "    --android-runtime-root [path]"
         echo "                          The path on target for the Android Runtime root."
-        echo "                          (/apex/com.android.runtime by default)."
+        echo "                          (/apex/com.android.art by default)."
         echo "    --android-tzdata-root [path]"
         echo "                          The path on target for the Android Time Zone Data root."
         echo "                          (/apex/com.android.tzdata by default)."

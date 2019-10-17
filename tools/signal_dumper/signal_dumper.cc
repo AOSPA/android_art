@@ -449,7 +449,7 @@ void DumpABI(pid_t forked_pid) {
       abi_str = "x86_64";
       break;
   }
-  std::cerr << "ABI: '" << abi_str << "'" << std::endl;
+  LOG(ERROR) << "ABI: '" << abi_str << "'" << std::endl;
 }
 
 }  // namespace ptrace
@@ -515,8 +515,7 @@ void DumpThread(pid_t pid,
                 const std::string* addr2line_path,
                 const char* prefix,
                 BacktraceMap* map) {
-  // Use std::cerr to avoid the LOG prefix.
-  std::cerr << std::endl << "=== pid: " << pid << " tid: " << tid << " ===" << std::endl;
+  LOG(ERROR) << std::endl << "=== pid: " << pid << " tid: " << tid << " ===" << std::endl;
 
   constexpr uint32_t kMaxWaitMicros = 1000 * 1000;  // 1s.
   if (pid != tid && !WaitForSigStopped(tid, kMaxWaitMicros)) {
@@ -574,19 +573,19 @@ void DumpThread(pid_t pid,
       }
       oss << ")";
     }
-    std::cerr << oss.str() << std::endl;
+    LOG(ERROR) << oss.str() << std::endl;
     if (try_addr2line && addr2line_path != nullptr) {
       addr2line::Addr2line(*addr2line_path,
                            it->map.name,
                            it->rel_pc,
-                           std::cerr,
+                           LOG_STREAM(ERROR),
                            prefix,
                            &addr2line_state);
     }
   }
 
   if (addr2line_state != nullptr) {
-    addr2line::Drain(0, prefix, &addr2line_state, std::cerr);
+    addr2line::Drain(0, prefix, &addr2line_state, LOG_STREAM(ERROR));
   }
 }
 
@@ -655,7 +654,7 @@ void WaitMainLoop(pid_t forked_pid, std::atomic<bool>* saw_wif_stopped_for_main)
 }
 
 [[noreturn]]
-void SetupAndWait(pid_t forked_pid, int signal) {
+void SetupAndWait(pid_t forked_pid, int signal, int timeout_exit_code) {
   timeout_signal::SignalSet signals;
   signals.Add(signal);
   signals.Block();
@@ -671,7 +670,7 @@ void SetupAndWait(pid_t forked_pid, int signal) {
 
     // Don't clean up. Just kill the child and exit.
     kill(forked_pid, SIGKILL);
-    _exit(1);
+    _exit(timeout_exit_code);
   });
 
   WaitMainLoop(forked_pid, &saw_wif_stopped_for_main);
@@ -681,16 +680,43 @@ void SetupAndWait(pid_t forked_pid, int signal) {
 }  // namespace art
 
 int main(int argc ATTRIBUTE_UNUSED, char** argv) {
+  android::base::InitLogging(argv);
+
   int signal = SIGRTMIN + 2;
+  int timeout_exit_code = 1;
 
   size_t index = 1u;
   CHECK(argv[index] != nullptr);
+
+  bool to_logcat = false;
+#ifdef __ANDROID__
+  if (strcmp(argv[index], "-l") == 0) {
+    index++;
+    CHECK(argv[index] != nullptr);
+    to_logcat = true;
+  }
+#endif
+  if (!to_logcat) {
+    android::base::SetLogger(android::base::StderrLogger);
+  }
+
   if (strcmp(argv[index], "-s") == 0) {
     index++;
     CHECK(argv[index] != nullptr);
     uint32_t signal_uint;
     CHECK(android::base::ParseUint(argv[index], &signal_uint)) << "Signal not a number.";
     signal = signal_uint;
+    index++;
+    CHECK(argv[index] != nullptr);
+  }
+
+  if (strcmp(argv[index], "-e") == 0) {
+    index++;
+    CHECK(argv[index] != nullptr);
+    uint32_t timeout_exit_code_uint;
+    CHECK(android::base::ParseUint(argv[index], &timeout_exit_code_uint))
+        << "Exit code not a number.";
+    timeout_exit_code = timeout_exit_code_uint;
     index++;
     CHECK(argv[index] != nullptr);
   }
@@ -713,6 +739,6 @@ int main(int argc ATTRIBUTE_UNUSED, char** argv) {
     __builtin_unreachable();
   }
 
-  art::SetupAndWait(pid, signal);
+  art::SetupAndWait(pid, signal, timeout_exit_code);
   __builtin_unreachable();
 }

@@ -528,18 +528,7 @@ class ReleaseTargetChecker:
 
     # Check internal libraries for ART.
     self._checker.check_prefer64_library('libart-disassembler')
-
-    # Check binaries for Bionic.
-    self._checker.check_multilib_executable('linker')
-    self._checker.check_multilib_executable('linker_asan')
-
-    # Check libraries for Bionic.
-    self._checker.check_native_library('bionic/libc')
-    self._checker.check_native_library('bionic/libdl')
-    self._checker.check_native_library('bionic/libm')
-    # ... and its internal dependencies
-    self._checker.check_native_library('libc_malloc_hooks')
-    self._checker.check_native_library('libc_malloc_debug')
+    self._checker.check_native_library('libperfetto_hprof')
 
     # Check exported native libraries for Managed Core Library.
     self._checker.check_native_library('libandroidicu')
@@ -553,12 +542,11 @@ class ReleaseTargetChecker:
     self._checker.check_native_library('libpac')
     self._checker.check_native_library('libz')
 
-    # Guest architecture proxy libraries currently end up in these
-    # subdirectories in x86 builds with native bridge.
-    # TODO(b/131155689): These are unused - fix the build rules to avoid
-    # creating them.
+    # TODO(b/139046641): Fix proper 2nd arch checks. For now, just ignore these
+    # directories.
+    self._checker.ignore_path('bin/arm')
     self._checker.ignore_path('lib/arm')
-    self._checker.ignore_path('lib64/arm64')
+    self._checker.ignore_path('lib64/arm')
 
 
 class ReleaseHostChecker:
@@ -634,6 +622,7 @@ class DebugTargetChecker:
     # Check ART internal libraries.
     self._checker.check_native_library('libdexfiled_external')
     self._checker.check_prefer64_library('libartd-disassembler')
+    self._checker.check_native_library('libperfetto_hprofd')
 
     # Check internal native library dependencies.
     #
@@ -912,6 +901,9 @@ class TestingTargetChecker:
     self._checker.check_native_library('libartd-disassembler')
     self._checker.check_native_library('libartd-simulator-container')
 
+    # Check ART test tools.
+    self._checker.check_executable('signal_dumper')
+
 
 class NoSuperfluousBinariesChecker:
   def __init__(self, checker):
@@ -1172,9 +1164,9 @@ def art_apex_test_default(test_parser):
 
   # TODO: Add host support
   configs = [
-    {'name': 'com.android.runtime.release', 'debug': False, 'testing': False, 'host': False},
-    {'name': 'com.android.runtime.debug',   'debug': True,  'testing': False, 'host': False},
-    {'name': 'com.android.runtime.testing', 'debug': False, 'testing': True,  'host': False},
+    {'name': 'com.android.art.release', 'debug': False, 'testing': False, 'host': False},
+    {'name': 'com.android.art.debug',   'debug': True,  'testing': False, 'host': False},
+    {'name': 'com.android.art.testing', 'debug': False, 'testing': True,  'host': False},
   ]
 
   for config in configs:

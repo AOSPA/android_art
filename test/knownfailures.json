@@ -442,7 +442,9 @@
             ".*method-handle.*",
             ".*varhandle.*",
             ".*var-handle.*",
-            "716-jli-jit-samples"
+            "716-jli-jit-samples",
+            "1975-hello-structural-transformation",
+            "1976-hello-structural-static-methods"
         ],
         "description": [
             "Tests for bytecodes introduced after DEX version 037 that are unsupported by",
@@ -502,7 +504,8 @@
             "909-attach-agent",
             "924-threads",
             "981-dedup-original-dex",
-            "1900-track-alloc"
+            "1900-track-alloc",
+            "2230-profile-save-hotness"
         ],
         "description": ["Tests that require exact knowledge of the deoptimization state, the ",
                         "number of plugins and agents, or breaks other openjdkjvmti assumptions."],
@@ -1093,7 +1096,8 @@
           "1940-ddms-ext",
           "1945-proxy-method-arguments",
           "1946-list-descriptors",
-          "1947-breakpoint-redefine-deopt"
+          "1947-breakpoint-redefine-deopt",
+          "2230-profile-save-hotness"
         ],
         "variant": "jvm",
         "bug": "b/73888836",
@@ -1119,7 +1123,16 @@
                   "1957-error-ext",
                   "1972-jni-id-swap-indices",
                   "1973-jni-id-swap-pointer",
-                  "1974-resize-array"
+                  "1974-resize-array",
+                  "1975-hello-structural-transformation",
+                  "1976-hello-structural-static-methods",
+                  "1977-hello-structural-obsolescence",
+                  "1978-regular-obsolete-then-structural-obsolescence",
+                  "1979-threaded-structural-transformation",
+                  "1980-obsolete-object-cleared",
+                  "1981-structural-redef-private-method-handles",
+                  "1982-no-virtuals-structural-redefinition",
+                  "1983-structural-redefinition-failures"
                 ],
         "variant": "jvm",
         "description": ["Doesn't run on RI."]
