@@ -774,7 +774,7 @@ extern "C" uint64_t artQuickToInterpreterBridge(ArtMethod* method, Thread* self,
     self->PushShadowFrame(shadow_frame);
     self->EndAssertNoThreadSuspension(old_cause);
 
-    if (method->IsStatic()) {
+    if (NeedsClinitCheckBeforeCall(method)) {
       ObjPtr<mirror::Class> declaring_class = method->GetDeclaringClass();
       if (UNLIKELY(!declaring_class->IsVisiblyInitialized())) {
         // Ensure static method's class is initialized.
@@ -1456,12 +1456,15 @@ extern "C" const void* artQuickResolutionTrampoline(
                                << invoke_type << " " << orig_called->GetVtableIndex();
     }
 
-    // Ensure that the called method's class is initialized.
-    StackHandleScope<1> hs(soa.Self());
-    Handle<mirror::Class> called_class(hs.NewHandle(called->GetDeclaringClass()));
-    linker->EnsureInitialized(soa.Self(), called_class, true, true);
+    ObjPtr<mirror::Class> called_class = called->GetDeclaringClass();
+    if (NeedsClinitCheckBeforeCall(called) && !called_class->IsVisiblyInitialized()) {
+      // Ensure that the called method's class is initialized.
+      StackHandleScope<1> hs(soa.Self());
+      HandleWrapperObjPtr<mirror::Class> h_called_class(hs.NewHandleWrapper(&called_class));
+      linker->EnsureInitialized(soa.Self(), h_called_class, true, true);
+    }
     bool force_interpreter = self->IsForceInterpreter() && !called->IsNative();
-    if (LIKELY(called_class->IsInitialized())) {
+    if (called_class->IsInitialized() || called_class->IsInitializing()) {
       if (UNLIKELY(force_interpreter ||
                    Dbg::IsForcedInterpreterNeededForResolution(self, called))) {
         // If we are single-stepping or the called method is deoptimized (by a
@@ -1480,21 +1483,16 @@ extern "C" const void* artQuickResolutionTrampoline(
         code = GetQuickInstrumentationEntryPoint();
       } else {
         code = called->GetEntryPointFromQuickCompiledCode();
-      }
-    } else if (called_class->IsInitializing()) {
-      if (UNLIKELY(force_interpreter ||
-                   Dbg::IsForcedInterpreterNeededForResolution(self, called))) {
-        // If we are single-stepping or the called method is deoptimized (by a
-        // breakpoint, for example), then we have to execute the called method
-        // with the interpreter.
-        code = GetQuickToInterpreterBridge();
-      } else if (invoke_type == kStatic) {
-        // Class is still initializing, go to JIT or oat and grab code (trampoline must be
-        // left in place until class is initialized to stop races between threads).
-        code = linker->GetQuickOatCodeFor(called);
-      } else {
-        // No trampoline for non-static methods.
-        code = called->GetEntryPointFromQuickCompiledCode();
+        if (linker->IsQuickResolutionStub(code)) {
+          DCHECK_EQ(invoke_type, kStatic);
+          // Go to JIT or oat and grab code.
+          code = linker->GetQuickOatCodeFor(called);
+          if (called_class->IsInitialized()) {
+            // Only update the entrypoint once the class is initialized. Other
+            // threads still need to go through the resolution stub.
+            Runtime::Current()->GetInstrumentation()->UpdateMethodsCode(called, code);
+          }
+        }
       }
     } else {
       DCHECK(called_class->IsErroneous());
@@ -2379,6 +2377,24 @@ extern "C" TwoWordReturn artQuickGenericJniTrampoline(Thread* self, ArtMethod** 
   jit::Jit* jit = runtime->GetJit();
   if (jit != nullptr) {
     jit->MethodEntered(self, called);
+  }
+
+  // We can set the entrypoint of a native method to generic JNI even when the
+  // class hasn't been initialized, so we need to do the initialization check
+  // before invoking the native code.
+  if (NeedsClinitCheckBeforeCall(called)) {
+    ObjPtr<mirror::Class> declaring_class = called->GetDeclaringClass();
+    if (UNLIKELY(!declaring_class->IsVisiblyInitialized())) {
+      // Ensure static method's class is initialized.
+      StackHandleScope<1> hs(self);
+      Handle<mirror::Class> h_class(hs.NewHandle(declaring_class));
+      if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(self, h_class, true, true)) {
+        DCHECK(Thread::Current()->IsExceptionPending()) << called->PrettyMethod();
+        self->PopHandleScope();
+        // A negative value denotes an error.
+        return GetTwoWordFailureValue();
+      }
+    }
   }
 
   uint32_t cookie;

@@ -98,6 +98,7 @@
 #include "quick_exception_handler.h"
 #include "read_barrier-inl.h"
 #include "reflection.h"
+#include "reflective_handle_scope-inl.h"
 #include "runtime-inl.h"
 #include "runtime.h"
 #include "runtime_callbacks.h"
@@ -2461,6 +2462,12 @@ Thread::~Thread() {
   CHECK(tlsPtr_.flip_function == nullptr);
   CHECK_EQ(tls32_.is_transitioning_to_runnable, false);
 
+  if (kUseReadBarrier) {
+    Runtime::Current()->GetHeap()->ConcurrentCopyingCollector()
+        ->AssertNoThreadMarkStackMapping(this);
+    gc::accounting::AtomicStack<mirror::Object>* tl_mark_stack = GetThreadLocalMarkStack();
+    CHECK(tl_mark_stack == nullptr) << "mark-stack: " << tl_mark_stack;
+  }
   // Make sure we processed all deoptimization requests.
   CHECK(tlsPtr_.deoptimization_context_stack == nullptr) << "Missed deoptimization";
   CHECK(tlsPtr_.frame_id_to_shadow_frame == nullptr) <<
@@ -3956,6 +3963,14 @@ class RootCallbackVisitor {
   RootVisitor* const visitor_;
   const uint32_t tid_;
 };
+
+void Thread::VisitReflectiveTargets(ReflectiveValueVisitor* visitor) {
+  for (BaseReflectiveHandleScope* brhs = GetTopReflectiveHandleScope();
+       brhs != nullptr;
+       brhs = brhs->GetLink()) {
+    brhs->VisitTargets(visitor);
+  }
+}
 
 template <bool kPrecise>
 void Thread::VisitRoots(RootVisitor* visitor) {

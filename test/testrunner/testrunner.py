@@ -70,6 +70,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -86,10 +87,10 @@ from device_config import device_config
 #       does not push the value to run-test. run-test is somewhat complicated:
 #                      base: 25m  (large for ASAN)
 #        + timeout handling:  2m
-#        +   gcstress extra:  5m
+#        +   gcstress extra: 20m
 #        -----------------------
-#                            32m
-timeout = 2100 # 35 minutes
+#                            47m
+timeout = 3600 # 60 minutes
 
 # DISABLED_TEST_CONTAINER holds information about the disabled tests. It is a map
 # that has key as the test name (like 001-HelloWorld), and value as set of
@@ -151,7 +152,6 @@ def gather_test_info():
   of disabled test. It also maps various variants to types.
   """
   global TOTAL_VARIANTS_SET
-  global DISABLED_TEST_CONTAINER
   # TODO: Avoid duplication of the variant names in different lists.
   VARIANT_TYPE_DICT['run'] = {'ndebug', 'debug'}
   VARIANT_TYPE_DICT['target'] = {'target', 'host', 'jvm'}
@@ -180,7 +180,6 @@ def gather_test_info():
   for f in os.listdir(test_dir):
     if fnmatch.fnmatch(f, '[0-9]*'):
       RUN_TEST_SET.add(f)
-  DISABLED_TEST_CONTAINER = get_disabled_test_info()
 
 
 def setup_test_env():
@@ -399,8 +398,9 @@ def run_tests(tests):
       elif target == 'jvm':
         options_test += ' --jvm'
 
-      # Honor ART_TEST_CHROOT, ART_TEST_ANDROID_ROOT, ART_TEST_ANDROID_RUNTIME_ROOT,
-      # ART_TEST_ANDROID_I18N_ROOT, and ART_TEST_ANDROID_TZDATA_ROOT but only for target tests.
+      # Honor ART_TEST_CHROOT, ART_TEST_ANDROID_ROOT, ART_TEST_ANDROID_ART_ROOT,
+      # ART_TEST_ANDROID_I18N_ROOT, and ART_TEST_ANDROID_TZDATA_ROOT but only
+      # for target tests.
       if target == 'target':
         if env.ART_TEST_CHROOT:
           options_test += ' --chroot ' + env.ART_TEST_CHROOT
@@ -408,8 +408,8 @@ def run_tests(tests):
           options_test += ' --android-root ' + env.ART_TEST_ANDROID_ROOT
         if env.ART_TEST_ANDROID_I18N_ROOT:
             options_test += ' --android-i18n-root ' + env.ART_TEST_ANDROID_I18N_ROOT
-        if env.ART_TEST_ANDROID_RUNTIME_ROOT:
-          options_test += ' --android-runtime-root ' + env.ART_TEST_ANDROID_RUNTIME_ROOT
+        if env.ART_TEST_ANDROID_ART_ROOT:
+          options_test += ' --android-art-root ' + env.ART_TEST_ANDROID_ART_ROOT
         if env.ART_TEST_ANDROID_TZDATA_ROOT:
           options_test += ' --android-tzdata-root ' + env.ART_TEST_ANDROID_TZDATA_ROOT
 
@@ -566,11 +566,14 @@ def run_test(command, test, test_variant, test_name):
     else:
       test_skipped = False
       test_start_time = time.monotonic()
+      if verbose:
+        print_text("Starting %s at %s\n" % (test_name, test_start_time))
       if gdb:
-        proc = subprocess.Popen(command.split(), stderr=subprocess.STDOUT, universal_newlines=True)
+        proc = subprocess.Popen(command.split(), stderr=subprocess.STDOUT,
+                                universal_newlines=True, start_new_session=True)
       else:
         proc = subprocess.Popen(command.split(), stderr=subprocess.STDOUT, stdout = subprocess.PIPE,
-                                universal_newlines=True)
+                                universal_newlines=True, start_new_session=True)
       script_output = proc.communicate(timeout=timeout)[0]
       test_passed = not proc.wait()
       test_time_seconds = time.monotonic() - test_start_time
@@ -588,14 +591,33 @@ def run_test(command, test, test_variant, test_name):
     else:
       return (test_name, 'PASS', None, test_time)
   except subprocess.TimeoutExpired as e:
+    if verbose:
+      print_text("Timeout of %s at %s\n" % (test_name, time.monotonic()))
     test_time_seconds = time.monotonic() - test_start_time
     test_time = datetime.timedelta(seconds=test_time_seconds)
     failed_tests.append((test_name, 'Timed out in %d seconds' % timeout))
 
+    # HACK(b/142039427): Print extra backtraces on timeout.
+    if "-target-" in test_name:
+      for i in range(8):
+        proc_name = "dalvikvm" + test_name[-2:]
+        pidof = subprocess.run(["adb", "shell", "pidof", proc_name], stdout=subprocess.PIPE)
+        for pid in pidof.stdout.decode("ascii").split():
+          if i >= 4:
+            print_text("Backtrace of %s at %s\n" % (pid, time.monotonic()))
+            subprocess.run(["adb", "shell", "debuggerd", pid])
+            time.sleep(10)
+          task_dir = "/proc/%s/task" % pid
+          tids = subprocess.run(["adb", "shell", "ls", task_dir], stdout=subprocess.PIPE)
+          for tid in tids.stdout.decode("ascii").split():
+            for status in ["stat", "status"]:
+              filename = "%s/%s/%s" % (task_dir, tid, status)
+              print_text("Content of %s\n" % (filename))
+              subprocess.run(["adb", "shell", "cat", filename])
+        time.sleep(60)
+
     # The python documentation states that it is necessary to actually kill the process.
-    # Note: This is not the correct solution, really, as it will not kill descendants. We would need
-    #       something more complex, e.g., killing by session ID (e.g., in a trap in run-test).
-    proc.kill()
+    os.killpg(proc.pid, signal.SIGKILL)
     script_output = proc.communicate()
 
     return (test_name, 'TIMEOUT', 'Timed out in %d seconds\n%s' % (timeout, command), test_time)
@@ -685,6 +707,7 @@ def verify_knownfailure_entry(entry):
       'description' : (list, str),
       'bug' : (str,),
       'variant' : (str,),
+      'devices': (list, str),
       'env_vars' : (dict,),
   }
   for field in entry:
@@ -695,7 +718,7 @@ def verify_knownfailure_entry(entry):
           field,
           str(entry)))
 
-def get_disabled_test_info():
+def get_disabled_test_info(device_name):
   """Generate set of known failures.
 
   It parses the art/test/knownfailures.json file to generate the list of
@@ -717,10 +740,23 @@ def get_disabled_test_info():
       tests = [tests]
     patterns = failure.get("test_patterns", [])
     if (not isinstance(patterns, list)):
-      raise ValueError("test_patters is not a list in %s" % failure)
+      raise ValueError("test_patterns is not a list in %s" % failure)
 
     tests += [f for f in RUN_TEST_SET if any(re.match(pat, f) is not None for pat in patterns)]
     variants = parse_variants(failure.get('variant'))
+
+    # Treat a '"devices": "<foo>"' equivalent to 'target' variant if
+    # "foo" is present in "devices".
+    device_names = failure.get('devices', [])
+    if isinstance(device_names, str):
+      device_names = [device_names]
+    if len(device_names) != 0:
+      if device_name in device_names:
+        variants.add('target')
+      else:
+        # Skip adding test info as device_name is not present in "devices" entry.
+        continue
+
     env_vars = failure.get('env_vars')
 
     if check_env_vars(env_vars):
@@ -734,6 +770,10 @@ def get_disabled_test_info():
           disabled_test_info[test] = variants
   return disabled_test_info
 
+def gather_disabled_test_info():
+  global DISABLED_TEST_CONTAINER
+  device_name = get_device_name() if 'target' in _user_input_variants['target'] else None
+  DISABLED_TEST_CONTAINER = get_disabled_test_info(device_name)
 
 def check_env_vars(env_vars):
   """Checks if the env variables are set as required to run the test.
@@ -1056,6 +1096,7 @@ def main():
   gather_test_info()
   user_requested_tests = parse_option()
   setup_test_env()
+  gather_disabled_test_info()
   if build:
     build_targets = ''
     if 'host' in _user_input_variants['target']:

@@ -132,7 +132,7 @@ class OatWriter {
   //   - AddVdexDexFilesSource().
   // Then the user must call in order
   //   - WriteAndOpenDexFiles()
-  //   - Initialize()
+  //   - StartRoData()
   //   - WriteVerifierDeps()
   //   - WriteQuickeningInfo()
   //   - WriteChecksumsAndVdexHeader()
@@ -167,19 +167,20 @@ class OatWriter {
   dchecked_vector<std::string> GetSourceLocations() const;
 
   // Write raw dex files to the vdex file, mmap the file and open the dex files from it.
-  // Supporting data structures are written into the .rodata section of the oat file.
   // The `verify` setting dictates whether the dex file verifier should check the dex files.
   // This is generally the case, and should only be false for tests.
   // If `update_input_vdex` is true, then this method won't actually write the dex files,
   // and the compiler will just re-use the existing vdex file.
   bool WriteAndOpenDexFiles(File* vdex_file,
-                            OutputStream* oat_rodata,
-                            SafeMap<std::string, std::string>* key_value_store,
                             bool verify,
                             bool update_input_vdex,
                             CopyOption copy_dex_files,
                             /*out*/ std::vector<MemMap>* opened_dex_files_map,
                             /*out*/ std::vector<std::unique_ptr<const DexFile>>* opened_dex_files);
+  // Start writing .rodata, including supporting data structures for dex files.
+  bool StartRoData(const std::vector<const DexFile*>& dex_files,
+                   OutputStream* oat_rodata,
+                   SafeMap<std::string, std::string>* key_value_store);
   // Initialize the writer with the given parameters.
   void Initialize(const CompilerDriver* compiler_driver,
                   ImageWriter* image_writer,
@@ -339,9 +340,9 @@ class OatWriter {
 
   bool RecordOatDataOffset(OutputStream* out);
   bool WriteTypeLookupTables(OutputStream* oat_rodata,
-                             const std::vector<std::unique_ptr<const DexFile>>& opened_dex_files);
+                             const std::vector<const DexFile*>& opened_dex_files);
   bool WriteDexLayoutSections(OutputStream* oat_rodata,
-                              const std::vector<std::unique_ptr<const DexFile>>& opened_dex_files);
+                              const std::vector<const DexFile*>& opened_dex_files);
   bool WriteCodeAlignment(OutputStream* out, uint32_t aligned_code_delta);
   bool WriteUpTo16BytesAlignment(OutputStream* out, uint32_t size, uint32_t* stat);
   void SetMultiOatRelativePatcherAdjustment();
@@ -355,6 +356,8 @@ class OatWriter {
 
   enum class WriteState {
     kAddingDexFileSources,
+    kStartRoData,
+    kInitialize,
     kPrepareLayout,
     kWriteRoData,
     kWriteText,

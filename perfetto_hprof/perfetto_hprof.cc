@@ -32,9 +32,11 @@
 #include "gc/scoped_gc_critical_section.h"
 #include "mirror/object-refvisitor-inl.h"
 #include "nativehelper/scoped_local_ref.h"
+#include "perfetto/profiling/normalize.h"
 #include "perfetto/trace/interned_data/interned_data.pbzero.h"
 #include "perfetto/trace/profiling/heap_graph.pbzero.h"
 #include "perfetto/trace/profiling/profile_common.pbzero.h"
+#include "perfetto/config/profiling/java_hprof_config.pbzero.h"
 #include "perfetto/tracing.h"
 #include "runtime-inl.h"
 #include "runtime_callbacks.h"
@@ -104,13 +106,71 @@ void ArmWatchdogOrDie() {
   }
 }
 
+constexpr size_t kMaxCmdlineSize = 512;
+
 class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
  public:
-  // TODO(fmayer): Change Client API and reject configs that do not target
-  // this process.
-  void OnSetup(const SetupArgs&) override {}
+  constexpr static perfetto::BufferExhaustedPolicy kBufferExhaustedPolicy =
+    perfetto::BufferExhaustedPolicy::kStall;
+  void OnSetup(const SetupArgs& args) override {
+    // This is on the heap as it triggers -Wframe-larger-than.
+    std::unique_ptr<perfetto::protos::pbzero::JavaHprofConfig::Decoder> cfg(
+        new perfetto::protos::pbzero::JavaHprofConfig::Decoder(
+          args.config->java_hprof_config_raw()));
+
+    uint64_t self_pid = static_cast<uint64_t>(getpid());
+    for (auto pid_it = cfg->pid(); pid_it; ++pid_it) {
+      if (*pid_it == self_pid) {
+        enabled_ = true;
+        return;
+      }
+    }
+
+    if (cfg->has_process_cmdline()) {
+      int fd = open("/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
+      if (fd == -1) {
+        PLOG(ERROR) << "failed to open /proc/self/cmdline";
+        return;
+      }
+      char cmdline[kMaxCmdlineSize];
+      ssize_t rd = read(fd, cmdline, sizeof(cmdline) - 1);
+      if (rd == -1) {
+        PLOG(ERROR) << "failed to read /proc/self/cmdline";
+      }
+      close(fd);
+      if (rd == -1) {
+        return;
+      }
+      cmdline[rd] = '\0';
+      char* cmdline_ptr = cmdline;
+      ssize_t sz = perfetto::profiling::NormalizeCmdLine(&cmdline_ptr, static_cast<size_t>(rd + 1));
+      if (sz == -1) {
+        PLOG(ERROR) << "failed to normalize cmdline";
+      }
+      for (auto it = cfg->process_cmdline(); it; ++it) {
+        std::string other = (*it).ToStdString();
+        // Append \0 to make this a C string.
+        other.resize(other.size() + 1);
+        char* other_ptr = &(other[0]);
+        ssize_t other_sz = perfetto::profiling::NormalizeCmdLine(&other_ptr, other.size());
+        if (other_sz == -1) {
+          PLOG(ERROR) << "failed to normalize other cmdline";
+          continue;
+        }
+        if (sz == other_sz && strncmp(cmdline_ptr, other_ptr, static_cast<size_t>(sz)) == 0) {
+          enabled_ = true;
+          return;
+        }
+      }
+    }
+  }
+
+  bool enabled() { return enabled_; }
 
   void OnStart(const StartArgs&) override {
+    if (!enabled()) {
+      return;
+    }
     art::MutexLock lk(art_thread(), GetStateMutex());
     if (g_state == State::kWaitForStart) {
       g_state = State::kStart;
@@ -131,6 +191,7 @@ class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
   }
 
  private:
+  bool enabled_ = false;
   static art::Thread* self_;
 };
 
@@ -199,7 +260,6 @@ class ReferredObjectsFinder {
  public:
   explicit ReferredObjectsFinder(
       std::vector<std::pair<std::string, art::mirror::Object*>>* referred_objects)
-      REQUIRES_SHARED(art::Locks::mutator_lock_)
       : referred_objects_(referred_objects) {}
 
   // For art::mirror::Object::VisitReferences.
@@ -231,6 +291,57 @@ class ReferredObjectsFinder {
   std::vector<std::pair<std::string, art::mirror::Object*>>* referred_objects_;
 };
 
+class RootFinder : public art::SingleRootVisitor {
+ public:
+  explicit RootFinder(
+    std::map<art::RootType, std::vector<art::mirror::Object*>>* root_objects)
+      : root_objects_(root_objects) {}
+
+  void VisitRoot(art::mirror::Object* root, const art::RootInfo& info) override {
+    (*root_objects_)[info.GetType()].emplace_back(root);
+  }
+
+ private:
+  // We can use a raw Object* pointer here, because there are no concurrent GC threads after the
+  // fork.
+  std::map<art::RootType, std::vector<art::mirror::Object*>>* root_objects_;
+};
+
+perfetto::protos::pbzero::HeapGraphRoot::Type ToProtoType(art::RootType art_type) {
+  switch (art_type) {
+    case art::kRootUnknown:
+      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_UNKNOWN;
+    case art::kRootJNIGlobal:
+      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_JNI_GLOBAL;
+    case art::kRootJNILocal:
+      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_JNI_LOCAL;
+    case art::kRootJavaFrame:
+      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_JAVA_FRAME;
+    case art::kRootNativeStack:
+      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_NATIVE_STACK;
+    case art::kRootStickyClass:
+      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_STICKY_CLASS;
+    case art::kRootThreadBlock:
+      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_THREAD_BLOCK;
+    case art::kRootMonitorUsed:
+      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_MONITOR_USED;
+    case art::kRootThreadObject:
+      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_THREAD_OBJECT;
+    case art::kRootInternedString:
+      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_INTERNED_STRING;
+    case art::kRootFinalizing:
+      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_FINALIZING;
+    case art::kRootDebugger:
+      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_DEBUGGER;
+    case art::kRootReferenceCleanup:
+      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_REFERENCE_CLEANUP;
+    case art::kRootVMInternal:
+      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_VM_INTERNAL;
+    case art::kRootJNIMonitor:
+      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_JNI_MONITOR;
+  }
+}
+
 void DumpPerfetto(art::Thread* self) {
   pid_t parent_pid = getpid();
   LOG(INFO) << "preparing to dump heap for " << parent_pid;
@@ -261,12 +372,32 @@ void DumpPerfetto(art::Thread* self) {
   JavaHprofDataSource::Trace(
       [parent_pid](JavaHprofDataSource::TraceContext ctx)
           NO_THREAD_SAFETY_ANALYSIS {
+            {
+              auto ds = ctx.GetDataSourceLocked();
+              if (!ds || !ds->enabled()) {
+                LOG(INFO) << "skipping irrelevant data source.";
+                return;
+              }
+            }
             LOG(INFO) << "dumping heap for " << parent_pid;
             Writer writer(parent_pid, &ctx);
             // Make sure that intern ID 0 (default proto value for a uint64_t) always maps to ""
             // (default proto value for a string).
             std::map<std::string, uint64_t> interned_fields{{"", 0}};
             std::map<std::string, uint64_t> interned_types{{"", 0}};
+
+            std::map<art::RootType, std::vector<art::mirror::Object*>> root_objects;
+            RootFinder rcf(&root_objects);
+            art::Runtime::Current()->VisitRoots(&rcf);
+            for (const auto& p : root_objects) {
+              const art::RootType root_type = p.first;
+              const std::vector<art::mirror::Object*>& children = p.second;
+              perfetto::protos::pbzero::HeapGraphRoot* root_proto =
+                writer.GetHeapGraph()->add_roots();
+              root_proto->set_root_type(ToProtoType(root_type));
+              for (art::mirror::Object* obj : children)
+                root_proto->add_object_ids(reinterpret_cast<uintptr_t>(obj));
+            }
 
             art::Runtime::Current()->GetHeap()->VisitObjectsPaused(
                 [&writer, &interned_types, &interned_fields](

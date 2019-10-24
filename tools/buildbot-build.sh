@@ -14,6 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -e
+
 if [ ! -d art ]; then
   echo "Script needs to be run at the root of the android tree"
   exit 1
@@ -85,8 +87,8 @@ elif [[ $mode == "target" ]]; then
   make_command+=" com.android.runtime"
   # Build the Testing ART APEX (which is a superset of the Release and Debug ART APEXes).
   make_command+=" com.android.art.testing"
-  # Build the system linker configuration, which is needed to use the
-  # Runtime APEX's linker configuration.
+  # Build the system linker configuration, which is needed to use the ART APEX's
+  # linker configuration.
   make_command+=" ld.config.txt "
   # Build the bootstrap Bionic artifacts links (linker, libc, libdl, libm).
   # These targets create these symlinks:

@@ -37,6 +37,7 @@
 #include "debugger_interface.h"
 #include "dex/dex_file_loader.h"
 #include "dex/method_reference.h"
+#include "entrypoints/entrypoint_utils-inl.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "gc/accounting/bitmap-inl.h"
 #include "gc/allocator/dlmalloc.h"
@@ -117,6 +118,41 @@ class JitCodeCache::JniStubData {
   void SetCode(const void* code) {
     DCHECK(code != nullptr);
     code_ = code;
+  }
+
+  void UpdateEntryPoints(const void* entrypoint) REQUIRES_SHARED(Locks::mutator_lock_) {
+    DCHECK(IsCompiled());
+    DCHECK(entrypoint == OatQuickMethodHeader::FromCodePointer(GetCode())->GetEntryPoint());
+    instrumentation::Instrumentation* instrum = Runtime::Current()->GetInstrumentation();
+    for (ArtMethod* m : GetMethods()) {
+      // Because `m` might be in the process of being deleted:
+      // - Call the dedicated method instead of the more generic UpdateMethodsCode
+      // - Check the class status without a full read barrier; use ReadBarrier::IsMarked().
+      bool can_set_entrypoint = true;
+      if (NeedsClinitCheckBeforeCall(m)) {
+        // To avoid resurrecting an unreachable object, we must not use a full read
+        // barrier but we do not want to miss updating an entrypoint under common
+        // circumstances, i.e. during a GC the class becomes visibly initialized,
+        // the method becomes hot, we compile the thunk and want to update the
+        // entrypoint while the method's declaring class field still points to the
+        // from-space class object with the old status. Therefore we read the
+        // declaring class without a read barrier and check if it's already marked.
+        // If yes, we check the status of the to-space class object as intended.
+        // Otherwise, there is no to-space object and the from-space class object
+        // contains the most recent value of the status field; even if this races
+        // with another thread doing a read barrier and updating the status, that's
+        // no different from a race with a thread that just updates the status.
+        // Such race can happen only for the zygote method pre-compilation, as we
+        // otherwise compile only thunks for methods of visibly initialized classes.
+        ObjPtr<mirror::Class> klass = m->GetDeclaringClass<kWithoutReadBarrier>();
+        ObjPtr<mirror::Class> marked = ReadBarrier::IsMarked(klass.Ptr());
+        ObjPtr<mirror::Class> checked_klass = (marked != nullptr) ? marked : klass;
+        can_set_entrypoint = checked_klass->IsVisiblyInitialized();
+      }
+      if (can_set_entrypoint) {
+        instrum->UpdateNativeMethodsCodeToJitCode(m, entrypoint);
+      }
+    }
   }
 
   const void* GetCode() const {
@@ -321,49 +357,6 @@ const void* JitCodeCache::GetSavedEntryPointOfPreCompiledMethod(ArtMethod* metho
     }
   }
   return nullptr;
-}
-
-uint8_t* JitCodeCache::CommitCode(Thread* self,
-                                  JitMemoryRegion* region,
-                                  ArtMethod* method,
-                                  const uint8_t* code,
-                                  size_t code_size,
-                                  const uint8_t* stack_map,
-                                  size_t stack_map_size,
-                                  const uint8_t* roots_data,
-                                  const std::vector<Handle<mirror::Object>>& roots,
-                                  bool osr,
-                                  bool has_should_deoptimize_flag,
-                                  const ArenaSet<ArtMethod*>& cha_single_implementation_list) {
-  uint8_t* result = CommitCodeInternal(self,
-                                       region,
-                                       method,
-                                       code,
-                                       code_size,
-                                       stack_map,
-                                       stack_map_size,
-                                       roots_data,
-                                       roots,
-                                       osr,
-                                       has_should_deoptimize_flag,
-                                       cha_single_implementation_list);
-  if (result == nullptr) {
-    // Retry.
-    GarbageCollectCache(self);
-    result = CommitCodeInternal(self,
-                                region,
-                                method,
-                                code,
-                                code_size,
-                                stack_map,
-                                stack_map_size,
-                                roots_data,
-                                roots,
-                                osr,
-                                has_should_deoptimize_flag,
-                                cha_single_implementation_list);
-  }
-  return result;
 }
 
 bool JitCodeCache::WaitForPotentialCollectionToComplete(Thread* self) {
@@ -668,19 +661,17 @@ void JitCodeCache::WaitForPotentialCollectionToCompleteRunnable(Thread* self) {
   }
 }
 
-uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
-                                          JitMemoryRegion* region,
-                                          ArtMethod* method,
-                                          const uint8_t* code,
-                                          size_t code_size,
-                                          const uint8_t* stack_map,
-                                          size_t stack_map_size,
-                                          const uint8_t* roots_data,
-                                          const std::vector<Handle<mirror::Object>>& roots,
-                                          bool osr,
-                                          bool has_should_deoptimize_flag,
-                                          const ArenaSet<ArtMethod*>&
-                                              cha_single_implementation_list) {
+bool JitCodeCache::Commit(Thread* self,
+                          JitMemoryRegion* region,
+                          ArtMethod* method,
+                          ArrayRef<const uint8_t> reserved_code,
+                          ArrayRef<const uint8_t> code,
+                          ArrayRef<const uint8_t> reserved_data,
+                          const std::vector<Handle<mirror::Object>>& roots,
+                          ArrayRef<const uint8_t> stack_map,
+                          bool osr,
+                          bool has_should_deoptimize_flag,
+                          const ArenaSet<ArtMethod*>& cha_single_implementation_list) {
   DCHECK(!method->IsNative() || !osr);
 
   if (!method->IsNative()) {
@@ -689,6 +680,7 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
     DCheckRootsAreValid(roots, IsSharedRegion(*region));
   }
 
+  const uint8_t* roots_data = reserved_data.data();
   size_t root_table_size = ComputeRootTableSize(roots.size());
   const uint8_t* stack_map_data = roots_data + root_table_size;
 
@@ -696,19 +688,16 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
   // We need to make sure that there will be no jit-gcs going on and wait for any ongoing one to
   // finish.
   WaitForPotentialCollectionToCompleteRunnable(self);
-  const uint8_t* code_ptr = region->AllocateCode(
-      code, code_size, stack_map_data, has_should_deoptimize_flag);
+  const uint8_t* code_ptr = region->CommitCode(
+      reserved_code, code, stack_map_data, has_should_deoptimize_flag);
   if (code_ptr == nullptr) {
-    return nullptr;
+    return false;
   }
   OatQuickMethodHeader* method_header = OatQuickMethodHeader::FromCodePointer(code_ptr);
 
   // Commit roots and stack maps before updating the entry point.
-  if (!region->CommitData(roots_data, roots, stack_map, stack_map_size)) {
-    ScopedCodeCacheWrite ccw(*region);
-    uintptr_t allocation = FromCodeToAllocation(code_ptr);
-    region->FreeCode(reinterpret_cast<uint8_t*>(allocation));
-    return nullptr;
+  if (!region->CommitData(reserved_data, roots, stack_map)) {
+    return false;
   }
 
   number_of_compilations_++;
@@ -734,10 +723,7 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
     // Discard the code if any single-implementation assumptions are now invalid.
     if (UNLIKELY(!single_impl_still_valid)) {
       VLOG(jit) << "JIT discarded jitted code due to invalid single-implementation assumptions.";
-      ScopedCodeCacheWrite ccw(*region);
-      uintptr_t allocation = FromCodeToAllocation(code_ptr);
-      region->FreeCode(reinterpret_cast<uint8_t*>(allocation));
-      return nullptr;
+      return false;
     }
     DCHECK(cha_single_implementation_list.empty() || !Runtime::Current()->IsJavaDebuggable())
         << "Should not be using cha on debuggable apps/runs!";
@@ -755,12 +741,7 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
       DCHECK(ContainsElement(data->GetMethods(), method))
           << "Entry inserted in NotifyCompilationOf() should contain this method.";
       data->SetCode(code_ptr);
-      instrumentation::Instrumentation* instrum = Runtime::Current()->GetInstrumentation();
-      for (ArtMethod* m : data->GetMethods()) {
-        if (!class_linker->IsQuickResolutionStub(m->GetEntryPointFromQuickCompiledCode())) {
-          instrum->UpdateMethodsCode(m, method_header->GetEntryPoint());
-        }
-      }
+      data->UpdateEntryPoints(method_header->GetEntryPoint());
     } else {
       if (method->IsPreCompiled() && IsSharedRegion(*region)) {
         zygote_map_.Put(code_ptr, method);
@@ -770,8 +751,8 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
       if (osr) {
         number_of_osr_compilations_++;
         osr_code_map_.Put(method, code_ptr);
-      } else if (class_linker->IsQuickResolutionStub(
-          method->GetEntryPointFromQuickCompiledCode())) {
+      } else if (NeedsClinitCheckBeforeCall(method) &&
+                 !method->GetDeclaringClass()->IsVisiblyInitialized()) {
         // This situation currently only occurs in the jit-zygote mode.
         DCHECK(Runtime::Current()->IsUsingApexBootImageLocation());
         DCHECK(!garbage_collect_code_);
@@ -794,16 +775,9 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
         << reinterpret_cast<const void*>(method_header->GetEntryPoint()) << ","
         << reinterpret_cast<const void*>(method_header->GetEntryPoint() +
                                          method_header->GetCodeSize());
-    histogram_code_memory_use_.AddValue(code_size);
-    if (code_size > kCodeSizeLogThreshold) {
-      LOG(INFO) << "JIT allocated "
-                << PrettySize(code_size)
-                << " for compiled code of "
-                << ArtMethod::PrettyMethod(method);
-    }
   }
 
-  return reinterpret_cast<uint8_t*>(method_header);
+  return true;
 }
 
 size_t JitCodeCache::CodeCacheSize() {
@@ -955,38 +929,73 @@ size_t JitCodeCache::DataCacheSizeLocked() {
   return GetCurrentRegion()->GetUsedMemoryForData();
 }
 
-void JitCodeCache::ClearData(Thread* self,
-                             JitMemoryRegion* region,
-                             const uint8_t* roots_data) {
-  MutexLock mu(self, *Locks::jit_lock_);
-  region->FreeData(roots_data);
-}
+bool JitCodeCache::Reserve(Thread* self,
+                           JitMemoryRegion* region,
+                           size_t code_size,
+                           size_t stack_map_size,
+                           size_t number_of_roots,
+                           ArtMethod* method,
+                           /*out*/ArrayRef<const uint8_t>* reserved_code,
+                           /*out*/ArrayRef<const uint8_t>* reserved_data) {
+  code_size = OatQuickMethodHeader::InstructionAlignedSize() + code_size;
+  size_t data_size = RoundUp(ComputeRootTableSize(number_of_roots) + stack_map_size, sizeof(void*));
 
-const uint8_t* JitCodeCache::ReserveData(Thread* self,
-                                         JitMemoryRegion* region,
-                                         size_t stack_map_size,
-                                         size_t number_of_roots,
-                                         ArtMethod* method) {
-  size_t table_size = ComputeRootTableSize(number_of_roots);
-  size_t size = RoundUp(stack_map_size + table_size, sizeof(void*));
-  const uint8_t* result = nullptr;
-
-  {
-    ScopedThreadSuspension sts(self, kSuspended);
-    MutexLock mu(self, *Locks::jit_lock_);
-    WaitForPotentialCollectionToComplete(self);
-    result = region->AllocateData(size);
+  const uint8_t* code;
+  const uint8_t* data;
+  // We might need to try the allocation twice (with GC in between to free up memory).
+  for (int i = 0; i < 2; i++) {
+    {
+      ScopedThreadSuspension sts(self, kSuspended);
+      MutexLock mu(self, *Locks::jit_lock_);
+      WaitForPotentialCollectionToComplete(self);
+      ScopedCodeCacheWrite ccw(*region);
+      code = region->AllocateCode(code_size);
+      data = region->AllocateData(data_size);
+    }
+    if (code == nullptr || data == nullptr) {
+      Free(self, region, code, data);
+      if (i == 0) {
+        GarbageCollectCache(self);
+        continue;  // Retry after GC.
+      } else {
+        return false;  // Fail.
+      }
+    }
+    break;  // Success.
   }
+  *reserved_code = ArrayRef<const uint8_t>(code, code_size);
+  *reserved_data = ArrayRef<const uint8_t>(data, data_size);
 
   MutexLock mu(self, *Locks::jit_lock_);
-  histogram_stack_map_memory_use_.AddValue(size);
-  if (size > kStackMapSizeLogThreshold) {
+  histogram_code_memory_use_.AddValue(code_size);
+  if (code_size > kCodeSizeLogThreshold) {
     LOG(INFO) << "JIT allocated "
-              << PrettySize(size)
+              << PrettySize(code_size)
+              << " for compiled code of "
+              << ArtMethod::PrettyMethod(method);
+  }
+  histogram_stack_map_memory_use_.AddValue(data_size);
+  if (data_size > kStackMapSizeLogThreshold) {
+    LOG(INFO) << "JIT allocated "
+              << PrettySize(data_size)
               << " for stack maps of "
               << ArtMethod::PrettyMethod(method);
   }
-  return result;
+  return true;
+}
+
+void JitCodeCache::Free(Thread* self,
+                        JitMemoryRegion* region,
+                        const uint8_t* code,
+                        const uint8_t* data) {
+  MutexLock mu(self, *Locks::jit_lock_);
+  ScopedCodeCacheWrite ccw(*region);
+  if (code != nullptr) {
+    region->FreeCode(code);
+  }
+  if (data != nullptr) {
+    region->FreeData(data);
+  }
 }
 
 class MarkCodeClosure final : public Closure {
@@ -1572,11 +1581,20 @@ bool JitCodeCache::NotifyCompilationOf(ArtMethod* method,
     return false;
   }
 
-  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  if (class_linker->IsQuickResolutionStub(method->GetEntryPointFromQuickCompiledCode())) {
-    if (!prejit) {
+  if (NeedsClinitCheckBeforeCall(method) && !prejit) {
+    // We do not need a synchronization barrier for checking the visibly initialized status
+    // or checking the initialized status just for requesting visible initialization.
+    ClassStatus status = method->GetDeclaringClass()
+        ->GetStatus<kDefaultVerifyFlags, /*kWithSynchronizationBarrier=*/ false>();
+    if (status != ClassStatus::kVisiblyInitialized) {
       // Unless we're pre-jitting, we currently don't save the JIT compiled code if we cannot
-      // update the entrypoint due to having the resolution stub.
+      // update the entrypoint due to needing an initialization check.
+      if (status == ClassStatus::kInitialized) {
+        // Request visible initialization but do not block to allow compiling other methods.
+        // Hopefully, this will complete by the time the method becomes hot again.
+        Runtime::Current()->GetClassLinker()->MakeInitializedClassesVisiblyInitialized(
+            self, /*wait=*/ false);
+      }
       VLOG(jit) << "Not compiling "
                 << method->PrettyMethod()
                 << " because it has the resolution stub";
@@ -1610,14 +1628,7 @@ bool JitCodeCache::NotifyCompilationOf(ArtMethod* method,
       // changed these entrypoints to GenericJNI in preparation for a full GC, we may
       // as well change them back as this stub shall not be collected anyway and this
       // can avoid a few expensive GenericJNI calls.
-      instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
-      for (ArtMethod* m : data->GetMethods()) {
-        // Call the dedicated method instead of the more generic UpdateMethodsCode, because
-        // `m` might be in the process of being deleted.
-        if (!class_linker->IsQuickResolutionStub(m->GetEntryPointFromQuickCompiledCode())) {
-          instrumentation->UpdateNativeMethodsCodeToJitCode(m, entrypoint);
-        }
-      }
+      data->UpdateEntryPoints(entrypoint);
       if (collection_in_progress_) {
         if (!IsInZygoteExecSpace(data->GetCode())) {
           GetLiveBitmap()->AtomicTestAndSet(FromCodeToAllocation(data->GetCode()));
@@ -1676,7 +1687,7 @@ void JitCodeCache::DoneCompiling(ArtMethod* method, Thread* self, bool osr) {
     if (UNLIKELY(!data->IsCompiled())) {
       // Failed to compile; the JNI compiler never fails, but the cache may be full.
       jni_stubs_map_.erase(it);  // Remove the entry added in NotifyCompilationOf().
-    }  // else CommitCodeInternal() updated entrypoints of all methods in the JniStubData.
+    }  // else Commit() updated entrypoints of all methods in the JniStubData.
   } else {
     ProfilingInfo* info = method->GetProfilingInfo(kRuntimePointerSize);
     if (info != nullptr) {
@@ -1833,6 +1844,9 @@ void ZygoteMap::Initialize(uint32_t number_of_methods) {
     region_->FillData(data, capacity, Entry { nullptr, nullptr });
     map_ = ArrayRef(data, capacity);
   }
+  done_ = reinterpret_cast<const bool*>(region_->AllocateData(sizeof(bool)));
+  CHECK(done_ != nullptr) << "Could not allocate a single boolean in the JIT region";
+  region_->WriteData(done_, false);
 }
 
 const void* ZygoteMap::GetCodeFor(ArtMethod* method, uintptr_t pc) const {
