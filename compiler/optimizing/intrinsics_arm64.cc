@@ -3239,6 +3239,28 @@ void IntrinsicCodeGeneratorARM64::VisitFP16Floor(HInvoke* invoke) {
   __ Sxth(out, out);  // sign extend as returning a short type.
 }
 
+void IntrinsicLocationsBuilderARM64::VisitFP16Ceil(HInvoke* invoke) {
+  if (!codegen_->GetInstructionSetFeatures().HasFP16()) {
+    return;
+  }
+
+  CreateIntToIntLocations(allocator_, invoke);
+}
+
+void IntrinsicCodeGeneratorARM64::VisitFP16Ceil(HInvoke* invoke) {
+  DCHECK(codegen_->GetInstructionSetFeatures().HasFP16());
+  LocationSummary* locations = invoke->GetLocations();
+  MacroAssembler* masm = GetVIXLAssembler();
+  UseScratchRegisterScope scratch_scope(masm);
+  Register out = WRegisterFrom(locations->Out());
+
+  VRegister half = scratch_scope.AcquireH();
+  __ Fmov(half, WRegisterFrom(locations->InAt(0)));
+  __ Frintp(half, half);
+  __ Fmov(out, half);
+  __ Sxth(out, out);  // sign extend as returning a short type.
+}
+
 UNIMPLEMENTED_INTRINSIC(ARM64, ReferenceGetReferent)
 
 UNIMPLEMENTED_INTRINSIC(ARM64, StringStringIndexOf);
