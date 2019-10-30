@@ -3216,6 +3216,17 @@ void IntrinsicCodeGeneratorARM64::VisitFP16ToHalf(HInvoke* invoke) {
   __ Sxth(out, out);  // sign extend due to returning a short type.
 }
 
+#define FP16Round(mode) \
+  DCHECK(codegen_->GetInstructionSetFeatures().HasFP16()); \
+  LocationSummary* locations = invoke->GetLocations(); \
+  MacroAssembler* masm = GetVIXLAssembler(); \
+  UseScratchRegisterScope scratch_scope(masm); \
+  Register out = WRegisterFrom(locations->Out()); \
+  VRegister half = scratch_scope.AcquireH(); \
+  __ Fmov(half, WRegisterFrom(locations->InAt(0))); \
+  __ Frint##mode(half, half); \
+  __ Fmov(out, half); \
+  __ Sxth(out, out);  // sign extend as returning a short type.
 
 void IntrinsicLocationsBuilderARM64::VisitFP16Floor(HInvoke* invoke) {
   if (!codegen_->GetInstructionSetFeatures().HasFP16()) {
@@ -3226,17 +3237,7 @@ void IntrinsicLocationsBuilderARM64::VisitFP16Floor(HInvoke* invoke) {
 }
 
 void IntrinsicCodeGeneratorARM64::VisitFP16Floor(HInvoke* invoke) {
-  DCHECK(codegen_->GetInstructionSetFeatures().HasFP16());
-  LocationSummary* locations = invoke->GetLocations();
-  MacroAssembler* masm = GetVIXLAssembler();
-  UseScratchRegisterScope scratch_scope(masm);
-  Register out = WRegisterFrom(locations->Out());
-
-  VRegister half = scratch_scope.AcquireH();
-  __ Fmov(half, WRegisterFrom(locations->InAt(0)));
-  __ Frintm(half, half);
-  __ Fmov(out, half);
-  __ Sxth(out, out);  // sign extend as returning a short type.
+  FP16Round(m); // Round to Minus infinity
 }
 
 void IntrinsicLocationsBuilderARM64::VisitFP16Ceil(HInvoke* invoke) {
@@ -3248,17 +3249,7 @@ void IntrinsicLocationsBuilderARM64::VisitFP16Ceil(HInvoke* invoke) {
 }
 
 void IntrinsicCodeGeneratorARM64::VisitFP16Ceil(HInvoke* invoke) {
-  DCHECK(codegen_->GetInstructionSetFeatures().HasFP16());
-  LocationSummary* locations = invoke->GetLocations();
-  MacroAssembler* masm = GetVIXLAssembler();
-  UseScratchRegisterScope scratch_scope(masm);
-  Register out = WRegisterFrom(locations->Out());
-
-  VRegister half = scratch_scope.AcquireH();
-  __ Fmov(half, WRegisterFrom(locations->InAt(0)));
-  __ Frintp(half, half);
-  __ Fmov(out, half);
-  __ Sxth(out, out);  // sign extend as returning a short type.
+  FP16Round(p); // Round to Plus infinity
 }
 
 void IntrinsicLocationsBuilderARM64::VisitFP16Rint(HInvoke* invoke) {
@@ -3270,17 +3261,7 @@ void IntrinsicLocationsBuilderARM64::VisitFP16Rint(HInvoke* invoke) {
 }
 
 void IntrinsicCodeGeneratorARM64::VisitFP16Rint(HInvoke* invoke) {
-  DCHECK(codegen_->GetInstructionSetFeatures().HasFP16());
-  LocationSummary* locations = invoke->GetLocations();
-  MacroAssembler* masm = GetVIXLAssembler();
-  UseScratchRegisterScope scratch_scope(masm);
-  Register out = WRegisterFrom(locations->Out());
-
-  VRegister half = scratch_scope.AcquireH();
-  __ Fmov(half, WRegisterFrom(locations->InAt(0)));
-  __ Frintn(half, half);
-  __ Fmov(out, half);
-  __ Sxth(out, out);  // sign extend as returning a short type.
+  FP16Round(n); // Round to Nearest even
 }
 
 UNIMPLEMENTED_INTRINSIC(ARM64, ReferenceGetReferent)
