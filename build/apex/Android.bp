@@ -1,3 +1,8 @@
+// ART APEX module
+//
+// Contains both the Android Managed Runtime (ART) and the Android Core Library
+// (Libcore).
+
 // Modules listed in LOCAL_REQUIRED_MODULES for module art-runtime in art/Android.mk.
 // - Base requirements (binaries for which both 32- and 64-bit versions are built, if relevant).
 art_runtime_base_binaries_both = [
@@ -52,13 +57,6 @@ bionic_native_shared_libs = [
     "libdl",
 ]
 
-bionic_native_device_only_shared_libs = [
-    // ... and their internal dependencies
-    // These are available only on device
-    "libc_malloc_debug",
-    "libc_malloc_hooks",
-]
-
 bionic_binaries_both = [
     "linker",
 ]
@@ -87,7 +85,15 @@ art_runtime_debug_native_shared_libs = [
 ]
 
 art_runtime_base_native_device_only_debug_shared_libs = [
-  "libperfetto_hprofd",
+    "libperfetto_hprofd",
+]
+
+// Libraries needed to execute ART run-tests.
+// TODO(b/124476339): When bug 124476339 is fixed, add these libraries as `runtime_libs`
+// dependencies of `libartd-compiler`, and remove `art_runtime_run_test_libs`.
+art_runtime_run_test_libs = [
+    "libart-disassembler",
+    "libartd-disassembler",
 ]
 
 // Tools common to both device APEX and host APEX. Derived from art-tools in art/Android.mk.
@@ -130,11 +136,6 @@ art_tools_host_only_binaries = [
     "hprof-conv",
 ]
 
-// Libraries needed to use com.android.art.host for zipapex run-tests
-art_runtime_host_run_test_libs = [
-    "libartd-disassembler",
-]
-
 // Core Java libraries.
 libcore_java_libs = [
     "core-oj",
@@ -165,6 +166,7 @@ libcore_native_shared_libs = [
     "libexpat",
     "libicui18n",
     "libicuuc",
+    "libicu_jni",
     "libjavacore",
     "libopenjdk",
 ]
@@ -185,52 +187,6 @@ art_runtime_libraries_zipapex = [
     "libnativehelper",
     "libcutils",
 ]
-
-// Runtime (Bionic) APEX module
-//
-// This used to consist of Bionic, ART and Libcore. Now it contains Bionic only,
-// but keeps /apex/com.android.runtime for app compat reasons.
-//
-// TODO(b/139176024): Move this to the Bionic tree.
-
-android_app_certificate {
-    name: "com.android.runtime.certificate",
-    certificate: "com.android.runtime",
-}
-
-apex_key {
-    name: "com.android.runtime.key",
-    public_key: "com.android.runtime.avbpubkey",
-    private_key: "com.android.runtime.pem",
-}
-
-prebuilt_etc {
-    name: "com.android.runtime.ld.config.txt",
-    src: "runtime-ld.config.txt",
-    filename: "ld.config.txt",
-    installable: false,
-}
-
-apex {
-    name: "com.android.runtime",
-    compile_multilib: "both",
-    manifest: "manifest-runtime.json",
-    native_shared_libs: bionic_native_shared_libs +
-        bionic_native_device_only_shared_libs,
-    multilib: {
-        both: {
-            binaries: bionic_binaries_both,
-        },
-    },
-    prebuilts: ["com.android.runtime.ld.config.txt"],
-    key: "com.android.runtime.key",
-    certificate: ":com.android.runtime.certificate",
-}
-
-// ART APEX module
-//
-// Contains both the Android Managed Runtime (ART) and the Android Core Library
-// (Libcore).
 
 android_app_certificate {
     name: "com.android.art.certificate",
@@ -292,6 +248,7 @@ apex_defaults {
     name: "com.android.art-dev-defaults",
     defaults: ["com.android.art-defaults"],
     native_shared_libs: art_runtime_base_native_device_only_debug_shared_libs +
+        art_runtime_run_test_libs +
         art_runtime_debug_native_shared_libs +
         libcore_debug_native_shared_libs,
     multilib: {
@@ -382,7 +339,7 @@ art_apex_test_host {
         libcore_native_shared_libs +
         libcore_debug_native_shared_libs +
         art_runtime_libraries_zipapex +
-        art_runtime_host_run_test_libs,
+        art_runtime_run_test_libs,
     multilib: {
         both: {
             binaries: art_runtime_base_binaries_both +
@@ -460,6 +417,7 @@ genrule {
     defaults: ["art-check-apex-gen-defaults"],
     srcs: [":com.android.art.release"],
     cmd: art_check_apex_gen_stem +
+        " --flavor release" +
         " $(in)" +
         " && touch $(out)",
     out: ["art-check-release-apex-gen.dummy"],
@@ -476,7 +434,7 @@ genrule {
     defaults: ["art-check-apex-gen-defaults"],
     srcs: [":com.android.art.debug"],
     cmd: art_check_apex_gen_stem +
-        " --debug" +
+        " --flavor debug" +
         " $(in)" +
         " && touch $(out)",
     out: ["art-check-debug-apex-gen.dummy"],
@@ -493,7 +451,7 @@ genrule {
     defaults: ["art-check-apex-gen-defaults"],
     srcs: [":com.android.art.testing"],
     cmd: art_check_apex_gen_stem +
-        " --testing" +
+        " --flavor testing" +
         " $(in)" +
         " && touch $(out)",
     out: ["art-check-testing-apex-gen.dummy"],

@@ -80,6 +80,12 @@ use_jit=true
 instant_jit=false
 variant_cmdline_parameter="--variant=X32"
 dump_command="/bin/true"
+called_from_libjdwp=${RUN_JDWP_TESTS_CALLED_FROM_LIBJDWP:-false}
+run_internal_jdwp_test=false
+# Let LUCI bots do what they want.
+if test -v LUCI_CONTEXT; then
+  run_internal_jdwp_test=true
+fi
 # Timeout of JDWP test in ms.
 #
 # Note: some tests expect a timeout to check that *no* reply/event is received for a specific case.
@@ -87,6 +93,7 @@ dump_command="/bin/true"
 # continuous testing. This value can be adjusted to fit the configuration of the host machine(s).
 jdwp_test_timeout=10000
 
+skip_tests=
 gdb_target=
 has_gdb="no"
 
@@ -123,6 +130,7 @@ while true; do
   elif [[ "$1" == "--mode=jvm" ]]; then
     mode="ri"
     make_target_name="apache-harmony-jdwp-tests"
+    run_internal_jdwp_test=true
     art="$(which java)"
     art_debugee="$(which java)"
     # No need for extra args.
@@ -137,6 +145,19 @@ while true; do
     vm_command=""
     # We don't care about jit with the RI
     use_jit=false
+    shift
+  elif [[ $1 == --skip-test ]]; then
+    skip_tests="${skip_tests},${2}"
+    # remove the --skip-test
+    args=${args/$1}
+    shift
+    # remove the arg
+    args=${args/$1}
+    shift
+  elif [[ $1 == --force-run-test ]]; then
+    run_internal_jdwp_test=true
+    # remove the --force-run-test
+    args=${args/$1}
     shift
   elif [[ $1 == --test-timeout-ms ]]; then
     # Remove the --test-timeout-ms from the arguments.
@@ -234,6 +255,16 @@ if [[ $mode == "target" ]]; then
     art_debugee="sh /system/bin/art"
     vm_command="--vm-command=$art"
     device_dir="--device-dir=/tmp"
+  fi
+fi
+
+if [[ $called_from_libjdwp != "true" ]]; then
+  if [[ $run_internal_jdwp_test = "false" ]]; then
+    echo "Calling run_jdwp_tests.sh directly is probably not what you want. You probably want to"
+    echo "run ./art/tools/run-libjdwp-tests.sh instead in order to test the JDWP implementation"
+    echo "used by apps. If you really wish to run these tests using the deprecated internal JDWP"
+    echo "implementation pass the '--force-run-test' flag."
+    exit 1
   fi
 fi
 
@@ -400,6 +431,7 @@ vogar $vm_command \
       --vm-arg -Djpda.settings.transportAddress=127.0.0.1:55107 \
       --vm-arg -Djpda.settings.dumpProcess="$dump_command" \
       --vm-arg -Djpda.settings.debuggeeJavaPath="$art_debugee $plugin $debuggee_args" \
+      --vm-arg -Djpda.settings.badTestCases="$skip_tests" \
       --classpath "$test_jar" \
       $toolchain_args \
       $test

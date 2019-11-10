@@ -1761,14 +1761,19 @@ void InstructionCodeGeneratorARM64::GenerateClassInitializationCheck(SlowPathCod
   UseScratchRegisterScope temps(GetVIXLAssembler());
   Register temp = temps.AcquireW();
   constexpr size_t status_lsb_position = SubtypeCheckBits::BitStructSizeOf();
-  constexpr uint32_t visibly_initialized = enum_cast<uint32_t>(ClassStatus::kVisiblyInitialized);
-  static_assert(visibly_initialized == MaxInt<uint32_t>(32u - status_lsb_position),
-                "kVisiblyInitialized must have all bits set");
+  const size_t status_byte_offset =
+      mirror::Class::StatusOffset().SizeValue() + (status_lsb_position / kBitsPerByte);
+  constexpr uint32_t shifted_visibly_initialized_value =
+      enum_cast<uint32_t>(ClassStatus::kVisiblyInitialized) << (status_lsb_position % kBitsPerByte);
 
-  const size_t status_offset = mirror::Class::StatusOffset().SizeValue();
-  __ Ldr(temp, HeapOperand(class_reg, status_offset));
-  __ Mvn(temp, Operand(temp, ASR, status_lsb_position));  // Were all the bits of the status set?
-  __ Cbnz(temp, slow_path->GetEntryLabel());              // If not, go to slow path.
+  // CMP (immediate) is limited to imm12 or imm12<<12, so we would need to materialize
+  // the constant 0xf0000000 for comparison with the full 32-bit field. To reduce the code
+  // size, load only the high byte of the field and compare with 0xf0.
+  // Note: The same code size could be achieved with LDR+MNV(asr #24)+CBNZ but benchmarks
+  // show that this pattern is slower (tested on little cores).
+  __ Ldrb(temp, HeapOperand(class_reg, status_byte_offset));
+  __ Cmp(temp, shifted_visibly_initialized_value);
+  __ B(lo, slow_path->GetEntryLabel());
   __ Bind(slow_path->GetExitLabel());
 }
 
@@ -6341,12 +6346,20 @@ void CodeGeneratorARM64::CompileBakerReadBarrierThunk(Arm64Assembler& assembler,
       CheckValidReg(holder_reg.GetCode());
       UseScratchRegisterScope temps(assembler.GetVIXLAssembler());
       temps.Exclude(ip0, ip1);
-      // If base_reg differs from holder_reg, the offset was too large and we must have emitted
-      // an explicit null check before the load. Otherwise, for implicit null checks, we need to
-      // null-check the holder as we do not necessarily do that check before going to the thunk.
+      // In the case of a field load (with relaxed semantic), if `base_reg` differs from
+      // `holder_reg`, the offset was too large and we must have emitted (during the construction
+      // of the HIR graph, see `art::HInstructionBuilder::BuildInstanceFieldAccess`) and preserved
+      // (see `art::PrepareForRegisterAllocation::VisitNullCheck`) an explicit null check before
+      // the load. Otherwise, for implicit null checks, we need to null-check the holder as we do
+      // not necessarily do that check before going to the thunk.
+      //
+      // In the case of a field load with load-acquire semantics (where `base_reg` always differs
+      // from `holder_reg`), we also need an explicit null check when implicit null checks are
+      // allowed, as we do not emit one before going to the thunk.
       vixl::aarch64::Label throw_npe_label;
       vixl::aarch64::Label* throw_npe = nullptr;
-      if (GetCompilerOptions().GetImplicitNullChecks() && holder_reg.Is(base_reg)) {
+      if (GetCompilerOptions().GetImplicitNullChecks() &&
+          (holder_reg.Is(base_reg) || (kind == BakerReadBarrierKind::kAcquire))) {
         throw_npe = &throw_npe_label;
         __ Cbz(holder_reg.W(), throw_npe);
       }

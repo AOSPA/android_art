@@ -14,27 +14,22 @@
  * limitations under the License.
  */
 
-#ifndef ART_RUNTIME_MIRROR_VAR_HANDLE_INL_H_
-#define ART_RUNTIME_MIRROR_VAR_HANDLE_INL_H_
+#include "reflective_handle_scope.h"
 
-#include "var_handle.h"
+#include <ostream>
+
+#include "thread.h"
 
 namespace art {
-class ArtField;
 
-namespace mirror {
 
-template<typename Visitor>
-inline void FieldVarHandle::VisitTarget(Visitor&& v) {
-  ArtField* orig = GetField();
-  ArtField* new_value = v(orig);
-  if (orig != new_value) {
-    SetField64</*kTransactionActive*/ false>(ArtFieldOffset(),
-                                             reinterpret_cast<uintptr_t>(new_value));
-  }
+void BaseReflectiveHandleScope::Describe(std::ostream& os) const {
+  os << "[BaseReflectiveHandleScope self_=" << *self_ << ", link_=" << link_ << "]";
 }
 
-}  // namespace mirror
-}  // namespace art
+std::ostream& operator<<(std::ostream& os, const BaseReflectiveHandleScope& brhs) {
+  brhs.Describe(os);
+  return os;
+}
 
-#endif  // ART_RUNTIME_MIRROR_VAR_HANDLE_INL_H_
+}  // namespace art

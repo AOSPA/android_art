@@ -69,7 +69,7 @@
 #include "dex/dex_file_loader.h"
 #include "dex/signature-inl.h"
 #include "dex/utf.h"
-#include "entrypoints/entrypoint_utils.h"
+#include "entrypoints/entrypoint_utils-inl.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "experimental_flags.h"
 #include "gc/accounting/card_table-inl.h"
@@ -303,6 +303,7 @@ class ClassLinker::VisiblyInitializedCallback final
           vm->DeleteWeakGlobalRef(self, classes_[i]);
           if (klass != nullptr) {
             mirror::Class::SetStatus(klass, ClassStatus::kVisiblyInitialized, self);
+            class_linker_->FixupStaticTrampolines(klass.Get());
           }
         }
         num_classes_ = 0u;
@@ -402,12 +403,14 @@ ClassLinker::VisiblyInitializedCallback* ClassLinker::MarkClassInitialized(
     // Thanks to the x86 memory model, we do not need any memory fences and
     // we can immediately mark the class as visibly initialized.
     mirror::Class::SetStatus(klass, ClassStatus::kVisiblyInitialized, self);
+    FixupStaticTrampolines(klass.Get());
     return nullptr;
   }
   if (Runtime::Current()->IsActiveTransaction()) {
     // Transactions are single-threaded, so we can mark the class as visibly intialized.
     // (Otherwise we'd need to track the callback's entry in the transaction for rollback.)
     mirror::Class::SetStatus(klass, ClassStatus::kVisiblyInitialized, self);
+    FixupStaticTrampolines(klass.Get());
     return nullptr;
   }
   mirror::Class::SetStatus(klass, ClassStatus::kInitialized, self);
@@ -3697,9 +3700,12 @@ bool ClassLinker::ShouldUseInterpreterEntrypoint(ArtMethod* method, const void* 
 
 void ClassLinker::FixupStaticTrampolines(ObjPtr<mirror::Class> klass) {
   ScopedAssertNoThreadSuspension sants(__FUNCTION__);
-  DCHECK(klass->IsInitialized()) << klass->PrettyDescriptor();
+  DCHECK(klass->IsVisiblyInitialized()) << klass->PrettyDescriptor();
   if (klass->NumDirectMethods() == 0) {
     return;  // No direct methods => no static methods.
+  }
+  if (UNLIKELY(klass->IsProxyClass())) {
+    return;
   }
   Runtime* runtime = Runtime::Current();
   if (!runtime->IsStarted()) {
@@ -3725,13 +3731,17 @@ void ClassLinker::FixupStaticTrampolines(ObjPtr<mirror::Class> klass) {
       // Only update static methods.
       continue;
     }
+    if (!IsQuickResolutionStub(method->GetEntryPointFromQuickCompiledCode())) {
+      // Only update methods whose entrypoint is the resolution stub.
+      continue;
+    }
     const void* quick_code = nullptr;
     if (has_oat_class) {
       OatFile::OatMethod oat_method = oat_class.GetOatMethod(method_index);
       quick_code = oat_method.GetQuickCode();
     }
     // Check if we have JIT compiled code for it.
-    jit::Jit* jit = Runtime::Current()->GetJit();
+    jit::Jit* jit = runtime->GetJit();
     if (quick_code == nullptr && jit != nullptr) {
       quick_code = jit->GetCodeCache()->GetSavedEntryPointOfPreCompiledMethod(method);
     }
@@ -3767,34 +3777,42 @@ static void LinkCode(ClassLinker* class_linker,
     // The following code only applies to a non-compiler runtime.
     return;
   }
+
   // Method shouldn't have already been linked.
   DCHECK(method->GetEntryPointFromQuickCompiledCode() == nullptr);
-  if (oat_class != nullptr) {
-    // Every kind of method should at least get an invoke stub from the oat_method.
-    // non-abstract methods also get their code pointers.
-    const OatFile::OatMethod oat_method = oat_class->GetOatMethod(class_def_method_index);
-    oat_method.LinkMethod(method);
-  }
-
-  // Install entry point from interpreter.
-  const void* quick_code = method->GetEntryPointFromQuickCompiledCode();
-  bool enter_interpreter = class_linker->ShouldUseInterpreterEntrypoint(method, quick_code);
 
   if (!method->IsInvokable()) {
     EnsureThrowsInvocationError(class_linker, method);
     return;
   }
 
-  if (method->IsStatic() && !method->IsConstructor()) {
-    // For static methods excluding the class initializer, install the trampoline.
+  const void* quick_code = nullptr;
+  if (oat_class != nullptr) {
+    // Every kind of method should at least get an invoke stub from the oat_method.
+    // non-abstract methods also get their code pointers.
+    const OatFile::OatMethod oat_method = oat_class->GetOatMethod(class_def_method_index);
+    quick_code = oat_method.GetQuickCode();
+  }
+
+  bool enter_interpreter = class_linker->ShouldUseInterpreterEntrypoint(method, quick_code);
+
+  // Note: this mimics the logic in image_writer.cc that installs the resolution
+  // stub only if we have compiled code and the method needs a class initialization
+  // check.
+  if (quick_code == nullptr) {
+    method->SetEntryPointFromQuickCompiledCode(
+        method->IsNative() ? GetQuickGenericJniStub() : GetQuickToInterpreterBridge());
+  } else if (enter_interpreter) {
+    method->SetEntryPointFromQuickCompiledCode(GetQuickToInterpreterBridge());
+  } else if (NeedsClinitCheckBeforeCall(method)) {
+    DCHECK(!method->GetDeclaringClass()->IsVisiblyInitialized());  // Actually ClassStatus::Idx.
+    // If we do have code but the method needs a class initialization check before calling
+    // that code, install the resolution stub that will perform the check.
     // It will be replaced by the proper entry point by ClassLinker::FixupStaticTrampolines
     // after initializing class (see ClassLinker::InitializeClass method).
     method->SetEntryPointFromQuickCompiledCode(GetQuickResolutionStub());
-  } else if (quick_code == nullptr && method->IsNative()) {
-    method->SetEntryPointFromQuickCompiledCode(GetQuickGenericJniStub());
-  } else if (enter_interpreter) {
-    // Set entry point from compiled code if there's no code or in interpreter only mode.
-    method->SetEntryPointFromQuickCompiledCode(GetQuickToInterpreterBridge());
+  } else {
+    method->SetEntryPointFromQuickCompiledCode(quick_code);
   }
 
   if (method->IsNative()) {
@@ -3802,12 +3820,10 @@ static void LinkCode(ClassLinker* class_linker,
     method->UnregisterNative();
 
     if (enter_interpreter || quick_code == nullptr) {
-      // We have a native method here without code. Then it should have either the generic JNI
-      // trampoline as entrypoint (non-static), or the resolution trampoline (static).
+      // We have a native method here without code. Then it should have the generic JNI
+      // trampoline as entrypoint.
       // TODO: this doesn't handle all the cases where trampolines may be installed.
-      const void* entry_point = method->GetEntryPointFromQuickCompiledCode();
-      DCHECK(class_linker->IsQuickGenericJniStub(entry_point) ||
-             class_linker->IsQuickResolutionStub(entry_point));
+      DCHECK(class_linker->IsQuickGenericJniStub(method->GetEntryPointFromQuickCompiledCode()));
     }
   }
 }
@@ -5662,8 +5678,6 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
         LOG(INFO) << "Initialized class " << klass->GetDescriptor(&temp) << " from " <<
             klass->GetLocation();
       }
-      // Opportunistically set static method trampolines to their destination.
-      FixupStaticTrampolines(klass.Get());
     }
   }
   if (callback != nullptr) {

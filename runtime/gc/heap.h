@@ -51,6 +51,7 @@ class ConditionVariable;
 enum class InstructionSet;
 class IsMarkedVisitor;
 class Mutex;
+class ReflectiveValueVisitor;
 class RootVisitor;
 class StackVisitor;
 class Thread;
@@ -68,6 +69,7 @@ namespace gc {
 class AllocationListener;
 class AllocRecordObjectMap;
 class GcPauseListener;
+class HeapTask;
 class ReferenceProcessor;
 class TaskProcessor;
 class Verification;
@@ -284,6 +286,9 @@ class Heap {
       REQUIRES(!Locks::heap_bitmap_lock_, !*gc_complete_lock_);
   template <typename Visitor>
   ALWAYS_INLINE void VisitObjectsPaused(Visitor&& visitor)
+      REQUIRES(Locks::mutator_lock_, !Locks::heap_bitmap_lock_, !*gc_complete_lock_);
+
+  void VisitReflectiveTargets(ReflectiveValueVisitor* visitor)
       REQUIRES(Locks::mutator_lock_, !Locks::heap_bitmap_lock_, !*gc_complete_lock_);
 
   void CheckPreconditionsForAllocObject(ObjPtr<mirror::Class> c, size_t byte_count)
@@ -903,6 +908,8 @@ class Heap {
   void PostForkChildAction(Thread* self);
 
   void TraceHeapSize(size_t heap_size);
+
+  bool AddHeapTask(gc::HeapTask* task);
 
  private:
   class ConcurrentGCTask;
@@ -1581,6 +1588,7 @@ class Heap {
   friend class GCCriticalSection;
   friend class ReferenceQueue;
   friend class ScopedGCCriticalSection;
+  friend class ScopedInterruptibleGCCriticalSection;
   friend class VerifyReferenceCardVisitor;
   friend class VerifyReferenceVisitor;
   friend class VerifyObjectVisitor;

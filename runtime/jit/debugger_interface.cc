@@ -69,6 +69,30 @@
 //       2) Read the symfile and re-read the next pointer.
 //       3) Re-read both the current and next seqlock.
 //       4) Go to step 1 with using new entry and seqlock.
+//   * New entries are appended at the end which makes it
+//     possible to repack entries even when the reader
+//     is concurrently iterating over the linked list.
+//
+// 3) Asynchronously, using the global seqlock.
+//   * The seqlock is a monotonically increasing counter which is incremented
+//     before and after every modification of the linked list. Odd value of
+//     the counter means the linked list is being modified (it is locked).
+//   * The tool should read the value of the seqlock both before and after
+//     copying the linked list.  If the seqlock values match and are even,
+//     the copy is consistent.  Otherwise, the reader should try again.
+//     * Note that using the data directly while is it being modified
+//       might crash the tool.  Therefore, the only safe way is to make
+//       a copy and use the copy only after the seqlock has been checked.
+//     * Note that the process might even free and munmap the data while
+//       it is being copied, therefore the reader should either handle
+//       SEGV or use OS calls to read the memory (e.g. process_vm_readv).
+//   * The timestamps on the entry record the time when the entry was
+//     created which is relevant if the unwinding is not live and is
+//     postponed until much later.  All timestamps must be unique.
+//   * For full conformance with the C++ memory model, all seqlock
+//     protected accesses should be atomic. We currently do this in the
+//     more critical cases. The rest will have to be fixed before
+//     attempting to run TSAN on this code.
 //
 
 namespace art {
@@ -91,11 +115,12 @@ extern "C" {
   // Public/stable binary interface.
   struct JITCodeEntryPublic {
     std::atomic<const JITCodeEntry*> next_;  // Atomic to guarantee consistency after crash.
-    const JITCodeEntry* prev_ = nullptr;     // For linked list deletion.  Unused in readers.
+    const JITCodeEntry* prev_ = nullptr;     // For linked list deletion. Unused in readers.
     const uint8_t* symfile_addr_ = nullptr;  // Address of the in-memory ELF file.
-    uint64_t symfile_size_ = 0;              // Note that the offset is 12 on x86, but 16 on ARM32.
+    uint64_t symfile_size_ = 0;              // NB: The offset is 12 on x86 but 16 on ARM32.
 
     // Android-specific fields:
+    uint64_t timestamp_;                     // CLOCK_MONOTONIC time of entry registration.
     std::atomic_uint32_t seqlock_{1};        // Synchronization. Even value if entry is valid.
   };
 
@@ -118,10 +143,19 @@ extern "C" {
     uint32_t action_flag_ = JIT_NOACTION;             // One of the JITAction enum values.
     const JITCodeEntry* relevant_entry_ = nullptr;    // The entry affected by the action.
     std::atomic<const JITCodeEntry*> head_{nullptr};  // Head of link list of all entries.
+
+    // Android-specific fields:
+    uint8_t magic_[8] = {'A', 'n', 'd', 'r', 'o', 'i', 'd', '2'};
+    uint32_t flags_ = 0;  // Reserved for future use. Must be 0.
+    uint32_t sizeof_descriptor = sizeof(JITDescriptorPublic);
+    uint32_t sizeof_entry = sizeof(JITCodeEntryPublic);
+    std::atomic_uint32_t seqlock_{0};  // Incremented before and after any modification.
+    uint64_t timestamp_ = 1;           // CLOCK_MONOTONIC time of last action.
   };
 
   // Implementation-specific fields (which can be used only in this file).
   struct JITDescriptor : public JITDescriptorPublic {
+    const JITCodeEntry* tail_ = nullptr;          // Tail of link list of all live entries.
     const JITCodeEntry* free_entries_ = nullptr;  // List of deleted entries ready for reuse.
 
     // Used for memory sharing with zygote. See NativeDebugInfoPreFork().
@@ -199,6 +233,53 @@ ArrayRef<const uint8_t> GetJITCodeEntrySymFile(const JITCodeEntry* entry) {
   return ArrayRef<const uint8_t>(entry->symfile_addr_, entry->symfile_size_);
 }
 
+// Ensure the timestamp is monotonically increasing even in presence of low
+// granularity system timer.  This ensures each entry has unique timestamp.
+static uint64_t GetNextTimestamp(JITDescriptor& descriptor) {
+  return std::max(descriptor.timestamp_ + 1, NanoTime());
+}
+
+// Mark the descriptor as "locked", so native tools know the data is being modified.
+static void Seqlock(JITDescriptor& descriptor) {
+  DCHECK_EQ(descriptor.seqlock_.load(kNonRacingRelaxed) & 1, 0u) << "Already locked";
+  descriptor.seqlock_.fetch_add(1, std::memory_order_relaxed);
+  // Ensure that any writes within the locked section cannot be reordered before the increment.
+  std::atomic_thread_fence(std::memory_order_release);
+}
+
+// Mark the descriptor as "unlocked", so native tools know the data is safe to read.
+static void Sequnlock(JITDescriptor& descriptor) {
+  DCHECK_EQ(descriptor.seqlock_.load(kNonRacingRelaxed) & 1, 1u) << "Already unlocked";
+  // Ensure that any writes within the locked section cannot be reordered after the increment.
+  std::atomic_thread_fence(std::memory_order_release);
+  descriptor.seqlock_.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Insert 'entry' in the linked list before 'next' and mark it as valid (append if 'next' is null).
+// This method must be called under global lock (g_jit_debug_lock or g_dex_debug_lock).
+template<class NativeInfo>
+static void InsertNewEntry(const JITCodeEntry* entry, const JITCodeEntry* next) {
+  CHECK_EQ(entry->seqlock_.load(kNonRacingRelaxed) & 1, 1u) << "Expected invalid entry";
+  JITDescriptor& descriptor = NativeInfo::Descriptor();
+  const JITCodeEntry* prev = (next != nullptr ? next->prev_ : descriptor.tail_);
+  JITCodeEntry* writable = NativeInfo::Writable(entry);
+  writable->next_ = next;
+  writable->prev_ = prev;
+  writable->seqlock_.fetch_add(1, std::memory_order_release);  // Mark as valid.
+  // Backward pointers should not be used by readers, so they are non-atomic.
+  if (next != nullptr) {
+    NativeInfo::Writable(next)->prev_ = entry;
+  } else {
+    descriptor.tail_ = entry;
+  }
+  // Forward pointers must be atomic and they must point to a valid entry at all times.
+  if (prev != nullptr) {
+    NativeInfo::Writable(prev)->next_.store(entry, std::memory_order_release);
+  } else {
+    descriptor.head_.store(entry, std::memory_order_release);
+  }
+}
+
 // This must be called with the appropriate lock taken (g_{jit,dex}_debug_lock).
 template<class NativeInfo>
 static const JITCodeEntry* CreateJITCodeEntryInternal(
@@ -230,38 +311,35 @@ static const JITCodeEntry* CreateJITCodeEntryInternal(
     symfile = ArrayRef<const uint8_t>(copy, symfile.size());
   }
 
-  // Zygote must insert entries at specific place.  See NativeDebugInfoPreFork().
-  std::atomic<const JITCodeEntry*>* head = &descriptor.head_;
-  const JITCodeEntry* prev = nullptr;
-  if (Runtime::Current()->IsZygote() && descriptor.zygote_head_entry_ != nullptr) {
-    head = &NativeInfo::Writable(descriptor.zygote_head_entry_)->next_;
-    prev = descriptor.zygote_head_entry_;
+  uint64_t timestamp = GetNextTimestamp(descriptor);
+
+  // We must insert entries at specific place.  See NativeDebugInfoPreFork().
+  const JITCodeEntry* next = nullptr;  // Append at the end of linked list.
+  if (!Runtime::Current()->IsZygote() && descriptor.zygote_head_entry_ != nullptr) {
+    next = &descriptor.application_tail_entry_;
   }
-  const JITCodeEntry* next = head->load(kNonRacingRelaxed);
 
   // Pop entry from the free list.
   const JITCodeEntry* entry = descriptor.free_entries_;
   descriptor.free_entries_ = descriptor.free_entries_->next_.load(kNonRacingRelaxed);
-  CHECK_EQ(entry->seqlock_.load(kNonRacingRelaxed) & 1, 1u) << "Expected invalid entry";
 
   // Create the entry and set all its fields.
   JITCodeEntry* writable_entry = NativeInfo::Writable(entry);
-  writable_entry->next_.store(next, std::memory_order_relaxed);
-  writable_entry->prev_ = prev;
   writable_entry->symfile_addr_ = symfile.data();
   writable_entry->symfile_size_ = symfile.size();
   writable_entry->addr_ = addr;
   writable_entry->allow_packing_ = allow_packing;
   writable_entry->is_compressed_ = is_compressed;
-  writable_entry->seqlock_.fetch_add(1, std::memory_order_release);  // Mark as valid.
+  writable_entry->timestamp_ = timestamp;
 
-  // Add the entry to the main link-list.
-  if (next != nullptr) {
-    NativeInfo::Writable(next)->prev_ = entry;
-  }
-  head->store(entry, std::memory_order_release);
+  // Add the entry to the main linked list.
+  Seqlock(descriptor);
+  InsertNewEntry<NativeInfo>(entry, next);
   descriptor.relevant_entry_ = entry;
   descriptor.action_flag_ = JIT_REGISTER_FN;
+  descriptor.timestamp_ = timestamp;
+  Sequnlock(descriptor);
+
   NativeInfo::NotifyNativeDebugger();
 
   return entry;
@@ -270,21 +348,27 @@ static const JITCodeEntry* CreateJITCodeEntryInternal(
 template<class NativeInfo>
 static void DeleteJITCodeEntryInternal(const JITCodeEntry* entry) {
   CHECK(entry != nullptr);
-  const uint8_t* symfile = entry->symfile_addr_;
   JITDescriptor& descriptor = NativeInfo::Descriptor();
 
   // Remove the entry from the main linked-list.
+  Seqlock(descriptor);
   const JITCodeEntry* next = entry->next_.load(kNonRacingRelaxed);
-  if (entry->prev_ != nullptr) {
-    NativeInfo::Writable(entry->prev_)->next_.store(next, std::memory_order_relaxed);
+  const JITCodeEntry* prev = entry->prev_;
+  if (next != nullptr) {
+    NativeInfo::Writable(next)->prev_ = prev;
+  } else {
+    descriptor.tail_ = prev;
+  }
+  if (prev != nullptr) {
+    NativeInfo::Writable(prev)->next_.store(next, std::memory_order_relaxed);
   } else {
     descriptor.head_.store(next, std::memory_order_relaxed);
   }
-  if (next != nullptr) {
-    NativeInfo::Writable(next)->prev_ = entry->prev_;
-  }
   descriptor.relevant_entry_ = entry;
   descriptor.action_flag_ = JIT_UNREGISTER_FN;
+  descriptor.timestamp_ = GetNextTimestamp(descriptor);
+  Sequnlock(descriptor);
+
   NativeInfo::NotifyNativeDebugger();
 
   // Delete the entry.
@@ -294,12 +378,15 @@ static void DeleteJITCodeEntryInternal(const JITCodeEntry* entry) {
   writable_entry->seqlock_.fetch_add(1, std::memory_order_release);  // Mark as invalid.
   // Release: Ensures that the entry is seen as invalid before it's data is freed.
   std::atomic_thread_fence(std::memory_order_release);
+  const uint8_t* symfile = entry->symfile_addr_;
+  writable_entry->symfile_addr_ = nullptr;
   if (NativeInfo::kCopySymfileData && symfile != nullptr) {
     NativeInfo::Free(symfile);
   }
 
   // Push the entry to the free list.
   writable_entry->next_.store(descriptor.free_entries_, kNonRacingRelaxed);
+  writable_entry->prev_ = nullptr;
   descriptor.free_entries_ = entry;
 }
 
@@ -333,10 +420,12 @@ void RemoveNativeDebugInfoForDex(Thread* self, const DexFile* dexfile) {
 // These entries are needed to preserve the next/prev pointers in the linked list,
 // since zygote can not modify the application's data and vice versa.
 //
-//          <--- owned by the application memory ---> <--- owned by zygote memory --->
+// <------- owned by the application memory --------> <--- owned by zygote memory --->
 //         |----------------------|------------------|-------------|-----------------|
 // head -> | application_entries* | application_tail | zygote_head | zygote_entries* |
-//         |----------------------|------------------|-------------|-----------------|
+//         |---------------------+|------------------|-------------|----------------+|
+//                               |                                                  |
+//     (new application entries)-/                             (new zygote entries)-/
 //
 void NativeDebugInfoPreFork() {
   CHECK(Runtime::Current()->IsZygote());
@@ -348,23 +437,22 @@ void NativeDebugInfoPreFork() {
   // Create the zygote-owned head entry (with no ELF file).
   // The data will be allocated from the current JIT memory (owned by zygote).
   MutexLock mu(Thread::Current(), *Locks::jit_lock_);  // Needed to alloc entry.
-  const JITCodeEntry* zygote_head = CreateJITCodeEntryInternal<JitNativeInfo>();
+  const JITCodeEntry* zygote_head =
+    reinterpret_cast<const JITCodeEntry*>(JitNativeInfo::Alloc(sizeof(JITCodeEntry)));
   CHECK(zygote_head != nullptr);
+  new (JitNativeInfo::Writable(zygote_head)) JITCodeEntry();  // Initialize.
+  InsertNewEntry<JitNativeInfo>(zygote_head, descriptor.head_);
   descriptor.zygote_head_entry_ = zygote_head;
 
   // Create the child-owned tail entry (with no ELF file).
   // The data is statically allocated since it must be owned by the forked process.
-  JITCodeEntry* app_tail = &descriptor.application_tail_entry_;
-  app_tail->next_ = zygote_head;
-  app_tail->seqlock_.store(2, kNonRacingRelaxed);  // Mark as valid.
-  descriptor.head_.store(app_tail, std::memory_order_release);
+  InsertNewEntry<JitNativeInfo>(&descriptor.application_tail_entry_, descriptor.head_);
 }
 
 void NativeDebugInfoPostFork() {
+  CHECK(!Runtime::Current()->IsZygote());
   JITDescriptor& descriptor = JitNativeInfo::Descriptor();
-  if (!Runtime::Current()->IsZygote()) {
-    descriptor.free_entries_ = nullptr;  // Don't reuse zygote's entries.
-  }
+  descriptor.free_entries_ = nullptr;  // Don't reuse zygote's entries.
 }
 
 // Size of JIT code range covered by each packed JITCodeEntry.
@@ -377,7 +465,7 @@ static uint32_t g_jit_num_unpacked_entries = 0;
 // Split the JIT code cache into groups of fixed size and create single JITCodeEntry for each group.
 // The start address of method's code determines which group it belongs to.  The end is irrelevant.
 // New mini debug infos will be merged if possible, and entries for GCed functions will be removed.
-static void RepackEntries(bool compress, ArrayRef<const void*> removed)
+static void RepackEntries(bool compress_entries, ArrayRef<const void*> removed)
     REQUIRES(g_jit_debug_lock) {
   DCHECK(std::is_sorted(removed.begin(), removed.end()));
   jit::Jit* jit = Runtime::Current()->GetJit();
@@ -395,7 +483,7 @@ static void RepackEntries(bool compress, ArrayRef<const void*> removed)
       break;  // Memory owned by the zygote process (read-only for an app).
     }
     if (it->allow_packing_) {
-      if (!compress && it->is_compressed_ && removed.empty()) {
+      if (!compress_entries && it->is_compressed_ && removed.empty()) {
         continue;  // If we are not compressing, also avoid decompressing.
       }
       entries.push_back(it);
@@ -420,6 +508,9 @@ static void RepackEntries(bool compress, ArrayRef<const void*> removed)
     auto removed_end = std::lower_bound(removed.begin(), removed.end(), group_end);
     CHECK(removed_end >= removed_begin);
     ArrayRef<const void*> removed_subset(&*removed_begin, removed_end - removed_begin);
+
+    // Optimization: Don't compress the last group since it will likely change again soon.
+    bool compress = compress_entries && end != entries.end();
 
     // Bail out early if there is nothing to do for this group.
     if (elfs.size() == 1 && removed_subset.empty() && (*begin)->is_compressed_ == compress) {
@@ -476,13 +567,13 @@ void AddNativeDebugInfoForJit(const void* code_ptr,
   // Always compress zygote, since it does not GC and we want to keep the high-water mark low.
   if (++g_jit_num_unpacked_entries >= kJitRepackFrequency) {
     bool is_zygote = Runtime::Current()->IsZygote();
-    RepackEntries(/*compress=*/ is_zygote, /*removed=*/ ArrayRef<const void*>());
+    RepackEntries(/*compress_entries=*/ is_zygote, /*removed=*/ ArrayRef<const void*>());
   }
 }
 
 void RemoveNativeDebugInfoForJit(ArrayRef<const void*> removed) {
   MutexLock mu(Thread::Current(), g_jit_debug_lock);
-  RepackEntries(/*compress=*/ true, removed);
+  RepackEntries(/*compress_entries=*/ true, removed);
 
   // Remove entries which are not allowed to be packed (containing single method each).
   for (const JITCodeEntry* it = __jit_debug_descriptor.head_; it != nullptr; it = it->next_) {
