@@ -107,6 +107,11 @@ inline vixl::aarch64::FPRegister SRegisterFrom(Location location) {
   return vixl::aarch64::FPRegister::GetSRegFromCode(location.reg());
 }
 
+inline vixl::aarch64::FPRegister HRegisterFrom(Location location) {
+  DCHECK(location.IsFpuRegister()) << location;
+  return vixl::aarch64::FPRegister::GetHRegFromCode(location.reg());
+}
+
 inline vixl::aarch64::FPRegister FPRegisterFrom(Location location, DataType::Type type) {
   DCHECK(DataType::IsFloatingPointType(type)) << type;
   return type == DataType::Type::kFloat64 ? DRegisterFrom(location) : SRegisterFrom(location);
