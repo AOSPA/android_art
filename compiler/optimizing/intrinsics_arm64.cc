@@ -3412,6 +3412,71 @@ void IntrinsicCodeGeneratorARM64::VisitFP16LessEquals(HInvoke* invoke) {
   GenerateFP16Compare(invoke, codegen_, masm, compareOp);
 }
 
+void IntrinsicLocationsBuilderARM64::VisitFP16Compare(HInvoke* invoke) {
+  if (!codegen_->GetInstructionSetFeatures().HasFP16()) {
+    return;
+  }
+
+  CreateIntIntToIntLocations(allocator_, invoke);
+  invoke->GetLocations()->AddTemp(Location::RequiresFpuRegister());
+  invoke->GetLocations()->AddTemp(Location::RequiresFpuRegister());
+}
+
+void IntrinsicCodeGeneratorARM64::VisitFP16Compare(HInvoke* invoke) {
+  MacroAssembler* masm = GetVIXLAssembler();
+  auto compareOp = [masm](const Register out,
+                          const VRegister& in0,
+                          const VRegister& in1) {
+    vixl::aarch64::Label end;
+    vixl::aarch64::Label one;
+    vixl::aarch64::Label neg_one;
+    vixl::aarch64::Label equal;
+    vixl::aarch64::Label zero;
+    vixl::aarch64::Label nan;
+
+    __ Fcmp(in0, in1);
+    __ B(gt, &one);
+    __ B(vs, &nan);
+    __ B(eq, &equal);
+
+    // if in0 < in1 or if only the 2nd input is NaN
+    __ Bind(&neg_one);
+    __ Mov(out, -1);
+    __ B(&end);
+
+    // if in0 > in1 or if only the 1st input is NaN
+    __ Bind(&one);
+    __ Mov(out, 1);
+    __ B(&end);
+
+    // if either of the input is NaN
+    // NaN is equal to itself and greater than any other number. Therfore:
+    // - if only in0 is NaN => return 1
+    // - if only in1 is NaN => return -1
+    // - if both in0 and in1 are NaN => return 0
+    __ Bind(&nan);
+    __ Fcmp(in0, 0.0);
+    // if in0 is not a NaN than only in1 was a NaN and therefore return -1
+    __ B(vc, &neg_one);
+    __ Fcmp(in1, 0.0);
+    // if in1 is not a NaN than only in0 was a NaN and return +1
+    __ B(vc, &one);
+    //  If the execution reaches this point, it means both registers are NaN and return 0
+    __ B(&zero);
+
+    // in0 == in1 or if one of the inputs is +0 and the other is -0
+    __ Bind(&equal);
+    __ Fcmp(in0.V1D(), in1.V1D());
+    __ B(mi, &one);  // in0 is +0, in1 is -0
+    __ B(hi, &neg_one);  // in0 is -0, in1 is +0
+    __ Bind(&zero);
+    __ Mov(out, 0);
+
+    __ Bind(&end);
+  };
+  GenerateFP16Compare(invoke, codegen_, masm, compareOp);
+}
+
 UNIMPLEMENTED_INTRINSIC(ARM64, ReferenceGetReferent)
 
 UNIMPLEMENTED_INTRINSIC(ARM64, StringStringIndexOf);
