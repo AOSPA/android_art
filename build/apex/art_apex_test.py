@@ -267,6 +267,14 @@ class Checker:
       return False, '%s is a directory'
     return True, ''
 
+  def is_dir(self, path):
+    fs_object = self._provider.get(path)
+    if fs_object is None:
+      return False, 'Could not find %s'
+    if not fs_object.is_dir:
+      return False, '%s is not a directory'
+    return True, ''
+
   def check_file(self, path):
     ok, msg = self.is_file(path)
     if not ok:
@@ -294,27 +302,30 @@ class Checker:
       self.fail('%s is not a symlink', path)
     self._expected_file_globs.add(path)
 
-  def check_art_test_executable(self, filename):
-    # This is a simplistic implementation, as we declare victory as soon as the
-    # test binary is found for one of the supported (not built) architectures.
-    # Ideally we would propagate the built architectures from the build system
-    # to this script and require test binaries for all of them to be present.
-    # Note that this behavior is not specific to this method: there are other
-    # places in this script where we rely on this simplified strategy.
+  def arch_dirs_for_path(self, path):
+    # Look for target-specific subdirectories for the given directory path.
+    # This is needed because the list of build targets is not propagated
+    # to this script.
     #
-    # TODO: Implement the suggestion above (here and in other places in this
-    # script).
-    test_found = False
+    # TODO: Pass build target information to this script and fix all places
+    # where this function in used (or similar workarounds).
+    dirs = []
     for arch in ARCHS:
-      test_path = '%s/%s/%s' % (ART_TEST_DIR, arch, filename)
-      test_is_file, _ = self.is_file(test_path)
-      if test_is_file:
-        test_found = True
-        self._expected_file_globs.add(test_path)
-        if not self._provider.get(test_path).is_exec:
-          self.fail('%s is not executable', test_path)
-    if not test_found:
+      dir = '%s/%s' % (path, arch)
+      found, _ = self.is_dir(dir)
+      if found:
+        dirs.append(dir)
+    return dirs
+
+  def check_art_test_executable(self, filename):
+    dirs = self.arch_dirs_for_path(ART_TEST_DIR)
+    if not dirs:
       self.fail('ART test binary missing: %s', filename)
+    for dir in dirs:
+      test_path = '%s/%s' % (dir, filename)
+      self._expected_file_globs.add(test_path)
+      if not self._provider.get(test_path).is_exec:
+        self.fail('%s is not executable', test_path)
 
   def check_single_library(self, filename):
     lib_path = 'lib/%s' % filename
@@ -327,6 +338,14 @@ class Checker:
       self._expected_file_globs.add(lib64_path)
     if not lib_is_file and not lib64_is_file:
       self.fail('Library missing: %s', filename)
+
+  def check_dexpreopt(self, basename):
+    dirs = self.arch_dirs_for_path('javalib')
+    if not dirs:
+      self.fail('Could not find javalib directory for any arch.')
+    for dir in dirs:
+      for ext in ['art', 'oat', 'vdex']:
+        self.check_file('%s/%s.%s' % (dir, basename, ext))
 
   def check_java_library(self, basename):
     return self.check_file('javalib/%s.jar' % basename)
@@ -451,8 +470,8 @@ class ReleaseChecker:
     return 'Release Checker'
 
   def run(self):
-    # Check the APEX manifest.
-    self._checker.check_file('apex_manifest.json')
+    # Check the Protocol Buffers APEX manifest.
+    self._checker.check_file('apex_manifest.pb')
 
     # Check binaries for ART.
     self._checker.check_executable('dex2oat')
@@ -467,6 +486,7 @@ class ReleaseChecker:
     self._checker.check_native_library('libnativebridge')
     self._checker.check_native_library('libnativehelper')
     self._checker.check_native_library('libnativeloader')
+    self._checker.check_native_library('libadbconnection_server')
 
     # Check internal libraries for ART.
     self._checker.check_native_library('libadbconnection')
@@ -522,6 +542,17 @@ class ReleaseChecker:
     self._checker.check_optional_native_library('libclang_rt.hwasan*')
     self._checker.check_optional_native_library('libclang_rt.ubsan*')
 
+    # Check dexpreopt files for libcore bootclasspath jars, unless this is a
+    # coverage build with EMMA_INSTRUMENT_FRAMEWORK=true (in that case we do not
+    # generate dexpreopt files because ART boot jars depend on framework and
+    # cannot be dexpreopted in isolation).
+    if 'EMMA_INSTRUMENT_FRAMEWORK' not in os.environ or not os.environ['EMMA_INSTRUMENT_FRAMEWORK']:
+      self._checker.check_dexpreopt('boot')
+      self._checker.check_dexpreopt('boot-apache-xml')
+      self._checker.check_dexpreopt('boot-bouncycastle')
+      self._checker.check_dexpreopt('boot-core-icu4j')
+      self._checker.check_dexpreopt('boot-core-libart')
+      self._checker.check_dexpreopt('boot-okhttp')
 
 class ReleaseTargetChecker:
   def __init__(self, checker):
@@ -531,12 +562,10 @@ class ReleaseTargetChecker:
     return 'Release (Target) Checker'
 
   def run(self):
-    # Check the APEX package scripts.
-    self._checker.check_executable('art_postinstall_hook')
-    self._checker.check_executable('art_preinstall_hook')
-    self._checker.check_executable('art_preinstall_hook_boot')
-    self._checker.check_executable('art_preinstall_hook_system_server')
-    self._checker.check_executable('art_prepostinstall_utils')
+    # We don't check for the presence of the JSON APEX manifest (file
+    # `apex_manifest.json`, only present in target APEXes), as it is only
+    # included for compatibility reasons with Android Q and will likely be
+    # removed in Android R.
 
     # Check binaries for ART.
     self._checker.check_executable('oatdump')
@@ -1058,24 +1087,26 @@ def art_apex_test_main(test_args):
     logging.error("Need debugfs.")
     return 1
 
-  if test_args.flavor == FLAVOR_AUTO:
-    logging.warning('--flavor=auto, trying to autodetect. This may be incorrect!')
-    for flavor in [ FLAVOR_RELEASE, FLAVOR_DEBUG, FLAVOR_TESTING ]:
-      flavor_pattern = '*.%s*' % flavor
-      if fnmatch.fnmatch(test_args.apex, flavor_pattern):
-        test_args.flavor = flavor
-        break
-    if test_args.flavor == FLAVOR_AUTO:
-      logging.error('  Could not detect APEX flavor, neither \'%s\', \'%s\' nor \'%s\' in \'%s\'',
-                  FLAVOR_RELEASE, FLAVOR_DEBUG, FLAVOR_TESTING, test_args.apex)
+  if test_args.host:
+    # Host APEX.
+    if test_args.flavor not in [FLAVOR_DEBUG, FLAVOR_AUTO]:
+      logging.error("Using option --host with non-Debug APEX")
       return 1
-
-  if test_args.host and test_args.flavor == FLAVOR_RELEASE:
-    logging.error("Using option --host with Release APEX")
-    return 1
-  if test_args.host and test_args.flavor == FLAVOR_TESTING:
-    logging.error("Using option --host with Testing APEX")
-    return 1
+    # Host APEX is always a debug flavor (for now).
+    test_args.flavor = FLAVOR_DEBUG
+  else:
+    # Device APEX.
+    if test_args.flavor == FLAVOR_AUTO:
+      logging.warning('--flavor=auto, trying to autodetect. This may be incorrect!')
+      for flavor in [ FLAVOR_RELEASE, FLAVOR_DEBUG, FLAVOR_TESTING ]:
+        flavor_pattern = '*.%s*' % flavor
+        if fnmatch.fnmatch(test_args.apex, flavor_pattern):
+          test_args.flavor = flavor
+          break
+      if test_args.flavor == FLAVOR_AUTO:
+        logging.error('  Could not detect APEX flavor, neither \'%s\', \'%s\' nor \'%s\' in \'%s\'',
+                    FLAVOR_RELEASE, FLAVOR_DEBUG, FLAVOR_TESTING, test_args.apex)
+        return 1
 
   try:
     if test_args.host:

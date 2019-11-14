@@ -39,8 +39,8 @@ public class Main {
         }
     }
 
-    public static void main(String args[]) {
-        // Test FP16 to float
+    public static void testHalfToFloatToHalfConversions(){
+        // Test FP16 to float and back to Half for all possible Short values
         for (short h = Short.MIN_VALUE; h < Short.MAX_VALUE; h++) {
             if (FP16.isNaN(h)) {
                 // NaN inputs are tested below.
@@ -48,7 +48,9 @@ public class Main {
             }
             assertEquals(h, FP16.toHalf(FP16.toFloat(h)));
         }
+    }
 
+    public static void testToHalf(){
         // These asserts check some known values and edge cases for FP16.toHalf
         // and have been inspired by the cts HalfTest.
         // Zeroes, NaN and infinities
@@ -88,6 +90,9 @@ public class Main {
         assertEquals(0x7400, FP16.toHalf(16392.0f));
         assertEquals(0x7800, FP16.toHalf(32784.0f));
 
+    }
+
+    public static void testToFloat(){
         // FP16 SNaN/QNaN inputs to float
         // The most significant bit of mantissa:
         //                 V
@@ -105,5 +110,92 @@ public class Main {
         assertEquals(0xffffe000, TestFP16ToFloatRawIntBits((short)(0xfdff)));  // SNaN->QNaN
         assertEquals(0xffc00000, TestFP16ToFloatRawIntBits((short)(0xfe00)));  // QNaN->QNaN
         assertEquals(0xffffe000, TestFP16ToFloatRawIntBits((short)(0xffff)));  // QNaN->QNaN
+    }
+
+    public static void testFloor() {
+        // These tests have been taken from the cts HalfTest
+        assertEquals(FP16.POSITIVE_INFINITY, FP16.floor(FP16.POSITIVE_INFINITY));
+        assertEquals(FP16.NEGATIVE_INFINITY, FP16.floor(FP16.NEGATIVE_INFINITY));
+        assertEquals(FP16.POSITIVE_ZERO, FP16.floor(FP16.POSITIVE_ZERO));
+        assertEquals(FP16.NEGATIVE_ZERO, FP16.floor(FP16.NEGATIVE_ZERO));
+        assertEquals(FP16.NaN, FP16.floor(FP16.NaN));
+        assertEquals(FP16.LOWEST_VALUE, FP16.floor(FP16.LOWEST_VALUE));
+        assertEquals(FP16.POSITIVE_ZERO, FP16.floor(FP16.MIN_NORMAL));
+        assertEquals(FP16.POSITIVE_ZERO, FP16.floor((short) 0x3ff));
+        assertEquals(FP16.POSITIVE_ZERO, FP16.floor(FP16.toHalf(0.2f)));
+        assertEquals(-1.0f, FP16.toFloat(FP16.floor(FP16.toHalf(-0.2f))));
+        assertEquals(-1.0f, FP16.toFloat(FP16.floor(FP16.toHalf(-0.7f))));
+        assertEquals(FP16.POSITIVE_ZERO, FP16.floor(FP16.toHalf(0.7f)));
+        assertEquals(124.0f, FP16.toFloat(FP16.floor(FP16.toHalf(124.7f))));
+        assertEquals(-125.0f, FP16.toFloat(FP16.floor(FP16.toHalf(-124.7f))));
+        assertEquals(124.0f, FP16.toFloat(FP16.floor(FP16.toHalf(124.2f))));
+        assertEquals(-125.0f, FP16.toFloat(FP16.floor(FP16.toHalf(-124.2f))));
+        // floor for NaN values
+        assertEquals((short) 0x7e01, FP16.floor((short) 0x7c01));
+        assertEquals((short) 0x7f00, FP16.floor((short) 0x7d00));
+        assertEquals((short) 0xfe01, FP16.floor((short) 0xfc01));
+        assertEquals((short) 0xff00, FP16.floor((short) 0xfd00));
+    }
+
+    public static void testCeil() {
+        // These tests have been taken from the cts HalfTest
+        assertEquals(FP16.POSITIVE_INFINITY, FP16.ceil(FP16.POSITIVE_INFINITY));
+        assertEquals(FP16.NEGATIVE_INFINITY, FP16.ceil(FP16.NEGATIVE_INFINITY));
+        assertEquals(FP16.POSITIVE_ZERO, FP16.ceil(FP16.POSITIVE_ZERO));
+        assertEquals(FP16.NEGATIVE_ZERO, FP16.ceil(FP16.NEGATIVE_ZERO));
+        assertEquals(FP16.NaN, FP16.ceil(FP16.NaN));
+        assertEquals(FP16.LOWEST_VALUE, FP16.ceil(FP16.LOWEST_VALUE));
+        assertEquals(1.0f, FP16.toFloat(FP16.ceil(FP16.MIN_NORMAL)));
+        assertEquals(1.0f, FP16.toFloat(FP16.ceil((short) 0x3ff)));
+        assertEquals(1.0f, FP16.toFloat(FP16.ceil(FP16.toHalf(0.2f))));
+        assertEquals(FP16.NEGATIVE_ZERO, FP16.ceil(FP16.toHalf(-0.2f)));
+        assertEquals(1.0f, FP16.toFloat(FP16.ceil(FP16.toHalf(0.7f))));
+        assertEquals(FP16.NEGATIVE_ZERO, FP16.ceil(FP16.toHalf(-0.7f)));
+        assertEquals(125.0f, FP16.toFloat(FP16.ceil(FP16.toHalf(124.7f))));
+        assertEquals(-124.0f, FP16.toFloat(FP16.ceil(FP16.toHalf(-124.7f))));
+        assertEquals(125.0f, FP16.toFloat(FP16.ceil(FP16.toHalf(124.2f))));
+        assertEquals(-124.0f, FP16.toFloat(FP16.ceil(FP16.toHalf(-124.2f))));
+        // ceil for NaN values
+        assertEquals((short) 0x7e01, FP16.floor((short) 0x7c01));
+        assertEquals((short) 0x7f00, FP16.floor((short) 0x7d00));
+        assertEquals((short) 0xfe01, FP16.floor((short) 0xfc01));
+        assertEquals((short) 0xff00, FP16.floor((short) 0xfd00));
+    }
+
+    public static void testRint() {
+        assertEquals(FP16.POSITIVE_INFINITY, FP16.rint(FP16.POSITIVE_INFINITY));
+        assertEquals(FP16.NEGATIVE_INFINITY, FP16.rint(FP16.NEGATIVE_INFINITY));
+        assertEquals(FP16.POSITIVE_ZERO, FP16.rint(FP16.POSITIVE_ZERO));
+        assertEquals(FP16.NEGATIVE_ZERO, FP16.rint(FP16.NEGATIVE_ZERO));
+        assertEquals(FP16.NaN, FP16.rint(FP16.NaN));
+        assertEquals(FP16.LOWEST_VALUE, FP16.rint(FP16.LOWEST_VALUE));
+        assertEquals(FP16.POSITIVE_ZERO, FP16.rint(FP16.MIN_VALUE));
+        assertEquals(FP16.POSITIVE_ZERO, FP16.rint((short) 0x200));
+        assertEquals(FP16.POSITIVE_ZERO, FP16.rint((short) 0x3ff));
+        assertEquals(FP16.POSITIVE_ZERO, FP16.rint(FP16.toHalf(0.2f)));
+        assertEquals(FP16.NEGATIVE_ZERO, FP16.rint(FP16.toHalf(-0.2f)));
+        assertEquals(1.0f, FP16.toFloat(FP16.rint(FP16.toHalf(0.7f))));
+        assertEquals(-1.0f, FP16.toFloat(FP16.rint(FP16.toHalf(-0.7f))));
+        assertEquals(0.0f, FP16.toFloat(FP16.rint(FP16.toHalf(0.5f))));
+        assertEquals(-0.0f, FP16.toFloat(FP16.rint(FP16.toHalf(-0.5f))));
+        assertEquals(125.0f, FP16.toFloat(FP16.rint(FP16.toHalf(124.7f))));
+        assertEquals(-125.0f, FP16.toFloat(FP16.rint(FP16.toHalf(-124.7f))));
+        assertEquals(124.0f, FP16.toFloat(FP16.rint(FP16.toHalf(124.2f))));
+        assertEquals(-124.0f, FP16.toFloat(FP16.rint(FP16.toHalf(-124.2f))));
+        // floor for NaN values
+        assertEquals((short) 0x7e01, FP16.floor((short) 0x7c01));
+        assertEquals((short) 0x7f00, FP16.floor((short) 0x7d00));
+        assertEquals((short) 0xfe01, FP16.floor((short) 0xfc01));
+        assertEquals((short) 0xff00, FP16.floor((short) 0xfd00));
+
+    }
+
+    public static void main(String args[]) {
+        testHalfToFloatToHalfConversions();
+        testToHalf();
+        testToFloat();
+        testFloor();
+        testCeil();
+        testRint();
     }
 }
