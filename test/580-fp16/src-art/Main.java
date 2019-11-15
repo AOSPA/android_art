@@ -423,6 +423,112 @@ public class Main {
         assertEquals(0, FP16.compare(FP16.toHalf(12.462f), FP16.toHalf(12.462f)));
     }
 
+    public static void testMin() {
+        assertEquals(FP16.NEGATIVE_INFINITY,
+                     FP16.min(FP16.POSITIVE_INFINITY, FP16.NEGATIVE_INFINITY));
+        assertEquals(FP16.NEGATIVE_INFINITY,
+                     FP16.min(FP16.NEGATIVE_INFINITY, FP16.POSITIVE_INFINITY));
+
+        assertEquals(FP16.NEGATIVE_ZERO, FP16.min(FP16.POSITIVE_ZERO, FP16.NEGATIVE_ZERO));
+        assertEquals(FP16.NEGATIVE_ZERO, FP16.min(FP16.NEGATIVE_ZERO,FP16.POSITIVE_ZERO));
+
+        assertEquals(FP16.NaN, FP16.min(FP16.NaN, FP16.LOWEST_VALUE));
+        assertEquals(FP16.NaN, FP16.min(FP16.LOWEST_VALUE, FP16.NaN));
+
+        assertEquals(FP16.NaN, FP16.min(FP16_ALT_NAN, FP16_ALT_NAN));
+        assertEquals(FP16.NaN, FP16.min(FP16.NaN, FP16_ALT_NAN));
+        assertEquals(FP16.NaN, FP16.min(FP16_ALT_NAN, FP16.NaN));
+
+        assertEquals(FP16.NEGATIVE_INFINITY, FP16.min(FP16.NEGATIVE_INFINITY, FP16.LOWEST_VALUE));
+        assertEquals(FP16.NEGATIVE_INFINITY, FP16.min(FP16.LOWEST_VALUE, FP16.NEGATIVE_INFINITY));
+
+        assertEquals(FP16.MAX_VALUE, FP16.min(FP16.POSITIVE_INFINITY, FP16.MAX_VALUE));
+        assertEquals(FP16.MAX_VALUE, FP16.min(FP16.MAX_VALUE, FP16.POSITIVE_INFINITY));
+
+        assertEquals(FP16.MIN_VALUE, FP16.min(FP16.MIN_VALUE, FP16.MIN_NORMAL));
+        assertEquals(FP16.MIN_VALUE, FP16.min(FP16.MIN_NORMAL, FP16.MIN_VALUE));
+
+        assertEquals(FP16.POSITIVE_ZERO, FP16.min(FP16.MIN_VALUE, FP16.POSITIVE_ZERO));
+        assertEquals(FP16.POSITIVE_ZERO, FP16.min(FP16.POSITIVE_ZERO, FP16.MIN_VALUE));
+
+        assertEquals(FP16.POSITIVE_ZERO, FP16.min(FP16.MIN_NORMAL, FP16.POSITIVE_ZERO));
+        assertEquals(FP16.POSITIVE_ZERO, FP16.min(FP16.POSITIVE_ZERO, FP16.MIN_NORMAL));
+
+        assertEquals(FP16.toHalf(-3.456f), FP16.min(FP16.toHalf(-3.456f), FP16.toHalf(-3.453f)));
+        assertEquals(FP16.toHalf(-3.456f), FP16.min(FP16.toHalf(-3.453f), FP16.toHalf(-3.456f)));
+
+        assertEquals(FP16.toHalf(3.453f), FP16.min(FP16.toHalf(3.456f), FP16.toHalf(3.453f)));
+        assertEquals(FP16.toHalf(3.453f), FP16.min(FP16.toHalf(3.453f), FP16.toHalf(3.456f)));
+
+        assertEquals(FP16.toHalf(-3.456f), FP16.min(FP16.toHalf(-3.456f), FP16.toHalf(3.456f)));
+        assertEquals(FP16.toHalf(-3.456f), FP16.min(FP16.toHalf(3.456f), FP16.toHalf(-3.456f)));
+    }
+
+    /// CHECK-START-ARM64: void Main.testCheckMin() disassembly (after)
+    /// CHECK-IF: hasIsaFeature("fp16")
+    ///      CHECK:                 InvokeStaticOrDirect intrinsic:FP16Min
+    ///      CHECK:                 fcmp {{h\d+}}, {{h\d+}}
+    /// CHECK-ELSE:
+    ///      CHECK:                 InvokeStaticOrDirect intrinsic:FP16Min
+    ///      CHECK-NOT:             fcmp {{h\d+}}, {{h\d+}}
+    /// CHECK-FI:
+    public static void testCheckMin() {
+        assertEquals(FP16.toHalf(-3.456f), FP16.min(FP16.toHalf(-3.456f), FP16.toHalf(-3.453f)));
+    }
+
+    public static void testMax() {
+        assertEquals(FP16.POSITIVE_INFINITY,
+                     FP16.max(FP16.POSITIVE_INFINITY, FP16.NEGATIVE_INFINITY));
+        assertEquals(FP16.POSITIVE_INFINITY,
+                     FP16.max(FP16.NEGATIVE_INFINITY, FP16.POSITIVE_INFINITY));
+
+        assertEquals(FP16.POSITIVE_ZERO, FP16.max(FP16.POSITIVE_ZERO, FP16.NEGATIVE_ZERO));
+        assertEquals(FP16.POSITIVE_ZERO, FP16.max(FP16.NEGATIVE_ZERO, FP16.POSITIVE_ZERO));
+
+        assertEquals(FP16.NaN, FP16.max(FP16.NaN, FP16.MAX_VALUE));
+        assertEquals(FP16.NaN, FP16.max(FP16.MAX_VALUE, FP16.NaN));
+
+        assertEquals(FP16.NaN, FP16.min(FP16_ALT_NAN, FP16_ALT_NAN));
+        assertEquals(FP16.NaN, FP16.min(FP16.NaN, FP16_ALT_NAN));
+        assertEquals(FP16.NaN, FP16.min(FP16_ALT_NAN, FP16.NaN));
+
+        assertEquals(FP16.LOWEST_VALUE, FP16.max(FP16.NEGATIVE_INFINITY, FP16.LOWEST_VALUE));
+        assertEquals(FP16.LOWEST_VALUE, FP16.max(FP16.LOWEST_VALUE, FP16.NEGATIVE_INFINITY));
+
+        assertEquals(FP16.POSITIVE_INFINITY, FP16.max(FP16.POSITIVE_INFINITY, FP16.MAX_VALUE));
+        assertEquals(FP16.POSITIVE_INFINITY, FP16.max(FP16.MAX_VALUE, FP16.POSITIVE_INFINITY));
+
+        assertEquals(FP16.MIN_NORMAL, FP16.max(FP16.MIN_VALUE, FP16.MIN_NORMAL));
+        assertEquals(FP16.MIN_NORMAL, FP16.max(FP16.MIN_NORMAL, FP16.MIN_VALUE));
+
+        assertEquals(FP16.MIN_VALUE, FP16.max(FP16.MIN_VALUE, FP16.POSITIVE_ZERO));
+        assertEquals(FP16.MIN_VALUE, FP16.max(FP16.POSITIVE_ZERO, FP16.MIN_VALUE));
+
+        assertEquals(FP16.MIN_NORMAL, FP16.max(FP16.MIN_NORMAL, FP16.POSITIVE_ZERO));
+        assertEquals(FP16.MIN_NORMAL, FP16.max(FP16.POSITIVE_ZERO, FP16.MIN_NORMAL));
+
+        assertEquals(FP16.toHalf(-3.453f), FP16.max(FP16.toHalf(-3.456f), FP16.toHalf(-3.453f)));
+        assertEquals(FP16.toHalf(-3.453f), FP16.max(FP16.toHalf(-3.453f), FP16.toHalf(-3.456f)));
+
+        assertEquals(FP16.toHalf(3.456f), FP16.max(FP16.toHalf(3.456f), FP16.toHalf(3.453f)));
+        assertEquals(FP16.toHalf(3.456f), FP16.max(FP16.toHalf(3.453f), FP16.toHalf(3.456f)));
+
+        assertEquals(FP16.toHalf(3.456f), FP16.max(FP16.toHalf(-3.456f), FP16.toHalf(3.456f)));
+        assertEquals(FP16.toHalf(3.456f), FP16.max(FP16.toHalf(3.456f), FP16.toHalf(-3.456f)));
+    }
+
+    /// CHECK-START-ARM64: void Main.testCheckMax() disassembly (after)
+    /// CHECK-IF: hasIsaFeature("fp16")
+    ///      CHECK:                 InvokeStaticOrDirect intrinsic:FP16Max
+    ///      CHECK:                 fcmp {{h\d+}}, {{h\d+}}
+    /// CHECK-ELSE:
+    ///      CHECK:                 InvokeStaticOrDirect intrinsic:FP16Max
+    ///      CHECK-NOT:             fcmp {{h\d+}}, {{h\d+}}
+    /// CHECK-FI:
+    public static void testCheckMax() {
+        assertEquals(FP16.toHalf(-3.453f), FP16.max(FP16.toHalf(-3.456f), FP16.toHalf(-3.453f)));
+    }
+
     public static void main(String args[]) {
         testHalfToFloatToHalfConversions();
         testToHalf();
@@ -436,5 +542,9 @@ public class Main {
         testLess();
         testCompare();
         testCheckCompare();
+        testMin();
+        testCheckMin();
+        testMax();
+        testCheckMax();
     }
 }
