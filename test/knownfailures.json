@@ -1140,9 +1140,14 @@
                   "1985-structural-redefine-stack-scope",
                   "1986-structural-redefine-multi-thread-stack-scope",
                   "1987-structural-redefine-recursive-stack-scope",
+                  "1988-multi-structural-redefine",
                   "1989-transform-bad-monitor",
                   "1990-structural-bad-verify",
-                  "1992-retransform-no-such-field"
+                  "1991-hello-structural-retransform",
+                  "1992-retransform-no-such-field",
+                  "1993-fallback-non-structural",
+                  "1997-structural-shadow-method",
+                  "1998-structural-shadow-field"
                 ],
         "variant": "jvm",
         "description": ["Doesn't run on RI."]
@@ -1264,5 +1269,11 @@
         "env_vars": {"ART_READ_BARRIER_TYPE": "TABLELOOKUP"},
         "bug": "b/140507091",
         "description": ["Test containing Checker assertions expecting Baker read barriers."]
+    },
+    {
+        "tests": ["689-zygote-jit-deopt"],
+        "variant": "gcstress",
+        "bug": "b/137887811",
+        "description": ["Occasional timeouts."]
     }
 ]

@@ -435,7 +435,7 @@ class Runtime {
     imt_conflict_method_ = nullptr;
   }
 
-  void FixupConflictTables();
+  void FixupConflictTables() REQUIRES_SHARED(Locks::mutator_lock_);
   void SetImtConflictMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
   void SetImtUnimplementedMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -599,6 +599,14 @@ class Runtime {
 
   hiddenapi::EnforcementPolicy GetCorePlatformApiEnforcementPolicy() const {
     return core_platform_api_policy_;
+  }
+
+  void SetTestApiEnforcementPolicy(hiddenapi::EnforcementPolicy policy) {
+    test_api_policy_ = policy;
+  }
+
+  hiddenapi::EnforcementPolicy GetTestApiEnforcementPolicy() const {
+    return test_api_policy_;
   }
 
   void SetHiddenApiExemptions(const std::vector<std::string>& exemptions) {
@@ -942,6 +950,9 @@ class Runtime {
     return verifier_missing_kthrow_fatal_;
   }
 
+  // Return true if we should load oat files as executable or not.
+  bool GetOatFilesExecutable() const;
+
  private:
   static void InitPlatformSignalHandlers();
 
@@ -1214,6 +1225,9 @@ class Runtime {
 
   // Whether access checks on core platform API should be performed.
   hiddenapi::EnforcementPolicy core_platform_api_policy_;
+
+  // Whether access checks on test API should be performed.
+  hiddenapi::EnforcementPolicy test_api_policy_;
 
   // List of signature prefixes of methods that have been removed from the blacklist, and treated
   // as if whitelisted.
