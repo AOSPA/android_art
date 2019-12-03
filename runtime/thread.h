@@ -263,6 +263,17 @@ class Thread {
         (state_and_flags.as_struct.flags & kSuspendRequest) != 0;
   }
 
+  void DecrDefineClassCount() {
+    tls32_.define_class_counter--;
+  }
+
+  void IncrDefineClassCount() {
+    tls32_.define_class_counter++;
+  }
+  uint32_t GetDefineClassCount() const {
+    return tls32_.define_class_counter;
+  }
+
   // If delta > 0 and (this != self or suspend_barrier is not null), this function may temporarily
   // release thread_suspend_count_lock_ internally.
   ALWAYS_INLINE
@@ -353,6 +364,21 @@ class Thread {
       tlsPtr_.last_no_thread_suspension_cause = old_cause;
     }
     Roles::uninterruptible_.Release();  // No-op.
+  }
+
+  // End region where no thread suspension is expected. Returns the current open region in case we
+  // want to reopen it. Used for ScopedAllowThreadSuspension. Not supported if no_thread_suspension
+  // is larger than one.
+  const char* EndAssertNoThreadSuspension() RELEASE(Roles::uninterruptible_) WARN_UNUSED {
+    const char* ret = nullptr;
+    if (kIsDebugBuild) {
+      CHECK_EQ(tls32_.no_thread_suspension, 1u);
+      tls32_.no_thread_suspension--;
+      ret = tlsPtr_.last_no_thread_suspension_cause;
+      tlsPtr_.last_no_thread_suspension_cause = nullptr;
+    }
+    Roles::uninterruptible_.Release();  // No-op.
+    return ret;
   }
 
   void AssertThreadSuspensionIsAllowable(bool check_locks = true) const;
@@ -1535,7 +1561,8 @@ class Thread {
           user_code_suspend_count(0),
           force_interpreter_count(0),
           use_mterp(0),
-          make_visibly_initialized_counter(0) {}
+          make_visibly_initialized_counter(0),
+          define_class_counter(0) {}
 
     union StateAndFlags state_and_flags;
     static_assert(sizeof(union StateAndFlags) == sizeof(int32_t),
@@ -1633,6 +1660,10 @@ class Thread {
     // initialized but not visibly initialized for a long time even if no more classes are
     // being initialized anymore.
     uint32_t make_visibly_initialized_counter;
+
+    // Counter for how many nested define-classes are ongoing in this thread. Used to allow waiting
+    // for threads to be done with class-definition work.
+    uint32_t define_class_counter;
   } tls32_;
 
   struct PACKED(8) tls_64bit_sized_values {
@@ -1909,6 +1940,30 @@ class SCOPED_CAPABILITY ScopedAssertNoThreadSuspension {
   const bool enabled_;
   const char* old_cause_;
 };
+
+class ScopedAllowThreadSuspension {
+ public:
+  ALWAYS_INLINE ScopedAllowThreadSuspension() RELEASE(Roles::uninterruptible_) {
+    if (kIsDebugBuild) {
+      self_ = Thread::Current();
+      old_cause_ = self_->EndAssertNoThreadSuspension();
+    } else {
+      Roles::uninterruptible_.Release();  // No-op.
+    }
+  }
+  ALWAYS_INLINE ~ScopedAllowThreadSuspension() ACQUIRE(Roles::uninterruptible_) {
+    if (kIsDebugBuild) {
+      CHECK(self_->StartAssertNoThreadSuspension(old_cause_) == nullptr);
+    } else {
+      Roles::uninterruptible_.Acquire();  // No-op.
+    }
+  }
+
+ private:
+  Thread* self_;
+  const char* old_cause_;
+};
+
 
 class ScopedStackedShadowFramePusher {
  public:

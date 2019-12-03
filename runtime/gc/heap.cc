@@ -17,6 +17,7 @@
 #include "heap.h"
 
 #include <limits>
+#include "android-base/thread_annotations.h"
 #if defined(__BIONIC__) || defined(__GLIBC__)
 #include <malloc.h>  // For mallinfo()
 #endif
@@ -1728,13 +1729,34 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
   // Make sure there is no pending exception since we may need to throw an OOME.
   self->AssertNoPendingException();
   DCHECK(klass != nullptr);
+
   StackHandleScope<1> hs(self);
-  HandleWrapperObjPtr<mirror::Class> h(hs.NewHandleWrapper(klass));
+  HandleWrapperObjPtr<mirror::Class> h_klass(hs.NewHandleWrapper(klass));
+
+  auto send_object_pre_alloc = [&]() REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (UNLIKELY(instrumented)) {
+      AllocationListener* l = alloc_listener_.load(std::memory_order_seq_cst);
+      if (UNLIKELY(l != nullptr) && UNLIKELY(l->HasPreAlloc())) {
+        l->PreObjectAllocated(self, h_klass, &alloc_size);
+      }
+    }
+  };
+#define PERFORM_SUSPENDING_OPERATION(op)                                          \
+  [&]() REQUIRES(Roles::uninterruptible_) REQUIRES_SHARED(Locks::mutator_lock_) { \
+    ScopedAllowThreadSuspension ats;                                              \
+    auto res = (op);                                                              \
+    send_object_pre_alloc();                                                      \
+    return res;                                                                   \
+  }()
+
   // The allocation failed. If the GC is running, block until it completes, and then retry the
   // allocation.
-  collector::GcType last_gc = WaitForGcToComplete(kGcCauseForAlloc, self);
+  collector::GcType last_gc =
+      PERFORM_SUSPENDING_OPERATION(WaitForGcToComplete(kGcCauseForAlloc, self));
   // If we were the default allocator but the allocator changed while we were suspended,
   // abort the allocation.
+  // We just waited, call the pre-alloc again.
+  send_object_pre_alloc();
   if ((was_default_allocator && allocator != GetCurrentAllocator()) ||
       (!instrumented && EntrypointsInstrumented())) {
     return nullptr;
@@ -1749,8 +1771,9 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
   }
 
   collector::GcType tried_type = next_gc_type_;
-  const bool gc_ran =
-      CollectGarbageInternal(tried_type, kGcCauseForAlloc, false) != collector::kGcTypeNone;
+  const bool gc_ran = PERFORM_SUSPENDING_OPERATION(
+      CollectGarbageInternal(tried_type, kGcCauseForAlloc, false) != collector::kGcTypeNone);
+
   if ((was_default_allocator && allocator != GetCurrentAllocator()) ||
       (!instrumented && EntrypointsInstrumented())) {
     return nullptr;
@@ -1769,8 +1792,8 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
       continue;
     }
     // Attempt to run the collector, if we succeed, re-try the allocation.
-    const bool plan_gc_ran =
-        CollectGarbageInternal(gc_type, kGcCauseForAlloc, false) != collector::kGcTypeNone;
+    const bool plan_gc_ran = PERFORM_SUSPENDING_OPERATION(
+        CollectGarbageInternal(gc_type, kGcCauseForAlloc, false) != collector::kGcTypeNone);
     if ((was_default_allocator && allocator != GetCurrentAllocator()) ||
         (!instrumented && EntrypointsInstrumented())) {
       return nullptr;
@@ -1800,7 +1823,7 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
   // TODO: Run finalization, but this may cause more allocations to occur.
   // We don't need a WaitForGcToComplete here either.
   DCHECK(!gc_plan_.empty());
-  CollectGarbageInternal(gc_plan_.back(), kGcCauseForAlloc, true);
+  PERFORM_SUSPENDING_OPERATION(CollectGarbageInternal(gc_plan_.back(), kGcCauseForAlloc, true));
   if ((was_default_allocator && allocator != GetCurrentAllocator()) ||
       (!instrumented && EntrypointsInstrumented())) {
     return nullptr;
@@ -1817,7 +1840,8 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
             current_time - last_time_homogeneous_space_compaction_by_oom_ >
             min_interval_homogeneous_space_compaction_by_oom_) {
           last_time_homogeneous_space_compaction_by_oom_ = current_time;
-          HomogeneousSpaceCompactResult result = PerformHomogeneousSpaceCompact();
+          HomogeneousSpaceCompactResult result =
+              PERFORM_SUSPENDING_OPERATION(PerformHomogeneousSpaceCompact());
           // Thread suspension could have occurred.
           if ((was_default_allocator && allocator != GetCurrentAllocator()) ||
               (!instrumented && EntrypointsInstrumented())) {
@@ -1862,8 +1886,10 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
       }
     }
   }
+#undef PERFORM_SUSPENDING_OPERATION
   // If the allocation hasn't succeeded by this point, throw an OOM error.
   if (ptr == nullptr) {
+    ScopedAllowThreadSuspension ats;
     ThrowOutOfMemoryError(self, alloc_size, allocator);
   }
   return ptr;
@@ -2266,12 +2292,6 @@ void Heap::IncrementFreedEver() {
                                 std::memory_order_release);
 }
 
-#pragma clang diagnostic push
-#if !ART_USE_FUTEXES
-// Frame gets too large, perhaps due to Bionic pthread_mutex_lock size. We don't care.
-#  pragma clang diagnostic ignored "-Wframe-larger-than="
-#endif
-// This has a large frame, but shouldn't be run anywhere near the stack limit.
 void Heap::PreZygoteFork() {
   if (!HasZygoteSpace()) {
     // We still want to GC in case there is some unreachable non moving objects that could cause a
@@ -2432,7 +2452,6 @@ void Heap::PreZygoteFork() {
     AddRememberedSet(post_zygote_non_moving_space_rem_set);
   }
 }
-#pragma clang diagnostic pop
 
 void Heap::FlushAllocStack() {
   MarkAllocStackAsLive(allocation_stack_.get());

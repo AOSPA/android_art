@@ -41,6 +41,7 @@
 #include "art_jvmti.h"
 #include "base/array_ref.h"
 #include "base/globals.h"
+#include "dex/class_accessor.h"
 #include "dex/dex_file.h"
 #include "dex/dex_file_structs.h"
 #include "jni/jni_env_ext-inl.h"
@@ -51,6 +52,7 @@
 #include "obj_ptr.h"
 
 namespace art {
+class ClassAccessor;
 namespace dex {
 struct ClassDef;
 }  // namespace dex
@@ -155,6 +157,9 @@ class Redefiner {
     bool FinishRemainingAllocations(/*out*/RedefinitionDataIter* cur_data)
         REQUIRES_SHARED(art::Locks::mutator_lock_);
 
+    bool CollectAndCreateNewInstances(/*out*/RedefinitionDataIter* cur_data)
+        REQUIRES_SHARED(art::Locks::mutator_lock_);
+
     bool AllocateAndRememberNewDexFileCookie(
         art::Handle<art::mirror::ClassLoader> source_class_loader,
         art::Handle<art::mirror::Object> dex_file_obj,
@@ -164,10 +169,15 @@ class Redefiner {
     void FindAndAllocateObsoleteMethods(art::ObjPtr<art::mirror::Class> art_klass)
         REQUIRES(art::Locks::mutator_lock_);
 
+    art::ObjPtr<art::mirror::Class> AllocateNewClassObject(
+        art::Handle<art::mirror::Class> old_class,
+        art::Handle<art::mirror::Class> super_class,
+        art::Handle<art::mirror::DexCache> cache,
+        uint16_t dex_class_def_index) REQUIRES_SHARED(art::Locks::mutator_lock_);
     art::ObjPtr<art::mirror::Class> AllocateNewClassObject(art::Handle<art::mirror::DexCache> cache)
         REQUIRES_SHARED(art::Locks::mutator_lock_);
 
-    uint32_t GetNewClassSize(bool with_embedded_tables, art::Handle<art::mirror::Class> old_class)
+    uint32_t GetNewClassSize(art::ClassAccessor& accessor)
         REQUIRES_SHARED(art::Locks::mutator_lock_);
 
     // Checks that the dex file contains only the single expected class and that the top-level class
@@ -234,8 +244,14 @@ class Redefiner {
 
     void RecordNewMethodAdded();
     void RecordNewFieldAdded();
+    void RecordHasVirtualMembers() {
+      has_virtuals_ = true;
+    }
 
-   private:
+    bool HasVirtualMembers() const {
+      return has_virtuals_;
+    }
+
     bool IsStructuralRedefinition() const {
       DCHECK(!(added_fields_ || added_methods_) || driver_->IsStructuralRedefinition())
           << "added_fields_: " << added_fields_ << " added_methods_: " << added_methods_
@@ -243,6 +259,7 @@ class Redefiner {
       return driver_->IsStructuralRedefinition() && (added_fields_ || added_methods_);
     }
 
+   private:
     void UpdateClassStructurally(const RedefinitionDataIter& cur_data)
         REQUIRES(art::Locks::mutator_lock_);
 
@@ -257,6 +274,7 @@ class Redefiner {
 
     bool added_fields_ = false;
     bool added_methods_ = false;
+    bool has_virtuals_ = false;
 
     // Does the class need to be reverified due to verification soft-fails possibly forcing
     // interpreter or lock-counting?
@@ -305,11 +323,14 @@ class Redefiner {
   jvmtiError Run() REQUIRES_SHARED(art::Locks::mutator_lock_);
 
   bool CheckAllRedefinitionAreValid() REQUIRES_SHARED(art::Locks::mutator_lock_);
+  bool CheckClassHierarchy() REQUIRES_SHARED(art::Locks::mutator_lock_);
   bool CheckAllClassesAreVerified(RedefinitionDataHolder& holder)
       REQUIRES_SHARED(art::Locks::mutator_lock_);
   bool EnsureAllClassAllocationsFinished(RedefinitionDataHolder& holder)
       REQUIRES_SHARED(art::Locks::mutator_lock_);
   bool FinishAllRemainingAllocations(RedefinitionDataHolder& holder)
+      REQUIRES_SHARED(art::Locks::mutator_lock_);
+  bool CollectAndCreateNewInstances(RedefinitionDataHolder& holder)
       REQUIRES_SHARED(art::Locks::mutator_lock_);
   void ReleaseAllDexFiles() REQUIRES_SHARED(art::Locks::mutator_lock_);
   void ReverifyClasses(RedefinitionDataHolder& holder) REQUIRES_SHARED(art::Locks::mutator_lock_);

@@ -531,9 +531,11 @@ PRIVATE_BIONIC_FILES := \
   lib/bootstrap/libc.so \
   lib/bootstrap/libm.so \
   lib/bootstrap/libdl.so \
+  lib/bootstrap/libdl_android.so \
   lib64/bootstrap/libc.so \
   lib64/bootstrap/libm.so \
   lib64/bootstrap/libdl.so \
+  lib64/bootstrap/libdl_android.so \
 
 PRIVATE_ART_APEX_DEPENDENCY_LIBS := \
   lib/libnativebridge.so \
@@ -574,7 +576,7 @@ PRIVATE_ART_APEX_DEPENDENCY_LIBS := \
 # TODO(b/129332183): Remove this when Golem has full support for the
 # ART APEX.
 .PHONY: standalone-apex-files
-standalone-apex-files: libc.bootstrap libdl.bootstrap libm.bootstrap linker $(DEBUG_ART_APEX)
+standalone-apex-files: libc.bootstrap libdl.bootstrap libdl_android.bootstrap libm.bootstrap linker $(DEBUG_ART_APEX)
 	for f in $(PRIVATE_BIONIC_FILES); do \
 	  tf=$(TARGET_OUT)/$$f; \
 	  if [ -f $$tf ]; then cp -f $$tf $$(echo $$tf | sed 's,bootstrap/,,'); fi; \
@@ -596,9 +598,9 @@ standalone-apex-files: libc.bootstrap libdl.bootstrap libm.bootstrap linker $(DE
 # Also include libartbenchmark, we always include it when running golem.
 # libstdc++ is needed when building for ART_TARGET_LINUX.
 
-# Also include the bootstrap Bionic libraries (libc, libdl, libm).
-# These are required as the "main" libc, libdl, and libm have moved to
-# the ART APEX. This is a temporary change needed until Golem
+# Also include the bootstrap Bionic libraries (libc, libdl, libdl_android,
+# libm). These are required as the "main" libc, libdl, libdl_android, and libm
+# have moved to the ART APEX. This is a temporary change needed until Golem
 # fully supports the ART APEX.
 #
 # TODO(b/129332183): Remove this when Golem has full support for the
@@ -637,7 +639,7 @@ build-art-target-golem: dex2oat dalvikvm linker libstdc++ \
                         $(ART_TARGET_SHARED_LIBRARY_BENCHMARK) \
                         $(TARGET_CORE_IMG_OUT_BASE).art \
                         $(TARGET_CORE_IMG_OUT_BASE)-interpreter.art \
-                        libc.bootstrap libdl.bootstrap libm.bootstrap \
+                        libc.bootstrap libdl.bootstrap libdl_android.bootstrap libm.bootstrap \
                         icu-data-art-test-i18n \
                         tzdata-art-test-tzdata tzlookup.xml-art-test-tzdata \
                         tz_version-art-test-tzdata icu_overlay-art-test-tzdata \

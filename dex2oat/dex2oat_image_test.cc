@@ -68,15 +68,31 @@ class Dex2oatImageTest : public CommonRuntimeTest {
   void TearDown() override {}
 
  protected:
+  void SetUpRuntimeOptions(RuntimeOptions* options) override {
+    // Disable implicit dex2oat invocations when loading image spaces.
+    options->emplace_back("-Xnoimage-dex2oat", nullptr);
+  }
+
   // Visitors take method and type references
   template <typename MethodVisitor, typename ClassVisitor>
   void VisitLibcoreDexes(const MethodVisitor& method_visitor,
                          const ClassVisitor& class_visitor,
                          size_t method_frequency = 1,
                          size_t class_frequency = 1) {
+    std::vector<std::string> dexes = GetLibCoreDexFileNames();
+    VisitDexes(dexes, method_visitor, class_visitor, method_frequency, class_frequency);
+  }
+
+  // Visitors take method and type references
+  template <typename MethodVisitor, typename ClassVisitor>
+  void VisitDexes(const std::vector<std::string>& dexes,
+                  const MethodVisitor& method_visitor,
+                  const ClassVisitor& class_visitor,
+                  size_t method_frequency = 1,
+                  size_t class_frequency = 1) {
     size_t method_counter = 0;
     size_t class_counter = 0;
-    for (const std::string& dex : GetLibCoreDexFileNames()) {
+    for (const std::string& dex : dexes) {
       std::vector<std::unique_ptr<const DexFile>> dex_files;
       std::string error_msg;
       const ArtDexFileLoader dex_file_loader;
@@ -107,19 +123,27 @@ class Dex2oatImageTest : public CommonRuntimeTest {
     EXPECT_TRUE(file->WriteFully(&line[0], line.length()));
   }
 
-  void GenerateProfile(File* out_file, size_t method_frequency,  size_t type_frequency) {
+  void GenerateProfile(const std::vector<std::string>& dexes,
+                       File* out_file,
+                       size_t method_frequency,
+                       size_t type_frequency) {
     ProfileCompilationInfo profile;
-    VisitLibcoreDexes([&profile](MethodReference ref) {
-      uint32_t flags = ProfileCompilationInfo::MethodHotness::kFlagHot |
-          ProfileCompilationInfo::MethodHotness::kFlagStartup;
-      EXPECT_TRUE(profile.AddMethod(
-          ProfileMethodInfo(ref),
-          static_cast<ProfileCompilationInfo::MethodHotness::Flag>(flags)));
-    }, [&profile](TypeReference ref) {
-      std::set<dex::TypeIndex> classes;
-      classes.insert(ref.TypeIndex());
-      EXPECT_TRUE(profile.AddClassesForDex(ref.dex_file, classes.begin(), classes.end()));
-    }, method_frequency, type_frequency);
+    VisitDexes(
+        dexes,
+        [&profile](MethodReference ref) {
+          uint32_t flags = ProfileCompilationInfo::MethodHotness::kFlagHot |
+              ProfileCompilationInfo::MethodHotness::kFlagStartup;
+          EXPECT_TRUE(profile.AddMethod(
+              ProfileMethodInfo(ref),
+              static_cast<ProfileCompilationInfo::MethodHotness::Flag>(flags)));
+        },
+        [&profile](TypeReference ref) {
+          std::set<dex::TypeIndex> classes;
+          classes.insert(ref.TypeIndex());
+          EXPECT_TRUE(profile.AddClassesForDex(ref.dex_file, classes.begin(), classes.end()));
+        },
+        method_frequency,
+        type_frequency);
     ScratchFile profile_file;
     profile.Save(out_file->Fd());
     EXPECT_EQ(out_file->Flush(), 0);
@@ -137,7 +161,8 @@ class Dex2oatImageTest : public CommonRuntimeTest {
     args.push_back(arg);
   }
 
-  ImageSizes CompileImageAndGetSizes(const std::vector<std::string>& extra_args) {
+  ImageSizes CompileImageAndGetSizes(ArrayRef<const std::string> dex_files,
+                                     const std::vector<std::string>& extra_args) {
     ImageSizes ret;
     ScratchFile scratch;
     std::string scratch_dir = scratch.GetFilename();
@@ -145,8 +170,6 @@ class Dex2oatImageTest : public CommonRuntimeTest {
       scratch_dir.pop_back();
     }
     CHECK(!scratch_dir.empty()) << "No directory " << scratch.GetFilename();
-    std::vector<std::string> libcore_dex_files = GetLibCoreDexFileNames();
-    ArrayRef<const std::string> dex_files(libcore_dex_files);
     std::vector<std::string> local_extra_args = extra_args;
     local_extra_args.push_back(android::base::StringPrintf("--base=0x%08x", kBaseAddress));
     std::string error_msg;
@@ -222,6 +245,38 @@ class Dex2oatImageTest : public CommonRuntimeTest {
     }
     return res.StandardSuccess();
   }
+
+  MemMap ReserveCoreImageAddressSpace(/*out*/std::string* error_msg) {
+    constexpr size_t kReservationSize = 256 * MB;  // This should be enough for the compiled images.
+    // Extend to both directions for maximum relocation difference.
+    static_assert(ART_BASE_ADDRESS_MIN_DELTA < 0);
+    static_assert(ART_BASE_ADDRESS_MAX_DELTA > 0);
+    static_assert(IsAligned<kPageSize>(ART_BASE_ADDRESS_MIN_DELTA));
+    static_assert(IsAligned<kPageSize>(ART_BASE_ADDRESS_MAX_DELTA));
+    constexpr size_t kExtra = ART_BASE_ADDRESS_MAX_DELTA - ART_BASE_ADDRESS_MIN_DELTA;
+    uint32_t min_relocated_address = kBaseAddress + ART_BASE_ADDRESS_MIN_DELTA;
+    return MemMap::MapAnonymous("Reservation",
+                                reinterpret_cast<uint8_t*>(min_relocated_address),
+                                kReservationSize + kExtra,
+                                PROT_NONE,
+                                /*low_4gb=*/ true,
+                                /*reuse=*/ false,
+                                /*reservation=*/ nullptr,
+                                error_msg);
+  }
+
+  void CopyDexFiles(const std::string& dir, /*inout*/std::vector<std::string>* dex_files) {
+    CHECK(EndsWith(dir, "/"));
+    for (std::string& dex_file : *dex_files) {
+      size_t slash_pos = dex_file.rfind('/');
+      CHECK_NE(std::string::npos, slash_pos);
+      std::string new_location = dir + dex_file.substr(slash_pos + 1u);
+      std::ifstream src_stream(dex_file, std::ios::binary);
+      std::ofstream dst_stream(new_location, std::ios::binary);
+      dst_stream << src_stream.rdbuf();
+      dex_file = new_location;
+    }
+  }
 };
 
 TEST_F(Dex2oatImageTest, TestModesAndFilters) {
@@ -234,15 +289,29 @@ TEST_F(Dex2oatImageTest, TestModesAndFilters) {
     // This test is too slow for target builds.
     return;
   }
-  ImageSizes base_sizes = CompileImageAndGetSizes({});
+  // Compile only a subset of the libcore dex files to make this test shorter.
+  std::vector<std::string> libcore_dex_files = GetLibCoreDexFileNames();
+  // The primary image must contain at least core-oj and core-libart to initialize the runtime
+  // and we also need the core-icu4j if we want to compile these with full profile.
+  ASSERT_NE(std::string::npos, libcore_dex_files[0].find("core-oj"));
+  ASSERT_NE(std::string::npos, libcore_dex_files[1].find("core-libart"));
+  ASSERT_NE(std::string::npos, libcore_dex_files[2].find("core-icu4j"));
+  ArrayRef<const std::string> dex_files =
+      ArrayRef<const std::string>(libcore_dex_files).SubArray(/*pos=*/ 0u, /*length=*/ 3u);
+
+  ImageSizes base_sizes = CompileImageAndGetSizes(dex_files, {});
   ImageSizes everything_sizes;
   ImageSizes filter_sizes;
   std::cout << "Base compile sizes " << base_sizes << std::endl;
   // Compile all methods and classes
   {
     ScratchFile profile_file;
-    GenerateProfile(profile_file.GetFile(), /*method_frequency=*/ 1u, /*type_frequency=*/ 1u);
+    GenerateProfile(GetLibCoreDexFileNames(),
+                    profile_file.GetFile(),
+                    /*method_frequency=*/ 1u,
+                    /*type_frequency=*/ 1u);
     everything_sizes = CompileImageAndGetSizes(
+        dex_files,
         {"--profile-file=" + profile_file.GetFilename(),
          "--compiler-filter=speed-profile"});
     profile_file.Close();
@@ -257,8 +326,12 @@ TEST_F(Dex2oatImageTest, TestModesAndFilters) {
   // Test compiling fewer methods and classes.
   {
     ScratchFile profile_file;
-    GenerateProfile(profile_file.GetFile(), kMethodFrequency, kTypeFrequency);
+    GenerateProfile(GetLibCoreDexFileNames(),
+                    profile_file.GetFile(),
+                    kMethodFrequency,
+                    kTypeFrequency);
     filter_sizes = CompileImageAndGetSizes(
+        dex_files,
         {"--profile-file=" + profile_file.GetFilename(),
          "--compiler-filter=speed-profile"});
     profile_file.Close();
@@ -275,6 +348,7 @@ TEST_F(Dex2oatImageTest, TestModesAndFilters) {
       WriteLine(classes.GetFile(), ref.dex_file->PrettyType(ref.TypeIndex()));
     }, /*method_frequency=*/ 1u, /*class_frequency=*/ 1u);
     ImageSizes image_classes_sizes = CompileImageAndGetSizes(
+        dex_files,
         {"--dirty-image-objects=" + classes.GetFilename()});
     classes.Close();
     std::cout << "Dirty image object sizes " << image_classes_sizes << std::endl;
@@ -282,24 +356,9 @@ TEST_F(Dex2oatImageTest, TestModesAndFilters) {
 }
 
 TEST_F(Dex2oatImageTest, TestExtension) {
-  constexpr size_t kReservationSize = 256 * MB;  // This should be enough for the compiled images.
-  // Extend to both directions for maximum relocation difference.
-  static_assert(ART_BASE_ADDRESS_MIN_DELTA < 0);
-  static_assert(ART_BASE_ADDRESS_MAX_DELTA > 0);
-  static_assert(IsAligned<kPageSize>(ART_BASE_ADDRESS_MIN_DELTA));
-  static_assert(IsAligned<kPageSize>(ART_BASE_ADDRESS_MAX_DELTA));
-  constexpr size_t kExtra = ART_BASE_ADDRESS_MAX_DELTA - ART_BASE_ADDRESS_MIN_DELTA;
-  uint32_t min_relocated_address = kBaseAddress + ART_BASE_ADDRESS_MIN_DELTA;
   std::string error_msg;
-  MemMap reservation = MemMap::MapAnonymous("Reservation",
-                                            reinterpret_cast<uint8_t*>(min_relocated_address),
-                                            kReservationSize + kExtra,
-                                            PROT_NONE,
-                                            /*low_4gb=*/ true,
-                                            /*reuse=*/ false,
-                                            /*reservation=*/ nullptr,
-                                            &error_msg);
-  ASSERT_TRUE(reservation.IsValid());
+  MemMap reservation = ReserveCoreImageAddressSpace(&error_msg);
+  ASSERT_TRUE(reservation.IsValid()) << error_msg;
 
   ScratchFile scratch;
   std::string scratch_dir = scratch.GetFilename() + "-d";
@@ -318,29 +377,32 @@ TEST_F(Dex2oatImageTest, TestExtension) {
   ASSERT_EQ(0, mkdir_result);
   jar_dir += '/';
   std::vector<std::string> libcore_dex_files = GetLibCoreDexFileNames();
-  for (std::string& dex_file : libcore_dex_files) {
-    size_t slash_pos = dex_file.rfind('/');
-    ASSERT_NE(std::string::npos, slash_pos);
-    std::string new_location = jar_dir + dex_file.substr(slash_pos + 1u);
-    std::ifstream src_stream(dex_file, std::ios::binary);
-    std::ofstream dst_stream(new_location, std::ios::binary);
-    dst_stream << src_stream.rdbuf();
-    dex_file = new_location;
-  }
+  CopyDexFiles(jar_dir, &libcore_dex_files);
+
+  // Create a profile.
+  ScratchFile profile_file;
+  GenerateProfile(libcore_dex_files,
+                  profile_file.GetFile(),
+                  /*method_frequency=*/ 1u,
+                  /*type_frequency=*/ 1u);
+  std::vector<std::string> extra_args;
+  extra_args.push_back("--profile-file=" + profile_file.GetFilename());
 
   ArrayRef<const std::string> full_bcp(libcore_dex_files);
   size_t total_dex_files = full_bcp.size();
-  ASSERT_GE(total_dex_files, 4u);  // 2 for "head", 1 for "tail", at least one for "mid", see below.
+  ASSERT_GE(total_dex_files, 5u);  // 3 for "head", 1 for "tail", at least one for "mid", see below.
 
-  // The primary image must contain at least core-oj and core-libart to initialize the runtime.
+  // The primary image must contain at least core-oj and core-libart to initialize the runtime
+  // and we also need the core-icu4j if we want to compile these with full profile.
   ASSERT_NE(std::string::npos, full_bcp[0].find("core-oj"));
   ASSERT_NE(std::string::npos, full_bcp[1].find("core-libart"));
-  ArrayRef<const std::string> head_dex_files = full_bcp.SubArray(/*pos=*/ 0u, /*length=*/ 2u);
+  ASSERT_NE(std::string::npos, full_bcp[2].find("core-icu4j"));
+  ArrayRef<const std::string> head_dex_files = full_bcp.SubArray(/*pos=*/ 0u, /*length=*/ 3u);
   // Middle part is everything else except for conscrypt.
   ASSERT_NE(std::string::npos, full_bcp[full_bcp.size() - 1u].find("conscrypt"));
   ArrayRef<const std::string> mid_bcp =
       full_bcp.SubArray(/*pos=*/ 0u, /*length=*/ total_dex_files - 1u);
-  ArrayRef<const std::string> mid_dex_files = mid_bcp.SubArray(/*pos=*/ 2u);
+  ArrayRef<const std::string> mid_dex_files = mid_bcp.SubArray(/*pos=*/ 3u);
   // Tail is just the conscrypt.
   ArrayRef<const std::string> tail_dex_files =
       full_bcp.SubArray(/*pos=*/ total_dex_files - 1u, /*length=*/ 1u);
@@ -367,22 +429,22 @@ TEST_F(Dex2oatImageTest, TestExtension) {
   std::string tail_name = tail_location.substr(tail_slash_pos + 1u);
 
   // Compile the "head", i.e. the primary boot image.
-  std::string base = android::base::StringPrintf("--base=0x%08x", kBaseAddress);
-  bool head_ok = CompileBootImage({base}, filename_prefix, head_dex_files, &error_msg);
+  extra_args.push_back(android::base::StringPrintf("--base=0x%08x", kBaseAddress));
+  bool head_ok = CompileBootImage(extra_args, filename_prefix, head_dex_files, &error_msg);
   ASSERT_TRUE(head_ok) << error_msg;
+  extra_args.pop_back();
 
   // Compile the "mid", i.e. the first extension.
   std::string mid_bcp_string = android::base::Join(mid_bcp, ':');
-  std::vector<std::string> extra_args;
   AddRuntimeArg(extra_args, "-Xbootclasspath:" + mid_bcp_string);
   AddRuntimeArg(extra_args, "-Xbootclasspath-locations:" + mid_bcp_string);
   extra_args.push_back("--boot-image=" + base_location);
   bool mid_ok = CompileBootImage(extra_args, filename_prefix, mid_dex_files, &error_msg);
   ASSERT_TRUE(mid_ok) << error_msg;
+  extra_args.resize(extra_args.size() - 3u);
 
   // Try to compile the "tail" without specifying the "mid" extension. This shall fail.
   std::string full_bcp_string = android::base::Join(full_bcp, ':');
-  extra_args.clear();
   AddRuntimeArg(extra_args, "-Xbootclasspath:" + full_bcp_string);
   AddRuntimeArg(extra_args, "-Xbootclasspath-locations:" + full_bcp_string);
   extra_args.push_back("--boot-image=" + base_location);
@@ -418,8 +480,12 @@ TEST_F(Dex2oatImageTest, TestExtension) {
                                                 &boot_image_spaces,
                                                 &extra_reservation);
   };
+  auto silent_load = [&](const std::string& image_location) {
+    ScopedLogSeverity quiet(LogSeverity::FATAL);
+    return load(image_location);
+  };
 
-  for (bool r : { false, true}) {
+  for (bool r : { false, true }) {
     relocate = r;
 
     // Load primary image with full path.
@@ -429,13 +495,13 @@ TEST_F(Dex2oatImageTest, TestExtension) {
     ASSERT_EQ(head_dex_files.size(), boot_image_spaces.size());
 
     // Fail to load primary image with just the name.
-    load_ok = load(base_name);
+    load_ok = silent_load(base_name);
     ASSERT_FALSE(load_ok);
 
     // Fail to load primary image with a search path.
-    load_ok = load("*");
+    load_ok = silent_load("*");
     ASSERT_FALSE(load_ok);
-    load_ok = load(scratch_dir + "*");
+    load_ok = silent_load(scratch_dir + "*");
     ASSERT_FALSE(load_ok);
 
     // Load the primary and first extension with full path.
@@ -477,17 +543,9 @@ TEST_F(Dex2oatImageTest, TestExtension) {
 
   // Now copy the libcore dex files to the `scratch_dir` and retry loading the boot image
   // with BCP in the scratch_dir so that the images can be found based on BCP paths.
-  for (std::string& bcp_component : boot_class_path) {
-    size_t slash_pos = bcp_component.rfind('/');
-    ASSERT_NE(std::string::npos, slash_pos);
-    std::string new_location = scratch_dir + bcp_component.substr(slash_pos + 1u);
-    std::ifstream src_stream(bcp_component, std::ios::binary);
-    std::ofstream dst_stream(new_location, std::ios::binary);
-    dst_stream << src_stream.rdbuf();
-    bcp_component = new_location;
-  }
+  CopyDexFiles(scratch_dir, &boot_class_path);
 
-  for (bool r : { false, true}) {
+  for (bool r : { false, true }) {
     relocate = r;
 
     // Loading the primary image with just the name now succeeds.
@@ -495,9 +553,9 @@ TEST_F(Dex2oatImageTest, TestExtension) {
     ASSERT_TRUE(load_ok) << error_msg;
 
     // Loading the primary image with a search path still fails.
-    load_ok = load("*");
+    load_ok = silent_load("*");
     ASSERT_FALSE(load_ok);
-    load_ok = load(scratch_dir + "*");
+    load_ok = silent_load(scratch_dir + "*");
     ASSERT_FALSE(load_ok);
 
     // Load the primary and first extension without paths.
@@ -532,9 +590,9 @@ TEST_F(Dex2oatImageTest, TestExtension) {
     ASSERT_EQ(full_bcp.size(), boot_image_spaces.size());
 
     // Fail to load any images with invalid image locations (named component after search paths).
-    load_ok = load(base_location + ":*:" + tail_location);
+    load_ok = silent_load(base_location + ":*:" + tail_location);
     ASSERT_FALSE(load_ok);
-    load_ok = load(base_location + ':' + scratch_dir + "*:" + tail_location);
+    load_ok = silent_load(base_location + ':' + scratch_dir + "*:" + tail_location);
     ASSERT_FALSE(load_ok);
   }
 
