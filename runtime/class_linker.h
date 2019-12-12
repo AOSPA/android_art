@@ -738,7 +738,7 @@ class ClassLinker {
       REQUIRES_SHARED(Locks::mutator_lock_)
       NO_THREAD_SAFETY_ANALYSIS;
 
-  void AppendToBootClassPath(Thread* self, const DexFile& dex_file)
+  void AppendToBootClassPath(Thread* self, const DexFile* dex_file)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_);
 
@@ -912,7 +912,7 @@ class ClassLinker {
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_, !Roles::uninterruptible_);
 
-  void AppendToBootClassPath(const DexFile& dex_file, ObjPtr<mirror::DexCache> dex_cache)
+  void AppendToBootClassPath(const DexFile* dex_file, ObjPtr<mirror::DexCache> dex_cache)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_);
 
@@ -1404,6 +1404,7 @@ class ClassLinker {
 
   // Trampolines within the image the bounce to runtime entrypoints. Done so that there is a single
   // patch point within the image. TODO: make these proper relocations.
+  const void* jni_dlsym_lookup_trampoline_;
   const void* quick_resolution_trampoline_;
   const void* quick_imt_conflict_trampoline_;
   const void* quick_generic_jni_trampoline_;
@@ -1439,6 +1440,10 @@ class ClassLinker {
 class ClassLoadCallback {
  public:
   virtual ~ClassLoadCallback() {}
+
+  // Called immediately before beginning class-definition and immediately before returning from it.
+  virtual void BeginDefineClass() REQUIRES_SHARED(Locks::mutator_lock_) {}
+  virtual void EndDefineClass() REQUIRES_SHARED(Locks::mutator_lock_) {}
 
   // If set we will replace initial_class_def & initial_dex_file with the final versions. The
   // callback author is responsible for ensuring these are allocated in such a way they can be

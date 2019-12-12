@@ -2300,37 +2300,6 @@ void BuildGenericJniFrameVisitor::FinalizeHandleScope(Thread* self) {
   }
 }
 
-extern "C" const void* artFindNativeMethod(Thread* self);
-
-static uint64_t artQuickGenericJniEndJNIRef(Thread* self,
-                                            uint32_t cookie,
-                                            bool fast_native ATTRIBUTE_UNUSED,
-                                            jobject l,
-                                            jobject lock) {
-  // TODO: add entrypoints for @FastNative returning objects.
-  if (lock != nullptr) {
-    return reinterpret_cast<uint64_t>(JniMethodEndWithReferenceSynchronized(l, cookie, lock, self));
-  } else {
-    return reinterpret_cast<uint64_t>(JniMethodEndWithReference(l, cookie, self));
-  }
-}
-
-static void artQuickGenericJniEndJNINonRef(Thread* self,
-                                           uint32_t cookie,
-                                           bool fast_native,
-                                           jobject lock) {
-  if (lock != nullptr) {
-    JniMethodEndSynchronized(cookie, lock, self);
-    // Ignore "fast_native" here because synchronized functions aren't very fast.
-  } else {
-    if (UNLIKELY(fast_native)) {
-      JniMethodFastEnd(cookie, self);
-    } else {
-      JniMethodEnd(cookie, self);
-    }
-  }
-}
-
 /*
  * Initializes an alloca region assumed to be directly below sp for a native call:
  * Create a HandleScope and call stack and fill a mini stack with values to be pushed to registers.
@@ -2389,7 +2358,7 @@ extern "C" TwoWordReturn artQuickGenericJniTrampoline(Thread* self, ArtMethod** 
       // Ensure static method's class is initialized.
       StackHandleScope<1> hs(self);
       Handle<mirror::Class> h_class(hs.NewHandle(declaring_class));
-      if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(self, h_class, true, true)) {
+      if (!runtime->GetClassLinker()->EnsureInitialized(self, h_class, true, true)) {
         DCHECK(Thread::Current()->IsExceptionPending()) << called->PrettyMethod();
         self->PopHandleScope();
         // A negative value denotes an error.
@@ -2424,35 +2393,10 @@ extern "C" TwoWordReturn artQuickGenericJniTrampoline(Thread* self, ArtMethod** 
   }
 
   // Retrieve the stored native code.
+  // Note that it may point to the lookup stub or trampoline.
+  // FIXME: This is broken for @CriticalNative as the art_jni_dlsym_lookup_stub
+  // does not handle that case. Calls from compiled stubs are also broken.
   void const* nativeCode = called->GetEntryPointFromJni();
-
-  // There are two cases for the content of nativeCode:
-  // 1) Pointer to the native function.
-  // 2) Pointer to the trampoline for native code binding.
-  // In the second case, we need to execute the binding and continue with the actual native function
-  // pointer.
-  DCHECK(nativeCode != nullptr);
-  if (nativeCode == GetJniDlsymLookupStub()) {
-    nativeCode = artFindNativeMethod(self);
-
-    if (nativeCode == nullptr) {
-      DCHECK(self->IsExceptionPending());    // There should be an exception pending now.
-
-      // @CriticalNative calls do not need to call back into JniMethodEnd.
-      if (LIKELY(!critical_native)) {
-        // End JNI, as the assembly will move to deliver the exception.
-        jobject lock = called->IsSynchronized() ? visitor.GetFirstHandleScopeJObject() : nullptr;
-        if (shorty[0] == 'L') {
-          artQuickGenericJniEndJNIRef(self, cookie, fast_native, nullptr, lock);
-        } else {
-          artQuickGenericJniEndJNINonRef(self, cookie, fast_native, lock);
-        }
-      }
-
-      return GetTwoWordFailureValue();
-    }
-    // Note that the native code pointer will be automatically set by artFindNativeMethod().
-  }
 
 #if defined(__mips__) && !defined(__LP64__)
   // On MIPS32 if the first two arguments are floating-point, we need to know their types

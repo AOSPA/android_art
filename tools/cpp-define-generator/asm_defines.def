@@ -26,6 +26,7 @@
 #include "mirror_dex_cache.def"
 #include "mirror_object.def"
 #include "mirror_string.def"
+#include "profiling_info.def"
 #include "rosalloc.def"
 #include "runtime.def"
 #include "shadow_frame.def"

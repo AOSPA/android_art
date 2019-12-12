@@ -1725,13 +1725,10 @@ ENTRY art_quick_generic_jni_trampoline
     mov r1, r10
     blx artQuickGenericJniTrampoline  // (Thread*, sp)
 
-    // The C call will have registered the complete save-frame on success.
+    // The C call will have registered the complete save-frame.
     // The result of the call is:
-    // r0: pointer to native code, 0 on error.
+    // r0: pointer to native code.
     // r1: pointer to the bottom of the used area of the alloca, can restore stack till there.
-
-    // Check for error = 0.
-    cbz r0, .Lexception_in_native
 
     // Release part of the alloca.
     mov sp, r1
@@ -2742,3 +2739,67 @@ ENTRY ExecuteSwitchImplAsm
     blx r1                                        // Call the wrapped method.
     pop {r4, pc}
 END ExecuteSwitchImplAsm
+
+// r0 contains the class, r4 contains the inline cache. We can use ip as temporary.
+ENTRY art_quick_update_inline_cache
+#if (INLINE_CACHE_SIZE != 5)
+#error "INLINE_CACHE_SIZE not as expected."
+#endif
+.Lentry1:
+    ldr ip, [r4, #INLINE_CACHE_CLASSES_OFFSET]
+    cmp ip, r0
+    beq .Ldone
+    cmp ip, #0
+    bne .Lentry2
+    ldrex ip, [r4, #INLINE_CACHE_CLASSES_OFFSET]
+    cmp ip, #0
+    bne .Lentry1
+    strex  ip, r0, [r4, #INLINE_CACHE_CLASSES_OFFSET]
+    cmp ip, #0
+    bne .Ldone
+    b .Lentry1
+.Lentry2:
+    ldr ip, [r4, #INLINE_CACHE_CLASSES_OFFSET+4]
+    cmp ip, r0
+    beq .Ldone
+    cmp ip, #0
+    bne .Lentry3
+    ldrex ip, [r4, #INLINE_CACHE_CLASSES_OFFSET+4]
+    cmp ip, #0
+    bne .Lentry2
+    strex  ip, r0, [r4, #INLINE_CACHE_CLASSES_OFFSET+4]
+    cmp ip, #0
+    bne .Ldone
+    b .Lentry2
+.Lentry3:
+    ldr ip, [r4, #INLINE_CACHE_CLASSES_OFFSET+8]
+    cmp ip, r0
+    beq .Ldone
+    cmp ip, #0
+    bne .Lentry4
+    ldrex ip, [r4, #INLINE_CACHE_CLASSES_OFFSET+8]
+    cmp ip, #0
+    bne .Lentry3
+    strex  ip, r0, [r4, #INLINE_CACHE_CLASSES_OFFSET+8]
+    cmp ip, #0
+    bne .Ldone
+    b .Lentry3
+.Lentry4:
+    ldr ip, [r4, #INLINE_CACHE_CLASSES_OFFSET+12]
+    cmp ip, r0
+    beq .Ldone
+    cmp ip, #0
+    bne .Lentry5
+    ldrex ip, [r4, #INLINE_CACHE_CLASSES_OFFSET+12]
+    cmp ip, #0
+    bne .Lentry4
+    strex  ip, r0, [r4, #INLINE_CACHE_CLASSES_OFFSET+12]
+    cmp ip, #0
+    bne .Ldone
+    b .Lentry4
+.Lentry5:
+    // Unconditionally store, the inline cache is megamorphic.
+    str  r0, [r4, #INLINE_CACHE_CLASSES_OFFSET+16]
+.Ldone:
+    blx lr
+END art_quick_update_inline_cache

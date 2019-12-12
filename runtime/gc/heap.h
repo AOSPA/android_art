@@ -1013,6 +1013,7 @@ class Heap {
                                          size_t* bytes_tl_bulk_allocated,
                                          ObjPtr<mirror::Class>* klass)
       REQUIRES(!Locks::thread_suspend_count_lock_, !*gc_complete_lock_, !*pending_task_lock_)
+      REQUIRES(Roles::uninterruptible_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Allocate into a specific space.

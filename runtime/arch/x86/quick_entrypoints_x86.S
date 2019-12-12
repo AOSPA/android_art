@@ -1928,14 +1928,10 @@ DEFINE_FUNCTION art_quick_generic_jni_trampoline
     pushl %fs:THREAD_SELF_OFFSET  // Pass Thread::Current().
     call SYMBOL(artQuickGenericJniTrampoline)  // (Thread*, sp)
 
-    // The C call will have registered the complete save-frame on success.
+    // The C call will have registered the complete save-frame.
     // The result of the call is:
-    // eax: pointer to native code, 0 on error.
+    // eax: pointer to native code.
     // edx: pointer to the bottom of the used area of the alloca, can restore stack till there.
-
-    // Check for error = 0.
-    test %eax, %eax
-    jz .Lexception_in_native
 
     // Release part of the alloca.
     movl %edx, %esp
@@ -2518,6 +2514,59 @@ DEFINE_FUNCTION ExecuteSwitchImplAsm
     POP ebx                  // Restore EBX
     ret
 END_FUNCTION ExecuteSwitchImplAsm
+
+// On entry: eax is the class, ebp is the inline cache.
+DEFINE_FUNCTION art_quick_update_inline_cache
+#if (INLINE_CACHE_SIZE != 5)
+#error "INLINE_CACHE_SIZE not as expected."
+#endif
+    PUSH ecx
+    movl %eax, %ecx // eax will be used for cmpxchg
+.Lentry1:
+    movl INLINE_CACHE_CLASSES_OFFSET(%ebp), %eax
+    cmpl %ecx, %eax
+    je .Ldone
+    cmpl LITERAL(0), %eax
+    jne .Lentry2
+    lock cmpxchg %ecx, INLINE_CACHE_CLASSES_OFFSET(%ebp)
+    jz .Ldone
+    jmp .Lentry1
+.Lentry2:
+    movl (INLINE_CACHE_CLASSES_OFFSET+4)(%ebp), %eax
+    cmpl %ecx, %eax
+    je .Ldone
+    cmpl LITERAL(0), %eax
+    jne .Lentry3
+    lock cmpxchg %ecx, (INLINE_CACHE_CLASSES_OFFSET+4)(%ebp)
+    jz .Ldone
+    jmp .Lentry2
+.Lentry3:
+    movl (INLINE_CACHE_CLASSES_OFFSET+8)(%ebp), %eax
+    cmpl %ecx, %eax
+    je .Ldone
+    cmpl LITERAL(0), %eax
+    jne .Lentry4
+    lock cmpxchg %ecx, (INLINE_CACHE_CLASSES_OFFSET+8)(%ebp)
+    jz .Ldone
+    jmp .Lentry3
+.Lentry4:
+    movl (INLINE_CACHE_CLASSES_OFFSET+12)(%ebp), %eax
+    cmpl %ecx, %eax
+    je .Ldone
+    cmpl LITERAL(0), %eax
+    jne .Lentry5
+    lock cmpxchg %ecx, (INLINE_CACHE_CLASSES_OFFSET+12)(%ebp)
+    jz .Ldone
+    jmp .Lentry4
+.Lentry5:
+    // Unconditionally store, the cache is megamorphic.
+    movl %ecx, (INLINE_CACHE_CLASSES_OFFSET+16)(%ebp)
+.Ldone:
+    // Restore registers
+    movl %ecx, %eax
+    POP ecx
+    ret
+END_FUNCTION art_quick_update_inline_cache
 
     // TODO: implement these!
 UNIMPLEMENTED art_quick_memcmp16
