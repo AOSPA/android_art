@@ -35,6 +35,7 @@
 #include <cstdlib>
 #include <limits>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "android-base/strings.h"
@@ -104,7 +105,7 @@
 #include "mirror/class-alloc-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_ext.h"
-#include "mirror/class_loader.h"
+#include "mirror/class_loader-inl.h"
 #include "mirror/emulated_stack_frame.h"
 #include "mirror/field.h"
 #include "mirror/method.h"
@@ -702,6 +703,7 @@ void Runtime::SweepSystemWeaks(IsMarkedVisitor* visitor) {
     // from mutators. See b/32167580.
     GetJit()->GetCodeCache()->SweepRootTables(visitor);
   }
+  thread_list_->SweepInterpreterCaches(visitor);
 
   // All other generic system-weak holders.
   for (gc::AbstractSystemWeakHolder* holder : system_weak_holders_) {
@@ -1038,6 +1040,13 @@ void Runtime::InitNonZygoteOrPostFork(
       LOG(WARNING) << "Failed to load perfetto_hprof: " << err;
     }
   }
+  if (LIKELY(automatically_set_jni_ids_indirection_) && CanSetJniIdType()) {
+    if (IsJavaDebuggable()) {
+      SetJniIdType(JniIdType::kIndices);
+    } else {
+      SetJniIdType(JniIdType::kPointer);
+    }
+  }
 }
 
 void Runtime::StartSignalCatcher() {
@@ -1226,8 +1235,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                                                     system_oat_location,
                                                     /*executable=*/ false,
                                                     /*low_4gb=*/ false,
-                                                    /*abs_dex_location=*/ nullptr,
-                                                    /*reservation=*/ nullptr,
                                                     &error_msg));
     if (oat_file == nullptr) {
       LOG(ERROR) << "Could not open boot oat file for extracting boot class path: " << error_msg;
@@ -1318,6 +1325,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   madvise_random_access_ = runtime_options.GetOrDefault(Opt::MadviseRandomAccess);
 
   jni_ids_indirection_ = runtime_options.GetOrDefault(Opt::OpaqueJniIds);
+  automatically_set_jni_ids_indirection_ =
+      runtime_options.GetOrDefault(Opt::AutoPromoteOpaqueJniIds);
 
   plugins_ = runtime_options.ReleaseOrDefault(Opt::Plugins);
   agent_specs_ = runtime_options.ReleaseOrDefault(Opt::AgentPath);
@@ -2843,6 +2852,27 @@ void Runtime::DeoptimizeBootImage() {
       jit->GetCodeCache()->ClearEntryPointsInZygoteExecSpace();
     }
   }
+  // Also de-quicken all -quick opcodes. We do this for both BCP and non-bcp so if we are swapping
+  // debuggable during startup by a plugin (eg JVMTI) even non-BCP code has its vdex files deopted.
+  std::unordered_set<const VdexFile*> vdexs;
+  GetClassLinker()->VisitKnownDexFiles(Thread::Current(), [&](const art::DexFile* df) {
+    const OatDexFile* odf = df->GetOatDexFile();
+    if (odf == nullptr) {
+      return;
+    }
+    const OatFile* of = odf->GetOatFile();
+    if (of == nullptr || of->IsDebuggable()) {
+      // no Oat or already debuggable so no -quick.
+      return;
+    }
+    vdexs.insert(of->GetVdexFile());
+  });
+  LOG(INFO) << "Unquickening " << vdexs.size() << " vdex files!";
+  for (const VdexFile* vf : vdexs) {
+    vf->AllowWriting(true);
+    vf->UnquickenInPlace(/*decompile_return_instruction=*/true);
+    vf->AllowWriting(false);
+  }
 }
 
 Runtime::ScopedThreadPoolUsage::ScopedThreadPoolUsage()
@@ -2976,6 +3006,31 @@ void Runtime::SetJniIdType(JniIdType t) {
 
 bool Runtime::GetOatFilesExecutable() const {
   return !IsAotCompiler() && !(IsSystemServer() && jit_options_->GetSaveProfilingInfo());
+}
+
+void Runtime::ProcessWeakClass(GcRoot<mirror::Class>* root_ptr,
+                               IsMarkedVisitor* visitor,
+                               mirror::Class* update) {
+    // This does not need a read barrier because this is called by GC.
+  mirror::Class* cls = root_ptr->Read<kWithoutReadBarrier>();
+  if (cls != nullptr && cls != GetWeakClassSentinel()) {
+    DCHECK((cls->IsClass<kDefaultVerifyFlags>()));
+    // Look at the classloader of the class to know if it has been unloaded.
+    // This does not need a read barrier because this is called by GC.
+    ObjPtr<mirror::Object> class_loader =
+        cls->GetClassLoader<kDefaultVerifyFlags, kWithoutReadBarrier>();
+    if (class_loader == nullptr || visitor->IsMarked(class_loader.Ptr()) != nullptr) {
+      // The class loader is live, update the entry if the class has moved.
+      mirror::Class* new_cls = down_cast<mirror::Class*>(visitor->IsMarked(cls));
+      // Note that new_object can be null for CMS and newly allocated objects.
+      if (new_cls != nullptr && new_cls != cls) {
+        *root_ptr = GcRoot<mirror::Class>(new_cls);
+      }
+    } else {
+      // The class loader is not live, clear the entry.
+      *root_ptr = GcRoot<mirror::Class>(update);
+    }
+  }
 }
 
 }  // namespace art
