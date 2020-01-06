@@ -75,8 +75,8 @@ elif [[ $mode == "target" ]]; then
     exit 1
   fi
   make_command="build/soong/soong_ui.bash --make-mode $j_arg $extra_args $showcommands build-art-target-tests $common_targets"
-  make_command+=" libjavacrypto-target libnetd_client-target toybox toolbox sh"
-  make_command+=" debuggerd su"
+  make_command+=" libjavacrypto libnetd_client-target toybox toolbox sh"
+  make_command+=" debuggerd su gdbserver"
   make_command+=" libstdc++ "
   make_command+=" ${ANDROID_PRODUCT_OUT#"${ANDROID_BUILD_TOP}/"}/system/etc/public.libraries.txt"
   if [[ -n "$ART_TEST_CHROOT" ]]; then
@@ -87,9 +87,6 @@ elif [[ $mode == "target" ]]; then
   make_command+=" com.android.runtime"
   # Build the Testing ART APEX (which is a superset of the Release and Debug ART APEXes).
   make_command+=" com.android.art.testing"
-  # Build the system linker configuration, which is needed to use the ART APEX's
-  # linker configuration.
-  make_command+=" ld.config.txt "
   # Build the bootstrap Bionic artifacts links (linker, libc, libdl, libm).
   # These targets create these symlinks:
   # - from /system/bin/linker(64) to /apex/com.android.runtime/bin/linker(64); and
@@ -99,7 +96,6 @@ elif [[ $mode == "target" ]]; then
   make_command+=" com.android.i18n"
   # Build the Time Zone Data APEX.
   make_command+=" com.android.tzdata"
-  mode_suffix="-target"
 fi
 
 mode_specific_libraries="libjavacoretests libjdwp libwrapagentproperties libwrapagentpropertiesd"
@@ -131,4 +127,9 @@ if [[ $mode == "target" ]]; then
   link_command="mkdir -p $(dirname "$link_name") && ln -sf com.android.art.testing \"$link_name\""
   echo "Executing $link_command"
   bash -c "$link_command"
+  find $ANDROID_PRODUCT_OUT/symbols/apex/com.android.runtime/bin -type f | while read target; do
+    cmd="ln -sf $target  $ANDROID_PRODUCT_OUT/symbols/system/bin/$(basename $target)"
+    echo "Executing $cmd"
+    bash -c "$cmd"
+  done
 fi

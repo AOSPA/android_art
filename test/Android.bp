@@ -45,6 +45,9 @@ art_cc_defaults {
     cflags: [
         "-Wno-frame-larger-than=",
     ],
+    apex_available: [
+        "com.android.art.debug",
+    ],
 }
 
 art_cc_defaults {
@@ -143,6 +146,9 @@ art_cc_defaults {
             enabled: false,
         },
     },
+    apex_available: [
+        "com.android.art.debug",
+    ],
 }
 
 art_cc_library {
@@ -168,6 +174,9 @@ art_cc_library {
             enabled: false,
         },
     },
+    apex_available: [
+        "com.android.art.debug",
+    ],
 }
 
 // ART run-tests.
@@ -361,6 +370,7 @@ art_cc_defaults {
         "1974-resize-array/resize_array.cc",
         "1975-hello-structural-transformation/structural_transform.cc",
         "1976-hello-structural-static-methods/structural_transform_methods.cc",
+        "2005-pause-all-redefine-multithreaded/pause-all.cc",
     ],
     // Use NDK-compatible headers for ctstiagent.
     header_libs: [
