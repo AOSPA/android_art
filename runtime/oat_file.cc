@@ -45,6 +45,7 @@
 #include "base/mem_map.h"
 #include "base/os.h"
 #include "base/stl_util.h"
+#include "base/string_view_cpp20.h"
 #include "base/systrace.h"
 #include "base/unix_file/fd_file.h"
 #include "base/utils.h"
@@ -110,7 +111,7 @@ class OatFileBase : public OatFile {
                                   bool writable,
                                   bool executable,
                                   bool low_4gb,
-                                  const char* abs_dex_location,
+                                  ArrayRef<const std::string> dex_filenames,
                                   /*inout*/MemMap* reservation,  // Where to load if not null.
                                   /*out*/std::string* error_msg);
 
@@ -123,7 +124,7 @@ class OatFileBase : public OatFile {
                                   bool writable,
                                   bool executable,
                                   bool low_4gb,
-                                  const char* abs_dex_location,
+                                  ArrayRef<const std::string> dex_filenames,
                                   /*inout*/MemMap* reservation,  // Where to load if not null.
                                   /*out*/std::string* error_msg);
 
@@ -164,7 +165,7 @@ class OatFileBase : public OatFile {
 
   virtual void PreSetup(const std::string& elf_filename) = 0;
 
-  bool Setup(int zip_fd, const char* abs_dex_location, std::string* error_msg);
+  bool Setup(int zip_fd, ArrayRef<const std::string> dex_filenames, std::string* error_msg);
   bool Setup(const std::vector<const DexFile*>& dex_files);
 
   // Setters exposed for ElfOatFile.
@@ -182,6 +183,10 @@ class OatFileBase : public OatFile {
   }
 
  private:
+  // Returns true if we want to remove quickened opcodes before loading the VDEX file, false
+  // otherwise.
+  bool ShouldUnquickenVDex() const;
+
   DISALLOW_COPY_AND_ASSIGN(OatFileBase);
 };
 
@@ -193,7 +198,7 @@ OatFileBase* OatFileBase::OpenOatFile(int zip_fd,
                                       bool writable,
                                       bool executable,
                                       bool low_4gb,
-                                      const char* abs_dex_location,
+                                      ArrayRef<const std::string> dex_filenames,
                                       /*inout*/MemMap* reservation,
                                       /*out*/std::string* error_msg) {
   std::unique_ptr<OatFileBase> ret(new kOatFileBaseSubType(location, executable));
@@ -219,7 +224,7 @@ OatFileBase* OatFileBase::OpenOatFile(int zip_fd,
     return nullptr;
   }
 
-  if (!ret->Setup(zip_fd, abs_dex_location, error_msg)) {
+  if (!ret->Setup(zip_fd, dex_filenames, error_msg)) {
     return nullptr;
   }
 
@@ -235,7 +240,7 @@ OatFileBase* OatFileBase::OpenOatFile(int zip_fd,
                                       bool writable,
                                       bool executable,
                                       bool low_4gb,
-                                      const char* abs_dex_location,
+                                      ArrayRef<const std::string> dex_filenames,
                                       /*inout*/MemMap* reservation,
                                       /*out*/std::string* error_msg) {
   std::unique_ptr<OatFileBase> ret(new kOatFileBaseSubType(oat_location, executable));
@@ -259,11 +264,18 @@ OatFileBase* OatFileBase::OpenOatFile(int zip_fd,
     return nullptr;
   }
 
-  if (!ret->Setup(zip_fd, abs_dex_location, error_msg)) {
+  if (!ret->Setup(zip_fd, dex_filenames, error_msg)) {
     return nullptr;
   }
 
   return ret.release();
+}
+
+bool OatFileBase::ShouldUnquickenVDex() const {
+  // We sometimes load oat files without a runtime (eg oatdump) and don't want to do anything in
+  // that case. If we are debuggable there are no -quick opcodes to unquicken. If the runtime is not
+  // debuggable we don't care whether there are -quick opcodes or not so no need to do anything.
+  return Runtime::Current() != nullptr && !IsDebuggable() && Runtime::Current()->IsJavaDebuggable();
 }
 
 bool OatFileBase::LoadVdex(const std::string& vdex_filename,
@@ -276,7 +288,7 @@ bool OatFileBase::LoadVdex(const std::string& vdex_filename,
                                   vdex_filename,
                                   writable,
                                   low_4gb,
-                                  /* unquicken=*/ false,
+                                  ShouldUnquickenVDex(),
                                   error_msg);
   if (vdex_.get() == nullptr) {
     *error_msg = StringPrintf("Failed to load vdex file '%s' %s",
@@ -298,16 +310,17 @@ bool OatFileBase::LoadVdex(int vdex_fd,
     if (rc == -1) {
       PLOG(WARNING) << "Failed getting length of vdex file";
     } else {
-      vdex_ = VdexFile::OpenAtAddress(vdex_begin_,
-                                      vdex_end_ - vdex_begin_,
-                                      /*mmap_reuse=*/ vdex_begin_ != nullptr,
-                                      vdex_fd,
-                                      s.st_size,
-                                      vdex_filename,
-                                      writable,
-                                      low_4gb,
-                                      /*unquicken=*/ false,
-                                      error_msg);
+      vdex_ = VdexFile::OpenAtAddress(
+          vdex_begin_,
+          vdex_end_ - vdex_begin_,
+          /*mmap_reuse=*/ vdex_begin_ != nullptr,
+          vdex_fd,
+          s.st_size,
+          vdex_filename,
+          writable,
+          low_4gb,
+          ShouldUnquickenVDex(),
+          error_msg);
       if (vdex_.get() == nullptr) {
         *error_msg = "Failed opening vdex file.";
         return false;
@@ -472,7 +485,9 @@ bool OatFileBase::Setup(const std::vector<const DexFile*>& dex_files) {
   return true;
 }
 
-bool OatFileBase::Setup(int zip_fd, const char* abs_dex_location, std::string* error_msg) {
+bool OatFileBase::Setup(int zip_fd,
+                        ArrayRef<const std::string> dex_filenames,
+                        std::string* error_msg) {
   if (!GetOatHeader().IsValid()) {
     std::string cause = GetOatHeader().GetValidationErrorMessage();
     *error_msg = StringPrintf("Invalid oat header for '%s': %s",
@@ -553,6 +568,9 @@ bool OatFileBase::Setup(int zip_fd, const char* abs_dex_location, std::string* e
     return false;
   }
 
+  std::string_view primary_location;
+  std::string_view primary_location_replacement;
+  size_t dex_filenames_pos = 0u;
   uint32_t dex_file_count = GetOatHeader().GetDexFileCount();
   oat_dex_files_storage_.reserve(dex_file_count);
   for (size_t i = 0; i < dex_file_count; i++) {
@@ -580,19 +598,61 @@ bool OatFileBase::Setup(int zip_fd, const char* abs_dex_location, std::string* e
     const char* dex_file_location_data = reinterpret_cast<const char*>(oat);
     oat += dex_file_location_size;
 
-    // Location encoded in the oat file. We will use this for multidex naming,
-    // see ResolveRelativeEncodedDexLocation.
-    std::string oat_dex_file_location(dex_file_location_data, dex_file_location_size);
-    // If `oat_dex_file_location` is relative (so that the oat file can be moved to
-    // a different folder), resolve to absolute location. Also resolve the file name
-    // in case dex files need to be opened from disk. The file name and location
-    // differ when cross-compiling on host for target.
-    std::string dex_file_name;
-    std::string dex_file_location;
-    ResolveRelativeEncodedDexLocation(abs_dex_location,
-                                      oat_dex_file_location,
-                                      &dex_file_location,
-                                      &dex_file_name);
+    // Location encoded in the oat file. We will use this for multidex naming.
+    std::string_view oat_dex_file_location(dex_file_location_data, dex_file_location_size);
+    std::string dex_file_location(oat_dex_file_location);
+    bool is_multidex = DexFileLoader::IsMultiDexLocation(dex_file_location.c_str());
+    // Check that `is_multidex` does not clash with other indicators. The first dex location
+    // must be primary location and, if we're opening external dex files, the location must
+    // be multi-dex if and only if we already have a dex file opened for it.
+    if ((i == 0 && is_multidex) ||
+        (!external_dex_files_.empty() && (is_multidex != (i < external_dex_files_.size())))) {
+      *error_msg = StringPrintf("In oat file '%s' found unexpected %s location '%s'",
+                                GetLocation().c_str(),
+                                is_multidex ? "multi-dex" : "primary",
+                                dex_file_location.c_str());
+      return false;
+    }
+    // Remember the primary location and, if provided, the replacement from `dex_filenames`.
+    if (!is_multidex) {
+      primary_location = oat_dex_file_location;
+      if (!dex_filenames.empty()) {
+        if (dex_filenames_pos == dex_filenames.size()) {
+          *error_msg = StringPrintf("In oat file '%s' found excessive primary location '%s'"
+                                        ", expected only %zu primary locations",
+                                    GetLocation().c_str(),
+                                    dex_file_location.c_str(),
+                                    dex_filenames.size());
+          return false;
+        }
+        primary_location_replacement = dex_filenames[dex_filenames_pos];
+        ++dex_filenames_pos;
+      }
+    }
+    // Check that the base location of a multidex location matches the last seen primary location.
+    if (is_multidex &&
+        (!StartsWith(dex_file_location, primary_location) ||
+             dex_file_location[primary_location.size()] != DexFileLoader::kMultiDexSeparator)) {
+      *error_msg = StringPrintf("In oat file '%s' found unexpected multidex location '%s',"
+                                    " unrelated to '%s'",
+                                GetLocation().c_str(),
+                                dex_file_location.c_str(),
+                                std::string(primary_location).c_str());
+      return false;
+    }
+    std::string dex_file_name = dex_file_location;
+    if (!dex_filenames.empty()) {
+      dex_file_name.replace(/*pos*/ 0u, primary_location.size(), primary_location_replacement);
+      // If the location does not contain path and matches the file name component,
+      // use the provided file name also as the location.
+      // TODO: Do we need this for anything other than tests?
+      if (dex_file_location.find('/') == std::string::npos &&
+          dex_file_name.size() > dex_file_location.size() &&
+          dex_file_name[dex_file_name.size() - dex_file_location.size() - 1u] == '/' &&
+          EndsWith(dex_file_name, dex_file_location)) {
+        dex_file_location = dex_file_name;
+      }
+    }
 
     uint32_t dex_file_checksum;
     if (UNLIKELY(!ReadOatDexFileData(*this, &oat, &dex_file_checksum))) {
@@ -625,17 +685,18 @@ bool OatFileBase::Setup(int zip_fd, const char* abs_dex_location, std::string* e
     }
     const uint8_t* dex_file_pointer = nullptr;
     if (UNLIKELY(dex_file_offset == 0U)) {
-      if (uncompressed_dex_files_ == nullptr) {
-        // Do not support mixed-mode oat files.
-        if (i > 0) {
-          *error_msg = StringPrintf("In oat file '%s', unsupported uncompressed-dex-file for dex "
-                                        "file %zu (%s)",
-                                    GetLocation().c_str(),
-                                    i,
-                                    dex_file_location.c_str());
-          return false;
-        }
-        uncompressed_dex_files_.reset(new std::vector<std::unique_ptr<const DexFile>>());
+      // Do not support mixed-mode oat files.
+      if (i != 0u && external_dex_files_.empty()) {
+        *error_msg = StringPrintf("In oat file '%s', unsupported uncompressed-dex-file for dex "
+                                      "file %zu (%s)",
+                                  GetLocation().c_str(),
+                                  i,
+                                  dex_file_location.c_str());
+        return false;
+      }
+      DCHECK_LE(i, external_dex_files_.size());
+      if (i == external_dex_files_.size()) {
+        std::vector<std::unique_ptr<const DexFile>> new_dex_files;
         // No dex files, load it from location.
         const ArtDexFileLoader dex_file_loader;
         bool loaded = false;
@@ -645,14 +706,14 @@ bool OatFileBase::Setup(int zip_fd, const char* abs_dex_location, std::string* e
                                            /*verify=*/ false,
                                            /*verify_checksum=*/ false,
                                            error_msg,
-                                           uncompressed_dex_files_.get());
+                                           &new_dex_files);
         } else {
           loaded = dex_file_loader.Open(dex_file_name.c_str(),
                                         dex_file_location,
                                         /*verify=*/ false,
                                         /*verify_checksum=*/ false,
                                         error_msg,
-                                        uncompressed_dex_files_.get());
+                                        &new_dex_files);
         }
         if (!loaded) {
           if (Runtime::Current() == nullptr) {
@@ -667,22 +728,32 @@ bool OatFileBase::Setup(int zip_fd, const char* abs_dex_location, std::string* e
         }
         // The oat file may be out of date wrt/ the dex-file location. We need to be defensive
         // here and ensure that at least the number of dex files still matches.
+        // If we have a zip_fd, or reached the end of provided `dex_filenames`, we must
+        // load all dex files from that file, otherwise we may open multiple files.
         // Note: actual checksum comparisons are the duty of the OatFileAssistant and will be
         //       done after loading the OatFile.
-        if (uncompressed_dex_files_->size() != dex_file_count) {
-          *error_msg = StringPrintf("In oat file '%s', expected %u uncompressed dex files, but "
+        size_t max_dex_files = dex_file_count - external_dex_files_.size();
+        bool expect_all =
+            (zip_fd != -1) || (!dex_filenames.empty() && dex_filenames_pos == dex_filenames.size());
+        if (expect_all ? new_dex_files.size() != max_dex_files
+                       : new_dex_files.size() > max_dex_files) {
+          *error_msg = StringPrintf("In oat file '%s', expected %s%zu uncompressed dex files, but "
                                         "found %zu in '%s'",
                                     GetLocation().c_str(),
-                                    dex_file_count,
-                                    uncompressed_dex_files_->size(),
+                                    (expect_all ? "" : "<="),
+                                    max_dex_files,
+                                    new_dex_files.size(),
                                     dex_file_location.c_str());
           return false;
         }
+        for (std::unique_ptr<const DexFile>& dex_file : new_dex_files) {
+          external_dex_files_.push_back(std::move(dex_file));
+        }
       }
-      dex_file_pointer = (*uncompressed_dex_files_)[i]->Begin();
+      dex_file_pointer = external_dex_files_[i]->Begin();
     } else {
       // Do not support mixed-mode oat files.
-      if (uncompressed_dex_files_ != nullptr) {
+      if (!external_dex_files_.empty()) {
         *error_msg = StringPrintf("In oat file '%s', unsupported embedded dex-file for dex file "
                                       "%zu (%s)",
                                   GetLocation().c_str(),
@@ -837,14 +908,22 @@ bool OatFileBase::Setup(int zip_fd, const char* abs_dex_location, std::string* e
     oat_dex_files_storage_.push_back(oat_dex_file);
 
     // Add the location and canonical location (if different) to the oat_dex_files_ table.
-    // Note: we use the dex_file_location_data storage for the view, as oat_dex_file_location
-    // is just a temporary string.
-    std::string_view key(dex_file_location_data, dex_file_location_size);
+    // Note: We do not add the non-canonical `dex_file_name`. If it is different from both
+    // the location and canonical location, GetOatDexFile() shall canonicalize it when
+    // requested and match the canonical path.
+    std::string_view key = oat_dex_file_location;  // References oat file data.
     std::string_view canonical_key(oat_dex_file->GetCanonicalDexFileLocation());
     oat_dex_files_.Put(key, oat_dex_file);
     if (canonical_key != key) {
       oat_dex_files_.Put(canonical_key, oat_dex_file);
     }
+  }
+  if (!dex_filenames.empty() && dex_filenames_pos != dex_filenames.size()) {
+    *error_msg = StringPrintf("Oat file '%s' contains only %zu primary dex locations, expected %zu",
+                              GetLocation().c_str(),
+                              dex_filenames_pos,
+                              dex_filenames.size());
+    return false;
   }
 
   if (DataBimgRelRoBegin() != nullptr) {
@@ -1230,14 +1309,14 @@ class ElfOatFile final : public OatFileBase {
                                  bool writable,
                                  bool executable,
                                  bool low_4gb,
-                                 const char* abs_dex_location,
+                                 ArrayRef<const std::string> dex_filenames,
                                  /*inout*/MemMap* reservation,  // Where to load if not null.
                                  /*out*/std::string* error_msg);
 
   bool InitializeFromElfFile(int zip_fd,
                              ElfFile* elf_file,
                              VdexFile* vdex_file,
-                             const char* abs_dex_location,
+                             ArrayRef<const std::string> dex_filenames,
                              std::string* error_msg);
 
  protected:
@@ -1291,7 +1370,7 @@ ElfOatFile* ElfOatFile::OpenElfFile(int zip_fd,
                                     bool writable,
                                     bool executable,
                                     bool low_4gb,
-                                    const char* abs_dex_location,
+                                    ArrayRef<const std::string> dex_filenames,
                                     /*inout*/MemMap* reservation,  // Where to load if not null.
                                     /*out*/std::string* error_msg) {
   ScopedTrace trace("Open elf file " + location);
@@ -1312,7 +1391,7 @@ ElfOatFile* ElfOatFile::OpenElfFile(int zip_fd,
     return nullptr;
   }
 
-  if (!oat_file->Setup(zip_fd, abs_dex_location, error_msg)) {
+  if (!oat_file->Setup(zip_fd, dex_filenames, error_msg)) {
     return nullptr;
   }
 
@@ -1322,7 +1401,7 @@ ElfOatFile* ElfOatFile::OpenElfFile(int zip_fd,
 bool ElfOatFile::InitializeFromElfFile(int zip_fd,
                                        ElfFile* elf_file,
                                        VdexFile* vdex_file,
-                                       const char* abs_dex_location,
+                                       ArrayRef<const std::string> dex_filenames,
                                        std::string* error_msg) {
   ScopedTrace trace(__PRETTY_FUNCTION__);
   if (IsExecutable()) {
@@ -1337,7 +1416,7 @@ bool ElfOatFile::InitializeFromElfFile(int zip_fd,
   SetBegin(elf_file->Begin() + offset);
   SetEnd(elf_file->Begin() + size + offset);
   // Ignore the optional .bss section when opening non-executable.
-  return Setup(zip_fd, abs_dex_location, error_msg);
+  return Setup(zip_fd, dex_filenames, error_msg);
 }
 
 bool ElfOatFile::Load(const std::string& elf_filename,
@@ -1502,72 +1581,6 @@ class OatFileBackedByVdex final : public OatFileBase {
 // General OatFile code //
 //////////////////////////
 
-static bool IsLocationSuffix(const char* abs_dex_location, const std::string& rel_dex_location) {
-  std::string_view abs_location(abs_dex_location);
-  std::string target_suffix = "/" + DexFileLoader::GetBaseLocation(rel_dex_location);
-  if (abs_location.size() <= target_suffix.size()) {
-    return false;
-  }
-  size_t pos = abs_location.size() - target_suffix.size();
-  return abs_location.compare(pos, std::string::npos, target_suffix) == 0;
-}
-
-static void MaybeResolveDexPath(const char* abs_dex_location,
-                                const std::string& rel_dex_location,
-                                bool resolve,
-                                /* out */ std::string* out_location) {
-  DCHECK(!resolve || abs_dex_location != nullptr);
-  if (out_location != nullptr) {
-    *out_location = resolve
-        ? std::string(abs_dex_location) + DexFileLoader::GetMultiDexSuffix(rel_dex_location)
-        : rel_dex_location;
-  }
-}
-
-void OatFile::ResolveRelativeEncodedDexLocation(const char* abs_dex_location,
-                                                const std::string& rel_dex_location,
-                                                /* out */ std::string* dex_file_location,
-                                                /* out */ std::string* dex_file_name) {
-  // Note that in this context `abs_dex_location` may not always be absolute
-  // and `rel_dex_location` may not always be relative. It simply means that
-  // we will try to resolve `rel_dex_location` into an absolute location using
-  // `abs_dex_location` for the base directory if needed.
-
-  bool resolve_location = false;
-  bool resolve_filename = false;
-
-  if (abs_dex_location != nullptr) {
-    if (!IsAbsoluteLocation(rel_dex_location) &&
-        IsLocationSuffix(abs_dex_location, rel_dex_location)) {
-      // The base location (w/o multidex suffix) of the relative `rel_dex_location` is a suffix
-      // of `abs_dex_location`. This typically happens for oat files which only encode the
-      // basename() so the oat and dex files can move to different directories.
-      // Example:
-      //   abs_dex_location = "/data/app/myapp/MyApplication.apk"
-      //   rel_dex_location = "MyApplication.apk!classes2.dex"
-      resolve_location = true;
-      resolve_filename = true;
-    } else {
-      // Case 1: `rel_dex_location` is absolute
-      //   On target always use `rel_dex_location` for both dex file name and dex location.
-      //   On host assume we're cross-compiling and use `abs_dex_location` as a file name
-      //   (for loading files) and `rel_dex_location` as the dex location. If we're not
-      //   cross-compiling, the two paths should be equal.
-      // Case 2: `rel_dex_location` is relative and not suffix of `abs_location`
-      //   This should never happen outside of tests. On target always use `rel_dex_location`. On
-      //   host use `abs_dex_location` with the appropriate multidex suffix because
-      //   `rel_dex_location` might be the target path.
-      resolve_location = false;
-      resolve_filename = !kIsTargetBuild;
-    }
-  }
-
-  // Construct dex file location and dex file name if the correspoding out-param pointers
-  // were provided by the caller.
-  MaybeResolveDexPath(abs_dex_location, rel_dex_location, resolve_location, dex_file_location);
-  MaybeResolveDexPath(abs_dex_location, rel_dex_location, resolve_filename, dex_file_name);
-}
-
 static void CheckLocation(const std::string& location) {
   CHECK(!location.empty());
 }
@@ -1576,10 +1589,10 @@ OatFile* OatFile::OpenWithElfFile(int zip_fd,
                                   ElfFile* elf_file,
                                   VdexFile* vdex_file,
                                   const std::string& location,
-                                  const char* abs_dex_location,
+                                  ArrayRef<const std::string> dex_filenames,
                                   std::string* error_msg) {
   std::unique_ptr<ElfOatFile> oat_file(new ElfOatFile(location, /*executable=*/ false));
-  return oat_file->InitializeFromElfFile(zip_fd, elf_file, vdex_file, abs_dex_location, error_msg)
+  return oat_file->InitializeFromElfFile(zip_fd, elf_file, vdex_file, dex_filenames, error_msg)
       ? oat_file.release()
       : nullptr;
 }
@@ -1589,7 +1602,7 @@ OatFile* OatFile::Open(int zip_fd,
                        const std::string& oat_location,
                        bool executable,
                        bool low_4gb,
-                       const char* abs_dex_location,
+                       ArrayRef<const std::string> dex_filenames,
                        /*inout*/MemMap* reservation,
                        /*out*/std::string* error_msg) {
   ScopedTrace trace("Open oat file " + oat_location);
@@ -1616,7 +1629,7 @@ OatFile* OatFile::Open(int zip_fd,
                                                                  /*writable=*/ false,
                                                                  executable,
                                                                  low_4gb,
-                                                                 abs_dex_location,
+                                                                 dex_filenames,
                                                                  reservation,
                                                                  error_msg);
   if (with_dlopen != nullptr) {
@@ -1645,7 +1658,7 @@ OatFile* OatFile::Open(int zip_fd,
                                                                 /*writable=*/ false,
                                                                 executable,
                                                                 low_4gb,
-                                                                abs_dex_location,
+                                                                dex_filenames,
                                                                 reservation,
                                                                 error_msg);
   return with_internal;
@@ -1657,7 +1670,7 @@ OatFile* OatFile::Open(int zip_fd,
                        const std::string& oat_location,
                        bool executable,
                        bool low_4gb,
-                       const char* abs_dex_location,
+                       ArrayRef<const std::string> dex_filenames,
                        /*inout*/MemMap* reservation,
                        /*out*/std::string* error_msg) {
   CHECK(!oat_location.empty()) << oat_location;
@@ -1672,7 +1685,7 @@ OatFile* OatFile::Open(int zip_fd,
                                                                 /*writable=*/ false,
                                                                 executable,
                                                                 low_4gb,
-                                                                abs_dex_location,
+                                                                dex_filenames,
                                                                 reservation,
                                                                 error_msg);
   return with_internal;
@@ -1681,7 +1694,7 @@ OatFile* OatFile::Open(int zip_fd,
 OatFile* OatFile::OpenWritable(int zip_fd,
                                File* file,
                                const std::string& location,
-                               const char* abs_dex_location,
+                               ArrayRef<const std::string> dex_filenames,
                                std::string* error_msg) {
   CheckLocation(location);
   return ElfOatFile::OpenElfFile(zip_fd,
@@ -1690,7 +1703,7 @@ OatFile* OatFile::OpenWritable(int zip_fd,
                                  /*writable=*/ true,
                                  /*executable=*/ false,
                                  /*low_4gb=*/false,
-                                 abs_dex_location,
+                                 dex_filenames,
                                  /*reservation=*/ nullptr,
                                  error_msg);
 }
@@ -1698,7 +1711,7 @@ OatFile* OatFile::OpenWritable(int zip_fd,
 OatFile* OatFile::OpenReadable(int zip_fd,
                                File* file,
                                const std::string& location,
-                               const char* abs_dex_location,
+                               ArrayRef<const std::string> dex_filenames,
                                std::string* error_msg) {
   CheckLocation(location);
   return ElfOatFile::OpenElfFile(zip_fd,
@@ -1707,7 +1720,7 @@ OatFile* OatFile::OpenReadable(int zip_fd,
                                  /*writable=*/ false,
                                  /*executable=*/ false,
                                  /*low_4gb=*/false,
-                                 abs_dex_location,
+                                 dex_filenames,
                                  /*reservation=*/ nullptr,
                                  error_msg);
 }

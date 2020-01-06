@@ -150,8 +150,7 @@ class ConcurrentCopying : public GarbageCollector {
   bool IsWeakRefAccessEnabled() REQUIRES(Locks::thread_list_lock_) {
     return weak_ref_access_enabled_;
   }
-  void RevokeThreadLocalMarkStack(Thread* thread) REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!mark_stack_lock_);
+  void RevokeThreadLocalMarkStack(Thread* thread) REQUIRES(!mark_stack_lock_);
 
   mirror::Object* IsMarked(mirror::Object* from_ref) override
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -361,6 +360,10 @@ class ConcurrentCopying : public GarbageCollector {
   // (see use case in ConcurrentCopying::MarkFromReadBarrier).
   bool rb_mark_bit_stack_full_;
 
+  // Guards access to pooled_mark_stacks_ and revoked_mark_stacks_ vectors.
+  // Also guards destruction and revocations of thread-local mark-stacks.
+  // Clearing thread-local mark-stack (by other threads or during destruction)
+  // should be guarded by it.
   Mutex mark_stack_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
   std::vector<accounting::ObjectStack*> revoked_mark_stacks_
       GUARDED_BY(mark_stack_lock_);

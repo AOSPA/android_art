@@ -2439,9 +2439,11 @@ void Thread::Destroy() {
   {
     ScopedObjectAccess soa(self);
     Runtime::Current()->GetHeap()->RevokeThreadLocalBuffers(this);
-    if (kUseReadBarrier) {
-      Runtime::Current()->GetHeap()->ConcurrentCopyingCollector()->RevokeThreadLocalMarkStack(this);
-    }
+  }
+  // Mark-stack revocation must be performed at the very end. No
+  // checkpoint/flip-function or read-barrier should be called after this.
+  if (kUseReadBarrier) {
+    Runtime::Current()->GetHeap()->ConcurrentCopyingCollector()->RevokeThreadLocalMarkStack(this);
   }
 }
 
@@ -2466,9 +2468,7 @@ Thread::~Thread() {
     Runtime::Current()->GetHeap()->ConcurrentCopyingCollector()
         ->AssertNoThreadMarkStackMapping(this);
     gc::accounting::AtomicStack<mirror::Object>* tl_mark_stack = GetThreadLocalMarkStack();
-    CHECK(tl_mark_stack == nullptr
-          || tl_mark_stack == reinterpret_cast<gc::accounting::AtomicStack<mirror::Object>*>(0x1))
-        << "mark-stack: " << tl_mark_stack;
+    CHECK(tl_mark_stack == nullptr) << "mark-stack: " << tl_mark_stack;
   }
   // Make sure we processed all deoptimization requests.
   CHECK(tlsPtr_.deoptimization_context_stack == nullptr) << "Missed deoptimization";
@@ -4036,6 +4036,41 @@ void Thread::VisitRoots(RootVisitor* visitor) {
   mapper.template WalkStack<StackVisitor::CountTransitions::kNo>(false);
   for (instrumentation::InstrumentationStackFrame& frame : *GetInstrumentationStack()) {
     visitor->VisitRootIfNonNull(&frame.this_object_, RootInfo(kRootVMInternal, thread_id));
+  }
+}
+
+void Thread::SweepInterpreterCache(IsMarkedVisitor* visitor) {
+  for (InterpreterCache::Entry& entry : GetInterpreterCache()->GetArray()) {
+    const Instruction* inst = reinterpret_cast<const Instruction*>(entry.first);
+    if (inst != nullptr) {
+      if (inst->Opcode() == Instruction::NEW_INSTANCE ||
+          inst->Opcode() == Instruction::CHECK_CAST ||
+          inst->Opcode() == Instruction::INSTANCE_OF ||
+          inst->Opcode() == Instruction::NEW_ARRAY ||
+          inst->Opcode() == Instruction::CONST_CLASS) {
+        mirror::Class* cls = reinterpret_cast<mirror::Class*>(entry.second);
+        if (cls == nullptr || cls == Runtime::GetWeakClassSentinel()) {
+          // Entry got deleted in a previous sweep.
+          continue;
+        }
+        Runtime::ProcessWeakClass(
+            reinterpret_cast<GcRoot<mirror::Class>*>(&entry.second),
+            visitor,
+            Runtime::GetWeakClassSentinel());
+      } else if (inst->Opcode() == Instruction::CONST_STRING ||
+                 inst->Opcode() == Instruction::CONST_STRING_JUMBO) {
+        mirror::Object* object = reinterpret_cast<mirror::Object*>(entry.second);
+        mirror::Object* new_object = visitor->IsMarked(object);
+        // We know the string is marked because it's a strongly-interned string that
+        // is always alive (see b/117621117 for trying to make those strings weak).
+        // The IsMarked implementation of the CMS collector returns
+        // null for newly allocated objects, but we know those haven't moved. Therefore,
+        // only update the entry if we get a different non-null string.
+        if (new_object != nullptr && new_object != object) {
+          entry.second = reinterpret_cast<size_t>(new_object);
+        }
+      }
+    }
   }
 }
 
