@@ -89,6 +89,8 @@ JitCompilerInterface* (*Jit::jit_load_)(void) = nullptr;
 JitOptions* JitOptions::CreateFromRuntimeArguments(const RuntimeArgumentMap& options) {
   auto* jit_options = new JitOptions;
   jit_options->use_jit_compilation_ = options.GetOrDefault(RuntimeArgumentMap::UseJitCompilation);
+  jit_options->use_tiered_jit_compilation_ =
+      options.GetOrDefault(RuntimeArgumentMap::UseTieredJitCompilation);
 
   jit_options->code_cache_initial_capacity_ =
       options.GetOrDefault(RuntimeArgumentMap::JITCodeCacheInitialCapacity);
@@ -247,6 +249,15 @@ Jit* Jit::Create(JitCodeCache* code_cache, JitOptions* options) {
       << ", compile_threshold=" << options->GetCompileThreshold()
       << ", profile_saver_options=" << options->GetProfileSaverOptions();
 
+  // We want to know whether the compiler is compiling baseline, as this
+  // affects how we GC ProfilingInfos.
+  for (const std::string& option : Runtime::Current()->GetCompilerOptions()) {
+    if (option == "--baseline") {
+      options->SetUseBaselineCompiler();
+      break;
+    }
+  }
+
   // Notify native debugger about the classes already loaded before the creation of the jit.
   jit->DumpTypeInfoForLoadedTypes(Runtime::Current()->GetClassLinker());
   return jit.release();
@@ -318,13 +329,14 @@ bool Jit::CompileMethod(ArtMethod* method, Thread* self, bool baseline, bool osr
   // If we get a request to compile a proxy method, we pass the actual Java method
   // of that proxy method, as the compiler does not expect a proxy method.
   ArtMethod* method_to_compile = method->GetInterfaceMethodIfProxy(kRuntimePointerSize);
-  if (!code_cache_->NotifyCompilationOf(method_to_compile, self, osr, prejit, region)) {
+  if (!code_cache_->NotifyCompilationOf(method_to_compile, self, osr, prejit, baseline, region)) {
     return false;
   }
 
   VLOG(jit) << "Compiling method "
             << ArtMethod::PrettyMethod(method_to_compile)
-            << " osr=" << std::boolalpha << osr;
+            << " osr=" << std::boolalpha << osr
+            << " baseline=" << std::boolalpha << baseline;
   bool success = jit_compiler_->CompileMethod(self, region, method_to_compile, baseline, osr);
   code_cache_->DoneCompiling(method_to_compile, self, osr);
   if (!success) {
@@ -1031,7 +1043,9 @@ void Jit::MapBootImageMethods() {
 
 
       uint8_t* pointer = reinterpret_cast<uint8_t*>(&method);
-      if (pointer >= page_start && pointer < page_end) {
+      // Note: We could refactor this to only check if the ArtMethod entrypoint is inside the
+      // page region. This would remove the need for the edge case handling below.
+      if (pointer >= page_start && pointer + sizeof(ArtMethod) < page_end) {
         // For all the methods in the mapping, put the entrypoint to the
         // resolution stub.
         ArtMethod* new_method = reinterpret_cast<ArtMethod*>(
@@ -1418,7 +1432,8 @@ bool Jit::MaybeCompileMethod(Thread* self,
     // Note: Native method have no "warm" state or profiling info.
     if (!method->IsNative() &&
         (method->GetProfilingInfo(kRuntimePointerSize) == nullptr) &&
-        code_cache_->CanAllocateProfilingInfo()) {
+        code_cache_->CanAllocateProfilingInfo() &&
+        !options_->UseTieredJitCompilation()) {
       bool success = ProfilingInfo::Create(self, method, /* retry_allocation= */ false);
       if (success) {
         VLOG(jit) << "Start profiling " << method->PrettyMethod();
@@ -1449,7 +1464,11 @@ bool Jit::MaybeCompileMethod(Thread* self,
     if (old_count < HotMethodThreshold() && new_count >= HotMethodThreshold()) {
       if (!code_cache_->ContainsPc(method->GetEntryPointFromQuickCompiledCode())) {
         DCHECK(thread_pool_ != nullptr);
-        thread_pool_->AddTask(self, new JitCompileTask(method, JitCompileTask::TaskKind::kCompile));
+        JitCompileTask::TaskKind kind =
+            (options_->UseTieredJitCompilation() || options_->UseBaselineCompiler())
+                ? JitCompileTask::TaskKind::kCompileBaseline
+                : JitCompileTask::TaskKind::kCompile;
+        thread_pool_->AddTask(self, new JitCompileTask(method, kind));
       }
     }
     if (old_count < OSRMethodThreshold() && new_count >= OSRMethodThreshold()) {
@@ -1465,6 +1484,16 @@ bool Jit::MaybeCompileMethod(Thread* self,
     }
   }
   return true;
+}
+
+void Jit::EnqueueOptimizedCompilation(ArtMethod* method, Thread* self) {
+  // We arrive here after a baseline compiled code has reached its baseline
+  // hotness threshold. If tiered compilation is enabled, enqueue a compilation
+  // task that will compile optimize the method.
+  if (options_->UseTieredJitCompilation()) {
+    thread_pool_->AddTask(
+        self, new JitCompileTask(method, JitCompileTask::TaskKind::kCompile));
+  }
 }
 
 class ScopedSetRuntimeThread {

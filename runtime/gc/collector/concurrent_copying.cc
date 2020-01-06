@@ -440,9 +440,6 @@ class ConcurrentCopying::ThreadFlipVisitor : public Closure, public RootVisitor 
   void Run(Thread* thread) override REQUIRES_SHARED(Locks::mutator_lock_) {
     // Note: self is not necessarily equal to thread since thread may be suspended.
     Thread* self = Thread::Current();
-    // TODO (lokeshgidra): Remove once b/140119552 is fixed.
-    CHECK(self->GetThreadLocalMarkStack()
-          != reinterpret_cast<accounting::AtomicStack<mirror::Object>*>(0x1));
     CHECK(thread == self || thread->IsSuspended() || thread->GetState() == kWaitingPerformingGc)
         << thread->GetState() << " thread " << thread << " self " << self;
     thread->SetIsGcMarkingAndUpdateEntrypoints(true);
@@ -998,14 +995,14 @@ class ConcurrentCopying::RevokeThreadLocalMarkStackCheckpoint : public Closure {
     CHECK(thread == self || thread->IsSuspended() || thread->GetState() == kWaitingPerformingGc)
         << thread->GetState() << " thread " << thread << " self " << self;
     // Revoke thread local mark stacks.
-    accounting::AtomicStack<mirror::Object>* tl_mark_stack = thread->GetThreadLocalMarkStack();
-    // TODO (lokeshgidra): remove the 0x1 condition once b/140119552 is fixed.
-    if (tl_mark_stack != nullptr
-        && tl_mark_stack != reinterpret_cast<accounting::AtomicStack<mirror::Object>*>(0x1)) {
+    {
       MutexLock mu(self, concurrent_copying_->mark_stack_lock_);
-      concurrent_copying_->revoked_mark_stacks_.push_back(tl_mark_stack);
-      thread->SetThreadLocalMarkStack(nullptr);
-      concurrent_copying_->RemoveThreadMarkStackMapping(thread, tl_mark_stack);
+      accounting::AtomicStack<mirror::Object>* tl_mark_stack = thread->GetThreadLocalMarkStack();
+      if (tl_mark_stack != nullptr) {
+        concurrent_copying_->revoked_mark_stacks_.push_back(tl_mark_stack);
+        thread->SetThreadLocalMarkStack(nullptr);
+        concurrent_copying_->RemoveThreadMarkStackMapping(thread, tl_mark_stack);
+      }
     }
     // Disable weak ref access.
     if (disable_weak_ref_access_) {
@@ -2056,17 +2053,14 @@ void ConcurrentCopying::RevokeThreadLocalMarkStacks(bool disable_weak_ref_access
 void ConcurrentCopying::RevokeThreadLocalMarkStack(Thread* thread) {
   Thread* self = Thread::Current();
   CHECK_EQ(self, thread);
+  MutexLock mu(self, mark_stack_lock_);
   accounting::AtomicStack<mirror::Object>* tl_mark_stack = thread->GetThreadLocalMarkStack();
   if (tl_mark_stack != nullptr) {
     CHECK(is_marking_);
-    MutexLock mu(self, mark_stack_lock_);
     revoked_mark_stacks_.push_back(tl_mark_stack);
     RemoveThreadMarkStackMapping(thread, tl_mark_stack);
     thread->SetThreadLocalMarkStack(nullptr);
   }
-  // TODO (lokeshgidra): storing a non-null value to diagnose b/140119552.
-  // The CL to be reverted once the issue is fixed.
-  thread->SetThreadLocalMarkStack(reinterpret_cast<accounting::AtomicStack<mirror::Object>*>(0x1));
 }
 
 void ConcurrentCopying::ProcessMarkStack() {

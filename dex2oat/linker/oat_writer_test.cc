@@ -414,8 +414,6 @@ TEST_F(OatTest, WriteRead) {
                                                   tmp_oat.GetFilename(),
                                                   /*executable=*/ false,
                                                   /*low_4gb=*/ true,
-                                                  /*abs_dex_location=*/ nullptr,
-                                                  /*reservation=*/ nullptr,
                                                   &error_msg));
   ASSERT_TRUE(oat_file.get() != nullptr) << error_msg;
   const OatHeader& oat_header = oat_file->GetOatHeader();
@@ -471,7 +469,7 @@ TEST_F(OatTest, OatHeaderSizeCheck) {
   EXPECT_EQ(56U, sizeof(OatHeader));
   EXPECT_EQ(4U, sizeof(OatMethodOffsets));
   EXPECT_EQ(8U, sizeof(OatQuickMethodHeader));
-  EXPECT_EQ(168 * static_cast<size_t>(GetInstructionSetPointerSize(kRuntimeISA)),
+  EXPECT_EQ(169 * static_cast<size_t>(GetInstructionSetPointerSize(kRuntimeISA)),
             sizeof(QuickEntryPoints));
 }
 
@@ -533,8 +531,6 @@ TEST_F(OatTest, EmptyTextSection) {
                                                   tmp_oat.GetFilename(),
                                                   /*executable=*/ false,
                                                   /*low_4gb=*/ false,
-                                                  /*abs_dex_location=*/ nullptr,
-                                                  /*reservation=*/ nullptr,
                                                   &error_msg));
   ASSERT_TRUE(oat_file != nullptr);
   EXPECT_LT(static_cast<size_t>(oat_file->Size()),
@@ -610,8 +606,6 @@ void OatTest::TestDexFileInput(bool verify, bool low_4gb, bool use_profile) {
                                                          tmp_oat.GetFilename(),
                                                          /*executable=*/ false,
                                                          low_4gb,
-                                                         /*abs_dex_location=*/ nullptr,
-                                                         /*reservation=*/ nullptr,
                                                          &error_msg));
   ASSERT_TRUE(opened_oat_file != nullptr) << error_msg;
   if (low_4gb) {
@@ -740,8 +734,6 @@ void OatTest::TestZipFileInput(bool verify, CopyOption copy) {
                                                              tmp_oat.GetFilename(),
                                                              /*executable=*/ false,
                                                              /*low_4gb=*/ false,
-                                                             /*abs_dex_location=*/ nullptr,
-                                                             /*reservation=*/ nullptr,
                                                              &error_msg));
       ASSERT_TRUE(opened_oat_file != nullptr) << error_msg;
       ASSERT_EQ(2u, opened_oat_file->GetOatDexFiles().size());
@@ -790,8 +782,6 @@ void OatTest::TestZipFileInput(bool verify, CopyOption copy) {
                                                              tmp_oat.GetFilename(),
                                                              /*executable=*/ false,
                                                              /*low_4gb=*/ false,
-                                                             /*abs_dex_location=*/ nullptr,
-                                                             /*reservation=*/ nullptr,
                                                              &error_msg));
       ASSERT_TRUE(opened_oat_file != nullptr) << error_msg;
       ASSERT_EQ(2u, opened_oat_file->GetOatDexFiles().size());
