@@ -196,7 +196,8 @@ static constexpr double kNormalMaxLoadFactor = 0.7;
 // barrier config.
 static constexpr double kExtraDefaultHeapGrowthMultiplier = kUseReadBarrier ? 1.0 : 0.0;
 
-static constexpr const char* kApexBootImageLocation = "/system/framework/apex.art";
+static constexpr const char* kApexBootImageLocation =
+    "/apex/com.android.art/javalib/apex.art:/system/framework/apex-framework.art";
 
 Runtime* Runtime::instance_ = nullptr;
 
@@ -416,7 +417,7 @@ Runtime::~Runtime() {
   // Shutdown any trace running.
   Trace::Shutdown();
 
-  // Report death. Clients me require a working thread, still, so do it before GC completes and
+  // Report death. Clients may require a working thread, still, so do it before GC completes and
   // all non-daemon threads are done.
   {
     ScopedObjectAccess soa(self);
@@ -439,9 +440,14 @@ Runtime::~Runtime() {
 
   // Make sure our internal threads are dead before we start tearing down things they're using.
   GetRuntimeCallbacks()->StopDebugger();
+  // Deletion ordering is tricky. Null out everything we've deleted.
   delete signal_catcher_;
+  signal_catcher_ = nullptr;
 
   // Make sure all other non-daemon threads have terminated, and all daemon threads are suspended.
+  // Also wait for daemon threads to quiesce, so that in addition to being "suspended", they
+  // no longer access monitor and thread list data structures. We leak user daemon threads
+  // themselves, since we have no mechanism for shutting them down.
   {
     ScopedTrace trace2("Delete thread list");
     thread_list_->ShutDown();
@@ -458,7 +464,10 @@ Runtime::~Runtime() {
   }
 
   // Finally delete the thread list.
+  // Thread_list_ can be accessed by "suspended" threads, e.g. in InflateThinLocked.
+  // We assume that by this point, we've waited long enough for things to quiesce.
   delete thread_list_;
+  thread_list_ = nullptr;
 
   // Delete the JIT after thread list to ensure that there is no remaining threads which could be
   // accessing the instrumentation when we delete it.
@@ -473,11 +482,17 @@ Runtime::~Runtime() {
 
   ScopedTrace trace2("Delete state");
   delete monitor_list_;
+  monitor_list_ = nullptr;
   delete monitor_pool_;
+  monitor_pool_ = nullptr;
   delete class_linker_;
+  class_linker_ = nullptr;
   delete heap_;
+  heap_ = nullptr;
   delete intern_table_;
+  intern_table_ = nullptr;
   delete oat_file_manager_;
+  oat_file_manager_ = nullptr;
   Thread::Shutdown();
   QuasiAtomic::Shutdown();
   verifier::ClassVerifier::Shutdown();
@@ -673,6 +688,7 @@ void Runtime::PreZygoteFork() {
     GetJit()->PreZygoteFork();
   }
   heap_->PreZygoteFork();
+  PreZygoteForkNativeBridge();
 }
 
 void Runtime::PostZygoteFork() {
@@ -920,6 +936,7 @@ bool Runtime::Start() {
         : NativeBridgeAction::kUnload;
     InitNonZygoteOrPostFork(self->GetJniEnv(),
                             /* is_system_server= */ false,
+                            /* is_child_zygote= */ false,
                             action,
                             GetInstructionSetString(kRuntimeISA));
   }
@@ -984,11 +1001,13 @@ void Runtime::EndThreadBirth() REQUIRES(Locks::runtime_shutdown_lock_) {
 void Runtime::InitNonZygoteOrPostFork(
     JNIEnv* env,
     bool is_system_server,
+    // This is true when we are initializing a child-zygote. It requires
+    // native bridge initialization to be able to run guest native code in
+    // doPreload().
+    bool is_child_zygote,
     NativeBridgeAction action,
     const char* isa,
     bool profile_system_server) {
-  DCHECK(!IsZygote());
-
   if (is_native_bridge_loaded_) {
     switch (action) {
       case NativeBridgeAction::kUnload:
@@ -1000,6 +1019,16 @@ void Runtime::InitNonZygoteOrPostFork(
         break;
     }
   }
+
+  if (is_child_zygote) {
+    // If creating a child-zygote we only initialize native bridge. The rest of
+    // runtime post-fork logic would spin up threads for Binder and JDWP.
+    // Instead, the Java side of the child process will call a static main in a
+    // class specified by the parent.
+    return;
+  }
+
+  DCHECK(!IsZygote());
 
   if (is_system_server && profile_system_server) {
     // Set the system server package name to "android".
@@ -1032,14 +1061,10 @@ void Runtime::InitNonZygoteOrPostFork(
 
   StartSignalCatcher();
 
-  // Start the JDWP thread. If the command-line debugger flags specified "suspend=y",
-  // this will pause the runtime (in the internal debugger implementation), so we probably want
-  // this to come last.
   ScopedObjectAccess soa(Thread::Current());
-  GetRuntimeCallbacks()->StartDebugger();
-
   if (Dbg::IsJdwpAllowed() || IsProfileableFromShell() || IsJavaDebuggable()) {
     std::string err;
+    ScopedTrace tr("perfetto_hprof init.");
     ScopedThreadSuspension sts(Thread::Current(), ThreadState::kNative);
     if (!EnsurePerfettoPlugin(&err)) {
       LOG(WARNING) << "Failed to load perfetto_hprof: " << err;
@@ -1052,6 +1077,10 @@ void Runtime::InitNonZygoteOrPostFork(
       SetJniIdType(JniIdType::kPointer);
     }
   }
+  // Start the JDWP thread. If the command-line debugger flags specified "suspend=y",
+  // this will pause the runtime (in the internal debugger implementation), so we probably want
+  // this to come last.
+  GetRuntimeCallbacks()->StartDebugger();
 }
 
 void Runtime::StartSignalCatcher() {

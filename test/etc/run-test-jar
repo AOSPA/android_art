@@ -919,10 +919,14 @@ if [ "$PREBUILD" = "y" ]; then
                       --dex-file=$DEX_LOCATION/$TEST_NAME.jar \
                       --oat-file=$DEX_LOCATION/oat/$ISA/$TEST_NAME.odex \
                       ${app_image} \
+                      --generate-mini-debug-info \
                       --instruction-set=$ISA"
   if [ "x$INSTRUCTION_SET_FEATURES" != "x" ] ; then
     dex2oat_cmdline="${dex2oat_cmdline} --instruction-set-features=${INSTRUCTION_SET_FEATURES}"
   fi
+
+  # Enable mini-debug-info for JIT (if JIT is used).
+  FLAGS="$FLAGS -Xcompiler-option --generate-mini-debug-info"
 
   # Add in a timeout. This is important for testing the compilation/verification time of
   # pathological cases.
@@ -1269,7 +1273,24 @@ else
       for var in ANDROID_PRINTF_LOG ANDROID_DATA ANDROID_ROOT ANDROID_I18N_ROOT ANDROID_TZDATA_ROOT ANDROID_ART_ROOT LD_LIBRARY_PATH DYLD_LIBRARY_PATH PATH LD_USE_LOAD_BIAS; do
         echo export $var="${!var}" >> ${DEX_LOCATION}/runit.sh
       done
-      echo $cmdline "2>&1" >> ${DEX_LOCATION}/runit.sh
+      if [ "$DEV_MODE" = "y" ]; then
+        echo $cmdline "2>&1" >> ${DEX_LOCATION}/runit.sh
+      else
+        echo 'STDERR=$(mktemp)' >> ${DEX_LOCATION}/runit.sh
+        echo 'STDOUT=$(mktemp)' >> ${DEX_LOCATION}/runit.sh
+        echo $cmdline '2>${STDERR} >${STDOUT}' >> ${DEX_LOCATION}/runit.sh
+        echo 'if diff ${STDOUT} $ANDROID_DATA/expected.txt; then' >> ${DEX_LOCATION}/runit.sh
+        echo '  rm -f ${STDOUT} ${STDERR}' >> ${DEX_LOCATION}/runit.sh
+        echo '  exit 0' >> ${DEX_LOCATION}/runit.sh
+        echo 'else' >> ${DEX_LOCATION}/runit.sh
+        echo '  echo  STDOUT:' >> ${DEX_LOCATION}/runit.sh
+        echo '  cat ${STDOUT}' >> ${DEX_LOCATION}/runit.sh
+        echo '  echo  STDERR:' >> ${DEX_LOCATION}/runit.sh
+        echo '  cat ${STDERR}' >> ${DEX_LOCATION}/runit.sh
+        echo '  rm -f ${STDOUT} ${STDERR}' >> ${DEX_LOCATION}/runit.sh
+        echo '  exit 1' >> ${DEX_LOCATION}/runit.sh
+        echo 'fi' >> ${DEX_LOCATION}/runit.sh
+      fi
       chmod u+x $DEX_LOCATION/runit.sh
       echo "Runnable test script written to ${DEX_LOCATION}/runit.sh"
     fi
