@@ -38,6 +38,7 @@
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
+#include "nterp_helpers.h"
 #include "oat_quick_method_header.h"
 #include "obj_ptr-inl.h"
 #include "quick/quick_method_frame_info.h"
@@ -122,13 +123,16 @@ uint32_t StackVisitor::GetDexPc(bool abort_on_failure) const {
       return current_inline_frames_.back().GetDexPc();
     } else if (cur_oat_quick_method_header_ == nullptr) {
       return dex::kDexNoIndex;
-    } else if (!(*GetCurrentQuickFrame())->IsNative()) {
+    } else if ((*GetCurrentQuickFrame())->IsNative()) {
+      return cur_oat_quick_method_header_->ToDexPc(
+          GetCurrentQuickFrame(), cur_quick_frame_pc_, abort_on_failure);
+    } else if (cur_oat_quick_method_header_->IsOptimized()) {
       StackMap* stack_map = GetCurrentStackMap();
       DCHECK(stack_map->IsValid());
       return stack_map->GetDexPc();
     } else {
-      return cur_oat_quick_method_header_->ToDexPc(
-          GetCurrentQuickFrame(), cur_quick_frame_pc_, abort_on_failure);
+      DCHECK(cur_oat_quick_method_header_->IsNterpMethodHeader());
+      return NterpGetDexPC(cur_quick_frame_);
     }
   } else {
     return 0;
@@ -214,18 +218,26 @@ bool StackVisitor::GetVReg(ArtMethod* m,
     if (GetVRegFromDebuggerShadowFrame(vreg, kind, val)) {
       return true;
     }
-    DCHECK(cur_oat_quick_method_header_->IsOptimized());
-    if (location.has_value() && kind != kReferenceVReg) {
-      uint32_t val2 = *val;
-      // The caller already known the register location, so we can use the faster overload
-      // which does not decode the stack maps.
-      bool ok = GetVRegFromOptimizedCode(location.value(), kind, val);
-      // Compare to the slower overload.
-      DCHECK_EQ(ok, GetVRegFromOptimizedCode(m, vreg, kind, &val2));
-      DCHECK_EQ(*val, val2);
-      return ok;
+    bool result = false;
+    if (cur_oat_quick_method_header_->IsNterpMethodHeader()) {
+      result = true;
+      *val = (kind == kReferenceVReg)
+          ? NterpGetVRegReference(cur_quick_frame_, vreg)
+          : NterpGetVReg(cur_quick_frame_, vreg);
+    } else {
+      DCHECK(cur_oat_quick_method_header_->IsOptimized());
+      if (location.has_value() && kind != kReferenceVReg) {
+        uint32_t val2 = *val;
+        // The caller already known the register location, so we can use the faster overload
+        // which does not decode the stack maps.
+        result = GetVRegFromOptimizedCode(location.value(), kind, val);
+        // Compare to the slower overload.
+        DCHECK_EQ(result, GetVRegFromOptimizedCode(m, vreg, kind, &val2));
+        DCHECK_EQ(*val, val2);
+      } else {
+        result = GetVRegFromOptimizedCode(m, vreg, kind, val);
+      }
     }
-    bool res = GetVRegFromOptimizedCode(m, vreg, kind, val);
     if (kind == kReferenceVReg) {
       // Perform a read barrier in case we are in a different thread and GC is ongoing.
       mirror::Object* out = reinterpret_cast<mirror::Object*>(static_cast<uintptr_t>(*val));
@@ -233,7 +245,7 @@ bool StackVisitor::GetVReg(ArtMethod* m,
       DCHECK_LT(ptr_out, std::numeric_limits<uint32_t>::max());
       *val = static_cast<uint32_t>(ptr_out);
     }
-    return res;
+    return result;
   } else {
     DCHECK(cur_shadow_frame_ != nullptr);
     if (kind == kReferenceVReg) {
@@ -710,7 +722,8 @@ void StackVisitor::SanityCheckFrame() const {
       // Check class linker linear allocs.
       // We get the canonical method as copied methods may have their declaring
       // class from another class loader.
-      ArtMethod* canonical = method->GetCanonicalMethod();
+      const PointerSize ptrSize = runtime->GetClassLinker()->GetImagePointerSize();
+      ArtMethod* canonical = method->GetCanonicalMethod(ptrSize);
       ObjPtr<mirror::Class> klass = canonical->GetDeclaringClass();
       LinearAlloc* const class_linear_alloc = (klass != nullptr)
           ? runtime->GetClassLinker()->GetAllocatorForClassLoader(klass->GetClassLoader())
@@ -739,14 +752,13 @@ void StackVisitor::SanityCheckFrame() const {
       // Frame sanity.
       size_t frame_size = GetCurrentQuickFrameInfo().FrameSizeInBytes();
       CHECK_NE(frame_size, 0u);
-      // A rough guess at an upper size we expect to see for a frame.
+      // For compiled code, we could try to have a rough guess at an upper size we expect
+      // to see for a frame:
       // 256 registers
       // 2 words HandleScope overhead
       // 3+3 register spills
-      // TODO: this seems architecture specific for the case of JNI frames.
-      // TODO: 083-compiler-regressions ManyFloatArgs shows this estimate is wrong.
       // const size_t kMaxExpectedFrameSize = (256 + 2 + 3 + 3) * sizeof(word);
-      const size_t kMaxExpectedFrameSize = 2 * KB;
+      const size_t kMaxExpectedFrameSize = interpreter::kMaxNterpFrame;
       CHECK_LE(frame_size, kMaxExpectedFrameSize) << method->PrettyMethod();
       size_t return_pc_offset = GetCurrentQuickFrameInfo().GetReturnPcOffset();
       CHECK_LT(return_pc_offset, frame_size);
@@ -771,7 +783,12 @@ static uint32_t GetNumberOfReferenceArgsWithoutReceiver(ArtMethod* method)
 
 QuickMethodFrameInfo StackVisitor::GetCurrentQuickFrameInfo() const {
   if (cur_oat_quick_method_header_ != nullptr) {
-    return cur_oat_quick_method_header_->GetFrameInfo();
+    if (cur_oat_quick_method_header_->IsOptimized()) {
+      return cur_oat_quick_method_header_->GetFrameInfo();
+    } else {
+      DCHECK(cur_oat_quick_method_header_->IsNterpMethodHeader());
+      return NterpFrameInfo(cur_quick_frame_);
+    }
   }
 
   ArtMethod* method = GetMethod();
@@ -838,7 +855,6 @@ void StackVisitor::WalkStack(bool include_transitions) {
     cur_quick_frame_ = current_fragment->GetTopQuickFrame();
     cur_quick_frame_pc_ = 0;
     cur_oat_quick_method_header_ = nullptr;
-
     if (cur_quick_frame_ != nullptr) {  // Handle quick stack frames.
       // Can't be both a shadow and a quick fragment.
       DCHECK(current_fragment->GetTopShadowFrame() == nullptr);

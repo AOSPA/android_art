@@ -140,12 +140,10 @@ gensrcs {
 
 art_cc_library {
     name: "libdexfile",
-    defaults: ["libdexfile_defaults"],
-    // Leave the symbols in the shared library so that stack unwinders can
-    // produce meaningful name resolution.
-    strip: {
-        keep_symbols: true,
-    },
+    defaults: [
+        "libdexfile_defaults",
+        "libart_nativeunwind_defaults",
+    ],
     target: {
         android: {
             shared_libs: [
@@ -176,6 +174,13 @@ art_cc_library {
             ],
         },
     },
+    apex_available: [
+        "com.android.art.release",
+        "com.android.art.debug",
+        // TODO(b/142944931) Clean this up. This is due to the dependency to libdexfile_support_static
+        // from /system/core, etc.
+        "//apex_available:platform",
+    ],
 }
 
 art_cc_library {
@@ -214,6 +219,9 @@ art_cc_library {
             ],
         },
     },
+    apex_available: [
+        "com.android.art.debug",
+    ],
 }
 
 art_cc_test {
@@ -300,6 +308,13 @@ cc_library {
     shared_libs: [
         "libdexfile",
     ],
+    apex_available: [
+        "com.android.art.release",
+        "com.android.art.debug",
+        // TODO(b/142944931) Clean this up. This is due to the dependency to libdexfile_support_static
+        // from /system/core, etc.
+        "//apex_available:platform",
+    ],
 }
 
 cc_library {
@@ -315,6 +330,9 @@ cc_library {
     },
     shared_libs: [
         "libdexfiled",
+    ],
+    apex_available: [
+        "com.android.art.debug",
     ],
 }
 
