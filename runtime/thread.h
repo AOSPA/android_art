@@ -1182,13 +1182,16 @@ class Thread {
   mirror::Object* AllocTlab(size_t bytes);
   void SetTlab(uint8_t* start, uint8_t* end, uint8_t* limit);
   bool HasTlab() const;
+  void ResetTlab();
   uint8_t* GetTlabStart() {
     return tlsPtr_.thread_local_start;
   }
   uint8_t* GetTlabPos() {
     return tlsPtr_.thread_local_pos;
   }
-
+  uint8_t* GetTlabEnd() {
+    return tlsPtr_.thread_local_end;
+  }
   // Remove the suspend trigger for this thread by making the suspend_trigger_ TLS value
   // equal to a valid pointer.
   // TODO: does this need to atomic?  I don't think so.

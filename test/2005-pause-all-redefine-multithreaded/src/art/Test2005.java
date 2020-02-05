@@ -108,7 +108,7 @@ public class Test2005 {
     public MyThread(CountDownLatch delay, int id) {
       super("Thread: " + id);
       this.thr_id = id;
-      this.results = new ArrayList<>(1000);
+      this.results = new HashSet<>();
       this.finish = false;
       this.delay = delay;
     }
@@ -138,7 +138,7 @@ public class Test2005 {
       }
     }
 
-    public ArrayList<String> results;
+    public HashSet<String> results;
     public volatile boolean finish;
     public int thr_id;
     public CountDownLatch delay;
@@ -171,7 +171,12 @@ public class Test2005 {
     Thread[] all_threads = new Thread[mytg.activeCount()];
     mytg.enumerate(all_threads);
     Set<Thread> thread_set = new HashSet<>(Arrays.asList(all_threads));
+    // We don't want to suspend ourself, that would cause a deadlock.
     thread_set.remove(Thread.currentThread());
+    // If some of the other threads finished between calling mytg.activeCount and enumerate we will
+    // have nulls. These nulls are interpreted as currentThread by SuspendThreadList so we want to
+    // get rid of them.
+    thread_set.remove(null);
     // Suspend them.
     Suspension.suspendList(thread_set.toArray(new Thread[0]));
     // Actual redefine.

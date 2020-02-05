@@ -2535,7 +2535,6 @@ class Dex2Oat final {
     } else {
       DCHECK_EQ(oat_writers_.size(), 1u);
       DCHECK_EQ(dex_filenames_.size(), dex_locations_.size());
-      DCHECK_NE(dex_filenames_.size(), 0u);
       for (size_t i = 0; i != dex_filenames_.size(); ++i) {
         if (!oat_writers_[0]->AddDexFileSource(dex_filenames_[i].c_str(),
                                                dex_locations_[i].c_str())) {
@@ -2627,6 +2626,7 @@ class Dex2Oat final {
 
     if (compiler_options_->IsForceDeterminism()) {
       // To make identity hashcode deterministic, set a known seed.
+      // TODO: Select a different seed for boot image extensions; maybe hash dex file checksums.
       mirror::Object::SetHashCodeSeed(987654321U);
     }
 

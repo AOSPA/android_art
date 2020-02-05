@@ -1636,7 +1636,10 @@ void Jit::PostForkChildAction(bool is_system_server, bool is_zygote) {
     tasks_after_boot_.clear();
   }
 
-  if (Runtime::Current()->IsUsingApexBootImageLocation() && fd_methods_ != -1) {
+  // Disable polling thread until b/145973776 is fixed.
+  static constexpr bool kRunPollingThread = false;
+  Runtime* const runtime = Runtime::Current();
+  if (kRunPollingThread && runtime->IsUsingApexBootImageLocation() && fd_methods_ != -1) {
     // Create a thread that will poll the status of zygote compilation, and map
     // the private mapping of boot image methods.
     zygote_mapping_methods_.ResetInForkedProcess();
@@ -1649,9 +1652,12 @@ void Jit::PostForkChildAction(bool is_system_server, bool is_zygote) {
         pthread_create,
         (&polling_thread, &attr, RunPollingThread, reinterpret_cast<void*>(this)),
         "Methods maps thread");
+  } else {
+    // We need to close the fd otherwise the webview zygote will have problems.
+    fd_methods_.reset();
   }
 
-  if (is_zygote || Runtime::Current()->IsSafeMode()) {
+  if (is_zygote || runtime->IsSafeMode()) {
     // Delete the thread pool, we are not going to JIT.
     thread_pool_.reset(nullptr);
     return;

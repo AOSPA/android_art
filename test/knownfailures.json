@@ -1033,6 +1033,7 @@
           "685-shifts",
           "686-get-this",
           "687-deopt",
+          "699-checker-string-append2",
           "706-checker-scheduler",
           "707-checker-invalid-profile",
           "714-invoke-custom-lambda-metafactory",
@@ -1105,7 +1106,49 @@
         ],
         "variant": "jvm",
         "bug": "b/73888836",
-        "description": ["Failing on RI. Needs further investigating."]
+        "description": ["Failing on RI. Needs further investigating. Some of these use smali."]
+    },
+    {
+      "tests": [
+                  "1974-resize-array",
+                  "1975-hello-structural-transformation",
+                  "1976-hello-structural-static-methods",
+                  "1977-hello-structural-obsolescence",
+                  "1978-regular-obsolete-then-structural-obsolescence",
+                  "1979-threaded-structural-transformation",
+                  "1980-obsolete-object-cleared",
+                  "1981-structural-redef-private-method-handles",
+                  "1982-no-virtuals-structural-redefinition",
+                  "1983-structural-redefinition-failures",
+                  "1984-structural-redefine-field-trace",
+                  "1985-structural-redefine-stack-scope",
+                  "1986-structural-redefine-multi-thread-stack-scope",
+                  "1987-structural-redefine-recursive-stack-scope",
+                  "1988-multi-structural-redefine",
+                  "1989-transform-bad-monitor",
+                  "1990-structural-bad-verify",
+                  "1991-hello-structural-retransform",
+                  "1992-retransform-no-such-field",
+                  "1993-fallback-non-structural",
+                  "1994-final-virtual-structural",
+                  "1995-final-virtual-structural-multithread",
+                  "1996-final-override-virtual-structural",
+                  "1997-structural-shadow-method",
+                  "1998-structural-shadow-field",
+                  "1999-virtual-structural",
+                  "2000-virtual-list-structural",
+                  "2001-virtual-structural-multithread",
+                  "2002-virtual-structural-initializing",
+                  "2003-double-virtual-structural",
+                  "2004-double-virtual-structural-abstract",
+                  "2005-pause-all-redefine-multithreaded",
+                  "2006-virtual-structural-finalizing",
+                  "2007-virtual-structural-finalizable"
+                ],
+        "env_vars": {"ART_USE_READ_BARRIER": "false"},
+        "description": ["Relies on the accuracy of the Heap::VisitObjects function which is broken",
+                        " when READ_BARRIER==false (I.e. On CMS collector)."],
+        "bug": "b/147207934"
     },
     {
         "tests": ["530-checker-peel-unroll",
@@ -1156,7 +1199,12 @@
                   "1999-virtual-structural",
                   "2000-virtual-list-structural",
                   "2001-virtual-structural-multithread",
-                  "2002-virtual-structural-initializing"
+                  "2002-virtual-structural-initializing",
+                  "2003-double-virtual-structural",
+                  "2004-double-virtual-structural-abstract",
+                  "2005-pause-all-redefine-multithreaded",
+                  "2006-virtual-structural-finalizing",
+                  "2007-virtual-structural-finalizable"
                 ],
         "variant": "jvm",
         "description": ["Doesn't run on RI."]
@@ -1203,6 +1251,12 @@
         "description" : ["Test seems to timeout when run with gcstress due to slower unwinding by libbacktrace"]
     },
     {
+        "tests": ["708-jit-cache-churn"],
+        "variant": "gcstress",
+        "bug": "b/147358440",
+        "description" : ["Times out under gcstress since https://r.android.com/1200060."]
+    },
+    {
         "tests": ["712-varhandle-invocations"],
         "variant": "gcstress",
         "bug": "b/111630237",
@@ -1232,13 +1286,6 @@
           "These tests directly set -Xjitthreshold:1000 to prevent the jit from compiling any",
           "extra methods. jit-at-first-use would disrupt this."
         ]
-    },
-    {
-        "tests": ["135-MirandaDispatch"],
-        "variant": "interp-ac & 32 & host",
-        "env_vars": {"SANITIZE_HOST": "address"},
-        "bug": "b/112993554",
-        "description": ["Timeout with ASan and interp-ac on 32-bit host (x86)."]
     },
     {
         "tests": ["454-get-vreg", "457-regs"],
@@ -1289,6 +1336,12 @@
         "tests": ["909-attach-agent", "126-miranda-multidex"],
         "zipapex": true,
         "bug": "b/135507613",
-        "description": ["These tests run dalvikvm multiple times, this can messup the zipapex runner"]
+        "description": ["These tests run dalvikvm multiple times, this can mess up the",
+                        "zipapex runner."]
+    },
+    {
+        "tests": ["2029-contended-monitors"],
+        "variant": "interpreter | interp-ac | gcstress | trace",
+        "description": ["Slow test. Prone to timeouts."]
     }
 ]
