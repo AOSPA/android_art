@@ -85,7 +85,6 @@ class BaseMutex;
 class ClassLinker;
 class Closure;
 class Context;
-struct DebugInvokeReq;
 class DeoptimizationContextRecord;
 class DexFile;
 class FrameIdToShadowFrame;
@@ -96,7 +95,6 @@ class Monitor;
 class RootVisitor;
 class ScopedObjectAccessAlreadyRunnable;
 class ShadowFrame;
-class SingleStepControl;
 class StackedShadowFrameRecord;
 enum class SuspendReason : char;
 class Thread;
@@ -941,14 +939,6 @@ class Thread {
     return handle_scope;
   }
 
-  DebugInvokeReq* GetInvokeReq() const {
-    return tlsPtr_.debug_invoke_req;
-  }
-
-  SingleStepControl* GetSingleStepControl() const {
-    return tlsPtr_.single_step_control;
-  }
-
   // Indicates whether this thread is ready to invoke a method for debugging. This
   // is only true if the thread has been suspended by a debug event.
   bool IsReadyForDebugInvoke() const {
@@ -1024,25 +1014,6 @@ class Thread {
   // Returns true if the thread is allowed to load java classes.
   bool CanLoadClasses() const;
 
-  // Activates single step control for debugging. The thread takes the
-  // ownership of the given SingleStepControl*. It is deleted by a call
-  // to DeactivateSingleStepControl or upon thread destruction.
-  void ActivateSingleStepControl(SingleStepControl* ssc);
-
-  // Deactivates single step control for debugging.
-  void DeactivateSingleStepControl();
-
-  // Sets debug invoke request for debugging. When the thread is resumed,
-  // it executes the method described by this request then sends the reply
-  // before suspending itself. The thread takes the ownership of the given
-  // DebugInvokeReq*. It is deleted by a call to ClearDebugInvokeReq.
-  void SetDebugInvokeReq(DebugInvokeReq* req);
-
-  // Clears debug invoke request for debugging. When the thread completes
-  // method invocation, it deletes its debug invoke request and suspends
-  // itself.
-  void ClearDebugInvokeReq();
-
   // Returns the fake exception used to activate deoptimization.
   static mirror::Throwable* GetDeoptimizationException() {
     // Note that the mirror::Throwable must be aligned to kObjectAlignment or else it cannot be
@@ -1093,7 +1064,19 @@ class Thread {
   void RemoveDebuggerShadowFrameMapping(size_t frame_id)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  std::deque<instrumentation::InstrumentationStackFrame>* GetInstrumentationStack() {
+  // While getting this map requires shared the mutator lock, manipulating it
+  // should actually follow these rules:
+  // (1) The owner of this map (the thread) can change it with its mutator lock.
+  // (2) Other threads can read this map when the owner is suspended and they
+  //     hold the mutator lock.
+  // (3) Other threads can change this map when owning the mutator lock exclusively.
+  //
+  // The reason why (3) needs the mutator lock exclusively (and not just having
+  // the owner suspended) is that we don't want other threads to concurrently read the map.
+  //
+  // TODO: Add a class abstraction to express these rules.
+  std::map<uintptr_t, instrumentation::InstrumentationStackFrame>* GetInstrumentationStack()
+      REQUIRES_SHARED(Locks::mutator_lock_) {
     return tlsPtr_.instrumentation_stack;
   }
 
@@ -1389,8 +1372,7 @@ class Thread {
                        jint thread_priority)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Avoid use, callers should use SetState. Used only by SignalCatcher::HandleSigQuit, ~Thread and
-  // Dbg::ManageDeoptimization.
+  // Avoid use, callers should use SetState. Used only by SignalCatcher::HandleSigQuit and, ~Thread
   ThreadState SetStateUnsafe(ThreadState new_state) {
     ThreadState old_state = GetState();
     if (old_state == kRunnable && new_state != kRunnable) {
@@ -1693,7 +1675,7 @@ class Thread {
       self(nullptr), opeer(nullptr), jpeer(nullptr), stack_begin(nullptr), stack_size(0),
       deps_or_stack_trace_sample(), wait_next(nullptr), monitor_enter_object(nullptr),
       top_handle_scope(nullptr), class_loader_override(nullptr), long_jump_context(nullptr),
-      instrumentation_stack(nullptr), debug_invoke_req(nullptr), single_step_control(nullptr),
+      instrumentation_stack(nullptr),
       stacked_shadow_frame_record(nullptr), deoptimization_context_stack(nullptr),
       frame_id_to_shadow_frame(nullptr), name(nullptr), pthread_self(0),
       last_no_thread_suspension_cause(nullptr), checkpoint_function(nullptr),
@@ -1776,14 +1758,12 @@ class Thread {
     Context* long_jump_context;
 
     // Additional stack used by method instrumentation to store method and return pc values.
-    // Stored as a pointer since std::deque is not PACKED.
-    std::deque<instrumentation::InstrumentationStackFrame>* instrumentation_stack;
-
-    // JDWP invoke-during-breakpoint support.
-    DebugInvokeReq* debug_invoke_req;
-
-    // JDWP single-stepping support.
-    SingleStepControl* single_step_control;
+    // Stored as a pointer since std::map is not PACKED.
+    // !DO NOT CHANGE! to std::unordered_map: the users of this map require an
+    // ordered iteration on the keys (which are stack addresses).
+    // Also see Thread::GetInstrumentationStack for the requirements on
+    // manipulating and reading this map.
+    std::map<uintptr_t, instrumentation::InstrumentationStackFrame>* instrumentation_stack;
 
     // For gc purpose, a shadow frame record stack that keeps track of:
     // 1) shadow frames under construction.
@@ -1906,7 +1886,6 @@ class Thread {
   // the caller is allowed to access all fields and methods in the Core Platform API.
   uint32_t core_platform_api_cookie_ = 0;
 
-  friend class Dbg;  // For SetStateUnsafe.
   friend class gc::collector::SemiSpace;  // For getting stack traces.
   friend class Runtime;  // For CreatePeer.
   friend class QuickExceptionHandler;  // For dumping the stack.

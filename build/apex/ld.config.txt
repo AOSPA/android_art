@@ -8,15 +8,16 @@
 dir.art = /apex/com.android.art/bin/
 
 [art]
-additional.namespaces = platform,conscrypt,art,neuralnetworks
+additional.namespaces = platform,conscrypt,art,neuralnetworks,adbd
 
 # The default namespace here only links to other namespaces, in particular "art"
 # where the real library loading takes place. Any outgoing links from "art" also
 # need to be present here.
 namespace.default.isolated = true
-namespace.default.links = art,platform
+namespace.default.links = art,platform,adbd
 namespace.default.link.art.allow_all_shared_libs = true
 namespace.default.link.platform.allow_all_shared_libs = true
+namespace.default.link.adbd.shared_libs = libadbconnection_client.so
 
 ###############################################################################
 # "art" APEX namespace
@@ -38,22 +39,27 @@ namespace.art.asan.search.paths = /apex/com.android.art/${LIB}
 # TODO(b/129534335): Move this to the linker configuration of the Test
 # ART APEX when it is available.
 namespace.art.permitted.paths = /data
+namespace.art.asan.permitted.paths = /data
 # odex files are in /system/framework and /apex/com.android.art/javalib.
 # dalvikvm has to be able to dlopen the files for CTS.
 namespace.art.permitted.paths += /system/framework
 namespace.art.permitted.paths += /apex/com.android.art/javalib
+namespace.art.asan.permitted.paths += /system/framework
+namespace.art.asan.permitted.paths += /apex/com.android.art/javalib
 # TODO(b/144533348): to allow symlinks pointing the libs under /system/lib
 # Note that this however does not open all libs in the system partition to
 # the APEX namespaces, because searching of the libs are NOT done in
 # /system/lib, but in /apex/<module>/lib directory.
 namespace.art.permitted.paths += /system/${LIB}
-namespace.art.links = platform,neuralnetworks
+namespace.art.asan.permitted.paths += /system/${LIB}
+namespace.art.links = platform,neuralnetworks,adbd
 # Need allow_all_shared_libs because libart.so can dlopen oat files in
 # /system/framework and /data.
 # TODO(b/130340935): Use a dynamically created linker namespace similar to
 # classloader-namespace for oat files, and tighten this up.
 namespace.art.link.platform.allow_all_shared_libs = true
 namespace.art.link.neuralnetworks.shared_libs = libneuralnetworks.so
+namespace.art.link.adbd.shared_libs = libadbconnection_client.so
 
 ###############################################################################
 # "platform" namespace
@@ -68,13 +74,6 @@ namespace.platform.visible = true
 
 namespace.platform.search.paths = /system/${LIB}
 namespace.platform.asan.search.paths = /data/asan/system/${LIB}
-
-# This is only a subset of platform default namespace permitted paths, and might
-# need extension.
-namespace.default.permitted.paths  = /data
-namespace.default.permitted.paths += /system/framework
-namespace.default.asan.permitted.paths  = /data
-namespace.default.asan.permitted.paths += /system/framework
 
 namespace.platform.links = art
 namespace.platform.link.art.shared_libs  = libandroidicu.so
@@ -123,6 +122,7 @@ namespace.conscrypt.asan.search.paths = /apex/com.android.conscrypt/${LIB}
 # the APEX namespaces, because searching of the libs are NOT done in
 # /system/lib, but in /apex/<module>/lib directory.
 namespace.conscrypt.permitted.paths = /system/${LIB}
+namespace.conscrypt.asan.permitted.paths = /system/${LIB}
 namespace.conscrypt.links = art,platform
 namespace.conscrypt.link.art.shared_libs = libandroidio.so
 namespace.conscrypt.link.platform.shared_libs  = libc.so
@@ -145,6 +145,7 @@ namespace.neuralnetworks.asan.search.paths = /apex/com.android.neuralnetworks/${
 # the APEX namespaces, because searching of the libs are NOT done in
 # /system/lib, but in /apex/<module>/lib directory.
 namespace.neuralnetworks.permitted.paths = /system/${LIB}
+namespace.neuralnetworks.asan.permitted.paths = /system/${LIB}
 namespace.neuralnetworks.links = platform
 namespace.neuralnetworks.link.platform.shared_libs  = libc.so
 namespace.neuralnetworks.link.platform.shared_libs += libcgrouprc.so
@@ -155,3 +156,20 @@ namespace.neuralnetworks.link.platform.shared_libs += libnativewindow.so
 namespace.neuralnetworks.link.platform.shared_libs += libneuralnetworks_packageinfo.so
 namespace.neuralnetworks.link.platform.shared_libs += libsync.so
 namespace.neuralnetworks.link.platform.shared_libs += libvndksupport.so
+
+###############################################################################
+# "adbd" APEX namespace
+#
+# This namespace is for libraries within the adbd APEX.
+###############################################################################
+
+namespace.adbd.isolated = true
+namespace.adbd.visible = true
+
+namespace.adbd.search.paths = /apex/com.android.adbd/${LIB}
+namespace.adbd.asan.search.paths = /apex/com.android.adbd/${LIB}
+namespace.adbd.links = platform
+namespace.adbd.link.platform.shared_libs  = libc.so
+namespace.adbd.link.platform.shared_libs += libm.so
+namespace.adbd.link.platform.shared_libs += libdl.so
+namespace.adbd.link.platform.shared_libs += liblog.so

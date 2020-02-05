@@ -790,7 +790,9 @@ void Thread::InstallImplicitProtection() {
 #else
           1u;
 #endif
-      volatile char space[kPageSize - (kAsanMultiplier * 256)];
+      // Keep space uninitialized as it can overflow the stack otherwise (should Clang actually
+      // auto-initialize this local variable).
+      volatile char space[kPageSize - (kAsanMultiplier * 256)] __attribute__((uninitialized));
       char sink ATTRIBUTE_UNUSED = space[zero];  // NOLINT
       // Remove tag from the pointer. Nop in non-hwasan builds.
       uintptr_t addr = reinterpret_cast<uintptr_t>(__hwasan_tag_pointer(space, 0));
@@ -1462,9 +1464,6 @@ bool Thread::ModifySuspendCountInternal(Thread* self,
 
   tls32_.suspend_count += delta;
   switch (reason) {
-    case SuspendReason::kForDebugger:
-      tls32_.debug_suspend_count += delta;
-      break;
     case SuspendReason::kForUserCode:
       tls32_.user_code_suspend_count += delta;
       break;
@@ -2299,7 +2298,8 @@ Thread::Thread(bool daemon)
       is_runtime_thread_(false) {
   wait_mutex_ = new Mutex("a thread wait mutex", LockLevel::kThreadWaitLock);
   wait_cond_ = new ConditionVariable("a thread wait condition variable", *wait_mutex_);
-  tlsPtr_.instrumentation_stack = new std::deque<instrumentation::InstrumentationStackFrame>;
+  tlsPtr_.instrumentation_stack =
+      new std::map<uintptr_t, instrumentation::InstrumentationStackFrame>;
   tlsPtr_.name = new std::string(kThreadNameDuringStartup);
 
   static_assert((sizeof(Thread) % 4) == 0U,
@@ -2499,9 +2499,6 @@ Thread::~Thread() {
     CleanupCpu();
   }
 
-  if (tlsPtr_.single_step_control != nullptr) {
-    delete tlsPtr_.single_step_control;
-  }
   delete tlsPtr_.instrumentation_stack;
   delete tlsPtr_.name;
   delete tlsPtr_.deps_or_stack_trace_sample.stack_trace_sample;
@@ -3625,7 +3622,7 @@ void Thread::QuickDeliverException() {
           method_type);
       artDeoptimize(this);
       UNREACHABLE();
-    } else {
+    } else if (visitor.caller != nullptr) {
       LOG(WARNING) << "Got a deoptimization request on un-deoptimizable method "
                    << visitor.caller->PrettyMethod();
     }
@@ -4028,9 +4025,6 @@ void Thread::VisitRoots(RootVisitor* visitor) {
   tlsPtr_.jni_env->VisitJniLocalRoots(visitor, RootInfo(kRootJNILocal, thread_id));
   tlsPtr_.jni_env->VisitMonitorRoots(visitor, RootInfo(kRootJNIMonitor, thread_id));
   HandleScopeVisitRoots(visitor, thread_id);
-  if (tlsPtr_.debug_invoke_req != nullptr) {
-    tlsPtr_.debug_invoke_req->VisitRoots(visitor, RootInfo(kRootDebugger, thread_id));
-  }
   // Visit roots for deoptimization.
   if (tlsPtr_.stacked_shadow_frame_record != nullptr) {
     RootCallbackVisitor visitor_to_callback(visitor, thread_id);
@@ -4072,8 +4066,8 @@ void Thread::VisitRoots(RootVisitor* visitor) {
   RootCallbackVisitor visitor_to_callback(visitor, thread_id);
   ReferenceMapVisitor<RootCallbackVisitor, kPrecise> mapper(this, &context, visitor_to_callback);
   mapper.template WalkStack<StackVisitor::CountTransitions::kNo>(false);
-  for (instrumentation::InstrumentationStackFrame& frame : *GetInstrumentationStack()) {
-    visitor->VisitRootIfNonNull(&frame.this_object_, RootInfo(kRootVMInternal, thread_id));
+  for (auto& entry : *GetInstrumentationStack()) {
+    visitor->VisitRootIfNonNull(&entry.second.this_object_, RootInfo(kRootVMInternal, thread_id));
   }
 }
 
@@ -4207,37 +4201,6 @@ bool Thread::UnprotectStack() {
   void* pregion = tlsPtr_.stack_begin - kStackOverflowProtectedSize;
   VLOG(threads) << "Unprotecting stack at " << pregion;
   return mprotect(pregion, kStackOverflowProtectedSize, PROT_READ|PROT_WRITE) == 0;
-}
-
-void Thread::ActivateSingleStepControl(SingleStepControl* ssc) {
-  CHECK(Dbg::IsDebuggerActive());
-  CHECK(GetSingleStepControl() == nullptr) << "Single step already active in thread " << *this;
-  CHECK(ssc != nullptr);
-  tlsPtr_.single_step_control = ssc;
-}
-
-void Thread::DeactivateSingleStepControl() {
-  CHECK(Dbg::IsDebuggerActive());
-  CHECK(GetSingleStepControl() != nullptr) << "Single step not active in thread " << *this;
-  SingleStepControl* ssc = GetSingleStepControl();
-  tlsPtr_.single_step_control = nullptr;
-  delete ssc;
-}
-
-void Thread::SetDebugInvokeReq(DebugInvokeReq* req) {
-  CHECK(Dbg::IsDebuggerActive());
-  CHECK(GetInvokeReq() == nullptr) << "Debug invoke req already active in thread " << *this;
-  CHECK(Thread::Current() != this) << "Debug invoke can't be dispatched by the thread itself";
-  CHECK(req != nullptr);
-  tlsPtr_.debug_invoke_req = req;
-}
-
-void Thread::ClearDebugInvokeReq() {
-  CHECK(GetInvokeReq() != nullptr) << "Debug invoke req not active in thread " << *this;
-  CHECK(Thread::Current() == this) << "Debug invoke must be finished by the thread itself";
-  DebugInvokeReq* req = tlsPtr_.debug_invoke_req;
-  tlsPtr_.debug_invoke_req = nullptr;
-  delete req;
 }
 
 void Thread::PushVerifier(verifier::MethodVerifier* verifier) {

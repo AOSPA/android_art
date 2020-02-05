@@ -83,10 +83,6 @@
 #include "handle_scope.h"
 #include "instrumentation.h"
 #include "intern_table.h"
-#include "jdwp/jdwp.h"
-#include "jdwp/jdwp_constants.h"
-#include "jdwp/jdwp_event.h"
-#include "jdwp/object_registry.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
 #include "jni/jni_env_ext-inl.h"
@@ -465,17 +461,44 @@ jvmtiError Redefiner::GetClassRedefinitionError(art::Handle<art::mirror::Class> 
           "safe to structurally redefine it.";
       return ERR(UNMODIFIABLE_CLASS);
     }
-    // Check for fields/methods which were returned before moving to index jni id type.
-    // TODO We might want to rework how this is done. Once full redefinition is implemented we will
-    // need to check any subtypes too.
-    art::ObjPtr<art::mirror::ClassExt> ext(klass->GetExtData());
-    if (!ext.IsNull()) {
-      if (ext->HasInstanceFieldPointerIdMarker() ||
-          ext->HasMethodPointerIdMarker() ||
-          ext->HasStaticFieldPointerIdMarker()) {
-        return ERR(UNMODIFIABLE_CLASS);
-      }
+    auto has_pointer_marker =
+        [](art::ObjPtr<art::mirror::Class> k) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+          // Check for fields/methods which were returned before moving to index jni id type.
+          // TODO We might want to rework how this is done. Once full redefinition is implemented we
+          // will need to check any subtypes too.
+          art::ObjPtr<art::mirror::ClassExt> ext(k->GetExtData());
+          if (!ext.IsNull()) {
+            if (ext->HasInstanceFieldPointerIdMarker() || ext->HasMethodPointerIdMarker() ||
+                ext->HasStaticFieldPointerIdMarker()) {
+              return true;
+            }
+          }
+          return false;
+        };
+    if (has_pointer_marker(klass.Get())) {
+      *error_msg =
+          StringPrintf("%s has active pointer jni-ids and cannot be redefined structurally",
+                       klass->PrettyClass().c_str());
+      return ERR(UNMODIFIABLE_CLASS);
     }
+    jvmtiError res = OK;
+    art::ClassFuncVisitor cfv(
+      [&](art::ObjPtr<art::mirror::Class> k) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+        // if there is any class 'K' that is a subtype (i.e. extends) klass and has pointer-jni-ids
+        // we cannot structurally redefine the class 'k' since we would structurally redefine the
+        // subtype.
+        if (k->IsLoaded() && klass->IsAssignableFrom(k) && has_pointer_marker(k)) {
+          *error_msg = StringPrintf(
+              "%s has active pointer jni-ids from subtype %s and cannot be redefined structurally",
+              klass->PrettyClass().c_str(),
+              k->PrettyClass().c_str());
+          res = ERR(UNMODIFIABLE_CLASS);
+          return false;
+        }
+        return true;
+      });
+    art::Runtime::Current()->GetClassLinker()->VisitClasses(&cfv);
+    return res;
   }
   return OK;
 }
@@ -2128,19 +2151,8 @@ void Redefiner::ClassRedefinition::UnregisterJvmtiBreakpoints() {
   BreakpointUtil::RemoveBreakpointsInClass(driver_->env_, GetMirrorClass().Ptr());
 }
 
-void Redefiner::ClassRedefinition::UnregisterBreakpoints() {
-  if (LIKELY(!art::Dbg::IsDebuggerActive())) {
-    return;
-  }
-  art::JDWP::JdwpState* state = art::Dbg::GetJdwpState();
-  if (state != nullptr) {
-    state->UnregisterLocationEventsOnClass(GetMirrorClass());
-  }
-}
-
 void Redefiner::UnregisterAllBreakpoints() {
   for (Redefiner::ClassRedefinition& redef : redefinitions_) {
-    redef.UnregisterBreakpoints();
     redef.UnregisterJvmtiBreakpoints();
   }
 }
