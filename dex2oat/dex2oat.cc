@@ -42,7 +42,6 @@
 #include "android-base/strings.h"
 
 #include "arch/instruction_set_features.h"
-#include "arch/mips/instruction_set_features_mips.h"
 #include "art_method-inl.h"
 #include "base/callee_save_type.h"
 #include "base/dumpable.h"
@@ -310,7 +309,7 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      Example: --android-root=out/host/linux-x86");
   UsageError("      Default: $ANDROID_ROOT");
   UsageError("");
-  UsageError("  --instruction-set=(arm|arm64|mips|mips64|x86|x86_64): compile for a particular");
+  UsageError("  --instruction-set=(arm|arm64|x86|x86_64): compile for a particular");
   UsageError("      instruction set.");
   UsageError("      Example: --instruction-set=x86");
   UsageError("      Default: arm");
@@ -341,7 +340,8 @@ NO_RETURN static void Usage(const char* fmt, ...) {
                 "|everything):");
   UsageError("      select compiler filter.");
   UsageError("      Example: --compiler-filter=everything");
-  UsageError("      Default: speed");
+  UsageError("      Default: speed-profile if --profile-file or --profile-file-fd is used,");
+  UsageError("               speed otherwise");
   UsageError("");
   UsageError("  --huge-method-max=<method-instruction-count>: threshold size for a huge");
   UsageError("      method for compiler filter tuning.");
@@ -829,13 +829,10 @@ class Dex2Oat final {
     DCHECK(compiler_options_->image_type_ == CompilerOptions::ImageType::kNone);
     if (!image_filenames_.empty() || image_fd_ != -1) {
       // If no boot image is provided, then dex2oat is compiling the primary boot image,
-      // otherwise it is compiling the boot image extension. In the case of JIT-zygote
-      // extension the primary boot image has a special name "apex.art".
+      // otherwise it is compiling the boot image extension.
       compiler_options_->image_type_ = boot_image_filename_.empty()
           ? CompilerOptions::ImageType::kBootImage
-          : android::base::EndsWith(boot_image_filename_, "apex.art")
-              ? CompilerOptions::ImageType::kApexBootImageExtension
-              : CompilerOptions::ImageType::kBootImageExtension;
+          : CompilerOptions::ImageType::kBootImageExtension;
     }
     if (app_image_fd_ != -1 || !app_image_file_name_.empty()) {
       if (compiler_options_->IsBootImage() || compiler_options_->IsBootImageExtension()) {
@@ -1013,8 +1010,6 @@ class Dex2Oat final {
       case InstructionSet::kArm64:
       case InstructionSet::kX86:
       case InstructionSet::kX86_64:
-      case InstructionSet::kMips:
-      case InstructionSet::kMips64:
         compiler_options_->implicit_null_checks_ = true;
         compiler_options_->implicit_so_checks_ = true;
         break;
@@ -1049,6 +1044,26 @@ class Dex2Oat final {
         Usage("Failed to read list of passes to run.");
       }
     }
+
+    // Trim the boot image location to the components that do not have any profile specified.
+    size_t profile_separator_pos = boot_image_filename_.find(ImageSpace::kProfileSeparator);
+    if (profile_separator_pos != std::string::npos) {
+      DCHECK(!IsBootImage());  // For primary boot image the boot_image_filename_ is empty.
+      if (IsBootImageExtension()) {
+        Usage("Unsupported profile specification in boot image location (%s) for extension.",
+              boot_image_filename_.c_str());
+      }
+      size_t component_separator_pos =
+          boot_image_filename_.rfind(ImageSpace::kComponentSeparator, profile_separator_pos);
+      if (component_separator_pos != std::string::npos && component_separator_pos != 0u) {
+        VLOG(compiler)
+            << "Truncating boot image location " << boot_image_filename_
+            << " because it contains profile specification. Truncated: "
+            << boot_image_filename_.substr(/*pos*/ 0u, /*length*/ component_separator_pos);
+        boot_image_filename_.resize(component_separator_pos);
+      }  // else let the full validation in ImageSpace reject the invalid location.
+    }
+
     compiler_options_->passes_to_run_ = passes_to_run_.get();
     compiler_options_->compiling_with_core_image_ =
         !boot_image_filename_.empty() &&
@@ -1314,6 +1329,14 @@ class Dex2Oat final {
     } else if (args.Exists(M::StoredClassLoaderContext)) {
       Usage("Option --stored-class-loader-context should only be used if "
             "--class-loader-context is also specified");
+    }
+
+    // If we have a profile, change the default compiler filter to speed-profile
+    // before reading compiler options.
+    static_assert(CompilerFilter::kDefaultCompilerFilter == CompilerFilter::kSpeed);
+    DCHECK_EQ(compiler_options_->GetCompilerFilter(), CompilerFilter::kSpeed);
+    if (UseProfile()) {
+      compiler_options_->SetCompilerFilter(CompilerFilter::kSpeedProfile);
     }
 
     if (!ReadCompilerOptions(args, compiler_options_.get(), &error_msg)) {

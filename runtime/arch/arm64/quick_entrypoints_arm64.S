@@ -19,27 +19,6 @@
 
 #include "arch/quick_alloc_entrypoints.S"
 
-
-.macro INCREASE_FRAME frame_adjustment
-    sub sp, sp, #(\frame_adjustment)
-    .cfi_adjust_cfa_offset (\frame_adjustment)
-.endm
-
-.macro DECREASE_FRAME frame_adjustment
-    add sp, sp, #(\frame_adjustment)
-    .cfi_adjust_cfa_offset -(\frame_adjustment)
-.endm
-
-.macro SAVE_REG reg, offset
-    str \reg, [sp, #(\offset)]
-    .cfi_rel_offset \reg, (\offset)
-.endm
-
-.macro RESTORE_REG reg, offset
-    ldr \reg, [sp, #(\offset)]
-    .cfi_restore \reg
-.endm
-
 .macro SAVE_REG_INCREASE_FRAME reg, frame_adjustment
     str \reg, [sp, #-(\frame_adjustment)]!
     .cfi_adjust_cfa_offset (\frame_adjustment)
@@ -50,18 +29,6 @@
     ldr \reg, [sp], #(\frame_adjustment)
     .cfi_restore \reg
     .cfi_adjust_cfa_offset -(\frame_adjustment)
-.endm
-
-.macro SAVE_TWO_REGS reg1, reg2, offset
-    stp \reg1, \reg2, [sp, #(\offset)]
-    .cfi_rel_offset \reg1, (\offset)
-    .cfi_rel_offset \reg2, (\offset) + 8
-.endm
-
-.macro RESTORE_TWO_REGS reg1, reg2, offset
-    ldp \reg1, \reg2, [sp, #(\offset)]
-    .cfi_restore \reg1
-    .cfi_restore \reg2
 .endm
 
 .macro SAVE_TWO_REGS_INCREASE_FRAME reg1, reg2, frame_adjustment
@@ -76,111 +43,6 @@
     .cfi_restore \reg1
     .cfi_restore \reg2
     .cfi_adjust_cfa_offset -(\frame_adjustment)
-.endm
-
-.macro LOAD_RUNTIME_INSTANCE reg
-#if __has_feature(hwaddress_sanitizer) && __clang_major__ >= 10
-    adrp xIP0, :pg_hi21_nc:_ZN3art7Runtime9instance_E
-#else
-    adrp xIP0, _ZN3art7Runtime9instance_E
-#endif
-    ldr xIP0, [xIP0, #:lo12:_ZN3art7Runtime9instance_E]
-.endm
-
-    /*
-     * Macro that sets up the callee save frame to conform with
-     * Runtime::CreateCalleeSaveMethod(kSaveAllCalleeSaves)
-     */
-.macro SETUP_SAVE_ALL_CALLEE_SAVES_FRAME
-    // art::Runtime* xIP0 = art::Runtime::instance_;
-    // Our registers aren't intermixed - just spill in order.
-    LOAD_RUNTIME_INSTANCE xIP0
-
-    // ArtMethod* xIP0 = Runtime::instance_->callee_save_methods_[kSaveAllCalleeSaves];
-    ldr xIP0, [xIP0, RUNTIME_SAVE_ALL_CALLEE_SAVES_METHOD_OFFSET]
-
-    INCREASE_FRAME 176
-
-    // Ugly compile-time check, but we only have the preprocessor.
-#if (FRAME_SIZE_SAVE_ALL_CALLEE_SAVES != 176)
-#error "FRAME_SIZE_SAVE_ALL_CALLEE_SAVES(ARM64) size not as expected."
-#endif
-
-    // Stack alignment filler [sp, #8].
-    // FP callee-saves.
-    stp d8, d9,   [sp, #16]
-    stp d10, d11, [sp, #32]
-    stp d12, d13, [sp, #48]
-    stp d14, d15, [sp, #64]
-
-    // GP callee-saves
-    SAVE_TWO_REGS x19, x20, 80
-    SAVE_TWO_REGS x21, x22, 96
-    SAVE_TWO_REGS x23, x24, 112
-    SAVE_TWO_REGS x25, x26, 128
-    SAVE_TWO_REGS x27, x28, 144
-    SAVE_TWO_REGS x29, xLR, 160
-
-    // Store ArtMethod* Runtime::callee_save_methods_[kSaveAllCalleeSaves].
-    str xIP0, [sp]
-    // Place sp in Thread::Current()->top_quick_frame.
-    mov xIP0, sp
-    str xIP0, [xSELF, # THREAD_TOP_QUICK_FRAME_OFFSET]
-.endm
-
-    /*
-     * Macro that sets up the callee save frame to conform with
-     * Runtime::CreateCalleeSaveMethod(kSaveRefsOnly).
-     */
-.macro SETUP_SAVE_REFS_ONLY_FRAME
-    // art::Runtime* xIP0 = art::Runtime::instance_;
-    // Our registers aren't intermixed - just spill in order.
-    LOAD_RUNTIME_INSTANCE xIP0
-
-    // ArtMethod* xIP0 = Runtime::instance_->callee_save_methods_[kSaveRefOnly];
-    ldr xIP0, [xIP0, RUNTIME_SAVE_REFS_ONLY_METHOD_OFFSET]
-
-    INCREASE_FRAME 96
-
-    // Ugly compile-time check, but we only have the preprocessor.
-#if (FRAME_SIZE_SAVE_REFS_ONLY != 96)
-#error "FRAME_SIZE_SAVE_REFS_ONLY(ARM64) size not as expected."
-#endif
-
-    // GP callee-saves.
-    // x20 paired with ArtMethod* - see below.
-    SAVE_TWO_REGS x21, x22, 16
-    SAVE_TWO_REGS x23, x24, 32
-    SAVE_TWO_REGS x25, x26, 48
-    SAVE_TWO_REGS x27, x28, 64
-    SAVE_TWO_REGS x29, xLR, 80
-
-    // Store ArtMethod* Runtime::callee_save_methods_[kSaveRefsOnly].
-    // Note: We could avoid saving X20 in the case of Baker read
-    // barriers, as it is overwritten by REFRESH_MARKING_REGISTER
-    // later; but it's not worth handling this special case.
-    stp xIP0, x20, [sp]
-    .cfi_rel_offset x20, 8
-
-    // Place sp in Thread::Current()->top_quick_frame.
-    mov xIP0, sp
-    str xIP0, [xSELF, # THREAD_TOP_QUICK_FRAME_OFFSET]
-.endm
-
-// TODO: Probably no need to restore registers preserved by aapcs64.
-.macro RESTORE_SAVE_REFS_ONLY_FRAME
-    // Callee-saves.
-    // Note: Likewise, we could avoid restoring X20 in the case of Baker
-    // read barriers, as it is overwritten by REFRESH_MARKING_REGISTER
-    // later; but it's not worth handling this special case.
-    RESTORE_REG x20, 8
-    RESTORE_TWO_REGS x21, x22, 16
-    RESTORE_TWO_REGS x23, x24, 32
-    RESTORE_TWO_REGS x25, x26, 48
-    RESTORE_TWO_REGS x27, x28, 64
-    RESTORE_TWO_REGS x29, xLR, 80
-
-    DECREASE_FRAME 96
 .endm
 
 .macro POP_SAVE_REFS_ONLY_FRAME
@@ -395,17 +257,6 @@
     RESTORE_SAVE_EVERYTHING_FRAME_KEEP_X0
 .endm
 
-// Macro to refresh the Marking Register (W20).
-//
-// This macro must be called at the end of functions implementing
-// entrypoints that possibly (directly or indirectly) perform a
-// suspend check (before they return).
-.macro REFRESH_MARKING_REGISTER
-#if defined(USE_READ_BARRIER) && defined(USE_BAKER_READ_BARRIER)
-    ldr wMR, [xSELF, #THREAD_IS_GC_MARKING_OFFSET]
-#endif
-.endm
-
 .macro RETURN_IF_RESULT_IS_ZERO
     cbnz x0, 1f                // result non-zero branch over
     ret                        // return
@@ -416,39 +267,6 @@
     cbz x0, 1f                 // result zero branch over
     ret                        // return
 1:
-.endm
-
-    /*
-     * Macro that calls through to artDeliverPendingExceptionFromCode, where the pending
-     * exception is Thread::Current()->exception_ when the runtime method frame is ready.
-     */
-.macro DELIVER_PENDING_EXCEPTION_FRAME_READY
-    mov x0, xSELF
-
-    // Point of no return.
-    bl artDeliverPendingExceptionFromCode  // artDeliverPendingExceptionFromCode(Thread*)
-    brk 0  // Unreached
-.endm
-
-    /*
-     * Macro that calls through to artDeliverPendingExceptionFromCode, where the pending
-     * exception is Thread::Current()->exception_.
-     */
-.macro DELIVER_PENDING_EXCEPTION
-    SETUP_SAVE_ALL_CALLEE_SAVES_FRAME
-    DELIVER_PENDING_EXCEPTION_FRAME_READY
-.endm
-
-.macro RETURN_OR_DELIVER_PENDING_EXCEPTION_REG reg
-    ldr \reg, [xSELF, # THREAD_EXCEPTION_OFFSET]   // Get exception field.
-    cbnz \reg, 1f
-    ret
-1:
-    DELIVER_PENDING_EXCEPTION
-.endm
-
-.macro RETURN_OR_DELIVER_PENDING_EXCEPTION
-    RETURN_OR_DELIVER_PENDING_EXCEPTION_REG xIP0
 .endm
 
 // Same as above with x1. This is helpful in stubs that want to avoid clobbering another register.
@@ -2069,7 +1887,6 @@ END art_quick_resolution_trampoline
  * | X22               |    callee save
  * | X21               |    callee save
  * | X20               |    callee save
- * | X19               |    callee save
  * | X7                |    arg7
  * | X6                |    arg6
  * | X5                |    arg5
@@ -2085,27 +1902,30 @@ END art_quick_resolution_trampoline
  * | D2                |    float arg 3
  * | D1                |    float arg 2
  * | D0                |    float arg 1
- * | Method*           | <- X0
+ * | padding           | // 8B
+ * | Method*           | <- X0 (Managed frame similar to SaveRefsAndArgs.)
  * #-------------------#
  * | local ref cookie  | // 4B
- * | handle scope size | // 4B
+ * | padding           | // 0B or 4B to align handle scope on 8B address
+ * | handle scope      | // Size depends on number of references; multiple of 4B.
  * #-------------------#
- * | JNI Call Stack    |
- * #-------------------#    <--- SP on native call
+ * | JNI Stack Args    | // Empty if all args fit into registers x0-x7, d0-d7.
+ * #-------------------#    <--- SP on native call (1)
+ * | Free scratch      |
+ * #-------------------#
+ * | SP for JNI call   | // Pointer to (1).
+ * #-------------------#
+ * | Hidden arg        | // For @CriticalNative
+ * #-------------------#
  * |                   |
  * | Stack for Regs    |    The trampoline assembly will pop these values
  * |                   |    into registers for native call
- * #-------------------#
- * | Native code ptr   |
- * #-------------------#
- * | Free scratch      |
- * #-------------------#
- * | Ptr to (1)        |    <--- SP
  * #-------------------#
  */
     /*
      * Called to do a generic JNI down-call
      */
+    .extern artQuickGenericJniTrampoline
 ENTRY art_quick_generic_jni_trampoline
     SETUP_SAVE_REFS_AND_ARGS_FRAME_WITH_METHOD_IN_X0
 
@@ -2121,28 +1941,28 @@ ENTRY art_quick_generic_jni_trampoline
     sub sp, sp, xIP0
 
     // prepare for artQuickGenericJniTrampoline call
-    // (Thread*,  SP)
-    //    x0      x1   <= C calling convention
-    //   xSELF    xFP  <= where they are
+    // (Thread*, managed_sp, reserved_area)
+    //    x0         x1            x2   <= C calling convention
+    //  xSELF       xFP            sp   <= where they are
 
     mov x0, xSELF   // Thread*
-    mov x1, xFP
+    mov x1, xFP     // SP for the managed frame.
+    mov x2, sp      // reserved area for arguments and other saved data (up to managed frame)
     bl artQuickGenericJniTrampoline  // (Thread*, sp)
 
-    // The C call will have registered the complete save-frame.
+    // The C call will have registered the complete save-frame on success.
     // The result of the call is:
-    // x0: pointer to native code.
-    // x1: pointer to the bottom of the used area of the alloca, can restore stack till there.
+    //     x0: pointer to native code, 0 on error.
+    //     The bottom of the reserved area contains values for arg registers,
+    //     hidden arg register and SP for out args for the call.
 
-    // Release part of the alloca.
-    mov sp, x1
+    // Check for error (class init check or locking for synchronized native method can throw).
+    cbz x0, .Lexception_in_native
 
     // Save the code pointer
     mov xIP0, x0
 
     // Load parameters from frame into registers.
-    // TODO Check with artQuickGenericJniTrampoline.
-    //      Also, check again APPCS64 - the stack arguments are interleaved.
     ldp x0, x1, [sp]
     ldp x2, x3, [sp, #16]
     ldp x4, x5, [sp, #32]
@@ -2153,7 +1973,11 @@ ENTRY art_quick_generic_jni_trampoline
     ldp d4, d5, [sp, #96]
     ldp d6, d7, [sp, #112]
 
-    add sp, sp, #128
+    // Load hidden arg (x15) for @CriticalNative and SP for out args.
+    ldp x15, xIP1, [sp, #128]
+
+    // Apply the new SP for out args, releasing unneeded reserved area.
+    mov sp, xIP1
 
     blr xIP0        // native call.
 

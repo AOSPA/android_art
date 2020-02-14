@@ -39,6 +39,11 @@ class ImageSpace : public MemMapSpace {
     return kSpaceTypeImageSpace;
   }
 
+  // The separator for boot image location components.
+  static constexpr char kComponentSeparator = ':';
+  // The separator for profile filename.
+  static constexpr char kProfileSeparator = '!';
+
   // Load boot image spaces for specified boot class path, image location, instruction set, etc.
   //
   // On successful return, the loaded spaces are added to boot_image_spaces (which must be
@@ -166,6 +171,10 @@ class ImageSpace : public MemMapSpace {
     return image_location_;
   }
 
+  const std::string GetProfileFile() const {
+    return profile_file_;
+  }
+
   accounting::ContinuousSpaceBitmap* GetLiveBitmap() override {
     return &live_bitmap_;
   }
@@ -284,6 +293,7 @@ class ImageSpace : public MemMapSpace {
 
   ImageSpace(const std::string& name,
              const char* image_location,
+             const char* profile_file,
              MemMap&& mem_map,
              accounting::ContinuousSpaceBitmap&& live_bitmap,
              uint8_t* end);
@@ -298,6 +308,7 @@ class ImageSpace : public MemMapSpace {
   const OatFile* oat_file_non_owned_;
 
   const std::string image_location_;
+  const std::string profile_file_;
 
   friend class Space;
 
