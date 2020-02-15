@@ -25,6 +25,7 @@
 #include <signal.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <thread>
 #include <time.h>
 
@@ -363,9 +364,30 @@ void DumpPerfetto(art::Thread* self) {
   art::ScopedSuspendAll ssa(__FUNCTION__, /* long_suspend=*/ true);
 
   pid_t pid = fork();
-  if (pid != 0) {
+  if (pid == -1) {
+    // Fork error.
+    PLOG(ERROR) << "fork";
     return;
   }
+  if (pid != 0) {
+    // Parent
+    int stat_loc;
+    for (;;) {
+      if (waitpid(pid, &stat_loc, 0) != -1 || errno != EINTR) {
+        break;
+      }
+    }
+    return;
+  }
+
+  // The following code is only executed by the child of the original process.
+  //
+  // Daemon creates a new process that is the grand-child of the original process, and exits.
+  if (daemon(0, 0) == -1) {
+    PLOG(FATAL) << "daemon";
+  }
+
+  // The following code is only executed by the grand-child of the original process.
 
   // Make sure that this is the first thing we do after forking, so if anything
   // below hangs, the fork will go away from the watchdog.
@@ -500,12 +522,13 @@ extern "C" bool ArtPlugin_Initialize() {
     g_state = State::kWaitForListener;
   }
 
-  if (pipe(g_signal_pipe_fds) == -1) {
+  if (pipe2(g_signal_pipe_fds, O_CLOEXEC) == -1) {
     PLOG(ERROR) << "Failed to pipe";
     return false;
   }
 
   struct sigaction act = {};
+  act.sa_flags = SA_SIGINFO | SA_RESTART;
   act.sa_sigaction = [](int, siginfo_t*, void*) {
     if (write(g_signal_pipe_fds[1], kByte, sizeof(kByte)) == -1) {
       PLOG(ERROR) << "Failed to trigger heap dump";
@@ -524,17 +547,17 @@ extern "C" bool ArtPlugin_Initialize() {
   std::thread th([] {
     art::Runtime* runtime = art::Runtime::Current();
     if (!runtime) {
-      LOG(FATAL_WITHOUT_ABORT) << "no runtime in hprof_listener";
+      LOG(FATAL_WITHOUT_ABORT) << "no runtime in perfetto_hprof_listener";
       return;
     }
-    if (!runtime->AttachCurrentThread("hprof_listener", /*as_daemon=*/ true,
+    if (!runtime->AttachCurrentThread("perfetto_hprof_listener", /*as_daemon=*/ true,
                                       runtime->GetSystemThreadGroup(), /*create_peer=*/ false)) {
       LOG(ERROR) << "failed to attach thread.";
       return;
     }
     art::Thread* self = art::Thread::Current();
     if (!self) {
-      LOG(FATAL_WITHOUT_ABORT) << "no thread in hprof_listener";
+      LOG(FATAL_WITHOUT_ABORT) << "no thread in perfetto_hprof_listener";
       return;
     }
     {

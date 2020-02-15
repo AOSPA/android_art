@@ -181,10 +181,6 @@ static void VMRuntime_clampGrowthLimit(JNIEnv*, jobject) {
   Runtime::Current()->GetHeap()->ClampGrowthLimit();
 }
 
-static jboolean VMRuntime_isDebuggerActive(JNIEnv*, jobject) {
-  return Dbg::IsDebuggerActive();
-}
-
 static jboolean VMRuntime_isNativeDebuggable(JNIEnv*, jobject) {
   return Runtime::Current()->IsNativeDebuggable();
 }
@@ -683,11 +679,7 @@ static jboolean VMRuntime_isBootClassPathOnDisk(JNIEnv* env, jclass, jstring jav
     env->ThrowNew(iae.get(), message.c_str());
     return JNI_FALSE;
   }
-  std::string error_msg;
-  Runtime* runtime = Runtime::Current();
-  std::unique_ptr<ImageHeader> image_header(gc::space::ImageSpace::ReadImageHeader(
-      runtime->GetImageLocation().c_str(), isa, runtime->GetImageSpaceLoadingOrder(), &error_msg));
-  return image_header.get() != nullptr;
+  return gc::space::ImageSpace::IsBootClassPathOnDisk(isa);
 }
 
 static jstring VMRuntime_getCurrentInstructionSet(JNIEnv* env, jclass) {
@@ -787,7 +779,6 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(VMRuntime, setHiddenApiExemptions, "([Ljava/lang/String;)V"),
   NATIVE_METHOD(VMRuntime, setHiddenApiAccessLogSamplingRate, "(I)V"),
   NATIVE_METHOD(VMRuntime, getTargetHeapUtilization, "()F"),
-  FAST_NATIVE_METHOD(VMRuntime, isDebuggerActive, "()Z"),
   FAST_NATIVE_METHOD(VMRuntime, isNativeDebuggable, "()Z"),
   NATIVE_METHOD(VMRuntime, isJavaDebuggable, "()Z"),
   NATIVE_METHOD(VMRuntime, nativeSetTargetHeapUtilization, "(F)V"),

@@ -24,13 +24,14 @@ Is Structurally modifiable class java.lang.Throwable false
 Is Structurally modifiable class java.lang.invoke.VarHandle false
 Is Structurally modifiable class java.lang.invoke.FieldVarHandle false
 Checking non-mirror'd classes
-Is Structurally modifiable class java.util.ArrayList true
-Is Structurally modifiable class java.util.Objects true
-Is Structurally modifiable class java.util.Arrays true
 Is Structurally modifiable class [Ljava.lang.Object; false
-Is Structurally modifiable class java.lang.Integer true
-Is Structurally modifiable class java.lang.Number true
 Is Structurally modifiable class art.Test1983$NoVirtuals true
 Is Structurally modifiable class art.Test1983$WithVirtuals true
 Is Structurally modifiable class art.Test1983$SubWithVirtuals true
+Checking non-mirror'd classes (non-cts)
+Is Structurally modifiable class java.util.ArrayList true
+Is Structurally modifiable class java.util.Objects true
+Is Structurally modifiable class java.util.Arrays true
+Is Structurally modifiable class java.lang.Integer true
+Is Structurally modifiable class java.lang.Number true
 Is Structurally modifiable class java.lang.invoke.MethodHandles true
