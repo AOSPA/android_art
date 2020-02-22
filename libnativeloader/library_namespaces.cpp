@@ -27,7 +27,7 @@
 #include <android-base/macros.h>
 #include <android-base/properties.h>
 #include <android-base/strings.h>
-#include <nativehelper/ScopedUtfChars.h>
+#include <nativehelper/scoped_utf_chars.h>
 
 #include "nativeloader/dlext_namespaces.h"
 #include "public_libraries.h"
@@ -42,9 +42,9 @@ namespace {
 // vendor and system namespaces.
 constexpr const char* kVendorNamespaceName = "sphal";
 constexpr const char* kVndkNamespaceName = "vndk";
-constexpr const char* kArtNamespaceName = "art";
-constexpr const char* kNeuralNetworksNamespaceName = "neuralnetworks";
-constexpr const char* kCronetNamespaceName = "cronet";
+constexpr const char* kArtNamespaceName = "com.android.art";
+constexpr const char* kNeuralNetworksNamespaceName = "com.android.neuralnetworks";
+constexpr const char* kCronetNamespaceName = "com.android.cronet";
 
 // classloader-namespace is a linker namespace that is created for the loaded
 // app. To be specific, it is created for the app classloader. When
@@ -52,7 +52,7 @@ constexpr const char* kCronetNamespaceName = "cronet";
 // classloader, the classloader-namespace namespace associated with that
 // classloader is selected for dlopen. The namespace is configured so that its
 // search path is set to the app-local JNI directory and it is linked to the
-// platform namespace with the names of libs listed in the public.libraries.txt.
+// system namespace with the names of libs listed in the public.libraries.txt.
 // This way an app can only load its own JNI libraries along with the public libs.
 constexpr const char* kClassloaderNamespaceName = "classloader-namespace";
 // Same thing for vendor APKs.
@@ -61,7 +61,7 @@ constexpr const char* kVendorClassloaderNamespaceName = "vendor-classloader-name
 // "classloader-namespace-shared" or "vendor-classloader-namespace-shared",
 // respectively. A shared namespace (cf. ANDROID_NAMESPACE_TYPE_SHARED) has
 // inherited all the libraries of the parent classloader namespace, or the
-// platform namespace for the main app classloader. It is used to give full
+// system namespace for the main app classloader. It is used to give full
 // access to the platform libraries for apps bundled in the system image,
 // including their later updates installed in /data.
 constexpr const char* kSharedNamespaceSuffix = "-shared";
@@ -182,25 +182,29 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
     // together in the vendor / product partition.
     const char* origin_partition;
     const char* origin_lib_path;
+    const char* llndk_libraries;
 
     switch (apk_origin) {
       case APK_ORIGIN_VENDOR:
         origin_partition = "vendor";
         origin_lib_path = kVendorLibPath;
+        llndk_libraries = llndk_libraries_vendor().c_str();
         break;
       case APK_ORIGIN_PRODUCT:
         origin_partition = "product";
         origin_lib_path = kProductLibPath;
+        llndk_libraries = llndk_libraries_product().c_str();
         break;
       default:
         origin_partition = "unknown";
         origin_lib_path = "";
+        llndk_libraries = "";
     }
     library_path = library_path + ":" + origin_lib_path;
     permitted_path = permitted_path + ":" + origin_lib_path;
 
-    // Also give access to LLNDK libraries since they are available to vendors
-    system_exposed_libraries = system_exposed_libraries + ":" + llndk_libraries().c_str();
+    // Also give access to LLNDK libraries since they are available to vendor or product
+    system_exposed_libraries = system_exposed_libraries + ":" + llndk_libraries;
 
     // Different name is useful for debugging
     namespace_name = kVendorClassloaderNamespaceName;
@@ -235,27 +239,27 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
   auto app_ns = NativeLoaderNamespace::Create(
       namespace_name, library_path, permitted_path, parent_ns, is_shared,
       target_sdk_version < 24 /* is_greylist_enabled */, also_used_as_anonymous);
-  if (!app_ns) {
+  if (!app_ns.ok()) {
     return app_ns.error();
   }
   // ... and link to other namespaces to allow access to some public libraries
   bool is_bridged = app_ns->IsBridged();
 
-  auto platform_ns = NativeLoaderNamespace::GetPlatformNamespace(is_bridged);
-  if (!platform_ns) {
-    return platform_ns.error();
+  auto system_ns = NativeLoaderNamespace::GetSystemNamespace(is_bridged);
+  if (!system_ns.ok()) {
+    return system_ns.error();
   }
 
-  auto linked = app_ns->Link(*platform_ns, system_exposed_libraries);
-  if (!linked) {
+  auto linked = app_ns->Link(*system_ns, system_exposed_libraries);
+  if (!linked.ok()) {
     return linked.error();
   }
 
   auto art_ns = NativeLoaderNamespace::GetExportedNamespace(kArtNamespaceName, is_bridged);
   // ART APEX does not exist on host, and under certain build conditions.
-  if (art_ns) {
+  if (art_ns.ok()) {
     linked = app_ns->Link(*art_ns, art_public_libraries());
-    if (!linked) {
+    if (!linked.ok()) {
       return linked.error();
     }
   }
@@ -263,9 +267,9 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
   // Give access to NNAPI libraries (apex-updated LLNDK library).
   auto nnapi_ns =
       NativeLoaderNamespace::GetExportedNamespace(kNeuralNetworksNamespaceName, is_bridged);
-  if (nnapi_ns) {
+  if (nnapi_ns.ok()) {
     linked = app_ns->Link(*nnapi_ns, neuralnetworks_public_libraries());
-    if (!linked) {
+    if (!linked.ok()) {
       return linked.error();
     }
   }
@@ -273,9 +277,9 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
   // Give access to VNDK-SP libraries from the 'vndk' namespace.
   if (unbundled_vendor_or_product_app && !vndksp_libraries().empty()) {
     auto vndk_ns = NativeLoaderNamespace::GetExportedNamespace(kVndkNamespaceName, is_bridged);
-    if (vndk_ns) {
+    if (vndk_ns.ok()) {
       linked = app_ns->Link(*vndk_ns, vndksp_libraries());
-      if (!linked) {
+      if (!linked.ok()) {
         return linked.error();
       }
     }
@@ -284,31 +288,31 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
   // TODO(b/143733063): Remove it after library path of apex module is supported.
   auto cronet_ns =
       NativeLoaderNamespace::GetExportedNamespace(kCronetNamespaceName, is_bridged);
-  if (cronet_ns) {
+  if (cronet_ns.ok()) {
     linked = app_ns->Link(*cronet_ns, cronet_public_libraries());
-    if (!linked) {
+    if (!linked.ok()) {
       return linked.error();
     }
   }
 
   if (!vendor_public_libraries().empty()) {
     auto vendor_ns = NativeLoaderNamespace::GetExportedNamespace(kVendorNamespaceName, is_bridged);
-    // when vendor_ns is not configured, link to the platform namespace
-    auto target_ns = vendor_ns ? vendor_ns : platform_ns;
-    if (target_ns) {
+    // when vendor_ns is not configured, link to the system namespace
+    auto target_ns = vendor_ns.ok() ? vendor_ns : system_ns;
+    if (target_ns.ok()) {
       linked = app_ns->Link(*target_ns, vendor_public_libraries());
-      if (!linked) {
+      if (!linked.ok()) {
         return linked.error();
       }
     }
   }
 
-  namespaces_.push_back(std::make_pair(env->NewWeakGlobalRef(class_loader), *app_ns));
+  auto& emplaced = namespaces_.emplace_back(
+      std::make_pair(env->NewWeakGlobalRef(class_loader), *app_ns));
   if (is_main_classloader) {
-    app_main_namespace_ = &(*app_ns);
+    app_main_namespace_ = &emplaced.second;
   }
-
-  return &(namespaces_.back().second);
+  return &emplaced.second;
 }
 
 NativeLoaderNamespace* LibraryNamespaces::FindNamespaceByClassLoader(JNIEnv* env,

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 The Android Open Source Project
+ * Copyright (C) 2020 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,8 +14,16 @@
  * limitations under the License.
  */
 
-public class Main {
-  public static void main(String[] args) throws Exception {
-    art.Test1944.run();
-  }
-}
+#ifndef ART_RUNTIME_NATIVE_DALVIK_SYSTEM_BASEDEXCLASSLOADER_H_
+#define ART_RUNTIME_NATIVE_DALVIK_SYSTEM_BASEDEXCLASSLOADER_H_
+
+#include <jni.h>
+#include <unistd.h>
+
+namespace art {
+
+void register_dalvik_system_BaseDexClassLoader(JNIEnv* env);
+
+}  // namespace art
+
+#endif  // ART_RUNTIME_NATIVE_DALVIK_SYSTEM_BASEDEXCLASSLOADER_H_

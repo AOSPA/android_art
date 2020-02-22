@@ -147,21 +147,6 @@ struct count_refs_helper<Arg, Args ...> {
       (jni_type_traits<Arg>::is_ref ? 1 : 0) + count_refs_helper<Args ...>::value;
 };
 
-template <typename T, T fn>
-struct count_refs_fn_helper;
-
-template <typename R, typename ... Args, R fn(Args...)>
-struct count_refs_fn_helper<R(Args...), fn> : public count_refs_helper<Args...> {};
-
-// Given a function type 'T' figure out how many of the parameter types are a reference.
-// -- The implicit jclass and thisObject also count as 1 reference.
-//
-// Fields:
-// * value - the result counting # of refs
-// * value_type - the type of value (size_t)
-template <typename T, T fn>
-struct count_refs : public count_refs_fn_helper<T, fn> {};
-
 // Base case: No parameters = 0 refs.
 size_t count_nonnull_refs_helper() {
   return 0;
@@ -200,10 +185,10 @@ size_t count_nonnull_refs(Args ... args) {
   return count_nonnull_refs_helper(args...);
 }
 
-template <typename T, T fn>
+template <typename T, T* fn>
 struct remove_extra_parameters_helper;
 
-template <typename R, typename Arg1, typename Arg2, typename ... Args, R fn(Arg1, Arg2, Args...)>
+template <typename R, typename Arg1, typename Arg2, typename ... Args, R (*fn)(Arg1, Arg2, Args...)>
 struct remove_extra_parameters_helper<R(Arg1, Arg2, Args...), fn> {
   // Note: Do not use Args&& here to maintain C-style parameter types.
   static R apply(Args... args) {
@@ -216,7 +201,7 @@ struct remove_extra_parameters_helper<R(Arg1, Arg2, Args...), fn> {
 // Given a function 'fn' create a function 'apply' which will omit the JNIEnv/jklass parameters
 //
 // i.e. if fn(JNIEnv*,jklass,a,b,c,d,e...) then apply(a,b,c,d,e,...)
-template <typename T, T fn>
+template <typename T, T* fn>
 struct jni_remove_extra_parameters : public remove_extra_parameters_helper<T, fn> {};
 
 class JniCompilerTest : public CommonCompilerTest {
@@ -370,9 +355,6 @@ class JniCompilerTest : public CommonCompilerTest {
   void StackArgsIntsFirstImpl();
   void StackArgsFloatsFirstImpl();
   void StackArgsMixedImpl();
-#if defined(__mips__) && defined(__LP64__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
-  void StackArgsSignExtendedMips64Impl();
-#endif
 
   void NormalNativeImpl();
   void FastNativeImpl();
@@ -575,11 +557,11 @@ static void expectNumStackReferences(size_t val1, size_t val2) {
 
 #define EXPECT_NUM_STACK_REFERENCES(val1, val2) expectNumStackReferences(val1, val2)
 
-template <typename T, T fn>
+template <typename T, T* fn>
 struct make_jni_test_decorator;
 
 // Decorator for "static" JNI callbacks.
-template <typename R, typename ... Args, R fn(JNIEnv*, jclass, Args...)>
+template <typename R, typename ... Args, R (*fn)(JNIEnv*, jclass, Args...)>
 struct make_jni_test_decorator<R(JNIEnv*, jclass kls, Args...), fn> {
   static R apply(JNIEnv* env, jclass kls, Args ... args) {
     EXPECT_THREAD_STATE_FOR_CURRENT_JNI();
@@ -594,7 +576,7 @@ struct make_jni_test_decorator<R(JNIEnv*, jclass kls, Args...), fn> {
 };
 
 // Decorator for instance JNI callbacks.
-template <typename R, typename ... Args, R fn(JNIEnv*, jobject, Args...)>
+template <typename R, typename ... Args, R (*fn)(JNIEnv*, jobject, Args...)>
 struct make_jni_test_decorator<R(JNIEnv*, jobject, Args...), fn> {
   static R apply(JNIEnv* env, jobject thisObj, Args ... args) {
     EXPECT_THREAD_STATE_FOR_CURRENT_JNI();
@@ -2150,44 +2132,6 @@ void JniCompilerTest::StackArgsMixedImpl() {
 }
 
 JNI_TEST_CRITICAL(StackArgsMixed)
-
-#if defined(__mips__) && defined(__LP64__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
-// Function will fetch the last argument passed from caller that is now on top of the stack and
-// return it as a 8B long. That way we can test if the caller has properly sign-extended the
-// value when placing it on the stack.
-__attribute__((naked))
-jlong Java_MyClassNatives_getStackArgSignExtendedMips64(
-    JNIEnv*, jclass,                      // Arguments passed from caller
-    jint, jint, jint, jint, jint, jint,   // through regs a0 to a7.
-    jint) {                               // The last argument will be passed on the stack.
-  __asm__(
-      ".set noreorder\n\t"                // Just return and store 8 bytes from the top of the stack
-      "jr  $ra\n\t"                       // in v0 (in branch delay slot). This should be the last
-      "ld  $v0, 0($sp)\n\t");             // argument. It is a 32-bit int, but it should be sign
-                                          // extended and it occupies 64-bit location.
-}
-
-void JniCompilerTest::StackArgsSignExtendedMips64Impl() {
-  uint64_t ret;
-  SetUpForTest(true,
-               "getStackArgSignExtendedMips64",
-               "(IIIIIII)J",
-               // Don't use wrapper because this is raw assembly function.
-               reinterpret_cast<void*>(&Java_MyClassNatives_getStackArgSignExtendedMips64));
-
-  // Mips64 ABI requires that arguments passed through stack be sign-extended 8B slots.
-  // First 8 arguments are passed through registers.
-  // Final argument's value is 7. When sign-extended, higher stack bits should be 0.
-  ret = env_->CallStaticLongMethod(jklass_, jmethod_, 1, 2, 3, 4, 5, 6, 7);
-  EXPECT_EQ(High32Bits(ret), static_cast<uint32_t>(0));
-
-  // Final argument's value is -8.  When sign-extended, higher stack bits should be 0xffffffff.
-  ret = env_->CallStaticLongMethod(jklass_, jmethod_, 1, 2, 3, 4, 5, 6, -8);
-  EXPECT_EQ(High32Bits(ret), static_cast<uint32_t>(0xffffffff));
-}
-
-JNI_TEST(StackArgsSignExtendedMips64)
-#endif
 
 void Java_MyClassNatives_normalNative(JNIEnv*, jclass) {
   // Intentionally left empty.

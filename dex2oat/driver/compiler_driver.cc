@@ -405,8 +405,6 @@ static bool InstructionSetHasGenericJniStub(InstructionSet isa) {
     case InstructionSet::kArm:
     case InstructionSet::kArm64:
     case InstructionSet::kThumb2:
-    case InstructionSet::kMips:
-    case InstructionSet::kMips64:
     case InstructionSet::kX86:
     case InstructionSet::kX86_64: return true;
     default: return false;
@@ -933,14 +931,6 @@ void CompilerDriver::PreCompile(jobject class_loader,
 }
 
 bool CompilerDriver::ShouldCompileBasedOnProfile(const MethodReference& method_ref) const {
-  // If compiling the apex image, filter out methods not in an apex file (the profile used
-  // for boot classpath is the same between the apex image and the boot image, so it includes
-  /// framewkro methods).
-  if (compiler_options_->IsApexBootImageExtension() &&
-      !android::base::StartsWith(method_ref.dex_file->GetLocation(), "/apex")) {
-    return false;
-  }
-
   // Profile compilation info may be null if no profile is passed.
   if (!CompilerFilter::DependsOnProfile(compiler_options_->GetCompilerFilter())) {
     // Use the compiler filter instead of the presence of profile_compilation_info_ since

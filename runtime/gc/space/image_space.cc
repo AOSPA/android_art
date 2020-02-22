@@ -78,6 +78,7 @@ Atomic<uint32_t> ImageSpace::bitmap_index_(0);
 
 ImageSpace::ImageSpace(const std::string& image_filename,
                        const char* image_location,
+                       const char* profile_file,
                        MemMap&& mem_map,
                        accounting::ContinuousSpaceBitmap&& live_bitmap,
                        uint8_t* end)
@@ -89,7 +90,8 @@ ImageSpace::ImageSpace(const std::string& image_filename,
                   kGcRetentionPolicyNeverCollect),
       live_bitmap_(std::move(live_bitmap)),
       oat_file_non_owned_(nullptr),
-      image_location_(image_location) {
+      image_location_(image_location),
+      profile_file_(profile_file) {
   DCHECK(live_bitmap_.IsValid());
 }
 
@@ -179,6 +181,15 @@ static bool GenerateImage(const std::string& image_filename,
 
   if (!kIsTargetBuild) {
     arg_vector.push_back("--host");
+  }
+
+  // Check if there is a boot profile, and pass it to dex2oat.
+  if (OS::FileExists("/system/etc/boot-image.prof")) {
+    arg_vector.push_back("--profile-file=/system/etc/boot-image.prof");
+  } else {
+    // We will compile the boot image with compiler filter "speed" unless overridden below.
+    LOG(WARNING) << "Missing boot-image.prof file, /system/etc/boot-image.prof not found: "
+                 << strerror(errno);
   }
 
   const std::vector<std::string>& compiler_options = Runtime::Current()->GetImageCompilerOptions();
@@ -760,6 +771,7 @@ class ImageSpace::Loader {
     return Init(file.get(),
                 image_filename,
                 image_location,
+                /* profile_file=*/ "",
                 oat_file,
                 /*allow_direct_mapping=*/ true,
                 logger,
@@ -770,6 +782,7 @@ class ImageSpace::Loader {
   static std::unique_ptr<ImageSpace> Init(File* file,
                                           const char* image_filename,
                                           const char* image_location,
+                                          const char* profile_file,
                                           const OatFile* oat_file,
                                           bool allow_direct_mapping,
                                           TimingLogger* logger,
@@ -905,6 +918,7 @@ class ImageSpace::Loader {
     // We only want the mirror object, not the ArtFields and ArtMethods.
     std::unique_ptr<ImageSpace> space(new ImageSpace(image_filename,
                                                      image_location,
+                                                     profile_file,
                                                      std::move(map),
                                                      std::move(bitmap),
                                                      image_end));
@@ -1496,6 +1510,7 @@ class ImageSpace::BootImageLayout {
   struct ImageChunk {
     std::string base_location;
     std::string base_filename;
+    std::string profile_file;
     size_t start_index;
     uint32_t component_count;
     uint32_t image_space_count;
@@ -1660,10 +1675,10 @@ class ImageSpace::BootImageLayout {
 
 std::string ImageSpace::BootImageLayout::GetPrimaryImageLocation() {
   size_t location_start = 0u;
-  size_t location_end = image_location_.find(':');
+  size_t location_end = image_location_.find(kComponentSeparator);
   while (location_end == location_start) {
     ++location_start;
-    location_end = image_location_.find(location_start, ':');
+    location_end = image_location_.find(location_start, kComponentSeparator);
   }
   std::string location = (location_end == std::string::npos)
       ? image_location_.substr(location_start)
@@ -1706,7 +1721,7 @@ bool ImageSpace::BootImageLayout::VerifyImageLocation(
   for (size_t i = 0; i != components_size; ++i) {
     const std::string& component = components[i];
     DCHECK(!component.empty());  // Guaranteed by Split().
-    const size_t profile_delimiter_pos = component.find('!');
+    const size_t profile_separator_pos = component.find(kProfileSeparator);
     size_t wildcard_pos = component.find('*');
     if (wildcard_pos == std::string::npos) {
       if (wildcards_start != components.size()) {
@@ -1715,12 +1730,12 @@ bool ImageSpace::BootImageLayout::VerifyImageLocation(
                          component.c_str());
         return false;
       }
-      if (profile_delimiter_pos != std::string::npos) {
-        if (component.find('!', profile_delimiter_pos + 1u) != std::string::npos) {
+      if (profile_separator_pos != std::string::npos) {
+        if (component.find(kProfileSeparator, profile_separator_pos + 1u) != std::string::npos) {
           *error_msg = StringPrintf("Multiple profile delimiters in %s", component.c_str());
           return false;
         }
-        if (profile_delimiter_pos == 0u || profile_delimiter_pos + 1u == component.size()) {
+        if (profile_separator_pos == 0u || profile_separator_pos + 1u == component.size()) {
           *error_msg = StringPrintf("Missing component and/or profile name in %s",
                                     component.c_str());
           return false;
@@ -1732,14 +1747,14 @@ bool ImageSpace::BootImageLayout::VerifyImageLocation(
         }
       }
       size_t component_name_length =
-          profile_delimiter_pos != std::string::npos ? profile_delimiter_pos : component.size();
+          profile_separator_pos != std::string::npos ? profile_separator_pos : component.size();
       if (component[component_name_length - 1u] == '/') {
         *error_msg = StringPrintf("Image component ends with path separator: %s",
                                   component.c_str());
         return false;
       }
     } else {
-      if (profile_delimiter_pos != std::string::npos) {
+      if (profile_separator_pos != std::string::npos) {
         *error_msg = StringPrintf("Unsupproted wildcard (*) and profile delimiter (!) in %s",
                                   component.c_str());
         return false;
@@ -1782,11 +1797,11 @@ bool ImageSpace::BootImageLayout::MatchNamedComponents(
   for (size_t i = 0, size = named_components.size(); i != size; ++i) {
     std::string component = named_components[i];
     std::string profile_filename;  // Empty.
-    const size_t profile_delimiter_pos = component.find('!');
-    if (profile_delimiter_pos != std::string::npos) {
-      profile_filename = component.substr(profile_delimiter_pos + 1u);
+    const size_t profile_separator_pos = component.find(kProfileSeparator);
+    if (profile_separator_pos != std::string::npos) {
+      profile_filename = component.substr(profile_separator_pos + 1u);
       DCHECK(!profile_filename.empty());  // Checked by VerifyImageLocation()
-      component.resize(profile_delimiter_pos);
+      component.resize(profile_separator_pos);
       DCHECK(!component.empty());  // Checked by VerifyImageLocation()
     }
     size_t slash_pos = component.rfind('/');
@@ -2076,7 +2091,7 @@ bool ImageSpace::BootImageLayout::CompileExtension(const std::string& base_locat
   args.push_back("-Xbootclasspath:" + boot_class_path);
   args.push_back("--runtime-arg");
   args.push_back("-Xbootclasspath-locations:" + boot_class_path_locations);
-  args.push_back("--boot-image=" + Join(dependencies, ':'));
+  args.push_back("--boot-image=" + Join(dependencies, kComponentSeparator));
   for (size_t i = bcp_index; i != bcp_end; ++i) {
     args.push_back("--dex-file=" + boot_class_path_[i]);
     args.push_back("--dex-location=" + boot_class_path_locations_[i]);
@@ -2088,6 +2103,13 @@ bool ImageSpace::BootImageLayout::CompileExtension(const std::string& base_locat
   args.push_back("--single-image");
   args.push_back("--image-format=uncompressed");
 
+  // We currently cannot guarantee that the boot class path has no verification failures.
+  // And we do not want to compile anything, compilation should be done by JIT in zygote.
+  args.push_back("--compiler-filter=verify");
+
+  // Pass the profile.
+  args.push_back("--profile-file=" + profile_filename);
+
   // Do not let the file descriptor numbers change the compilation output.
   args.push_back("--avoid-storing-invocation");
 
@@ -2097,6 +2119,7 @@ bool ImageSpace::BootImageLayout::CompileExtension(const std::string& base_locat
     args.push_back("--host");
   }
 
+  // Image compiler options go last to allow overriding above args, such as --compiler-filter.
   for (const std::string& compiler_option : runtime->GetImageCompilerOptions()) {
     args.push_back(compiler_option);
   }
@@ -2127,6 +2150,7 @@ bool ImageSpace::BootImageLayout::CompileExtension(const std::string& base_locat
   ImageChunk chunk;
   chunk.base_location = base_location;
   chunk.base_filename = base_filename;
+  chunk.profile_file = profile_filename;
   chunk.start_index = bcp_index;
   chunk.component_count = header.GetComponentCount();
   chunk.image_space_count = header.GetImageSpaceCount();
@@ -2189,7 +2213,7 @@ bool ImageSpace::BootImageLayout::LoadOrValidate(FilenameFn&& filename_fn,
   DCHECK(!validate || StartsWith(*oat_checksums, "i"));
 
   std::vector<std::string> components;
-  Split(image_location_, ':', &components);
+  Split(image_location_, kComponentSeparator, &components);
   size_t named_components_count = 0u;
   if (!VerifyImageLocation(components, &named_components_count, error_msg)) {
     return false;
@@ -2860,6 +2884,7 @@ class ImageSpace::BootImageLoader {
 
   std::unique_ptr<ImageSpace> Load(const std::string& image_location,
                                    const std::string& image_filename,
+                                   const std::string& profile_file,
                                    android::base::unique_fd art_fd,
                                    TimingLogger* logger,
                                    /*inout*/MemMap* image_reservation,
@@ -2875,6 +2900,7 @@ class ImageSpace::BootImageLoader {
       std::unique_ptr<ImageSpace> result = Loader::Init(&image_file,
                                                         image_filename.c_str(),
                                                         image_location.c_str(),
+                                                        profile_file.c_str(),
                                                         /*oat_file=*/ nullptr,
                                                         /*allow_direct_mapping=*/ false,
                                                         logger,
@@ -3102,6 +3128,7 @@ class ImageSpace::BootImageLoader {
     for (size_t i = 0u, size = locations.size(); i != size; ++i) {
       spaces->push_back(Load(locations[i],
                              filenames[i],
+                             chunk.profile_file,
                              std::move(chunk.art_fd),
                              logger,
                              image_reservation,
