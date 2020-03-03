@@ -370,14 +370,6 @@ bool StackVisitor::GetRegisterIfAccessible(uint32_t reg, VRegKind kind, uint32_t
     reg = (kind == kDoubleHiVReg) ? (2 * reg + 1) : (2 * reg);
   }
 
-  // MIPS32 float registers are used as 64-bit (for MIPS32r2 it is pair
-  // F(2n)-F(2n+1), and for MIPS32r6 it is 64-bit register F(2n)). When
-  // accessing upper 32-bits from double, reg + 1 should be used.
-  if ((kRuntimeISA == InstructionSet::kMips) && (kind == kDoubleHiVReg)) {
-    DCHECK_ALIGNED(reg, 2);
-    reg++;
-  }
-
   if (!IsAccessibleRegister(reg, is_float)) {
     return false;
   }
@@ -813,10 +805,12 @@ QuickMethodFrameInfo StackVisitor::GetCurrentQuickFrameInfo() const {
     return RuntimeCalleeSaveFrame::GetMethodFrameInfo(CalleeSaveType::kSaveRefsAndArgs);
   }
 
-  // The only remaining case is if the method is native and uses the generic JNI stub,
-  // called either directly or through some (resolution, instrumentation) trampoline.
+  // The only remaining cases are for native methods that either
+  //   - use the Generic JNI stub, called either directly or through some
+  //     (resolution, instrumentation) trampoline; or
+  //   - fake a Generic JNI frame in art_jni_dlsym_lookup_critical_stub.
   DCHECK(method->IsNative());
-  if (kIsDebugBuild) {
+  if (kIsDebugBuild && !method->IsCriticalNative()) {
     ClassLinker* class_linker = runtime->GetClassLinker();
     const void* entry_point = runtime->GetInstrumentation()->GetQuickCodeFor(method,
                                                                              kRuntimePointerSize);

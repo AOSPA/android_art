@@ -17,8 +17,8 @@ ANDROID_ROOT="/system"
 ANDROID_ART_ROOT="/apex/com.android.art"
 ANDROID_I18N_ROOT="/apex/com.android.i18n"
 ANDROID_TZDATA_ROOT="/apex/com.android.tzdata"
-ARCHITECTURES_32="(arm|x86|mips|none)"
-ARCHITECTURES_64="(arm64|x86_64|mips64|none)"
+ARCHITECTURES_32="(arm|x86|none)"
+ARCHITECTURES_64="(arm64|x86_64|none)"
 ARCHITECTURES_PATTERN="${ARCHITECTURES_32}"
 GET_DEVICE_ISA_BITNESS_FLAG="--32"
 BOOT_IMAGE=""
@@ -238,10 +238,6 @@ while true; do
         shift
     elif [ "x$1" = "x--host" ]; then
         HOST="y"
-        ANDROID_ROOT="${ANDROID_HOST_OUT}"
-        ANDROID_ART_ROOT="${ANDROID_HOST_OUT}/com.android.art"
-        ANDROID_I18N_ROOT="${ANDROID_HOST_OUT}/com.android.i18n"
-        ANDROID_TZDATA_ROOT="${ANDROID_HOST_OUT}/com.android.tzdata"
         shift
     elif [ "x$1" = "x--bionic" ]; then
         BIONIC="y"
@@ -449,8 +445,20 @@ while true; do
     fi
 done
 
-# HACK: Force the use of `signal_dumper` on host.
 if [[ "$HOST" = "y" ]]; then
+  ANDROID_ROOT="${ANDROID_HOST_OUT}"
+  ANDROID_ART_ROOT="${ANDROID_HOST_OUT}/com.android.art"
+  ANDROID_I18N_ROOT="${ANDROID_HOST_OUT}/com.android.i18n"
+  ANDROID_TZDATA_ROOT="${ANDROID_HOST_OUT}/com.android.tzdata"
+  if [ "$HOST_PREFER_32_BIT" = true ]; then
+    DEX2OAT_HOST_SUFFIX=32
+  else
+    DEX2OAT_HOST_SUFFIX=64
+  fi
+  DEX2OAT_NDEBUG_BINARY="${DEX2OAT_NDEBUG_BINARY}${DEX2OAT_HOST_SUFFIX}"
+  DEX2OAT_DEBUG_BINARY="${DEX2OAT_DEBUG_BINARY}${DEX2OAT_HOST_SUFFIX}"
+
+  # HACK: Force the use of `signal_dumper` on host.
   TIME_OUT="timeout"
 fi
 
@@ -902,6 +910,9 @@ if [ "$PROFILE" = "y" ] || [ "$RANDOM_PROFILE" = "y" ]; then
   fi
 fi
 
+# Enable mini-debug-info for JIT (if JIT is used).
+FLAGS="$FLAGS -Xcompiler-option --generate-mini-debug-info"
+
 if [ "$PREBUILD" = "y" ]; then
   mkdir_locations="${mkdir_locations} ${DEX_LOCATION}/oat/$ISA"
   if [ "$APP_IMAGE" = "y" ]; then
@@ -924,9 +935,6 @@ if [ "$PREBUILD" = "y" ]; then
   if [ "x$INSTRUCTION_SET_FEATURES" != "x" ] ; then
     dex2oat_cmdline="${dex2oat_cmdline} --instruction-set-features=${INSTRUCTION_SET_FEATURES}"
   fi
-
-  # Enable mini-debug-info for JIT (if JIT is used).
-  FLAGS="$FLAGS -Xcompiler-option --generate-mini-debug-info"
 
   # Add in a timeout. This is important for testing the compilation/verification time of
   # pathological cases.
