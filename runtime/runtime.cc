@@ -1784,9 +1784,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   VLOG(startup) << "Runtime::Init exiting";
 
   // Set OnlyUseSystemOatFiles only after boot classpath has been set up.
-  if (is_zygote_ || runtime_options.Exists(Opt::OnlyUseSystemOatFiles)) {
-    oat_file_manager_->SetOnlyUseSystemOatFiles(/*enforce=*/ true,
-                                                /*assert_no_files_loaded=*/ true);
+  if (runtime_options.Exists(Opt::OnlyUseSystemOatFiles)) {
+    oat_file_manager_->SetOnlyUseSystemOatFiles(/*assert_no_files_loaded=*/ true);
   }
 
   return true;
@@ -2735,9 +2734,10 @@ bool Runtime::IsAsyncDeoptimizeable(uintptr_t code) const {
   // We could look at the oat file where `code` is being defined,
   // and check whether it's been compiled debuggable, but we decided to
   // only rely on the JIT for debuggable apps.
-  return IsJavaDebuggable() &&
-      GetJit() != nullptr &&
-      GetJit()->GetCodeCache()->ContainsPc(reinterpret_cast<const void*>(code));
+  // The JIT-zygote is not debuggable so we need to be sure to exclude code from the non-private
+  // region as well.
+  return IsJavaDebuggable() && GetJit() != nullptr &&
+         GetJit()->GetCodeCache()->PrivateRegionContainsPc(reinterpret_cast<const void*>(code));
 }
 
 LinearAlloc* Runtime::CreateLinearAlloc() {
@@ -2851,8 +2851,8 @@ void Runtime::DeoptimizeBootImage() {
     GetClassLinker()->VisitClasses(&visitor);
     jit::Jit* jit = GetJit();
     if (jit != nullptr) {
-      // Code JITted by the zygote is not compiled debuggable.
-      jit->GetCodeCache()->ClearEntryPointsInZygoteExecSpace();
+      // Code previously compiled may not be compiled debuggable.
+      jit->GetCodeCache()->TransitionToDebuggable();
     }
   }
   // Also de-quicken all -quick opcodes. We do this for both BCP and non-bcp so if we are swapping

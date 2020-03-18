@@ -273,8 +273,12 @@ JitCodeCache::JitCodeCache()
 
 JitCodeCache::~JitCodeCache() {}
 
+bool JitCodeCache::PrivateRegionContainsPc(const void* ptr) const {
+  return private_region_.IsInExecSpace(ptr);
+}
+
 bool JitCodeCache::ContainsPc(const void* ptr) const {
-  return private_region_.IsInExecSpace(ptr) || shared_region_.IsInExecSpace(ptr);
+  return PrivateRegionContainsPc(ptr) || shared_region_.IsInExecSpace(ptr);
 }
 
 bool JitCodeCache::WillExecuteJitCode(ArtMethod* method) {
@@ -879,12 +883,38 @@ void JitCodeCache::MoveObsoleteMethod(ArtMethod* old_method, ArtMethod* new_meth
   }
 }
 
-void JitCodeCache::ClearEntryPointsInZygoteExecSpace() {
-  MutexLock mu(Thread::Current(), *Locks::jit_lock_);
-  for (const auto& it : method_code_map_) {
-    ArtMethod* method = it.second;
+void JitCodeCache::TransitionToDebuggable() {
+  // We want to discard JIT compiled methods that are non-debuggable. These are:
+  // - Methods compiled by the zygote (where the compiled code is in the zygote exec
+  //   space)
+  // - Methods that are precompiled in the method_code_map_.
+  //
+  // Also, we want to clear the precompiled flag to clear the effects of
+  // GetSavedEntryPointOfPreCompiledMethod.
+  {
+    MutexLock mu(Thread::Current(), *Locks::jit_lock_);
+    for (const auto& it : method_code_map_) {
+      ArtMethod* method = it.second;
+      if (IsInZygoteExecSpace(method->GetEntryPointFromQuickCompiledCode()) ||
+          method->IsPreCompiled()) {
+        method->SetEntryPointFromQuickCompiledCode(GetQuickToInterpreterBridge());
+      }
+      if (method->IsPreCompiled()) {
+        method->ClearPreCompiled();
+      }
+    }
+    // Not strictly necessary, but this map is useless now.
+    saved_compiled_methods_map_.clear();
+  }
+  for (const auto& entry : zygote_map_) {
+    ArtMethod* method = entry.method;
     if (IsInZygoteExecSpace(method->GetEntryPointFromQuickCompiledCode())) {
       method->SetEntryPointFromQuickCompiledCode(GetQuickToInterpreterBridge());
+    }
+    // We check if it's precompiled instead of DCHECKing it to support
+    // TransitionToDebuggable being called multiple times.
+    if (method->IsPreCompiled()) {
+      method->ClearPreCompiled();
     }
   }
 }
