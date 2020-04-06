@@ -32,14 +32,14 @@ using android::base::Result;
 const std::string& preloadable_public_libraries();
 const std::string& default_public_libraries();
 const std::string& art_public_libraries();
-const std::string& cronet_public_libraries();
 const std::string& statsd_public_libraries();
 const std::string& vendor_public_libraries();
 const std::string& extended_public_libraries();
 const std::string& neuralnetworks_public_libraries();
 const std::string& llndk_libraries_product();
 const std::string& llndk_libraries_vendor();
-const std::string& vndksp_libraries();
+const std::string& vndksp_libraries_product();
+const std::string& vndksp_libraries_vendor();
 
 // Returns true if libnativeloader is running on devices and the device has
 // ro.product.vndk.version property. It returns false for host.

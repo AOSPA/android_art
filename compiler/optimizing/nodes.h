@@ -509,7 +509,7 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
     return reverse_post_order_;
   }
 
-  ArrayRef<HBasicBlock* const> GetReversePostOrderSkipEntryBlock() {
+  ArrayRef<HBasicBlock* const> GetReversePostOrderSkipEntryBlock() const {
     DCHECK(GetReversePostOrder()[0] == entry_block_);
     return ArrayRef<HBasicBlock* const>(GetReversePostOrder()).SubArray(1);
   }
@@ -6947,6 +6947,8 @@ class HStringBuilderAppend final : public HVariableInputSizeInstruction {
   bool NeedsEnvironment() const override { return true; }
 
   bool CanThrow() const override { return true; }
+
+  bool CanBeNull() const override { return false; }
 
   DECLARE_INSTRUCTION(StringBuilderAppend);
 

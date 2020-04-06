@@ -170,7 +170,11 @@ class TargetFlattenedApexProvider:
         is_dir = os.path.isdir(filepath)
         is_exec = os.access(filepath, os.X_OK)
         is_symlink = os.path.islink(filepath)
-        size = os.path.getsize(filepath)
+        if is_symlink:
+          # Report the length of the symlink's target's path as file size, like `ls`.
+          size = len(os.readlink(filepath))
+        else:
+          size = os.path.getsize(filepath)
         apex_map[basename] = FSObject(basename, is_dir, is_exec, is_symlink, size)
     self._folder_cache[apex_dir] = apex_map
     return apex_map
@@ -496,6 +500,7 @@ class ReleaseChecker:
     self._checker.check_native_library('libart')
     self._checker.check_native_library('libart-compiler')
     self._checker.check_native_library('libart-dexlayout')
+    self._checker.check_native_library('libart-disassembler')
     self._checker.check_native_library('libartbase')
     self._checker.check_native_library('libartpalette')
     self._checker.check_native_library('libdexfile')
@@ -819,7 +824,6 @@ class TestingTargetChecker:
     self._checker.check_art_test_executable('membarrier_test')
     self._checker.check_art_test_executable('memfd_test')
     self._checker.check_art_test_executable('memory_region_test')
-    self._checker.check_art_test_executable('memory_type_table_test')
     self._checker.check_art_test_executable('safe_copy_test')
     self._checker.check_art_test_executable('scoped_flock_test')
     self._checker.check_art_test_executable('time_utils_test')

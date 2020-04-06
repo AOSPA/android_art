@@ -86,7 +86,6 @@
 #include "gc/task_processor.h"
 #include "handle_scope-inl.h"
 #include "hidden_api.h"
-#include "hidden_api_jni.h"
 #include "image-inl.h"
 #include "instrumentation.h"
 #include "intern_table-inl.h"
@@ -510,8 +509,6 @@ Runtime::~Runtime() {
   // instance. We rely on a small initialization order issue in Runtime::Start() that requires
   // elements of WellKnownClasses to be null, see b/65500943.
   WellKnownClasses::Clear();
-
-  hiddenapi::JniShutdownNativeCallerCheck();
 }
 
 struct AbortState {
@@ -891,6 +888,10 @@ bool Runtime::Start() {
   // because in checking the invocation types of intrinsic methods ArtMethod::GetInvokeType()
   // needs the SignaturePolymorphic annotation class which is initialized in WellKnownClasses::Init.
   InitializeIntrinsics();
+
+  // InitializeCorePlatformApiPrivateFields() needs to be called after well known class
+  // initializtion in InitNativeMethods().
+  art::hiddenapi::InitializeCorePlatformApiPrivateFields();
 
   // Initialize well known thread group values that may be accessed threads while attaching.
   InitThreadGroups(self);
@@ -1783,9 +1784,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   VLOG(startup) << "Runtime::Init exiting";
 
   // Set OnlyUseSystemOatFiles only after boot classpath has been set up.
-  if (is_zygote_ || runtime_options.Exists(Opt::OnlyUseSystemOatFiles)) {
-    oat_file_manager_->SetOnlyUseSystemOatFiles(/*enforce=*/ true,
-                                                /*assert_no_files_loaded=*/ true);
+  if (runtime_options.Exists(Opt::OnlyUseSystemOatFiles)) {
+    oat_file_manager_->SetOnlyUseSystemOatFiles(/*assert_no_files_loaded=*/ true);
   }
 
   return true;
@@ -1908,10 +1908,6 @@ void Runtime::InitNativeMethods() {
 
   // Initialize well known classes that may invoke runtime native methods.
   WellKnownClasses::LateInit(env);
-
-  // Having loaded native libraries for Managed Core library, enable field and
-  // method resolution checks via JNI from native code.
-  hiddenapi::JniInitializeNativeCallerCheck();
 
   VLOG(startup) << "Runtime::InitNativeMethods exiting";
 }
@@ -2738,9 +2734,10 @@ bool Runtime::IsAsyncDeoptimizeable(uintptr_t code) const {
   // We could look at the oat file where `code` is being defined,
   // and check whether it's been compiled debuggable, but we decided to
   // only rely on the JIT for debuggable apps.
-  return IsJavaDebuggable() &&
-      GetJit() != nullptr &&
-      GetJit()->GetCodeCache()->ContainsPc(reinterpret_cast<const void*>(code));
+  // The JIT-zygote is not debuggable so we need to be sure to exclude code from the non-private
+  // region as well.
+  return IsJavaDebuggable() && GetJit() != nullptr &&
+         GetJit()->GetCodeCache()->PrivateRegionContainsPc(reinterpret_cast<const void*>(code));
 }
 
 LinearAlloc* Runtime::CreateLinearAlloc() {
@@ -2854,8 +2851,8 @@ void Runtime::DeoptimizeBootImage() {
     GetClassLinker()->VisitClasses(&visitor);
     jit::Jit* jit = GetJit();
     if (jit != nullptr) {
-      // Code JITted by the zygote is not compiled debuggable.
-      jit->GetCodeCache()->ClearEntryPointsInZygoteExecSpace();
+      // Code previously compiled may not be compiled debuggable.
+      jit->GetCodeCache()->TransitionToDebuggable();
     }
   }
   // Also de-quicken all -quick opcodes. We do this for both BCP and non-bcp so if we are swapping
