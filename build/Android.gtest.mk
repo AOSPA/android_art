@@ -30,6 +30,8 @@ GTEST_DEX_DIRECTORIES := \
   ErroneousA \
   ErroneousB \
   ErroneousInit \
+  Extension1 \
+  Extension2 \
   ForClassLoaderA \
   ForClassLoaderB \
   ForClassLoaderC \
@@ -221,7 +223,7 @@ ART_GTEST_jni_compiler_test_DEX_DEPS := MyClassNatives
 ART_GTEST_jni_internal_test_DEX_DEPS := AllFields StaticLeafMethods MyClassNatives
 ART_GTEST_oat_file_assistant_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS)
 ART_GTEST_dexoptanalyzer_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS)
-ART_GTEST_image_space_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS)
+ART_GTEST_image_space_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) Extension1 Extension2
 ART_GTEST_oat_file_test_DEX_DEPS := Main MultiDex MainUncompressedAligned MultiDexUncompressedAligned MainStripped Nested MultiDexModifiedSecondary
 ART_GTEST_oat_test_DEX_DEPS := Main
 ART_GTEST_oat_writer_test_DEX_DEPS := Main
@@ -306,6 +308,11 @@ ART_GTEST_dex2oat_image_test_HOST_DEPS := \
 ART_GTEST_dex2oat_image_test_TARGET_DEPS := \
   $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS) \
   $(TESTING_ART_APEX)  # For dex2oatd.
+
+ART_GTEST_module_exclusion_test_HOST_DEPS := \
+  $(ART_GTEST_dex2oat_image_test_HOST_DEPS)
+ART_GTEST_module_exclusion_test_TARGET_DEPS := \
+  $(ART_GTEST_dex2oat_image_test_TARGET_DEPS)
 
 # TODO: document why this is needed.
 ART_GTEST_proxy_test_HOST_DEPS := $(HOST_CORE_IMAGE_DEFAULT_64) $(HOST_CORE_IMAGE_DEFAULT_32)
@@ -710,6 +717,8 @@ ART_GTEST_dex2oat_test_TARGET_DEPS :=
 ART_GTEST_dex2oat_image_test_DEX_DEPS :=
 ART_GTEST_dex2oat_image_test_HOST_DEPS :=
 ART_GTEST_dex2oat_image_test_TARGET_DEPS :=
+ART_GTEST_module_exclusion_test_HOST_DEPS :=
+ART_GTEST_module_exclusion_test_TARGET_DEPS :=
 ART_GTEST_object_test_DEX_DEPS :=
 ART_GTEST_proxy_test_DEX_DEPS :=
 ART_GTEST_reflection_test_DEX_DEPS :=
