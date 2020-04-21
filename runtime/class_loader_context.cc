@@ -16,6 +16,8 @@
 
 #include "class_loader_context.h"
 
+#include <algorithm>
+
 #include <android-base/parseint.h>
 #include <android-base/strings.h>
 
@@ -1277,6 +1279,43 @@ static inline bool AbsolutePathHasRelativeSuffix(const std::string& path,
          (std::string_view(path).substr(/*pos*/ path.size() - suffix.size()) == suffix);
 }
 
+// Returns true if the given dex names are mathing, false otherwise.
+static bool AreDexNameMatching(const std::string& actual_dex_name,
+                               const std::string& expected_dex_name) {
+  // Compute the dex location that must be compared.
+  // We shouldn't do a naive comparison `actual_dex_name == expected_dex_name`
+  // because even if they refer to the same file, one could be encoded as a relative location
+  // and the other as an absolute one.
+  bool is_dex_name_absolute = IsAbsoluteLocation(actual_dex_name);
+  bool is_expected_dex_name_absolute = IsAbsoluteLocation(expected_dex_name);
+  bool dex_names_match = false;
+
+  if (is_dex_name_absolute == is_expected_dex_name_absolute) {
+    // If both locations are absolute or relative then compare them as they are.
+    // This is usually the case for: shared libraries and secondary dex files.
+    dex_names_match = (actual_dex_name == expected_dex_name);
+  } else if (is_dex_name_absolute) {
+    // The runtime name is absolute but the compiled name (the expected one) is relative.
+    // This is the case for split apks which depend on base or on other splits.
+    dex_names_match =
+        AbsolutePathHasRelativeSuffix(actual_dex_name, expected_dex_name);
+  } else if (is_expected_dex_name_absolute) {
+    // The runtime name is relative but the compiled name is absolute.
+    // There is no expected use case that would end up here as dex files are always loaded
+    // with their absolute location. However, be tolerant and do the best effort (in case
+    // there are unexpected new use case...).
+    dex_names_match =
+        AbsolutePathHasRelativeSuffix(expected_dex_name, actual_dex_name);
+  } else {
+    // Both locations are relative. In this case there's not much we can be sure about
+    // except that the names are the same. The checksum will ensure that the files are
+    // are same. This should not happen outside testing and manual invocations.
+    dex_names_match = (actual_dex_name == expected_dex_name);
+  }
+
+  return dex_names_match;
+}
+
 bool ClassLoaderContext::ClassLoaderInfoMatch(
     const ClassLoaderInfo& info,
     const ClassLoaderInfo& expected_info,
@@ -1305,37 +1344,7 @@ bool ClassLoaderContext::ClassLoaderInfoMatch(
 
   if (verify_names) {
     for (size_t k = 0; k < info.classpath.size(); k++) {
-      // Compute the dex location that must be compared.
-      // We shouldn't do a naive comparison `info.classpath[k] == expected_info.classpath[k]`
-      // because even if they refer to the same file, one could be encoded as a relative location
-      // and the other as an absolute one.
-      bool is_dex_name_absolute = IsAbsoluteLocation(info.classpath[k]);
-      bool is_expected_dex_name_absolute = IsAbsoluteLocation(expected_info.classpath[k]);
-      bool dex_names_match = false;
-
-
-      if (is_dex_name_absolute == is_expected_dex_name_absolute) {
-        // If both locations are absolute or relative then compare them as they are.
-        // This is usually the case for: shared libraries and secondary dex files.
-        dex_names_match = (info.classpath[k] == expected_info.classpath[k]);
-      } else if (is_dex_name_absolute) {
-        // The runtime name is absolute but the compiled name (the expected one) is relative.
-        // This is the case for split apks which depend on base or on other splits.
-        dex_names_match =
-            AbsolutePathHasRelativeSuffix(info.classpath[k], expected_info.classpath[k]);
-      } else if (is_expected_dex_name_absolute) {
-        // The runtime name is relative but the compiled name is absolute.
-        // There is no expected use case that would end up here as dex files are always loaded
-        // with their absolute location. However, be tolerant and do the best effort (in case
-        // there are unexpected new use case...).
-        dex_names_match =
-            AbsolutePathHasRelativeSuffix(expected_info.classpath[k], info.classpath[k]);
-      } else {
-        // Both locations are relative. In this case there's not much we can be sure about
-        // except that the names are the same. The checksum will ensure that the files are
-        // are same. This should not happen outside testing and manual invocations.
-        dex_names_match = (info.classpath[k] == expected_info.classpath[k]);
-      }
+      bool dex_names_match = AreDexNameMatching(info.classpath[k], expected_info.classpath[k]);
 
       // Compare the locations.
       if (!dex_names_match) {
@@ -1391,6 +1400,37 @@ bool ClassLoaderContext::ClassLoaderInfoMatch(
                                 verify_names,
                                 verify_checksums);
   }
+}
+
+std::set<const DexFile*> ClassLoaderContext::CheckForDuplicateDexFiles(
+    const std::vector<const DexFile*>& dex_files_to_check) {
+  DCHECK(dex_files_open_attempted_);
+  DCHECK(dex_files_open_result_);
+
+  std::set<const DexFile*> result;
+
+  // If we are the special shared library or the chain is null there's nothing
+  // we can check, return an empty list;
+  // The class loader chain can be null if there were issues when creating the
+  // class loader context (e.g. tests).
+  if (special_shared_library_ || class_loader_chain_ == nullptr) {
+    return result;
+  }
+
+  // We only check the current Class Loader which the first one in the chain.
+  // Cross class-loader duplicates may be a valid scenario (though unlikely
+  // in the Android world) - and as such we decide not to warn on them.
+  ClassLoaderInfo* info = class_loader_chain_.get();
+  for (size_t k = 0; k < info->classpath.size(); k++) {
+    for (const DexFile* dex_file : dex_files_to_check) {
+      if (info->checksums[k] == dex_file->GetLocationChecksum()
+          && AreDexNameMatching(info->classpath[k], dex_file->GetLocation())) {
+        result.insert(dex_file);
+      }
+    }
+  }
+
+  return result;
 }
 
 }  // namespace art
