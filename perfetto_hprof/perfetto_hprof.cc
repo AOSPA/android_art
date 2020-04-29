@@ -35,9 +35,11 @@
 #include "mirror/object-refvisitor-inl.h"
 #include "nativehelper/scoped_local_ref.h"
 #include "perfetto/profiling/normalize.h"
+#include "perfetto/profiling/parse_smaps.h"
 #include "perfetto/trace/interned_data/interned_data.pbzero.h"
 #include "perfetto/trace/profiling/heap_graph.pbzero.h"
 #include "perfetto/trace/profiling/profile_common.pbzero.h"
+#include "perfetto/trace/profiling/smaps.pbzero.h"
 #include "perfetto/config/profiling/java_hprof_config.pbzero.h"
 #include "perfetto/protozero/packed_repeated_fields.h"
 #include "perfetto/tracing.h"
@@ -46,6 +48,7 @@
 #include "scoped_thread_state_change-inl.h"
 #include "thread_list.h"
 #include "well_known_classes.h"
+#include "dex/descriptors_names.h"
 
 // There are three threads involved in this:
 // * listener thread: this is idle in the background when this plugin gets loaded, and waits
@@ -109,6 +112,34 @@ void ArmWatchdogOrDie() {
   }
 }
 
+bool StartsWith(const std::string& str, const std::string& prefix) {
+  return str.compare(0, prefix.length(), prefix) == 0;
+}
+
+// Sample entries that match one of the following
+// start with /system/
+// start with /vendor/
+// start with /data/app/
+// contains "extracted in memory from Y", where Y matches any of the above
+bool ShouldSampleSmapsEntry(const perfetto::profiling::SmapsEntry& e) {
+  if (StartsWith(e.pathname, "/system/") || StartsWith(e.pathname, "/vendor/") ||
+      StartsWith(e.pathname, "/data/app/")) {
+    return true;
+  }
+  if (StartsWith(e.pathname, "[anon:")) {
+    if (e.pathname.find("extracted in memory from /system/") != std::string::npos) {
+      return true;
+    }
+    if (e.pathname.find("extracted in memory from /vendor/") != std::string::npos) {
+      return true;
+    }
+    if (e.pathname.find("extracted in memory from /data/app/") != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
 constexpr size_t kMaxCmdlineSize = 512;
 
 class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
@@ -120,6 +151,8 @@ class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
     std::unique_ptr<perfetto::protos::pbzero::JavaHprofConfig::Decoder> cfg(
         new perfetto::protos::pbzero::JavaHprofConfig::Decoder(
           args.config->java_hprof_config_raw()));
+
+    dump_smaps_ = cfg->dump_smaps();
 
     uint64_t self_pid = static_cast<uint64_t>(getpid());
     for (auto pid_it = cfg->pid(); pid_it; ++pid_it) {
@@ -168,6 +201,7 @@ class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
     }
   }
 
+  bool dump_smaps() { return dump_smaps_; }
   bool enabled() { return enabled_; }
 
   void OnStart(const StartArgs&) override {
@@ -195,6 +229,7 @@ class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
 
  private:
   bool enabled_ = false;
+  bool dump_smaps_ = false;
   static art::Thread* self_;
 };
 
@@ -347,6 +382,37 @@ perfetto::protos::pbzero::HeapGraphRoot::Type ToProtoType(art::RootType art_type
   }
 }
 
+std::string PrettyType(art::mirror::Class* klass) NO_THREAD_SAFETY_ANALYSIS {
+  if (klass == nullptr) {
+    return "(raw)";
+  }
+  std::string temp;
+  std::string result(art::PrettyDescriptor(klass->GetDescriptor(&temp)));
+  return result;
+}
+
+void DumpSmaps(JavaHprofDataSource::TraceContext* ctx) {
+  FILE* smaps = fopen("/proc/self/smaps", "r");
+  if (smaps != nullptr) {
+    auto trace_packet = ctx->NewTracePacket();
+    auto* smaps_packet = trace_packet->set_smaps_packet();
+    smaps_packet->set_pid(getpid());
+    perfetto::profiling::ParseSmaps(smaps,
+        [&smaps_packet](const perfetto::profiling::SmapsEntry& e) {
+      if (ShouldSampleSmapsEntry(e)) {
+        auto* smaps_entry = smaps_packet->add_entries();
+        smaps_entry->set_path(e.pathname);
+        smaps_entry->set_size_kb(e.size_kb);
+        smaps_entry->set_private_dirty_kb(e.private_dirty_kb);
+        smaps_entry->set_swap_kb(e.swap_kb);
+      }
+    });
+    fclose(smaps);
+  } else {
+    PLOG(ERROR) << "failed to open smaps";
+  }
+}
+
 void DumpPerfetto(art::Thread* self) {
   pid_t parent_pid = getpid();
   LOG(INFO) << "preparing to dump heap for " << parent_pid;
@@ -404,19 +470,24 @@ void DumpPerfetto(art::Thread* self) {
   JavaHprofDataSource::Trace(
       [parent_pid, timestamp](JavaHprofDataSource::TraceContext ctx)
           NO_THREAD_SAFETY_ANALYSIS {
+            bool dump_smaps;
             {
               auto ds = ctx.GetDataSourceLocked();
               if (!ds || !ds->enabled()) {
                 LOG(INFO) << "skipping irrelevant data source.";
                 return;
               }
+              dump_smaps = ds->dump_smaps();
             }
             LOG(INFO) << "dumping heap for " << parent_pid;
+            if (dump_smaps) {
+              DumpSmaps(&ctx);
+            }
             Writer writer(parent_pid, &ctx, timestamp);
             // Make sure that intern ID 0 (default proto value for a uint64_t) always maps to ""
             // (default proto value for a string).
             std::map<std::string, uint64_t> interned_fields{{"", 0}};
-            std::map<std::string, uint64_t> interned_types{{"", 0}};
+            std::map<std::string, uint64_t> interned_locations{{"", 0}};
 
             std::map<art::RootType, std::vector<art::mirror::Object*>> root_objects;
             RootFinder rcf(&root_objects);
@@ -441,14 +512,41 @@ void DumpPerfetto(art::Thread* self) {
                 new protozero::PackedVarInt);
 
             art::Runtime::Current()->GetHeap()->VisitObjectsPaused(
-                [&writer, &interned_types, &interned_fields,
+                [&writer, &interned_fields, &interned_locations,
                 &reference_field_ids, &reference_object_ids](
                     art::mirror::Object* obj) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+                  if (obj->IsClass()) {
+                    art::mirror::Class* klass = obj->AsClass().Ptr();
+                    perfetto::protos::pbzero::HeapGraphType* type_proto =
+                      writer.GetHeapGraph()->add_types();
+                    type_proto->set_id(reinterpret_cast<uintptr_t>(klass));
+                    type_proto->set_class_name(PrettyType(klass));
+                    type_proto->set_location_id(FindOrAppend(&interned_locations,
+                          klass->GetLocation()));
+                  }
+
+                  art::mirror::Class* klass = obj->GetClass();
+                  uintptr_t class_id = reinterpret_cast<uintptr_t>(klass);
+                  // We need to synethesize a new type for Class<Foo>, which does not exist
+                  // in the runtime. Otherwise, all the static members of all classes would be
+                  // attributed to java.lang.Class.
+                  if (klass->IsClassClass()) {
+                    CHECK(obj->IsClass());
+                    perfetto::protos::pbzero::HeapGraphType* type_proto =
+                      writer.GetHeapGraph()->add_types();
+                    // All pointers are at least multiples of two, so this way we can make sure
+                    // we are not colliding with a real class.
+                    class_id = reinterpret_cast<uintptr_t>(obj) | 1;
+                    type_proto->set_id(class_id);
+                    type_proto->set_class_name(obj->PrettyTypeOf());
+                    type_proto->set_location_id(FindOrAppend(&interned_locations,
+                          obj->AsClass()->GetLocation()));
+                  }
+
                   perfetto::protos::pbzero::HeapGraphObject* object_proto =
                     writer.GetHeapGraph()->add_objects();
                   object_proto->set_id(reinterpret_cast<uintptr_t>(obj));
-                  object_proto->set_type_id(
-                      FindOrAppend(&interned_types, obj->PrettyTypeOf()));
+                  object_proto->set_type_id(class_id);
                   object_proto->set_self_size(obj->SizeOf());
 
                   std::vector<std::pair<std::string, art::mirror::Object*>>
@@ -475,14 +573,14 @@ void DumpPerfetto(art::Thread* self) {
               field_proto->set_str(
                   reinterpret_cast<const uint8_t*>(str.c_str()), str.size());
             }
-            for (const auto& p : interned_types) {
+            for (const auto& p : interned_locations) {
               const std::string& str = p.first;
               uint64_t id = p.second;
 
-              perfetto::protos::pbzero::InternedString* type_proto =
-                writer.GetHeapGraph()->add_type_names();
-              type_proto->set_iid(id);
-              type_proto->set_str(reinterpret_cast<const uint8_t*>(str.c_str()),
+              perfetto::protos::pbzero::InternedString* location_proto =
+                writer.GetHeapGraph()->add_location_names();
+              location_proto->set_iid(id);
+              location_proto->set_str(reinterpret_cast<const uint8_t*>(str.c_str()),
                                   str.size());
             }
 

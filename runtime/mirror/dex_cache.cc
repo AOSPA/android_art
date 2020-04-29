@@ -220,18 +220,20 @@ bool DexCache::AddPreResolvedStringsArray() {
   Thread* const self = Thread::Current();
   LinearAlloc* linear_alloc = Runtime::Current()->GetLinearAlloc();
   const size_t num_strings = GetDexFile()->NumStringIds();
-  GcRoot<mirror::String>* strings =
-      linear_alloc->AllocArray<GcRoot<mirror::String>>(self, num_strings);
-  if (strings == nullptr) {
-    // Failed to allocate pre-resolved string array (probably due to address fragmentation), bail.
-    return false;
-  }
-  SetField32<false>(NumPreResolvedStringsOffset(), num_strings);
+  if (num_strings != 0) {
+    GcRoot<mirror::String>* strings =
+        linear_alloc->AllocArray<GcRoot<mirror::String>>(self, num_strings);
+    if (strings == nullptr) {
+      // Failed to allocate pre-resolved string array (probably due to address fragmentation), bail.
+      return false;
+    }
+    SetField32<false>(NumPreResolvedStringsOffset(), num_strings);
 
-  CHECK(strings != nullptr);
-  SetPreResolvedStrings(strings);
-  for (size_t i = 0; i < GetDexFile()->NumStringIds(); ++i) {
-    CHECK(GetPreResolvedStrings()[i].Read() == nullptr);
+    CHECK(strings != nullptr);
+    SetPreResolvedStrings(strings);
+    for (size_t i = 0; i < GetDexFile()->NumStringIds(); ++i) {
+      CHECK(GetPreResolvedStrings()[i].Read() == nullptr);
+    }
   }
   return true;
 }
@@ -277,6 +279,10 @@ void DexCache::Init(const DexFile* dex_file,
 
 void DexCache::SetLocation(ObjPtr<mirror::String> location) {
   SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(DexCache, location_), location);
+}
+
+void DexCache::SetClassLoader(ObjPtr<ClassLoader> class_loader) {
+  SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(DexCache, class_loader_), class_loader);
 }
 
 #if !defined(__aarch64__) && !defined(__x86_64__)

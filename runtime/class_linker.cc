@@ -116,6 +116,7 @@
 #include "mirror/object.h"
 #include "mirror/object_array-alloc-inl.h"
 #include "mirror/object_array-inl.h"
+#include "mirror/object_array.h"
 #include "mirror/object_reference.h"
 #include "mirror/object_reference-inl.h"
 #include "mirror/proxy.h"
@@ -137,8 +138,10 @@
 #include "runtime_callbacks.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread-inl.h"
+#include "thread.h"
 #include "thread_list.h"
 #include "trace.h"
+#include "transaction.h"
 #include "utils/dex_cache_arrays_layout-inl.h"
 #include "verifier/class_verifier.h"
 #include "well_known_classes.h"
@@ -2179,7 +2182,7 @@ bool ClassLinker::AddImageSpace(
         // class loader is only the initiating loader but not the defining loader.
         // Avoid read barrier since we are comparing against null.
         if (klass->GetClassLoader<kDefaultVerifyFlags, kWithoutReadBarrier>() != nullptr) {
-          klass->SetClassLoader</*kCheckTransaction=*/ false>(loader);
+          klass->SetClassLoader(loader);
         }
       }
     }
@@ -2636,7 +2639,7 @@ void ClassLinker::FinishArrayClassSetup(ObjPtr<mirror::Class> array_class) {
   // Arrays are access-checks-clean and preverified.
   access_flags |= kAccVerificationAttempted;
 
-  array_class->SetAccessFlags(access_flags);
+  array_class->SetAccessFlagsDuringLinking(access_flags);
 
   // Array classes are fully initialized either during single threaded startup,
   // or from a pre-fence visitor, so visibly initialized.
@@ -3144,16 +3147,6 @@ ObjPtr<mirror::Class> ClassLinker::FindClass(Thread* self,
   return result_ptr;
 }
 
-static bool IsReservedBootClassPathDescriptor(const char* descriptor) {
-  std::string_view descriptor_sv(descriptor);
-  return
-      // Reserved conscrypt packages (includes sub-packages under these paths).
-      StartsWith(descriptor_sv, "Landroid/net/ssl/") ||
-      StartsWith(descriptor_sv, "Lcom/android/org/conscrypt/") ||
-      // Reserved updatable-media package (includes sub-packages under this path).
-      StartsWith(descriptor_sv, "Landroid/media/");
-}
-
 // Helper for maintaining DefineClass counting. We need to notify callbacks when we start/end a
 // define-class and how many recursive DefineClasses we are at in order to allow for doing  things
 // like pausing class definition.
@@ -3231,7 +3224,7 @@ ObjPtr<mirror::Class> ClassLinker::DefineClass(Thread* self,
   // with these modules as these classes could be resolved differently during execution.
   if (class_loader != nullptr &&
       Runtime::Current()->IsAotCompiler() &&
-      IsReservedBootClassPathDescriptor(descriptor)) {
+      IsUpdatableBootClassPathDescriptor(descriptor)) {
     ObjPtr<mirror::Throwable> pre_allocated =
         Runtime::Current()->GetPreAllocatedNoClassDefFoundError();
     self->SetException(pre_allocated);
@@ -3694,7 +3687,7 @@ void ClassLinker::SetupClass(const DexFile& dex_file,
   klass->SetClass(GetClassRoot<mirror::Class>(this));
   uint32_t access_flags = dex_class_def.GetJavaAccessFlags();
   CHECK_EQ(access_flags & ~kAccJavaFlagsMask, 0U);
-  klass->SetAccessFlags(access_flags);
+  klass->SetAccessFlagsDuringLinking(access_flags);
   klass->SetClassLoader(class_loader);
   DCHECK_EQ(klass->GetPrimitiveType(), Primitive::kPrimNot);
   mirror::Class::SetStatus(klass, ClassStatus::kIdx, nullptr);
@@ -4025,6 +4018,8 @@ void ClassLinker::RegisterDexFileLocked(const DexFile& dex_file,
   // Make sure to hold the dex cache live in the class table. This case happens for the boot class
   // path dex caches without an image.
   data.class_table->InsertStrongRoot(dex_cache);
+  // Make sure that the dex cache holds the classloader live.
+  dex_cache->SetClassLoader(class_loader);
   if (class_loader != nullptr) {
     // Since we added a strong root to the class table, do the write barrier as required for
     // remembered sets and generational GCs.
@@ -4242,7 +4237,7 @@ void ClassLinker::CreatePrimitiveClass(Thread* self,
   CHECK(primitive_class != nullptr) << "OOM for primitive class " << type;
   // Do not hold lock on the primitive class object, the initialization of
   // primitive classes is done while the process is still single threaded.
-  primitive_class->SetAccessFlags(
+  primitive_class->SetAccessFlagsDuringLinking(
       kAccPublic | kAccFinal | kAccAbstract | kAccVerificationAttempted);
   primitive_class->SetPrimitiveType(type);
   primitive_class->SetIfTable(GetClassRoot<mirror::Object>(this)->GetIfTable());
@@ -4359,6 +4354,7 @@ ObjPtr<mirror::Class> ClassLinker::CreateArrayClass(Thread* self,
   auto visitor = [this, array_class_size, component_type](ObjPtr<mirror::Object> obj,
                                                           size_t usable_size)
       REQUIRES_SHARED(Locks::mutator_lock_) {
+    ScopedAssertNoNewTransactionRecords sanntr("CreateArrayClass");
     mirror::Class::InitializeClassVisitor init_class(array_class_size);
     init_class(obj, usable_size);
     ObjPtr<mirror::Class> klass = ObjPtr<mirror::Class>::DownCast(obj);
@@ -4948,7 +4944,7 @@ ObjPtr<mirror::Class> ClassLinker::CreateProxyClass(ScopedObjectAccessAlreadyRun
     return nullptr;
   }
 
-  StackHandleScope<10> hs(self);
+  StackHandleScope<12> hs(self);
   MutableHandle<mirror::Class> temp_klass(hs.NewHandle(
       AllocClass(self, GetClassRoot<mirror::Class>(this), sizeof(mirror::Class))));
   if (temp_klass == nullptr) {
@@ -4959,7 +4955,8 @@ ObjPtr<mirror::Class> ClassLinker::CreateProxyClass(ScopedObjectAccessAlreadyRun
   temp_klass->SetObjectSize(sizeof(mirror::Proxy));
   // Set the class access flags incl. VerificationAttempted, so we do not try to set the flag on
   // the methods.
-  temp_klass->SetAccessFlags(kAccClassIsProxy | kAccPublic | kAccFinal | kAccVerificationAttempted);
+  temp_klass->SetAccessFlagsDuringLinking(
+      kAccClassIsProxy | kAccPublic | kAccFinal | kAccVerificationAttempted);
   temp_klass->SetClassLoader(soa.Decode<mirror::ClassLoader>(loader));
   DCHECK_EQ(temp_klass->GetPrimitiveType(), Primitive::kPrimNot);
   temp_klass->SetName(soa.Decode<mirror::String>(name));
@@ -5002,11 +4999,53 @@ ObjPtr<mirror::Class> ClassLinker::CreateProxyClass(ScopedObjectAccessAlreadyRun
   // Proxies have 1 direct method, the constructor
   const size_t num_direct_methods = 1;
 
-  // They have as many virtual methods as the array
-  auto h_methods = hs.NewHandle(soa.Decode<mirror::ObjectArray<mirror::Method>>(methods));
+  // The array we get passed contains all methods, including private and static
+  // ones that aren't proxied. We need to filter those out since only interface
+  // methods (non-private & virtual) are actually proxied.
+  Handle<mirror::ObjectArray<mirror::Method>> h_methods =
+      hs.NewHandle(soa.Decode<mirror::ObjectArray<mirror::Method>>(methods));
   DCHECK_EQ(h_methods->GetClass(), GetClassRoot<mirror::ObjectArray<mirror::Method>>())
       << mirror::Class::PrettyClass(h_methods->GetClass());
-  const size_t num_virtual_methods = h_methods->GetLength();
+  // List of the actual virtual methods this class will have.
+  std::vector<ArtMethod*> proxied_methods;
+  std::vector<size_t> proxied_throws_idx;
+  proxied_methods.reserve(h_methods->GetLength());
+  proxied_throws_idx.reserve(h_methods->GetLength());
+  // Filter out to only the non-private virtual methods.
+  for (auto [mirror, idx] : ZipCount(h_methods.Iterate<mirror::Method>())) {
+    ArtMethod* m = mirror->GetArtMethod();
+    if (!m->IsPrivate() && !m->IsStatic()) {
+      proxied_methods.push_back(m);
+      proxied_throws_idx.push_back(idx);
+    }
+  }
+  const size_t num_virtual_methods = proxied_methods.size();
+  // We also need to filter out the 'throws'. The 'throws' are a Class[][] that
+  // contains an array of all the classes each function is declared to throw.
+  // This is used to wrap unexpected exceptions in a
+  // UndeclaredThrowableException exception. This array is in the same order as
+  // the methods array and like the methods array must be filtered to remove any
+  // non-proxied methods.
+  const bool has_filtered_methods =
+      static_cast<int32_t>(num_virtual_methods) != h_methods->GetLength();
+  MutableHandle<mirror::ObjectArray<mirror::ObjectArray<mirror::Class>>> original_proxied_throws(
+      hs.NewHandle(soa.Decode<mirror::ObjectArray<mirror::ObjectArray<mirror::Class>>>(throws)));
+  MutableHandle<mirror::ObjectArray<mirror::ObjectArray<mirror::Class>>> proxied_throws(
+      hs.NewHandle<mirror::ObjectArray<mirror::ObjectArray<mirror::Class>>>(
+          (has_filtered_methods)
+              ? mirror::ObjectArray<mirror::ObjectArray<mirror::Class>>::Alloc(
+                    self, original_proxied_throws->GetClass(), num_virtual_methods)
+              : original_proxied_throws.Get()));
+  if (proxied_throws.IsNull() && !original_proxied_throws.IsNull()) {
+    self->AssertPendingOOMException();
+    return nullptr;
+  }
+  if (has_filtered_methods) {
+    for (auto [orig_idx, new_idx] : ZipCount(MakeIterationRange(proxied_throws_idx))) {
+      DCHECK_LE(new_idx, orig_idx);
+      proxied_throws->Set(new_idx, original_proxied_throws->Get(orig_idx));
+    }
+  }
 
   // Create the methods array.
   LengthPrefixedArray<ArtMethod>* proxy_class_methods = AllocArtMethodArray(
@@ -5026,7 +5065,7 @@ ObjPtr<mirror::Class> ClassLinker::CreateProxyClass(ScopedObjectAccessAlreadyRun
   // TODO These should really use the iterators.
   for (size_t i = 0; i < num_virtual_methods; ++i) {
     auto* virtual_method = temp_klass->GetVirtualMethodUnchecked(i, image_pointer_size_);
-    auto* prototype = h_methods->Get(i)->GetArtMethod();
+    auto* prototype = proxied_methods[i];
     CreateProxyMethod(temp_klass, prototype, virtual_method);
     DCHECK(virtual_method->GetDeclaringClass() != nullptr);
     DCHECK(prototype->GetDeclaringClass() != nullptr);
@@ -5065,7 +5104,7 @@ ObjPtr<mirror::Class> ClassLinker::CreateProxyClass(ScopedObjectAccessAlreadyRun
   CHECK_EQ(throws_sfield.GetDeclaringClass(), klass.Get());
   throws_sfield.SetObject<false>(
       klass.Get(),
-      soa.Decode<mirror::ObjectArray<mirror::ObjectArray<mirror::Class>>>(throws));
+      proxied_throws.Get());
 
   Runtime::Current()->GetRuntimeCallbacks()->ClassPrepare(temp_klass, klass);
 
@@ -5096,8 +5135,7 @@ ObjPtr<mirror::Class> ClassLinker::CreateProxyClass(ScopedObjectAccessAlreadyRun
 
     for (size_t i = 0; i < num_virtual_methods; ++i) {
       auto* virtual_method = klass->GetVirtualMethodUnchecked(i, image_pointer_size_);
-      auto* prototype = h_methods->Get(i++)->GetArtMethod();
-      CheckProxyMethod(virtual_method, prototype);
+      CheckProxyMethod(virtual_method, proxied_methods[i]);
     }
 
     StackHandleScope<1> hs2(self);
@@ -5113,7 +5151,7 @@ ObjPtr<mirror::Class> ClassLinker::CreateProxyClass(ScopedObjectAccessAlreadyRun
     CHECK_EQ(klass.Get()->GetProxyInterfaces(),
              soa.Decode<mirror::ObjectArray<mirror::Class>>(interfaces));
     CHECK_EQ(klass.Get()->GetProxyThrows(),
-             soa.Decode<mirror::ObjectArray<mirror::ObjectArray<mirror::Class>>>(throws));
+             proxied_throws.Get());
   }
   return klass.Get();
 }
@@ -8092,7 +8130,7 @@ bool ClassLinker::LinkInterfaceMethods(
         // If we are overwriting a super class interface, try to only virtual methods instead of the
         // whole vtable.
         using_virtuals = true;
-        input_virtual_methods = klass->GetDeclaredMethodsSlice(image_pointer_size_);
+        input_virtual_methods = klass->GetDeclaredVirtualMethodsSlice(image_pointer_size_);
         input_array_length = input_virtual_methods.size();
       } else {
         // For a new interface, however, we need the whole vtable in case a new
@@ -8128,6 +8166,7 @@ bool ClassLinker::LinkInterfaceMethods(
               input_vtable_array->GetElementPtrSize<ArtMethod*>(k, image_pointer_size_);
           ArtMethod* vtable_method_for_name_comparison =
               vtable_method->GetInterfaceMethodIfProxy(image_pointer_size_);
+          DCHECK(!vtable_method->IsStatic()) << vtable_method->PrettyMethod();
           if (interface_name_comparator.HasSameNameAndSignature(
               vtable_method_for_name_comparison)) {
             if (!vtable_method->IsAbstract() && !vtable_method->IsPublic()) {
@@ -9785,6 +9824,12 @@ ObjPtr<mirror::IfTable> ClassLinker::AllocIfTable(Thread* self, size_t ifcount) 
       mirror::IfTable::Alloc(self,
                              GetClassRoot<mirror::ObjectArray<mirror::Object>>(this),
                              ifcount * mirror::IfTable::kMax)));
+}
+
+bool ClassLinker::IsUpdatableBootClassPathDescriptor(const char* descriptor ATTRIBUTE_UNUSED) {
+  // Should not be called on ClassLinker, only on AotClassLinker that overrides this.
+  LOG(FATAL) << "UNREACHABLE";
+  UNREACHABLE();
 }
 
 // Instantiate ClassLinker::ResolveMethod.
