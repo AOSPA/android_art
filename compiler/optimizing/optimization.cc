@@ -168,8 +168,7 @@ ArenaVector<HOptimization*> ConstructOptimizations(
     HGraph* graph,
     OptimizingCompilerStats* stats,
     CodeGenerator* codegen,
-    const DexCompilationUnit& dex_compilation_unit,
-    VariableSizedHandleScope* handles) {
+    const DexCompilationUnit& dex_compilation_unit) {
   ArenaVector<HOptimization*> optimizations(allocator->Adapter());
 
   // Some optimizations require SideEffectsAnalysis or HInductionVarAnalysis
@@ -235,7 +234,6 @@ ArenaVector<HOptimization*> ConstructOptimizations(
                                        codegen,
                                        dex_compilation_unit,    // outer_compilation_unit
                                        dex_compilation_unit,    // outermost_compilation_unit
-                                       handles,
                                        stats,
                                        accessor.RegistersSize(),
                                        /* total_number_of_instructions= */ 0,
@@ -245,7 +243,7 @@ ArenaVector<HOptimization*> ConstructOptimizations(
         break;
       }
       case OptimizationPass::kSelectGenerator:
-        opt = new (allocator) HSelectGenerator(graph, handles, stats, pass_name);
+        opt = new (allocator) HSelectGenerator(graph, stats, pass_name);
         break;
       case OptimizationPass::kInstructionSimplifier:
         opt = new (allocator) InstructionSimplifier(graph, codegen, stats, pass_name);

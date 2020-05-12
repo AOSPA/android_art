@@ -41,7 +41,6 @@ class InstructionOperands;
 class OptimizingCompilerStats;
 class ScopedObjectAccess;
 class SsaBuilder;
-class VariableSizedHandleScope;
 
 namespace mirror {
 class Class;
@@ -61,7 +60,6 @@ class HInstructionBuilder : public ValueObject {
                       CodeGenerator* code_generator,
                       ArrayRef<const uint8_t> interpreter_metadata,
                       OptimizingCompilerStats* compiler_stats,
-                      VariableSizedHandleScope* handles,
                       ScopedArenaAllocator* local_allocator);
 
   bool Build();
@@ -305,7 +303,6 @@ class HInstructionBuilder : public ValueObject {
 
   ArenaAllocator* const allocator_;
   HGraph* const graph_;
-  VariableSizedHandleScope* const handles_;
 
   // The dex file where the method being compiled is, and the bytecode data.
   const DexFile* const dex_file_;
@@ -347,7 +344,7 @@ class HInstructionBuilder : public ValueObject {
   ScopedArenaVector<HBasicBlock*> loop_headers_;
 
   // Cached resolved types for the current compilation unit's DexFile.
-  // Handle<>s reference entries in the `handles_`.
+  // Handle<>s reference entries in the `graph_->GetHandleCache()`.
   ScopedArenaSafeMap<dex::TypeIndex, Handle<mirror::Class>> class_cache_;
 
   static constexpr int kDefaultNumberOfLoops = 2;
