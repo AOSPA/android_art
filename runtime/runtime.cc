@@ -818,6 +818,9 @@ std::string Runtime::GetCompilerExecutable() const {
   if (kIsDebugBuild) {
     compiler_executable += 'd';
   }
+  if (kIsTargetBuild) {
+    compiler_executable += Is64BitInstructionSet(kRuntimeISA) ? "64" : "32";
+  }
   return compiler_executable;
 }
 
@@ -1059,7 +1062,8 @@ void Runtime::InitNonZygoteOrPostFork(
   StartSignalCatcher();
 
   ScopedObjectAccess soa(Thread::Current());
-  if (Dbg::IsJdwpAllowed() || IsProfileableFromShell() || IsJavaDebuggable()) {
+  if (Dbg::IsJdwpAllowed() || IsProfileableFromShell() || IsJavaDebuggable() ||
+      Runtime::Current()->IsSystemServer()) {
     std::string err;
     ScopedTrace tr("perfetto_hprof init.");
     ScopedThreadSuspension sts(Thread::Current(), ThreadState::kNative);
