@@ -208,7 +208,7 @@ class OptimizingUnitTestHelper {
   std::unique_ptr<VariableSizedHandleScope> handles_;
 };
 
-class OptimizingUnitTest : public CommonCompilerTest, public OptimizingUnitTestHelper {};
+class OptimizingUnitTest : public CommonArtTest, public OptimizingUnitTestHelper {};
 
 // OptimizingUnitTest with some handy functions to ease the graph creation.
 class ImprovedOptimizingUnitTest : public OptimizingUnitTest {
