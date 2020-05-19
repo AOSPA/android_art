@@ -50,6 +50,7 @@ CompilerOptions::CompilerOptions()
       dex_files_for_oat_file_(),
       image_classes_(),
       verification_results_(nullptr),
+      compiler_type_(CompilerType::kAotCompiler),
       image_type_(ImageType::kNone),
       compiling_with_core_image_(false),
       baseline_(false),
