@@ -32,9 +32,7 @@ class LoadStoreEliminationTest : public ImprovedOptimizingUnitTest {
     graph_->BuildDominatorTree();
     SideEffectsAnalysis side_effects(graph_);
     side_effects.Run();
-    LoadStoreAnalysis lsa(graph_);
-    lsa.Run();
-    LoadStoreElimination lse(graph_, side_effects, lsa, nullptr);
+    LoadStoreElimination lse(graph_, side_effects, /*stats=*/ nullptr);
     lse.Run();
     EXPECT_TRUE(CheckGraphSkipRefTypeInfoChecks());
   }
