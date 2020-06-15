@@ -296,7 +296,8 @@ Runtime::Runtime()
       process_state_(kProcessStateJankPerceptible),
       zygote_no_threads_(false),
       verifier_logging_threshold_ms_(100),
-      verifier_missing_kthrow_fatal_(false) {
+      verifier_missing_kthrow_fatal_(false),
+      perfetto_hprof_enabled_(false) {
   static_assert(Runtime::kCalleeSaveSize ==
                     static_cast<uint32_t>(CalleeSaveType::kLastCalleeSaveType), "Unexpected size");
   CheckConstants();
@@ -1062,8 +1063,9 @@ void Runtime::InitNonZygoteOrPostFork(
   StartSignalCatcher();
 
   ScopedObjectAccess soa(Thread::Current());
-  if (Dbg::IsJdwpAllowed() || IsProfileableFromShell() || IsJavaDebuggable() ||
-      Runtime::Current()->IsSystemServer()) {
+  if (IsPerfettoHprofEnabled() &&
+      (Dbg::IsJdwpAllowed() || IsProfileableFromShell() || IsJavaDebuggable() ||
+       Runtime::Current()->IsSystemServer())) {
     std::string err;
     ScopedTrace tr("perfetto_hprof init.");
     ScopedThreadSuspension sts(Thread::Current(), ThreadState::kNative);
@@ -1199,6 +1201,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   MemMap::Init();
 
   verifier_missing_kthrow_fatal_ = runtime_options.GetOrDefault(Opt::VerifierMissingKThrowFatal);
+  perfetto_hprof_enabled_ = runtime_options.GetOrDefault(Opt::PerfettoHprof);
 
   // Try to reserve a dedicated fault page. This is allocated for clobbered registers and sentinels.
   // If we cannot reserve it, log a warning.
@@ -1783,6 +1786,14 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   {
     ScopedObjectAccess soa(self);
     callbacks_->NextRuntimePhase(RuntimePhaseCallback::RuntimePhase::kInitialAgents);
+  }
+
+  if (IsZygote() && IsPerfettoHprofEnabled()) {
+    constexpr const char* plugin_name = kIsDebugBuild ?
+    "libperfetto_hprofd.so" : "libperfetto_hprof.so";
+    // Load eagerly in Zygote to improve app startup times. This will make
+    // subsequent dlopens for the library no-ops.
+    dlopen(plugin_name, RTLD_NOW | RTLD_LOCAL);
   }
 
   VLOG(startup) << "Runtime::Init exiting";
