@@ -185,16 +185,19 @@ static bool IncludeClassInProfile(const TypeReference& type_ref,
 
 // Returns true iff a class with the given metada should be included in the list of
 // prelaoded classes.
-static bool IncludeInPreloadedClasses(uint32_t max_aggregation_count,
+static bool IncludeInPreloadedClasses(const std::string& class_name,
+                                      uint32_t max_aggregation_count,
                                       const FlattenProfileData::ItemMetadata& metadata,
                                       const BootImageOptions& options) {
-  return IncludeItemInProfile(
+  bool blacklisted = options.preloaded_classes_blacklist.find(class_name) !=
+      options.preloaded_classes_blacklist.end();
+  return !blacklisted && IncludeItemInProfile(
       max_aggregation_count, options.preloaded_class_threshold, metadata, options);
 }
 
 bool GenerateBootImageProfile(
     const std::vector<std::unique_ptr<const DexFile>>& dex_files,
-    const ProfileCompilationInfo& profile,
+    const std::vector<std::string>& profile_files,
     const BootImageOptions& options,
     const std::string& boot_profile_out_path,
     const std::string& preloaded_classes_out_path) {
@@ -205,7 +208,16 @@ bool GenerateBootImageProfile(
 
   bool generate_preloaded_classes = !preloaded_classes_out_path.empty();
 
-  std::unique_ptr<FlattenProfileData> flattenData = profile.ExtractProfileData(dex_files);
+  std::unique_ptr<FlattenProfileData> flattend_data(new FlattenProfileData());
+  for (const std::string& profile_file : profile_files) {
+    ProfileCompilationInfo profile;
+    if (!profile.Load(profile_file, /*clear_if_invalid=*/ false)) {
+      LOG(ERROR) << "Profile is not a valid: " << profile_file;
+      return false;
+    }
+    std::unique_ptr<FlattenProfileData> currentData = profile.ExtractProfileData(dex_files);
+    flattend_data->MergeData(*currentData);
+  }
 
   // We want the output sorted by the method/class name.
   // So we use an intermediate map for that.
@@ -215,8 +227,8 @@ bool GenerateBootImageProfile(
   SafeMap<std::string, FlattenProfileData::ItemMetadata> profile_classes;
   SafeMap<std::string, FlattenProfileData::ItemMetadata> preloaded_classes;
 
-  for (const auto& it : flattenData->GetMethodData()) {
-    if (IncludeMethodInProfile(flattenData->GetMaxAggregationForMethods(), it.second, options)) {
+  for (const auto& it : flattend_data->GetMethodData()) {
+    if (IncludeMethodInProfile(flattend_data->GetMaxAggregationForMethods(), it.second, options)) {
       FlattenProfileData::ItemMetadata metadata(it.second);
       if (options.upgrade_startup_to_hot
           && ((metadata.GetFlags() & Hotness::Flag::kFlagStartup) != 0)) {
@@ -226,20 +238,22 @@ bool GenerateBootImageProfile(
     }
   }
 
-  for (const auto& it : flattenData->GetClassData()) {
+  for (const auto& it : flattend_data->GetClassData()) {
     const TypeReference& type_ref = it.first;
     const FlattenProfileData::ItemMetadata& metadata = it.second;
     if (IncludeClassInProfile(type_ref,
-            flattenData->GetMaxAggregationForClasses(),
+            flattend_data->GetMaxAggregationForClasses(),
             metadata,
             options)) {
       profile_classes.Put(BootImageRepresentation(it.first), it.second);
     }
+    std::string preloaded_class_representation = PreloadedClassesRepresentation(it.first);
     if (generate_preloaded_classes && IncludeInPreloadedClasses(
-            flattenData->GetMaxAggregationForClasses(),
+            preloaded_class_representation,
+            flattend_data->GetMaxAggregationForClasses(),
             metadata,
             options)) {
-      preloaded_classes.Put(PreloadedClassesRepresentation(it.first), it.second);
+      preloaded_classes.Put(preloaded_class_representation, it.second);
     }
   }
 

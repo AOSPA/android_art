@@ -20,6 +20,7 @@
 #include <limits>
 #include <memory>
 #include <vector>
+#include <set>
 
 #include "base/safe_map.h"
 #include "dex/dex_file.h"
@@ -63,6 +64,9 @@ struct BootImageOptions {
   // Should be use only for debugging as it will add additional elements to the text output
   // that are not compatible with the default profile format.
   bool append_package_use_list = false;
+
+  // The set of classes that should not be preloaded in Zygote
+  std::set<std::string> preloaded_classes_blacklist;
 };
 
 // Generate a boot image profile according to the specified options.
@@ -71,7 +75,7 @@ struct BootImageOptions {
 // Returns true if the generation was successful, false otherwise.
 bool GenerateBootImageProfile(
     const std::vector<std::unique_ptr<const DexFile>>& dex_files,
-    const ProfileCompilationInfo& profile,
+    const std::vector<std::string>& profile_files,
     const BootImageOptions& options,
     const std::string& boot_profile_out_path,
     const std::string& preloaded_classes_out_path);
