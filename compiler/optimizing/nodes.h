@@ -4457,7 +4457,8 @@ class HInvokePolymorphic final : public HInvoke {
                      uint32_t number_of_arguments,
                      DataType::Type return_type,
                      uint32_t dex_pc,
-                     uint32_t dex_method_index)
+                     uint32_t dex_method_index,
+                     ArtMethod* resolved_method)
       : HInvoke(kInvokePolymorphic,
                 allocator,
                 number_of_arguments,
@@ -4465,7 +4466,7 @@ class HInvokePolymorphic final : public HInvoke {
                 return_type,
                 dex_pc,
                 dex_method_index,
-                nullptr,
+                resolved_method,
                 kVirtual) {
   }
 
