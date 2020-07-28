@@ -4475,7 +4475,7 @@ class HInvokePolymorphic final : public HInvoke {
                 dex_pc,
                 dex_method_index,
                 resolved_method,
-                kVirtual) {
+                kPolymorphic) {
   }
 
   bool IsClonable() const override { return true; }
