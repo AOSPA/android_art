@@ -449,7 +449,8 @@ void JitCodeCache::SweepRootTables(IsMarkedVisitor* visitor) {
     }
   }
   // Walk over inline caches to clear entries containing unloaded classes.
-  for (ProfilingInfo* info : profiling_infos_) {
+  for (auto it : profiling_infos_) {
+    ProfilingInfo* info = it.second;
     for (size_t i = 0; i < info->number_of_inline_caches_; ++i) {
       InlineCache* cache = &info->cache_[i];
       for (size_t j = 0; j < InlineCache::kIndividualCacheSize; ++j) {
@@ -547,9 +548,8 @@ void JitCodeCache::RemoveMethodsIn(Thread* self, const LinearAlloc& alloc) {
       }
     }
     for (auto it = profiling_infos_.begin(); it != profiling_infos_.end();) {
-      ProfilingInfo* info = *it;
+      ProfilingInfo* info = it->second;
       if (alloc.ContainsUnsafe(info->GetMethod())) {
-        info->GetMethod()->SetProfilingInfo(nullptr);
         private_region_.FreeWritableData(reinterpret_cast<uint8_t*>(info));
         it = profiling_infos_.erase(it);
       } else {
@@ -788,11 +788,10 @@ bool JitCodeCache::RemoveMethod(ArtMethod* method, bool release_memory) {
 
 bool JitCodeCache::RemoveMethodLocked(ArtMethod* method, bool release_memory) {
   if (LIKELY(!method->IsNative())) {
-    ProfilingInfo* info = method->GetProfilingInfo(kRuntimePointerSize);
-    if (info != nullptr) {
-      RemoveElement(profiling_infos_, info);
+    auto it = profiling_infos_.find(method);
+    if (it != profiling_infos_.end()) {
+      profiling_infos_.erase(it);
     }
-    method->SetProfilingInfo(nullptr);
   }
 
   bool in_cache = false;
@@ -855,19 +854,6 @@ void JitCodeCache::MoveObsoleteMethod(ArtMethod* old_method, ArtMethod* new_meth
       data.MoveObsoleteMethod(old_method, new_method);
     }
     return;
-  }
-  // Update ProfilingInfo to the new one and remove it from the old_method.
-  if (old_method->GetProfilingInfo(kRuntimePointerSize) != nullptr) {
-    DCHECK_EQ(old_method->GetProfilingInfo(kRuntimePointerSize)->GetMethod(), old_method);
-    ProfilingInfo* info = old_method->GetProfilingInfo(kRuntimePointerSize);
-    old_method->SetProfilingInfo(nullptr);
-    // Since the JIT should be paused and all threads suspended by the time this is called these
-    // checks should always pass.
-    DCHECK(!info->IsInUseByCompiler());
-    new_method->SetProfilingInfo(info);
-    // Get rid of the old saved entrypoint if it is there.
-    info->SetSavedEntryPoint(nullptr);
-    info->method_ = new_method;
   }
   // Update method_code_map_ to point to the new method.
   for (auto& it : method_code_map_) {
@@ -1138,6 +1124,7 @@ void JitCodeCache::GarbageCollectCache(Thread* self) {
 
       // Start polling the liveness of compiled code to prepare for the next full collection.
       if (next_collection_will_be_full) {
+<<<<<<< HEAD
         if (Runtime::Current()->GetJITOptions()->CanCompileBaseline()) {
           for (ProfilingInfo* info : profiling_infos_) {
             info->SetBaselineHotnessCount(0);
@@ -1157,6 +1144,10 @@ void JitCodeCache::GarbageCollectCache(Thread* self) {
               info->GetMethod()->SetEntryPointFromQuickCompiledCode(GetQuickToInterpreterBridge());
             }
           }
+=======
+        for (auto it : profiling_infos_) {
+          it.second->SetBaselineHotnessCount(0);
+>>>>>>> 095dc4611b... Move the profiling info out of ArtMethod.
         }
 
         // Change entry points of native methods back to the GenericJNI entrypoint.
@@ -1245,6 +1236,7 @@ void JitCodeCache::DoCollection(Thread* self, bool collect_profiling_info) {
   {
     MutexLock mu(self, *Locks::jit_lock_);
 
+<<<<<<< HEAD
     if (Runtime::Current()->GetJITOptions()->CanCompileBaseline()) {
       // Update to interpreter the methods that have baseline entrypoints and whose baseline
       // hotness count is zero.
@@ -1259,6 +1251,21 @@ void JitCodeCache::DoCollection(Thread* self, bool collect_profiling_info) {
             if (CodeInfo::IsBaseline(method_header->GetOptimizedCodeInfoPtr())) {
               info->GetMethod()->SetEntryPointFromQuickCompiledCode(GetQuickToInterpreterBridge());
             }
+=======
+    // Update to interpreter the methods that have baseline entrypoints and whose baseline
+    // hotness count is zero.
+    // Note that these methods may be in thread stack or concurrently revived
+    // between. That's OK, as the thread executing it will mark it.
+    for (auto it : profiling_infos_) {
+      ProfilingInfo* info = it.second;
+      if (info->GetBaselineHotnessCount() == 0) {
+        const void* entry_point = info->GetMethod()->GetEntryPointFromQuickCompiledCode();
+        if (ContainsPc(entry_point)) {
+          OatQuickMethodHeader* method_header =
+              OatQuickMethodHeader::FromEntryPoint(entry_point);
+          if (CodeInfo::IsBaseline(method_header->GetOptimizedCodeInfoPtr())) {
+            info->GetMethod()->SetEntryPointFromQuickCompiledCode(GetQuickToInterpreterBridge());
+>>>>>>> 095dc4611b... Move the profiling info out of ArtMethod.
           }
         }
       }
@@ -1335,28 +1342,7 @@ void JitCodeCache::DoCollection(Thread* self, bool collect_profiling_info) {
   RemoveUnmarkedCode(self);
 
   if (collect_profiling_info) {
-    MutexLock mu(self, *Locks::jit_lock_);
-    // Free all profiling infos of methods not compiled nor being compiled.
-    auto profiling_kept_end = std::remove_if(profiling_infos_.begin(), profiling_infos_.end(),
-      [this] (ProfilingInfo* info) NO_THREAD_SAFETY_ANALYSIS {
-        const void* ptr = info->GetMethod()->GetEntryPointFromQuickCompiledCode();
-        // We have previously cleared the ProfilingInfo pointer in the ArtMethod in the hope
-        // that the compiled code would not get revived. As mutator threads run concurrently,
-        // they may have revived the compiled code, and now we are in the situation where
-        // a method has compiled code but no ProfilingInfo.
-        // We make sure compiled methods have a ProfilingInfo object. It is needed for
-        // code cache collection.
-        if (ContainsPc(ptr) &&
-            info->GetMethod()->GetProfilingInfo(kRuntimePointerSize) == nullptr) {
-          info->GetMethod()->SetProfilingInfo(info);
-        } else if (info->GetMethod()->GetProfilingInfo(kRuntimePointerSize) != info) {
-          // No need for this ProfilingInfo object anymore.
-          private_region_.FreeWritableData(reinterpret_cast<uint8_t*>(info));
-          return true;
-        }
-        return false;
-      });
-    profiling_infos_.erase(profiling_kept_end, profiling_infos_.end());
+    // TODO: Collect unused profiling infos.
   }
 }
 
@@ -1471,29 +1457,24 @@ ProfilingInfo* JitCodeCache::AddProfilingInfo(Thread* self,
 ProfilingInfo* JitCodeCache::AddProfilingInfoInternal(Thread* self ATTRIBUTE_UNUSED,
                                                       ArtMethod* method,
                                                       const std::vector<uint32_t>& entries) {
+  // Check whether some other thread has concurrently created it.
+  auto it = profiling_infos_.find(method);
+  if (it != profiling_infos_.end()) {
+    return it->second;
+  }
+
   size_t profile_info_size = RoundUp(
       sizeof(ProfilingInfo) + sizeof(InlineCache) * entries.size(),
       sizeof(void*));
-
-  // Check whether some other thread has concurrently created it.
-  ProfilingInfo* info = method->GetProfilingInfo(kRuntimePointerSize);
-  if (info != nullptr) {
-    return info;
-  }
 
   const uint8_t* data = private_region_.AllocateData(profile_info_size);
   if (data == nullptr) {
     return nullptr;
   }
   uint8_t* writable_data = private_region_.GetWritableDataAddress(data);
-  info = new (writable_data) ProfilingInfo(method, entries);
+  ProfilingInfo* info = new (writable_data) ProfilingInfo(method, entries);
 
-  // Make sure other threads see the data in the profiling info object before the
-  // store in the ArtMethod's ProfilingInfo pointer.
-  std::atomic_thread_fence(std::memory_order_release);
-
-  method->SetProfilingInfo(info);
-  profiling_infos_.push_back(info);
+  profiling_infos_.Put(method, info);
   histogram_profiling_info_memory_use_.AddValue(profile_info_size);
   return info;
 }
@@ -1511,7 +1492,8 @@ void JitCodeCache::GetProfiledMethods(const std::set<std::string>& dex_base_loca
   MutexLock mu(self, *Locks::jit_lock_);
   ScopedTrace trace(__FUNCTION__);
   uint16_t jit_compile_threshold = Runtime::Current()->GetJITOptions()->GetCompileThreshold();
-  for (const ProfilingInfo* info : profiling_infos_) {
+  for (auto it : profiling_infos_) {
+    ProfilingInfo* info = it.second;
     ArtMethod* method = info->GetMethod();
     const DexFile* dex_file = method->GetDexFile();
     const std::string base_location = DexFileLoader::GetBaseLocation(dex_file->GetLocation());
@@ -1671,6 +1653,7 @@ bool JitCodeCache::NotifyCompilationOf(ArtMethod* method,
     }
     return new_compilation;
   } else {
+<<<<<<< HEAD
     ProfilingInfo* info = method->GetProfilingInfo(kRuntimePointerSize);
     if (CanAllocateProfilingInfo() && baseline && info == nullptr) {
       // We can retry allocation here as we're the JIT thread.
@@ -1686,6 +1669,20 @@ bool JitCodeCache::NotifyCompilationOf(ArtMethod* method,
         // threshold for creating the ProfilingInfo. Reset the counter now to "correct" this.
         ClearMethodCounter(method, /*was_warm=*/ false);
         return false;
+=======
+    if (CanAllocateProfilingInfo() && (compilation_kind == CompilationKind::kBaseline)) {
+      bool has_profiling_info = false;
+      {
+        MutexLock mu(self, *Locks::jit_lock_);
+        has_profiling_info = (profiling_infos_.find(method) != profiling_infos_.end());
+      }
+      if (!has_profiling_info) {
+        if (ProfilingInfo::Create(self, method) == nullptr) {
+          VLOG(jit) << method->PrettyMethod() << " needs a ProfilingInfo to be compiled baseline";
+          ClearMethodCounter(method, /*was_warm=*/ false);
+          return false;
+        }
+>>>>>>> 095dc4611b... Move the profiling info out of ArtMethod.
       }
     } else {
       MutexLock mu(self, *Locks::jit_lock_);
@@ -1700,21 +1697,22 @@ bool JitCodeCache::NotifyCompilationOf(ArtMethod* method,
 
 ProfilingInfo* JitCodeCache::NotifyCompilerUse(ArtMethod* method, Thread* self) {
   MutexLock mu(self, *Locks::jit_lock_);
-  ProfilingInfo* info = method->GetProfilingInfo(kRuntimePointerSize);
-  if (info != nullptr) {
-    if (!info->IncrementInlineUse()) {
-      // Overflow of inlining uses, just bail.
-      return nullptr;
-    }
+  auto it = profiling_infos_.find(method);
+  if (it == profiling_infos_.end()) {
+    return nullptr;
   }
-  return info;
+  if (!it->second->IncrementInlineUse()) {
+    // Overflow of inlining uses, just bail.
+    return nullptr;
+  }
+  return it->second;
 }
 
 void JitCodeCache::DoneCompilerUse(ArtMethod* method, Thread* self) {
   MutexLock mu(self, *Locks::jit_lock_);
-  ProfilingInfo* info = method->GetProfilingInfo(kRuntimePointerSize);
-  DCHECK(info != nullptr);
-  info->DecrementInlineUse();
+  auto it = profiling_infos_.find(method);
+  DCHECK(it != profiling_infos_.end());
+  it->second->DecrementInlineUse();
 }
 
 void JitCodeCache::DoneCompiling(ArtMethod* method, Thread* self, bool osr) {
@@ -1763,7 +1761,6 @@ void JitCodeCache::InvalidateAllCompiledCode() {
 void JitCodeCache::InvalidateCompiledCodeFor(ArtMethod* method,
                                              const OatQuickMethodHeader* header) {
   DCHECK(!method->IsNative());
-  ProfilingInfo* profiling_info = method->GetProfilingInfo(kRuntimePointerSize);
   const void* method_entrypoint = method->GetEntryPointFromQuickCompiledCode();
   if ((profiling_info != nullptr) &&
       (profiling_info->GetSavedEntryPoint() == header->GetEntryPoint())) {
@@ -1780,7 +1777,7 @@ void JitCodeCache::InvalidateCompiledCodeFor(ArtMethod* method,
     // and clear the counter to get the method Jitted again.
     Runtime::Current()->GetInstrumentation()->UpdateMethodsCode(
         method, GetQuickToInterpreterBridge());
-    ClearMethodCounter(method, /*was_warm=*/ profiling_info != nullptr);
+    ClearMethodCounter(method, /*was_warm=*/ true);
   } else {
     MutexLock mu(Thread::Current(), *Locks::jit_lock_);
     auto it = osr_code_map_.find(method);

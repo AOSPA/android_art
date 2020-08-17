@@ -520,7 +520,7 @@ class JitCodeCache {
   SafeMap<ArtMethod*, const void*> osr_code_map_ GUARDED_BY(Locks::jit_lock_);
 
   // ProfilingInfo objects we have allocated.
-  std::vector<ProfilingInfo*> profiling_infos_ GUARDED_BY(Locks::jit_lock_);
+  SafeMap<ArtMethod*, ProfilingInfo*> profiling_infos_ GUARDED_BY(Locks::jit_lock_);
 
   // Methods that the zygote has compiled and can be shared across processes
   // forked from the zygote.
