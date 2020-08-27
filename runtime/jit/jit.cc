@@ -1058,6 +1058,7 @@ void Jit::PostZygoteFork() {
     return;
   }
   thread_pool_->CreateThreads();
+  thread_pool_->SetPthreadPriority(options_->GetThreadPoolPthreadPriority());
 }
 
 }  // namespace jit
