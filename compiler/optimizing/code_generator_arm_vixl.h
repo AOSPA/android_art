@@ -187,6 +187,30 @@ class InvokeDexCallingConventionVisitorARMVIXL : public InvokeDexCallingConventi
   DISALLOW_COPY_AND_ASSIGN(InvokeDexCallingConventionVisitorARMVIXL);
 };
 
+class CriticalNativeCallingConventionVisitorARMVIXL : public InvokeDexCallingConventionVisitor {
+ public:
+  explicit CriticalNativeCallingConventionVisitorARMVIXL(bool for_register_allocation)
+      : for_register_allocation_(for_register_allocation) {}
+
+  virtual ~CriticalNativeCallingConventionVisitorARMVIXL() {}
+
+  Location GetNextLocation(DataType::Type type) override;
+  Location GetReturnLocation(DataType::Type type) const override;
+  Location GetMethodLocation() const override;
+
+  size_t GetStackOffset() const { return stack_offset_; }
+
+ private:
+  // Register allocator does not support adjusting frame size, so we cannot provide final locations
+  // of stack arguments for register allocation. We ask the register allocator for any location and
+  // move these arguments to the right place after adjusting the SP when generating the call.
+  const bool for_register_allocation_;
+  size_t gpr_index_ = 0u;
+  size_t stack_offset_ = 0u;
+
+  DISALLOW_COPY_AND_ASSIGN(CriticalNativeCallingConventionVisitorARMVIXL);
+};
+
 class FieldAccessCallingConventionARMVIXL : public FieldAccessCallingConvention {
  public:
   FieldAccessCallingConventionARMVIXL() {}
@@ -448,6 +472,13 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
 
   size_t GetCalleePreservedFPWidth() const override {
     return vixl::aarch32::kSRegSizeInBytes;
+  }
+
+  size_t GetSIMDRegisterWidth() const override {
+    // ARM 32-bit backend doesn't support Q registers in vectorizer, only D
+    // registers (due to register allocator restrictions: overlapping s/d/q
+    // registers).
+    return vixl::aarch32::kDRegSizeInBytes;
   }
 
   HGraphVisitor* GetLocationBuilder() override { return &location_builder_; }
@@ -725,6 +756,9 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
   // artReadBarrierForRootSlow.
   void GenerateReadBarrierForRootSlow(HInstruction* instruction, Location out, Location root);
 
+  void IncreaseFrame(size_t adjustment) override;
+  void DecreaseFrame(size_t adjustment) override;
+
   void GenerateNop() override;
 
   void GenerateImplicitNullCheck(HNullCheck* instruction) override;
@@ -845,9 +879,6 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
   void CompileBakerReadBarrierThunk(ArmVIXLAssembler& assembler,
                                     uint32_t encoded_data,
                                     /*out*/ std::string* debug_name);
-
-  vixl::aarch32::Register GetInvokeStaticOrDirectExtraParameter(HInvokeStaticOrDirect* invoke,
-                                                                vixl::aarch32::Register temp);
 
   using Uint32ToLiteralMap = ArenaSafeMap<uint32_t, VIXLUInt32Literal*>;
   using StringToLiteralMap = ArenaSafeMap<StringReference,

@@ -4,7 +4,7 @@
 // (Libcore).
 
 // Modules listed in LOCAL_REQUIRED_MODULES for module art-runtime in art/Android.mk.
-// - Base requirements (binaries for which both 32- and 64-bit versions are built, if relevant).
+// - Base requirements (binaries for which both 32- and 64-bit versions are built, if possible).
 art_runtime_base_binaries_both = [
     "dalvikvm",
 ]
@@ -17,6 +17,7 @@ art_runtime_base_binaries_prefer32_on_device_first_on_host = [
     "dexoptanalyzer",
     "profman",
 ]
+
 // - Base requirements (libraries).
 //
 // Note: ART on-device chroot-based testing and benchmarking is not yet using
@@ -140,7 +141,6 @@ art_tools_host_only_binaries = [
 libcore_java_libs = [
     "core-oj",
     "core-libart",
-    "core-icu4j",
     "okhttp",
     "bouncycastle",
     "apache-xml",
@@ -159,25 +159,15 @@ libcore_java_libs = [
 // the ART APEX.
 libcore_native_shared_libs = [
     // External API (having APEX stubs).
-    "libandroidicu",
     "libandroidio",
     // TODO(b/124476339): Clean up the following libraries once "required"
     // dependencies work with APEX libraries.
     "libexpat",
-    "libicui18n",
-    "libicuuc",
-    "libicu_jni",
     "libjavacore",
     "libopenjdk",
 ]
 libcore_debug_native_shared_libs = [
     "libopenjdkd",
-]
-
-libcore_native_device_only_shared_libs = [
-    // TODO(b/122876336): Remove libpac.so once it's migrated to Webview.
-    // libpac is used by frameworks, not by ART host.
-    "libpac",
 ]
 
 // Temporary library includes for b/123591866 as all libraries are moved into the main art-apex.
@@ -199,13 +189,6 @@ apex_key {
     private_key: "com.android.art.pem",
 }
 
-prebuilt_etc {
-    name: "com.android.art.ld.config.txt",
-    src: "ld.config.txt",
-    filename: "ld.config.txt",
-    installable: false,
-}
-
 // Default values shared by device ART APEXes.
 apex_defaults {
     name: "com.android.art-defaults",
@@ -214,7 +197,6 @@ apex_defaults {
     java_libs: libcore_java_libs,
     native_shared_libs: art_runtime_base_native_shared_libs +
         art_runtime_base_native_device_only_shared_libs +
-        libcore_native_device_only_shared_libs +
         libcore_native_shared_libs,
     multilib: {
         both: {
@@ -229,12 +211,18 @@ apex_defaults {
                 art_tools_device_only_binaries,
         },
     },
-    prebuilts: ["com.android.art.ld.config.txt"],
     key: "com.android.art.key",
     required: [
-        "art_apex_boot_integrity",
         "com.android.i18n",
     ],
+    // ART APEXes depend on bouncycastle which is disabled for PDK builds.
+    // Since the dependency is disabled, ART APEXes can't be built either.
+    // Disable the APEXes too. See b/157267166.
+    product_variables: {
+        pdk: {
+            enabled: false,
+        },
+    },
 }
 
 // Default values shared by (device) Debug and Testing ART APEXes.
@@ -362,6 +350,14 @@ art_apex_test_host {
                     binaries: bionic_binaries_both,
                 },
             },
+        },
+    },
+    // ART APEXes depend on bouncycastle which is disabled for PDK builds.
+    // Since the dependency is disabled, ART APEXes can't be built either.
+    // Disable the APEXes too. See b/157267166.
+    product_variables: {
+        pdk: {
+            enabled: false,
         },
     },
 }

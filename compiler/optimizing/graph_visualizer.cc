@@ -21,6 +21,7 @@
 #include <cctype>
 #include <sstream>
 
+#include "android-base/stringprintf.h"
 #include "art_method.h"
 #include "base/intrusive_forward_list.h"
 #include "bounds_check_elimination.h"
@@ -41,6 +42,8 @@
 #include "utils/assembler.h"
 
 namespace art {
+
+using android::base::StringPrintf;
 
 static bool HasWhitespace(const char* str) {
   DCHECK(str != nullptr);
@@ -449,10 +452,7 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
   }
 
   void VisitCompare(HCompare* compare) override {
-    ComparisonBias bias = compare->GetBias();
-    StartAttributeStream("bias") << (bias == ComparisonBias::kGtBias
-                                     ? "gt"
-                                     : (bias == ComparisonBias::kLtBias ? "lt" : "none"));
+    StartAttributeStream("bias") << compare->GetBias();
   }
 
   void VisitInvoke(HInvoke* invoke) override {
@@ -904,6 +904,19 @@ void HGraphVisualizer::PrintHeader(const char* method_name) const {
   printer.PrintTime("date");
   printer.EndTag("compilation");
   printer.Flush();
+}
+
+std::string HGraphVisualizer::InsertMetaDataAsCompilationBlock(const std::string& meta_data) {
+  std::string time_str = std::to_string(time(nullptr));
+  std::string quoted_meta_data = "\"" + meta_data + "\"";
+  return StringPrintf("begin_compilation\n"
+                      "  name %s\n"
+                      "  method %s\n"
+                      "  date %s\n"
+                      "end_compilation\n",
+                      quoted_meta_data.c_str(),
+                      quoted_meta_data.c_str(),
+                      time_str.c_str());
 }
 
 void HGraphVisualizer::DumpGraph(const char* pass_name,

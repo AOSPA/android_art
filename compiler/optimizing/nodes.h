@@ -32,6 +32,8 @@
 #include "base/stl_util.h"
 #include "base/transform_array_ref.h"
 #include "art_method.h"
+#include "class_root.h"
+#include "compilation_kind.h"
 #include "data_type.h"
 #include "deoptimization_kind.h"
 #include "dex/dex_file.h"
@@ -272,13 +274,6 @@ class ReferenceTypeInfo : ValueObject {
     return GetTypeHandle()->IsAssignableFrom(rti.GetTypeHandle().Get());
   }
 
-  bool IsStrictSupertypeOf(ReferenceTypeInfo rti) const REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK(IsValid());
-    DCHECK(rti.IsValid());
-    return GetTypeHandle().Get() != rti.GetTypeHandle().Get() &&
-        GetTypeHandle()->IsAssignableFrom(rti.GetTypeHandle().Get());
-  }
-
   // Returns true if the type information provide the same amount of details.
   // Note that it does not mean that the instructions have the same actual type
   // (because the type can be the result of a merge).
@@ -309,23 +304,86 @@ class ReferenceTypeInfo : ValueObject {
 
 std::ostream& operator<<(std::ostream& os, const ReferenceTypeInfo& rhs);
 
+class HandleCache {
+ public:
+  explicit HandleCache(VariableSizedHandleScope* handles) : handles_(handles) { }
+
+  VariableSizedHandleScope* GetHandles() { return handles_; }
+
+  template <typename T>
+  MutableHandle<T> NewHandle(T* object) REQUIRES_SHARED(Locks::mutator_lock_) {
+    return handles_->NewHandle(object);
+  }
+
+  template <typename T>
+  MutableHandle<T> NewHandle(ObjPtr<T> object) REQUIRES_SHARED(Locks::mutator_lock_) {
+    return handles_->NewHandle(object);
+  }
+
+  ReferenceTypeInfo::TypeHandle GetObjectClassHandle() {
+    return GetRootHandle(ClassRoot::kJavaLangObject, &object_class_handle_);
+  }
+
+  ReferenceTypeInfo::TypeHandle GetClassClassHandle() {
+    return GetRootHandle(ClassRoot::kJavaLangClass, &class_class_handle_);
+  }
+
+  ReferenceTypeInfo::TypeHandle GetMethodHandleClassHandle() {
+    return GetRootHandle(ClassRoot::kJavaLangInvokeMethodHandleImpl, &method_handle_class_handle_);
+  }
+
+  ReferenceTypeInfo::TypeHandle GetMethodTypeClassHandle() {
+    return GetRootHandle(ClassRoot::kJavaLangInvokeMethodType, &method_type_class_handle_);
+  }
+
+  ReferenceTypeInfo::TypeHandle GetStringClassHandle() {
+    return GetRootHandle(ClassRoot::kJavaLangString, &string_class_handle_);
+  }
+
+  ReferenceTypeInfo::TypeHandle GetThrowableClassHandle() {
+    return GetRootHandle(ClassRoot::kJavaLangThrowable, &throwable_class_handle_);
+  }
+
+
+ private:
+  inline ReferenceTypeInfo::TypeHandle GetRootHandle(ClassRoot class_root,
+                                                     ReferenceTypeInfo::TypeHandle* cache) {
+    if (UNLIKELY(!ReferenceTypeInfo::IsValidHandle(*cache))) {
+      *cache = CreateRootHandle(handles_, class_root);
+    }
+    return *cache;
+  }
+
+  static ReferenceTypeInfo::TypeHandle CreateRootHandle(VariableSizedHandleScope* handles,
+                                                        ClassRoot class_root);
+
+  VariableSizedHandleScope* handles_;
+
+  ReferenceTypeInfo::TypeHandle object_class_handle_;
+  ReferenceTypeInfo::TypeHandle class_class_handle_;
+  ReferenceTypeInfo::TypeHandle method_handle_class_handle_;
+  ReferenceTypeInfo::TypeHandle method_type_class_handle_;
+  ReferenceTypeInfo::TypeHandle string_class_handle_;
+  ReferenceTypeInfo::TypeHandle throwable_class_handle_;
+};
+
 // Control-flow graph of a method. Contains a list of basic blocks.
 class HGraph : public ArenaObject<kArenaAllocGraph> {
  public:
   HGraph(ArenaAllocator* allocator,
          ArenaStack* arena_stack,
+         VariableSizedHandleScope* handles,
          const DexFile& dex_file,
          uint32_t method_idx,
          InstructionSet instruction_set,
          InvokeType invoke_type = kInvalidInvokeType,
          bool dead_reference_safe = false,
          bool debuggable = false,
-         bool osr = false,
-         bool is_shared_jit_code = false,
-         bool baseline = false,
+         CompilationKind compilation_kind = CompilationKind::kOptimized,
          int start_instruction_id = 0)
       : allocator_(allocator),
         arena_stack_(arena_stack),
+        handle_cache_(handles),
         blocks_(allocator->Adapter(kArenaAllocBlockList)),
         reverse_post_order_(allocator->Adapter(kArenaAllocReversePostOrder)),
         linear_order_(allocator->Adapter(kArenaAllocLinearOrder)),
@@ -357,19 +415,16 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
         cached_double_constants_(std::less<int64_t>(), allocator->Adapter(kArenaAllocConstantsMap)),
         cached_current_method_(nullptr),
         art_method_(nullptr),
-        inexact_object_rti_(ReferenceTypeInfo::CreateInvalid()),
-        osr_(osr),
-        baseline_(baseline),
-        cha_single_implementation_list_(allocator->Adapter(kArenaAllocCHA)),
-        is_shared_jit_code_(is_shared_jit_code) {
+        compilation_kind_(compilation_kind),
+        cha_single_implementation_list_(allocator->Adapter(kArenaAllocCHA)) {
     blocks_.reserve(kDefaultNumberOfBlocks);
   }
 
-  // Acquires and stores RTI of inexact Object to be used when creating HNullConstant.
-  void InitializeInexactObjectRTI(VariableSizedHandleScope* handles);
-
   ArenaAllocator* GetAllocator() const { return allocator_; }
   ArenaStack* GetArenaStack() const { return arena_stack_; }
+
+  HandleCache* GetHandleCache() { return &handle_cache_; }
+
   const ArenaVector<HBasicBlock*>& GetBlocks() const { return blocks_; }
 
   bool IsInSsaForm() const { return in_ssa_form_; }
@@ -589,13 +644,11 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
     return instruction_set_;
   }
 
-  bool IsCompilingOsr() const { return osr_; }
+  bool IsCompilingOsr() const { return compilation_kind_ == CompilationKind::kOsr; }
 
-  bool IsCompilingBaseline() const { return baseline_; }
+  bool IsCompilingBaseline() const { return compilation_kind_ == CompilationKind::kBaseline; }
 
-  bool IsCompilingForSharedJitCode() const {
-    return is_shared_jit_code_;
-  }
+  CompilationKind GetCompilationKind() const { return compilation_kind_; }
 
   ArenaSet<ArtMethod*>& GetCHASingleImplementationList() {
     return cha_single_implementation_list_;
@@ -632,7 +685,9 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   // before cursor.
   HInstruction* InsertOppositeCondition(HInstruction* cond, HInstruction* cursor);
 
-  ReferenceTypeInfo GetInexactObjectRti() const { return inexact_object_rti_; }
+  ReferenceTypeInfo GetInexactObjectRti() {
+    return ReferenceTypeInfo::Create(handle_cache_.GetObjectClassHandle(), /* is_exact= */ false);
+  }
 
   uint32_t GetNumberOfCHAGuards() { return number_of_cha_guards_; }
   void SetNumberOfCHAGuards(uint32_t num) { number_of_cha_guards_ = num; }
@@ -674,6 +729,8 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
 
   ArenaAllocator* const allocator_;
   ArenaStack* const arena_stack_;
+
+  HandleCache handle_cache_;
 
   // List of blocks in insertion order.
   ArenaVector<HBasicBlock*> blocks_;
@@ -781,25 +838,14 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   // (such as when the superclass could not be found).
   ArtMethod* art_method_;
 
-  // Keep the RTI of inexact Object to avoid having to pass stack handle
-  // collection pointer to passes which may create NullConstant.
-  ReferenceTypeInfo inexact_object_rti_;
-
-  // Whether we are compiling this graph for on stack replacement: this will
-  // make all loops seen as irreducible and emit special stack maps to mark
-  // compiled code entries which the interpreter can directly jump to.
-  const bool osr_;
-
-  // Whether we are compiling baseline (not running optimizations). This affects
-  // the code being generated.
-  const bool baseline_;
+  // How we are compiling the graph: either optimized, osr, or baseline.
+  // For osr, we will make all loops seen as irreducible and emit special
+  // stack maps to mark compiled code entries which the interpreter can
+  // directly jump to.
+  const CompilationKind compilation_kind_;
 
   // List of methods that are assumed to have single implementation.
   ArenaSet<ArtMethod*> cha_single_implementation_list_;
-
-  // Whether we are JIT compiling in the shared region area, putting
-  // restrictions on, for example, how literals are being generated.
-  bool is_shared_jit_code_;
 
   friend class SsaBuilder;           // For caching constants.
   friend class SsaLivenessAnalysis;  // For the linear order.
@@ -1387,7 +1433,7 @@ class HLoopInformationOutwardIterator : public ValueObject {
   DISALLOW_COPY_AND_ASSIGN(HLoopInformationOutwardIterator);
 };
 
-#define FOR_EACH_CONCRETE_INSTRUCTION_COMMON(M)                         \
+#define FOR_EACH_CONCRETE_INSTRUCTION_SCALAR_COMMON(M)                  \
   M(Above, Condition)                                                   \
   M(AboveOrEqual, Condition)                                            \
   M(Abs, UnaryOperation)                                                \
@@ -1477,7 +1523,9 @@ class HLoopInformationOutwardIterator : public ValueObject {
   M(TryBoundary, Instruction)                                           \
   M(TypeConversion, Instruction)                                        \
   M(UShr, BinaryOperation)                                              \
-  M(Xor, BinaryOperation)                                               \
+  M(Xor, BinaryOperation)
+
+#define FOR_EACH_CONCRETE_INSTRUCTION_VECTOR_COMMON(M)                  \
   M(VecReplicateScalar, VecUnaryOperation)                              \
   M(VecExtractScalar, VecUnaryOperation)                                \
   M(VecReduce, VecUnaryOperation)                                       \
@@ -1507,6 +1555,13 @@ class HLoopInformationOutwardIterator : public ValueObject {
   M(VecDotProd, VecOperation)                                           \
   M(VecLoad, VecMemoryOperation)                                        \
   M(VecStore, VecMemoryOperation)                                       \
+  M(VecPredSetAll, VecPredSetOperation)                                 \
+  M(VecPredWhile, VecPredSetOperation)                                  \
+  M(VecPredCondition, VecOperation)                                     \
+
+#define FOR_EACH_CONCRETE_INSTRUCTION_COMMON(M)                         \
+  FOR_EACH_CONCRETE_INSTRUCTION_SCALAR_COMMON(M)                        \
+  FOR_EACH_CONCRETE_INSTRUCTION_VECTOR_COMMON(M)
 
 /*
  * Instructions, shared across several (not all) architectures.
@@ -1563,7 +1618,8 @@ class HLoopInformationOutwardIterator : public ValueObject {
   M(VecOperation, Instruction)                                          \
   M(VecUnaryOperation, VecOperation)                                    \
   M(VecBinaryOperation, VecOperation)                                   \
-  M(VecMemoryOperation, VecOperation)
+  M(VecMemoryOperation, VecOperation)                                   \
+  M(VecPredSetOperation, VecOperation)
 
 #define FOR_EACH_INSTRUCTION(M)                                         \
   FOR_EACH_CONCRETE_INSTRUCTION(M)                                      \
@@ -2032,7 +2088,7 @@ class HEnvironment : public ArenaObject<kArenaAllocEnvironment> {
 class HInstruction : public ArenaObject<kArenaAllocInstruction> {
  public:
 #define DECLARE_KIND(type, super) k##type,
-  enum InstructionKind {
+  enum InstructionKind {  // private marker to avoid generate-operator-out.py from processing.
     FOR_EACH_CONCRETE_INSTRUCTION(DECLARE_KIND)
     kLastInstructionKind
   };
@@ -2590,7 +2646,7 @@ class HInstruction : public ArenaObject<kArenaAllocInstruction> {
   friend class HGraph;
   friend class HInstructionList;
 };
-std::ostream& operator<<(std::ostream& os, const HInstruction::InstructionKind& rhs);
+std::ostream& operator<<(std::ostream& os, HInstruction::InstructionKind rhs);
 
 // Iterates over the instructions, while preserving the next instruction
 // in case the current instruction gets removed from the list by the user
@@ -3615,14 +3671,14 @@ class HBinaryOperation : public HExpression<2> {
 
 // The comparison bias applies for floating point operations and indicates how NaN
 // comparisons are treated:
-enum class ComparisonBias {
+enum class ComparisonBias {  // private marker to avoid generate-operator-out.py from processing.
   kNoBias,  // bias is not applicable (i.e. for long operation)
   kGtBias,  // return 1 for NaN comparisons
   kLtBias,  // return -1 for NaN comparisons
   kLast = kLtBias
 };
 
-std::ostream& operator<<(std::ostream& os, const ComparisonBias& rhs);
+std::ostream& operator<<(std::ostream& os, ComparisonBias rhs);
 
 class HCondition : public HBinaryOperation {
  public:
@@ -4149,8 +4205,6 @@ class HCompare final : public HBinaryOperation {
                          SideEffectsForArchRuntimeCalls(comparison_type),
                          dex_pc) {
     SetPackedField<ComparisonBiasField>(bias);
-    DCHECK_EQ(comparison_type, DataType::Kind(first->GetType()));
-    DCHECK_EQ(comparison_type, DataType::Kind(second->GetType()));
   }
 
   template <typename T>
@@ -4453,7 +4507,8 @@ class HInvokePolymorphic final : public HInvoke {
                      uint32_t number_of_arguments,
                      DataType::Type return_type,
                      uint32_t dex_pc,
-                     uint32_t dex_method_index)
+                     uint32_t dex_method_index,
+                     ArtMethod* resolved_method)
       : HInvoke(kInvokePolymorphic,
                 allocator,
                 number_of_arguments,
@@ -4461,7 +4516,7 @@ class HInvokePolymorphic final : public HInvoke {
                 return_type,
                 dex_pc,
                 dex_method_index,
-                nullptr,
+                resolved_method,
                 kVirtual) {
   }
 
@@ -4509,7 +4564,7 @@ class HInvokeStaticOrDirect final : public HInvoke {
  public:
   // Requirements of this method call regarding the class
   // initialization (clinit) check of its declaring class.
-  enum class ClinitCheckRequirement {
+  enum class ClinitCheckRequirement {  // private marker to avoid generate-operator-out.py from processing.
     kNone,      // Class already initialized.
     kExplicit,  // Static call having explicit clinit check as last input.
     kImplicit,  // Static call implicitly requiring a clinit check.
@@ -4550,6 +4605,11 @@ class HInvokeStaticOrDirect final : public HInvoke {
     // Recursive call, use local PC-relative call instruction.
     kCallSelf,
 
+    // Use native pointer from the Artmethod*.
+    // Used for @CriticalNative to avoid going through the compiled stub. This call goes through
+    // a special resolution stub if the class is not initialized or no native code is registered.
+    kCallCriticalNative,
+
     // Use code pointer from the ArtMethod*.
     // Used when we don't know the target code. This is also the last-resort-kind used when
     // other kinds are unimplemented or impractical (i.e. slow) on a particular architecture.
@@ -4579,9 +4639,9 @@ class HInvokeStaticOrDirect final : public HInvoke {
       : HInvoke(kInvokeStaticOrDirect,
                 allocator,
                 number_of_arguments,
-                // There is potentially one extra argument for the HCurrentMethod node, and
-                // potentially one other if the clinit check is explicit.
-                (NeedsCurrentMethodInput(dispatch_info.method_load_kind) ? 1u : 0u) +
+                // There is potentially one extra argument for the HCurrentMethod input,
+                // and one other if the clinit check is explicit. These can be removed later.
+                (NeedsCurrentMethodInput(dispatch_info) ? 1u : 0u) +
                     (clinit_check_requirement == ClinitCheckRequirement::kExplicit ? 1u : 0u),
                 return_type,
                 dex_pc,
@@ -4595,31 +4655,23 @@ class HInvokeStaticOrDirect final : public HInvoke {
 
   bool IsClonable() const override { return true; }
 
-  void SetDispatchInfo(const DispatchInfo& dispatch_info) {
+  void SetDispatchInfo(DispatchInfo dispatch_info) {
     bool had_current_method_input = HasCurrentMethodInput();
-    bool needs_current_method_input = NeedsCurrentMethodInput(dispatch_info.method_load_kind);
+    bool needs_current_method_input = NeedsCurrentMethodInput(dispatch_info);
 
     // Using the current method is the default and once we find a better
     // method load kind, we should not go back to using the current method.
     DCHECK(had_current_method_input || !needs_current_method_input);
 
     if (had_current_method_input && !needs_current_method_input) {
-      DCHECK_EQ(InputAt(GetSpecialInputIndex()), GetBlock()->GetGraph()->GetCurrentMethod());
-      RemoveInputAt(GetSpecialInputIndex());
+      DCHECK_EQ(InputAt(GetCurrentMethodIndex()), GetBlock()->GetGraph()->GetCurrentMethod());
+      RemoveInputAt(GetCurrentMethodIndex());
     }
     dispatch_info_ = dispatch_info;
   }
 
   DispatchInfo GetDispatchInfo() const {
     return dispatch_info_;
-  }
-
-  void AddSpecialInput(HInstruction* input) {
-    // We allow only one special input.
-    DCHECK(!IsStringInit() && !HasCurrentMethodInput());
-    DCHECK(InputCount() == GetSpecialInputIndex() ||
-           (InputCount() == GetSpecialInputIndex() + 1 && IsStaticWithExplicitClinitCheck()));
-    InsertInputAt(GetSpecialInputIndex(), input);
   }
 
   using HInstruction::GetInputRecords;  // Keep the const version visible.
@@ -4642,7 +4694,7 @@ class HInvokeStaticOrDirect final : public HInvoke {
   }
 
   bool CanDoImplicitNullCheckOn(HInstruction* obj ATTRIBUTE_UNUSED) const override {
-    // We access the method via the dex cache so we can't do an implicit null check.
+    // We do not access the method via object reference, so we cannot do an implicit null check.
     // TODO: for intrinsics we can generate implicit null checks.
     return false;
   }
@@ -4650,14 +4702,6 @@ class HInvokeStaticOrDirect final : public HInvoke {
   bool CanBeNull() const override {
     return GetType() == DataType::Type::kReference && !IsStringInit();
   }
-
-  // Get the index of the special input, if any.
-  //
-  // If the invoke HasCurrentMethodInput(), the "special input" is the current
-  // method pointer; otherwise there may be one platform-specific special input,
-  // such as PC-relative addressing base.
-  uint32_t GetSpecialInputIndex() const { return GetNumberOfArguments(); }
-  bool HasSpecialInput() const { return GetNumberOfArguments() != InputCount(); }
 
   MethodLoadKind GetMethodLoadKind() const { return dispatch_info_.method_load_kind; }
   CodePtrLocation GetCodePtrLocation() const { return dispatch_info_.code_ptr_location; }
@@ -4669,17 +4713,6 @@ class HInvokeStaticOrDirect final : public HInvoke {
     return GetMethodLoadKind() == MethodLoadKind::kBootImageLinkTimePcRelative ||
            GetMethodLoadKind() == MethodLoadKind::kBootImageRelRo ||
            GetMethodLoadKind() == MethodLoadKind::kBssEntry;
-  }
-  bool HasCurrentMethodInput() const {
-    // This function can be called only after the invoke has been fully initialized by the builder.
-    if (NeedsCurrentMethodInput(GetMethodLoadKind())) {
-      DCHECK(InputAt(GetSpecialInputIndex())->IsCurrentMethod());
-      return true;
-    } else {
-      DCHECK(InputCount() == GetSpecialInputIndex() ||
-             !InputAt(GetSpecialInputIndex())->IsCurrentMethod());
-      return false;
-    }
   }
 
   QuickEntrypointEnum GetStringInitEntryPoint() const {
@@ -4705,6 +4738,60 @@ class HInvokeStaticOrDirect final : public HInvoke {
 
   MethodReference GetTargetMethod() const {
     return target_method_;
+  }
+
+  // Does this method load kind need the current method as an input?
+  static bool NeedsCurrentMethodInput(DispatchInfo dispatch_info) {
+    return dispatch_info.method_load_kind == MethodLoadKind::kRecursive ||
+           dispatch_info.method_load_kind == MethodLoadKind::kRuntimeCall ||
+           dispatch_info.code_ptr_location == CodePtrLocation::kCallCriticalNative;
+  }
+
+  // Get the index of the current method input.
+  size_t GetCurrentMethodIndex() const {
+    DCHECK(HasCurrentMethodInput());
+    return GetCurrentMethodIndexUnchecked();
+  }
+  size_t GetCurrentMethodIndexUnchecked() const {
+    return GetNumberOfArguments();
+  }
+
+  // Check if the method has a current method input.
+  bool HasCurrentMethodInput() const {
+    if (NeedsCurrentMethodInput(GetDispatchInfo())) {
+      DCHECK(InputAt(GetCurrentMethodIndexUnchecked()) == nullptr ||  // During argument setup.
+             InputAt(GetCurrentMethodIndexUnchecked())->IsCurrentMethod());
+      return true;
+    } else {
+      DCHECK(InputCount() == GetCurrentMethodIndexUnchecked() ||
+             InputAt(GetCurrentMethodIndexUnchecked()) == nullptr ||  // During argument setup.
+             !InputAt(GetCurrentMethodIndexUnchecked())->IsCurrentMethod());
+      return false;
+    }
+  }
+
+  // Get the index of the special input.
+  size_t GetSpecialInputIndex() const {
+    DCHECK(HasSpecialInput());
+    return GetSpecialInputIndexUnchecked();
+  }
+  size_t GetSpecialInputIndexUnchecked() const {
+    return GetNumberOfArguments() + (HasCurrentMethodInput() ? 1u : 0u);
+  }
+
+  // Check if the method has a special input.
+  bool HasSpecialInput() const {
+    size_t other_inputs =
+        GetSpecialInputIndexUnchecked() + (IsStaticWithExplicitClinitCheck() ? 1u : 0u);
+    size_t input_count = InputCount();
+    DCHECK_LE(input_count - other_inputs, 1u) << other_inputs << " " << input_count;
+    return other_inputs != input_count;
+  }
+
+  void AddSpecialInput(HInstruction* input) {
+    // We allow only one special input.
+    DCHECK(!HasSpecialInput());
+    InsertInputAt(GetSpecialInputIndexUnchecked(), input);
   }
 
   // Remove the HClinitCheck or the replacement HLoadClass (set as last input by
@@ -4734,11 +4821,6 @@ class HInvokeStaticOrDirect final : public HInvoke {
     return IsStatic() && (GetClinitCheckRequirement() == ClinitCheckRequirement::kImplicit);
   }
 
-  // Does this method load kind need the current method as an input?
-  static bool NeedsCurrentMethodInput(MethodLoadKind kind) {
-    return kind == MethodLoadKind::kRecursive || kind == MethodLoadKind::kRuntimeCall;
-  }
-
   DECLARE_INSTRUCTION(InvokeStaticOrDirect);
 
  protected:
@@ -4761,6 +4843,7 @@ class HInvokeStaticOrDirect final : public HInvoke {
   DispatchInfo dispatch_info_;
 };
 std::ostream& operator<<(std::ostream& os, HInvokeStaticOrDirect::MethodLoadKind rhs);
+std::ostream& operator<<(std::ostream& os, HInvokeStaticOrDirect::CodePtrLocation rhs);
 std::ostream& operator<<(std::ostream& os, HInvokeStaticOrDirect::ClinitCheckRequirement rhs);
 
 class HInvokeVirtual final : public HInvoke {
@@ -5542,8 +5625,6 @@ class HRor final : public HBinaryOperation {
  public:
   HRor(DataType::Type result_type, HInstruction* value, HInstruction* distance)
       : HBinaryOperation(kRor, result_type, value, distance) {
-    DCHECK_EQ(result_type, DataType::Kind(value->GetType()));
-    DCHECK_EQ(DataType::Type::kInt32, DataType::Kind(distance->GetType()));
   }
 
   template <typename T>
@@ -7146,7 +7227,7 @@ class HThrow final : public HExpression<1> {
  * Implementation strategies for the code generator of a HInstanceOf
  * or `HCheckCast`.
  */
-enum class TypeCheckKind {
+enum class TypeCheckKind {  // private marker to avoid generate-operator-out.py from processing.
   kUnresolvedCheck,       // Check against an unresolved type.
   kExactCheck,            // Can do a single class compare.
   kClassHierarchyCheck,   // Can just walk the super class chain.
@@ -7420,7 +7501,7 @@ enum MemBarrierKind {
   kNTStoreStore,
   kLastBarrierKind = kNTStoreStore
 };
-std::ostream& operator<<(std::ostream& os, const MemBarrierKind& kind);
+std::ostream& operator<<(std::ostream& os, MemBarrierKind kind);
 
 class HMemoryBarrier final : public HExpression<0> {
  public:
@@ -8121,9 +8202,17 @@ inline HInstruction* HuntForDeclaration(HInstruction* instruction) {
   return instruction;
 }
 
+inline bool IsAddOrSub(const HInstruction* instruction) {
+  return instruction->IsAdd() || instruction->IsSub();
+}
+
 void RemoveEnvironmentUses(HInstruction* instruction);
 bool HasEnvironmentUsedByOthers(HInstruction* instruction);
 void ResetEnvironmentInputRecords(HInstruction* instruction);
+
+// Detects an instruction that is >= 0. As long as the value is carried by
+// a single instruction, arithmetic wrap-around cannot occur.
+bool IsGEZero(HInstruction* instruction);
 
 }  // namespace art
 

@@ -21,6 +21,7 @@
 #include <dirent.h>
 
 #include <algorithm>
+#include <map>
 #include <memory>
 
 #include <android-base/file.h>
@@ -30,7 +31,7 @@
 #include <android-base/strings.h>
 #include <log/log.h>
 
-#if defined(__ANDROID__)
+#if defined(ART_TARGET_ANDROID)
 #include <android/sysprop/VndkProperties.sysprop.h>
 #endif
 
@@ -42,6 +43,7 @@ using android::base::ErrnoError;
 using android::base::Result;
 using internal::ConfigEntry;
 using internal::ParseConfig;
+using internal::ParseJniConfig;
 using std::literals::string_literals::operator""s;
 
 namespace {
@@ -49,16 +51,21 @@ namespace {
 constexpr const char* kDefaultPublicLibrariesFile = "/etc/public.libraries.txt";
 constexpr const char* kExtendedPublicLibrariesFilePrefix = "public.libraries-";
 constexpr const char* kExtendedPublicLibrariesFileSuffix = ".txt";
+constexpr const char* kJniConfigFile = "/linkerconfig/jni.config.txt";
 constexpr const char* kVendorPublicLibrariesFile = "/vendor/etc/public.libraries.txt";
 constexpr const char* kLlndkLibrariesFile = "/apex/com.android.vndk.v{}/etc/llndk.libraries.{}.txt";
 constexpr const char* kVndkLibrariesFile = "/apex/com.android.vndk.v{}/etc/vndksp.libraries.{}.txt";
 
 const std::vector<const std::string> kArtApexPublicLibraries = {
+    "libnativehelper.so",
+};
+
+const std::vector<const std::string> ki18nApexPublicLibraries = {
     "libicuuc.so",
     "libicui18n.so",
 };
 
-constexpr const char* kArtApexLibPath = "/apex/com.android.art/" LIB;
+constexpr const char* kI18nApexLibPath = "/apex/com.android.i18n/" LIB;
 
 constexpr const char* kNeuralNetworksApexPublicLibrary = "libneuralnetworks.so";
 
@@ -191,14 +198,14 @@ static std::string InitDefaultPublicLibraries(bool for_preload) {
     return android::base::Join(*sonames, ':');
   }
 
-  // Remove the public libs in the art namespace.
+  // Remove the public libs in the i18n namespace.
   // These libs are listed in public.android.txt, but we don't want the rest of android
   // in default namespace to dlopen the libs.
   // For example, libicuuc.so is exposed to classloader namespace from art namespace.
   // Unfortunately, it does not have stable C symbols, and default namespace should only use
   // stable symbols in libandroidicu.so. http://b/120786417
-  for (const std::string& lib_name : kArtApexPublicLibraries) {
-    std::string path(kArtApexLibPath);
+  for (const std::string& lib_name : ki18nApexPublicLibraries) {
+    std::string path(kI18nApexLibPath);
     path.append("/").append(lib_name);
 
     struct stat s;
@@ -223,13 +230,19 @@ static std::string InitDefaultPublicLibraries(bool for_preload) {
 }
 
 static std::string InitArtPublicLibraries() {
-  CHECK_GT((int)sizeof(kArtApexPublicLibraries), 0);
+  CHECK_GT((int)kArtApexPublicLibraries.size(), 0);
   std::string list = android::base::Join(kArtApexPublicLibraries, ":");
 
   std::string additional_libs = additional_public_libraries();
   if (!additional_libs.empty()) {
     list = list + ':' + additional_libs;
   }
+  return list;
+}
+
+static std::string InitI18nPublicLibraries() {
+  static_assert(sizeof(ki18nApexPublicLibraries) > 0, "ki18nApexPublicLibraries is empty");
+  std::string list = android::base::Join(ki18nApexPublicLibraries, ":");
   return list;
 }
 
@@ -313,6 +326,21 @@ static std::string InitStatsdPublicLibraries() {
   return kStatsdApexPublicLibrary;
 }
 
+static std::map<std::string, std::string> InitApexJniLibraries() {
+  std::string file_content;
+  if (!base::ReadFileToString(kJniConfigFile, &file_content)) {
+    // jni config is optional
+    return {};
+  }
+  auto config = ParseJniConfig(file_content);
+  if (!config.ok()) {
+    LOG_ALWAYS_FATAL("%s: %s", kJniConfigFile, config.error().message().c_str());
+    // not reach here
+    return {};
+  }
+  return *config;
+}
+
 }  // namespace
 
 const std::string& preloadable_public_libraries() {
@@ -327,6 +355,11 @@ const std::string& default_public_libraries() {
 
 const std::string& art_public_libraries() {
   static std::string list = InitArtPublicLibraries();
+  return list;
+}
+
+const std::string& i18n_public_libraries() {
+  static std::string list = InitI18nPublicLibraries();
   return list;
 }
 
@@ -370,8 +403,13 @@ const std::string& vndksp_libraries_vendor() {
   return list;
 }
 
+const std::string& apex_jni_libraries(const std::string& apex_ns_name) {
+  static std::map<std::string, std::string> jni_libraries = InitApexJniLibraries();
+  return jni_libraries[apex_ns_name];
+}
+
 bool is_product_vndk_version_defined() {
-#if defined(__ANDROID__)
+#if defined(ART_TARGET_ANDROID)
   return android::sysprop::VndkProperties::product_vndk_version().has_value();
 #else
   return false;
@@ -379,7 +417,7 @@ bool is_product_vndk_version_defined() {
 }
 
 std::string get_vndk_version(bool is_product_vndk) {
-#if defined(__ANDROID__)
+#if defined(ART_TARGET_ANDROID)
   if (is_product_vndk) {
     return android::sysprop::VndkProperties::product_vndk_version().value_or("");
   }
@@ -445,6 +483,24 @@ Result<std::vector<std::string>> ParseConfig(
     }
   }
   return sonames;
+}
+
+Result<std::map<std::string, std::string>> ParseJniConfig(const std::string& file_content) {
+  std::map<std::string, std::string> entries;
+  std::vector<std::string> lines = base::Split(file_content, "\n");
+  for (auto& line : lines) {
+    auto trimmed_line = base::Trim(line);
+    if (trimmed_line[0] == '#' || trimmed_line.empty()) {
+      continue;
+    }
+
+    std::vector<std::string> tokens = base::Split(trimmed_line, " ");
+    if (tokens.size() < 2) {
+      return Errorf( "Malformed line \"{}\"", line);
+    }
+    entries[tokens[0]] = tokens[1];
+  }
+  return entries;
 }
 
 }  // namespace internal

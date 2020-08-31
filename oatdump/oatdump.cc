@@ -44,7 +44,7 @@
 #include "base/unix_file/fd_file.h"
 #include "class_linker-inl.h"
 #include "class_linker.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "compiled_method.h"
 #include "debug/debug_info.h"
 #include "debug/elf_debug_writer.h"
@@ -564,7 +564,11 @@ class OatDumper {
           }
           dex_files.push_back(dex_file);
         }
-        verifier::VerifierDeps deps(dex_files, oat_file_.GetVdexFile()->GetVerifierDepsData());
+        verifier::VerifierDeps deps(dex_files, /*output_only=*/ false);
+        if (!deps.ParseStoredData(dex_files, oat_file_.GetVdexFile()->GetVerifierDepsData())) {
+          os << "Error parsing verifier dependencies." << std::endl;
+          return false;
+        }
         deps.Dump(&vios);
       } else {
         os << "UNRECOGNIZED vdex file, magic "
@@ -2371,12 +2375,22 @@ class ImageDumper {
     } else if (method->IsAbstract() || method->IsClassInitializer()) {
       // Don't print information for these.
     } else if (method->IsRuntimeMethod()) {
-      ImtConflictTable* table = method->GetImtConflictTable(image_header_.GetPointerSize());
-      if (table != nullptr) {
-        indent_os << "IMT conflict table " << table << " method: ";
-        for (size_t i = 0, count = table->NumEntries(pointer_size); i < count; ++i) {
-          indent_os << ArtMethod::PrettyMethod(table->GetImplementationMethod(i, pointer_size))
-                    << " ";
+      if (method == Runtime::Current()->GetResolutionMethod()) {
+        const void* resolution_trampoline =
+            method->GetEntryPointFromQuickCompiledCodePtrSize(image_header_.GetPointerSize());
+        indent_os << StringPrintf("Resolution trampoline: %p\n", resolution_trampoline);
+        const void* critical_native_resolution_trampoline =
+            method->GetEntryPointFromJniPtrSize(image_header_.GetPointerSize());
+        indent_os << StringPrintf("Resolution trampoline for @CriticalNative: %p\n",
+                                  critical_native_resolution_trampoline);
+      } else {
+        ImtConflictTable* table = method->GetImtConflictTable(image_header_.GetPointerSize());
+        if (table != nullptr) {
+          indent_os << "IMT conflict table " << table << " method: ";
+          for (size_t i = 0, count = table->NumEntries(pointer_size); i < count; ++i) {
+            indent_os << ArtMethod::PrettyMethod(table->GetImplementationMethod(i, pointer_size))
+                      << " ";
+          }
         }
       }
     } else {

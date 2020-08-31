@@ -40,8 +40,7 @@ MACRO0(SETUP_SAVE_REFS_AND_ARGS_FRAME)
 #else
     SETUP_SAVE_REFS_AND_ARGS_FRAME_REGISTERS_ONLY
     // R10 := Runtime::Current()
-    movq _ZN3art7Runtime9instance_E@GOTPCREL(%rip), %r10
-    movq (%r10), %r10
+    LOAD_RUNTIME_INSTANCE r10
     // R10 := ArtMethod* for ref and args callee save frame method.
     movq RUNTIME_SAVE_REFS_AND_ARGS_METHOD_OFFSET(%r10), %r10
     // Store ArtMethod* to bottom of stack.
@@ -88,8 +87,7 @@ MACRO1(SETUP_SAVE_EVERYTHING_FRAME_R14_R15_SAVED, runtime_method_offset = RUNTIM
     subq MACRO_LITERAL(8 + 16 * 8), %rsp
     CFI_ADJUST_CFA_OFFSET(8 + 16 * 8)
     // R10 := Runtime::Current()
-    movq _ZN3art7Runtime9instance_E@GOTPCREL(%rip), %r10
-    movq (%r10), %r10
+    LOAD_RUNTIME_INSTANCE r10
     // Save FPRs.
     movq %xmm0, 8(%rsp)
     movq %xmm1, 16(%rsp)
@@ -1676,13 +1674,16 @@ DEFINE_FUNCTION art_quick_generic_jni_trampoline
     movq 48(%rsp), %xmm6
     movq 56(%rsp), %xmm7
 
-    // Load hidden arg (r11) for @CriticalNative.
-    movq 64(%rsp), %r11
+    // Save call target in scratch register.
+    movq %rax, %r11
+
+    // Load hidden arg (rax) for @CriticalNative.
+    movq 64(%rsp), %rax
     // Load SP for out args, releasing unneeded reserved area.
     movq 72(%rsp), %rsp
 
     // native call
-    call *%rax
+    call *%r11
 
     // result sign extension is handled in C code
     // prepare for artQuickGenericJniEndTrampoline call

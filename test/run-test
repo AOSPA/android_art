@@ -141,6 +141,7 @@ dev_mode="no"
 create_runner="no"
 update_mode="no"
 debug_mode="no"
+simulator_mode="no"
 relocate="no"
 runtime="art"
 usage="no"
@@ -180,6 +181,9 @@ while true; do
         target_mode="no"
         DEX_LOCATION=$tmp_dir
         run_args+=(--host)
+        shift
+    elif [ "x$1" = "x--simulate-arm64" ]; then
+        simulator_mode="yes"
         shift
     elif [ "x$1" = "x--quiet" ]; then
         quiet="yes"
@@ -615,7 +619,8 @@ fi
 function guess_target_arch_name() {
     # Check whether this is a device with native bridge. Currently this is hardcoded
     # to x86 + arm.
-    x86_arm=`ls ${ANDROID_PRODUCT_OUT}/data/art-test | sort | grep -E '^(arm|x86)$'`
+    local guess_path=${ANDROID_PRODUCT_OUT}/system/apex/com.android.art.testing/javalib
+    local x86_arm=`ls ${guess_path} | sort | grep -E '^(arm|x86)$'`
     # Collapse line-breaks into spaces
     x86_arm=$(echo $x86_arm)
     if [ "x$x86_arm" = "xarm x86" ] ; then
@@ -627,8 +632,8 @@ function guess_target_arch_name() {
             target_arch_name=x86
         fi
     else
-        grep32bit=`ls ${ANDROID_PRODUCT_OUT}/data/art-test | grep -E '^(arm|x86)$'`
-        grep64bit=`ls ${ANDROID_PRODUCT_OUT}/data/art-test | grep -E '^(arm64|x86_64)$'`
+        local grep32bit=`ls ${guess_path} | grep -E '^(arm|x86)$'`
+        local grep64bit=`ls ${guess_path} | grep -E '^(arm64|x86_64)$'`
         if [ "x${suffix64}" = "x64" ]; then
             target_arch_name=${grep64bit}
         else
@@ -673,14 +678,18 @@ if [ "$runtime" = "dalvik" ]; then
         true # defaults to using target BOOTCLASSPATH
     fi
 elif [ "$runtime" = "art" ]; then
-    if [ "$target_mode" = "no" ]; then
+    if [ "$target_mode" = "no" ] && [ "$simulator_mode" = "no" ]; then
         guess_host_arch_name
-        run_args+=(--boot "${ANDROID_HOST_OUT}/framework/core.art:*")
+        run_args+=(--boot "${ANDROID_HOST_OUT}/apex/com.android.art/javalib/boot.art")
+        run_args+=(--runtime-option "-Djava.library.path=${host_lib_root}/lib${suffix64}:${host_lib_root}/nativetest${suffix64}")
+    elif [ "$simulator_mode" = "yes" ]; then
+        run_args+=(--simulate-isa "arm64")
+        run_args+=(--boot "${ANDROID_PRODUCT_OUT}/system/apex/com.android.art.testing/javalib/boot.art")
         run_args+=(--runtime-option "-Djava.library.path=${host_lib_root}/lib${suffix64}:${host_lib_root}/nativetest${suffix64}")
     else
         guess_target_arch_name
         run_args+=(--runtime-option "-Djava.library.path=/data/nativetest${suffix64}/art/${target_arch_name}")
-        run_args+=(--boot "/data/art-test/core.art:/data/art-test/*")
+        run_args+=(--boot "/apex/com.android.art/javalib/boot.art")
     fi
     if [ "$relocate" = "yes" ]; then
       run_args+=(--relocate)
@@ -797,7 +806,6 @@ if [ "$usage" = "yes" ]; then
         echo "    --zygote              Spawn the process from the Zygote." \
              "If used, then the"
         echo "                          other runtime options are ignored."
-        echo "    --no-dex2oat          Run as though dex2oat was failing."
         echo "    --prebuild            Run dex2oat on the files before starting test. (default)"
         echo "    --no-prebuild         Do not run dex2oat on the files before starting"
         echo "                          the test."
@@ -915,7 +923,10 @@ if [[ "$TEST_NAME" =~ ^[0-9]+-checker- ]]; then
     if [ "$prebuild_mode" = "yes" -a "$have_image" = "yes" ]; then
       run_checker="yes"
 
-      if [ "$target_mode" = "no" ]; then
+      if [ "$simulator_mode" = "yes" ]; then
+        cfg_output_dir="$tmp_dir"
+        checker_args="--arch=ARM64"
+      elif [ "$target_mode" = "no" ]; then
         cfg_output_dir="$tmp_dir"
         checker_args="--arch=${host_arch_name^^}"
       else
@@ -1076,7 +1087,7 @@ fi
           # Checker failures dump the whole CFG, so we output the whole diff.
           diff --strip-trailing-cr -u "$expected" "$output"
         else
-          diff --strip-trailing-cr -u "$expected" "$output" | tail -n 3000
+          diff --strip-trailing-cr -u "$expected" "$output" | tail -n 10000
         fi
         echo '####################'
         if [ "$strace" = "yes" ]; then

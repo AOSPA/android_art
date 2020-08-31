@@ -448,15 +448,11 @@ bool DexFileVerifier::VerifyTypeDescriptor(dex::TypeIndex idx,
   // All sources of the `idx` have already been checked in CheckIntraSection().
   DCHECK_LT(idx.index_, header_->type_ids_size_);
 
-  auto err_fn = [&](const char* descriptor) {
-    ErrorStringPrintf("%s: '%s'", error_msg, descriptor);
-  };
-
   char cached_char = verified_type_descriptors_[idx.index_];
   if (cached_char != 0) {
     if (!extra_check(cached_char)) {
       const char* descriptor = dex_file_->StringByTypeIdx(idx);
-      err_fn(descriptor);
+      ErrorStringPrintf("%s: '%s'", error_msg, descriptor);
       return false;
     }
     return true;
@@ -464,13 +460,13 @@ bool DexFileVerifier::VerifyTypeDescriptor(dex::TypeIndex idx,
 
   const char* descriptor = dex_file_->StringByTypeIdx(idx);
   if (UNLIKELY(!IsValidDescriptor(descriptor))) {
-    err_fn(descriptor);
+    ErrorStringPrintf("%s: '%s'", error_msg, descriptor);
     return false;
   }
   verified_type_descriptors_[idx.index_] = descriptor[0];
 
   if (!extra_check(descriptor[0])) {
-    err_fn(descriptor);
+    ErrorStringPrintf("%s: '%s'", error_msg, descriptor);
     return false;
   }
   return true;
@@ -671,7 +667,7 @@ bool DexFileVerifier::CheckMap() {
   uint32_t data_items_left = header_->data_size_;
   uint32_t used_bits = 0;
 
-  // Sanity check the size of the map list.
+  // Check the validity of the size of the map list.
   if (!CheckListSize(item, count, sizeof(dex::MapItem), "map size")) {
     return false;
   }
@@ -2273,7 +2269,7 @@ bool DexFileVerifier::CheckIntraDataSection(size_t offset, uint32_t count) {
   size_t data_start = header_->data_off_;
   size_t data_end = data_start + header_->data_size_;
 
-  // Sanity check the offset of the section.
+  // Check the validity of the offset of the section.
   if (UNLIKELY((offset < data_start) || (offset > data_end))) {
     ErrorStringPrintf("Bad offset for data subsection: %zx", offset);
     return false;

@@ -22,7 +22,6 @@
 #include "art_method-inl.h"
 #include "base/dumpable.h"
 #include "base/file_utils.h"
-#include "class_root.h"
 #include "dex/class_accessor-inl.h"
 #include "dex/dex_file_loader.h"
 #include "mirror/class_ext.h"
@@ -94,7 +93,8 @@ static Domain DetermineDomainFromLocation(const std::string& dex_location,
   // is set to "/system".
   if (ArtModuleRootDistinctFromAndroidRoot()) {
     if (LocationIsOnArtModule(dex_location.c_str()) ||
-        LocationIsOnConscryptModule(dex_location.c_str())) {
+        LocationIsOnConscryptModule(dex_location.c_str()) ||
+        LocationIsOnI18nModule(dex_location.c_str())) {
       return Domain::kCorePlatform;
     }
 
@@ -107,9 +107,16 @@ static Domain DetermineDomainFromLocation(const std::string& dex_location,
     return Domain::kPlatform;
   }
 
+  if (LocationIsOnSystemExtFramework(dex_location.c_str())) {
+    return Domain::kPlatform;
+  }
+
   if (class_loader.IsNull()) {
-    LOG(WARNING) << "DexFile " << dex_location
-        << " is in boot class path but is not in a known location";
+    if (kIsTargetBuild && !kIsTargetLinux) {
+      // This is unexpected only when running on Android.
+      LOG(WARNING) << "DexFile " << dex_location
+          << " is in boot class path but is not in a known location";
+    }
     return Domain::kPlatform;
   }
 
@@ -131,7 +138,6 @@ void InitializeCorePlatformApiPrivateFields() {
   // API that cannot be otherwise expressed and propagated through tooling (b/144502743).
   jfieldID private_core_platform_api_fields[] = {
     WellKnownClasses::java_io_FileDescriptor_descriptor,
-    WellKnownClasses::java_io_FileDescriptor_ownerId,
     WellKnownClasses::java_nio_Buffer_address,
     WellKnownClasses::java_nio_Buffer_elementSizeShift,
     WellKnownClasses::java_nio_Buffer_limit,

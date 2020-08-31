@@ -24,9 +24,10 @@
 #include "base/mutex.h"
 #include "base/runtime_debug.h"
 #include "base/timing_logger.h"
+#include "compilation_kind.h"
 #include "handle.h"
 #include "offsets.h"
-#include "interpreter/mterp/mterp.h"
+#include "interpreter/mterp/nterp.h"
 #include "jit/debugger_interface.h"
 #include "jit/profile_saver_options.h"
 #include "obj_ptr.h"
@@ -192,7 +193,7 @@ class JitCompilerInterface {
  public:
   virtual ~JitCompilerInterface() {}
   virtual bool CompileMethod(
-      Thread* self, JitMemoryRegion* region, ArtMethod* method, bool baseline, bool osr)
+      Thread* self, JitMemoryRegion* region, ArtMethod* method, CompilationKind compilation_kind)
       REQUIRES_SHARED(Locks::mutator_lock_) = 0;
   virtual void TypesLoaded(mirror::Class**, size_t count)
       REQUIRES_SHARED(Locks::mutator_lock_) = 0;
@@ -243,7 +244,7 @@ class Jit {
   // Create JIT itself.
   static Jit* Create(JitCodeCache* code_cache, JitOptions* options);
 
-  bool CompileMethod(ArtMethod* method, Thread* self, bool baseline, bool osr, bool prejit)
+  bool CompileMethod(ArtMethod* method, Thread* self, CompilationKind compilation_kind, bool prejit)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   const JitCodeCache* GetCodeCache() const {

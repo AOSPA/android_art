@@ -42,7 +42,7 @@
 #include "base/systrace.h"
 #include "base/time_utils.h"
 #include "base/utils.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "common_throws.h"
 #include "debugger.h"
 #include "dex/dex_file-inl.h"
@@ -901,8 +901,9 @@ void Heap::IncrementDisableThreadFlip(Thread* self) {
   MutexLock mu(self, *thread_flip_lock_);
   thread_flip_cond_->CheckSafeToWait(self);
   bool has_waited = false;
-  uint64_t wait_start = NanoTime();
+  uint64_t wait_start = 0;
   if (thread_flip_running_) {
+    wait_start = NanoTime();
     ScopedTrace trace("IncrementDisableThreadFlip");
     while (thread_flip_running_) {
       has_waited = true;
@@ -1394,7 +1395,12 @@ void Heap::ThrowOutOfMemoryError(Thread* self, size_t byte_count, AllocatorType 
                allocator_type == kAllocatorTypeRegionTLAB) {
       space = region_space_;
     }
-    if (space != nullptr) {
+
+    // There is no fragmentation info to log for large-object space.
+    if (allocator_type != kAllocatorTypeLOS) {
+      CHECK(space != nullptr) << "allocator_type:" << allocator_type
+                              << " byte_count:" << byte_count
+                              << " total_bytes_free:" << total_bytes_free;
       space->LogFragmentationAllocFailure(oss, byte_count);
     }
   }
@@ -1737,6 +1743,9 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
                                              size_t* usable_size,
                                              size_t* bytes_tl_bulk_allocated,
                                              ObjPtr<mirror::Class>* klass) {
+  // After a GC (due to allocation failure) we should retrieve at least this
+  // fraction of the current max heap size. Otherwise throw OOME.
+  constexpr double kMinFreeHeapAfterGcForAlloc = 0.01;
   bool was_default_allocator = allocator == GetCurrentAllocator();
   // Make sure there is no pending exception since we may need to throw an OOME.
   self->AssertNoPendingException();
@@ -1781,49 +1790,35 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
     }
   }
 
+  auto have_reclaimed_enough = [&]() {
+    size_t curr_bytes_allocated = GetBytesAllocated();
+    double curr_free_heap =
+        static_cast<double>(growth_limit_ - curr_bytes_allocated) / growth_limit_;
+    return curr_free_heap >= kMinFreeHeapAfterGcForAlloc;
+  };
+  // We perform one GC as per the next_gc_type_ (chosen in GrowForUtilization),
+  // if it's not already tried. If that doesn't succeed then go for the most
+  // exhaustive option. Perform a full-heap collection including clearing
+  // SoftReferences. In case of ConcurrentCopying, it will also ensure that
+  // all regions are evacuated. If allocation doesn't succeed even after that
+  // then there is no hope, so we throw OOME.
   collector::GcType tried_type = next_gc_type_;
-  const bool gc_ran = PERFORM_SUSPENDING_OPERATION(
-      CollectGarbageInternal(tried_type, kGcCauseForAlloc, false) != collector::kGcTypeNone);
+  if (last_gc < tried_type) {
+    const bool gc_ran = PERFORM_SUSPENDING_OPERATION(
+        CollectGarbageInternal(tried_type, kGcCauseForAlloc, false) != collector::kGcTypeNone);
 
-  if ((was_default_allocator && allocator != GetCurrentAllocator()) ||
-      (!instrumented && EntrypointsInstrumented())) {
-    return nullptr;
-  }
-  if (gc_ran) {
-    mirror::Object* ptr = TryToAllocate<true, false>(self, allocator, alloc_size, bytes_allocated,
-                                                     usable_size, bytes_tl_bulk_allocated);
-    if (ptr != nullptr) {
-      return ptr;
-    }
-  }
-
-  // Loop through our different Gc types and try to Gc until we get enough free memory.
-  for (collector::GcType gc_type : gc_plan_) {
-    if (gc_type == tried_type) {
-      continue;
-    }
-    // Attempt to run the collector, if we succeed, re-try the allocation.
-    const bool plan_gc_ran = PERFORM_SUSPENDING_OPERATION(
-        CollectGarbageInternal(gc_type, kGcCauseForAlloc, false) != collector::kGcTypeNone);
     if ((was_default_allocator && allocator != GetCurrentAllocator()) ||
         (!instrumented && EntrypointsInstrumented())) {
       return nullptr;
     }
-    if (plan_gc_ran) {
-      // Did we free sufficient memory for the allocation to succeed?
-      mirror::Object* ptr = TryToAllocate<true, false>(self, allocator, alloc_size, bytes_allocated,
+    if (gc_ran && have_reclaimed_enough()) {
+      mirror::Object* ptr = TryToAllocate<true, false>(self, allocator,
+                                                       alloc_size, bytes_allocated,
                                                        usable_size, bytes_tl_bulk_allocated);
       if (ptr != nullptr) {
         return ptr;
       }
     }
-  }
-  // Allocations have failed after GCs;  this is an exceptional state.
-  // Try harder, growing the heap if necessary.
-  mirror::Object* ptr = TryToAllocate<true, true>(self, allocator, alloc_size, bytes_allocated,
-                                                  usable_size, bytes_tl_bulk_allocated);
-  if (ptr != nullptr) {
-    return ptr;
   }
   // Most allocations should have succeeded by now, so the heap is really full, really fragmented,
   // or the requested size is really big. Do another GC, collecting SoftReferences this time. The
@@ -1839,8 +1834,12 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
       (!instrumented && EntrypointsInstrumented())) {
     return nullptr;
   }
-  ptr = TryToAllocate<true, true>(self, allocator, alloc_size, bytes_allocated, usable_size,
-                                  bytes_tl_bulk_allocated);
+  mirror::Object* ptr = nullptr;
+  if (have_reclaimed_enough()) {
+    ptr = TryToAllocate<true, true>(self, allocator, alloc_size, bytes_allocated,
+                                    usable_size, bytes_tl_bulk_allocated);
+  }
+
   if (ptr == nullptr) {
     const uint64_t current_time = NanoTime();
     switch (allocator) {
@@ -4167,12 +4166,12 @@ void Heap::RemoveGcPauseListener() {
 }
 
 mirror::Object* Heap::AllocWithNewTLAB(Thread* self,
+                                       AllocatorType allocator_type,
                                        size_t alloc_size,
                                        bool grow,
                                        size_t* bytes_allocated,
                                        size_t* usable_size,
                                        size_t* bytes_tl_bulk_allocated) {
-  const AllocatorType allocator_type = GetCurrentAllocator();
   if (kUsePartialTlabs && alloc_size <= self->TlabRemainingCapacity()) {
     DCHECK_GT(alloc_size, self->TlabSize());
     // There is enough space if we grow the TLAB. Lets do that. This increases the

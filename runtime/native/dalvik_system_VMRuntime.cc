@@ -660,9 +660,6 @@ static void VMRuntime_registerAppInfo(JNIEnv* env,
   Runtime::Current()->RegisterAppInfo(code_paths_vec, profile_file_str);
 }
 
-static void VMRuntime_doNotInitializeInAot() {
-}
-
 static jboolean VMRuntime_isBootClassPathOnDisk(JNIEnv* env, jclass, jstring java_instruction_set) {
   ScopedUtfChars instruction_set(env, java_instruction_set);
   if (instruction_set.c_str() == nullptr) {
@@ -722,11 +719,6 @@ static void VMRuntime_setProcessDataDirectory(JNIEnv* env, jclass, jstring java_
   Runtime::Current()->SetProcessDataDirectory(data_dir.c_str());
 }
 
-static jboolean VMRuntime_hasBootImageSpaces(JNIEnv* env ATTRIBUTE_UNUSED,
-                                             jclass klass ATTRIBUTE_UNUSED) {
-  return Runtime::Current()->GetHeap()->HasBootImageSpace() ? JNI_TRUE : JNI_FALSE;
-}
-
 static void VMRuntime_bootCompleted(JNIEnv* env ATTRIBUTE_UNUSED,
                                     jclass klass ATTRIBUTE_UNUSED) {
   jit::Jit* jit = Runtime::Current()->GetJit();
@@ -783,7 +775,6 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(VMRuntime, clearGrowthLimit, "()V"),
   NATIVE_METHOD(VMRuntime, concurrentGC, "()V"),
   NATIVE_METHOD(VMRuntime, disableJitCompilation, "()V"),
-  FAST_NATIVE_METHOD(VMRuntime, hasBootImageSpaces, "()Z"),  // Could be CRITICAL.
   NATIVE_METHOD(VMRuntime, setHiddenApiExemptions, "([Ljava/lang/String;)V"),
   NATIVE_METHOD(VMRuntime, setHiddenApiAccessLogSamplingRate, "(I)V"),
   NATIVE_METHOD(VMRuntime, getTargetHeapUtilization, "()F"),
@@ -817,7 +808,6 @@ static JNINativeMethod gMethods[] = {
   FAST_NATIVE_METHOD(VMRuntime, isCheckJniEnabled, "()Z"),
   NATIVE_METHOD(VMRuntime, preloadDexCaches, "()V"),
   NATIVE_METHOD(VMRuntime, registerAppInfo, "(Ljava/lang/String;[Ljava/lang/String;)V"),
-  CRITICAL_NATIVE_METHOD(VMRuntime, doNotInitializeInAot, "()V"),
   NATIVE_METHOD(VMRuntime, isBootClassPathOnDisk, "(Ljava/lang/String;)Z"),
   NATIVE_METHOD(VMRuntime, getCurrentInstructionSet, "()Ljava/lang/String;"),
   NATIVE_METHOD(VMRuntime, didPruneDalvikCache, "()Z"),

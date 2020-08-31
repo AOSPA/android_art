@@ -23,6 +23,7 @@
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "heap_poisoning.h"
 #include "intrinsics.h"
+#include "intrinsics_utils.h"
 #include "lock_word.h"
 #include "mirror/array-inl.h"
 #include "mirror/object_array-inl.h"
@@ -46,7 +47,6 @@ namespace art {
 namespace arm64 {
 
 using helpers::DRegisterFrom;
-using helpers::FPRegisterFrom;
 using helpers::HeapOperand;
 using helpers::LocationFrom;
 using helpers::OperandFrom;
@@ -74,86 +74,11 @@ ArenaAllocator* IntrinsicCodeGeneratorARM64::GetAllocator() {
   return codegen_->GetGraph()->GetAllocator();
 }
 
+using IntrinsicSlowPathARM64 = IntrinsicSlowPath<InvokeDexCallingConventionVisitorARM64,
+                                                 SlowPathCodeARM64,
+                                                 Arm64Assembler>;
+
 #define __ codegen->GetVIXLAssembler()->
-
-static void MoveFromReturnRegister(Location trg,
-                                   DataType::Type type,
-                                   CodeGeneratorARM64* codegen) {
-  if (!trg.IsValid()) {
-    DCHECK(type == DataType::Type::kVoid);
-    return;
-  }
-
-  DCHECK_NE(type, DataType::Type::kVoid);
-
-  if (DataType::IsIntegralType(type) || type == DataType::Type::kReference) {
-    Register trg_reg = RegisterFrom(trg, type);
-    Register res_reg = RegisterFrom(ARM64ReturnLocation(type), type);
-    __ Mov(trg_reg, res_reg, kDiscardForSameWReg);
-  } else {
-    VRegister trg_reg = FPRegisterFrom(trg, type);
-    VRegister res_reg = FPRegisterFrom(ARM64ReturnLocation(type), type);
-    __ Fmov(trg_reg, res_reg);
-  }
-}
-
-static void MoveArguments(HInvoke* invoke, CodeGeneratorARM64* codegen) {
-  InvokeDexCallingConventionVisitorARM64 calling_convention_visitor;
-  IntrinsicVisitor::MoveArguments(invoke, codegen, &calling_convention_visitor);
-}
-
-// Slow-path for fallback (calling the managed code to handle the intrinsic) in an intrinsified
-// call. This will copy the arguments into the positions for a regular call.
-//
-// Note: The actual parameters are required to be in the locations given by the invoke's location
-//       summary. If an intrinsic modifies those locations before a slowpath call, they must be
-//       restored!
-class IntrinsicSlowPathARM64 : public SlowPathCodeARM64 {
- public:
-  explicit IntrinsicSlowPathARM64(HInvoke* invoke)
-      : SlowPathCodeARM64(invoke), invoke_(invoke) { }
-
-  void EmitNativeCode(CodeGenerator* codegen_in) override {
-    CodeGeneratorARM64* codegen = down_cast<CodeGeneratorARM64*>(codegen_in);
-    __ Bind(GetEntryLabel());
-
-    SaveLiveRegisters(codegen, invoke_->GetLocations());
-
-    MoveArguments(invoke_, codegen);
-
-    {
-      // Ensure that between the BLR (emitted by Generate*Call) and RecordPcInfo there
-      // are no pools emitted.
-      vixl::EmissionCheckScope guard(codegen->GetVIXLAssembler(), kInvokeCodeMarginSizeInBytes);
-      if (invoke_->IsInvokeStaticOrDirect()) {
-        codegen->GenerateStaticOrDirectCall(
-            invoke_->AsInvokeStaticOrDirect(), LocationFrom(kArtMethodRegister), this);
-      } else {
-        codegen->GenerateVirtualCall(
-            invoke_->AsInvokeVirtual(), LocationFrom(kArtMethodRegister), this);
-      }
-    }
-
-    // Copy the result back to the expected output.
-    Location out = invoke_->GetLocations()->Out();
-    if (out.IsValid()) {
-      DCHECK(out.IsRegister());  // TODO: Replace this when we support output in memory.
-      DCHECK(!invoke_->GetLocations()->GetLiveRegisters()->ContainsCoreRegister(out.reg()));
-      MoveFromReturnRegister(out, invoke_->GetType(), codegen);
-    }
-
-    RestoreLiveRegisters(codegen, invoke_->GetLocations());
-    __ B(GetExitLabel());
-  }
-
-  const char* GetDescription() const override { return "IntrinsicSlowPathARM64"; }
-
- private:
-  // The instruction where this slow path is happening.
-  HInvoke* const invoke_;
-
-  DISALLOW_COPY_AND_ASSIGN(IntrinsicSlowPathARM64);
-};
 
 // Slow path implementing the SystemArrayCopy intrinsic copy loop with read barriers.
 class ReadBarrierSystemArrayCopySlowPathARM64 : public SlowPathCodeARM64 {
@@ -3403,6 +3328,7 @@ void IntrinsicCodeGeneratorARM64::VisitFP16LessEquals(HInvoke* invoke) {
 }
 
 UNIMPLEMENTED_INTRINSIC(ARM64, ReferenceGetReferent)
+UNIMPLEMENTED_INTRINSIC(ARM64, IntegerDivideUnsigned)
 
 UNIMPLEMENTED_INTRINSIC(ARM64, StringStringIndexOf);
 UNIMPLEMENTED_INTRINSIC(ARM64, StringStringIndexOfAfter);
@@ -3428,6 +3354,45 @@ UNIMPLEMENTED_INTRINSIC(ARM64, UnsafeGetAndAddLong)
 UNIMPLEMENTED_INTRINSIC(ARM64, UnsafeGetAndSetInt)
 UNIMPLEMENTED_INTRINSIC(ARM64, UnsafeGetAndSetLong)
 UNIMPLEMENTED_INTRINSIC(ARM64, UnsafeGetAndSetObject)
+
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleFullFence)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleAcquireFence)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleReleaseFence)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleLoadLoadFence)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleStoreStoreFence)
+UNIMPLEMENTED_INTRINSIC(ARM64, MethodHandleInvokeExact)
+UNIMPLEMENTED_INTRINSIC(ARM64, MethodHandleInvoke)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleCompareAndExchange)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleCompareAndExchangeAcquire)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleCompareAndExchangeRelease)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleCompareAndSet)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGet)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGetAcquire)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGetAndAdd)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGetAndAddAcquire)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGetAndAddRelease)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGetAndBitwiseAnd)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGetAndBitwiseAndAcquire)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGetAndBitwiseAndRelease)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGetAndBitwiseOr)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGetAndBitwiseOrAcquire)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGetAndBitwiseOrRelease)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGetAndBitwiseXor)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGetAndBitwiseXorAcquire)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGetAndBitwiseXorRelease)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGetAndSet)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGetAndSetAcquire)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGetAndSetRelease)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGetOpaque)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleGetVolatile)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleSet)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleSetOpaque)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleSetRelease)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleSetVolatile)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleWeakCompareAndSet)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleWeakCompareAndSetAcquire)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleWeakCompareAndSetPlain)
+UNIMPLEMENTED_INTRINSIC(ARM64, VarHandleWeakCompareAndSetRelease)
 
 UNREACHABLE_INTRINSICS(ARM64)
 

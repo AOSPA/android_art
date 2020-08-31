@@ -70,7 +70,7 @@ enum OatClassType {
   kOatClassMax = 3,
 };
 
-std::ostream& operator<<(std::ostream& os, const OatClassType& rhs);
+std::ostream& operator<<(std::ostream& os, OatClassType rhs);
 
 class PACKED(4) OatMethodOffsets {
  public:
@@ -377,6 +377,9 @@ class OatFile {
   bool ContainsDexCode() const {
     return external_dex_files_.empty();
   }
+
+  // Returns whether an image (e.g. app image) is required to safely execute this OAT file.
+  bool RequiresImage() const;
 
  protected:
   OatFile(const std::string& filename, bool executable);

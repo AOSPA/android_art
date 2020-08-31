@@ -21,6 +21,8 @@
 #include "code_generator_arm_vixl.h"
 #include "common_arm.h"
 #include "heap_poisoning.h"
+#include "intrinsics.h"
+#include "intrinsics_utils.h"
 #include "lock_word.h"
 #include "mirror/array-inl.h"
 #include "mirror/object_array-inl.h"
@@ -64,61 +66,9 @@ ArenaAllocator* IntrinsicCodeGeneratorARMVIXL::GetAllocator() {
   return codegen_->GetGraph()->GetAllocator();
 }
 
-// Default slow-path for fallback (calling the managed code to handle the intrinsic) in an
-// intrinsified call. This will copy the arguments into the positions for a regular call.
-//
-// Note: The actual parameters are required to be in the locations given by the invoke's location
-//       summary. If an intrinsic modifies those locations before a slowpath call, they must be
-//       restored!
-//
-// Note: If an invoke wasn't sharpened, we will put down an invoke-virtual here. That's potentially
-//       sub-optimal (compared to a direct pointer call), but this is a slow-path.
-
-class IntrinsicSlowPathARMVIXL : public SlowPathCodeARMVIXL {
- public:
-  explicit IntrinsicSlowPathARMVIXL(HInvoke* invoke)
-      : SlowPathCodeARMVIXL(invoke), invoke_(invoke) {}
-
-  Location MoveArguments(CodeGenerator* codegen) {
-    InvokeDexCallingConventionVisitorARMVIXL calling_convention_visitor;
-    IntrinsicVisitor::MoveArguments(invoke_, codegen, &calling_convention_visitor);
-    return calling_convention_visitor.GetMethodLocation();
-  }
-
-  void EmitNativeCode(CodeGenerator* codegen) override {
-    ArmVIXLAssembler* assembler = down_cast<ArmVIXLAssembler*>(codegen->GetAssembler());
-    __ Bind(GetEntryLabel());
-
-    SaveLiveRegisters(codegen, invoke_->GetLocations());
-
-    Location method_loc = MoveArguments(codegen);
-
-    if (invoke_->IsInvokeStaticOrDirect()) {
-      codegen->GenerateStaticOrDirectCall(invoke_->AsInvokeStaticOrDirect(), method_loc, this);
-    } else {
-      codegen->GenerateVirtualCall(invoke_->AsInvokeVirtual(), method_loc, this);
-    }
-
-    // Copy the result back to the expected output.
-    Location out = invoke_->GetLocations()->Out();
-    if (out.IsValid()) {
-      DCHECK(out.IsRegister());  // TODO: Replace this when we support output in memory.
-      DCHECK(!invoke_->GetLocations()->GetLiveRegisters()->ContainsCoreRegister(out.reg()));
-      codegen->MoveFromReturnRegister(out, invoke_->GetType());
-    }
-
-    RestoreLiveRegisters(codegen, invoke_->GetLocations());
-    __ B(GetExitLabel());
-  }
-
-  const char* GetDescription() const override { return "IntrinsicSlowPath"; }
-
- private:
-  // The instruction where this slow path is happening.
-  HInvoke* const invoke_;
-
-  DISALLOW_COPY_AND_ASSIGN(IntrinsicSlowPathARMVIXL);
-};
+using IntrinsicSlowPathARMVIXL = IntrinsicSlowPath<InvokeDexCallingConventionVisitorARMVIXL,
+                                                   SlowPathCodeARMVIXL,
+                                                   ArmVIXLAssembler>;
 
 // Compute base address for the System.arraycopy intrinsic in `base`.
 static void GenSystemArrayCopyBaseAddress(ArmVIXLAssembler* assembler,
@@ -3067,6 +3017,7 @@ UNIMPLEMENTED_INTRINSIC(ARMVIXL, MathRoundDouble)   // Could be done by changing
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeCASLong)     // High register pressure.
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, SystemArrayCopyChar)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, ReferenceGetReferent)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, IntegerDivideUnsigned)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, CRC32Update)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, CRC32UpdateBytes)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, CRC32UpdateByteBuffer)
@@ -3104,6 +3055,45 @@ UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndAddLong)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndSetInt)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndSetLong)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndSetObject)
+
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleFullFence)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleAcquireFence)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleReleaseFence)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleLoadLoadFence)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleStoreStoreFence)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, MethodHandleInvokeExact)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, MethodHandleInvoke)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleCompareAndExchange)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleCompareAndExchangeAcquire)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleCompareAndExchangeRelease)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleCompareAndSet)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGet)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAcquire)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndAdd)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndAddAcquire)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndAddRelease)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndBitwiseAnd)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndBitwiseAndAcquire)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndBitwiseAndRelease)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndBitwiseOr)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndBitwiseOrAcquire)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndBitwiseOrRelease)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndBitwiseXor)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndBitwiseXorAcquire)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndBitwiseXorRelease)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndSet)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndSetAcquire)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndSetRelease)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetOpaque)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetVolatile)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleSet)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleSetOpaque)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleSetRelease)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleSetVolatile)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleWeakCompareAndSet)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleWeakCompareAndSetAcquire)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleWeakCompareAndSetPlain)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleWeakCompareAndSetRelease)
 
 UNREACHABLE_INTRINSICS(ARMVIXL)
 

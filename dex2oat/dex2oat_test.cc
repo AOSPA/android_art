@@ -1084,12 +1084,6 @@ class Dex2oatReturnCodeTest : public Dex2oatTest {
   }
 };
 
-TEST_F(Dex2oatReturnCodeTest, TestCreateRuntime) {
-  TEST_DISABLED_FOR_MEMORY_TOOL();  // b/19100793
-  int status = RunTest({ "--boot-image=/this/does/not/exist/yolo.oat" });
-  EXPECT_EQ(static_cast<int>(dex2oat::ReturnCode::kCreateRuntime), WEXITSTATUS(status)) << output_;
-}
-
 class Dex2oatClassLoaderContextTest : public Dex2oatTest {
  protected:
   void RunTest(const char* class_loader_context,
@@ -1308,7 +1302,6 @@ TEST_F(Dex2oatDeterminism, UnloadCompile) {
   const std::string unload_vdex_name = out_dir + "/unload.vdex";
   const std::string no_unload_oat_name = out_dir + "/nounload.oat";
   const std::string no_unload_vdex_name = out_dir + "/nounload.vdex";
-  const std::string app_image_name = out_dir + "/unload.art";
   std::string error_msg;
   const std::vector<gc::space::ImageSpace*>& spaces = runtime->GetHeap()->GetBootImageSpaces();
   ASSERT_GT(spaces.size(), 0u);
@@ -1336,7 +1329,7 @@ TEST_F(Dex2oatDeterminism, UnloadCompile) {
       base_oat_name,
       CompilerFilter::Filter::kQuicken,
       &error_msg,
-      {"--force-determinism", "--avoid-storing-invocation", "--app-image-file=" + app_image_name});
+      {"--force-determinism", "--avoid-storing-invocation", "--compile-individually"});
   ASSERT_EQ(res2, 0);
   Copy(base_oat_name, no_unload_oat_name);
   Copy(base_vdex_name, no_unload_vdex_name);
@@ -1353,10 +1346,6 @@ TEST_F(Dex2oatDeterminism, UnloadCompile) {
       << unload_oat_name << " " << no_unload_oat_name;
   EXPECT_EQ(unload_vdex->Compare(no_unload_vdex.get()), 0)
       << unload_vdex_name << " " << no_unload_vdex_name;
-  // App image file.
-  std::unique_ptr<File> app_image_file(OS::OpenFileForReading(app_image_name.c_str()));
-  ASSERT_TRUE(app_image_file != nullptr);
-  EXPECT_GT(app_image_file->GetLength(), 0u);
 }
 
 // Test that dexlayout section info is correctly written to the oat file for profile based
@@ -2003,7 +1992,7 @@ TEST_F(Dex2oatTest, DontExtract) {
 
   // Generate a quickened dex by using the input dm file to verify.
   generate_and_check(CompilerFilter::Filter::kQuicken);
-  // Use verify compiler filter to sanity check that FastVerify works for that filter too.
+  // Use verify compiler filter to check that FastVerify works for that filter too.
   generate_and_check(CompilerFilter::Filter::kVerify);
 }
 
@@ -2547,6 +2536,31 @@ TEST_F(Dex2oatISAFeaturesRuntimeDetectionTest, TestCurrentRuntimeFeaturesAsDex2O
   }
 
   RunTest();
+}
+
+class LinkageTest : public Dex2oatTest {};
+
+TEST_F(LinkageTest, LinkageEnabled) {
+  TEST_DISABLED_FOR_TARGET();
+  std::unique_ptr<const DexFile> dex(OpenTestDexFile("LinkageTest"));
+  std::string out_dir = GetScratchDir();
+  const std::string base_oat_name = out_dir + "/base.oat";
+  std::string error_msg;
+  const int res_fail = GenerateOdexForTestWithStatus(
+        {dex->GetLocation()},
+        base_oat_name,
+        CompilerFilter::Filter::kQuicken,
+        &error_msg,
+        {"--check-linkage-conditions", "--crash-on-linkage-violation"});
+  EXPECT_NE(0, res_fail);
+
+  const int res_no_fail = GenerateOdexForTestWithStatus(
+        {dex->GetLocation()},
+        base_oat_name,
+        CompilerFilter::Filter::kQuicken,
+        &error_msg,
+        {"--check-linkage-conditions"});
+  EXPECT_EQ(0, res_no_fail);
 }
 
 }  // namespace art

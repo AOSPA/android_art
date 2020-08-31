@@ -17,6 +17,12 @@
 cc_defaults {
     name: "libartbase_defaults",
     defaults: ["art_defaults"],
+    visibility: [
+        // Visibility for prebuilt binaries from the prebuilt of this module.
+        // TODO(b/155921753): Restrict this when prebuilts are in their proper
+        // locations.
+        "//prebuilts:__subpackages__",
+    ],
     host_supported: true,
     srcs: [
         "arch/instruction_set.cc",
@@ -56,9 +62,9 @@ cc_defaults {
             static_libs: [
                 // ZipArchive support, the order matters here to get all symbols.
                 "libziparchive",
-                "libz",
             ],
             shared_libs: [
+                "libz",
                 "liblog",
                 // For ashmem.
                 "libartpalette",
@@ -256,6 +262,7 @@ art_cc_test {
         "base/bit_utils_test.cc",
         "base/bit_vector_test.cc",
         "base/file_utils_test.cc",
+        "base/hash_map_test.cc",
         "base/hash_set_test.cc",
         "base/hex_dump_test.cc",
         "base/histogram_test.cc",

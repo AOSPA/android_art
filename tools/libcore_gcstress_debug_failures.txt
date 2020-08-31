@@ -7,7 +7,7 @@
 {
   description: "Timeouts on target with gcstress and debug.",
   result: EXEC_FAILED,
-  modes: [device_testdex],
+  modes: [device],
   names: ["jsr166.CompletableFutureTest#testCompleteOnTimeout_completed",
           "jsr166.CompletableFutureTest#testDelayedExecutor",
           "jsr166.ExecutorsTest#testTimedCallable",
@@ -59,6 +59,16 @@
     "libcore.libcore.icu.RelativeDateTimeFormatterTest#test_getRelativeTimeSpanStringCTS",
     "libcore.libcore.icu.RelativeDateTimeFormatterTest#test_getRelativeTimeSpanStringFrench",
     "libcore.libcore.icu.RelativeDateTimeFormatterTest#test_getRelativeTimeSpanStringGerman"
+  ]
+},
+{
+  description: "Timeouts relating to ICU implementation change.",
+  result: EXEC_FAILED,
+  bug: 161420453,
+  modes: [host],
+  names: [
+    "libcore.java.text.DecimalFormatTest#testCurrencySymbolSpacing",
+    "libcore.java.text.SimpleDateFormatTest#testLocales"
   ]
 }
 ]

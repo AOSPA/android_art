@@ -21,7 +21,7 @@
 #include "base/logging.h"
 #include "builder.h"
 #include "class_linker.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "constant_folding.h"
 #include "data_type-inl.h"
 #include "dead_code_elimination.h"
@@ -148,15 +148,14 @@ bool HInliner::Run() {
   DCHECK_NE(total_number_of_instructions_, 0u);
   DCHECK_NE(inlining_budget_, 0u);
 
-  // If we're compiling with a core image (which is only used for
-  // test purposes), honor inlining directives in method names:
+  // If we're compiling tests, honor inlining directives in method names:
   // - if a method's name contains the substring "$noinline$", do not
   //   inline that method;
   // - if a method's name contains the substring "$inline$", ensure
   //   that this method is actually inlined.
   // We limit the latter to AOT compilation, as the JIT may or may not inline
   // depending on the state of classes at runtime.
-  const bool honor_noinline_directives = codegen_->GetCompilerOptions().CompilingWithCoreImage();
+  const bool honor_noinline_directives = codegen_->GetCompilerOptions().CompileArtTest();
   const bool honor_inline_directives =
       honor_noinline_directives && Runtime::Current()->IsAotCompiler();
 
@@ -415,7 +414,7 @@ ArtMethod* HInliner::TryCHADevirtualization(ArtMethod* resolved_method) {
 static bool IsMethodUnverified(const CompilerOptions& compiler_options, ArtMethod* method)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   if (!method->GetDeclaringClass()->IsVerified()) {
-    if (Runtime::Current()->UseJitCompilation()) {
+    if (compiler_options.IsJitCompiler()) {
       // We're at runtime, we know this is cold code if the class
       // is not verified, so don't bother analyzing.
       return true;
@@ -490,11 +489,19 @@ ArtMethod* HInliner::FindActualCallTarget(HInvoke* invoke_instruction, bool* cha
 }
 
 bool HInliner::TryInline(HInvoke* invoke_instruction) {
-  if (invoke_instruction->IsInvokeUnresolved() ||
-      invoke_instruction->IsInvokePolymorphic() ||
-      invoke_instruction->IsInvokeCustom()) {
-    return false;  // Don't bother to move further if we know the method is unresolved or the
-                   // invocation is polymorphic (invoke-{polymorphic,custom}).
+  MaybeRecordStat(stats_, MethodCompilationStat::kTryInline);
+
+  // Don't bother to move further if we know the method is unresolved or the invocation is
+  // polymorphic (invoke-{polymorphic,custom}).
+  if (invoke_instruction->IsInvokeUnresolved()) {
+    MaybeRecordStat(stats_, MethodCompilationStat::kNotInlinedUnresolved);
+    return false;
+  } else if (invoke_instruction->IsInvokePolymorphic()) {
+    MaybeRecordStat(stats_, MethodCompilationStat::kNotInlinedPolymorphic);
+    return false;
+  } else if (invoke_instruction->IsInvokeCustom()) {
+    MaybeRecordStat(stats_, MethodCompilationStat::kNotInlinedCustom);
+    return false;
   }
 
   ScopedObjectAccess soa(Thread::Current());
@@ -666,7 +673,7 @@ HInliner::InlineCacheType HInliner::GetInlineCacheJIT(
     StackHandleScope<1>* hs,
     /*out*/Handle<mirror::ObjectArray<mirror::Class>>* inline_cache)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  DCHECK(Runtime::Current()->UseJitCompilation());
+  DCHECK(codegen_->GetCompilerOptions().IsJitCompiler());
 
   ArtMethod* caller = graph_->GetArtMethod();
   // Under JIT, we should always know the caller.
@@ -856,7 +863,8 @@ bool HInliner::TryInlineMonomorphicCall(HInvoke* invoke_instruction,
 
   ClassLinker* class_linker = caller_compilation_unit_.GetClassLinker();
   PointerSize pointer_size = class_linker->GetImagePointerSize();
-  Handle<mirror::Class> monomorphic_type = handles_->NewHandle(GetMonomorphicType(classes));
+  Handle<mirror::Class> monomorphic_type =
+      graph_->GetHandleCache()->NewHandle(GetMonomorphicType(classes));
   resolved_method = ResolveMethodFromInlineCache(
       monomorphic_type, resolved_method, invoke_instruction, pointer_size);
 
@@ -892,7 +900,6 @@ bool HInliner::TryInlineMonomorphicCall(HInvoke* invoke_instruction,
   ReferenceTypePropagation rtp_fixup(graph_,
                                      outer_compilation_unit_.GetClassLoader(),
                                      outer_compilation_unit_.GetDexCache(),
-                                     handles_,
                                      /* is_first_run= */ false);
   rtp_fixup.Run();
 
@@ -1020,7 +1027,7 @@ bool HInliner::TryInlinePolymorphicCall(HInvoke* invoke_instruction,
     }
     ArtMethod* method = nullptr;
 
-    Handle<mirror::Class> handle = handles_->NewHandle(classes->Get(i));
+    Handle<mirror::Class> handle = graph_->GetHandleCache()->NewHandle(classes->Get(i));
     method = ResolveMethodFromInlineCache(
         handle, resolved_method, invoke_instruction, pointer_size);
     if (method == nullptr) {
@@ -1092,7 +1099,6 @@ bool HInliner::TryInlinePolymorphicCall(HInvoke* invoke_instruction,
   ReferenceTypePropagation rtp_fixup(graph_,
                                      outer_compilation_unit_.GetClassLoader(),
                                      outer_compilation_unit_.GetDexCache(),
-                                     handles_,
                                      /* is_first_run= */ false);
   rtp_fixup.Run();
   return true;
@@ -1179,7 +1185,7 @@ bool HInliner::TryInlinePolymorphicCallToSameTarget(
     ArtMethod* resolved_method,
     Handle<mirror::ObjectArray<mirror::Class>> classes) {
   // This optimization only works under JIT for now.
-  if (!Runtime::Current()->UseJitCompilation()) {
+  if (!codegen_->GetCompilerOptions().IsJitCompiler()) {
     return false;
   }
 
@@ -1288,7 +1294,6 @@ bool HInliner::TryInlinePolymorphicCallToSameTarget(
   ReferenceTypePropagation rtp_fixup(graph_,
                                      outer_compilation_unit_.GetClassLoader(),
                                      outer_compilation_unit_.GetDexCache(),
-                                     handles_,
                                      /* is_first_run= */ false);
   rtp_fixup.Run();
 
@@ -1412,7 +1417,6 @@ bool HInliner::TryInlineAndReplace(HInvoke* invoke_instruction,
     ReferenceTypePropagation(graph_,
                              outer_compilation_unit_.GetClassLoader(),
                              outer_compilation_unit_.GetDexCache(),
-                             handles_,
                              /* is_first_run= */ false).Run();
   }
   return true;
@@ -1730,11 +1734,11 @@ HInstanceFieldGet* HInliner::CreateInstanceFieldGet(uint32_t field_index,
       /* dex_pc= */ 0);
   if (iget->GetType() == DataType::Type::kReference) {
     // Use the same dex_cache that we used for field lookup as the hint_dex_cache.
-    Handle<mirror::DexCache> dex_cache = handles_->NewHandle(referrer->GetDexCache());
+    Handle<mirror::DexCache> dex_cache =
+        graph_->GetHandleCache()->NewHandle(referrer->GetDexCache());
     ReferenceTypePropagation rtp(graph_,
                                  outer_compilation_unit_.GetClassLoader(),
                                  dex_cache,
-                                 handles_,
                                  /* is_first_run= */ false);
     rtp.Visit(iget);
   }
@@ -1773,11 +1777,9 @@ HInstanceFieldSet* HInliner::CreateInstanceFieldSet(uint32_t field_index,
 }
 
 template <typename T>
-static inline Handle<T> NewHandleIfDifferent(ObjPtr<T> object,
-                                             Handle<T> hint,
-                                             VariableSizedHandleScope* handles)
+static inline Handle<T> NewHandleIfDifferent(ObjPtr<T> object, Handle<T> hint, HGraph* graph)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  return (object != hint.Get()) ? handles->NewHandle(object) : hint;
+  return (object != hint.Get()) ? graph->GetHandleCache()->NewHandle(object) : hint;
 }
 
 static bool CanEncodeInlinedMethodInStackMap(const DexFile& caller_dex_file, ArtMethod* callee)
@@ -1840,7 +1842,6 @@ void HInliner::SubstituteArguments(HGraph* callee_graph,
     ReferenceTypePropagation(callee_graph,
                              outer_compilation_unit_.GetClassLoader(),
                              dex_compilation_unit.GetDexCache(),
-                             handles_,
                              /* is_first_run= */ false).Run();
   }
 }
@@ -1998,13 +1999,14 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
   ClassLinker* class_linker = caller_compilation_unit_.GetClassLinker();
   Handle<mirror::DexCache> dex_cache = NewHandleIfDifferent(resolved_method->GetDexCache(),
                                                             caller_compilation_unit_.GetDexCache(),
-                                                            handles_);
+                                                            graph_);
   Handle<mirror::ClassLoader> class_loader =
       NewHandleIfDifferent(resolved_method->GetDeclaringClass()->GetClassLoader(),
                            caller_compilation_unit_.GetClassLoader(),
-                           handles_);
+                           graph_);
 
-  Handle<mirror::Class> compiling_class = handles_->NewHandle(resolved_method->GetDeclaringClass());
+  Handle<mirror::Class> compiling_class =
+      graph_->GetHandleCache()->NewHandle(resolved_method->GetDeclaringClass());
   DexCompilationUnit dex_compilation_unit(
       class_loader,
       class_linker,
@@ -2036,15 +2038,14 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
   HGraph* callee_graph = new (graph_->GetAllocator()) HGraph(
       graph_->GetAllocator(),
       graph_->GetArenaStack(),
+      graph_->GetHandleCache()->GetHandles(),
       callee_dex_file,
       method_index,
       codegen_->GetCompilerOptions().GetInstructionSet(),
       invoke_type,
       callee_dead_reference_safe,
       graph_->IsDebuggable(),
-      /* osr= */ false,
-      /* is_shared_jit_code= */ graph_->IsCompilingForSharedJitCode(),
-      /* baseline= */ graph_->IsCompilingBaseline(),
+      graph_->GetCompilationKind(),
       /* start_instruction_id= */ caller_instruction_counter);
   callee_graph->SetArtMethod(resolved_method);
 
@@ -2067,8 +2068,7 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
                         &outer_compilation_unit_,
                         codegen_,
                         inline_stats_,
-                        resolved_method->GetQuickenedInfo(),
-                        handles_);
+                        resolved_method->GetQuickenedInfo());
 
   if (builder.BuildGraph() != kAnalysisSuccess) {
     LOG_FAIL(stats_, MethodCompilationStat::kNotInlinedCannotBuild)
@@ -2159,7 +2159,6 @@ void HInliner::RunOptimizations(HGraph* callee_graph,
                    codegen_,
                    outer_compilation_unit_,
                    dex_compilation_unit,
-                   handles_,
                    inline_stats_,
                    total_number_of_dex_registers_ + accessor.RegistersSize(),
                    total_number_of_instructions_ + number_of_instructions,
@@ -2168,7 +2167,8 @@ void HInliner::RunOptimizations(HGraph* callee_graph,
   inliner.Run();
 }
 
-static bool IsReferenceTypeRefinement(ReferenceTypeInfo declared_rti,
+static bool IsReferenceTypeRefinement(ObjPtr<mirror::Class> declared_class,
+                                      bool declared_is_exact,
                                       bool declared_can_be_null,
                                       HInstruction* actual_obj)
     REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -2177,22 +2177,29 @@ static bool IsReferenceTypeRefinement(ReferenceTypeInfo declared_rti,
   }
 
   ReferenceTypeInfo actual_rti = actual_obj->GetReferenceTypeInfo();
-  return (actual_rti.IsExact() && !declared_rti.IsExact()) ||
-          declared_rti.IsStrictSupertypeOf(actual_rti);
+  ObjPtr<mirror::Class> actual_class = actual_rti.GetTypeHandle().Get();
+  return (actual_rti.IsExact() && !declared_is_exact) ||
+         (declared_class != actual_class && declared_class->IsAssignableFrom(actual_class));
 }
 
-ReferenceTypeInfo HInliner::GetClassRTI(ObjPtr<mirror::Class> klass) {
-  return ReferenceTypePropagation::IsAdmissible(klass)
-      ? ReferenceTypeInfo::Create(handles_->NewHandle(klass))
-      : graph_->GetInexactObjectRti();
+static bool IsReferenceTypeRefinement(ObjPtr<mirror::Class> declared_class,
+                                      bool declared_can_be_null,
+                                      HInstruction* actual_obj)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool admissible = ReferenceTypePropagation::IsAdmissible(declared_class);
+  return IsReferenceTypeRefinement(
+      admissible ? declared_class : GetClassRoot<mirror::Class>(),
+      /*declared_is_exact=*/ admissible && declared_class->CannotBeAssignedFromOtherTypes(),
+      declared_can_be_null,
+      actual_obj);
 }
 
 bool HInliner::ArgumentTypesMoreSpecific(HInvoke* invoke_instruction, ArtMethod* resolved_method) {
   // If this is an instance call, test whether the type of the `this` argument
   // is more specific than the class which declares the method.
   if (!resolved_method->IsStatic()) {
-    if (IsReferenceTypeRefinement(GetClassRTI(resolved_method->GetDeclaringClass()),
-                                  /* declared_can_be_null= */ false,
+    if (IsReferenceTypeRefinement(resolved_method->GetDeclaringClass(),
+                                  /*declared_can_be_null=*/ false,
                                   invoke_instruction->InputAt(0u))) {
       return true;
     }
@@ -2211,9 +2218,7 @@ bool HInliner::ArgumentTypesMoreSpecific(HInvoke* invoke_instruction, ArtMethod*
     if (input->GetType() == DataType::Type::kReference) {
       ObjPtr<mirror::Class> param_cls = resolved_method->LookupResolvedClassFromTypeIndex(
           param_list->GetTypeItem(param_idx).type_idx_);
-      if (IsReferenceTypeRefinement(GetClassRTI(param_cls),
-                                    /* declared_can_be_null= */ true,
-                                    input)) {
+      if (IsReferenceTypeRefinement(param_cls, /*declared_can_be_null=*/ true, input)) {
         return true;
       }
     }
@@ -2228,8 +2233,10 @@ bool HInliner::ReturnTypeMoreSpecific(HInvoke* invoke_instruction,
   if (return_replacement != nullptr) {
     if (return_replacement->GetType() == DataType::Type::kReference) {
       // Test if the return type is a refinement of the declared return type.
-      if (IsReferenceTypeRefinement(invoke_instruction->GetReferenceTypeInfo(),
-                                    /* declared_can_be_null= */ true,
+      ReferenceTypeInfo invoke_rti = invoke_instruction->GetReferenceTypeInfo();
+      if (IsReferenceTypeRefinement(invoke_rti.GetTypeHandle().Get(),
+                                    invoke_rti.IsExact(),
+                                    /*declared_can_be_null=*/ true,
                                     return_replacement)) {
         return true;
       } else if (return_replacement->IsInstanceFieldGet()) {
@@ -2259,7 +2266,10 @@ void HInliner::FixUpReturnReferenceType(ArtMethod* resolved_method,
         // some functionality from the reference type propagation.
         DCHECK(return_replacement->IsPhi());
         ObjPtr<mirror::Class> cls = resolved_method->LookupResolvedReturnType();
-        return_replacement->SetReferenceTypeInfo(GetClassRTI(cls));
+        ReferenceTypeInfo rti = ReferenceTypePropagation::IsAdmissible(cls)
+            ? ReferenceTypeInfo::Create(graph_->GetHandleCache()->NewHandle(cls))
+            : graph_->GetInexactObjectRti();
+        return_replacement->SetReferenceTypeInfo(rti);
       }
     }
   }

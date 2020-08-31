@@ -41,7 +41,6 @@ class InstructionOperands;
 class OptimizingCompilerStats;
 class ScopedObjectAccess;
 class SsaBuilder;
-class VariableSizedHandleScope;
 
 namespace mirror {
 class Class;
@@ -61,7 +60,6 @@ class HInstructionBuilder : public ValueObject {
                       CodeGenerator* code_generator,
                       ArrayRef<const uint8_t> interpreter_metadata,
                       OptimizingCompilerStats* compiler_stats,
-                      VariableSizedHandleScope* handles,
                       ScopedArenaAllocator* local_allocator);
 
   bool Build();
@@ -230,7 +228,7 @@ class HInstructionBuilder : public ValueObject {
   Handle<mirror::Class> ResolveClass(ScopedObjectAccess& soa, dex::TypeIndex type_index)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  bool LoadClassNeedsAccessCheck(Handle<mirror::Class> klass)
+  bool LoadClassNeedsAccessCheck(ObjPtr<mirror::Class> klass)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Builds a `HLoadMethodHandle` loading the given `method_handle_index`.
@@ -243,17 +241,22 @@ class HInstructionBuilder : public ValueObject {
                                      uint32_t dex_pc,
                                      HInvoke* invoke);
 
-  bool SetupInvokeArguments(HInvoke* invoke,
+  enum class ReceiverArg {
+    kNone,             // No receiver, static method.
+    kNullCheckedArg,   // Normal instance invoke, null check and pass the argument.
+    kNullCheckedOnly,  // Null check but do not use the arg, used for intrinsic replacements.
+    kPlainArg,         // Do not null check but pass the argument, used for unresolved methods.
+    kIgnored,          // No receiver despite allocated vreg, used for String.<init>.
+  };
+  bool SetupInvokeArguments(HInstruction* invoke,
                             const InstructionOperands& operands,
                             const char* shorty,
-                            size_t start_index,
-                            size_t* argument_index);
+                            ReceiverArg receiver_arg);
 
   bool HandleInvoke(HInvoke* invoke,
                     const InstructionOperands& operands,
                     const char* shorty,
-                    bool is_unresolved,
-                    HClinitCheck* clinit_check = nullptr);
+                    bool is_unresolved);
 
   bool HandleStringInit(HInvoke* invoke,
                         const InstructionOperands& operands,
@@ -263,8 +266,15 @@ class HInstructionBuilder : public ValueObject {
   HClinitCheck* ProcessClinitCheckForInvoke(
       uint32_t dex_pc,
       ArtMethod* method,
-      HInvokeStaticOrDirect::ClinitCheckRequirement* clinit_check_requirement)
-      REQUIRES_SHARED(Locks::mutator_lock_);
+      HInvokeStaticOrDirect::ClinitCheckRequirement* clinit_check_requirement);
+
+  // Try to build a replacement for an intrinsic invoke. Returns true on success,
+  // false on failure. Failure can be either lack of replacement HIR classes, or
+  // input register mismatch.
+  bool BuildSimpleIntrinsic(ArtMethod* method,
+                            uint32_t dex_pc,
+                            const InstructionOperands& operands,
+                            const char* shorty);
 
   // Build a HNewInstance instruction.
   HNewInstance* BuildNewInstance(dex::TypeIndex type_index, uint32_t dex_pc);
@@ -274,12 +284,8 @@ class HInstructionBuilder : public ValueObject {
   void BuildConstructorFenceForAllocation(HInstruction* allocation);
 
   // Return whether the compiler can assume `cls` is initialized.
-  bool IsInitialized(Handle<mirror::Class> cls) const
+  bool IsInitialized(ObjPtr<mirror::Class> cls) const
       REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Try to resolve a method using the class linker. Return null if a method could
-  // not be resolved.
-  ArtMethod* ResolveMethod(uint16_t method_idx, InvokeType invoke_type);
 
   // Try to resolve a field using the class linker. Return null if it could not
   // be found.
@@ -293,7 +299,6 @@ class HInstructionBuilder : public ValueObject {
 
   ArenaAllocator* const allocator_;
   HGraph* const graph_;
-  VariableSizedHandleScope* const handles_;
 
   // The dex file where the method being compiled is, and the bytecode data.
   const DexFile* const dex_file_;
@@ -335,7 +340,7 @@ class HInstructionBuilder : public ValueObject {
   ScopedArenaVector<HBasicBlock*> loop_headers_;
 
   // Cached resolved types for the current compilation unit's DexFile.
-  // Handle<>s reference entries in the `handles_`.
+  // Handle<>s reference entries in the `graph_->GetHandleCache()`.
   ScopedArenaSafeMap<dex::TypeIndex, Handle<mirror::Class>> class_cache_;
 
   static constexpr int kDefaultNumberOfLoops = 2;

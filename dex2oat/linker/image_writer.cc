@@ -35,7 +35,7 @@
 #include "base/stl_util.h"
 #include "base/unix_file/fd_file.h"
 #include "class_linker-inl.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "compiled_method.h"
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_types.h"
@@ -3432,6 +3432,9 @@ void ImageWriter::CopyAndFixupMethod(ArtMethod* orig,
       CopyAndFixupPointer(copy, ArtMethod::DataOffset(target_ptr_size_), orig_table);
     } else if (UNLIKELY(orig == runtime->GetResolutionMethod())) {
       quick_code = GetOatAddress(StubType::kQuickResolutionTrampoline);
+      // Set JNI entrypoint for resolving @CriticalNative methods called from compiled code .
+      const void* jni_code = GetOatAddress(StubType::kJNIDlsymLookupCriticalTrampoline);
+      copy->SetEntryPointFromJniPtrSize(jni_code, target_ptr_size_);
     } else {
       bool found_one = false;
       for (size_t i = 0; i < static_cast<size_t>(CalleeSaveType::kLastCalleeSaveType); ++i) {

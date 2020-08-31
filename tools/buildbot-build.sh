@@ -63,7 +63,21 @@ while true; do
 done
 
 # Allow to build successfully in master-art.
-extra_args="SOONG_ALLOW_MISSING_DEPENDENCIES=true TEMPORARY_DISABLE_PATH_RESTRICTIONS=true"
+extra_args="SOONG_ALLOW_MISSING_DEPENDENCIES=true"
+
+# Switch the build system to unbundled mode in the reduced manifest branch.
+# TODO(b/159109002): Clean this up.
+if [ ! -d frameworks/base ]; then
+  extra_args="$extra_args TARGET_BUILD_UNBUNDLED=true"
+fi
+
+apexes=(
+  "com.android.art.testing"
+  "com.android.conscrypt"
+  "com.android.i18n"
+  "com.android.runtime"
+  "com.android.tzdata"
+)
 
 if [[ $mode == "host" ]]; then
   make_command="build/soong/soong_ui.bash --make-mode $j_arg $extra_args $showcommands build-art-host-tests $common_targets"
@@ -75,32 +89,23 @@ elif [[ $mode == "target" ]]; then
     exit 1
   fi
   make_command="build/soong/soong_ui.bash --make-mode $j_arg $extra_args $showcommands build-art-target-tests $common_targets"
-  make_command+=" libnetd_client-target toybox toolbox sh"
+  make_command+=" libnetd_client-target toybox sh"
   make_command+=" debuggerd su gdbserver"
-  make_command+=" libstdc++ "
+  # vogar requires the class files for conscrypt and ICU.
+  make_command+=" conscrypt core-icu4j"
   make_command+=" ${ANDROID_PRODUCT_OUT#"${ANDROID_BUILD_TOP}/"}/system/etc/public.libraries.txt"
-  if [[ -n "$ART_TEST_CHROOT" ]]; then
-    # Targets required to generate a linker configuration on device within the
-    # chroot environment.
-    make_command+=" linkerconfig"
-    # Additional targets needed for the chroot environment.
-    make_command+=" crash_dump event-log-tags"
-  fi
-  # Build the Runtime (Bionic) APEX.
-  make_command+=" com.android.runtime"
-  # Build the Testing ART APEX (which is a superset of the Release and Debug ART APEXes).
-  make_command+=" com.android.art.testing"
-  # Build the bootstrap Bionic artifacts links (linker, libc, libdl, libm).
-  # These targets create these symlinks:
-  # - from /system/bin/linker(64) to /apex/com.android.runtime/bin/linker(64); and
-  # - from /system/lib(64)/$lib to /apex/com.android.runtime/lib(64)/$lib.
-  make_command+=" linker libc.bootstrap libdl.bootstrap libdl_android.bootstrap libm.bootstrap"
-  # Build the Conscrypt APEX.
-  make_command+=" com.android.conscrypt"
-  # Build the i18n APEX.
-  make_command+=" com.android.i18n"
-  # Build the Time Zone Data APEX.
-  make_command+=" com.android.tzdata"
+  # Targets required to generate a linker configuration for device within the
+  # chroot environment. The *.libraries.txt targets are required by
+  # linkerconfig but not included in host_linkerconfig_all_targets. We cannot
+  # use linkerconfig, because building the device binary statically might not
+  # work in an unbundled tree.
+  make_command+=" host_linkerconfig_all_targets sanitizer.libraries.txt vndkcorevariant.libraries.txt"
+  # Additional targets needed for the chroot environment.
+  make_command+=" event-log-tags"
+  # Needed to extract prebuilt APEXes.
+  make_command+=" deapexer"
+  # Build/install the required APEXes.
+  make_command+=" ${apexes[*]}"
 fi
 
 mode_specific_libraries="libjavacoretests libjdwp libwrapagentproperties libwrapagentpropertiesd"
@@ -114,6 +119,24 @@ echo "Executing $make_command"
 eval "$make_command"
 
 if [[ $mode == "target" ]]; then
+  if [[ -z "${ANDROID_HOST_OUT}" ]]; then
+    echo "ANDROID_HOST_OUT environment variable is empty; using $out_dir/host/linux-x86"
+    ANDROID_HOST_OUT=$out_dir/host/linux-x86
+  fi
+
+  # Extract prebuilt APEXes.
+  debugfs=$ANDROID_HOST_OUT/bin/debugfs_static
+  for apex in ${apexes[@]}; do
+    dir="$ANDROID_PRODUCT_OUT/system/apex/${apex}"
+    file="$ANDROID_PRODUCT_OUT/system/apex/${apex}.apex"
+    if [ -f "${file}" ]; then
+      echo "Extracting APEX file: ${apex}"
+      rm -rf $dir
+      mkdir -p $dir
+      $ANDROID_HOST_OUT/bin/deapexer --debugfs_path $debugfs extract $file $dir
+    fi
+  done
+
   # Create canonical name -> file name symlink in the symbol directory for the
   # Testing ART APEX.
   #
@@ -140,18 +163,22 @@ if [[ $mode == "target" ]]; then
   done
 
   # Temporary fix for libjavacrypto.so dependencies in libcore and jvmti tests (b/147124225).
-  conscrypt_apex="$ANDROID_PRODUCT_OUT/system/apex/com.android.conscrypt"
+  conscrypt_dir="$ANDROID_PRODUCT_OUT/system/apex/com.android.conscrypt"
   conscrypt_libs="libjavacrypto.so libcrypto.so libssl.so"
-  if [ ! -d "${conscrypt_apex}" ]; then
-    echo -e "Missing conscrypt APEX in build output: ${conscrypt_apex}"
+  if [ ! -d "${conscrypt_dir}" ]; then
+    echo -e "Missing conscrypt APEX in build output: ${conscrypt_dir}"
+    exit 1
+  fi
+  if [ ! -f "${conscrypt_dir}/javalib/conscrypt.jar" ]; then
+    echo -e "Missing conscrypt jar in build output: ${conscrypt_dir}"
     exit 1
   fi
   for l in lib lib64; do
-    if [ ! -d "${conscrypt_apex}/$l" ]; then
+    if [ ! -d "$ANDROID_PRODUCT_OUT/system/$l" ]; then
       continue
     fi
     for so in $conscrypt_libs; do
-      src="${conscrypt_apex}/${l}/${so}"
+      src="${conscrypt_dir}/${l}/${so}"
       dst="$ANDROID_PRODUCT_OUT/system/${l}/${so}"
       if [ "${src}" -nt "${dst}" ]; then
         cmd="cp -p \"${src}\" \"${dst}\""
@@ -160,4 +187,67 @@ if [[ $mode == "target" ]]; then
       fi
     done
   done
+
+  # TODO(b/159355595): Ensure there is a tzdata in system to avoid warnings on
+  # stderr from Bionic.
+  if [ ! -f $ANDROID_PRODUCT_OUT/system/usr/share/zoneinfo/tzdata ]; then
+    mkdir -p $ANDROID_PRODUCT_OUT/system/usr/share/zoneinfo
+    cp $ANDROID_PRODUCT_OUT/system/apex/com.android.tzdata/etc/tz/tzdata \
+      $ANDROID_PRODUCT_OUT/system/usr/share/zoneinfo/tzdata
+  fi
+
+  # Create system symlinks for the Runtime APEX. Normally handled by
+  # installSymlinkToRuntimeApex in soong/cc/binary.go, but we have to replicate
+  # it here since we don't run the install rules for the Runtime APEX.
+  for b in linker{,_asan}{,64}; do
+    echo "Symlinking /apex/com.android.runtime/bin/$b to /system/bin"
+    ln -sf /apex/com.android.runtime/bin/$b $ANDROID_PRODUCT_OUT/system/bin/$b
+  done
+  for p in $ANDROID_PRODUCT_OUT/system/apex/com.android.runtime/lib{,64}/bionic/*; do
+    lib_dir=$(expr $p : '.*/\(lib[0-9]*\)/.*')
+    lib_file=$(basename $p)
+    src=/apex/com.android.runtime/${lib_dir}/bionic/${lib_file}
+    dst=$ANDROID_PRODUCT_OUT/system/${lib_dir}/${lib_file}
+    echo "Symlinking $src into /system/${lib_dir}"
+    mkdir -p $(dirname $dst)
+    ln -sf $src $dst
+  done
+
+  # Create linker config files. We run linkerconfig on host to avoid problems
+  # building it statically for device in an unbundled tree.
+
+  # temporary root for linkerconfig
+  linkerconfig_root=$ANDROID_PRODUCT_OUT/art_linkerconfig_root
+
+  rm -rf $linkerconfig_root
+
+  # Linkerconfig reads files from /system/etc
+  mkdir -p $linkerconfig_root/system
+  cp -r $ANDROID_PRODUCT_OUT/system/etc $linkerconfig_root/system
+
+  # For linkerconfig to pick up the APEXes correctly we need to make them
+  # available in $linkerconfig_root/apex.
+  mkdir -p $linkerconfig_root/apex
+  for apex in ${apexes[@]}; do
+    src="$ANDROID_PRODUCT_OUT/system/apex/${apex}"
+    if [[ $apex == com.android.art.* ]]; then
+      dst="$linkerconfig_root/apex/com.android.art"
+    else
+      dst="$linkerconfig_root/apex/${apex}"
+    fi
+    echo "Copying APEX directory from $src to $dst"
+    rm -rf $dst
+    cp -r $src $dst
+  done
+
+  # To avoid warnings from linkerconfig when it checks following two partitions
+  mkdir -p $linkerconfig_root/product
+  mkdir -p $linkerconfig_root/system_ext
+
+  platform_version=$(build/soong/soong_ui.bash --dumpvar-mode PLATFORM_VERSION)
+  linkerconfig_out=$ANDROID_PRODUCT_OUT/linkerconfig
+  echo "Generating linkerconfig in $linkerconfig_out"
+  rm -rf $linkerconfig_out
+  mkdir -p $linkerconfig_out
+  $ANDROID_HOST_OUT/bin/linkerconfig --target $linkerconfig_out --root $linkerconfig_root --vndk $platform_version
 fi

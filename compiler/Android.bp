@@ -22,6 +22,12 @@
 art_cc_defaults {
     name: "libart-compiler-defaults",
     defaults: ["art_defaults"],
+    visibility: [
+        // Visibility for prebuilt binaries from the prebuilt of this module.
+        // TODO(b/155921753): Restrict this when prebuilts are in their proper
+        // locations.
+        "//prebuilts:__subpackages__",
+    ],
     host_supported: true,
     srcs: [
         "compiled_method.cc",
@@ -112,7 +118,8 @@ art_cc_defaults {
             srcs: [
                 "jni/quick/arm64/calling_convention_arm64.cc",
                 "optimizing/code_generator_arm64.cc",
-                "optimizing/code_generator_vector_arm64.cc",
+                "optimizing/code_generator_vector_arm64_neon.cc",
+                "optimizing/code_generator_vector_arm64_sve.cc",
                 "optimizing/scheduler_arm64.cc",
                 "optimizing/instruction_simplifier_arm64.cc",
                 "optimizing/intrinsics_arm64.cc",
@@ -174,9 +181,9 @@ gensrcs {
     cmd: "$(location generate_operator_out) art/compiler $(in) > $(out)",
     tools: ["generate_operator_out"],
     srcs: [
-        "driver/compiler_options.h",
         "linker/linker_patch.h",
         "optimizing/locations.h",
+        "optimizing/nodes.h",
         "optimizing/optimizing_compiler_stats.h",
 
         "utils/arm/constants_arm.h",
@@ -358,6 +365,11 @@ art_cc_test {
     defaults: [
         "art_gtest_defaults",
     ],
+    data: [
+        ":art-gtest-jars-ExceptionHandle",
+        ":art-gtest-jars-Interfaces",
+        ":art-gtest-jars-MyClassNatives",
+    ],
     srcs: [
         "debug/dwarf/dwarf_test.cc",
         "debug/src_map_elem_test.cc",
@@ -367,8 +379,9 @@ art_cc_test {
         "linker/linker_patch_test.cc",
         "linker/output_stream_test.cc",
         "optimizing/bounds_check_elimination_test.cc",
-        "optimizing/superblock_cloner_test.cc",
+        "optimizing/constant_folding_test.cc",
         "optimizing/data_type_test.cc",
+        "optimizing/dead_code_elimination_test.cc",
         "optimizing/dominator_test.cc",
         "optimizing/find_loops_test.cc",
         "optimizing/graph_checker_test.cc",
@@ -377,7 +390,10 @@ art_cc_test {
         "optimizing/induction_var_analysis_test.cc",
         "optimizing/induction_var_range_test.cc",
         "optimizing/licm_test.cc",
+        "optimizing/linearize_test.cc",
         "optimizing/live_interval_test.cc",
+        "optimizing/live_ranges_test.cc",
+        "optimizing/liveness_test.cc",
         "optimizing/loop_optimization_test.cc",
         "optimizing/nodes_test.cc",
         "optimizing/nodes_vector_test.cc",
@@ -389,6 +405,7 @@ art_cc_test {
         "optimizing/ssa_liveness_analysis_test.cc",
         "optimizing/ssa_test.cc",
         "optimizing/stack_map_test.cc",
+        "optimizing/superblock_cloner_test.cc",
         "optimizing/suspend_check_test.cc",
         "utils/atomic_dex_ref_map_test.cc",
         "utils/dedupe_set_test.cc",
@@ -417,14 +434,8 @@ art_cc_test {
             srcs: [
                 "utils/x86/managed_register_x86_test.cc",
 
-                // These tests are testing architecture-independent
-                // functionality, but happen to use x86 codegen as part of the
-                // test.
-                "optimizing/constant_folding_test.cc",
-                "optimizing/dead_code_elimination_test.cc",
-                "optimizing/linearize_test.cc",
-                "optimizing/live_ranges_test.cc",
-                "optimizing/liveness_test.cc",
+                // This test is testing architecture-independent functionality,
+                // but happens to use x86 codegen as part of the test.
                 "optimizing/register_allocator_test.cc",
             ],
         },
@@ -441,10 +452,13 @@ art_cc_test {
         "libnativehelper_header_only",
     ],
 
+    static_libs: [
+        "libartd-simulator-container",
+    ],
+
     shared_libs: [
         "libprofiled",
         "libartd-compiler",
-        "libartd-simulator-container",
         "libvixld",
 
         "libbacktrace",

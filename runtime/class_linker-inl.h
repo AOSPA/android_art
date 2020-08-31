@@ -226,6 +226,7 @@ inline bool ClassLinker::CheckInvokeClassMismatch(ObjPtr<mirror::DexCache> dex_c
   switch (type) {
     case kStatic:
     case kSuper:
+    case kPolymorphic:
       break;
     case kInterface: {
       // We have to check whether the method id really belongs to an interface (dex static bytecode
@@ -279,7 +280,7 @@ inline bool ClassLinker::CheckInvokeClassMismatch(ObjPtr<mirror::DexCache> dex_c
         const dex::MethodId& method_id = dex_cache->GetDexFile()->GetMethodId(method_idx);
         ObjPtr<mirror::Class> klass =
             LookupResolvedType(method_id.class_idx_, dex_cache, class_loader);
-        DCHECK(klass != nullptr);
+        DCHECK(klass != nullptr) << dex_cache->GetDexFile()->PrettyMethod(method_idx);
         return klass;
       });
 }

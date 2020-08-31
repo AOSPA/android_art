@@ -18,6 +18,7 @@
 
 #include "arch/arm64/asm_support_arm64.h"
 #include "arch/arm64/instruction_set_features_arm64.h"
+#include "arch/arm64/jni_frame_arm64.h"
 #include "art_method-inl.h"
 #include "base/bit_utils.h"
 #include "base/bit_utils_iterator.h"
@@ -75,7 +76,6 @@ using helpers::OperandFromMemOperand;
 using helpers::OutputCPURegister;
 using helpers::OutputFPRegister;
 using helpers::OutputRegister;
-using helpers::QRegisterFrom;
 using helpers::RegisterFrom;
 using helpers::StackOperandFrom;
 using helpers::VIXLRegCodeFromART;
@@ -176,8 +176,9 @@ static void SaveRestoreLiveRegistersHelper(CodeGenerator* codegen,
                                          codegen->GetNumberOfFloatingPointRegisters()));
 
   CPURegList core_list = CPURegList(CPURegister::kRegister, kXRegSize, core_spills);
-  unsigned v_reg_size = codegen->GetGraph()->HasSIMD() ? kQRegSize : kDRegSize;
-  CPURegList fp_list = CPURegList(CPURegister::kVRegister, v_reg_size, fp_spills);
+  const unsigned v_reg_size_in_bits = codegen->GetSlowPathFPWidth() * 8;
+  DCHECK_LE(codegen->GetSIMDRegisterWidth(), kQRegSizeInBytes);
+  CPURegList fp_list = CPURegList(CPURegister::kVRegister, v_reg_size_in_bits, fp_spills);
 
   MacroAssembler* masm = down_cast<CodeGeneratorARM64*>(codegen)->GetVIXLAssembler();
   UseScratchRegisterScope temps(masm);
@@ -224,7 +225,7 @@ void SlowPathCodeARM64::SaveLiveRegisters(CodeGenerator* codegen, LocationSummar
     stack_offset += kXRegSizeInBytes;
   }
 
-  const size_t fp_reg_size = codegen->GetGraph()->HasSIMD() ? kQRegSizeInBytes : kDRegSizeInBytes;
+  const size_t fp_reg_size = codegen->GetSlowPathFPWidth();
   const uint32_t fp_spills = codegen->GetSlowPathSpills(locations, /* core_registers= */ false);
   for (uint32_t i : LowToHighBits(fp_spills)) {
     DCHECK_LT(stack_offset, codegen->GetFrameSize() - codegen->FrameEntrySpillSize());
@@ -426,10 +427,10 @@ class SuspendCheckSlowPathARM64 : public SlowPathCodeARM64 {
     LocationSummary* locations = instruction_->GetLocations();
     CodeGeneratorARM64* arm64_codegen = down_cast<CodeGeneratorARM64*>(codegen);
     __ Bind(GetEntryLabel());
-    SaveLiveRegisters(codegen, locations);  // Only saves live 128-bit regs for SIMD.
+    SaveLiveRegisters(codegen, locations);  // Only saves live vector regs for SIMD.
     arm64_codegen->InvokeRuntime(kQuickTestSuspend, instruction_, instruction_->GetDexPc(), this);
     CheckEntrypointTypes<kQuickTestSuspend, void, void>();
-    RestoreLiveRegisters(codegen, locations);  // Only restores live 128-bit regs for SIMD.
+    RestoreLiveRegisters(codegen, locations);  // Only restores live vector regs for SIMD.
     if (successor_ == nullptr) {
       __ B(GetReturnLabel());
     } else {
@@ -870,6 +871,49 @@ Location InvokeDexCallingConventionVisitorARM64::GetMethodLocation() const {
   return LocationFrom(kArtMethodRegister);
 }
 
+Location CriticalNativeCallingConventionVisitorARM64::GetNextLocation(DataType::Type type) {
+  DCHECK_NE(type, DataType::Type::kReference);
+
+  Location location = Location::NoLocation();
+  if (DataType::IsFloatingPointType(type)) {
+    if (fpr_index_ < kParameterFPRegistersLength) {
+      location = LocationFrom(kParameterFPRegisters[fpr_index_]);
+      ++fpr_index_;
+    }
+  } else {
+    // Native ABI uses the same registers as managed, except that the method register x0
+    // is a normal argument.
+    if (gpr_index_ < 1u + kParameterCoreRegistersLength) {
+      location = LocationFrom(gpr_index_ == 0u ? x0 : kParameterCoreRegisters[gpr_index_ - 1u]);
+      ++gpr_index_;
+    }
+  }
+  if (location.IsInvalid()) {
+    if (DataType::Is64BitType(type)) {
+      location = Location::DoubleStackSlot(stack_offset_);
+    } else {
+      location = Location::StackSlot(stack_offset_);
+    }
+    stack_offset_ += kFramePointerSize;
+
+    if (for_register_allocation_) {
+      location = Location::Any();
+    }
+  }
+  return location;
+}
+
+Location CriticalNativeCallingConventionVisitorARM64::GetReturnLocation(DataType::Type type) const {
+  // We perform conversion to the managed ABI return register after the call if needed.
+  InvokeDexCallingConventionVisitorARM64 dex_calling_convention;
+  return dex_calling_convention.GetReturnLocation(type);
+}
+
+Location CriticalNativeCallingConventionVisitorARM64::GetMethodLocation() const {
+  // Pass the method in the hidden argument x15.
+  return Location::RegisterLocation(x15.GetCode());
+}
+
 CodeGeneratorARM64::CodeGeneratorARM64(HGraph* graph,
                                        const CompilerOptions& compiler_options,
                                        OptimizingCompilerStats* stats)
@@ -883,8 +927,10 @@ CodeGeneratorARM64::CodeGeneratorARM64(HGraph* graph,
                     stats),
       block_labels_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       jump_tables_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
-      location_builder_(graph, this),
-      instruction_visitor_(graph, this),
+      location_builder_neon_(graph, this),
+      instruction_visitor_neon_(graph, this),
+      location_builder_sve_(graph, this),
+      instruction_visitor_sve_(graph, this),
       move_resolver_(graph->GetAllocator(), this),
       assembler_(graph->GetAllocator(),
                  compiler_options.GetInstructionSetFeatures()->AsArm64InstructionSetFeatures()),
@@ -909,6 +955,19 @@ CodeGeneratorARM64::CodeGeneratorARM64(HGraph* graph,
                                          graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)) {
   // Save the link register (containing the return address) to mimic Quick.
   AddAllocatedRegister(LocationFrom(lr));
+
+  bool use_sve = ShouldUseSVE();
+  if (use_sve) {
+    location_builder_ = &location_builder_sve_;
+    instruction_visitor_ = &instruction_visitor_sve_;
+  } else {
+    location_builder_ = &location_builder_neon_;
+    instruction_visitor_ = &instruction_visitor_neon_;
+  }
+}
+
+bool CodeGeneratorARM64::ShouldUseSVE() const {
+  return kArm64AllowSVE && GetInstructionSetFeatures().HasSVE();
 }
 
 #define __ GetVIXLAssembler()->
@@ -923,7 +982,7 @@ void CodeGeneratorARM64::Finalize(CodeAllocator* allocator) {
   EmitJumpTables();
 
   // Emit JIT baker read barrier slow paths.
-  DCHECK(Runtime::Current()->UseJitCompilation() || jit_baker_read_barrier_slow_paths_.empty());
+  DCHECK(GetCompilerOptions().IsJitCompiler() || jit_baker_read_barrier_slow_paths_.empty());
   for (auto& entry : jit_baker_read_barrier_slow_paths_) {
     uint32_t encoded_data = entry.first;
     vixl::aarch64::Label* slow_path_entry = &entry.second.label;
@@ -1038,9 +1097,9 @@ Location ParallelMoveResolverARM64::AllocateScratchLocationFor(Location::Kind ki
     scratch = LocationFrom(vixl_temps_.AcquireX());
   } else {
     DCHECK_EQ(kind, Location::kFpuRegister);
-    scratch = LocationFrom(codegen_->GetGraph()->HasSIMD()
-        ? vixl_temps_.AcquireVRegisterOfSize(kQRegSize)
-        : vixl_temps_.AcquireD());
+    scratch = codegen_->GetGraph()->HasSIMD()
+        ? codegen_->GetInstructionCodeGeneratorArm64()->AllocateSIMDScratchLocation(&vixl_temps_)
+        : LocationFrom(vixl_temps_.AcquireD());
   }
   AddScratchLocation(scratch);
   return scratch;
@@ -1051,7 +1110,11 @@ void ParallelMoveResolverARM64::FreeScratchLocation(Location loc) {
     vixl_temps_.Release(XRegisterFrom(loc));
   } else {
     DCHECK(loc.IsFpuRegister());
-    vixl_temps_.Release(codegen_->GetGraph()->HasSIMD() ? QRegisterFrom(loc) : DRegisterFrom(loc));
+    if (codegen_->GetGraph()->HasSIMD()) {
+      codegen_->GetInstructionCodeGeneratorArm64()->FreeSIMDScratchLocation(loc, &vixl_temps_);
+    } else {
+      vixl_temps_.Release(DRegisterFrom(loc));
+    }
   }
   RemoveScratchLocation(loc);
 }
@@ -1094,9 +1157,9 @@ void CodeGeneratorARM64::MaybeIncrementHotness(bool is_frame_entry) {
       __ B(ne, &done);
       if (is_frame_entry) {
         if (HasEmptyFrame()) {
-          // The entyrpoint expects the method at the bottom of the stack. We
+          // The entrypoint expects the method at the bottom of the stack. We
           // claim stack space necessary for alignment.
-          __ Claim(kStackAlignment);
+          IncreaseFrame(kStackAlignment);
           __ Stp(kArtMethodRegister, lr, MemOperand(sp, 0));
         } else if (!RequiresCurrentMethod()) {
           __ Str(kArtMethodRegister, MemOperand(sp, 0));
@@ -1113,7 +1176,7 @@ void CodeGeneratorARM64::MaybeIncrementHotness(bool is_frame_entry) {
       if (HasEmptyFrame()) {
         CHECK(is_frame_entry);
         __ Ldr(lr, MemOperand(sp, 8));
-        __ Drop(kStackAlignment);
+        DecreaseFrame(kStackAlignment);
       }
       __ Bind(&done);
     }
@@ -1434,7 +1497,7 @@ void CodeGeneratorARM64::MoveLocation(Location destination,
       DCHECK(dst.Is64Bits() == source.IsDoubleStackSlot());
       __ Ldr(dst, StackOperandFrom(source));
     } else if (source.IsSIMDStackSlot()) {
-      __ Ldr(QRegisterFrom(destination), StackOperandFrom(source));
+      GetInstructionCodeGeneratorArm64()->LoadSIMDRegFromStack(destination, source);
     } else if (source.IsConstant()) {
       DCHECK(CoherentConstantAndType(source, dst_type));
       MoveConstant(dst, source.GetConstant());
@@ -1458,30 +1521,14 @@ void CodeGeneratorARM64::MoveLocation(Location destination,
       } else {
         DCHECK(destination.IsFpuRegister());
         if (GetGraph()->HasSIMD()) {
-          __ Mov(QRegisterFrom(destination), QRegisterFrom(source));
+          GetInstructionCodeGeneratorArm64()->MoveSIMDRegToSIMDReg(destination, source);
         } else {
           __ Fmov(VRegister(dst), FPRegisterFrom(source, dst_type));
         }
       }
     }
   } else if (destination.IsSIMDStackSlot()) {
-    if (source.IsFpuRegister()) {
-      __ Str(QRegisterFrom(source), StackOperandFrom(destination));
-    } else {
-      DCHECK(source.IsSIMDStackSlot());
-      UseScratchRegisterScope temps(GetVIXLAssembler());
-      if (GetVIXLAssembler()->GetScratchVRegisterList()->IsEmpty()) {
-        Register temp = temps.AcquireX();
-        __ Ldr(temp, MemOperand(sp, source.GetStackIndex()));
-        __ Str(temp, MemOperand(sp, destination.GetStackIndex()));
-        __ Ldr(temp, MemOperand(sp, source.GetStackIndex() + kArm64WordSize));
-        __ Str(temp, MemOperand(sp, destination.GetStackIndex() + kArm64WordSize));
-      } else {
-        VRegister temp = temps.AcquireVRegisterOfSize(kQRegSize);
-        __ Ldr(temp, StackOperandFrom(source));
-        __ Str(temp, StackOperandFrom(destination));
-      }
-    }
+    GetInstructionCodeGeneratorArm64()->MoveToSIMDStackSlot(destination, source);
   } else {  // The destination is not a register. It must be a stack slot.
     DCHECK(destination.IsStackSlot() || destination.IsDoubleStackSlot());
     if (source.IsRegister() || source.IsFpuRegister()) {
@@ -1779,7 +1826,7 @@ void CodeGeneratorARM64::InvokeRuntime(QuickEntrypointEnum entrypoint,
   // Reduce code size for AOT by using shared trampolines for slow path runtime calls across the
   // entire oat file. This adds an extra branch and we do not want to slow down the main path.
   // For JIT, thunk sharing is per-method, so the gains would be smaller or even negative.
-  if (slow_path == nullptr || Runtime::Current()->UseJitCompilation()) {
+  if (slow_path == nullptr || GetCompilerOptions().IsJitCompiler()) {
     __ Ldr(lr, MemOperand(tr, entrypoint_offset.Int32Value()));
     // Ensure the pc position is recorded immediately after the `blr` instruction.
     ExactAssemblyScope eas(GetVIXLAssembler(), kInstructionSize, CodeBufferCheckScope::kExactSize);
@@ -3013,27 +3060,94 @@ void InstructionCodeGeneratorARM64::GenerateIntDivForPower2Denom(HDiv* instructi
   Register out = OutputRegister(instruction);
   Register dividend = InputRegisterAt(instruction, 0);
 
-  if (abs_imm == 2) {
-    int bits = DataType::Size(instruction->GetResultType()) * kBitsPerByte;
-    __ Add(out, dividend, Operand(dividend, LSR, bits - 1));
+  Register final_dividend;
+  if (HasNonNegativeResultOrMinInt(instruction->GetLeft())) {
+    // No need to adjust the result for non-negative dividends or the INT32_MIN/INT64_MIN dividends.
+    // NOTE: The generated code for HDiv correctly works for the INT32_MIN/INT64_MIN dividends:
+    //   imm == 2
+    //     add out, dividend(0x80000000), dividend(0x80000000), lsr #31 => out = 0x80000001
+    //     asr out, out(0x80000001), #1 => out = 0xc0000000
+    //     This is the same as 'asr out, 0x80000000, #1'
+    //
+    //   imm > 2
+    //     add temp, dividend(0x80000000), imm - 1 => temp = 0b10..01..1, where the number
+    //         of the rightmost 1s is ctz_imm.
+    //     cmp dividend(0x80000000), 0 => N = 1, V = 0 (lt is true)
+    //     csel out, temp(0b10..01..1), dividend(0x80000000), lt => out = 0b10..01..1
+    //     asr out, out(0b10..01..1), #ctz_imm => out = 0b1..10..0, where the number of the
+    //         leftmost 1s is ctz_imm + 1.
+    //     This is the same as 'asr out, dividend(0x80000000), #ctz_imm'.
+    //
+    //   imm == INT32_MIN
+    //     add tmp, dividend(0x80000000), #0x7fffffff => tmp = -1
+    //     cmp dividend(0x80000000), 0 => N = 1, V = 0 (lt is true)
+    //     csel out, temp(-1), dividend(0x80000000), lt => out = -1
+    //     neg out, out(-1), asr #31 => out = 1
+    //     This is the same as 'neg out, dividend(0x80000000), asr #31'.
+    final_dividend = dividend;
   } else {
-    UseScratchRegisterScope temps(GetVIXLAssembler());
-    Register temp = temps.AcquireSameSizeAs(out);
-    __ Add(temp, dividend, abs_imm - 1);
-    __ Cmp(dividend, 0);
-    __ Csel(out, temp, dividend, lt);
+    if (abs_imm == 2) {
+      int bits = DataType::Size(instruction->GetResultType()) * kBitsPerByte;
+      __ Add(out, dividend, Operand(dividend, LSR, bits - 1));
+    } else {
+      UseScratchRegisterScope temps(GetVIXLAssembler());
+      Register temp = temps.AcquireSameSizeAs(out);
+      __ Add(temp, dividend, abs_imm - 1);
+      __ Cmp(dividend, 0);
+      __ Csel(out, temp, dividend, lt);
+    }
+    final_dividend = out;
   }
 
   int ctz_imm = CTZ(abs_imm);
   if (imm > 0) {
-    __ Asr(out, out, ctz_imm);
+    __ Asr(out, final_dividend, ctz_imm);
   } else {
-    __ Neg(out, Operand(out, ASR, ctz_imm));
+    __ Neg(out, Operand(final_dividend, ASR, ctz_imm));
   }
 }
 
-void InstructionCodeGeneratorARM64::GenerateDivRemWithAnyConstant(HBinaryOperation* instruction) {
+// Return true if the magic number was modified by subtracting 2^32. So dividend needs to be added.
+static inline bool NeedToAddDividend(int64_t magic_number, int64_t divisor) {
+  return divisor > 0 && magic_number < 0;
+}
+
+// Return true if the magic number was modified by adding 2^32. So dividend needs to be subtracted.
+static inline bool NeedToSubDividend(int64_t magic_number, int64_t divisor) {
+  return divisor < 0 && magic_number > 0;
+}
+
+// Generate code which increments the value in register 'in' by 1 if the value is negative.
+// It is done with 'add out, in, in, lsr #31 or #63'.
+// If the value is a result of an operation setting the N flag, CINC MI can be used
+// instead of ADD. 'use_cond_inc' controls this.
+void InstructionCodeGeneratorARM64::GenerateIncrementNegativeByOne(
+    Register out,
+    Register in,
+    bool use_cond_inc) {
+  if (use_cond_inc) {
+    __ Cinc(out, in, mi);
+  } else {
+    __ Add(out, in, Operand(in, LSR, in.GetSizeInBits() - 1));
+  }
+}
+
+// Helper to generate code producing the result of HRem with a constant divisor.
+void InstructionCodeGeneratorARM64::GenerateResultRemWithAnyConstant(
+    Register out,
+    Register dividend,
+    Register quotient,
+    int64_t divisor,
+    UseScratchRegisterScope* temps_scope) {
+  Register temp_imm = temps_scope->AcquireSameSizeAs(out);
+  __ Mov(temp_imm, divisor);
+  __ Msub(out, quotient, temp_imm, dividend);
+}
+
+void InstructionCodeGeneratorARM64::GenerateInt64DivRemWithAnyConstant(
+    HBinaryOperation* instruction) {
   DCHECK(instruction->IsDiv() || instruction->IsRem());
+  DCHECK(instruction->GetResultType() == DataType::Type::kInt64);
 
   LocationSummary* locations = instruction->GetLocations();
   Location second = locations->InAt(1);
@@ -3043,44 +3157,117 @@ void InstructionCodeGeneratorARM64::GenerateDivRemWithAnyConstant(HBinaryOperati
   Register dividend = InputRegisterAt(instruction, 0);
   int64_t imm = Int64FromConstant(second.GetConstant());
 
-  DataType::Type type = instruction->GetResultType();
-  DCHECK(type == DataType::Type::kInt32 || type == DataType::Type::kInt64);
-
   int64_t magic;
   int shift;
-  CalculateMagicAndShiftForDivRem(
-      imm, /* is_long= */ type == DataType::Type::kInt64, &magic, &shift);
+  CalculateMagicAndShiftForDivRem(imm, /* is_long= */ true, &magic, &shift);
 
   UseScratchRegisterScope temps(GetVIXLAssembler());
   Register temp = temps.AcquireSameSizeAs(out);
 
   // temp = get_high(dividend * magic)
   __ Mov(temp, magic);
-  if (type == DataType::Type::kInt64) {
-    __ Smulh(temp, dividend, temp);
-  } else {
-    __ Smull(temp.X(), dividend, temp);
-    __ Lsr(temp.X(), temp.X(), 32);
-  }
+  __ Smulh(temp, dividend, temp);
 
-  if (imm > 0 && magic < 0) {
-    __ Add(temp, temp, dividend);
-  } else if (imm < 0 && magic > 0) {
-    __ Sub(temp, temp, dividend);
+  // The multiplication result might need some corrections to be finalized.
+  // The last correction is to increment by 1, if the result is negative.
+  // Currently it is done with 'add result, temp_result, temp_result, lsr #31 or #63'.
+  // Such ADD usually has latency 2, e.g. on Cortex-A55.
+  // However if one of the corrections is ADD or SUB, the sign can be detected
+  // with ADDS/SUBS. They set the N flag if the result is negative.
+  // This allows to use CINC MI which has latency 1.
+  bool use_cond_inc = false;
+
+  // As magic_number can be modified to fit into 32 bits, check whether the correction is needed.
+  if (NeedToAddDividend(magic, imm)) {
+    __ Adds(temp, temp, dividend);
+    use_cond_inc = true;
+  } else if (NeedToSubDividend(magic, imm)) {
+    __ Subs(temp, temp, dividend);
+    use_cond_inc = true;
   }
 
   if (shift != 0) {
     __ Asr(temp, temp, shift);
   }
 
-  if (instruction->IsDiv()) {
-    __ Sub(out, temp, Operand(temp, ASR, type == DataType::Type::kInt64 ? 63 : 31));
+  if (instruction->IsRem()) {
+    GenerateIncrementNegativeByOne(temp, temp, use_cond_inc);
+    GenerateResultRemWithAnyConstant(out, dividend, temp, imm, &temps);
   } else {
-    __ Sub(temp, temp, Operand(temp, ASR, type == DataType::Type::kInt64 ? 63 : 31));
-    // TODO: Strength reduction for msub.
-    Register temp_imm = temps.AcquireSameSizeAs(out);
-    __ Mov(temp_imm, imm);
-    __ Msub(out, temp, temp_imm, dividend);
+    GenerateIncrementNegativeByOne(out, temp, use_cond_inc);
+  }
+}
+
+void InstructionCodeGeneratorARM64::GenerateInt32DivRemWithAnyConstant(
+    HBinaryOperation* instruction) {
+  DCHECK(instruction->IsDiv() || instruction->IsRem());
+  DCHECK(instruction->GetResultType() == DataType::Type::kInt32);
+
+  LocationSummary* locations = instruction->GetLocations();
+  Location second = locations->InAt(1);
+  DCHECK(second.IsConstant());
+
+  Register out = OutputRegister(instruction);
+  Register dividend = InputRegisterAt(instruction, 0);
+  int64_t imm = Int64FromConstant(second.GetConstant());
+
+  int64_t magic;
+  int shift;
+  CalculateMagicAndShiftForDivRem(imm, /* is_long= */ false, &magic, &shift);
+  UseScratchRegisterScope temps(GetVIXLAssembler());
+  Register temp = temps.AcquireSameSizeAs(out);
+
+  // temp = get_high(dividend * magic)
+  __ Mov(temp, magic);
+  __ Smull(temp.X(), dividend, temp);
+
+  // The multiplication result might need some corrections to be finalized.
+  // The last correction is to increment by 1, if the result is negative.
+  // Currently it is done with 'add result, temp_result, temp_result, lsr #31 or #63'.
+  // Such ADD usually has latency 2, e.g. on Cortex-A55.
+  // However if one of the corrections is ADD or SUB, the sign can be detected
+  // with ADDS/SUBS. They set the N flag if the result is negative.
+  // This allows to use CINC MI which has latency 1.
+  bool use_cond_inc = false;
+
+  // ADD/SUB correction is performed in the high 32 bits
+  // as high 32 bits are ignored because type are kInt32.
+  if (NeedToAddDividend(magic, imm)) {
+    __ Adds(temp.X(), temp.X(), Operand(dividend.X(), LSL, 32));
+    use_cond_inc = true;
+  } else if (NeedToSubDividend(magic, imm)) {
+    __ Subs(temp.X(), temp.X(), Operand(dividend.X(), LSL, 32));
+    use_cond_inc = true;
+  }
+
+  // Extract the result from the high 32 bits and apply the final right shift.
+  DCHECK_LT(shift, 32);
+  if (imm > 0 && IsGEZero(instruction->GetLeft())) {
+    // No need to adjust the result for a non-negative dividend and a positive divisor.
+    if (instruction->IsDiv()) {
+      __ Lsr(out.X(), temp.X(), 32 + shift);
+    } else {
+      __ Lsr(temp.X(), temp.X(), 32 + shift);
+      GenerateResultRemWithAnyConstant(out, dividend, temp, imm, &temps);
+    }
+  } else {
+    __ Asr(temp.X(), temp.X(), 32 + shift);
+
+    if (instruction->IsRem()) {
+      GenerateIncrementNegativeByOne(temp, temp, use_cond_inc);
+      GenerateResultRemWithAnyConstant(out, dividend, temp, imm, &temps);
+    } else {
+      GenerateIncrementNegativeByOne(out, temp, use_cond_inc);
+    }
+  }
+}
+
+void InstructionCodeGeneratorARM64::GenerateDivRemWithAnyConstant(HBinaryOperation* instruction) {
+  DCHECK(instruction->IsDiv() || instruction->IsRem());
+  if (instruction->GetResultType() == DataType::Type::kInt64) {
+    GenerateInt64DivRemWithAnyConstant(instruction);
+  } else {
+    GenerateInt32DivRemWithAnyConstant(instruction);
   }
 }
 
@@ -3503,6 +3690,16 @@ void LocationsBuilderARM64::VisitNativeDebugInfo(HNativeDebugInfo* info) {
 
 void InstructionCodeGeneratorARM64::VisitNativeDebugInfo(HNativeDebugInfo*) {
   // MaybeRecordNativeDebugInfo is already called implicitly in CodeGenerator::Compile.
+}
+
+void CodeGeneratorARM64::IncreaseFrame(size_t adjustment) {
+  __ Claim(adjustment);
+  GetAssembler()->cfi().AdjustCFAOffset(adjustment);
+}
+
+void CodeGeneratorARM64::DecreaseFrame(size_t adjustment) {
+  __ Drop(adjustment);
+  GetAssembler()->cfi().AdjustCFAOffset(-adjustment);
 }
 
 void CodeGeneratorARM64::GenerateNop() {
@@ -4190,7 +4387,13 @@ void LocationsBuilderARM64::VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* inv
     return;
   }
 
-  HandleInvoke(invoke);
+  if (invoke->GetCodePtrLocation() == HInvokeStaticOrDirect::CodePtrLocation::kCallCriticalNative) {
+    CriticalNativeCallingConventionVisitorARM64 calling_convention_visitor(
+        /*for_register_allocation=*/ true);
+    CodeGenerator::CreateCommonInvokeLocationSummary(invoke, &calling_convention_visitor);
+  } else {
+    HandleInvoke(invoke);
+  }
 }
 
 static bool TryGenerateIntrinsicCode(HInvoke* invoke, CodeGeneratorARM64* codegen) {
@@ -4222,7 +4425,7 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
       break;
     }
     case HInvokeStaticOrDirect::MethodLoadKind::kRecursive:
-      callee_method = invoke->GetLocations()->InAt(invoke->GetSpecialInputIndex());
+      callee_method = invoke->GetLocations()->InAt(invoke->GetCurrentMethodIndex());
       break;
     case HInvokeStaticOrDirect::MethodLoadKind::kBootImageLinkTimePcRelative: {
       DCHECK(GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension());
@@ -4268,6 +4471,19 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
     }
   }
 
+  auto call_code_pointer_member = [&](MemberOffset offset) {
+    // LR = callee_method->member;
+    __ Ldr(lr, MemOperand(XRegisterFrom(callee_method), offset.Int32Value()));
+    {
+      // Use a scope to help guarantee that `RecordPcInfo()` records the correct pc.
+      ExactAssemblyScope eas(GetVIXLAssembler(),
+                             kInstructionSize,
+                             CodeBufferCheckScope::kExactSize);
+      // lr()
+      __ blr(lr);
+      RecordPcInfo(invoke, invoke->GetDexPc(), slow_path);
+    }
+  };
   switch (invoke->GetCodePtrLocation()) {
     case HInvokeStaticOrDirect::CodePtrLocation::kCallSelf:
       {
@@ -4279,20 +4495,43 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
         RecordPcInfo(invoke, invoke->GetDexPc(), slow_path);
       }
       break;
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod:
-      // LR = callee_method->entry_point_from_quick_compiled_code_;
-      __ Ldr(lr, MemOperand(
-          XRegisterFrom(callee_method),
-          ArtMethod::EntryPointFromQuickCompiledCodeOffset(kArm64PointerSize).Int32Value()));
-      {
-        // Use a scope to help guarantee that `RecordPcInfo()` records the correct pc.
-        ExactAssemblyScope eas(GetVIXLAssembler(),
-                               kInstructionSize,
-                               CodeBufferCheckScope::kExactSize);
-        // lr()
-        __ blr(lr);
-        RecordPcInfo(invoke, invoke->GetDexPc(), slow_path);
+    case HInvokeStaticOrDirect::CodePtrLocation::kCallCriticalNative: {
+      size_t out_frame_size =
+          PrepareCriticalNativeCall<CriticalNativeCallingConventionVisitorARM64,
+                                    kAapcs64StackAlignment,
+                                    GetCriticalNativeDirectCallFrameSize>(invoke);
+      call_code_pointer_member(ArtMethod::EntryPointFromJniOffset(kArm64PointerSize));
+      // Zero-/sign-extend the result when needed due to native and managed ABI mismatch.
+      switch (invoke->GetType()) {
+        case DataType::Type::kBool:
+          __ Ubfx(w0, w0, 0, 8);
+          break;
+        case DataType::Type::kInt8:
+          __ Sbfx(w0, w0, 0, 8);
+          break;
+        case DataType::Type::kUint16:
+          __ Ubfx(w0, w0, 0, 16);
+          break;
+        case DataType::Type::kInt16:
+          __ Sbfx(w0, w0, 0, 16);
+          break;
+        case DataType::Type::kInt32:
+        case DataType::Type::kInt64:
+        case DataType::Type::kFloat32:
+        case DataType::Type::kFloat64:
+        case DataType::Type::kVoid:
+          break;
+        default:
+          DCHECK(false) << invoke->GetType();
+          break;
       }
+      if (out_frame_size != 0u) {
+        DecreaseFrame(out_frame_size);
+      }
+      break;
+    }
+    case HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod:
+      call_code_pointer_member(ArtMethod::EntryPointFromQuickCompiledCodeOffset(kArm64PointerSize));
       break;
   }
 
@@ -4346,11 +4585,38 @@ void CodeGeneratorARM64::GenerateVirtualCall(
   }
 }
 
+void CodeGeneratorARM64::MoveFromReturnRegister(Location trg, DataType::Type type) {
+  if (!trg.IsValid()) {
+    DCHECK(type == DataType::Type::kVoid);
+    return;
+  }
+
+  DCHECK_NE(type, DataType::Type::kVoid);
+
+  if (DataType::IsIntegralType(type) || type == DataType::Type::kReference) {
+    Register trg_reg = RegisterFrom(trg, type);
+    Register res_reg = RegisterFrom(ARM64ReturnLocation(type), type);
+    __ Mov(trg_reg, res_reg, kDiscardForSameWReg);
+  } else {
+    VRegister trg_reg = FPRegisterFrom(trg, type);
+    VRegister res_reg = FPRegisterFrom(ARM64ReturnLocation(type), type);
+    __ Fmov(trg_reg, res_reg);
+  }
+}
+
 void LocationsBuilderARM64::VisitInvokePolymorphic(HInvokePolymorphic* invoke) {
+  IntrinsicLocationsBuilderARM64 intrinsic(GetGraph()->GetAllocator(), codegen_);
+  if (intrinsic.TryDispatch(invoke)) {
+    return;
+  }
   HandleInvoke(invoke);
 }
 
 void InstructionCodeGeneratorARM64::VisitInvokePolymorphic(HInvokePolymorphic* invoke) {
+  if (TryGenerateIntrinsicCode(invoke, codegen_)) {
+    codegen_->MaybeGenerateMarkingRegisterCheck(/* code= */ __LINE__);
+    return;
+  }
   codegen_->GenerateInvokePolymorphicCall(invoke);
   codegen_->MaybeGenerateMarkingRegisterCheck(/* code= */ __LINE__);
 }
@@ -4423,7 +4689,7 @@ vixl::aarch64::Label* CodeGeneratorARM64::NewStringBssEntryPatch(
 
 void CodeGeneratorARM64::EmitEntrypointThunkCall(ThreadOffset64 entrypoint_offset) {
   DCHECK(!__ AllowMacroInstructions());  // In ExactAssemblyScope.
-  DCHECK(!Runtime::Current()->UseJitCompilation());
+  DCHECK(!GetCompilerOptions().IsJitCompiler());
   call_entrypoint_patches_.emplace_back(/*dex_file*/ nullptr, entrypoint_offset.Uint32Value());
   vixl::aarch64::Label* bl_label = &call_entrypoint_patches_.back().label;
   __ bind(bl_label);
@@ -4432,7 +4698,7 @@ void CodeGeneratorARM64::EmitEntrypointThunkCall(ThreadOffset64 entrypoint_offse
 
 void CodeGeneratorARM64::EmitBakerReadBarrierCbnz(uint32_t custom_data) {
   DCHECK(!__ AllowMacroInstructions());  // In ExactAssemblyScope.
-  if (Runtime::Current()->UseJitCompilation()) {
+  if (GetCompilerOptions().IsJitCompiler()) {
     auto it = jit_baker_read_barrier_slow_paths_.FindOrAdd(custom_data);
     vixl::aarch64::Label* slow_path_entry = &it->second.label;
     __ cbnz(mr, slow_path_entry);
@@ -4523,7 +4789,7 @@ void CodeGeneratorARM64::LoadBootImageAddress(vixl::aarch64::Register reg,
     vixl::aarch64::Label* ldr_label = NewBootImageRelRoPatch(boot_image_reference, adrp_label);
     EmitLdrOffsetPlaceholder(ldr_label, reg.W(), reg.X());
   } else {
-    DCHECK(Runtime::Current()->UseJitCompilation());
+    DCHECK(GetCompilerOptions().IsJitCompiler());
     gc::Heap* heap = Runtime::Current()->GetHeap();
     DCHECK(!heap->GetBootImageSpaces().empty());
     const uint8_t* address = heap->GetBootImageSpaces()[0]->Begin() + boot_image_reference;
@@ -4695,14 +4961,9 @@ void InstructionCodeGeneratorARM64::VisitInvokeStaticOrDirect(HInvokeStaticOrDir
     return;
   }
 
-  {
-    // Ensure that between the BLR (emitted by GenerateStaticOrDirectCall) and RecordPcInfo there
-    // are no pools emitted.
-    EmissionCheckScope guard(GetVIXLAssembler(), kInvokeCodeMarginSizeInBytes);
-    LocationSummary* locations = invoke->GetLocations();
-    codegen_->GenerateStaticOrDirectCall(
-        invoke, locations->HasTemps() ? locations->GetTemp(0) : Location::NoLocation());
-  }
+  LocationSummary* locations = invoke->GetLocations();
+  codegen_->GenerateStaticOrDirectCall(
+      invoke, locations->HasTemps() ? locations->GetTemp(0) : Location::NoLocation());
 
   codegen_->MaybeGenerateMarkingRegisterCheck(/* code= */ __LINE__);
 }
@@ -4735,11 +4996,11 @@ HLoadClass::LoadKind CodeGeneratorARM64::GetSupportedLoadClassKind(
     case HLoadClass::LoadKind::kBootImageLinkTimePcRelative:
     case HLoadClass::LoadKind::kBootImageRelRo:
     case HLoadClass::LoadKind::kBssEntry:
-      DCHECK(!Runtime::Current()->UseJitCompilation());
+      DCHECK(!GetCompilerOptions().IsJitCompiler());
       break;
     case HLoadClass::LoadKind::kJitBootImageAddress:
     case HLoadClass::LoadKind::kJitTableAddress:
-      DCHECK(Runtime::Current()->UseJitCompilation());
+      DCHECK(GetCompilerOptions().IsJitCompiler());
       break;
     case HLoadClass::LoadKind::kRuntimeCall:
       break;
@@ -4954,11 +5215,11 @@ HLoadString::LoadKind CodeGeneratorARM64::GetSupportedLoadStringKind(
     case HLoadString::LoadKind::kBootImageLinkTimePcRelative:
     case HLoadString::LoadKind::kBootImageRelRo:
     case HLoadString::LoadKind::kBssEntry:
-      DCHECK(!Runtime::Current()->UseJitCompilation());
+      DCHECK(!GetCompilerOptions().IsJitCompiler());
       break;
     case HLoadString::LoadKind::kJitBootImageAddress:
     case HLoadString::LoadKind::kJitTableAddress:
-      DCHECK(Runtime::Current()->UseJitCompilation());
+      DCHECK(GetCompilerOptions().IsJitCompiler());
       break;
     case HLoadString::LoadKind::kRuntimeCall:
       break;
@@ -5372,18 +5633,27 @@ void InstructionCodeGeneratorARM64::GenerateIntRemForPower2Denom(HRem *instructi
   Register out = OutputRegister(instruction);
   Register dividend = InputRegisterAt(instruction, 0);
 
-  if (abs_imm == 2) {
-    __ Cmp(dividend, 0);
-    __ And(out, dividend, 1);
-    __ Csneg(out, out, out, ge);
-  } else {
-    UseScratchRegisterScope temps(GetVIXLAssembler());
-    Register temp = temps.AcquireSameSizeAs(out);
-
-    __ Negs(temp, dividend);
+  if (HasNonNegativeResultOrMinInt(instruction->GetLeft())) {
+    // No need to adjust the result for non-negative dividends or the INT32_MIN/INT64_MIN dividends.
+    // NOTE: The generated code for HRem correctly works for the INT32_MIN/INT64_MIN dividends.
+    // INT*_MIN % imm must be 0 for any imm of power 2. 'and' works only with bits
+    // 0..30 (Int32 case)/0..62 (Int64 case) of a dividend. For INT32_MIN/INT64_MIN they are zeros.
+    // So 'and' always produces zero.
     __ And(out, dividend, abs_imm - 1);
-    __ And(temp, temp, abs_imm - 1);
-    __ Csneg(out, out, temp, mi);
+  } else {
+    if (abs_imm == 2) {
+      __ Cmp(dividend, 0);
+      __ And(out, dividend, 1);
+      __ Csneg(out, out, out, ge);
+    } else {
+      UseScratchRegisterScope temps(GetVIXLAssembler());
+      Register temp = temps.AcquireSameSizeAs(out);
+
+      __ Negs(temp, dividend);
+      __ And(out, dividend, abs_imm - 1);
+      __ And(temp, temp, abs_imm - 1);
+      __ Csneg(out, out, temp, mi);
+    }
   }
 }
 
@@ -6372,6 +6642,39 @@ void CodeGeneratorARM64::EmitJitRootPatches(uint8_t* code, const uint8_t* roots_
   }
 }
 
+MemOperand InstructionCodeGeneratorARM64::VecNeonAddress(
+    HVecMemoryOperation* instruction,
+    UseScratchRegisterScope* temps_scope,
+    size_t size,
+    bool is_string_char_at,
+    /*out*/ Register* scratch) {
+  LocationSummary* locations = instruction->GetLocations();
+  Register base = InputRegisterAt(instruction, 0);
+
+  if (instruction->InputAt(1)->IsIntermediateAddressIndex()) {
+    DCHECK(!is_string_char_at);
+    return MemOperand(base.X(), InputRegisterAt(instruction, 1).X());
+  }
+
+  Location index = locations->InAt(1);
+  uint32_t offset = is_string_char_at
+      ? mirror::String::ValueOffset().Uint32Value()
+      : mirror::Array::DataOffset(size).Uint32Value();
+  size_t shift = ComponentSizeShiftWidth(size);
+
+  // HIntermediateAddress optimization is only applied for scalar ArrayGet and ArraySet.
+  DCHECK(!instruction->InputAt(0)->IsIntermediateAddress());
+
+  if (index.IsConstant()) {
+    offset += Int64FromLocation(index) << shift;
+    return HeapOperand(base, offset);
+  } else {
+    *scratch = temps_scope->AcquireSameSizeAs(base);
+    __ Add(*scratch, base, Operand(WRegisterFrom(index), LSL, shift));
+    return HeapOperand(*scratch, offset);
+  }
+}
+
 #undef __
 #undef QUICK_ENTRY_POINT
 
@@ -6538,10 +6841,8 @@ void CodeGeneratorARM64::CompileBakerReadBarrierThunk(Arm64Assembler& assembler,
   }
 
   // For JIT, the slow path is considered part of the compiled method,
-  // so JIT should pass null as `debug_name`. Tests may not have a runtime.
-  DCHECK(Runtime::Current() == nullptr ||
-         !Runtime::Current()->UseJitCompilation() ||
-         debug_name == nullptr);
+  // so JIT should pass null as `debug_name`.
+  DCHECK(!GetCompilerOptions().IsJitCompiler() || debug_name == nullptr);
   if (debug_name != nullptr && GetCompilerOptions().GenerateAnyDebugInfo()) {
     std::ostringstream oss;
     oss << "BakerReadBarrierThunk";

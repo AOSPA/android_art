@@ -223,12 +223,15 @@ static void VerifyGeneratedCode(InstructionSet target_isa,
                                 Expected expected) {
   ASSERT_TRUE(CanExecute(target_isa)) << "Target isa is not executable.";
 
-  // Verify on simulator.
-  CodeSimulatorContainer simulator(target_isa);
-  if (simulator.CanSimulate()) {
-    Expected result = SimulatorExecute<Expected>(simulator.Get(), f);
-    if (has_result) {
-      ASSERT_EQ(expected, result);
+  // Simulator cannot run without runtime, because it needs quick entrypoints.
+  if (Runtime::Current() != nullptr) {
+    // Verify on simulator.
+    CodeSimulatorContainer simulator(target_isa);
+    if (simulator.CanSimulate()) {
+      Expected result = SimulatorExecute<Expected>(simulator.Get(), f);
+      if (has_result) {
+        ASSERT_EQ(expected, result);
+      }
     }
   }
 
@@ -313,25 +316,25 @@ static void RunCode(CodegenTargetConfig target_config,
 }
 
 #ifdef ART_ENABLE_CODEGEN_arm
-CodeGenerator* create_codegen_arm_vixl32(HGraph* graph, const CompilerOptions& compiler_options) {
+inline CodeGenerator* create_codegen_arm_vixl32(HGraph* graph, const CompilerOptions& compiler_options) {
   return new (graph->GetAllocator()) TestCodeGeneratorARMVIXL(graph, compiler_options);
 }
 #endif
 
 #ifdef ART_ENABLE_CODEGEN_arm64
-CodeGenerator* create_codegen_arm64(HGraph* graph, const CompilerOptions& compiler_options) {
+inline CodeGenerator* create_codegen_arm64(HGraph* graph, const CompilerOptions& compiler_options) {
   return new (graph->GetAllocator()) TestCodeGeneratorARM64(graph, compiler_options);
 }
 #endif
 
 #ifdef ART_ENABLE_CODEGEN_x86
-CodeGenerator* create_codegen_x86(HGraph* graph, const CompilerOptions& compiler_options) {
+inline CodeGenerator* create_codegen_x86(HGraph* graph, const CompilerOptions& compiler_options) {
   return new (graph->GetAllocator()) TestCodeGeneratorX86(graph, compiler_options);
 }
 #endif
 
 #ifdef ART_ENABLE_CODEGEN_x86_64
-CodeGenerator* create_codegen_x86_64(HGraph* graph, const CompilerOptions& compiler_options) {
+inline CodeGenerator* create_codegen_x86_64(HGraph* graph, const CompilerOptions& compiler_options) {
   return new (graph->GetAllocator()) x86_64::CodeGeneratorX86_64(graph, compiler_options);
 }
 #endif

@@ -110,6 +110,7 @@ RegionSpace::RegionSpace(const std::string& name, MemMap&& mem_map, bool use_gen
       use_generational_cc_(use_generational_cc),
       time_(1U),
       num_regions_(mem_map_.Size() / kRegionSize),
+      madvise_time_(0U),
       num_non_free_regions_(0U),
       num_evac_regions_(0U),
       max_peak_num_non_free_regions_(0U),
@@ -499,8 +500,13 @@ void RegionSpace::ClearFromSpace(/* out */ uint64_t* cleared_bytes,
   }
 
   // Madvise the memory ranges.
+  uint64_t start_time = NanoTime();
   for (const auto &iter : madvise_list) {
     ZeroAndProtectRegion(iter.first, iter.second);
+  }
+  madvise_time_ += NanoTime() - start_time;
+
+  for (const auto &iter : madvise_list) {
     if (clear_bitmap) {
       GetLiveBitmap()->ClearRange(
           reinterpret_cast<mirror::Object*>(iter.first),
