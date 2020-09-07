@@ -3110,26 +3110,8 @@ void IntrinsicCodeGeneratorX86::VisitIntegerDivideUnsigned(HInvoke* invoke) {
   __ Bind(slow_path->GetExitLabel());
 }
 
-static uint32_t GetExpectedVarHandleCoordinatesCount(HInvoke *invoke) {
-  mirror::VarHandle::AccessModeTemplate access_mode_template =
-      mirror::VarHandle::GetAccessModeTemplateByIntrinsic(invoke->GetIntrinsic());
-  uint32_t var_type_count = mirror::VarHandle::GetNumberOfVarTypeParameters(access_mode_template);
-  uint32_t accessor_argument_count = invoke->GetNumberOfArguments() - 1;
-
-  return accessor_argument_count - var_type_count;
-}
-
-static DataType::Type GetDataTypeFromShorty(HInvoke* invoke, uint32_t index) {
-  DCHECK(invoke->IsInvokePolymorphic());
-  const DexFile& dex_file = invoke->GetBlock()->GetGraph()->GetDexFile();
-  const char* shorty = dex_file.GetShorty(invoke->AsInvokePolymorphic()->GetProtoIndex());
-  DCHECK_LT(index, strlen(shorty));
-
-  return DataType::FromShorty(shorty[index]);
-}
-
 static bool IsValidFieldVarHandleExpected(HInvoke* invoke) {
-  uint32_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
+  size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
   if (expected_coordinates_count > 1u) {
     // Only static and instance fields VarHandle are supported now.
     return false;
@@ -3278,7 +3260,7 @@ static void GenerateVarHandleCommonChecks(HInvoke *invoke,
                                    slow_path,
                                    assembler);
 
-  uint32_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
+  size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
   switch (expected_coordinates_count) {
     case 0u:
       GenerateVarHandleStaticFieldCheck(vh_object, slow_path, assembler);
@@ -3329,7 +3311,7 @@ static Register GenerateVarHandleFieldReference(HInvoke* invoke,
   // Load the ArtField and the offset
   __ movl(temp, Address(varhandle_object, artfield_offset));
   __ movl(offset, Address(temp, offset_offset));
-  uint32_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
+  size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
   if (expected_coordinates_count == 0) {
     // For static fields, load the declaring class
     InstructionCodeGeneratorX86* instr_codegen =
@@ -3363,7 +3345,7 @@ void IntrinsicLocationsBuilderX86::VisitVarHandleGet(HInvoke* invoke) {
   LocationSummary* locations = new (allocator) LocationSummary(
       invoke, LocationSummary::kCallOnSlowPath, kIntrinsified);
   locations->SetInAt(0, Location::RequiresRegister());
-  uint32_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
+  size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
   if (expected_coordinates_count == 1u) {
     // For instance fields, this is the source object.
     locations->SetInAt(1, Location::RequiresRegister());
@@ -3466,7 +3448,7 @@ void IntrinsicLocationsBuilderX86::VisitVarHandleSet(HInvoke* invoke) {
   // This temporary register is also used for card for MarkGCCard. Make sure it's a byte register
   locations->AddTemp(Location::RegisterLocation(EAX));
   locations->SetInAt(0, Location::RequiresRegister());
-  uint32_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
+  size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
   if (expected_coordinates_count == 1u) {
     // For instance fields, this is the source object
     locations->SetInAt(1, Location::RequiresRegister());
@@ -3545,7 +3527,7 @@ void IntrinsicCodeGeneratorX86::VisitVarHandleSet(HInvoke* invoke) {
   // Store the value to the field
   CodeGeneratorX86* codegen_x86 = down_cast<CodeGeneratorX86*>(codegen_);
   if (value_type == DataType::Type::kReference) {
-    uint32_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
+    size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
     bool needs_write_barrier =
       CodeGenerator::StoreNeedsWriteBarrier(value_type, invoke->InputAt(value_index));
     Register value_reg = value.AsRegister<Register>();
@@ -3722,7 +3704,7 @@ void IntrinsicCodeGeneratorX86::VisitVarHandleCompareAndSet(HInvoke* invoke) {
       Register new_value = new_value_loc.AsRegister<Register>();
       bool needs_write_barrier =
           CodeGenerator::StoreNeedsWriteBarrier(new_value_type, invoke->InputAt(new_value_index));
-      uint32_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
+      size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
       temp = expected_coordinates_count == 1u ? temp :
              locations->GetTemp(2).AsRegister<Register>();
       if (kCompilerReadBarrierOption == kWithReadBarrier) {
