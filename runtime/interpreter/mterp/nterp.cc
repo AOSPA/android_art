@@ -52,7 +52,6 @@ bool CanMethodUseNterp(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_) 
       // Nterp supports the same methods the compiler supports.
       method->IsCompilable() &&
       !method->MustCountLocks() &&
-      method->GetDexFile()->IsStandardDexFile() &&
       // Proxy methods do not go through the JIT like other methods, so we don't
       // run them with nterp.
       !method->IsProxyMethod() &&
