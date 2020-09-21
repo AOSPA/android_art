@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#if defined(ART_TARGET_ANDROID)
+
 #include <dlfcn.h>
 #include <memory>
 #include <unordered_map>
@@ -38,6 +40,7 @@ using ::testing::StrEq;
 using ::testing::_;
 using internal::ConfigEntry;
 using internal::ParseConfig;
+using internal::ParseJniConfig;
 
 #if defined(__LP64__)
 #define LIB_DIR "lib64"
@@ -94,7 +97,7 @@ class Platform {
 static std::unordered_map<std::string, Platform::mock_namespace_handle> namespaces = {
     {"system", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("system"))},
     {"default", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("default"))},
-    {"com_android_art", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("com_android_art"))},
+    {"com_android_i18n", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("com_android_i18n"))},
     {"sphal", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("sphal"))},
     {"vndk", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("vndk"))},
     {"vndk_product", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("vndk_product"))},
@@ -352,6 +355,7 @@ class NativeLoaderTest_Create : public NativeLoaderTest {
   std::string expected_parent_namespace = "system";
   bool expected_link_with_platform_ns = true;
   bool expected_link_with_art_ns = true;
+  bool expected_link_with_i18n_ns = true;
   bool expected_link_with_sphal_ns = !vendor_public_libraries().empty();
   bool expected_link_with_vndk_ns = false;
   bool expected_link_with_vndk_product_ns = false;
@@ -360,6 +364,7 @@ class NativeLoaderTest_Create : public NativeLoaderTest {
   bool expected_link_with_statsd_ns = true;
   std::string expected_shared_libs_to_platform_ns = default_public_libraries();
   std::string expected_shared_libs_to_art_ns = art_public_libraries();
+  std::string expected_shared_libs_to_i18n_ns = i18n_public_libraries();
   std::string expected_shared_libs_to_sphal_ns = vendor_public_libraries();
   std::string expected_shared_libs_to_vndk_ns = vndksp_libraries_vendor();
   std::string expected_shared_libs_to_vndk_product_ns = vndksp_libraries_product();
@@ -388,6 +393,11 @@ class NativeLoaderTest_Create : public NativeLoaderTest {
     if (expected_link_with_art_ns) {
       EXPECT_CALL(*mock, mock_link_namespaces(Eq(IsBridged()), _, NsEq("com_android_art"),
                                               StrEq(expected_shared_libs_to_art_ns)))
+          .WillOnce(Return(true));
+    }
+    if (expected_link_with_i18n_ns) {
+      EXPECT_CALL(*mock, mock_link_namespaces(Eq(IsBridged()), _, NsEq("com_android_i18n"),
+                                              StrEq(expected_shared_libs_to_i18n_ns)))
           .WillOnce(Return(true));
     }
     if (expected_link_with_sphal_ns) {
@@ -674,5 +684,30 @@ TEST(NativeLoaderConfigParser, RejectMalformed) {
   ASSERT_FALSE(ParseConfig("libA.so nopreload # comment", always_true).ok());
 }
 
+TEST(NativeLoaderJniConfigParser, BasicLoading) {
+  const char file_content[] = R"(
+# comment
+com_android_foo libfoo.so
+# Empty line is ignored
+
+com_android_bar libbar.so:libbar2.so
+)";
+
+  std::map<std::string, std::string> expected_result{
+    {"com_android_foo", "libfoo.so"},
+    {"com_android_bar", "libbar.so:libbar2.so"},
+  };
+
+  Result<std::map<std::string, std::string>> result = ParseJniConfig(file_content);
+  ASSERT_RESULT_OK(result);
+  ASSERT_EQ(expected_result, *result);
+}
+
+TEST(NativeLoaderJniConfigParser, RejectMalformed) {
+  ASSERT_FALSE(ParseJniConfig("com_android_foo").ok());
+}
+
 }  // namespace nativeloader
 }  // namespace android
+
+#endif  // defined(ART_TARGET_ANDROID)

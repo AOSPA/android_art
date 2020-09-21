@@ -17,6 +17,12 @@
 cc_defaults {
     name: "libartpalette_defaults",
     defaults: ["art_defaults"],
+    visibility: [
+        // Visibility for prebuilt binaries from the prebuilt of this module.
+        // TODO(b/155921753): Restrict this when prebuilts are in their proper
+        // locations.
+        "//prebuilts:__subpackages__",
+    ],
     host_supported: true,
     export_include_dirs: ["include"],
 }
@@ -34,12 +40,13 @@ cc_library_headers {
 art_cc_library {
     name: "libartpalette",
     defaults: ["libartpalette_defaults"],
-    required: ["libartpalette-system"], // libartpalette.so dlopen()'s libartpalette-system.
     header_libs: ["libbase_headers"],
     target: {
         // Targets supporting dlopen build the client library which loads
         // and binds the methods in the libartpalette-system library.
         android: {
+            // libartpalette.so dlopen()'s libartpalette-system.
+            required: ["libartpalette-system"],
             srcs: ["apex/palette.cc"],
             shared_libs: ["liblog"],
             version_script: "libartpalette.map.txt",
@@ -101,5 +108,4 @@ art_cc_test {
     host_supported: true,
     srcs: ["apex/palette_test.cc"],
     shared_libs: ["libartpalette"],
-    test_per_src: true,
 }

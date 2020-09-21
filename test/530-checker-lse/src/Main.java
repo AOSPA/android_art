@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-import java.lang.reflect.Method;
-
 class Circle {
   Circle(double radius) {
     this.radius = radius;
@@ -44,6 +42,7 @@ class TestClass {
   volatile int k;
   TestClass next;
   String str;
+  byte b;
   static int si;
   static TestClass sTestClassObj;
 }
@@ -169,6 +168,57 @@ public class Main {
     return obj.i + obj1.j + obj2.i + obj2.j;
   }
 
+  /// CHECK-START: int Main.test4(TestClass, boolean) load_store_elimination (before)
+  /// CHECK-DAG: InstanceFieldSet
+  /// CHECK-DAG: InstanceFieldSet
+  /// CHECK-DAG: InstanceFieldGet
+  /// CHECK-DAG: Return
+
+  /// CHECK-START: int Main.test4(TestClass, boolean) load_store_elimination (after)
+  /// CHECK-DAG: InstanceFieldSet
+  /// CHECK-DAG: InstanceFieldSet
+  /// CHECK-DAG: Return
+
+  /// CHECK-START: int Main.test4(TestClass, boolean) load_store_elimination (after)
+  /// CHECK:     NullCheck
+  /// CHECK:     NullCheck
+  /// CHECK-NOT: NullCheck
+
+  /// CHECK-START: int Main.test4(TestClass, boolean) load_store_elimination (after)
+  /// CHECK-NOT: InstanceFieldGet
+
+  // Set and merge the same value in two branches.
+  static int test4(TestClass obj, boolean b) {
+    if (b) {
+      obj.i = 1;
+    } else {
+      obj.i = 1;
+    }
+    return obj.i;
+  }
+
+  /// CHECK-START: int Main.test5(TestClass, boolean) load_store_elimination (before)
+  /// CHECK-DAG: InstanceFieldSet
+  /// CHECK-DAG: InstanceFieldSet
+  /// CHECK-DAG: InstanceFieldGet
+  /// CHECK-DAG: Return
+
+  /// CHECK-START: int Main.test5(TestClass, boolean) load_store_elimination (after)
+  /// CHECK-DAG: InstanceFieldSet
+  /// CHECK-DAG: InstanceFieldSet
+  /// CHECK-DAG: InstanceFieldGet
+  /// CHECK-DAG: Return
+
+  // Set and merge different values in two branches.
+  static int test5(TestClass obj, boolean b) {
+    if (b) {
+      obj.i = 1;
+    } else {
+      obj.i = 2;
+    }
+    return obj.i;
+  }
+
   /// CHECK-START: int Main.test6(TestClass, TestClass, boolean) load_store_elimination (before)
   /// CHECK: InstanceFieldSet
   /// CHECK: InstanceFieldSet
@@ -249,6 +299,31 @@ public class Main {
     obj.next = obj2;
     System.out.print("");
     return obj2.i;
+  }
+
+  /// CHECK-START: int Main.test10(TestClass) load_store_elimination (before)
+  /// CHECK-DAG: StaticFieldGet
+  /// CHECK-DAG: InstanceFieldGet
+  /// CHECK-DAG: StaticFieldSet
+  /// CHECK-DAG: InstanceFieldGet
+
+  /// CHECK-START: int Main.test10(TestClass) load_store_elimination (after)
+  /// CHECK-DAG: StaticFieldGet
+  /// CHECK-DAG: InstanceFieldGet
+  /// CHECK-DAG: StaticFieldSet
+
+  /// CHECK-START: int Main.test10(TestClass) load_store_elimination (after)
+  /// CHECK:     NullCheck
+  /// CHECK-NOT: NullCheck
+
+  /// CHECK-START: int Main.test10(TestClass) load_store_elimination (after)
+  /// CHECK:     InstanceFieldGet
+  /// CHECK-NOT: InstanceFieldGet
+
+  // Static fields shouldn't alias with instance fields.
+  static int test10(TestClass obj) {
+    TestClass.si += obj.i;
+    return obj.i;
   }
 
   /// CHECK-START: int Main.test11(TestClass) load_store_elimination (before)
@@ -493,6 +568,133 @@ public class Main {
     obj3.i = 5;    // This store can be eliminated since the singleton is created after the loop.
     sum += obj1.i + obj3.i;
     return sum;
+  }
+
+  /// CHECK-START: int Main.test23(boolean) load_store_elimination (before)
+  /// CHECK-DAG: NewInstance
+  /// CHECK-DAG: InstanceFieldSet
+  /// CHECK-DAG: InstanceFieldGet
+  /// CHECK-DAG: InstanceFieldSet
+  /// CHECK-DAG: InstanceFieldGet
+  /// CHECK-DAG: InstanceFieldSet
+  /// CHECK-DAG: InstanceFieldGet
+  /// CHECK-DAG: Return
+
+  /// CHECK-START: int Main.test23(boolean) load_store_elimination (after)
+  /// CHECK-DAG: NewInstance
+  /// CHECK-DAG: InstanceFieldSet
+  /// CHECK-DAG: InstanceFieldSet
+  /// CHECK-DAG: InstanceFieldGet
+  /// CHECK-DAG: Return
+
+  /// CHECK-START: int Main.test23(boolean) load_store_elimination (after)
+  /// CHECK:     InstanceFieldSet
+  /// CHECK:     InstanceFieldSet
+  /// CHECK-NOT: InstanceFieldSet
+
+  /// CHECK-START: int Main.test23(boolean) load_store_elimination (after)
+  /// CHECK: InstanceFieldGet
+  /// CHECK-NOT: InstanceFieldGet
+
+  /// CHECK-START: int Main.test23(boolean) load_store_elimination (after)
+  /// CHECK-DAG: <<Get:i\d+>> InstanceFieldGet
+  /// CHECK-DAG: Return [<<Get>>]
+
+  // Test store elimination on merging.
+  static int test23(boolean b) {
+    TestClass obj = new TestClass();
+    obj.i = 3;      // This store can be eliminated since the value flows into each branch.
+    if (b) {
+      obj.i += 1;   // This store cannot be eliminated due to the merge later.
+    } else {
+      obj.i += 2;   // This store cannot be eliminated due to the merge later.
+    }
+    return obj.i;
+  }
+
+  /// CHECK-START: float Main.test24() load_store_elimination (before)
+  /// CHECK-DAG:     <<True:i\d+>>     IntConstant 1
+  /// CHECK-DAG:     <<Float8:f\d+>>   FloatConstant 8
+  /// CHECK-DAG:     <<Float42:f\d+>>  FloatConstant 42
+  /// CHECK-DAG:     <<Obj:l\d+>>      NewInstance
+  /// CHECK-DAG:                       InstanceFieldSet [<<Obj>>,<<True>>]
+  /// CHECK-DAG:                       InstanceFieldSet [<<Obj>>,<<Float8>>]
+  /// CHECK-DAG:     <<GetTest:z\d+>>  InstanceFieldGet [<<Obj>>]
+  /// CHECK-DAG:     <<GetField:f\d+>> InstanceFieldGet [<<Obj>>]
+  /// CHECK-DAG:     <<Select:f\d+>>   Select [<<Float42>>,<<GetField>>,<<GetTest>>]
+  /// CHECK-DAG:                       Return [<<Select>>]
+
+  /// CHECK-START: float Main.test24() load_store_elimination (after)
+  /// CHECK-DAG:     <<True:i\d+>>     IntConstant 1
+  /// CHECK-DAG:     <<Float8:f\d+>>   FloatConstant 8
+  /// CHECK-DAG:     <<Float42:f\d+>>  FloatConstant 42
+  /// CHECK-DAG:     <<Select:f\d+>>   Select [<<Float42>>,<<Float8>>,<<True>>]
+  /// CHECK-DAG:                       Return [<<Select>>]
+
+  static float test24() {
+    float a = 42.0f;
+    TestClass3 obj = new TestClass3();
+    if (obj.test1) {
+      a = obj.floatField;
+    }
+    return a;
+  }
+
+  /// CHECK-START: int Main.$noinline$testConversion1(TestClass, int) load_store_elimination (before)
+  /// CHECK-DAG:                     InstanceFieldSet
+  /// CHECK-DAG:                     InstanceFieldSet
+  /// CHECK-DAG:                     InstanceFieldGet
+  /// CHECK-DAG:                     InstanceFieldSet
+  /// CHECK-DAG:                     InstanceFieldGet
+
+  /// CHECK-START: int Main.$noinline$testConversion1(TestClass, int) load_store_elimination (after)
+  /// CHECK-DAG:                     InstanceFieldSet
+  /// CHECK-DAG:                     InstanceFieldSet
+  /// CHECK-DAG:                     TypeConversion
+  /// CHECK-DAG:                     InstanceFieldSet
+  /// CHECK-DAG:                     InstanceFieldGet
+  static int $noinline$testConversion1(TestClass obj, int x) {
+    obj.i = x;
+    if ((x & 1) != 0) {
+      obj.b = (byte) x;
+      obj.i = obj.b;
+    }
+    return obj.i;
+  }
+
+  /// CHECK-START: int Main.$noinline$testConversion2(TestClass, int) load_store_elimination (before)
+  /// CHECK-DAG:                     InstanceFieldSet
+  /// CHECK-DAG:                     InstanceFieldSet
+  /// CHECK-DAG:                     InstanceFieldGet
+  /// CHECK-DAG:                     InstanceFieldSet
+  /// CHECK-DAG:                     InstanceFieldGet
+
+  /// CHECK-START: int Main.$noinline$testConversion2(TestClass, int) load_store_elimination (after)
+  /// CHECK-DAG:                     InstanceFieldSet
+  /// CHECK-DAG:                     InstanceFieldSet
+  /// CHECK-DAG:                     TypeConversion
+  /// CHECK-DAG:                     InstanceFieldSet
+  /// CHECK-DAG:                     InstanceFieldGet
+
+  /// CHECK-START: int Main.$noinline$testConversion2(TestClass, int) load_store_elimination (after)
+  /// CHECK:                         TypeConversion
+  /// CHECK-NOT:                     TypeConversion
+  static int $noinline$testConversion2(TestClass obj, int x) {
+    int tmp = 0;
+    obj.i = x;
+    if ((x & 1) != 0) {
+      // The instruction simplifier can remove this TypeConversion if there are
+      // no environment uses. Currently, there is an environment use in NullCheck,
+      // so this TypeConversion remains and GVN removes the second TypeConversion
+      // below. Since we really want to test that the TypeConversion from below
+      // can be moved and used for the load of `obj.b`, we have a similar test
+      // written in smali in 530-checker-lse3, StoreLoad.test3(int), except that
+      // it's using static fields (which would not help with the environment use).
+      obj.b = (byte) x;
+      obj.i = obj.b;
+      tmp = (byte) x;
+    }
+    return obj.i + tmp;
   }
 
   /// CHECK-START: void Main.testFinalizable() load_store_elimination (before)
@@ -1013,6 +1215,25 @@ public class Main {
     array[1] = obj;    // store the same value as the defaut value.
   }
 
+  /// CHECK-START: int Main.$noinline$testByteArrayDefaultValue() load_store_elimination (before)
+  /// CHECK-DAG:                 NewArray
+  /// CHECK-DAG: <<Value:b\d+>>  ArrayGet
+  /// CHECK-DAG:                 Return [<<Value>>]
+
+  /// CHECK-START: int Main.$noinline$testByteArrayDefaultValue() load_store_elimination (after)
+  /// CHECK-DAG: <<Const0:i\d+>> IntConstant 0
+  /// CHECK-DAG:                 Return [<<Const0>>]
+
+  /// CHECK-START: int Main.$noinline$testByteArrayDefaultValue() load_store_elimination (after)
+  /// CHECK-NOT:                 NewArray
+  /// CHECK-NOT:                 ArrayGet
+  /// CHECK-NOT:                 TypeConversion
+  private static int $noinline$testByteArrayDefaultValue() {
+    byte[] array = new byte[2];
+    array[1] = 1;  // FIXME: Without any stores, LSA tells LSE not to run.
+    return array[0];
+  }
+
   static Object[] sArray;
 
   /// CHECK-START: int Main.testLocalArrayMerge1(boolean) load_store_elimination (before)
@@ -1135,6 +1356,27 @@ public class Main {
     return a[0] + (a[0] & 0xff);
   }
 
+  /// CHECK-START: void Main.$noinline$testThrowingArraySet(java.lang.Object[], java.lang.Object) load_store_elimination (before)
+  /// CHECK-DAG:                 ArrayGet
+  /// CHECK-DAG:                 ArraySet
+  /// CHECK-DAG:                 ArraySet
+  /// CHECK-DAG:                 ArraySet
+  /// CHECK-DAG:                 ArraySet
+
+  /// CHECK-START: void Main.$noinline$testThrowingArraySet(java.lang.Object[], java.lang.Object) load_store_elimination (after)
+  /// CHECK-DAG:                 ArrayGet
+  /// CHECK-DAG:                 ArraySet
+  /// CHECK-DAG:                 ArraySet
+  /// CHECK-DAG:                 ArraySet
+  /// CHECK-DAG:                 ArraySet
+  private static void $noinline$testThrowingArraySet(Object[] a, Object o) {
+    Object olda0 = a[0];
+    a[0] = null;
+    a[1] = olda0;
+    a[0] = o;
+    a[1] = null;
+  }
+
   static void assertIntEquals(int result, int expected) {
     if (expected != result) {
       throw new Error("Expected: " + expected + ", found: " + result);
@@ -1153,15 +1395,7 @@ public class Main {
     }
   }
 
-  public static void main(String[] args) throws Exception {
-
-    Class main2 = Class.forName("Main2");
-    Method test4 = main2.getMethod("test4", TestClass.class, boolean.class);
-    Method test5 = main2.getMethod("test5", TestClass.class, boolean.class);
-    Method test10 = main2.getMethod("test10", TestClass.class);
-    Method test23 = main2.getMethod("test23", boolean.class);
-    Method test24 = main2.getMethod("test24");
-
+  public static void main(String[] args) {
     assertDoubleEquals(Math.PI * Math.PI * Math.PI, calcCircleArea(Math.PI));
     assertIntEquals(test1(new TestClass(), new TestClass()), 3);
     assertIntEquals(test2(new TestClass()), 1);
@@ -1169,10 +1403,10 @@ public class Main {
     TestClass obj2 = new TestClass();
     obj1.next = obj2;
     assertIntEquals(test3(obj1), 10);
-    assertIntEquals((int)test4.invoke(null, new TestClass(), true), 1);
-    assertIntEquals((int)test4.invoke(null, new TestClass(), false), 1);
-    assertIntEquals((int)test5.invoke(null, new TestClass(), true), 1);
-    assertIntEquals((int)test5.invoke(null, new TestClass(), false), 2);
+    assertIntEquals(test4(new TestClass(), true), 1);
+    assertIntEquals(test4(new TestClass(), false), 1);
+    assertIntEquals(test5(new TestClass(), true), 1);
+    assertIntEquals(test5(new TestClass(), false), 2);
     assertIntEquals(test6(new TestClass(), new TestClass(), true), 4);
     assertIntEquals(test6(new TestClass(), new TestClass(), false), 2);
     assertIntEquals(test7(new TestClass()), 1);
@@ -1181,7 +1415,7 @@ public class Main {
     obj2 = new TestClass();
     obj1.next = obj2;
     assertIntEquals(test9(new TestClass()), 1);
-    assertIntEquals((int)test10.invoke(null, new TestClass(3, 4)), 3);
+    assertIntEquals(test10(new TestClass(3, 4)), 3);
     assertIntEquals(TestClass.si, 3);
     assertIntEquals(test11(new TestClass()), 10);
     assertIntEquals(test12(new TestClass(), new TestClass()), 10);
@@ -1198,9 +1432,9 @@ public class Main {
     assertFloatEquals(test20().i, 0);
     test21(new TestClass());
     assertIntEquals(test22(), 13);
-    assertIntEquals((int)test23.invoke(null, true), 4);
-    assertIntEquals((int)test23.invoke(null, false), 5);
-    assertFloatEquals((float)test24.invoke(null), 8.0f);
+    assertIntEquals(test23(true), 4);
+    assertIntEquals(test23(false), 5);
+    assertFloatEquals(test24(), 8.0f);
     testFinalizableByForcingGc();
     assertIntEquals($noinline$testHSelect(true), 0xdead);
     int[] array = {2, 5, 9, -1, -3, 10, 8, 4};
@@ -1210,12 +1444,17 @@ public class Main {
     assertDoubleEquals(Math.PI * Math.PI * Math.PI, getCircleArea(Math.PI, true));
     assertDoubleEquals(0d, getCircleArea(Math.PI, false));
 
+    assertIntEquals($noinline$testConversion1(new TestClass(), 300), 300);
+    assertIntEquals($noinline$testConversion1(new TestClass(), 301), 45);
+    assertIntEquals($noinline$testConversion2(new TestClass(), 300), 300);
+    assertIntEquals($noinline$testConversion2(new TestClass(), 301), 90);
+
     int[] iarray = {0, 0, 0};
     double[] darray = {0d, 0d, 0d};
     try {
       assertDoubleEquals(Math.PI * Math.PI * Math.PI, testDeoptimize(iarray, darray, Math.PI));
     } catch (Exception e) {
-      System.out.println(e);
+      System.out.println(e.getClass().getName());
     }
     assertIntEquals(iarray[0], 1);
     assertIntEquals(iarray[1], 1);
@@ -1278,6 +1517,8 @@ public class Main {
 
     assertIntEquals(testStoreStoreWithDeoptimize(new int[4]), 4);
 
+    assertIntEquals($noinline$testByteArrayDefaultValue(), 0);
+
     assertIntEquals(testLocalArrayMerge1(true), 1);
     assertIntEquals(testLocalArrayMerge1(false), 1);
     assertIntEquals(testLocalArrayMerge2(true), 2);
@@ -1286,6 +1527,18 @@ public class Main {
     assertIntEquals(testLocalArrayMerge3(false), 1);
     assertIntEquals(testLocalArrayMerge4(true), 2);
     assertIntEquals(testLocalArrayMerge4(false), 2);
+
+    TestClass[] tca = new TestClass[] { new TestClass(), null };
+    try {
+      $noinline$testThrowingArraySet(tca, new TestClass2());
+    } catch (ArrayStoreException expected) {
+      if (tca[0] != null) {
+        throw new Error("tca[0] is not null");
+      }
+      if (tca[1] == null) {
+        throw new Error("tca[1] is null");
+      }
+    }
   }
 
   static boolean sFlag;

@@ -461,12 +461,36 @@ class Runtime {
     return OFFSETOF_MEMBER(Runtime, callee_save_methods_[static_cast<size_t>(type)]);
   }
 
+  // There are different kinds of ISAs in runtime:
+  //   1) Runtime ISA: for compiler, frame information
+  //   2) Quick code ISA: for image loading
+  //   3) Simulate ISA: for simulator
   InstructionSet GetInstructionSet() const {
     return instruction_set_;
   }
 
   void SetInstructionSet(InstructionSet instruction_set);
   void ClearInstructionSet();
+
+  static InstructionSet GetQuickCodeISA();
+
+  void SetSimulateISA(InstructionSet instruction_set);
+
+  InstructionSet GetSimulateISA() const {
+    return simulate_isa_;
+  }
+
+  static inline bool SimulatorMode() {
+    if (kIsDebugBuild) {
+      Runtime* runtime = Current();
+      // Disable simulator for compiler.
+      if (runtime == nullptr || runtime->IsCompiler()) {
+        return false;
+      }
+      return runtime->GetSimulateISA() != InstructionSet::kNone;
+    }
+    return false;
+  }
 
   void SetCalleeSaveMethod(ArtMethod* method, CalleeSaveType type);
   void ClearCalleeSaveMethods();
@@ -654,10 +678,6 @@ class Runtime {
     } else {
       process_data_directory_ = data_dir;
     }
-  }
-
-  bool IsDexFileFallbackEnabled() const {
-    return allow_dex_file_fallback_;
   }
 
   const std::vector<std::string>& GetCpuAbilist() const {
@@ -1050,6 +1070,10 @@ class Runtime {
 
   InstructionSet instruction_set_;
 
+  // The ISA of code we are simulating. If it is not kNone, we will run the code with that ISA and
+  // run with a simulator. The code might come from JIT compiler or a pre-built image.
+  InstructionSet simulate_isa_;
+
   CompilerCallbacks* compiler_callbacks_;
   bool is_zygote_;
   bool is_primary_zygote_;
@@ -1171,10 +1195,6 @@ class Runtime {
 
   // If kNone, verification is disabled. kEnable by default.
   verifier::VerifyMode verify_;
-
-  // If true, the runtime may use dex files directly with the interpreter if an oat file is not
-  // available/usable.
-  bool allow_dex_file_fallback_;
 
   // List of supported cpu abis.
   std::vector<std::string> cpu_abilist_;

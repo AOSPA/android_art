@@ -34,7 +34,7 @@
 #include "base/time_utils.h"
 #include "base/utils.h"
 #include "class_linker.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "compiler_callbacks.h"
 #include "dex/class_accessor-inl.h"
 #include "dex/descriptors_names.h"
@@ -257,7 +257,7 @@ class MethodVerifier final : public ::art::verifier::MethodVerifier {
    * Call this after widths have been set in "insn_flags".
    *
    * Returns "false" if something in the exception table looks fishy, but we're expecting the
-   * exception table to be somewhat sane.
+   * exception table to be valid.
    */
   bool ScanTryCatchBlocks() REQUIRES_SHARED(Locks::mutator_lock_);
 

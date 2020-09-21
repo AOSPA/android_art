@@ -46,13 +46,13 @@ function cparg {
 
 function boot_classpath_arg {
   local dir="$1"
-  local suffix="$2"
-  shift 2
+  shift 1
   printf -- "--vm-arg -Xbootclasspath"
   for var
   do
-    printf -- ":${dir}/${var}${suffix}.jar";
+    printf -- ":${dir}/${var}.jar";
   done
+  printf -- ":/apex/com.android.i18n/javalib/core-icu4j.jar:/apex/com.android.conscrypt/javalib/conscrypt.jar";
 }
 
 function usage {
@@ -112,7 +112,6 @@ working_packages=("libcore.android.system"
                   "libcore.libcore.net"
                   "libcore.libcore.reflect"
                   "libcore.libcore.util"
-                  "libcore.libcore.timezone"
                   "libcore.sun.invoke"
                   "libcore.sun.net"
                   "libcore.sun.misc"
@@ -145,9 +144,9 @@ source build/envsetup.sh >&/dev/null # for get_build_var, setpaths
 setpaths # include platform prebuilt java, javac, etc in $PATH.
 
 # Note: This must start with the CORE_IMG_JARS in Android.common_path.mk
-# because that's what we use for compiling the core.art image.
+# because that's what we use for compiling the boot.art image.
 # It may contain additional modules from TEST_CORE_JARS.
-BOOT_CLASSPATH_JARS="core-oj core-libart core-icu4j okhttp bouncycastle apache-xml conscrypt"
+BOOT_CLASSPATH_JARS="core-oj core-libart okhttp bouncycastle apache-xml"
 
 DEPS="core-tests jsr166-tests mockito-target"
 
@@ -183,11 +182,9 @@ vogar_args=""
 while [ -n "$1" ]; do
   case "$1" in
     --mode=device)
-      # Use --mode=device_testdex not --mode=device for buildbot-build.sh.
-      # See commit 191cae33c7c24e for more details.
-      vogar_args="$vogar_args --mode=device_testdex"
-      vogar_args="$vogar_args --vm-arg -Ximage:/data/art-test/core.art"
-      vogar_args="$vogar_args $(boot_classpath_arg /system/framework -testdex $BOOT_CLASSPATH_JARS)"
+      vogar_args="$vogar_args --mode=device"
+      vogar_args="$vogar_args --vm-arg -Ximage:/apex/com.android.art/javalib/boot.art"
+      vogar_args="$vogar_args $(boot_classpath_arg /apex/com.android.art/javalib $BOOT_CLASSPATH_JARS)"
       execution_mode="device"
       ;;
     --mode=host)

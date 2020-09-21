@@ -63,11 +63,6 @@ bool IntrinsicLocationsBuilderX86::TryDispatch(HInvoke* invoke) {
   return res->Intrinsified();
 }
 
-static void MoveArguments(HInvoke* invoke, CodeGeneratorX86* codegen) {
-  InvokeDexCallingConventionVisitorX86 calling_convention_visitor;
-  IntrinsicVisitor::MoveArguments(invoke, codegen, &calling_convention_visitor);
-}
-
 using IntrinsicSlowPathX86 = IntrinsicSlowPath<InvokeDexCallingConventionVisitorX86>;
 
 // NOLINT on __ macro to suppress wrong warning/fix (misc-macro-parentheses) from clang-tidy.
@@ -347,52 +342,23 @@ void IntrinsicCodeGeneratorX86::VisitMathSqrt(HInvoke* invoke) {
   GetAssembler()->sqrtsd(out, in);
 }
 
-static void InvokeOutOfLineIntrinsic(CodeGeneratorX86* codegen, HInvoke* invoke) {
-  MoveArguments(invoke, codegen);
-
-  DCHECK(invoke->IsInvokeStaticOrDirect());
-  codegen->GenerateStaticOrDirectCall(invoke->AsInvokeStaticOrDirect(),
-                                      Location::RegisterLocation(EAX));
-
-  // Copy the result back to the expected output.
-  Location out = invoke->GetLocations()->Out();
-  if (out.IsValid()) {
-    DCHECK(out.IsRegister());
-    codegen->MoveFromReturnRegister(out, invoke->GetType());
-  }
-}
-
 static void CreateSSE41FPToFPLocations(ArenaAllocator* allocator,
                                        HInvoke* invoke,
                                        CodeGeneratorX86* codegen) {
   // Do we have instruction support?
-  if (codegen->GetInstructionSetFeatures().HasSSE4_1()) {
-    CreateFPToFPLocations(allocator, invoke);
+  if (!codegen->GetInstructionSetFeatures().HasSSE4_1()) {
     return;
   }
 
-  // We have to fall back to a call to the intrinsic.
-  LocationSummary* locations =
-      new (allocator) LocationSummary(invoke, LocationSummary::kCallOnMainOnly);
-  InvokeRuntimeCallingConvention calling_convention;
-  locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetFpuRegisterAt(0)));
-  locations->SetOut(Location::FpuRegisterLocation(XMM0));
-  // Needs to be EAX for the invoke.
-  locations->AddTemp(Location::RegisterLocation(EAX));
+  CreateFPToFPLocations(allocator, invoke);
 }
 
-static void GenSSE41FPToFPIntrinsic(CodeGeneratorX86* codegen,
-                                   HInvoke* invoke,
-                                   X86Assembler* assembler,
-                                   int round_mode) {
+static void GenSSE41FPToFPIntrinsic(HInvoke* invoke, X86Assembler* assembler, int round_mode) {
   LocationSummary* locations = invoke->GetLocations();
-  if (locations->WillCall()) {
-    InvokeOutOfLineIntrinsic(codegen, invoke);
-  } else {
-    XmmRegister in = locations->InAt(0).AsFpuRegister<XmmRegister>();
-    XmmRegister out = locations->Out().AsFpuRegister<XmmRegister>();
-    __ roundsd(out, in, Immediate(round_mode));
-  }
+  DCHECK(!locations->WillCall());
+  XmmRegister in = locations->InAt(0).AsFpuRegister<XmmRegister>();
+  XmmRegister out = locations->Out().AsFpuRegister<XmmRegister>();
+  __ roundsd(out, in, Immediate(round_mode));
 }
 
 void IntrinsicLocationsBuilderX86::VisitMathCeil(HInvoke* invoke) {
@@ -400,7 +366,7 @@ void IntrinsicLocationsBuilderX86::VisitMathCeil(HInvoke* invoke) {
 }
 
 void IntrinsicCodeGeneratorX86::VisitMathCeil(HInvoke* invoke) {
-  GenSSE41FPToFPIntrinsic(codegen_, invoke, GetAssembler(), 2);
+  GenSSE41FPToFPIntrinsic(invoke, GetAssembler(), 2);
 }
 
 void IntrinsicLocationsBuilderX86::VisitMathFloor(HInvoke* invoke) {
@@ -408,7 +374,7 @@ void IntrinsicLocationsBuilderX86::VisitMathFloor(HInvoke* invoke) {
 }
 
 void IntrinsicCodeGeneratorX86::VisitMathFloor(HInvoke* invoke) {
-  GenSSE41FPToFPIntrinsic(codegen_, invoke, GetAssembler(), 1);
+  GenSSE41FPToFPIntrinsic(invoke, GetAssembler(), 1);
 }
 
 void IntrinsicLocationsBuilderX86::VisitMathRint(HInvoke* invoke) {
@@ -416,44 +382,33 @@ void IntrinsicLocationsBuilderX86::VisitMathRint(HInvoke* invoke) {
 }
 
 void IntrinsicCodeGeneratorX86::VisitMathRint(HInvoke* invoke) {
-  GenSSE41FPToFPIntrinsic(codegen_, invoke, GetAssembler(), 0);
+  GenSSE41FPToFPIntrinsic(invoke, GetAssembler(), 0);
 }
 
 void IntrinsicLocationsBuilderX86::VisitMathRoundFloat(HInvoke* invoke) {
   // Do we have instruction support?
-  if (codegen_->GetInstructionSetFeatures().HasSSE4_1()) {
-    HInvokeStaticOrDirect* static_or_direct = invoke->AsInvokeStaticOrDirect();
-    DCHECK(static_or_direct != nullptr);
-    LocationSummary* locations =
-        new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
-    locations->SetInAt(0, Location::RequiresFpuRegister());
-    if (static_or_direct->HasSpecialInput() &&
-        invoke->InputAt(
-            static_or_direct->GetSpecialInputIndex())->IsX86ComputeBaseMethodAddress()) {
-      locations->SetInAt(1, Location::RequiresRegister());
-    }
-    locations->SetOut(Location::RequiresRegister());
-    locations->AddTemp(Location::RequiresFpuRegister());
-    locations->AddTemp(Location::RequiresFpuRegister());
+  if (!codegen_->GetInstructionSetFeatures().HasSSE4_1()) {
     return;
   }
 
-  // We have to fall back to a call to the intrinsic.
+  HInvokeStaticOrDirect* static_or_direct = invoke->AsInvokeStaticOrDirect();
+  DCHECK(static_or_direct != nullptr);
   LocationSummary* locations =
-      new (allocator_) LocationSummary(invoke, LocationSummary::kCallOnMainOnly);
-  InvokeRuntimeCallingConvention calling_convention;
-  locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetFpuRegisterAt(0)));
-  locations->SetOut(Location::RegisterLocation(EAX));
-  // Needs to be EAX for the invoke.
-  locations->AddTemp(Location::RegisterLocation(EAX));
+      new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
+  locations->SetInAt(0, Location::RequiresFpuRegister());
+  if (static_or_direct->HasSpecialInput() &&
+      invoke->InputAt(
+          static_or_direct->GetSpecialInputIndex())->IsX86ComputeBaseMethodAddress()) {
+    locations->SetInAt(1, Location::RequiresRegister());
+  }
+  locations->SetOut(Location::RequiresRegister());
+  locations->AddTemp(Location::RequiresFpuRegister());
+  locations->AddTemp(Location::RequiresFpuRegister());
 }
 
 void IntrinsicCodeGeneratorX86::VisitMathRoundFloat(HInvoke* invoke) {
   LocationSummary* locations = invoke->GetLocations();
-  if (locations->WillCall()) {  // TODO: can we reach this?
-    InvokeOutOfLineIntrinsic(codegen_, invoke);
-    return;
-  }
+  DCHECK(!locations->WillCall());
 
   XmmRegister in = locations->InAt(0).AsFpuRegister<XmmRegister>();
   XmmRegister t1 = locations->GetTemp(0).AsFpuRegister<XmmRegister>();
@@ -3022,7 +2977,8 @@ void IntrinsicCodeGeneratorX86::VisitIntegerValueOf(HInvoke* invoke) {
       DCHECK(method_address != nullptr);
       Register method_address_reg =
           invoke->GetLocations()->InAt(method_address_index).AsRegister<Register>();
-      __ movl(out, Address(method_address_reg, out, TIMES_4, CodeGeneratorX86::kDummy32BitOffset));
+      __ movl(out,
+              Address(method_address_reg, out, TIMES_4, CodeGeneratorX86::kPlaceholder32BitOffset));
       codegen_->RecordBootImageIntrinsicPatch(method_address, info.array_data_boot_image_reference);
     } else {
       // Note: We're about to clobber the index in `out`, so we need to use `in` and
@@ -3072,6 +3028,42 @@ void IntrinsicLocationsBuilderX86::VisitReachabilityFence(HInvoke* invoke) {
 
 void IntrinsicCodeGeneratorX86::VisitReachabilityFence(HInvoke* invoke ATTRIBUTE_UNUSED) { }
 
+void IntrinsicLocationsBuilderX86::VisitIntegerDivideUnsigned(HInvoke* invoke) {
+  LocationSummary* locations = new (allocator_) LocationSummary(invoke,
+                                                                LocationSummary::kCallOnSlowPath,
+                                                                kIntrinsified);
+  locations->SetInAt(0, Location::RegisterLocation(EAX));
+  locations->SetInAt(1, Location::RequiresRegister());
+  locations->SetOut(Location::SameAsFirstInput());
+  // Intel uses edx:eax as the dividend.
+  locations->AddTemp(Location::RegisterLocation(EDX));
+}
+
+void IntrinsicCodeGeneratorX86::VisitIntegerDivideUnsigned(HInvoke* invoke) {
+  X86Assembler* assembler = GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+  Location out = locations->Out();
+  Location first = locations->InAt(0);
+  Location second = locations->InAt(1);
+  Register edx = locations->GetTemp(0).AsRegister<Register>();
+  Register second_reg = second.AsRegister<Register>();
+
+  DCHECK_EQ(EAX, first.AsRegister<Register>());
+  DCHECK_EQ(EAX, out.AsRegister<Register>());
+  DCHECK_EQ(EDX, edx);
+
+  // Check if divisor is zero, bail to managed implementation to handle.
+  __ testl(second_reg, second_reg);
+  SlowPathCode* slow_path = new (codegen_->GetScopedAllocator()) IntrinsicSlowPathX86(invoke);
+  codegen_->AddSlowPath(slow_path);
+  __ j(kEqual, slow_path->GetEntryLabel());
+
+  __ xorl(edx, edx);
+  __ divl(second_reg);
+
+  __ Bind(slow_path->GetExitLabel());
+}
+
 UNIMPLEMENTED_INTRINSIC(X86, MathRoundDouble)
 UNIMPLEMENTED_INTRINSIC(X86, ReferenceGetReferent)
 UNIMPLEMENTED_INTRINSIC(X86, FloatIsInfinite)
@@ -3115,6 +3107,45 @@ UNIMPLEMENTED_INTRINSIC(X86, UnsafeGetAndAddLong)
 UNIMPLEMENTED_INTRINSIC(X86, UnsafeGetAndSetInt)
 UNIMPLEMENTED_INTRINSIC(X86, UnsafeGetAndSetLong)
 UNIMPLEMENTED_INTRINSIC(X86, UnsafeGetAndSetObject)
+
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleFullFence)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleAcquireFence)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleReleaseFence)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleLoadLoadFence)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleStoreStoreFence)
+UNIMPLEMENTED_INTRINSIC(X86, MethodHandleInvokeExact)
+UNIMPLEMENTED_INTRINSIC(X86, MethodHandleInvoke)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleCompareAndExchange)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleCompareAndExchangeAcquire)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleCompareAndExchangeRelease)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleCompareAndSet)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGet)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAcquire)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndAdd)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndAddAcquire)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndAddRelease)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndBitwiseAnd)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndBitwiseAndAcquire)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndBitwiseAndRelease)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndBitwiseOr)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndBitwiseOrAcquire)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndBitwiseOrRelease)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndBitwiseXor)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndBitwiseXorAcquire)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndBitwiseXorRelease)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndSet)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndSetAcquire)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndSetRelease)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetOpaque)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetVolatile)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleSet)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleSetOpaque)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleSetRelease)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleSetVolatile)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleWeakCompareAndSet)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleWeakCompareAndSetAcquire)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleWeakCompareAndSetPlain)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleWeakCompareAndSetRelease)
 
 UNREACHABLE_INTRINSICS(X86)
 

@@ -57,7 +57,7 @@
 #include "cha.h"
 #include "class_linker-inl.h"
 #include "class_loader_utils.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "class_table-inl.h"
 #include "compiler_callbacks.h"
 #include "debug_print.h"
@@ -88,6 +88,7 @@
 #include "imtable-inl.h"
 #include "intern_table-inl.h"
 #include "interpreter/interpreter.h"
+#include "interpreter/mterp/nterp.h"
 #include "jit/debugger_interface.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
@@ -322,7 +323,7 @@ class ClassLinker::VisiblyInitializedCallback final
           vm->DeleteWeakGlobalRef(self, classes_[i]);
           if (klass != nullptr) {
             mirror::Class::SetStatus(klass, ClassStatus::kVisiblyInitialized, self);
-            class_linker_->FixupStaticTrampolines(klass.Get());
+            class_linker_->FixupStaticTrampolines(self, klass.Get());
           }
         }
         num_classes_ = 0u;
@@ -422,14 +423,14 @@ ClassLinker::VisiblyInitializedCallback* ClassLinker::MarkClassInitialized(
     // Thanks to the x86 memory model, we do not need any memory fences and
     // we can immediately mark the class as visibly initialized.
     mirror::Class::SetStatus(klass, ClassStatus::kVisiblyInitialized, self);
-    FixupStaticTrampolines(klass.Get());
+    FixupStaticTrampolines(self, klass.Get());
     return nullptr;
   }
   if (Runtime::Current()->IsActiveTransaction()) {
     // Transactions are single-threaded, so we can mark the class as visibly intialized.
     // (Otherwise we'd need to track the callback's entry in the transaction for rollback.)
     mirror::Class::SetStatus(klass, ClassStatus::kVisiblyInitialized, self);
-    FixupStaticTrampolines(klass.Get());
+    FixupStaticTrampolines(self, klass.Get());
     return nullptr;
   }
   mirror::Class::SetStatus(klass, ClassStatus::kInitialized, self);
@@ -446,6 +447,65 @@ ClassLinker::VisiblyInitializedCallback* ClassLinker::MarkClassInitialized(
     return callback;
   } else {
     return nullptr;
+  }
+}
+
+const void* ClassLinker::RegisterNative(
+    Thread* self, ArtMethod* method, const void* native_method) {
+  CHECK(method->IsNative()) << method->PrettyMethod();
+  CHECK(native_method != nullptr) << method->PrettyMethod();
+  void* new_native_method = nullptr;
+  Runtime* runtime = Runtime::Current();
+  runtime->GetRuntimeCallbacks()->RegisterNativeMethod(method,
+                                                       native_method,
+                                                       /*out*/&new_native_method);
+  if (method->IsCriticalNative()) {
+    MutexLock lock(self, critical_native_code_with_clinit_check_lock_);
+    // Remove old registered method if any.
+    auto it = critical_native_code_with_clinit_check_.find(method);
+    if (it != critical_native_code_with_clinit_check_.end()) {
+      critical_native_code_with_clinit_check_.erase(it);
+    }
+    // To ensure correct memory visibility, we need the class to be visibly
+    // initialized before we can set the JNI entrypoint.
+    if (method->GetDeclaringClass()->IsVisiblyInitialized()) {
+      method->SetEntryPointFromJni(new_native_method);
+    } else {
+      critical_native_code_with_clinit_check_.emplace(method, new_native_method);
+    }
+  } else {
+    method->SetEntryPointFromJni(new_native_method);
+  }
+  return new_native_method;
+}
+
+void ClassLinker::UnregisterNative(Thread* self, ArtMethod* method) {
+  CHECK(method->IsNative()) << method->PrettyMethod();
+  // Restore stub to lookup native pointer via dlsym.
+  if (method->IsCriticalNative()) {
+    MutexLock lock(self, critical_native_code_with_clinit_check_lock_);
+    auto it = critical_native_code_with_clinit_check_.find(method);
+    if (it != critical_native_code_with_clinit_check_.end()) {
+      critical_native_code_with_clinit_check_.erase(it);
+    }
+    method->SetEntryPointFromJni(GetJniDlsymLookupCriticalStub());
+  } else {
+    method->SetEntryPointFromJni(GetJniDlsymLookupStub());
+  }
+}
+
+const void* ClassLinker::GetRegisteredNative(Thread* self, ArtMethod* method) {
+  if (method->IsCriticalNative()) {
+    MutexLock lock(self, critical_native_code_with_clinit_check_lock_);
+    auto it = critical_native_code_with_clinit_check_.find(method);
+    if (it != critical_native_code_with_clinit_check_.end()) {
+      return it->second;
+    }
+    const void* native_code = method->GetEntryPointFromJni();
+    return IsJniDlsymLookupCriticalStub(native_code) ? nullptr : native_code;
+  } else {
+    const void* native_code = method->GetEntryPointFromJni();
+    return IsJniDlsymLookupStub(native_code) ? nullptr : native_code;
   }
 }
 
@@ -638,6 +698,8 @@ ClassLinker::ClassLinker(InternTable* intern_table, bool fast_class_not_found_ex
       image_pointer_size_(kRuntimePointerSize),
       visibly_initialized_callback_lock_("visibly initialized callback lock"),
       visibly_initialized_callback_(nullptr),
+      critical_native_code_with_clinit_check_lock_("critical native code with clinit check lock"),
+      critical_native_code_with_clinit_check_(),
       cha_(Runtime::Current()->IsAotCompiler() ? nullptr : new ClassHierarchyAnalysis()) {
   // For CHA disabled during Aot, see b/34193647.
 
@@ -1133,8 +1195,10 @@ void ClassLinker::RunRootClinits(Thread* self) {
     if (!c->IsArrayClass() && !c->IsPrimitive()) {
       StackHandleScope<1> hs(self);
       Handle<mirror::Class> h_class(hs.NewHandle(c));
-      EnsureInitialized(self, h_class, true, true);
-      self->AssertNoPendingException();
+      if (!EnsureInitialized(self, h_class, true, true)) {
+        LOG(FATAL) << "Exception when initializing " << h_class->PrettyClass()
+            << ": " << self->GetException()->Dump();
+      }
     } else {
       DCHECK(c->IsInitialized());
     }
@@ -2121,9 +2185,14 @@ bool ClassLinker::AddImageSpace(
     header.VisitPackedArtMethods([&](ArtMethod& method) REQUIRES_SHARED(Locks::mutator_lock_) {
       if (!method.IsRuntimeMethod()) {
         DCHECK(method.GetDeclaringClass() != nullptr);
-        if (!method.IsNative() && !method.IsResolutionMethod()) {
-          method.SetEntryPointFromQuickCompiledCodePtrSize(GetQuickToInterpreterBridge(),
-                                                            image_pointer_size_);
+        if (!method.IsResolutionMethod()) {
+          if (!method.IsNative()) {
+            method.SetEntryPointFromQuickCompiledCodePtrSize(GetQuickToInterpreterBridge(),
+                                                             image_pointer_size_);
+          } else if (Runtime::SimulatorMode()) {
+            method.SetEntryPointFromQuickCompiledCodePtrSize(GetQuickGenericJniStub(),
+                                                             image_pointer_size_);
+          }
         }
       }
     }, space->Begin(), image_pointer_size_);
@@ -2495,6 +2564,17 @@ void ClassLinker::DeleteClassLoader(Thread* self, const ClassLoaderData& data, b
   if (cleanup_cha) {
     CHAOnDeleteUpdateClassVisitor visitor(data.allocator);
     data.class_table->Visit<CHAOnDeleteUpdateClassVisitor, kWithoutReadBarrier>(visitor);
+  }
+  {
+    MutexLock lock(self, critical_native_code_with_clinit_check_lock_);
+    auto end = critical_native_code_with_clinit_check_.end();
+    for (auto it = critical_native_code_with_clinit_check_.begin(); it != end; ) {
+      if (data.allocator->ContainsUnsafe(it->first)) {
+        it = critical_native_code_with_clinit_check_.erase(it);
+      } else {
+        ++it;
+      }
+    }
   }
 
   delete data.allocator;
@@ -3479,6 +3559,10 @@ bool ClassLinker::ShouldUseInterpreterEntrypoint(ArtMethod* method, const void* 
     return true;
   }
 
+  if (Runtime::SimulatorMode()) {
+    return !method->CanBeSimulated();
+  }
+
   Runtime* runtime = Runtime::Current();
   instrumentation::Instrumentation* instr = runtime->GetInstrumentation();
   if (instr->InterpretOnly()) {
@@ -3529,14 +3613,30 @@ bool ClassLinker::ShouldUseInterpreterEntrypoint(ArtMethod* method, const void* 
   return false;
 }
 
-void ClassLinker::FixupStaticTrampolines(ObjPtr<mirror::Class> klass) {
+void ClassLinker::FixupStaticTrampolines(Thread* self, ObjPtr<mirror::Class> klass) {
   ScopedAssertNoThreadSuspension sants(__FUNCTION__);
   DCHECK(klass->IsVisiblyInitialized()) << klass->PrettyDescriptor();
-  if (klass->NumDirectMethods() == 0) {
+  size_t num_direct_methods = klass->NumDirectMethods();
+  if (num_direct_methods == 0) {
     return;  // No direct methods => no static methods.
   }
   if (UNLIKELY(klass->IsProxyClass())) {
     return;
+  }
+  PointerSize pointer_size = image_pointer_size_;
+  if (std::any_of(klass->GetDirectMethods(pointer_size).begin(),
+                  klass->GetDirectMethods(pointer_size).end(),
+                  [](const ArtMethod& m) { return m.IsCriticalNative(); })) {
+    // Store registered @CriticalNative methods, if any, to JNI entrypoints.
+    // Direct methods are a contiguous chunk of memory, so use the ordering of the map.
+    ArtMethod* first_method = klass->GetDirectMethod(0u, pointer_size);
+    ArtMethod* last_method = klass->GetDirectMethod(num_direct_methods - 1u, pointer_size);
+    MutexLock lock(self, critical_native_code_with_clinit_check_lock_);
+    auto lb = critical_native_code_with_clinit_check_.lower_bound(first_method);
+    while (lb != critical_native_code_with_clinit_check_.end() && lb->first <= last_method) {
+      lb->first->SetEntryPointFromJni(lb->second);
+      lb = critical_native_code_with_clinit_check_.erase(lb);
+    }
   }
   Runtime* runtime = Runtime::Current();
   if (!runtime->IsStarted()) {
@@ -3546,18 +3646,13 @@ void ClassLinker::FixupStaticTrampolines(ObjPtr<mirror::Class> klass) {
   }
 
   const DexFile& dex_file = klass->GetDexFile();
-  const uint16_t class_def_idx = klass->GetDexClassDefIndex();
-  CHECK_NE(class_def_idx, DexFile::kDexNoIndex16);
-  ClassAccessor accessor(dex_file, class_def_idx);
-  // There should always be class data if there were direct methods.
-  CHECK(accessor.HasClassData()) << klass->PrettyDescriptor();
   bool has_oat_class;
   OatFile::OatClass oat_class = OatFile::FindOatClass(dex_file,
                                                       klass->GetDexClassDefIndex(),
                                                       &has_oat_class);
   // Link the code of methods skipped by LinkCode.
-  for (size_t method_index = 0; method_index < accessor.NumDirectMethods(); ++method_index) {
-    ArtMethod* method = klass->GetDirectMethod(method_index, image_pointer_size_);
+  for (size_t method_index = 0; method_index < num_direct_methods; ++method_index) {
+    ArtMethod* method = klass->GetDirectMethod(method_index, pointer_size);
     if (!method->IsStatic()) {
       // Only update static methods.
       continue;
@@ -3585,7 +3680,7 @@ void ClassLinker::FixupStaticTrampolines(ObjPtr<mirror::Class> klass) {
     }
 
     // Check whether the method is native, in which case it's generic JNI.
-    if (quick_code == nullptr && method->IsNative()) {
+    if ((Runtime::SimulatorMode() || quick_code == nullptr) && method->IsNative()) {
       quick_code = GetQuickGenericJniStub();
     } else if (ShouldUseInterpreterEntrypoint(method, quick_code)) {
       // Use interpreter entry point.
@@ -3645,7 +3740,7 @@ static void LinkCode(ClassLinker* class_linker,
   // Note: this mimics the logic in image_writer.cc that installs the resolution
   // stub only if we have compiled code and the method needs a class initialization
   // check.
-  if (quick_code == nullptr) {
+  if (quick_code == nullptr || Runtime::SimulatorMode()) {
     method->SetEntryPointFromQuickCompiledCode(
         method->IsNative() ? GetQuickGenericJniStub() : GetQuickToInterpreterBridge());
   } else if (enter_interpreter) {
@@ -3662,8 +3757,10 @@ static void LinkCode(ClassLinker* class_linker,
   }
 
   if (method->IsNative()) {
-    // Unregistering restores the dlsym lookup stub.
-    method->UnregisterNative();
+    // Set up the dlsym lookup stub. Do not go through `UnregisterNative()`
+    // as the extra processing for @CriticalNative is not needed yet.
+    method->SetEntryPointFromJni(
+        method->IsCriticalNative() ? GetJniDlsymLookupCriticalStub() : GetJniDlsymLookupStub());
 
     if (enter_interpreter || quick_code == nullptr) {
       // We have a native method here without code. Then it should have the generic JNI
@@ -4078,10 +4175,11 @@ void ClassLinker::RegisterExistingDexCache(ObjPtr<mirror::DexCache> dex_cache,
   }
 }
 
-static void ThrowDexFileAlreadyRegisteredError(Thread* self, const DexFile& dex_file) REQUIRES_SHARED(Locks::mutator_lock_) {
+static void ThrowDexFileAlreadyRegisteredError(Thread* self, const DexFile& dex_file)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
   self->ThrowNewExceptionF("Ljava/lang/InternalError;",
-                            "Attempt to register dex file %s with multiple class loaders",
-                            dex_file.GetLocation().c_str());
+                           "Attempt to register dex file %s with multiple class loaders",
+                           dex_file.GetLocation().c_str());
 }
 
 ObjPtr<mirror::DexCache> ClassLinker::RegisterDexFile(const DexFile& dex_file,
@@ -5280,8 +5378,10 @@ bool ClassLinker::CanWeInitializeClass(ObjPtr<mirror::Class> klass, bool can_ini
   return can_init_parents && CanWeInitializeClass(super_class, can_init_statics, can_init_parents);
 }
 
-bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
-                                  bool can_init_statics, bool can_init_parents) {
+bool ClassLinker::InitializeClass(Thread* self,
+                                  Handle<mirror::Class> klass,
+                                  bool can_init_statics,
+                                  bool can_init_parents) {
   // see JLS 3rd edition, 12.4.2 "Detailed Initialization Procedure" for the locking protocol
 
   // Are we already initialized and therefore done?
@@ -5297,6 +5397,8 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
   }
 
   self->AllowThreadSuspension();
+  Runtime* const runtime = Runtime::Current();
+  const bool stats_enabled = runtime->HasStatsEnabled();
   uint64_t t0;
   {
     ObjectLock<mirror::Class> lock(self, klass);
@@ -5384,7 +5486,6 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
     // is different at runtime than it was at compile time, the oat file is rejected. So if the
     // oat file is present, the classpaths must match, and the runtime time check can be skipped.
     bool has_oat_class = false;
-    const Runtime* runtime = Runtime::Current();
     const OatFile::OatClass oat_class = (runtime->IsStarted() && !runtime->IsAotCompiler())
         ? OatFile::FindOatClass(klass->GetDexFile(), klass->GetDexClassDefIndex(), &has_oat_class)
         : OatFile::OatClass::Invalid();
@@ -5403,7 +5504,7 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
     klass->SetClinitThreadId(self->GetTid());
     mirror::Class::SetStatus(klass, ClassStatus::kInitializing, self);
 
-    t0 = NanoTime();
+    t0 = stats_enabled ? NanoTime() : 0u;
   }
 
   uint64_t t_sub = 0;
@@ -5416,9 +5517,9 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
       CHECK(can_init_parents);
       StackHandleScope<1> hs(self);
       Handle<mirror::Class> handle_scope_super(hs.NewHandle(super_class));
-      uint64_t super_t0 = NanoTime();
+      uint64_t super_t0 = stats_enabled ? NanoTime() : 0u;
       bool super_initialized = InitializeClass(self, handle_scope_super, can_init_statics, true);
-      uint64_t super_t1 = NanoTime();
+      uint64_t super_t1 = stats_enabled ? NanoTime() : 0u;
       if (!super_initialized) {
         // The super class was verified ahead of entering initializing, we should only be here if
         // the super class became erroneous due to initialization.
@@ -5457,12 +5558,13 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
         // We cannot just call initialize class directly because we need to ensure that ALL
         // interfaces with default methods are initialized. Non-default interface initialization
         // will not affect other non-default super-interfaces.
-        uint64_t inf_t0 = NanoTime();  // This is not very precise, misses all walking.
+        // This is not very precise, misses all walking.
+        uint64_t inf_t0 = stats_enabled ? NanoTime() : 0u;
         bool iface_initialized = InitializeDefaultInterfaceRecursive(self,
                                                                      handle_scope_iface,
                                                                      can_init_statics,
                                                                      can_init_parents);
-        uint64_t inf_t1 = NanoTime();
+        uint64_t inf_t1 = stats_enabled ? NanoTime() : 0u;
         if (!iface_initialized) {
           ObjectLock<mirror::Class> lock(self, klass);
           // Initialization failed because one of our interfaces with default methods is erroneous.
@@ -5541,7 +5643,7 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
     }
   }
   self->AllowThreadSuspension();
-  uint64_t t1 = NanoTime();
+  uint64_t t1 = stats_enabled ? NanoTime() : 0u;
 
   VisiblyInitializedCallback* callback = nullptr;
   bool success = true;
@@ -5558,16 +5660,18 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
       VLOG(compiler) << "Return from class initializer of "
                      << mirror::Class::PrettyDescriptor(klass.Get())
                      << " without exception while transaction was aborted: re-throw it now.";
-      Runtime::Current()->ThrowTransactionAbortError(self);
+      runtime->ThrowTransactionAbortError(self);
       mirror::Class::SetStatus(klass, ClassStatus::kErrorResolved, self);
       success = false;
     } else {
-      RuntimeStats* global_stats = Runtime::Current()->GetStats();
-      RuntimeStats* thread_stats = self->GetStats();
-      ++global_stats->class_init_count;
-      ++thread_stats->class_init_count;
-      global_stats->class_init_time_ns += (t1 - t0 - t_sub);
-      thread_stats->class_init_time_ns += (t1 - t0 - t_sub);
+      if (stats_enabled) {
+        RuntimeStats* global_stats = runtime->GetStats();
+        RuntimeStats* thread_stats = self->GetStats();
+        ++global_stats->class_init_count;
+        ++thread_stats->class_init_count;
+        global_stats->class_init_time_ns += (t1 - t0 - t_sub);
+        thread_stats->class_init_time_ns += (t1 - t0 - t_sub);
+      }
       // Set the class as initialized except if failed to initialize static fields.
       callback = MarkClassInitialized(self, klass);
       if (VLOG_IS_ON(class_linker)) {
@@ -8764,6 +8868,7 @@ ArtMethod* ClassLinker::ResolveMethod(uint32_t method_idx,
                                       Handle<mirror::ClassLoader> class_loader,
                                       ArtMethod* referrer,
                                       InvokeType type) {
+  DCHECK(!Thread::Current()->IsExceptionPending()) << Thread::Current()->GetException()->Dump();
   DCHECK(dex_cache != nullptr);
   DCHECK(referrer == nullptr || !referrer->IsProxyMethod());
   // Check for hit in the dex cache.
@@ -8911,6 +9016,7 @@ ArtField* ClassLinker::ResolveField(uint32_t field_idx,
                                     Handle<mirror::ClassLoader> class_loader,
                                     bool is_static) {
   DCHECK(dex_cache != nullptr);
+  DCHECK(!Thread::Current()->IsExceptionPending()) << Thread::Current()->GetException()->Dump();
   ArtField* resolved = dex_cache->GetResolvedField(field_idx, image_pointer_size_);
   Thread::PoisonObjectPointersIfDebug();
   if (resolved != nullptr) {

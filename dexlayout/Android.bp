@@ -15,6 +15,12 @@
 art_cc_defaults {
     name: "libart-dexlayout-defaults",
     defaults: ["art_defaults"],
+    visibility: [
+        // Visibility for prebuilt binaries from the prebuilt of this module.
+        // TODO(b/155921753): Restrict this when prebuilts are in their proper
+        // locations.
+        "//prebuilts:__subpackages__",
+    ],
     host_supported: true,
     srcs: [
         "compact_dex_writer.cc",
@@ -47,7 +53,7 @@ art_cc_defaults {
             ],
         },
     },
-    static_libs: ["libz"],
+    shared_libs: ["libz"],
 }
 
 cc_defaults {
@@ -229,7 +235,14 @@ art_cc_test {
         "libprofiled",
         "libartd-dexlayout",
     ],
+    data: [
+        ":art-gtest-jars-ManyMethods",
+    ],
     srcs: ["dexlayout_test.cc"],
+    required: [
+        "dexlayoutd",
+        "dexdump",
+    ],
 }
 
 art_cc_binary {
@@ -265,4 +278,5 @@ art_cc_test {
         "art_gtest_defaults",
     ],
     srcs: ["dexdiag_test.cc"],
+    required: ["dexdiag"],
 }

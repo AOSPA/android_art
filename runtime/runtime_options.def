@@ -133,13 +133,14 @@ RUNTIME_OPTIONS_KEY (hiddenapi::EnforcementPolicy,
                                           hiddenapi::EnforcementPolicy::kDisabled)
 RUNTIME_OPTIONS_KEY (std::string,         NativeBridge)
 RUNTIME_OPTIONS_KEY (unsigned int,        ZygoteMaxFailedBoots,           10)
-RUNTIME_OPTIONS_KEY (Unit,                NoDexFileFallback)
 RUNTIME_OPTIONS_KEY (std::string,         CpuAbiList)
 RUNTIME_OPTIONS_KEY (std::string,         Fingerprint)
 RUNTIME_OPTIONS_KEY (ExperimentalFlags,   Experimental,     ExperimentalFlags::kNone) // -Xexperimental:{...}
 RUNTIME_OPTIONS_KEY (std::list<ti::AgentSpec>,         AgentLib)  // -agentlib:<libname>=<options>
 RUNTIME_OPTIONS_KEY (std::list<ti::AgentSpec>,         AgentPath)  // -agentpath:<libname>=<options>
 RUNTIME_OPTIONS_KEY (std::vector<Plugin>,            Plugins)  // -Xplugin:<library>
+// Simulator is disabled by default.
+RUNTIME_OPTIONS_KEY (InstructionSet,      SimulateInstructionSet,         InstructionSet::kNone)  // --simulate-isa=_
 
 // Not parse-able from command line, but can be provided explicitly.
 // (Do not add anything here that is defined in ParsedOptions::MakeParser)

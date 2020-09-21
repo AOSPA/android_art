@@ -46,7 +46,6 @@ art_cc_defaults {
 
 art_cc_defaults {
     name: "art_gtest_defaults",
-    test_per_src: true,
     // These really are gtests, but the gtest library comes from libart-gtest.so
     gtest: false,
     defaults: [
@@ -54,6 +53,11 @@ art_cc_defaults {
         "art_debug_defaults",
         "art_defaults",
     ],
+
+    test_suites: ["general-tests"],
+    test_options: {
+        test_suite_tag: ["art-host-gtest"],
+    },
 
     shared_libs: [
         "libartd",
@@ -65,8 +69,6 @@ art_cc_defaults {
         "libartbased",
 
         "libbase",
-        "libicuuc",
-        "libicui18n",
         "libnativehelper",
         "libz",
     ],
@@ -117,9 +119,10 @@ art_cc_defaults {
         "libdexfiled",
         "libprofiled",
         "libartbased",
+        "liblog",
     ],
     static_libs: [
-        "libgtest",
+        "libgtest_isolated",
     ],
     target: {
         android32: {
@@ -148,11 +151,18 @@ art_cc_defaults {
 art_cc_library {
     name: "libart-gtest",
     host_supported: true,
+    defaults: [
+        "art_debug_defaults",
+        "art_defaults",
+    ],
+    srcs: [
+        "common/gtest_main.cc",
+    ],
     whole_static_libs: [
         "libart-compiler-gtest",
         "libart-runtime-gtest",
         "libartbase-art-gtest",
-        "libgtest",
+        "libgtest_isolated",
     ],
     shared_libs: [
         "libartd",
@@ -162,6 +172,7 @@ art_cc_library {
         "libartbased",
         "libbase",
         "libbacktrace",
+        "liblog",
     ],
     target: {
         darwin: {
@@ -174,6 +185,37 @@ art_cc_library {
 }
 
 // ART run-tests.
+
+filegroup {
+    name: "art-run-test-template",
+    srcs: [
+        "AndroidTestTemplate.xml",
+    ],
+}
+
+java_defaults {
+    name: "art-run-test-defaults",
+
+    // Compile against the "core" bootclasspath, not the "default" one (current
+    // platform) -- use the same settings as Libcore tests (see e.g. the
+    // definition of module `core-tests` in libcore/JavaLibrary.bp).
+    //
+    // Note: The legacy way to build ART run-tests uses the
+    // `javac_with_bootclasspath` function defined in `test/etc/default-build`.
+    // See also `tools/javac-helper.sh`.
+    sdk_version: "none",
+    system_modules: "core-all-system-modules",
+
+    // Some ART run-tests contain constructs which break ErrorProne checks;
+    // disable them on `errorprone` builds.
+    errorprone: {
+        javacflags: ["-XepDisableAllChecks"],
+    },
+
+    data: ["expected.txt"],
+    test_config_template: ":art-run-test-template",
+    test_suites: ["general-tests"],
+}
 
 art_cc_test_library {
     name: "libarttest",
@@ -561,6 +603,7 @@ cc_defaults {
         "172-app-image-twice/debug_print_class.cc",
         "177-visibly-initialized-deadlock/visibly_initialized.cc",
         "178-app-image-native-method/native_methods.cc",
+        "179-nonvirtual-jni/nonvirtual-call.cc",
         "1945-proxy-method-arguments/get_args.cc",
         "203-multi-checkpoint/multi_checkpoint.cc",
         "305-other-fault-handler/fault_handler.cc",
@@ -597,6 +640,8 @@ cc_defaults {
         "1985-structural-redefine-stack-scope/stack_scope.cc",
         "2011-stack-walk-concurrent-instrument/stack_walk_concurrent.cc",
         "2031-zygote-compiled-frame-deopt/native-wait.cc",
+        "2033-shutdown-mechanics/native_shutdown.cc",
+        "2036-jni-filechannel/jni_filechannel.cc",
         "common/runtime_state.cc",
         "common/stack_inspect.cc",
     ],
@@ -607,7 +652,7 @@ cc_defaults {
     ],
 }
 
-filegroup {
+java_library {
     name: "art_cts_jvmti_test_library",
     visibility: [
         "//cts/hostsidetests/jvmti:__subpackages__",
@@ -777,10 +822,7 @@ filegroup {
 // source tree each expected test result is in the NN-xxxx/expected.txt.
 // Copy+rename them them to a temporary directory and them zip them.
 java_genrule {
-    name: "expected_cts_outputs",
-    visibility: [
-        "//cts/hostsidetests/jvmti:__subpackages__",
-    ],
+    name: "expected_cts_outputs_gen",
     srcs: [
         "901-hello-ti-agent/expected.txt",
         "902-hello-transformation/expected.txt",
@@ -918,6 +960,32 @@ java_genrule {
         "$(location soong_zip) -o $(out) -C $(genDir)/res -D $(genDir)/res",
 }
 
+// Wrap the expected_cts_outputs_gen inside a java library to make it easy
+// to export as a member of a module_exports.
+java_library {
+    name: "expected_cts_outputs",
+    visibility: [
+        "//art/build/sdk",
+        "//cts/hostsidetests/jvmti:__subpackages__",
+    ],
+    static_libs: [
+        "expected_cts_outputs_gen",
+    ],
+    sdk_version: "core_current",
+}
+
+art_cc_test {
+    name: "ArtGtestsTarget",
+    data: [
+        // We need the ART testing apex, which contains all gtest binaries.
+        // Note that due to linker constraints the gtests must be in the apex.
+        ":com.android.art.testing",
+        ":art-gtest-jars",
+    ],
+    test_suites: ["device-tests"],
+    test_config: "gtests-target.xml",
+}
+
 filegroup {
     name: "art-gtest-jars",
     srcs: [
@@ -983,6 +1051,7 @@ java_defaults {
         enabled: false,
     },
     sdk_version: "core_platform",
+    uncompress_dex: false,
 }
 
 // The following modules are just trivial compilations (non-trivial cases are the end).
@@ -1347,23 +1416,35 @@ java_library {
     ],
 }
 
+// Smali compiled files.
+// Since they are not compiled by javac, we use different extension for them.
+// The .jar extension for them would cause subtle failures in the test infra,
+// which finds and opens all jar files and expects them to be valid zip files.
+
 genrule {
     name: "art-gtest-jars-VerifierDeps",
     defaults: ["art-gtest-jars-smali-defaults"],
     srcs: ["VerifierDeps/**/*.smali"],
-    out: ["art-gtest-jars-VerifierDeps.jar"],
+    out: ["art-gtest-jars-VerifierDeps.dex"],
 }
 
 genrule {
     name: "art-gtest-jars-VerifierDepsMulti",
     defaults: ["art-gtest-jars-smali-defaults"],
     srcs: ["VerifierDepsMulti/**/*.smali"],
-    out: ["art-gtest-jars-VerifierDepsMulti.jar"],
+    out: ["art-gtest-jars-VerifierDepsMulti.dex"],
 }
 
 genrule {
     name: "art-gtest-jars-VerifySoftFailDuringClinit",
     defaults: ["art-gtest-jars-smali-defaults"],
     srcs: ["VerifySoftFailDuringClinit/**/*.smali"],
-    out: ["art-gtest-jars-VerifySoftFailDuringClinit.jar"],
+    out: ["art-gtest-jars-VerifySoftFailDuringClinit.dex"],
+}
+
+genrule {
+    name: "art-gtest-jars-LinkageTest",
+    defaults: ["art-gtest-jars-smali-defaults"],
+    srcs: ["LinkageTest/*.smali"],
+    out: ["art-gtest-jars-LinkageTest.dex"],
 }

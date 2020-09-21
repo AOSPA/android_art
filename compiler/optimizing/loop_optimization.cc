@@ -21,6 +21,7 @@
 #include "arch/instruction_set.h"
 #include "arch/x86/instruction_set_features_x86.h"
 #include "arch/x86_64/instruction_set_features_x86_64.h"
+#include "code_generator.h"
 #include "driver/compiler_options.h"
 #include "linear_order.h"
 #include "mirror/array-inl.h"
@@ -305,7 +306,8 @@ static bool IsAddConst2(HGraph* graph,
                         /*out*/ HInstruction** a,
                         /*out*/ HInstruction** b,
                         /*out*/ int64_t* c) {
-  if (IsAddConst(instruction, a, b, c) && *a != nullptr) {
+  // We want an actual add/sub and not the trivial case where {b: 0, c: 0}.
+  if (IsAddOrSub(instruction) && IsAddConst(instruction, a, b, c) && *a != nullptr) {
     if (*b == nullptr) {
       // Constant is usually already present, unless accumulated.
       *b = graph->GetConstant(instruction->GetType(), (*c));
@@ -429,7 +431,7 @@ static void PeelByCount(HLoopInformation* loop_info,
                         InductionVarRange* induction_range) {
   for (int i = 0; i < count; i++) {
     // Perform peeling.
-    PeelUnrollSimpleHelper helper(loop_info, induction_range);
+    LoopClonerSimpleHelper helper(loop_info, induction_range);
     helper.DoPeeling();
   }
 }
@@ -456,12 +458,13 @@ static DataType::Type GetNarrowerType(HInstruction* a, HInstruction* b) {
 //
 
 HLoopOptimization::HLoopOptimization(HGraph* graph,
-                                     const CompilerOptions* compiler_options,
+                                     const CodeGenerator& codegen,
                                      HInductionVarAnalysis* induction_analysis,
                                      OptimizingCompilerStats* stats,
                                      const char* name)
     : HOptimization(graph, name, stats),
-      compiler_options_(compiler_options),
+      compiler_options_(&codegen.GetCompilerOptions()),
+      simd_register_size_(codegen.GetSIMDRegisterWidth()),
       induction_range_(induction_analysis),
       loop_allocator_(nullptr),
       global_allocator_(graph_->GetAllocator()),
@@ -804,7 +807,7 @@ bool HLoopOptimization::TryUnrollingForBranchPenaltyReduction(LoopAnalysisInfo* 
 
     // Perform unrolling.
     HLoopInformation* loop_info = analysis_info->GetLoopInfo();
-    PeelUnrollSimpleHelper helper(loop_info, &induction_range_);
+    LoopClonerSimpleHelper helper(loop_info, &induction_range_);
     helper.DoUnrolling();
 
     // Remove the redundant loop check after unrolling.
@@ -829,7 +832,7 @@ bool HLoopOptimization::TryPeelingForLoopInvariantExitsElimination(LoopAnalysisI
 
   if (generate_code) {
     // Perform peeling.
-    PeelUnrollSimpleHelper helper(loop_info, &induction_range_);
+    LoopClonerSimpleHelper helper(loop_info, &induction_range_);
     helper.DoPeeling();
 
     // Statically evaluate loop check after peeling for loop invariant condition.
@@ -885,12 +888,6 @@ bool HLoopOptimization::TryFullUnrolling(LoopAnalysisInfo* analysis_info, bool g
 }
 
 bool HLoopOptimization::TryPeelingAndUnrolling(LoopNode* node) {
-  // Don't run peeling/unrolling if compiler_options_ is nullptr (i.e., running under tests)
-  // as InstructionSet is needed.
-  if (compiler_options_ == nullptr) {
-    return false;
-  }
-
   HLoopInformation* loop_info = node->loop_info;
   int64_t trip_count = LoopAnalysis::GetLoopTripCount(loop_info, &induction_range_);
   LoopAnalysisInfo analysis_info(loop_info);
@@ -908,7 +905,7 @@ bool HLoopOptimization::TryPeelingAndUnrolling(LoopNode* node) {
   }
 
   // Run 'IsLoopClonable' the last as it might be time-consuming.
-  if (!PeelUnrollHelper::IsLoopClonable(loop_info)) {
+  if (!LoopClonerHelper::IsLoopClonable(loop_info)) {
     return false;
   }
 
@@ -1542,13 +1539,15 @@ bool HLoopOptimization::VectorizeUse(LoopNode* node,
 }
 
 uint32_t HLoopOptimization::GetVectorSizeInBytes() {
-  switch (compiler_options_->GetInstructionSet()) {
-    case InstructionSet::kArm:
-    case InstructionSet::kThumb2:
-      return 8;  // 64-bit SIMD
-    default:
-      return 16;  // 128-bit SIMD
+  if (kIsDebugBuild) {
+    InstructionSet isa = compiler_options_->GetInstructionSet();
+    // TODO: Remove this check when there are no implicit assumptions on the SIMD reg size.
+    DCHECK_EQ(simd_register_size_, (isa == InstructionSet::kArm || isa == InstructionSet::kThumb2)
+                                   ? 8u
+                                   : 16u);
   }
+
+  return simd_register_size_;
 }
 
 bool HLoopOptimization::TrySetVectorType(DataType::Type type, uint64_t* restrictions) {
@@ -1563,14 +1562,14 @@ bool HLoopOptimization::TrySetVectorType(DataType::Type type, uint64_t* restrict
         case DataType::Type::kUint8:
         case DataType::Type::kInt8:
           *restrictions |= kNoDiv | kNoReduction | kNoDotProd;
-          return TrySetVectorLength(8);
+          return TrySetVectorLength(type, 8);
         case DataType::Type::kUint16:
         case DataType::Type::kInt16:
           *restrictions |= kNoDiv | kNoStringCharAt | kNoReduction | kNoDotProd;
-          return TrySetVectorLength(4);
+          return TrySetVectorLength(type, 4);
         case DataType::Type::kInt32:
           *restrictions |= kNoDiv | kNoWideSAD;
-          return TrySetVectorLength(2);
+          return TrySetVectorLength(type, 2);
         default:
           break;
       }
@@ -1583,23 +1582,23 @@ bool HLoopOptimization::TrySetVectorType(DataType::Type type, uint64_t* restrict
         case DataType::Type::kUint8:
         case DataType::Type::kInt8:
           *restrictions |= kNoDiv;
-          return TrySetVectorLength(16);
+          return TrySetVectorLength(type, 16);
         case DataType::Type::kUint16:
         case DataType::Type::kInt16:
           *restrictions |= kNoDiv;
-          return TrySetVectorLength(8);
+          return TrySetVectorLength(type, 8);
         case DataType::Type::kInt32:
           *restrictions |= kNoDiv;
-          return TrySetVectorLength(4);
+          return TrySetVectorLength(type, 4);
         case DataType::Type::kInt64:
           *restrictions |= kNoDiv | kNoMul;
-          return TrySetVectorLength(2);
+          return TrySetVectorLength(type, 2);
         case DataType::Type::kFloat32:
           *restrictions |= kNoReduction;
-          return TrySetVectorLength(4);
+          return TrySetVectorLength(type, 4);
         case DataType::Type::kFloat64:
           *restrictions |= kNoReduction;
-          return TrySetVectorLength(2);
+          return TrySetVectorLength(type, 2);
         default:
           return false;
       }
@@ -1619,7 +1618,7 @@ bool HLoopOptimization::TrySetVectorType(DataType::Type type, uint64_t* restrict
                              kNoUnroundedHAdd |
                              kNoSAD |
                              kNoDotProd;
-            return TrySetVectorLength(16);
+            return TrySetVectorLength(type, 16);
           case DataType::Type::kUint16:
             *restrictions |= kNoDiv |
                              kNoAbs |
@@ -1627,26 +1626,26 @@ bool HLoopOptimization::TrySetVectorType(DataType::Type type, uint64_t* restrict
                              kNoUnroundedHAdd |
                              kNoSAD |
                              kNoDotProd;
-            return TrySetVectorLength(8);
+            return TrySetVectorLength(type, 8);
           case DataType::Type::kInt16:
             *restrictions |= kNoDiv |
                              kNoAbs |
                              kNoSignedHAdd |
                              kNoUnroundedHAdd |
                              kNoSAD;
-            return TrySetVectorLength(8);
+            return TrySetVectorLength(type, 8);
           case DataType::Type::kInt32:
             *restrictions |= kNoDiv | kNoSAD;
-            return TrySetVectorLength(4);
+            return TrySetVectorLength(type, 4);
           case DataType::Type::kInt64:
             *restrictions |= kNoMul | kNoDiv | kNoShr | kNoAbs | kNoSAD;
-            return TrySetVectorLength(2);
+            return TrySetVectorLength(type, 2);
           case DataType::Type::kFloat32:
             *restrictions |= kNoReduction;
-            return TrySetVectorLength(4);
+            return TrySetVectorLength(type, 4);
           case DataType::Type::kFloat64:
             *restrictions |= kNoReduction;
-            return TrySetVectorLength(2);
+            return TrySetVectorLength(type, 2);
           default:
             break;
         }  // switch type
@@ -1657,7 +1656,7 @@ bool HLoopOptimization::TrySetVectorType(DataType::Type type, uint64_t* restrict
   }  // switch instruction set
 }
 
-bool HLoopOptimization::TrySetVectorLength(uint32_t length) {
+bool HLoopOptimization::TrySetVectorLengthImpl(uint32_t length) {
   DCHECK(IsPowerOfTwo(length) && length >= 2u);
   // First time set?
   if (vector_length_ == 0) {
@@ -2044,13 +2043,13 @@ bool HLoopOptimization::VectorizeSADIdiom(LoopNode* node,
       (reduction_type != DataType::Type::kInt32 && reduction_type != DataType::Type::kInt64)) {
     return false;
   }
-  HInstruction* q = instruction->InputAt(0);
-  HInstruction* v = instruction->InputAt(1);
+  HInstruction* acc = instruction->InputAt(0);
+  HInstruction* abs = instruction->InputAt(1);
   HInstruction* a = nullptr;
   HInstruction* b = nullptr;
-  if (v->IsAbs() &&
-      v->GetType() == reduction_type &&
-      IsSubConst2(graph_, v->InputAt(0), /*out*/ &a, /*out*/ &b)) {
+  if (abs->IsAbs() &&
+      abs->GetType() == reduction_type &&
+      IsSubConst2(graph_, abs->InputAt(0), /*out*/ &a, /*out*/ &b)) {
     DCHECK(a != nullptr && b != nullptr);
   } else {
     return false;
@@ -2076,16 +2075,16 @@ bool HLoopOptimization::VectorizeSADIdiom(LoopNode* node,
   // idiomatic operation. Sequential code uses the original scalar expressions.
   DCHECK(r != nullptr && s != nullptr);
   if (generate_code && vector_mode_ != kVector) {  // de-idiom
-    r = s = v->InputAt(0);
+    r = s = abs->InputAt(0);
   }
-  if (VectorizeUse(node, q, generate_code, sub_type, restrictions) &&
+  if (VectorizeUse(node, acc, generate_code, sub_type, restrictions) &&
       VectorizeUse(node, r, generate_code, sub_type, restrictions) &&
       VectorizeUse(node, s, generate_code, sub_type, restrictions)) {
     if (generate_code) {
       if (vector_mode_ == kVector) {
         vector_map_->Put(instruction, new (global_allocator_) HVecSADAccumulate(
             global_allocator_,
-            vector_map_->Get(q),
+            vector_map_->Get(acc),
             vector_map_->Get(r),
             vector_map_->Get(s),
             HVecOperation::ToProperType(reduction_type, is_unsigned),
@@ -2093,8 +2092,14 @@ bool HLoopOptimization::VectorizeSADIdiom(LoopNode* node,
             kNoDexPc));
         MaybeRecordStat(stats_, MethodCompilationStat::kLoopVectorizedIdiom);
       } else {
-        GenerateVecOp(v, vector_map_->Get(r), nullptr, reduction_type);
-        GenerateVecOp(instruction, vector_map_->Get(q), vector_map_->Get(v), reduction_type);
+        // "GenerateVecOp()" must not be called more than once for each original loop body
+        // instruction. As the SAD idiom processes both "current" instruction ("instruction")
+        // and its ABS input in one go, we must check that for the scalar case the ABS instruction
+        // has not yet been processed.
+        if (vector_map_->find(abs) == vector_map_->end()) {
+          GenerateVecOp(abs, vector_map_->Get(r), nullptr, reduction_type);
+        }
+        GenerateVecOp(instruction, vector_map_->Get(acc), vector_map_->Get(abs), reduction_type);
       }
     }
     return true;
@@ -2116,20 +2121,20 @@ bool HLoopOptimization::VectorizeDotProdIdiom(LoopNode* node,
     return false;
   }
 
-  HInstruction* q = instruction->InputAt(0);
-  HInstruction* v = instruction->InputAt(1);
-  if (!v->IsMul() || v->GetType() != reduction_type) {
+  HInstruction* const acc = instruction->InputAt(0);
+  HInstruction* const mul = instruction->InputAt(1);
+  if (!mul->IsMul() || mul->GetType() != reduction_type) {
     return false;
   }
 
-  HInstruction* a = v->InputAt(0);
-  HInstruction* b = v->InputAt(1);
-  HInstruction* r = a;
-  HInstruction* s = b;
-  DataType::Type op_type = GetNarrowerType(a, b);
+  HInstruction* const mul_left = mul->InputAt(0);
+  HInstruction* const mul_right = mul->InputAt(1);
+  HInstruction* r = mul_left;
+  HInstruction* s = mul_right;
+  DataType::Type op_type = GetNarrowerType(mul_left, mul_right);
   bool is_unsigned = false;
 
-  if (!IsNarrowerOperands(a, b, op_type, &r, &s, &is_unsigned)) {
+  if (!IsNarrowerOperands(mul_left, mul_right, op_type, &r, &s, &is_unsigned)) {
     return false;
   }
   op_type = HVecOperation::ToProperType(op_type, is_unsigned);
@@ -2143,17 +2148,17 @@ bool HLoopOptimization::VectorizeDotProdIdiom(LoopNode* node,
   // Accept dot product idiom for vectorizable operands. Vectorized code uses the shorthand
   // idiomatic operation. Sequential code uses the original scalar expressions.
   if (generate_code && vector_mode_ != kVector) {  // de-idiom
-    r = a;
-    s = b;
+    r = mul_left;
+    s = mul_right;
   }
-  if (VectorizeUse(node, q, generate_code, op_type, restrictions) &&
+  if (VectorizeUse(node, acc, generate_code, op_type, restrictions) &&
       VectorizeUse(node, r, generate_code, op_type, restrictions) &&
       VectorizeUse(node, s, generate_code, op_type, restrictions)) {
     if (generate_code) {
       if (vector_mode_ == kVector) {
         vector_map_->Put(instruction, new (global_allocator_) HVecDotProd(
             global_allocator_,
-            vector_map_->Get(q),
+            vector_map_->Get(acc),
             vector_map_->Get(r),
             vector_map_->Get(s),
             reduction_type,
@@ -2162,8 +2167,14 @@ bool HLoopOptimization::VectorizeDotProdIdiom(LoopNode* node,
             kNoDexPc));
         MaybeRecordStat(stats_, MethodCompilationStat::kLoopVectorizedIdiom);
       } else {
-        GenerateVecOp(v, vector_map_->Get(r), vector_map_->Get(s), reduction_type);
-        GenerateVecOp(instruction, vector_map_->Get(q), vector_map_->Get(v), reduction_type);
+        // "GenerateVecOp()" must not be called more than once for each original loop body
+        // instruction. As the DotProd idiom processes both "current" instruction ("instruction")
+        // and its MUL input in one go, we must check that for the scalar case the MUL instruction
+        // has not yet been processed.
+        if (vector_map_->find(mul) == vector_map_->end()) {
+          GenerateVecOp(mul, vector_map_->Get(r), vector_map_->Get(s), reduction_type);
+        }
+        GenerateVecOp(instruction, vector_map_->Get(acc), vector_map_->Get(mul), reduction_type);
       }
     }
     return true;

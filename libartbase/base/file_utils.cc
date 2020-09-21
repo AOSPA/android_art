@@ -68,12 +68,13 @@ static constexpr const char* kClassesDex = "classes.dex";
 static constexpr const char* kApexDefaultPath = "/apex/";
 static constexpr const char* kAndroidRootEnvVar = "ANDROID_ROOT";
 static constexpr const char* kAndroidRootDefaultPath = "/system";
+static constexpr const char* kAndroidSystemExtRootEnvVar = "ANDROID_SYSTEM_EXT";
+static constexpr const char* kAndroidSystemExtRootDefaultPath = "/system_ext";
 static constexpr const char* kAndroidDataEnvVar = "ANDROID_DATA";
 static constexpr const char* kAndroidDataDefaultPath = "/data";
 static constexpr const char* kAndroidArtRootEnvVar = "ANDROID_ART_ROOT";
-static constexpr const char* kAndroidArtApexDefaultPath = "/apex/com.android.art";
 static constexpr const char* kAndroidConscryptRootEnvVar = "ANDROID_CONSCRYPT_ROOT";
-static constexpr const char* kAndroidConscryptApexDefaultPath = "/apex/com.android.conscrypt";
+static constexpr const char* kAndroidI18nRootEnvVar = "ANDROID_I18N_ROOT";
 
 // Get the "root" directory containing the "lib" directory where this instance
 // of the libartbase library (which contains `GetRootContainingLibartbase`) is
@@ -450,9 +451,21 @@ bool LocationIsOnSystemFramework(const char* full_path) {
                             /* subdir= */ "framework/");
 }
 
+bool LocationIsOnSystemExtFramework(const char* full_path) {
+  return IsLocationOnModule(full_path,
+                            kAndroidSystemExtRootEnvVar,
+                            kAndroidSystemExtRootDefaultPath,
+                            /* subdir= */ "framework/");
+}
+
 bool LocationIsOnConscryptModule(const char* full_path) {
   return IsLocationOnModule(
       full_path, kAndroidConscryptRootEnvVar, kAndroidConscryptApexDefaultPath);
+}
+
+bool LocationIsOnI18nModule(const char* full_path) {
+  return IsLocationOnModule(
+      full_path, kAndroidI18nRootEnvVar, kAndroidI18nApexDefaultPath);
 }
 
 bool LocationIsOnApex(const char* full_path) {

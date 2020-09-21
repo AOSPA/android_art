@@ -22,7 +22,7 @@
 #include "art_method-inl.h"
 #include "base/enums.h"
 #include "class_linker-inl.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "common_throws.h"
 #include "dex/descriptors_names.h"
 #include "dex/dex_file-inl.h"
@@ -33,7 +33,7 @@
 #include "mirror/class-alloc-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
-#include "mirror/field-inl.h"
+#include "mirror/field.h"
 #include "mirror/method.h"
 #include "mirror/method_handles_lookup.h"
 #include "mirror/object-inl.h"
@@ -312,7 +312,7 @@ static ObjPtr<mirror::ObjectArray<mirror::Field>> GetDeclaredFields(
   for (ArtField& field : ifields) {
     if (IsDiscoverable(public_only, hiddenapi_context, &field)) {
       ObjPtr<mirror::Field> reflect_field =
-          mirror::Field::CreateFromArtField<kRuntimePointerSize>(self, &field, force_resolve);
+          mirror::Field::CreateFromArtField(self, &field, force_resolve);
       if (reflect_field == nullptr) {
         if (kIsDebugBuild) {
           self->AssertPendingException();
@@ -326,7 +326,7 @@ static ObjPtr<mirror::ObjectArray<mirror::Field>> GetDeclaredFields(
   for (ArtField& field : sfields) {
     if (IsDiscoverable(public_only, hiddenapi_context, &field)) {
       ObjPtr<mirror::Field> reflect_field =
-          mirror::Field::CreateFromArtField<kRuntimePointerSize>(self, &field, force_resolve);
+          mirror::Field::CreateFromArtField(self, &field, force_resolve);
       if (reflect_field == nullptr) {
         if (kIsDebugBuild) {
           self->AssertPendingException();
@@ -417,11 +417,11 @@ ALWAYS_INLINE static inline ObjPtr<mirror::Field> GetDeclaredField(Thread* self,
   }
   ArtField* art_field = FindFieldByName(name, c->GetIFieldsPtr());
   if (art_field != nullptr) {
-    return mirror::Field::CreateFromArtField<kRuntimePointerSize>(self, art_field, true);
+    return mirror::Field::CreateFromArtField(self, art_field, true);
   }
   art_field = FindFieldByName(name, c->GetSFieldsPtr());
   if (art_field != nullptr) {
-    return mirror::Field::CreateFromArtField<kRuntimePointerSize>(self, art_field, true);
+    return mirror::Field::CreateFromArtField(self, art_field, true);
   }
   return nullptr;
 }
@@ -540,10 +540,10 @@ static jobject Class_getDeclaredConstructorInternal(
     return nullptr;
   }
   Handle<mirror::Constructor> result = hs.NewHandle(
-      mirror::Class::GetDeclaredConstructorInternal<kRuntimePointerSize, false>(
-      soa.Self(),
-      klass,
-      soa.Decode<mirror::ObjectArray<mirror::Class>>(args)));
+      mirror::Class::GetDeclaredConstructorInternal<kRuntimePointerSize>(
+          soa.Self(),
+          klass,
+          soa.Decode<mirror::ObjectArray<mirror::Class>>(args)));
   if (result == nullptr || ShouldDenyAccessToMember(result->GetArtMethod(), soa.Self())) {
     return nullptr;
   }
@@ -588,7 +588,7 @@ static jobjectArray Class_getDeclaredConstructorsInternal(
       DCHECK_EQ(Runtime::Current()->GetClassLinker()->GetImagePointerSize(), kRuntimePointerSize);
       DCHECK(!Runtime::Current()->IsActiveTransaction());
       ObjPtr<mirror::Constructor> constructor =
-          mirror::Constructor::CreateFromArtMethod<kRuntimePointerSize, false>(soa.Self(), &m);
+          mirror::Constructor::CreateFromArtMethod<kRuntimePointerSize>(soa.Self(), &m);
       if (UNLIKELY(constructor == nullptr)) {
         soa.Self()->AssertPendingOOMException();
         return nullptr;
@@ -611,7 +611,7 @@ static jobject Class_getDeclaredMethodInternal(JNIEnv* env, jobject javaThis,
     return nullptr;
   }
   Handle<mirror::Method> result = hs.NewHandle(
-      mirror::Class::GetDeclaredMethodInternal<kRuntimePointerSize, false>(
+      mirror::Class::GetDeclaredMethodInternal<kRuntimePointerSize>(
           soa.Self(),
           klass,
           soa.Decode<mirror::String>(name),
@@ -659,7 +659,7 @@ static jobjectArray Class_getDeclaredMethodsUnchecked(JNIEnv* env, jobject javaT
       DCHECK_EQ(Runtime::Current()->GetClassLinker()->GetImagePointerSize(), kRuntimePointerSize);
       DCHECK(!Runtime::Current()->IsActiveTransaction());
       ObjPtr<mirror::Method> method =
-          mirror::Method::CreateFromArtMethod<kRuntimePointerSize, false>(soa.Self(), &m);
+          mirror::Method::CreateFromArtMethod<kRuntimePointerSize>(soa.Self(), &m);
       if (method == nullptr) {
         soa.Self()->AssertPendingException();
         return nullptr;

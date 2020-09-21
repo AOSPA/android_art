@@ -23,7 +23,7 @@
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "class_linker-inl.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "code_generator.h"
 #include "common_dominator.h"
 #include "intrinsics.h"
@@ -39,12 +39,11 @@ namespace art {
 // double).
 static constexpr bool kEnableFloatingPointStaticEvaluation = (FLT_EVAL_METHOD == 0);
 
-void HGraph::InitializeInexactObjectRTI(VariableSizedHandleScope* handles) {
+ReferenceTypeInfo::TypeHandle HandleCache::CreateRootHandle(VariableSizedHandleScope* handles,
+                                                            ClassRoot class_root) {
+  // Mutator lock is required for NewHandle and GetClassRoot().
   ScopedObjectAccess soa(Thread::Current());
-  // Create the inexact Object reference type and store it in the HGraph.
-  inexact_object_rti_ = ReferenceTypeInfo::Create(
-      handles->NewHandle(GetClassRoot<mirror::Object>()),
-      /* is_exact= */ false);
+  return handles->NewHandle(GetClassRoot(class_root));
 }
 
 void HGraph::AddBlock(HBasicBlock* block) {
@@ -662,7 +661,7 @@ HNullConstant* HGraph::GetNullConstant(uint32_t dex_pc) {
   // id and/or any invariants the graph is assuming when adding new instructions.
   if ((cached_null_constant_ == nullptr) || (cached_null_constant_->GetBlock() == nullptr)) {
     cached_null_constant_ = new (allocator_) HNullConstant(dex_pc);
-    cached_null_constant_->SetReferenceTypeInfo(inexact_object_rti_);
+    cached_null_constant_->SetReferenceTypeInfo(GetInexactObjectRti());
     InsertConstant(cached_null_constant_);
   }
   if (kIsDebugBuild) {
@@ -1703,14 +1702,15 @@ HInstruction* HBinaryOperation::GetLeastConstantLeft() const {
   }
 }
 
-std::ostream& operator<<(std::ostream& os, const ComparisonBias& rhs) {
+std::ostream& operator<<(std::ostream& os, ComparisonBias rhs) {
+  // TODO: Replace with auto-generated operator<<.
   switch (rhs) {
     case ComparisonBias::kNoBias:
-      return os << "no_bias";
+      return os << "none";
     case ComparisonBias::kGtBias:
-      return os << "gt_bias";
+      return os << "gt";
     case ComparisonBias::kLtBias:
-      return os << "lt_bias";
+      return os << "lt";
     default:
       LOG(FATAL) << "Unknown ComparisonBias: " << static_cast<int>(rhs);
       UNREACHABLE();
@@ -1736,7 +1736,7 @@ bool HInstruction::Equals(const HInstruction* other) const {
   return true;
 }
 
-std::ostream& operator<<(std::ostream& os, const HInstruction::InstructionKind& rhs) {
+std::ostream& operator<<(std::ostream& os, HInstruction::InstructionKind rhs) {
 #define DECLARE_CASE(type, super) case HInstruction::k##type: os << #type; break;
   switch (rhs) {
     FOR_EACH_CONCRETE_INSTRUCTION(DECLARE_CASE)
@@ -2934,28 +2934,6 @@ bool HInvokeStaticOrDirect::NeedsDexCacheOfDeclaringClass() const {
   return !opt.GetDoesNotNeedDexCache();
 }
 
-std::ostream& operator<<(std::ostream& os, HInvokeStaticOrDirect::MethodLoadKind rhs) {
-  switch (rhs) {
-    case HInvokeStaticOrDirect::MethodLoadKind::kStringInit:
-      return os << "StringInit";
-    case HInvokeStaticOrDirect::MethodLoadKind::kRecursive:
-      return os << "Recursive";
-    case HInvokeStaticOrDirect::MethodLoadKind::kBootImageLinkTimePcRelative:
-      return os << "BootImageLinkTimePcRelative";
-    case HInvokeStaticOrDirect::MethodLoadKind::kBootImageRelRo:
-      return os << "BootImageRelRo";
-    case HInvokeStaticOrDirect::MethodLoadKind::kBssEntry:
-      return os << "BssEntry";
-    case HInvokeStaticOrDirect::MethodLoadKind::kJitDirectAddress:
-      return os << "JitDirectAddress";
-    case HInvokeStaticOrDirect::MethodLoadKind::kRuntimeCall:
-      return os << "RuntimeCall";
-    default:
-      LOG(FATAL) << "Unknown MethodLoadKind: " << static_cast<int>(rhs);
-      UNREACHABLE();
-  }
-}
-
 std::ostream& operator<<(std::ostream& os, HInvokeStaticOrDirect::ClinitCheckRequirement rhs) {
   switch (rhs) {
     case HInvokeStaticOrDirect::ClinitCheckRequirement::kExplicit:
@@ -2991,28 +2969,6 @@ bool HLoadClass::InstructionDataEquals(const HInstruction* other) const {
   }
 }
 
-std::ostream& operator<<(std::ostream& os, HLoadClass::LoadKind rhs) {
-  switch (rhs) {
-    case HLoadClass::LoadKind::kReferrersClass:
-      return os << "ReferrersClass";
-    case HLoadClass::LoadKind::kBootImageLinkTimePcRelative:
-      return os << "BootImageLinkTimePcRelative";
-    case HLoadClass::LoadKind::kBootImageRelRo:
-      return os << "BootImageRelRo";
-    case HLoadClass::LoadKind::kBssEntry:
-      return os << "BssEntry";
-    case HLoadClass::LoadKind::kJitBootImageAddress:
-      return os << "JitBootImageAddress";
-    case HLoadClass::LoadKind::kJitTableAddress:
-      return os << "JitTableAddress";
-    case HLoadClass::LoadKind::kRuntimeCall:
-      return os << "RuntimeCall";
-    default:
-      LOG(FATAL) << "Unknown HLoadClass::LoadKind: " << static_cast<int>(rhs);
-      UNREACHABLE();
-  }
-}
-
 bool HLoadString::InstructionDataEquals(const HInstruction* other) const {
   const HLoadString* other_load_string = other->AsLoadString();
   // TODO: To allow GVN for HLoadString from different dex files, we should compare the strings
@@ -3030,26 +2986,6 @@ bool HLoadString::InstructionDataEquals(const HInstruction* other) const {
     }
     default:
       return IsSameDexFile(GetDexFile(), other_load_string->GetDexFile());
-  }
-}
-
-std::ostream& operator<<(std::ostream& os, HLoadString::LoadKind rhs) {
-  switch (rhs) {
-    case HLoadString::LoadKind::kBootImageLinkTimePcRelative:
-      return os << "BootImageLinkTimePcRelative";
-    case HLoadString::LoadKind::kBootImageRelRo:
-      return os << "BootImageRelRo";
-    case HLoadString::LoadKind::kBssEntry:
-      return os << "BssEntry";
-    case HLoadString::LoadKind::kJitBootImageAddress:
-      return os << "JitBootImageAddress";
-    case HLoadString::LoadKind::kJitTableAddress:
-      return os << "JitTableAddress";
-    case HLoadString::LoadKind::kRuntimeCall:
-      return os << "RuntimeCall";
-    default:
-      LOG(FATAL) << "Unknown HLoadString::LoadKind: " << static_cast<int>(rhs);
-      UNREACHABLE();
   }
 }
 
@@ -3164,25 +3100,6 @@ std::ostream& operator<<(std::ostream& os, TypeCheckKind rhs) {
   }
 }
 
-std::ostream& operator<<(std::ostream& os, const MemBarrierKind& kind) {
-  switch (kind) {
-    case MemBarrierKind::kAnyStore:
-      return os << "AnyStore";
-    case MemBarrierKind::kLoadAny:
-      return os << "LoadAny";
-    case MemBarrierKind::kStoreStore:
-      return os << "StoreStore";
-    case MemBarrierKind::kAnyAny:
-      return os << "AnyAny";
-    case MemBarrierKind::kNTStoreStore:
-      return os << "NTStoreStore";
-
-    default:
-      LOG(FATAL) << "Unknown MemBarrierKind: " << static_cast<int>(kind);
-      UNREACHABLE();
-  }
-}
-
 // Check that intrinsic enum values fit within space set aside in ArtMethod modifier flags.
 #define CHECK_INTRINSICS_ENUM_VALUES(Name, InvokeType, _, SideEffects, Exceptions, ...) \
   static_assert( \
@@ -3242,11 +3159,7 @@ static inline IntrinsicExceptions GetExceptionsIntrinsic(Intrinsics i) {
 }
 
 void HInvoke::SetResolvedMethod(ArtMethod* method) {
-  // TODO: b/65872996 The intent is that polymorphic signature methods should
-  // be compiler intrinsics. At present, they are only interpreter intrinsics.
-  if (method != nullptr &&
-      method->IsIntrinsic() &&
-      !method->IsPolymorphicSignature()) {
+  if (method != nullptr && method->IsIntrinsic()) {
     Intrinsics intrinsic = static_cast<Intrinsics>(method->GetIntrinsic());
     SetIntrinsic(intrinsic,
                  NeedsEnvironmentOrCacheIntrinsic(intrinsic),
@@ -3254,6 +3167,24 @@ void HInvoke::SetResolvedMethod(ArtMethod* method) {
                  GetExceptionsIntrinsic(intrinsic));
   }
   resolved_method_ = method;
+}
+
+bool IsGEZero(HInstruction* instruction) {
+  DCHECK(instruction != nullptr);
+  if (instruction->IsArrayLength()) {
+    return true;
+  } else if (instruction->IsMin()) {
+    // Instruction MIN(>=0, >=0) is >= 0.
+    return IsGEZero(instruction->InputAt(0)) &&
+           IsGEZero(instruction->InputAt(1));
+  } else if (instruction->IsAbs()) {
+    // Instruction ABS(>=0) is >= 0.
+    // NOTE: ABS(minint) = minint prevents assuming
+    //       >= 0 without looking at the argument.
+    return IsGEZero(instruction->InputAt(0));
+  }
+  int64_t value = -1;
+  return IsInt64AndGet(instruction, &value) && value >= 0;
 }
 
 }  // namespace art

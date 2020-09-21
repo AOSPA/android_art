@@ -97,6 +97,10 @@ enum class MethodCompilationStat {
   kNotInlinedWont,
   kNotInlinedRecursiveBudget,
   kNotInlinedProxy,
+  kNotInlinedUnresolved,
+  kNotInlinedPolymorphic,
+  kNotInlinedCustom,
+  kTryInline,
   kConstructorFenceGeneratedNew,
   kConstructorFenceGeneratedFinal,
   kConstructorFenceRemovedLSE,
@@ -106,7 +110,7 @@ enum class MethodCompilationStat {
   kJitOutOfMemoryForCommit,
   kLastStat
 };
-std::ostream& operator<<(std::ostream& os, const MethodCompilationStat& rhs);
+std::ostream& operator<<(std::ostream& os, MethodCompilationStat rhs);
 
 class OptimizingCompilerStats {
  public:

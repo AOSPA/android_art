@@ -227,6 +227,10 @@ static Parser CreateArgumentParser() {
           .IntoKey(M::VeryLargeAppThreshold)
       .Define("--force-determinism")
           .IntoKey(M::ForceDeterminism)
+      .Define("--check-linkage-conditions")
+          .IntoKey(M::CheckLinkageConditions)
+      .Define("--crash-on-linkage-violation")
+          .IntoKey(M::CrashOnLinkageViolation)
       .Define("--copy-dex-files=_")
           .WithType<linker::CopyOption>()
           .WithValueMap({{"true", linker::CopyOption::kOnlyIfCompressed},
@@ -258,7 +262,9 @@ static Parser CreateArgumentParser() {
           .IntoKey(M::RuntimeOptions)
       .Define("--compilation-reason=_")
           .WithType<std::string>()
-          .IntoKey(M::CompilationReason);
+          .IntoKey(M::CompilationReason)
+      .Define("--compile-individually")
+          .IntoKey(M::CompileIndividually);
 
   AddCompilerOptionsArgumentParserOptions<Dex2oatArgumentMap>(*parser_builder);
 

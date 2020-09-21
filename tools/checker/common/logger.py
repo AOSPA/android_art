@@ -44,14 +44,14 @@ class Logger(object):
   Verbosity = Level.Info
 
   @staticmethod
-  def log(text, level=Level.Info, color=Color.Default, newLine=True, out=sys.stdout):
+  def log(content, level=Level.Info, color=Color.Default, newLine=True, out=sys.stdout):
     if level <= Logger.Verbosity:
-      text = Logger.Color.terminalCode(color, out) + text + \
+      content = Logger.Color.terminalCode(color, out) + str(content) + \
              Logger.Color.terminalCode(Logger.Color.Default, out)
       if newLine:
-        print(text, file=out)
+        print(content, file=out)
       else:
-        print(text, end="", file=out)
+        print(content, end="", file=out)
       out.flush()
 
   @staticmethod
@@ -94,6 +94,6 @@ class Logger(object):
     Logger.log("PASS", color=Logger.Color.Blue)
 
   @staticmethod
-  def testFailed(msg, assertion, variables):
+  def testFailed(msg, statement, variables):
     Logger.log("FAIL", color=Logger.Color.Red)
-    Logger.fail(msg, assertion.fileName, assertion.lineNo, assertion.originalText, variables)
+    Logger.fail(msg, statement.fileName, statement.lineNo, statement.originalText, variables)

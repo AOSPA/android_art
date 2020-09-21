@@ -55,24 +55,14 @@ art_cc_defaults {
         },
     },
 
-    target: {
-        android: {
-            static_libs: [
-                "libz",
-            ],
-        },
-        host: {
-            shared_libs: [
-                "libz",
-            ],
-        },
-    },
     generated_sources: ["art_dex2oat_operator_srcs"],
     shared_libs: [
         "libbase",
 
         // For SHA-1 checksumming of build ID
         "libcrypto",
+
+        "libz",
     ],
     export_include_dirs: ["."],
 }
@@ -92,7 +82,6 @@ gensrcs {
     tools: ["generate_operator_out"],
     srcs: [
         "dex/dex_to_dex_compiler.h",
-        "driver/compiler_driver.h",
         "linker/image_writer.h",
     ],
     output_extension: "operator_out.cc",
@@ -250,6 +239,7 @@ art_cc_binary {
         "libartpalette",
         "libbase",
         "libsigchain",
+        "libz",
     ],
     static_libs: [
         "libart-dex2oat",
@@ -277,19 +267,13 @@ art_cc_binary {
             lto: {
                 thin: true,
             },
-            static_libs: [
-                "libz",
-            ],
         },
         host: {
-            shared_libs: [
-                "libz",
-            ],
             // Override the prefer32 added by art_cc_binary when
             // HOST_PREFER_32_BIT is in use. Necessary because the logic in
             // Soong for setting ctx.Config().BuildOSTarget (used in
             // dexpreopt.RegisterToolDeps) doesn't take host prefer32 into
-            // account. Note that this override cannot be in cc_default because
+            // account. Note that this override cannot be in cc_defaults because
             // it'd get overridden by the load hook even when it uses
             // PrependProperties.
             compile_multilib: "64",
@@ -322,25 +306,18 @@ art_cc_binary {
         "libartpalette",
         "libbase",
         "libsigchain",
+        "libz",
     ],
     static_libs: [
         "libartd-dex2oat",
     ],
     target: {
-        android: {
-            static_libs: [
-                "libz",
-            ],
-        },
         host: {
-            shared_libs: [
-                "libz",
-            ],
             // Override the prefer32 added by art_cc_binary when
             // HOST_PREFER_32_BIT is in use. Necessary because the logic in
             // Soong for setting ctx.Config().BuildOSTarget (used in
             // dexpreopt.RegisterToolDeps) doesn't take host prefer32 into
-            // account. Note that this override cannot be in cc_default because
+            // account. Note that this override cannot be in cc_defaults because
             // it'd get overridden by the load hook even when it uses
             // PrependProperties.
             compile_multilib: "64",
@@ -445,6 +422,31 @@ art_cc_test {
     defaults: [
         "art_gtest_defaults",
     ],
+    data: [
+        ":art-gtest-jars-AbstractMethod",
+        ":art-gtest-jars-DefaultMethods",
+        ":art-gtest-jars-DexToDexDecompiler",
+        ":art-gtest-jars-ImageLayoutA",
+        ":art-gtest-jars-ImageLayoutB",
+        ":art-gtest-jars-LinkageTest",
+        ":art-gtest-jars-Main",
+        ":art-gtest-jars-MainEmptyUncompressed",
+        ":art-gtest-jars-MainEmptyUncompressedAligned",
+        ":art-gtest-jars-MainStripped",
+        ":art-gtest-jars-MainUncompressedAligned",
+        ":art-gtest-jars-ManyMethods",
+        ":art-gtest-jars-MultiDex",
+        ":art-gtest-jars-MultiDexModifiedSecondary",
+        ":art-gtest-jars-MyClassNatives",
+        ":art-gtest-jars-Nested",
+        ":art-gtest-jars-ProfileTestMultiDex",
+        ":art-gtest-jars-StaticLeafMethods",
+        ":art-gtest-jars-Statics",
+        ":art-gtest-jars-StringLiterals",
+        ":art-gtest-jars-VerifierDeps",
+        ":art-gtest-jars-VerifierDepsMulti",
+        ":art-gtest-jars-VerifySoftFailDuringClinit",
+    ],
     srcs: [
         "dex2oat_test.cc",
         "dex2oat_image_test.cc",
@@ -458,6 +460,7 @@ art_cc_test {
         "linker/oat_writer_test.cc",
         "verifier_deps_test.cc",
     ],
+    required: ["dex2oatd"],
 
     codegen: {
         arm: {

@@ -255,6 +255,9 @@ END_FUNCTION \name
     GOTO_NEXT
 3:
     movq (%rsp), %rdi
+#if (NTERP_HOTNESS_MASK != 0xffff)
+#error "Nterp x86_64 expects Nterp hotness mask to be 0xffff"
+#endif
     addw $$1, ART_METHOD_HOTNESS_COUNT_OFFSET(%rdi)
     // If the counter overflows, handle this in the runtime.
     jo NterpHandleHotnessOverflow
@@ -288,10 +291,13 @@ END_FUNCTION \name
     leaq -24(%rsp), %r10
     subq %r11, %r10
     // Alignment
+    // Note: There may be two pieces of alignment but there is no need to align
+    // out args to `kPointerSize` separately before aligning to kStackAlignment.
     andq $$-16, %r10
 
-    // Set reference and dex registers.
-    leaq 24(%r10, \refs, 4), \refs
+    // Set reference and dex registers, align to pointer size for previous frame and dex pc.
+    leaq 24 + 4(%r10, \refs, 4), \refs
+    andq LITERAL(-__SIZEOF_POINTER__), \refs
     leaq (\refs, %rbx, 4), \fp
 
     // Now setup the stack pointer.
@@ -606,19 +612,19 @@ END_FUNCTION \name
     je 2f
     cmpb MACRO_LITERAL(70), %al             // if (al == 'F') goto FOUND_FLOAT
     je 3f
-    addq MACRO_LITERAL(4), REG_VAR(arg_index)
+    addq MACRO_LITERAL(1), REG_VAR(arg_index)
     //  Handle extra argument in arg array taken by a long.
     cmpb MACRO_LITERAL(74), %al   // if (al != 'J') goto LOOP
     jne 1b
-    addq MACRO_LITERAL(4), REG_VAR(arg_index)
+    addq MACRO_LITERAL(1), REG_VAR(arg_index)
     jmp 1b                        // goto LOOP
 2:  // FOUND_DOUBLE
-    movsd REG_VAR(xmm_reg),(REG_VAR(fp), REG_VAR(arg_index), 1)
-    addq MACRO_LITERAL(8), REG_VAR(arg_index)
+    movsd REG_VAR(xmm_reg),(REG_VAR(fp), REG_VAR(arg_index), 4)
+    addq MACRO_LITERAL(2), REG_VAR(arg_index)
     jmp 4f
 3:  // FOUND_FLOAT
-    movss REG_VAR(xmm_reg), (REG_VAR(fp), REG_VAR(arg_index), 1)
-    addq MACRO_LITERAL(4), REG_VAR(arg_index)
+    movss REG_VAR(xmm_reg), (REG_VAR(fp), REG_VAR(arg_index), 4)
+    addq MACRO_LITERAL(1), REG_VAR(arg_index)
 4:
 .endm
 
@@ -638,22 +644,22 @@ END_FUNCTION \name
     je 3f
     cmpb MACRO_LITERAL(68), %al   // if (al == 'D') goto SKIP_DOUBLE
     je 4f
-    movl REG_VAR(gpr_reg32), (REG_VAR(regs), REG_VAR(arg_index), 1)
+    movl REG_VAR(gpr_reg32), (REG_VAR(regs), REG_VAR(arg_index), 4)
     cmpb MACRO_LITERAL(76), %al   // if (al != 'L') goto NOT_REFERENCE
     jne 6f
-    movl REG_VAR(gpr_reg32), (REG_VAR(refs), REG_VAR(arg_index), 1)
+    movl REG_VAR(gpr_reg32), (REG_VAR(refs), REG_VAR(arg_index), 4)
 6:  // NOT_REFERENCE
-    addq MACRO_LITERAL(4), REG_VAR(arg_index)
+    addq MACRO_LITERAL(1), REG_VAR(arg_index)
     jmp 5f
 2:  // FOUND_LONG
-    movq REG_VAR(gpr_reg64), (REG_VAR(regs), REG_VAR(arg_index), 1)
-    addq MACRO_LITERAL(8), REG_VAR(arg_index)
+    movq REG_VAR(gpr_reg64), (REG_VAR(regs), REG_VAR(arg_index), 4)
+    addq MACRO_LITERAL(2), REG_VAR(arg_index)
     jmp 5f
 3:  // SKIP_FLOAT
-    addq MACRO_LITERAL(4), REG_VAR(arg_index)
+    addq MACRO_LITERAL(1), REG_VAR(arg_index)
     jmp 1b
 4:  // SKIP_DOUBLE
-    addq MACRO_LITERAL(8), REG_VAR(arg_index)
+    addq MACRO_LITERAL(2), REG_VAR(arg_index)
     jmp 1b
 5:
 .endm
@@ -676,21 +682,21 @@ END_FUNCTION \name
     je 2f
     cmpb MACRO_LITERAL(70), %al             // if (al == 'F') goto FOUND_FLOAT
     je 3f
-    addq MACRO_LITERAL(4), REG_VAR(arg_index)
+    addq MACRO_LITERAL(1), REG_VAR(arg_index)
     //  Handle extra argument in arg array taken by a long.
     cmpb MACRO_LITERAL(74), %al   // if (al != 'J') goto LOOP
     jne 1b
-    addq MACRO_LITERAL(4), REG_VAR(arg_index)
+    addq MACRO_LITERAL(1), REG_VAR(arg_index)
     jmp 1b                        // goto LOOP
 2:  // FOUND_DOUBLE
-    movq OFFSET_TO_FIRST_ARGUMENT_IN_STACK(REG_VAR(stack_ptr), REG_VAR(arg_index), 1), %rax
-    movq %rax, (REG_VAR(regs), REG_VAR(arg_index), 1)
-    addq MACRO_LITERAL(8), REG_VAR(arg_index)
+    movq OFFSET_TO_FIRST_ARGUMENT_IN_STACK(REG_VAR(stack_ptr), REG_VAR(arg_index), 4), %rax
+    movq %rax, (REG_VAR(regs), REG_VAR(arg_index), 4)
+    addq MACRO_LITERAL(2), REG_VAR(arg_index)
     jmp 1b
 3:  // FOUND_FLOAT
-    movl OFFSET_TO_FIRST_ARGUMENT_IN_STACK(REG_VAR(stack_ptr), REG_VAR(arg_index), 1), %eax
-    movl %eax, (REG_VAR(regs), REG_VAR(arg_index), 1)
-    addq MACRO_LITERAL(4), REG_VAR(arg_index)
+    movl OFFSET_TO_FIRST_ARGUMENT_IN_STACK(REG_VAR(stack_ptr), REG_VAR(arg_index), 4), %eax
+    movl %eax, (REG_VAR(regs), REG_VAR(arg_index), 4)
+    addq MACRO_LITERAL(1), REG_VAR(arg_index)
     jmp 1b
 .endm
 
@@ -712,32 +718,35 @@ END_FUNCTION \name
     je 3f
     cmpb MACRO_LITERAL(68), %al   // if (al == 'D') goto SKIP_DOUBLE
     je 4f
-    movl OFFSET_TO_FIRST_ARGUMENT_IN_STACK(REG_VAR(stack_ptr), REG_VAR(arg_index), 1), %eax
-    movl %eax, (REG_VAR(regs), REG_VAR(arg_index), 1)
-    addq MACRO_LITERAL(4), REG_VAR(arg_index)
+    movl OFFSET_TO_FIRST_ARGUMENT_IN_STACK(REG_VAR(stack_ptr), REG_VAR(arg_index), 4), %eax
+    movl %eax, (REG_VAR(regs), REG_VAR(arg_index), 4)
+    addq MACRO_LITERAL(1), REG_VAR(arg_index)
     jmp 1b
 6:  // FOUND_REFERENCE
-    movl OFFSET_TO_FIRST_ARGUMENT_IN_STACK(REG_VAR(stack_ptr), REG_VAR(arg_index), 1), %eax
-    movl %eax, (REG_VAR(regs), REG_VAR(arg_index), 1)
-    movl %eax, (REG_VAR(refs), REG_VAR(arg_index), 1)
-    addq MACRO_LITERAL(4), REG_VAR(arg_index)
+    movl OFFSET_TO_FIRST_ARGUMENT_IN_STACK(REG_VAR(stack_ptr), REG_VAR(arg_index), 4), %eax
+    movl %eax, (REG_VAR(regs), REG_VAR(arg_index), 4)
+    movl %eax, (REG_VAR(refs), REG_VAR(arg_index), 4)
+    addq MACRO_LITERAL(1), REG_VAR(arg_index)
     jmp 1b
 2:  // FOUND_LONG
-    movq OFFSET_TO_FIRST_ARGUMENT_IN_STACK(REG_VAR(stack_ptr), REG_VAR(arg_index), 1), %rax
-    movq %rax, (REG_VAR(regs), REG_VAR(arg_index), 1)
-    addq MACRO_LITERAL(8), REG_VAR(arg_index)
+    movq OFFSET_TO_FIRST_ARGUMENT_IN_STACK(REG_VAR(stack_ptr), REG_VAR(arg_index), 4), %rax
+    movq %rax, (REG_VAR(regs), REG_VAR(arg_index), 4)
+    addq MACRO_LITERAL(2), REG_VAR(arg_index)
     jmp 1b
 3:  // SKIP_FLOAT
-    addq MACRO_LITERAL(4), REG_VAR(arg_index)
+    addq MACRO_LITERAL(1), REG_VAR(arg_index)
     jmp 1b
 4:  // SKIP_DOUBLE
-    addq MACRO_LITERAL(8), REG_VAR(arg_index)
+    addq MACRO_LITERAL(2), REG_VAR(arg_index)
     jmp 1b
 .endm
 
 // Increase method hotness and do suspend check before starting executing the method.
 .macro START_EXECUTING_INSTRUCTIONS
    movq (%rsp), %rdi
+#if (NTERP_HOTNESS_MASK != 0xffff)
+#error "Nterp x86_64 expects Nterp hotness mask to be 0xffff"
+#endif
    addw $$1, ART_METHOD_HOTNESS_COUNT_OFFSET(%rdi)
    jo 2f
    testl $$(THREAD_SUSPEND_OR_CHECKPOINT_REQUEST), rSELF:THREAD_FLAGS_OFFSET

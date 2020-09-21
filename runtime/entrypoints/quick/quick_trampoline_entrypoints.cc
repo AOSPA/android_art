@@ -19,7 +19,7 @@
 #include "base/enums.h"
 #include "callee_save_frame.h"
 #include "common_throws.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "debug_print.h"
 #include "debugger.h"
 #include "dex/dex_file-inl.h"
@@ -32,7 +32,6 @@
 #include "gc/accounting/card_table-inl.h"
 #include "imt_conflict_table.h"
 #include "imtable-inl.h"
-#include "index_bss_mapping.h"
 #include "instrumentation.h"
 #include "interpreter/interpreter.h"
 #include "interpreter/interpreter_common.h"
@@ -845,7 +844,7 @@ extern "C" uint64_t artQuickProxyInvokeHandler(
   DCHECK_EQ(Runtime::Current()->GetClassLinker()->GetImagePointerSize(), kRuntimePointerSize);
   DCHECK(!Runtime::Current()->IsActiveTransaction());
   ObjPtr<mirror::Method> interface_reflect_method =
-      mirror::Method::CreateFromArtMethod<kRuntimePointerSize, false>(soa.Self(), interface_method);
+      mirror::Method::CreateFromArtMethod<kRuntimePointerSize>(soa.Self(), interface_method);
   if (interface_reflect_method == nullptr) {
     soa.Self()->AssertPendingOOMException();
     return 0;
@@ -1319,26 +1318,9 @@ extern "C" const void* artQuickResolutionTrampoline(
     called = linker->ResolveMethod<ClassLinker::ResolveMode::kCheckICCEAndIAE>(
         self, called_method.index, caller, invoke_type);
 
-    // Update .bss entry in oat file if any.
-    if (called != nullptr && called_method.dex_file->GetOatDexFile() != nullptr) {
-      size_t bss_offset = IndexBssMappingLookup::GetBssOffset(
-          called_method.dex_file->GetOatDexFile()->GetMethodBssMapping(),
-          called_method.index,
-          called_method.dex_file->NumMethodIds(),
-          static_cast<size_t>(kRuntimePointerSize));
-      if (bss_offset != IndexBssMappingLookup::npos) {
-        DCHECK_ALIGNED(bss_offset, static_cast<size_t>(kRuntimePointerSize));
-        const OatFile* oat_file = called_method.dex_file->GetOatDexFile()->GetOatFile();
-        ArtMethod** method_entry = reinterpret_cast<ArtMethod**>(const_cast<uint8_t*>(
-            oat_file->BssBegin() + bss_offset));
-        DCHECK_GE(method_entry, oat_file->GetBssMethods().data());
-        DCHECK_LT(method_entry,
-                  oat_file->GetBssMethods().data() + oat_file->GetBssMethods().size());
-        std::atomic<ArtMethod*>* atomic_entry =
-            reinterpret_cast<std::atomic<ArtMethod*>*>(method_entry);
-        static_assert(sizeof(*method_entry) == sizeof(*atomic_entry), "Size check.");
-        atomic_entry->store(called, std::memory_order_release);
-      }
+    // If successful, update .bss entry in oat file if any.
+    if (called != nullptr) {
+      MaybeUpdateBssMethodEntry(called, called_method);
     }
   }
   const void* code = nullptr;
@@ -1374,35 +1356,29 @@ extern "C" const void* artQuickResolutionTrampoline(
                                << invoke_type << " " << orig_called->GetVtableIndex();
     }
 
+    // Static invokes need class initialization check but instance invokes can proceed even if
+    // the class is erroneous, i.e. in the edge case of escaping instances of erroneous classes.
+    bool success = true;
     ObjPtr<mirror::Class> called_class = called->GetDeclaringClass();
     if (NeedsClinitCheckBeforeCall(called) && !called_class->IsVisiblyInitialized()) {
       // Ensure that the called method's class is initialized.
       StackHandleScope<1> hs(soa.Self());
       HandleWrapperObjPtr<mirror::Class> h_called_class(hs.NewHandleWrapper(&called_class));
-      linker->EnsureInitialized(soa.Self(), h_called_class, true, true);
+      success = linker->EnsureInitialized(soa.Self(), h_called_class, true, true);
     }
-    bool force_interpreter = self->IsForceInterpreter() && !called->IsNative();
-    if (called_class->IsInitialized() || called_class->IsInitializing()) {
-      if (UNLIKELY(force_interpreter)) {
-        // If we are single-stepping or the called method is deoptimized (by a
-        // breakpoint, for example), then we have to execute the called method
-        // with the interpreter.
+    if (success) {
+      code = called->GetEntryPointFromQuickCompiledCode();
+      if (linker->IsQuickResolutionStub(code)) {
+        DCHECK_EQ(invoke_type, kStatic);
+        // Go to JIT or oat and grab code.
+        code = linker->GetQuickOatCodeFor(called);
+      }
+      if (linker->ShouldUseInterpreterEntrypoint(called, code)) {
         code = GetQuickToInterpreterBridge();
-      } else {
-        code = called->GetEntryPointFromQuickCompiledCode();
-        if (linker->IsQuickResolutionStub(code)) {
-          DCHECK_EQ(invoke_type, kStatic);
-          // Go to JIT or oat and grab code.
-          code = linker->GetQuickOatCodeFor(called);
-          if (called_class->IsInitialized()) {
-            // Only update the entrypoint once the class is initialized. Other
-            // threads still need to go through the resolution stub.
-            Runtime::Current()->GetInstrumentation()->UpdateMethodsCode(called, code);
-          }
-        }
       }
     } else {
       DCHECK(called_class->IsErroneous());
+      DCHECK(self->IsExceptionPending());
     }
   }
   CHECK_EQ(code == nullptr, self->IsExceptionPending());
@@ -2493,6 +2469,10 @@ extern "C" TwoWordReturn artInvokeInterfaceTrampoline(ArtMethod* interface_metho
   // We arrive here if we have found an implementation, and it is not in the ImtConflictTable.
   // We create a new table with the new pair { interface_method, method }.
   DCHECK(conflict_method->IsRuntimeMethod());
+
+  // Classes in the boot image should never need to update conflict methods in
+  // their IMT.
+  CHECK(!Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(cls.Get())) << cls->PrettyClass();
   ArtMethod* new_conflict_method = Runtime::Current()->GetClassLinker()->AddMethodToConflictTable(
       cls.Get(),
       conflict_method,

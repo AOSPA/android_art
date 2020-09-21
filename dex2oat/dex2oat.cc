@@ -521,6 +521,9 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("");
   UsageError("  --max-image-block-size=<size>: Maximum solid block size for compressed images.");
   UsageError("");
+  UsageError("  --compile-individually: Compiles dex files individually, unloading classes in");
+  UsageError("      between compiling each file.");
+  UsageError("");
   std::cerr << "See log for usage error information\n";
   exit(EXIT_FAILURE);
 }
@@ -774,6 +777,15 @@ class ThreadLocalHashOverride {
   Handle<mirror::Object> old_field_value_;
 };
 
+class OatKeyValueStore : public SafeMap<std::string, std::string> {
+ public:
+  using SafeMap::Put;
+
+  iterator Put(const std::string& k, bool v) {
+    return SafeMap::Put(k, v ? OatHeader::kTrueValue : OatHeader::kFalseValue);
+  }
+};
+
 class Dex2Oat final {
  public:
   explicit Dex2Oat(TimingLogger* timings) :
@@ -813,7 +825,10 @@ class Dex2Oat final {
       app_image_fd_(kInvalidFd),
       profile_file_fd_(kInvalidFd),
       timings_(timings),
-      force_determinism_(false)
+      force_determinism_(false),
+      check_linkage_conditions_(false),
+      crash_on_linkage_violation_(false),
+      compile_individually_(false)
       {}
 
   ~Dex2Oat() {
@@ -889,6 +904,7 @@ class Dex2Oat final {
   }
 
   void ProcessOptions(ParserOptions* parser_options) {
+    compiler_options_->compiler_type_ = CompilerOptions::CompilerType::kAotCompiler;
     compiler_options_->compile_pic_ = true;  // All AOT compilation is PIC.
 
     if (android_root_.empty()) {
@@ -1109,13 +1125,16 @@ class Dex2Oat final {
     }
 
     // Fill some values into the key-value store for the oat header.
-    key_value_store_.reset(new SafeMap<std::string, std::string>());
+    key_value_store_.reset(new OatKeyValueStore());
 
     // Automatically force determinism for the boot image and boot image extensions in a host build.
     if (!kIsTargetBuild && (IsBootImage() || IsBootImageExtension())) {
       force_determinism_ = true;
     }
     compiler_options_->force_determinism_ = force_determinism_;
+
+    compiler_options_->check_linkage_conditions_ = check_linkage_conditions_;
+    compiler_options_->crash_on_linkage_violation_ = crash_on_linkage_violation_;
 
     if (passes_to_run_filename_ != nullptr) {
       passes_to_run_ = ReadCommentedInputFromFile<std::vector<std::string>>(
@@ -1148,9 +1167,6 @@ class Dex2Oat final {
     }
 
     compiler_options_->passes_to_run_ = passes_to_run_.get();
-    compiler_options_->compiling_with_core_image_ =
-        !boot_image_filename_.empty() &&
-        CompilerOptions::IsCoreImageFilename(boot_image_filename_);
   }
 
   void ExpandOatAndImageFilenames() {
@@ -1198,16 +1214,13 @@ class Dex2Oat final {
       }
       key_value_store_->Put(OatHeader::kDex2OatCmdLineKey, oss.str());
     }
-    key_value_store_->Put(
-        OatHeader::kDebuggableKey,
-        compiler_options_->debuggable_ ? OatHeader::kTrueValue : OatHeader::kFalseValue);
-    key_value_store_->Put(
-        OatHeader::kNativeDebuggableKey,
-        compiler_options_->GetNativeDebuggable() ? OatHeader::kTrueValue : OatHeader::kFalseValue);
+    key_value_store_->Put(OatHeader::kDebuggableKey, compiler_options_->debuggable_);
+    key_value_store_->Put(OatHeader::kNativeDebuggableKey,
+                          compiler_options_->GetNativeDebuggable());
     key_value_store_->Put(OatHeader::kCompilerFilter,
-        CompilerFilter::NameOfFilter(compiler_options_->GetCompilerFilter()));
-    key_value_store_->Put(OatHeader::kConcurrentCopying,
-                          kUseReadBarrier ? OatHeader::kTrueValue : OatHeader::kFalseValue);
+                          CompilerFilter::NameOfFilter(compiler_options_->GetCompilerFilter()));
+    key_value_store_->Put(OatHeader::kConcurrentCopying, kUseReadBarrier);
+    key_value_store_->Put(OatHeader::kRequiresImage, compiler_options_->IsGeneratingImage());
     if (invocation_file_.get() != -1) {
       std::ostringstream oss;
       for (int i = 0; i < argc; ++i) {
@@ -1336,6 +1349,8 @@ class Dex2Oat final {
     AssignIfExists(args, M::UpdatableBcpPackagesFile, &updatable_bcp_packages_filename_);
     AssignIfExists(args, M::ImageFormat, &image_storage_mode_);
     AssignIfExists(args, M::CompilationReason, &compilation_reason_);
+    AssignTrueIfExists(args, M::CheckLinkageConditions, &check_linkage_conditions_);
+    AssignTrueIfExists(args, M::CrashOnLinkageViolation, &crash_on_linkage_violation_);
 
     AssignIfExists(args, M::Backend, &compiler_kind_);
     parser_options->requested_specific_compiler = args.Exists(M::Backend);
@@ -1366,6 +1381,7 @@ class Dex2Oat final {
     if (args.Exists(M::ForceDeterminism)) {
       force_determinism_ = true;
     }
+    AssignTrueIfExists(args, M::CompileIndividually, &compile_individually_);
 
     if (args.Exists(M::Base)) {
       ParseBase(*args.Get(M::Base));
@@ -1957,6 +1973,20 @@ class Dex2Oat final {
       }
     }
 
+    // Setup VerifierDeps for compilation and report if we fail to parse the data.
+    if (!DoEagerUnquickeningOfVdex() && input_vdex_file_ != nullptr) {
+      std::unique_ptr<verifier::VerifierDeps> verifier_deps(
+          new verifier::VerifierDeps(dex_files, /*output_only=*/ false));
+      if (!verifier_deps->ParseStoredData(dex_files, input_vdex_file_->GetVerifierDepsData())) {
+        return dex2oat::ReturnCode::kOther;
+      }
+      callbacks_->SetVerifierDeps(verifier_deps.release());
+    } else {
+      // Create the main VerifierDeps, here instead of in the compiler since we want to aggregate
+      // the results for all the dex files, not just the results for the current dex file.
+      callbacks_->SetVerifierDeps(new verifier::VerifierDeps(dex_files));
+    }
+
     return dex2oat::ReturnCode::kNoFailure;
   }
 
@@ -1990,17 +2020,17 @@ class Dex2Oat final {
   }
 
   bool ShouldCompileDexFilesIndividually() const {
-    // Compile individually if we are:
-    // 1. not building an image,
-    // 2. not verifying a vdex file,
-    // 3. using multidex,
+    // Compile individually if we are specifically asked to, or
+    // 1. not building an image, and
+    // 2. not verifying a vdex file, and
+    // 3. using multidex, and
     // 4. not doing any AOT compilation.
     // This means extract, no-vdex verify, and quicken, will use the individual compilation
     // mode (to reduce RAM used by the compiler).
-    return !IsImage() &&
-        !update_input_vdex_ &&
-        compiler_options_->dex_files_for_oat_file_.size() > 1 &&
-        !CompilerFilter::IsAotCompilationEnabled(compiler_options_->GetCompilerFilter());
+    return compile_individually_ ||
+           (!IsImage() && !update_input_vdex_ &&
+            compiler_options_->dex_files_for_oat_file_.size() > 1 &&
+            !CompilerFilter::IsAotCompilationEnabled(compiler_options_->GetCompilerFilter()));
   }
 
   uint32_t GetCombinedChecksums() const {
@@ -2094,9 +2124,6 @@ class Dex2Oat final {
     // Setup vdex for compilation.
     const std::vector<const DexFile*>& dex_files = compiler_options_->dex_files_for_oat_file_;
     if (!DoEagerUnquickeningOfVdex() && input_vdex_file_ != nullptr) {
-      callbacks_->SetVerifierDeps(
-          new verifier::VerifierDeps(dex_files, input_vdex_file_->GetVerifierDepsData()));
-
       // TODO: we unquicken unconditionally, as we don't know
       // if the boot image has changed. How exactly we'll know is under
       // experimentation.
@@ -2106,10 +2133,6 @@ class Dex2Oat final {
       // optimization does not depend on the boot image (the optimization relies on not
       // having final fields in a class, which does not change for an app).
       input_vdex_file_->Unquicken(dex_files, /* decompile_return_instruction */ false);
-    } else {
-      // Create the main VerifierDeps, here instead of in the compiler since we want to aggregate
-      // the results for all the dex files, not just the results for the current dex file.
-      callbacks_->SetVerifierDeps(new verifier::VerifierDeps(dex_files));
     }
 
     // To allow initialization of classes that construct ThreadLocal objects in class initializer,
@@ -2285,23 +2308,8 @@ class Dex2Oat final {
       verifier::VerifierDeps* verifier_deps = callbacks_->GetVerifierDeps();
       for (size_t i = 0, size = oat_files_.size(); i != size; ++i) {
         File* vdex_file = vdex_files_[i].get();
-        std::unique_ptr<BufferedOutputStream> vdex_out =
-            std::make_unique<BufferedOutputStream>(
-                std::make_unique<FileOutputStream>(vdex_file));
-
-        if (!oat_writers_[i]->WriteVerifierDeps(vdex_out.get(), verifier_deps)) {
-          LOG(ERROR) << "Failed to write verifier dependencies into VDEX " << vdex_file->GetPath();
-          return false;
-        }
-
-        if (!oat_writers_[i]->WriteQuickeningInfo(vdex_out.get())) {
-          LOG(ERROR) << "Failed to write quickening info into VDEX " << vdex_file->GetPath();
-          return false;
-        }
-
-        // VDEX finalized, seek back to the beginning and write checksums and the header.
-        if (!oat_writers_[i]->WriteChecksumsAndVdexHeader(vdex_out.get())) {
-          LOG(ERROR) << "Failed to write vdex header into VDEX " << vdex_file->GetPath();
+        if (!oat_writers_[i]->FinishVdexFile(vdex_file, verifier_deps)) {
+          LOG(ERROR) << "Failed to finish VDEX file " << vdex_file->GetPath();
           return false;
         }
       }
@@ -2561,18 +2569,21 @@ class Dex2Oat final {
     // cleaning up before that (e.g. the oat writers are created before the
     // runtime).
     profile_compilation_info_.reset(new ProfileCompilationInfo());
-    ScopedFlock profile_file;
-    std::string error;
+    // Dex2oat only uses the reference profile and that is not updated concurrently by the app or
+    // other processes. So we don't need to lock (as we have to do in profman or when writing the
+    // profile info).
+    std::unique_ptr<File> profile_file;
     if (profile_file_fd_ != -1) {
-      profile_file = LockedFile::DupOf(profile_file_fd_, "profile",
-                                       true /* read_only_mode */, &error);
+      profile_file.reset(new File(DupCloexec(profile_file_fd_),
+                                  "profile",
+                                  /* check_usage= */ false,
+                                  /* read_only_mode= */ true));
     } else if (profile_file_ != "") {
-      profile_file = LockedFile::Open(profile_file_.c_str(), O_RDONLY, true, &error);
+      profile_file.reset(OS::OpenFileForReading(profile_file_.c_str()));
     }
 
-    // Return early if we're unable to obtain a lock on the profile.
     if (profile_file.get() == nullptr) {
-      LOG(ERROR) << "Cannot lock profiles: " << error;
+      PLOG(ERROR) << "Cannot lock profiles";
       return false;
     }
 
@@ -2787,12 +2798,6 @@ class Dex2Oat final {
         std::make_pair("imageinstructionset",
                        GetInstructionSetString(compiler_options_->GetInstructionSet())));
 
-    // Only allow no boot image for the runtime if we're compiling one. When we compile an app,
-    // we don't want fallback mode, it will abort as we do not push a boot classpath (it might
-    // have been stripped in preopting, anyways).
-    if (!IsBootImage()) {
-      raw_options.push_back(std::make_pair("-Xno-dex-file-fallback", nullptr));
-    }
     // Never allow implicit image compilation.
     raw_options.push_back(std::make_pair("-Xnoimage-dex2oat", nullptr));
     // Disable libsigchain. We don't don't need it during compilation and it prevents us
@@ -2988,7 +2993,7 @@ class Dex2Oat final {
   std::unique_ptr<CompilerOptions> compiler_options_;
   Compiler::Kind compiler_kind_;
 
-  std::unique_ptr<SafeMap<std::string, std::string> > key_value_store_;
+  std::unique_ptr<OatKeyValueStore> key_value_store_;
 
   std::unique_ptr<VerificationResults> verification_results_;
 
@@ -3079,6 +3084,10 @@ class Dex2Oat final {
 
   // See CompilerOptions.force_determinism_.
   bool force_determinism_;
+  // See CompilerOptions.crash_on_linkage_violation_.
+  bool check_linkage_conditions_;
+  // See CompilerOptions.crash_on_linkage_violation_.
+  bool crash_on_linkage_violation_;
 
   // Directory of relative classpaths.
   std::string classpath_dir_;
@@ -3092,6 +3101,9 @@ class Dex2Oat final {
 
   // The reason for invoking the compiler.
   std::string compilation_reason_;
+
+  // Whether to force individual compilation.
+  bool compile_individually_;
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(Dex2Oat);
 };

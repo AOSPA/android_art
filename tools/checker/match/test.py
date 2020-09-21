@@ -16,9 +16,10 @@ from common.immutables               import ImmutableDict
 from common.testing                  import ToUnicode
 from file_format.c1visualizer.parser import ParseC1visualizerStream
 from file_format.c1visualizer.struct import C1visualizerFile, C1visualizerPass
-from file_format.checker.parser      import ParseCheckerStream, ParseCheckerAssertion
-from file_format.checker.struct      import CheckerFile, TestCase, TestAssertion
-from match.file                      import MatchTestCase, MatchFailedException
+from file_format.checker.parser      import ParseCheckerStream, ParseCheckerStatement
+from file_format.checker.struct      import CheckerFile, TestCase, TestStatement
+from match.file                      import MatchTestCase, MatchFailedException, \
+                                            BadStructureException
 from match.line                      import MatchLines
 
 import io
@@ -28,13 +29,13 @@ CheckerException = SystemExit
 
 class MatchLines_Test(unittest.TestCase):
 
-  def createTestAssertion(self, checkerString):
+  def createTestStatement(self, checkerString):
     checkerFile = CheckerFile("<checker-file>")
     testCase = TestCase(checkerFile, "TestMethod TestPass", 0)
-    return ParseCheckerAssertion(testCase, checkerString, TestAssertion.Variant.InOrder, 0)
+    return ParseCheckerStatement(testCase, checkerString, TestStatement.Variant.InOrder, 0)
 
   def tryMatch(self, checkerString, c1String, varState={}):
-    return MatchLines(self.createTestAssertion(checkerString),
+    return MatchLines(self.createTestStatement(checkerString),
                       ToUnicode(c1String),
                       ImmutableDict(varState))
 
@@ -102,12 +103,27 @@ class MatchLines_Test(unittest.TestCase):
 
 class MatchFiles_Test(unittest.TestCase):
 
-  def assertMatches(self, checkerString, c1String):
+  def assertMatches(self, checkerString, c1String, instructionSetFeatures=None):
     checkerString = \
       """
         /// CHECK-START: MyMethod MyPass
       """ + checkerString
-    c1String = \
+    featureString = ""
+    if instructionSetFeatures:
+      joinedFeatures = ",".join(map(lambda feature: feature
+                                                    if instructionSetFeatures[feature]
+                                                    else "-" + feature,
+                                    instructionSetFeatures))
+
+      featureString = \
+        """
+          begin_compilation
+            name "isa_features:%s"
+            method "isa_features:%s"
+            date 1234
+          end_compilation
+        """ % (joinedFeatures, joinedFeatures)
+    c1String = featureString + \
       """
         begin_compilation
           name "MyMethod"
@@ -124,10 +140,14 @@ class MatchFiles_Test(unittest.TestCase):
     c1File = ParseC1visualizerStream("<c1-file>", io.StringIO(ToUnicode(c1String)))
     assert len(checkerFile.testCases) == 1
     assert len(c1File.passes) == 1
-    MatchTestCase(checkerFile.testCases[0], c1File.passes[0])
+    MatchTestCase(checkerFile.testCases[0], c1File.passes[0], c1File.instructionSetFeatures)
 
-  def assertDoesNotMatch(self, checkerString, c1String):
+  def assertDoesNotMatch(self, checkerString, c1String, instructionSetFeatures=None):
     with self.assertRaises(MatchFailedException):
+      self.assertMatches(checkerString, c1String, instructionSetFeatures)
+
+  def assertBadStructure(self, checkerString, c1String):
+    with self.assertRaises(BadStructureException):
       self.assertMatches(checkerString, c1String)
 
   def test_Text(self):
@@ -175,7 +195,7 @@ class MatchFiles_Test(unittest.TestCase):
     self.assertDoesNotMatch("/// CHECK: b{{.}}r", "abc barX def")
     self.assertDoesNotMatch("/// CHECK: b{{.}}r", "abc b r def")
 
-  def test_InOrderAssertions(self):
+  def test_InOrderStatements(self):
     self.assertMatches(
     """
       /// CHECK: foo
@@ -195,7 +215,7 @@ class MatchFiles_Test(unittest.TestCase):
       foo
     """)
 
-  def test_NextLineAssertions(self):
+  def test_NextLineStatements(self):
     self.assertMatches(
     """
       /// CHECK:      foo
@@ -243,7 +263,7 @@ class MatchFiles_Test(unittest.TestCase):
       abc
     """)
 
-  def test_DagAssertions(self):
+  def test_DagStatements(self):
     self.assertMatches(
     """
       /// CHECK-DAG: foo
@@ -263,7 +283,7 @@ class MatchFiles_Test(unittest.TestCase):
       foo
     """)
 
-  def test_DagAssertionsScope(self):
+  def test_DagStatementsScope(self):
     self.assertMatches(
     """
       /// CHECK:     foo
@@ -304,7 +324,7 @@ class MatchFiles_Test(unittest.TestCase):
       abc
     """)
 
-  def test_NotAssertions(self):
+  def test_NotStatements(self):
     self.assertMatches(
     """
       /// CHECK-NOT: foo
@@ -331,7 +351,7 @@ class MatchFiles_Test(unittest.TestCase):
       def bar
     """)
 
-  def test_NotAssertionsScope(self):
+  def test_NotStatementsScope(self):
     self.assertMatches(
     """
       /// CHECK:     abc
@@ -364,6 +384,39 @@ class MatchFiles_Test(unittest.TestCase):
       foo
       def
     """)
+    self.assertDoesNotMatch(
+    """
+      /// CHECK-NOT:  foo
+      /// CHECK-EVAL: 1 + 1 == 2
+      /// CHECK:      bar
+    """,
+    """
+      foo
+      abc
+      bar
+    """);
+    self.assertMatches(
+    """
+      /// CHECK-DAG:  bar
+      /// CHECK-DAG:  abc
+      /// CHECK-NOT:  foo
+    """,
+    """
+      foo
+      abc
+      bar
+    """);
+    self.assertDoesNotMatch(
+    """
+      /// CHECK-DAG:  abc
+      /// CHECK-DAG:  foo
+      /// CHECK-NOT:  bar
+    """,
+    """
+      foo
+      abc
+      bar
+    """);
 
   def test_LineOnlyMatchesOnce(self):
     self.assertMatches(
@@ -387,7 +440,7 @@ class MatchFiles_Test(unittest.TestCase):
       bar
     """)
 
-  def test_EvalAssertions(self):
+  def test_EvalStatements(self):
     self.assertMatches("/// CHECK-EVAL: True", "foo")
     self.assertDoesNotMatch("/// CHECK-EVAL: False", "foo")
 
@@ -400,3 +453,516 @@ class MatchFiles_Test(unittest.TestCase):
                      """
     self.assertMatches(twoVarTestCase, "42 41");
     self.assertDoesNotMatch(twoVarTestCase, "42 43")
+
+  def test_MisplacedNext(self):
+    self.assertBadStructure(
+      """
+        /// CHECK-DAG:  foo
+        /// CHECK-NEXT: bar
+      """,
+      """
+      foo
+      bar
+      """)
+    self.assertBadStructure(
+      """
+        /// CHECK-NOT:  foo
+        /// CHECK-NEXT: bar
+      """,
+      """
+      foo
+      bar
+      """)
+    self.assertBadStructure(
+      """
+        /// CHECK-EVAL: True
+        /// CHECK-NEXT: bar
+      """,
+      """
+      foo
+      bar
+      """)
+    self.assertBadStructure(
+      """
+        /// CHECK-NEXT: bar
+      """,
+      """
+      foo
+      bar
+      """)
+
+  def test_EnvVariableEval(self):
+    self.assertMatches(
+    """
+      /// CHECK-IF: os.environ.get('MARTY_MCFLY') != '89mph!'
+      /// CHECK-FI:
+    """,
+    """
+    foo
+    """
+    )
+    self.assertMatches(
+    """
+      /// CHECK-EVAL: os.environ.get('MARTY_MCFLY') != '89mph!'
+    """,
+    """
+    foo
+    """
+    )
+
+  def test_IfStatements(self):
+    self.assertMatches(
+    """
+      /// CHECK: foo1
+      /// CHECK-IF: True
+      ///   CHECK-NEXT: foo2
+      /// CHECK-FI:
+      /// CHECK-NEXT: foo3
+      /// CHECK-NEXT: bar
+    """,
+    """
+    foo1
+    foo2
+    foo3
+    bar
+    """)
+    self.assertMatches(
+    """
+      /// CHECK: foo1
+      /// CHECK-IF: False
+      ///   CHECK-NEXT:    foo2
+      /// CHECK-FI:
+      /// CHECK-NEXT:    bar
+    """,
+    """
+    foo1
+    bar
+    """)
+    self.assertMatches(
+    """
+      /// CHECK: foo1
+      /// CHECK-IF: True
+      ///   CHECK-DAG:    foo2
+      /// CHECK-FI:
+      /// CHECK-DAG:    bar
+      /// CHECK: foo3
+    """,
+    """
+    foo1
+    bar
+    foo2
+    foo3
+    """)
+    self.assertDoesNotMatch(
+    """
+      /// CHECK: foo1
+      /// CHECK-IF: False
+      ///   CHECK-NEXT: foo2
+      /// CHECK-FI:
+      /// CHECK-NEXT: foo3
+    """,
+    """
+    foo1
+    foo2
+    foo3
+    """)
+
+  def test_IfElseStatements(self):
+    self.assertMatches(
+    """
+      /// CHECK: foo1
+      /// CHECK-IF: True
+      ///   CHECK-NEXT:    foo2
+      /// CHECK-ELSE:
+      ///   CHECK-NEXT:    foo3
+      /// CHECK-FI:
+      /// CHECK-NEXT:    bar
+    """,
+    """
+    foo1
+    foo2
+    bar
+    """)
+    self.assertMatches(
+    """
+      /// CHECK: foo1
+      /// CHECK-IF: False
+      ///   CHECK-NEXT:    foo2
+      /// CHECK-ELSE:
+      ///   CHECK-NEXT:    foo3
+      /// CHECK-FI:
+      /// CHECK-NEXT:    bar
+    """,
+    """
+    foo1
+    foo3
+    bar
+    """)
+    self.assertMatches(
+    """
+      /// CHECK: foo1
+      /// CHECK-IF: False
+      ///   CHECK-NEXT:    foo2
+      /// CHECK-ELSE:
+      ///   CHECK-DAG:    bar
+      /// CHECK-FI:
+      /// CHECK-DAG:    foo3
+      /// CHECK: foo4
+    """,
+    """
+    foo1
+    foo3
+    bar
+    foo4
+    """)
+    self.assertDoesNotMatch(
+    """
+      /// CHECK: foo1
+      /// CHECK-IF: False
+      ///   CHECK-NEXT:    foo2
+      /// CHECK-ELSE:
+      ///   CHECK-NEXT:    foo3
+      /// CHECK-FI:
+      /// CHECK-NEXT:    bar
+    """,
+    """
+    foo1
+    foo2
+    bar
+    """)
+
+  def test_IfElifElseStatements(self):
+    self.assertMatches(
+    """
+      /// CHECK: foo1
+      /// CHECK-IF: True
+      ///   CHECK-NEXT:    foo2
+      /// CHECK-ELIF: True
+      ///   CHECK-NEXT:    foo3
+      /// CHECK-ELIF: True
+      ///   CHECK-NEXT:    foo4
+      /// CHECK-FI:
+      /// CHECK-NEXT:    bar
+    """,
+    """
+    foo1
+    foo2
+    bar
+    """)
+    self.assertMatches(
+    """
+      /// CHECK: foo1
+      /// CHECK-IF: False
+      ///   CHECK-NEXT:    foo2
+      /// CHECK-ELIF: False
+      ///   CHECK-NEXT:    foo3
+      /// CHECK-ELIF: True
+      ///   CHECK-NEXT:    foo4
+      /// CHECK-FI:
+      /// CHECK-NEXT:    bar
+    """,
+    """
+    foo1
+    foo4
+    bar
+    """)
+    self.assertMatches(
+    """
+      /// CHECK: foo1
+      /// CHECK-IF: False
+      ///   CHECK-NEXT:    foo2
+      /// CHECK-ELIF: True
+      ///   CHECK-NEXT:    foo3
+      /// CHECK-ELIF: True
+      ///   CHECK-NEXT:    foo4
+      /// CHECK-FI:
+      /// CHECK-NEXT:    bar
+    """,
+    """
+    foo1
+    foo3
+    bar
+    """)
+    self.assertMatches(
+    """
+      /// CHECK: foo1
+      /// CHECK-IF: False
+      ///   CHECK-NEXT:    foo2
+      /// CHECK-ELIF: False
+      ///   CHECK-NEXT:    foo3
+      /// CHECK-ELIF: False
+      ///   CHECK-NEXT:    foo4
+      /// CHECK-FI:
+      /// CHECK-NEXT:    bar
+    """,
+    """
+    foo1
+    bar
+    """)
+    self.assertDoesNotMatch(
+    """
+      /// CHECK: foo1
+      /// CHECK-IF: False
+      ///   CHECK-NEXT:    foo2
+      /// CHECK-ELIF: True
+      ///   CHECK-NEXT:    foo3
+      /// CHECK-ELSE:
+      ///   CHECK-NEXT:    foo4
+      /// CHECK-FI:
+      /// CHECK-NEXT:    bar
+    """,
+    """
+    foo1
+    foo2
+    bar
+    """)
+
+  def test_NestedBranching(self):
+    self.assertMatches(
+    """
+      /// CHECK: foo1
+      /// CHECK-IF: True
+      ///   CHECK-IF: True
+      ///     CHECK-NEXT:    foo2
+      ///   CHECK-ELSE:
+      ///     CHECK-NEXT:    foo3
+      ///   CHECK-FI:
+      /// CHECK-ELSE:
+      ///   CHECK-IF: True
+      ///     CHECK-NEXT:    foo4
+      ///   CHECK-ELSE:
+      ///     CHECK-NEXT:    foo5
+      ///   CHECK-FI:
+      /// CHECK-FI:
+      /// CHECK-NEXT: foo6
+    """,
+    """
+    foo1
+    foo2
+    foo6
+    """)
+    self.assertMatches(
+    """
+      /// CHECK-IF: True
+      ///   CHECK-IF: False
+      ///     CHECK:    foo1
+      ///   CHECK-ELSE:
+      ///     CHECK:    foo2
+      ///   CHECK-FI:
+      /// CHECK-ELSE:
+      ///   CHECK-IF: True
+      ///     CHECK:    foo3
+      ///   CHECK-ELSE:
+      ///     CHECK:    foo4
+      ///   CHECK-FI:
+      /// CHECK-FI:
+    """,
+    """
+    foo2
+    """)
+    self.assertMatches(
+    """
+      /// CHECK-IF: False
+      ///   CHECK-IF: True
+      ///     CHECK:    foo1
+      ///   CHECK-ELSE:
+      ///     CHECK:    foo2
+      ///   CHECK-FI:
+      /// CHECK-ELSE:
+      ///   CHECK-IF: False
+      ///     CHECK:    foo3
+      ///   CHECK-ELSE:
+      ///     CHECK-IF: False
+      ///       CHECK:    foo4
+      ///     CHECK-ELSE:
+      ///       CHECK: foo5
+      ///     CHECK-FI:
+      ///   CHECK-FI:
+      /// CHECK-FI:
+    """,
+    """
+    foo5
+    """)
+    self.assertDoesNotMatch(
+    """
+      /// CHECK: foo1
+      /// CHECK-IF: True
+      ///   CHECK-IF: False
+      ///     CHECK-NEXT:    foo2
+      ///   CHECK-ELSE:
+      ///     CHECK-NEXT:    foo3
+      ///   CHECK-FI:
+      /// CHECK-NEXT: foo6
+    """,
+    """
+    foo1
+    foo2
+    foo6
+    """)
+
+  def test_VariablesInBranches(self):
+    self.assertMatches(
+    """
+      /// CHECK-IF: True
+      ///   CHECK: foo<<VarA:\d+>>
+      /// CHECK-FI:
+      /// CHECK-EVAL: <<VarA>> == 12
+    """,
+    """
+    foo12
+    """)
+    self.assertDoesNotMatch(
+    """
+      /// CHECK-IF: True
+      ///   CHECK: foo<<VarA:\d+>>
+      /// CHECK-FI:
+      /// CHECK-EVAL: <<VarA>> == 99
+    """,
+    """
+    foo12
+    """)
+    self.assertMatches(
+    """
+      /// CHECK-IF: True
+      ///   CHECK: foo<<VarA:\d+>>
+      ///   CHECK-IF: <<VarA>> == 12
+      ///     CHECK: bar<<VarB:M|N>>
+      ///   CHECK-FI:
+      /// CHECK-FI:
+      /// CHECK-EVAL: "<<VarB>>" == "M"
+    """,
+    """
+    foo12
+    barM
+    """)
+    self.assertMatches(
+    """
+      /// CHECK-IF: False
+      ///   CHECK: foo<<VarA:\d+>>
+      /// CHECK-ELIF: True
+      ///   CHECK: foo<<VarA:M|N>>
+      /// CHECK-FI:
+      /// CHECK-EVAL: "<<VarA>>" == "M"
+    """,
+    """
+    fooM
+    """)
+    self.assertMatches(
+    """
+      /// CHECK-IF: False
+      ///   CHECK: foo<<VarA:A|B>>
+      /// CHECK-ELIF: False
+      ///   CHECK: foo<<VarA:A|B>>
+      /// CHECK-ELSE:
+      ///   CHECK-IF: False
+      ///     CHECK: foo<<VarA:A|B>>
+      ///   CHECK-ELSE:
+      ///     CHECK: foo<<VarA:M|N>>
+      ///   CHECK-FI:
+      /// CHECK-FI:
+      /// CHECK-EVAL: "<<VarA>>" == "N"
+    """,
+    """
+    fooN
+    """)
+
+  def test_MalformedBranching(self):
+    self.assertBadStructure(
+      """
+        /// CHECK-IF: True
+        /// CHECK: foo
+      """,
+      """
+      foo
+      """)
+    self.assertBadStructure(
+      """
+        /// CHECK-ELSE:
+        /// CHECK: foo
+      """,
+      """
+      foo
+      """)
+    self.assertBadStructure(
+      """
+        /// CHECK-IF: True
+        /// CHECK: foo
+        /// CHECK-ELSE:
+      """,
+      """
+      foo
+      """)
+    self.assertBadStructure(
+      """
+        /// CHECK-IF: True
+        ///   CHECK: foo
+        /// CHECK-ELIF:
+        ///   CHECK: foo
+        ///   CHECK-IF: True
+        ///     CHECK: foo
+        /// CHECK-FI:
+      """,
+      """
+      foo
+      """)
+    self.assertBadStructure(
+      """
+        /// CHECK-IF: True
+        ///   CHECK: foo
+        /// CHECK-ELSE:
+        ///   CHECK: foo
+        /// CHECK-ELIF:
+        ///   CHECK: foo
+        /// CHECK-FI:
+      """,
+      """
+      foo
+      """)
+    self.assertBadStructure(
+      """
+        /// CHECK-IF: True
+        ///   CHECK: foo
+        /// CHECK-ELSE:
+        ///   CHECK: foo
+        /// CHECK-ELSE:
+        ///   CHECK: foo
+        /// CHECK-FI:
+      """,
+      """
+      foo
+      """)
+
+  def test_hasIsaFeature(self):
+    self.assertMatches(
+      """
+        /// CHECK-EVAL: hasIsaFeature('feature1') and not hasIsaFeature('feature2')
+      """,
+      """
+      foo
+      """,
+      ImmutableDict({"feature1": True})
+    )
+    self.assertDoesNotMatch(
+      """
+        /// CHECK-EVAL: not hasIsaFeature('feature1')
+      """,
+      """
+      foo
+      """,
+      ImmutableDict({"feature1": True})
+    )
+    self.assertMatches(
+      """
+        /// CHECK-IF: hasIsaFeature('feature2')
+        ///   CHECK: bar1
+        /// CHECK-ELSE:
+        ///   CHECK: bar2
+        /// CHECK-FI:
+      """,
+      """
+      foo
+      bar1
+      """,
+      ImmutableDict({"feature1": False, "feature2": True})
+    )
+

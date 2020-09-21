@@ -3166,6 +3166,13 @@ void X86Assembler::idivl(Register reg) {
 }
 
 
+void X86Assembler::divl(Register reg) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0xF7);
+  EmitUint8(0xF0 | reg);
+}
+
+
 void X86Assembler::imull(Register dst, Register src) {
   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
   EmitUint8(0x0F);
@@ -3587,7 +3594,7 @@ void X86Assembler::repne_scasw() {
 
 void X86Assembler::repe_cmpsb() {
   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
-  EmitUint8(0xF2);
+  EmitUint8(0xF3);
   EmitUint8(0xA6);
 }
 
