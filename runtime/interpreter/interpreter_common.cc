@@ -85,10 +85,6 @@ bool UseFastInterpreterToInterpreterInvoke(ArtMethod* method) {
   if (method->IsStatic() && !method->GetDeclaringClass()->IsVisiblyInitialized()) {
     return false;
   }
-  ProfilingInfo* profiling_info = method->GetProfilingInfo(kRuntimePointerSize);
-  if ((profiling_info != nullptr) && (profiling_info->GetSavedEntryPoint() != nullptr)) {
-    return false;
-  }
   return true;
 }
 
@@ -565,7 +561,7 @@ bool DoInvokePolymorphic(Thread* self,
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   ArtMethod* invoke_method =
       class_linker->ResolveMethod<ClassLinker::ResolveMode::kCheckICCEAndIAE>(
-          self, invoke_method_idx, shadow_frame.GetMethod(), kVirtual);
+          self, invoke_method_idx, shadow_frame.GetMethod(), kPolymorphic);
 
   // Ensure intrinsic identifiers are initialized.
   DCHECK(invoke_method->IsIntrinsic());

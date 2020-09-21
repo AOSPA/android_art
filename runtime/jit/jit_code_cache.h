@@ -197,8 +197,7 @@ class JitCodeCache {
   bool NotifyCompilationOf(ArtMethod* method,
                            Thread* self,
                            CompilationKind compilation_kind,
-                           bool prejit,
-                           JitMemoryRegion* region)
+                           bool prejit)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::jit_lock_);
 
@@ -227,10 +226,6 @@ class JitCodeCache {
 
   // Return true if the code cache contains this pc in the private region (i.e. not from zygote).
   bool PrivateRegionContainsPc(const void* pc) const;
-
-  // Returns true if either the method's entrypoint is JIT compiled code or it is the
-  // instrumentation entrypoint and we can jump to jit code for this method. For testing use only.
-  bool WillExecuteJitCode(ArtMethod* method) REQUIRES(!Locks::jit_lock_);
 
   // Return true if the code cache contains this method.
   bool ContainsMethod(ArtMethod* method) REQUIRES(!Locks::jit_lock_);
@@ -287,9 +282,9 @@ class JitCodeCache {
       REQUIRES(!Locks::jit_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Given the 'pc', try to find the JIT compiled code associated with it.
-  // Return null if 'pc' is not in the code cache. 'method' is passed for
-  // sanity check.
+  // Given the 'pc', try to find the JIT compiled code associated with it.  'method' may be null
+  // when LookupMethodHeader is called from MarkCodeClosure::Run() in debug builds.  Return null
+  // if 'pc' is not in the code cache.
   OatQuickMethodHeader* LookupMethodHeader(uintptr_t pc, ArtMethod* method)
       REQUIRES(!Locks::jit_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -314,12 +309,10 @@ class JitCodeCache {
       REQUIRES(!Locks::jit_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Create a 'ProfileInfo' for 'method'. If 'retry_allocation' is true,
-  // will collect and retry if the first allocation is unsuccessful.
+  // Create a 'ProfileInfo' for 'method'.
   ProfilingInfo* AddProfilingInfo(Thread* self,
                                   ArtMethod* method,
-                                  const std::vector<uint32_t>& entries,
-                                  bool retry_allocation)
+                                  const std::vector<uint32_t>& entries)
       REQUIRES(!Locks::jit_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -374,12 +367,6 @@ class JitCodeCache {
   ZygoteMap* GetZygoteMap() {
     return &zygote_map_;
   }
-
-  // If Jit-gc has been disabled (and instrumentation has been enabled) this will return the
-  // jit-compiled entrypoint for this method.  Otherwise it will return null.
-  const void* FindCompiledCodeForInstrumentation(ArtMethod* method)
-      REQUIRES(!Locks::jit_lock_)
-      REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Fetch the code of a method that was JITted, but the JIT could not
   // update its entrypoint due to the resolution trampoline.
@@ -549,7 +536,7 @@ class JitCodeCache {
   SafeMap<ArtMethod*, const void*> osr_code_map_ GUARDED_BY(Locks::jit_lock_);
 
   // ProfilingInfo objects we have allocated.
-  std::vector<ProfilingInfo*> profiling_infos_ GUARDED_BY(Locks::jit_lock_);
+  SafeMap<ArtMethod*, ProfilingInfo*> profiling_infos_ GUARDED_BY(Locks::jit_lock_);
 
   // Methods we are currently compiling, one set for each kind of compilation.
   std::set<ArtMethod*> current_optimized_compilations_ GUARDED_BY(Locks::jit_lock_);

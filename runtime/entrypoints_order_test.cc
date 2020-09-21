@@ -64,8 +64,7 @@ class EntrypointsOrderTest : public CommonRuntimeTest {
   void CheckThreadOffsets() {
     CHECKED(OFFSETOF_MEMBER(Thread, tls32_.state_and_flags) == 0, thread_flags_at_zero);
     EXPECT_OFFSET_DIFFP(Thread, tls32_, state_and_flags, suspend_count, 4);
-    EXPECT_OFFSET_DIFFP(Thread, tls32_, suspend_count, debug_suspend_count, 4);
-    EXPECT_OFFSET_DIFFP(Thread, tls32_, debug_suspend_count, thin_lock_thread_id, 4);
+    EXPECT_OFFSET_DIFFP(Thread, tls32_, suspend_count, thin_lock_thread_id, 4);
     EXPECT_OFFSET_DIFFP(Thread, tls32_, thin_lock_thread_id, tid, 4);
     EXPECT_OFFSET_DIFFP(Thread, tls32_, tid, daemon, 4);
     EXPECT_OFFSET_DIFFP(Thread, tls32_, daemon, throwing_OutOfMemoryError, 4);
@@ -136,12 +135,12 @@ class EntrypointsOrderTest : public CommonRuntimeTest {
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, thread_local_mark_stack, async_exception, sizeof(void*));
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, async_exception, top_reflective_handle_scope,
                         sizeof(void*));
-    EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, top_reflective_handle_scope, simulator, sizeof(void*));
     // The first field after tlsPtr_ is forced to a 16 byte alignment so it might have some space.
     auto offset_tlsptr_end = OFFSETOF_MEMBER(Thread, tlsPtr_) +
         sizeof(decltype(reinterpret_cast<Thread*>(16)->tlsPtr_));
-    CHECKED(offset_tlsptr_end - OFFSETOF_MEMBER(Thread, tlsPtr_.simulator) == sizeof(void*),
-            "simulator last field");
+    CHECKED(offset_tlsptr_end - OFFSETOF_MEMBER(Thread, tlsPtr_.top_reflective_handle_scope) ==
+                sizeof(void*),
+            "async_exception last field");
   }
 
   void CheckJniEntryPoints() {

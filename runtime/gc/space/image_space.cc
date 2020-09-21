@@ -1501,8 +1501,8 @@ class ImageSpace::Loader {
         }
       }
 
-      // Fixup objects may read fields in the boot image, use the mutator lock here for sanity.
-      // Though its probably not required.
+      // Fixup objects may read fields in the boot image so we hold the mutator lock (although it is
+      // probably not required).
       TimingLogger::ScopedTiming timing("Fixup objects", &logger);
       ScopedObjectAccess soa(Thread::Current());
       // Need to update the image to be at the target base.
@@ -2872,8 +2872,10 @@ class ImageSpace::BootImageLoader {
       image_header.VisitPackedArtMethods([&](ArtMethod& method)
           REQUIRES_SHARED(Locks::mutator_lock_) {
         main_patch_object_visitor.PatchGcRoot(&method.DeclaringClassRoot());
-        void** data_address = PointerAddress(&method, ArtMethod::DataOffset(kPointerSize));
-        main_patch_object_visitor.PatchNativePointer(data_address);
+        if (!method.HasCodeItem()) {
+          void** data_address = PointerAddress(&method, ArtMethod::DataOffset(kPointerSize));
+          main_patch_object_visitor.PatchNativePointer(data_address);
+        }
         void** entrypoint_address =
             PointerAddress(&method, ArtMethod::EntryPointFromQuickCompiledCodeOffset(kPointerSize));
         main_patch_object_visitor.PatchNativePointer(entrypoint_address);

@@ -45,8 +45,9 @@ BitVector::BitVector(uint32_t start_bits,
               allocator,
               BitsToWords(start_bits),
               static_cast<uint32_t*>(allocator->Alloc(BitsToWords(start_bits) * kWordBytes))) {
+  // We don't know if the allocator cleared things.
+  ClearAllBits();
 }
-
 
 BitVector::BitVector(const BitVector& src,
                      bool expandable,
@@ -60,7 +61,10 @@ BitVector::BitVector(const BitVector& src,
 }
 
 BitVector::~BitVector() {
-  allocator_->Free(storage_);
+  if (storage_ != nullptr) {
+    // Only free if we haven't been moved out of.
+    allocator_->Free(storage_);
+  }
 }
 
 bool BitVector::SameBitsSet(const BitVector *src) const {
@@ -154,7 +158,7 @@ bool BitVector::Union(const BitVector* src) {
 
     EnsureSize(highest_bit);
 
-    // Paranoid: storage size should be big enough to hold this bit now.
+    // Check: storage size should be big enough to hold this bit now.
     DCHECK_LT(static_cast<uint32_t> (highest_bit), storage_size_ * kWordBits);
   }
 
@@ -186,7 +190,7 @@ bool BitVector::UnionIfNotIn(const BitVector* union_with, const BitVector* not_i
   if (storage_size_ < union_with_size) {
     EnsureSize(highest_bit);
 
-    // Paranoid: storage size should be big enough to hold this bit now.
+    // Check: storage size should be big enough to hold this bit now.
     DCHECK_LT(static_cast<uint32_t> (highest_bit), storage_size_ * kWordBits);
   }
 

@@ -179,7 +179,7 @@ bool CacheOperationsMaySegFault() {
   return false;
 }
 
-pid_t GetTid() {
+uint32_t GetTid() {
 #if defined(__APPLE__)
   uint64_t owner;
   CHECK_PTHREAD_CALL(pthread_threadid_np, (nullptr, &owner), __FUNCTION__);  // Requires Mac OS 10.6
@@ -209,30 +209,25 @@ std::string GetThreadName(pid_t tid) {
   return result;
 }
 
-std::string PrettySize(int64_t byte_count) {
+std::string PrettySize(uint64_t byte_count) {
   // The byte thresholds at which we display amounts.  A byte count is displayed
   // in unit U when kUnitThresholds[U] <= bytes < kUnitThresholds[U+1].
-  static const int64_t kUnitThresholds[] = {
-    0,       // B up to...
-    10*KB,   // KB up to...
-    10*MB,   // MB up to...
-    10LL*GB  // GB from here.
+  static const uint64_t kUnitThresholds[] = {
+    0,        // B up to...
+    10*KB,    // KB up to...
+    10*MB,    // MB up to...
+    10ULL*GB  // GB from here.
   };
-  static const int64_t kBytesPerUnit[] = { 1, KB, MB, GB };
+  static const uint64_t kBytesPerUnit[] = { 1, KB, MB, GB };
   static const char* const kUnitStrings[] = { "B", "KB", "MB", "GB" };
-  const char* negative_str = "";
-  if (byte_count < 0) {
-    negative_str = "-";
-    byte_count = -byte_count;
-  }
   int i = arraysize(kUnitThresholds);
   while (--i > 0) {
     if (byte_count >= kUnitThresholds[i]) {
       break;
     }
   }
-  return StringPrintf("%s%" PRId64 "%s",
-                      negative_str, byte_count / kBytesPerUnit[i], kUnitStrings[i]);
+  return StringPrintf("%" PRIu64 "%s",
+                      byte_count / kBytesPerUnit[i], kUnitStrings[i]);
 }
 
 void Split(const std::string& s, char separator, std::vector<std::string>* result) {

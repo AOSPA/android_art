@@ -103,6 +103,7 @@ art_cc_defaults {
                 "jni/quick/arm/calling_convention_arm.cc",
                 "optimizing/code_generator_arm_vixl.cc",
                 "optimizing/code_generator_vector_arm_vixl.cc",
+                "optimizing/critical_native_abi_fixup_arm.cc",
                 "optimizing/instruction_simplifier_arm.cc",
                 "optimizing/instruction_simplifier_shared.cc",
                 "optimizing/intrinsics_arm_vixl.cc",
@@ -452,13 +453,10 @@ art_cc_test {
         "libnativehelper_header_only",
     ],
 
-    static_libs: [
-        "libartd-simulator-container",
-    ],
-
     shared_libs: [
         "libprofiled",
         "libartd-compiler",
+        "libartd-simulator-container",
         "libvixld",
 
         "libbacktrace",

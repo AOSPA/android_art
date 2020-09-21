@@ -219,6 +219,11 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .IntoKey(M::DumpJITInfoOnShutdown)
       .Define("-XX:IgnoreMaxFootprint")
           .IntoKey(M::IgnoreMaxFootprint)
+      .Define("-XX:AlwaysLogExplicitGcs:_")
+          .WithHelp("Allows one to control the logging of explicit GCs. Defaults to 'true'")
+          .WithType<bool>()
+          .WithValueMap({{"false", false}, {"true", true}})
+          .IntoKey(M::AlwaysLogExplicitGcs)
       .Define("-XX:UseTLAB")
           .WithValue(true)
           .IntoKey(M::UseTLAB)
@@ -237,10 +242,6 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .WithType<bool>()
           .WithValueMap({{"false", false}, {"true", true}})
           .IntoKey(M::UseJitCompilation)
-      .Define("-Xusetieredjit:_")
-          .WithType<bool>()
-          .WithValueMap({{"false", false}, {"true", true}})
-          .IntoKey(M::UseTieredJitCompilation)
       .Define("-Xjitinitialsize:_")
           .WithType<MemoryKiB>()
           .IntoKey(M::JITCodeCacheInitialCapacity)
@@ -422,11 +423,6 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .WithType<bool>()
           .WithValueMap({{"false", false}, {"true", true}})
           .IntoKey(M::PerfettoHprof)
-      .Define("--simulate-isa=_")
-          .WithType<InstructionSet>()
-          .WithValueMap({{"none",  InstructionSet::kNone},
-                         {"arm64", InstructionSet::kArm64}})
-          .IntoKey(M::SimulateInstructionSet)
       .Ignore({
           "-ea", "-da", "-enableassertions", "-disableassertions", "--runtime-arg", "-esa",
           "-dsa", "-enablesystemassertions", "-disablesystemassertions", "-Xrs", "-Xint:_",

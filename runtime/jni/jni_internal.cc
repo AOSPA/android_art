@@ -1857,14 +1857,20 @@ class JNI {
       ThrowSIOOBE(soa, start, length, s->GetLength());
     } else {
       CHECK_NON_NULL_MEMCPY_ARGUMENT(length, buf);
+      if (length == 0 && buf == nullptr) {
+        // Don't touch anything when length is 0 and null buffer.
+        return;
+      }
       if (s->IsCompressed()) {
         for (int i = 0; i < length; ++i) {
           buf[i] = s->CharAt(start+i);
         }
+        buf[length] = '\0';
       } else {
         const jchar* chars = s->GetValue();
         size_t bytes = CountUtf8Bytes(chars + start, length);
         ConvertUtf16ToModifiedUtf8(buf, bytes, chars + start, length);
+        buf[bytes] = '\0';
       }
     }
   }
@@ -2684,7 +2690,7 @@ class JNI {
     bool is_copy = array_data != elements;
     size_t bytes = array->GetLength() * component_size;
     if (is_copy) {
-      // Sanity check: If elements is not the same as the java array's data, it better not be a
+      // Integrity check: If elements is not the same as the java array's data, it better not be a
       // heap address. TODO: This might be slow to check, may be worth keeping track of which
       // copies we make?
       if (heap->IsNonDiscontinuousSpaceHeapAddress(elements)) {

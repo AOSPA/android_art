@@ -275,6 +275,11 @@ test-art-target-jit$(2ND_ART_PHONY_TEST_TARGET_SUFFIX): test-art-target-run-test
 	$(hide) $(call ART_TEST_PREREQ_FINISHED,$@)
 endif
 
+#######################
+# Reset LOCAL_PATH because previous includes may override its value.
+# Keep this after all "include $(art_path)/..." are done, and before any
+# "include $(BUILD_...)".
+LOCAL_PATH := $(art_path)
 
 #######################
 # ART APEX.
@@ -413,6 +418,7 @@ include $(BUILD_PHONY_PACKAGE)
 # The art-tools package depends on helpers and tools that are useful for developers. Similar
 # dependencies exist for the APEX builds for these tools (see build/apex/Android.bp).
 
+ifneq ($(HOST_OS),darwin)
 include $(CLEAR_VARS)
 LOCAL_MODULE := art-tools
 LOCAL_IS_HOST_MODULE := true
@@ -433,6 +439,7 @@ LOCAL_REQUIRED_MODULES += \
 endif
 
 include $(BUILD_PHONY_PACKAGE)
+endif # HOST_OS != darwin
 
 ####################################################################################################
 # Fake packages to ensure generation of libopenjdkd when one builds with mm/mmm/mmma.
@@ -445,6 +452,7 @@ include $(BUILD_PHONY_PACKAGE)
 #         64-bit systems, even if it is the default.
 
 # ART on the host.
+ifneq ($(HOST_OS),darwin)
 ifeq ($(ART_BUILD_HOST_DEBUG),true)
 include $(CLEAR_VARS)
 LOCAL_MODULE := art-libartd-libopenjdkd-host-dependency
@@ -453,15 +461,7 @@ LOCAL_REQUIRED_MODULES := libopenjdkd
 LOCAL_IS_HOST_MODULE := true
 include $(BUILD_PHONY_PACKAGE)
 endif
-
-# ART on the target.
-ifeq ($(ART_BUILD_TARGET_DEBUG),true)
-include $(CLEAR_VARS)
-LOCAL_MODULE := art-libartd-libopenjdkd-target-dependency
-LOCAL_MULTILIB := both
-LOCAL_REQUIRED_MODULES := libopenjdkd
-include $(BUILD_PHONY_PACKAGE)
-endif
+endif # HOST_OS != darwin
 
 ########################################################################
 # "m build-art" for quick minimal build
@@ -469,8 +469,7 @@ endif
 build-art: build-art-host build-art-target
 
 # For host, we extract the ICU data from the apex and install it to HOST_OUT/I18N_APEX.
-host-i18n-data-timestamp := $(HOST_OUT)/$(I18N_APEX)/timestamp
-$(host-i18n-data-timestamp): $(TARGET_OUT)/apex/$(I18N_APEX).apex $(HOST_OUT)/bin/deapexer
+$(HOST_I18N_DATA): $(TARGET_OUT)/apex/$(I18N_APEX).apex $(HOST_OUT)/bin/deapexer
 	$(call extract-from-apex,$(I18N_APEX))
 	rm -rf $(HOST_OUT)/$(I18N_APEX)
 	mkdir -p $(HOST_OUT)/$(I18N_APEX)/
@@ -478,7 +477,7 @@ $(host-i18n-data-timestamp): $(TARGET_OUT)/apex/$(I18N_APEX).apex $(HOST_OUT)/bi
 	touch $@
 
 .PHONY: build-art-host
-build-art-host:   $(HOST_OUT_EXECUTABLES)/art $(ART_HOST_DEPENDENCIES) $(HOST_CORE_IMG_OUTS) $(host-i18n-data-timestamp)
+build-art-host:   $(HOST_OUT_EXECUTABLES)/art $(ART_HOST_DEPENDENCIES) $(HOST_CORE_IMG_OUTS) $(HOST_I18N_DATA)
 
 .PHONY: build-art-target
 build-art-target: $(TARGET_OUT_EXECUTABLES)/art $(ART_TARGET_DEPENDENCIES) $(TARGET_CORE_IMG_OUTS)
@@ -640,11 +639,17 @@ standalone-apex-files: deapexer \
 	  $(PRIVATE_ART_APEX_DEPENDENCY_LIBS) $(PRIVATE_ART_APEX_DEPENDENCY_FILES))
 	# The Runtime APEX has the Bionic libs in ${LIB}/bionic subdirectories,
 	# so we need to move them up a level after extraction.
+	# Also, platform libraries are installed in prebuilts, so copy them over.
 	$(call extract-from-apex,$(RUNTIME_APEX),\
 	  $(PRIVATE_RUNTIME_APEX_DEPENDENCY_FILES)) && \
 	  for libdir in $(TARGET_OUT)/lib $(TARGET_OUT)/lib64; do \
 	    if [ -d $$libdir/bionic ]; then \
 	      mv -f $$libdir/bionic/*.so $$libdir; \
+	    fi || exit 1; \
+	  done && \
+	  for libdir in $(TARGET_OUT)/lib $(TARGET_OUT)/lib64; do \
+	    if [ -d $$libdir ]; then \
+          cp prebuilts/runtime/mainline/platform/impl/$(TARGET_ARCH)/*.so $$libdir; \
 	    fi || exit 1; \
 	  done
 	$(call extract-from-apex,$(CONSCRYPT_APEX),\
@@ -680,11 +685,17 @@ standalone-apex-files: deapexer \
 # ART APEX (and TZ Data APEX).
 
 ART_TARGET_SHARED_LIBRARY_BENCHMARK := $(TARGET_OUT_SHARED_LIBRARIES)/libartbenchmark.so
+ART_TARGET_SHARED_LIBRARY_PALETTE_DEPENDENCIES := \
+    $(TARGET_OUT_SHARED_LIBRARIES)/libcutils.so \
+    $(TARGET_OUT_SHARED_LIBRARIES)/libprocessgroup.so \
+    $(TARGET_OUT_SHARED_LIBRARIES)/libtombstoned_client.so
+
 build-art-target-golem: $(RELEASE_ART_APEX) com.android.runtime $(CONSCRYPT_APEX) \
                         $(TARGET_OUT_EXECUTABLES)/art \
                         $(TARGET_OUT_EXECUTABLES)/dex2oat_wrapper \
                         $(TARGET_OUT)/etc/public.libraries.txt \
                         $(ART_TARGET_SHARED_LIBRARY_BENCHMARK) \
+                        $(ART_TARGET_SHARED_LIBRARY_PALETTE_DEPENDENCIES) \
                         $(TARGET_OUT_SHARED_LIBRARIES)/libz.so \
                         libartpalette-system \
                         tzdata-art-test-tzdata tzlookup.xml-art-test-tzdata \

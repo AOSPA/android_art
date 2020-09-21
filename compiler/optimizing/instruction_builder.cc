@@ -42,6 +42,44 @@
 
 namespace art {
 
+namespace {
+
+class SamePackageCompare {
+ public:
+  explicit SamePackageCompare(const DexCompilationUnit& dex_compilation_unit)
+      : dex_compilation_unit_(dex_compilation_unit) {}
+
+  bool operator()(ObjPtr<mirror::Class> klass) REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (klass->GetClassLoader() != dex_compilation_unit_.GetClassLoader().Get()) {
+      return false;
+    }
+    if (referrers_descriptor_ == nullptr) {
+      const DexFile* dex_file = dex_compilation_unit_.GetDexFile();
+      uint32_t referrers_method_idx = dex_compilation_unit_.GetDexMethodIndex();
+      referrers_descriptor_ =
+          dex_file->StringByTypeIdx(dex_file->GetMethodId(referrers_method_idx).class_idx_);
+      referrers_package_length_ = PackageLength(referrers_descriptor_);
+    }
+    std::string temp;
+    const char* klass_descriptor = klass->GetDescriptor(&temp);
+    size_t klass_package_length = PackageLength(klass_descriptor);
+    return (referrers_package_length_ == klass_package_length) &&
+           memcmp(referrers_descriptor_, klass_descriptor, referrers_package_length_) == 0;
+  };
+
+ private:
+  static size_t PackageLength(const char* descriptor) {
+    const char* slash_pos = strrchr(descriptor, '/');
+    return (slash_pos != nullptr) ? static_cast<size_t>(slash_pos - descriptor) : 0u;
+  }
+
+  const DexCompilationUnit& dex_compilation_unit_;
+  const char* referrers_descriptor_ = nullptr;
+  size_t referrers_package_length_ = 0u;
+};
+
+}  // anonymous namespace
+
 HInstructionBuilder::HInstructionBuilder(HGraph* graph,
                                          HBasicBlockBuilder* block_builder,
                                          SsaBuilder* ssa_builder,
@@ -414,6 +452,10 @@ bool HInstructionBuilder::Build() {
 void HInstructionBuilder::BuildIntrinsic(ArtMethod* method) {
   DCHECK(!code_item_accessor_.HasCodeItem());
   DCHECK(method->IsIntrinsic());
+  if (kIsDebugBuild) {
+    ScopedObjectAccess soa(Thread::Current());
+    CHECK(!method->IsSignaturePolymorphic());
+  }
 
   locals_for_.resize(
       graph_->GetBlocks().size(),
@@ -454,7 +496,7 @@ void HInstructionBuilder::BuildIntrinsic(ArtMethod* method) {
         number_of_arguments,
         return_type_,
         kNoDexPc,
-        method_idx,
+        target_method,
         method,
         dispatch_info,
         invoke_type,
@@ -832,7 +874,7 @@ static ArtMethod* ResolveMethod(uint16_t method_idx,
                                 ArtMethod* referrer,
                                 const DexCompilationUnit& dex_compilation_unit,
                                 /*inout*/InvokeType* invoke_type,
-                                /*out*/MethodReference* target_method,
+                                /*out*/MethodReference* method_info,
                                 /*out*/bool* is_string_constructor) {
   ScopedObjectAccess soa(Thread::Current());
 
@@ -858,8 +900,29 @@ static ArtMethod* ResolveMethod(uint16_t method_idx,
   // resolved because, for example, we don't find a superclass in the classpath.
   if (referrer == nullptr) {
     // The class linker cannot check access without a referrer, so we have to do it.
-    // Fall back to HInvokeUnresolved if the method isn't public.
-    if (!resolved_method->IsPublic()) {
+    // Check if the declaring class or referencing class is accessible.
+    SamePackageCompare same_package(dex_compilation_unit);
+    ObjPtr<mirror::Class> declaring_class = resolved_method->GetDeclaringClass();
+    bool declaring_class_accessible = declaring_class->IsPublic() || same_package(declaring_class);
+    if (!declaring_class_accessible) {
+      // It is possible to access members from an inaccessible superclass
+      // by referencing them through an accessible subclass.
+      ObjPtr<mirror::Class> referenced_class = class_linker->LookupResolvedType(
+          dex_compilation_unit.GetDexFile()->GetMethodId(method_idx).class_idx_,
+          dex_compilation_unit.GetDexCache().Get(),
+          class_loader.Get());
+      DCHECK(referenced_class != nullptr);  // Must have been resolved when resolving the method.
+      if (!referenced_class->IsPublic() && !same_package(referenced_class)) {
+        return nullptr;
+      }
+    }
+    // Check whether the method itself is accessible.
+    // Since the referrer is unresolved but the method is resolved, it cannot be
+    // inside the same class, so a private method is known to be inaccessible.
+    // And without a resolved referrer, we cannot check for protected member access
+    // in superlass, so we handle only access to public member or within the package.
+    if (resolved_method->IsPrivate() ||
+        (!resolved_method->IsPublic() && !declaring_class_accessible)) {
       return nullptr;
     }
   }
@@ -894,18 +957,6 @@ static ArtMethod* ResolveMethod(uint16_t method_idx,
       actual_method = compiling_class->GetSuperClass()->GetVTableEntry(
           vtable_index, class_linker->GetImagePointerSize());
     }
-    if (actual_method != resolved_method &&
-        !IsSameDexFile(*actual_method->GetDexFile(), *dex_compilation_unit.GetDexFile())) {
-      // The back-end code generator relies on this check in order to ensure that it will not
-      // attempt to read the dex_cache with a dex_method_index that is not from the correct
-      // dex_file. If we didn't do this check then the dex_method_index will not be updated in the
-      // builder, which means that the code-generator (and sharpening and inliner, maybe)
-      // might invoke an incorrect method.
-      // TODO: The actual method could still be referenced in the current dex file, so we
-      //       could try locating it.
-      // TODO: Remove the dex_file restriction.
-      return nullptr;
-    }
     if (!actual_method->IsInvokable()) {
       // Fail if the actual method cannot be invoked. Otherwise, the runtime resolution stub
       // could resolve the callee to the wrong method.
@@ -926,18 +977,18 @@ static ArtMethod* ResolveMethod(uint16_t method_idx,
 
   if (*invoke_type == kDirect || *invoke_type == kStatic || *invoke_type == kSuper) {
     // Record the target method needed for HInvokeStaticOrDirect.
-    *target_method =
+    *method_info =
         MethodReference(resolved_method->GetDexFile(), resolved_method->GetDexMethodIndex());
   } else if (*invoke_type == kVirtual) {
     // For HInvokeVirtual we need the vtable index.
-    *target_method = MethodReference(/*file=*/ nullptr, resolved_method->GetVtableIndex());
+    *method_info = MethodReference(/*file=*/ nullptr, resolved_method->GetVtableIndex());
   } else if (*invoke_type == kInterface) {
     // For HInvokeInterface we need the IMT index.
-    *target_method = MethodReference(/*file=*/ nullptr, ImTable::GetImtIndex(resolved_method));
+    *method_info = MethodReference(/*file=*/ nullptr, ImTable::GetImtIndex(resolved_method));
   } else {
     // For HInvokePolymorphic we don't need the target method yet
     DCHECK_EQ(*invoke_type, kPolymorphic);
-    DCHECK(target_method == nullptr);
+    DCHECK(method_info == nullptr);
   }
 
   *is_string_constructor =
@@ -961,15 +1012,16 @@ bool HInstructionBuilder::BuildInvoke(const Instruction& instruction,
     number_of_arguments++;
   }
 
-  MethodReference target_method(nullptr, 0u);
+  MethodReference method_info(nullptr, 0u);
   bool is_string_constructor = false;
   ArtMethod* resolved_method = ResolveMethod(method_idx,
                                              graph_->GetArtMethod(),
                                              *dex_compilation_unit_,
                                              &invoke_type,
-                                             &target_method,
+                                             &method_info,
                                              &is_string_constructor);
 
+  MethodReference method_reference(&graph_->GetDexFile(), method_idx);
   if (UNLIKELY(resolved_method == nullptr)) {
     DCHECK(!Thread::Current()->IsExceptionPending());
     MaybeRecordStat(compilation_stats_,
@@ -978,7 +1030,7 @@ bool HInstructionBuilder::BuildInvoke(const Instruction& instruction,
                                                          number_of_arguments,
                                                          return_type,
                                                          dex_pc,
-                                                         method_idx,
+                                                         method_reference,
                                                          invoke_type);
     return HandleInvoke(invoke, operands, shorty, /* is_unresolved= */ true);
   }
@@ -998,11 +1050,11 @@ bool HInstructionBuilder::BuildInvoke(const Instruction& instruction,
         number_of_arguments - 1,
         /* return_type= */ DataType::Type::kReference,
         dex_pc,
-        method_idx,
+        method_reference,
         /* resolved_method= */ nullptr,
         dispatch_info,
         invoke_type,
-        target_method,
+        method_info,
         HInvokeStaticOrDirect::ClinitCheckRequirement::kImplicit);
     return HandleStringInit(invoke, operands, shorty);
   }
@@ -1028,25 +1080,44 @@ bool HInstructionBuilder::BuildInvoke(const Instruction& instruction,
 
   HInvoke* invoke = nullptr;
   if (invoke_type == kDirect || invoke_type == kStatic || invoke_type == kSuper) {
+    // For sharpening, we create another MethodReference, to account for the
+    // kSuper case below where we cannot find a dex method index.
+    bool has_method_id = true;
     if (invoke_type == kSuper) {
-      if (IsSameDexFile(*target_method.dex_file, *dex_compilation_unit_->GetDexFile())) {
+      uint32_t dex_method_index = method_reference.index;
+      if (IsSameDexFile(*method_info.dex_file, *dex_compilation_unit_->GetDexFile())) {
         // Update the method index to the one resolved. Note that this may be a no-op if
         // we resolved to the method referenced by the instruction.
-        method_idx = target_method.index;
+        dex_method_index = method_info.index;
+      } else {
+        // Try to find a dex method index in this caller's dex file.
+        ScopedObjectAccess soa(Thread::Current());
+        dex_method_index = resolved_method->FindDexMethodIndexInOtherDexFile(
+            *dex_compilation_unit_->GetDexFile(), method_idx);
+      }
+      if (dex_method_index == dex::kDexNoIndex) {
+        has_method_id = false;
+      } else {
+        method_reference.index = dex_method_index;
       }
     }
-
     HInvokeStaticOrDirect::DispatchInfo dispatch_info =
-        HSharpening::SharpenInvokeStaticOrDirect(resolved_method, code_generator_);
+        HSharpening::SharpenInvokeStaticOrDirect(resolved_method,
+                                                 has_method_id,
+                                                 code_generator_);
+    if (dispatch_info.code_ptr_location ==
+            HInvokeStaticOrDirect::CodePtrLocation::kCallCriticalNative) {
+      graph_->SetHasDirectCriticalNativeCall(true);
+    }
     invoke = new (allocator_) HInvokeStaticOrDirect(allocator_,
                                                     number_of_arguments,
                                                     return_type,
                                                     dex_pc,
-                                                    method_idx,
+                                                    method_reference,
                                                     resolved_method,
                                                     dispatch_info,
                                                     invoke_type,
-                                                    target_method,
+                                                    method_info,
                                                     clinit_check_requirement);
     if (clinit_check != nullptr) {
       // Add the class initialization check as last input of `invoke`.
@@ -1056,23 +1127,23 @@ bool HInstructionBuilder::BuildInvoke(const Instruction& instruction,
       invoke->SetArgumentAt(clinit_check_index, clinit_check);
     }
   } else if (invoke_type == kVirtual) {
-    DCHECK(target_method.dex_file == nullptr);
+    DCHECK(method_info.dex_file == nullptr);
     invoke = new (allocator_) HInvokeVirtual(allocator_,
                                              number_of_arguments,
                                              return_type,
                                              dex_pc,
-                                             method_idx,
+                                             method_reference,
                                              resolved_method,
-                                             /*vtable_index=*/ target_method.index);
+                                             /*vtable_index=*/ method_info.index);
   } else {
     DCHECK_EQ(invoke_type, kInterface);
     invoke = new (allocator_) HInvokeInterface(allocator_,
                                                number_of_arguments,
                                                return_type,
                                                dex_pc,
-                                               method_idx,
+                                               method_reference,
                                                resolved_method,
-                                               /*imt_index=*/ target_method.index);
+                                               /*imt_index=*/ method_info.index);
   }
   return HandleInvoke(invoke, operands, shorty, /* is_unresolved= */ false);
 }
@@ -1094,15 +1165,38 @@ bool HInstructionBuilder::BuildInvokePolymorphic(uint32_t dex_pc,
                                             graph_->GetArtMethod(),
                                             *dex_compilation_unit_,
                                             &invoke_type,
-                                            /* target_method= */ nullptr,
+                                            /* method_info= */ nullptr,
                                             &is_string_constructor);
+
+  MethodReference method_reference(&graph_->GetDexFile(), method_idx);
   HInvoke* invoke = new (allocator_) HInvokePolymorphic(allocator_,
                                                         number_of_arguments,
                                                         return_type,
                                                         dex_pc,
-                                                        method_idx,
-                                                        resolved_method);
-  return HandleInvoke(invoke, operands, shorty, /* is_unresolved= */ false);
+                                                        method_reference,
+                                                        resolved_method,
+                                                        proto_idx);
+  if (!HandleInvoke(invoke, operands, shorty, /* is_unresolved= */ false)) {
+    return false;
+  }
+
+  bool needs_ret_type_check =
+      resolved_method->GetIntrinsic() == static_cast<uint32_t>(Intrinsics::kVarHandleGet) &&
+      return_type == DataType::Type::kReference &&
+      // VarHandle.get() is only implemented for fields now.
+      number_of_arguments < 3u;
+  if (needs_ret_type_check) {
+    ScopedObjectAccess soa(Thread::Current());
+    ArtMethod* referrer = graph_->GetArtMethod();
+    dex::TypeIndex ret_type_index = referrer->GetDexFile()->GetProtoId(proto_idx).return_type_idx_;
+
+    // Type check is needed because intrinsic implementations do not type check the retrieved
+    // reference.
+    BuildTypeCheck(/* is_instance_of= */ false, invoke, ret_type_index, dex_pc);
+    latest_result_ = current_block_->GetLastInstruction();
+  }
+
+  return true;
 }
 
 
@@ -1113,11 +1207,14 @@ bool HInstructionBuilder::BuildInvokeCustom(uint32_t dex_pc,
   const char* shorty = dex_file_->GetShorty(proto_idx);
   DataType::Type return_type = DataType::FromShorty(shorty[0]);
   size_t number_of_arguments = strlen(shorty) - 1;
+  // HInvokeCustom takes a DexNoNoIndex method reference.
+  MethodReference method_reference(&graph_->GetDexFile(), dex::kDexNoIndex);
   HInvoke* invoke = new (allocator_) HInvokeCustom(allocator_,
                                                    number_of_arguments,
                                                    call_site_idx,
                                                    return_type,
-                                                   dex_pc);
+                                                   dex_pc,
+                                                   method_reference);
   return HandleInvoke(invoke, operands, shorty, /* is_unresolved= */ false);
 }
 
@@ -1932,7 +2029,29 @@ ArtField* HInstructionBuilder::ResolveField(uint16_t field_idx, bool is_static, 
   // Check access.
   Handle<mirror::Class> compiling_class = dex_compilation_unit_->GetCompilingClass();
   if (compiling_class == nullptr) {
-    if (!resolved_field->IsPublic()) {
+    // Check if the declaring class or referencing class is accessible.
+    SamePackageCompare same_package(*dex_compilation_unit_);
+    ObjPtr<mirror::Class> declaring_class = resolved_field->GetDeclaringClass();
+    bool declaring_class_accessible = declaring_class->IsPublic() || same_package(declaring_class);
+    if (!declaring_class_accessible) {
+      // It is possible to access members from an inaccessible superclass
+      // by referencing them through an accessible subclass.
+      ObjPtr<mirror::Class> referenced_class = class_linker->LookupResolvedType(
+          dex_compilation_unit_->GetDexFile()->GetFieldId(field_idx).class_idx_,
+          dex_compilation_unit_->GetDexCache().Get(),
+          class_loader.Get());
+      DCHECK(referenced_class != nullptr);  // Must have been resolved when resolving the field.
+      if (!referenced_class->IsPublic() && !same_package(referenced_class)) {
+        return nullptr;
+      }
+    }
+    // Check whether the field itself is accessible.
+    // Since the referrer is unresolved but the field is resolved, it cannot be
+    // inside the same class, so a private field is known to be inaccessible.
+    // And without a resolved referrer, we cannot check for protected member access
+    // in superlass, so we handle only access to public member or within the package.
+    if (resolved_field->IsPrivate() ||
+        (!resolved_field->IsPublic() && !declaring_class_accessible)) {
       return nullptr;
     }
   } else if (!compiling_class->CanAccessResolvedField(resolved_field->GetDeclaringClass(),
@@ -2306,9 +2425,11 @@ bool HInstructionBuilder::LoadClassNeedsAccessCheck(ObjPtr<mirror::Class> klass)
     return true;
   } else if (klass->IsPublic()) {
     return false;
+  } else if (dex_compilation_unit_->GetCompilingClass() != nullptr) {
+    return !dex_compilation_unit_->GetCompilingClass()->CanAccess(klass);
   } else {
-    ObjPtr<mirror::Class> compiling_class = dex_compilation_unit_->GetCompilingClass().Get();
-    return compiling_class == nullptr || !compiling_class->CanAccess(klass);
+    SamePackageCompare same_package(*dex_compilation_unit_);
+    return !same_package(klass);
   }
 }
 
@@ -2326,13 +2447,10 @@ void HInstructionBuilder::BuildLoadMethodType(dex::ProtoIndex proto_index, uint3
   AppendInstruction(load_method_type);
 }
 
-void HInstructionBuilder::BuildTypeCheck(const Instruction& instruction,
-                                         uint8_t destination,
-                                         uint8_t reference,
+void HInstructionBuilder::BuildTypeCheck(bool is_instance_of,
+                                         HInstruction* object,
                                          dex::TypeIndex type_index,
                                          uint32_t dex_pc) {
-  HInstruction* object = LoadLocal(reference, DataType::Type::kReference);
-
   ScopedObjectAccess soa(Thread::Current());
   const DexFile& dex_file = *dex_compilation_unit_->GetDexFile();
   Handle<mirror::Class> klass = ResolveClass(soa, type_index);
@@ -2358,7 +2476,7 @@ void HInstructionBuilder::BuildTypeCheck(const Instruction& instruction,
   }
   DCHECK(class_or_null != nullptr);
 
-  if (instruction.Opcode() == Instruction::INSTANCE_OF) {
+  if (is_instance_of) {
     AppendInstruction(new (allocator_) HInstanceOf(object,
                                                    class_or_null,
                                                    check_kind,
@@ -2367,9 +2485,7 @@ void HInstructionBuilder::BuildTypeCheck(const Instruction& instruction,
                                                    allocator_,
                                                    bitstring_path_to_root,
                                                    bitstring_mask));
-    UpdateLocal(destination, current_block_->GetLastInstruction());
   } else {
-    DCHECK_EQ(instruction.Opcode(), Instruction::CHECK_CAST);
     // We emit a CheckCast followed by a BoundType. CheckCast is a statement
     // which may throw. If it succeeds BoundType sets the new type of `object`
     // for all subsequent uses.
@@ -2383,6 +2499,23 @@ void HInstructionBuilder::BuildTypeCheck(const Instruction& instruction,
                                     bitstring_path_to_root,
                                     bitstring_mask));
     AppendInstruction(new (allocator_) HBoundType(object, dex_pc));
+  }
+}
+
+void HInstructionBuilder::BuildTypeCheck(const Instruction& instruction,
+                                         uint8_t destination,
+                                         uint8_t reference,
+                                         dex::TypeIndex type_index,
+                                         uint32_t dex_pc) {
+  HInstruction* object = LoadLocal(reference, DataType::Type::kReference);
+  bool is_instance_of = instruction.Opcode() == Instruction::INSTANCE_OF;
+
+  BuildTypeCheck(is_instance_of, object, type_index, dex_pc);
+
+  if (is_instance_of) {
+    UpdateLocal(destination, current_block_->GetLastInstruction());
+  } else {
+    DCHECK_EQ(instruction.Opcode(), Instruction::CHECK_CAST);
     UpdateLocal(reference, current_block_->GetLastInstruction());
   }
 }

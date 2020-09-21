@@ -117,16 +117,6 @@ class JitOptions {
     return use_jit_compilation_;
   }
 
-  bool UseTieredJitCompilation() const {
-    return use_tiered_jit_compilation_;
-  }
-
-  bool CanCompileBaseline() const {
-    return use_tiered_jit_compilation_ ||
-           use_baseline_compiler_ ||
-           interpreter::IsNterpSupported();
-  }
-
   void SetUseJitCompilation(bool b) {
     use_jit_compilation_ = b;
   }
@@ -158,7 +148,6 @@ class JitOptions {
   static uint32_t RoundUpThreshold(uint32_t threshold);
 
   bool use_jit_compilation_;
-  bool use_tiered_jit_compilation_;
   bool use_baseline_compiler_;
   size_t code_cache_initial_capacity_;
   size_t code_cache_max_capacity_;
@@ -173,7 +162,6 @@ class JitOptions {
 
   JitOptions()
       : use_jit_compilation_(false),
-        use_tiered_jit_compilation_(false),
         use_baseline_compiler_(false),
         code_cache_initial_capacity_(0),
         code_cache_max_capacity_(0),
@@ -273,6 +261,10 @@ class Jit {
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  int GetThreadPoolPthreadPriority() const {
+    return options_->GetThreadPoolPthreadPriority();
+  }
+
   uint16_t OSRMethodThreshold() const {
     return options_->GetOsrThreshold();
   }
@@ -312,20 +304,18 @@ class Jit {
                                 bool with_backedges)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void InvokeVirtualOrInterface(ObjPtr<mirror::Object> this_object,
-                                ArtMethod* caller,
-                                uint32_t dex_pc,
-                                ArtMethod* callee)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
   void NotifyInterpreterToCompiledCodeTransition(Thread* self, ArtMethod* caller)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    AddSamples(self, caller, options_->GetInvokeTransitionWeight(), false);
+    if (!IgnoreSamplesForMethod(caller)) {
+      AddSamples(self, caller, options_->GetInvokeTransitionWeight(), false);
+    }
   }
 
   void NotifyCompiledCodeToInterpreterTransition(Thread* self, ArtMethod* callee)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    AddSamples(self, callee, options_->GetInvokeTransitionWeight(), false);
+    if (!IgnoreSamplesForMethod(callee)) {
+      AddSamples(self, callee, options_->GetInvokeTransitionWeight(), false);
+    }
   }
 
   // Starts the profile saver if the config options allow profile recording.
@@ -444,6 +434,10 @@ class Jit {
 
  private:
   Jit(JitCodeCache* code_cache, JitOptions* options);
+
+  // Whether we should not add hotness counts for the given method.
+  bool IgnoreSamplesForMethod(ArtMethod* method)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Compile an individual method listed in a profile. If `add_to_queue` is
   // true and the method was resolved, return true. Otherwise return false.

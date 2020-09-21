@@ -399,6 +399,7 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
         has_simd_(false),
         has_loops_(false),
         has_irreducible_loops_(false),
+        has_direct_critical_native_call_(false),
         dead_reference_safe_(dead_reference_safe),
         debuggable_(debuggable),
         current_instruction_id_(start_instruction_id),
@@ -677,6 +678,9 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   bool HasIrreducibleLoops() const { return has_irreducible_loops_; }
   void SetHasIrreducibleLoops(bool value) { has_irreducible_loops_ = value; }
 
+  bool HasDirectCriticalNativeCall() const { return has_direct_critical_native_call_; }
+  void SetHasDirectCriticalNativeCall(bool value) { has_direct_critical_native_call_ = value; }
+
   ArtMethod* GetArtMethod() const { return art_method_; }
   void SetArtMethod(ArtMethod* method) { art_method_ = method; }
 
@@ -787,6 +791,10 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   // best effort to keep it up to date in the presence of code elimination
   // so there might be false positives.
   bool has_irreducible_loops_;
+
+  // Flag whether there are any direct calls to native code registered
+  // for @CriticalNative methods.
+  bool has_direct_critical_native_call_;
 
   // Is the code known to be robust against eliminating dead references
   // and the effects of early finalization? If false, dead reference variables
@@ -2235,8 +2243,9 @@ class HInstruction : public ArenaObject<kArenaAllocInstruction> {
     DCHECK(user != nullptr);
     // Note: fixup_end remains valid across push_front().
     auto fixup_end = uses_.empty() ? uses_.begin() : ++uses_.begin();
+    ArenaAllocator* allocator = user->GetBlock()->GetGraph()->GetAllocator();
     HUseListNode<HInstruction*>* new_node =
-        new (GetBlock()->GetGraph()->GetAllocator()) HUseListNode<HInstruction*>(user, index);
+        new (allocator) HUseListNode<HInstruction*>(user, index);
     uses_.push_front(*new_node);
     FixUpUserRecordsAfterUseInsertion(fixup_end);
   }
@@ -4377,8 +4386,6 @@ class HInvoke : public HVariableInputSizeInstruction {
   // inputs at the end of their list of inputs.
   uint32_t GetNumberOfArguments() const { return number_of_arguments_; }
 
-  uint32_t GetDexMethodIndex() const { return dex_method_index_; }
-
   InvokeType GetInvokeType() const {
     return GetPackedField<InvokeTypeField>();
   }
@@ -4421,7 +4428,9 @@ class HInvoke : public HVariableInputSizeInstruction {
   bool IsIntrinsic() const { return intrinsic_ != Intrinsics::kNone; }
 
   ArtMethod* GetResolvedMethod() const { return resolved_method_; }
-  void SetResolvedMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
+  void SetResolvedMethod(ArtMethod* method);
+
+  MethodReference GetMethodReference() const { return method_reference_; }
 
   DECLARE_ABSTRACT_INSTRUCTION(Invoke);
 
@@ -4441,7 +4450,7 @@ class HInvoke : public HVariableInputSizeInstruction {
           uint32_t number_of_other_inputs,
           DataType::Type return_type,
           uint32_t dex_pc,
-          uint32_t dex_method_index,
+          MethodReference method_reference,
           ArtMethod* resolved_method,
           InvokeType invoke_type)
     : HVariableInputSizeInstruction(
@@ -4453,13 +4462,11 @@ class HInvoke : public HVariableInputSizeInstruction {
           number_of_arguments + number_of_other_inputs,
           kArenaAllocInvokeInputs),
       number_of_arguments_(number_of_arguments),
-      dex_method_index_(dex_method_index),
+      method_reference_(method_reference),
       intrinsic_(Intrinsics::kNone),
       intrinsic_optimizations_(0) {
     SetPackedField<InvokeTypeField>(invoke_type);
     SetPackedFlag<kFlagCanThrow>(true);
-    // Check mutator lock, constructors lack annotalysis support.
-    Locks::mutator_lock_->AssertNotExclusiveHeld(Thread::Current());
     SetResolvedMethod(resolved_method);
   }
 
@@ -4467,7 +4474,7 @@ class HInvoke : public HVariableInputSizeInstruction {
 
   uint32_t number_of_arguments_;
   ArtMethod* resolved_method_;
-  const uint32_t dex_method_index_;
+  const MethodReference method_reference_;
   Intrinsics intrinsic_;
 
   // A magic word holding optimizations for intrinsics. See intrinsics.h.
@@ -4480,7 +4487,7 @@ class HInvokeUnresolved final : public HInvoke {
                     uint32_t number_of_arguments,
                     DataType::Type return_type,
                     uint32_t dex_pc,
-                    uint32_t dex_method_index,
+                    MethodReference method_reference,
                     InvokeType invoke_type)
       : HInvoke(kInvokeUnresolved,
                 allocator,
@@ -4488,7 +4495,7 @@ class HInvokeUnresolved final : public HInvoke {
                 /* number_of_other_inputs= */ 0u,
                 return_type,
                 dex_pc,
-                dex_method_index,
+                method_reference,
                 nullptr,
                 invoke_type) {
   }
@@ -4507,24 +4514,32 @@ class HInvokePolymorphic final : public HInvoke {
                      uint32_t number_of_arguments,
                      DataType::Type return_type,
                      uint32_t dex_pc,
-                     uint32_t dex_method_index,
-                     ArtMethod* resolved_method)
+                     MethodReference method_reference,
+                     // resolved_method is the ArtMethod object corresponding to the polymorphic
+                     // method (e.g. VarHandle.get), resolved using the class linker. It is needed
+                     // to pass intrinsic information to the HInvokePolymorphic node.
+                     ArtMethod* resolved_method,
+                     dex::ProtoIndex proto_idx)
       : HInvoke(kInvokePolymorphic,
                 allocator,
                 number_of_arguments,
                 /* number_of_other_inputs= */ 0u,
                 return_type,
                 dex_pc,
-                dex_method_index,
+                method_reference,
                 resolved_method,
-                kVirtual) {
+                kPolymorphic),
+        proto_idx_(proto_idx) {
   }
 
   bool IsClonable() const override { return true; }
 
+  dex::ProtoIndex GetProtoIndex() { return proto_idx_; }
+
   DECLARE_INSTRUCTION(InvokePolymorphic);
 
  protected:
+  dex::ProtoIndex proto_idx_;
   DEFAULT_COPY_CONSTRUCTOR(InvokePolymorphic);
 };
 
@@ -4534,14 +4549,15 @@ class HInvokeCustom final : public HInvoke {
                 uint32_t number_of_arguments,
                 uint32_t call_site_index,
                 DataType::Type return_type,
-                uint32_t dex_pc)
+                uint32_t dex_pc,
+                MethodReference method_reference)
       : HInvoke(kInvokeCustom,
                 allocator,
                 number_of_arguments,
                 /* number_of_other_inputs= */ 0u,
                 return_type,
                 dex_pc,
-                /* dex_method_index= */ dex::kDexNoIndex,
+                method_reference,
                 /* resolved_method= */ nullptr,
                 kStatic),
       call_site_index_(call_site_index) {
@@ -4630,11 +4646,11 @@ class HInvokeStaticOrDirect final : public HInvoke {
                         uint32_t number_of_arguments,
                         DataType::Type return_type,
                         uint32_t dex_pc,
-                        uint32_t method_index,
+                        MethodReference method_reference,
                         ArtMethod* resolved_method,
                         DispatchInfo dispatch_info,
                         InvokeType invoke_type,
-                        MethodReference target_method,
+                        MethodReference resolved_method_reference,
                         ClinitCheckRequirement clinit_check_requirement)
       : HInvoke(kInvokeStaticOrDirect,
                 allocator,
@@ -4645,10 +4661,10 @@ class HInvokeStaticOrDirect final : public HInvoke {
                     (clinit_check_requirement == ClinitCheckRequirement::kExplicit ? 1u : 0u),
                 return_type,
                 dex_pc,
-                method_index,
+                method_reference,
                 resolved_method,
                 invoke_type),
-        target_method_(target_method),
+        resolved_method_reference_(resolved_method_reference),
         dispatch_info_(dispatch_info) {
     SetPackedField<ClinitCheckRequirementField>(clinit_check_requirement);
   }
@@ -4736,8 +4752,8 @@ class HInvokeStaticOrDirect final : public HInvoke {
     return GetInvokeType() == kStatic;
   }
 
-  MethodReference GetTargetMethod() const {
-    return target_method_;
+  const MethodReference GetResolvedMethodReference() const {
+    return resolved_method_reference_;
   }
 
   // Does this method load kind need the current method as an input?
@@ -4839,7 +4855,7 @@ class HInvokeStaticOrDirect final : public HInvoke {
                                                kFieldClinitCheckRequirementSize>;
 
   // Cached values of the resolved method, to avoid needing the mutator lock.
-  const MethodReference target_method_;
+  const MethodReference resolved_method_reference_;
   DispatchInfo dispatch_info_;
 };
 std::ostream& operator<<(std::ostream& os, HInvokeStaticOrDirect::MethodLoadKind rhs);
@@ -4852,7 +4868,7 @@ class HInvokeVirtual final : public HInvoke {
                  uint32_t number_of_arguments,
                  DataType::Type return_type,
                  uint32_t dex_pc,
-                 uint32_t dex_method_index,
+                 MethodReference method_reference,
                  ArtMethod* resolved_method,
                  uint32_t vtable_index)
       : HInvoke(kInvokeVirtual,
@@ -4861,7 +4877,7 @@ class HInvokeVirtual final : public HInvoke {
                 0u,
                 return_type,
                 dex_pc,
-                dex_method_index,
+                method_reference,
                 resolved_method,
                 kVirtual),
         vtable_index_(vtable_index) {
@@ -4914,7 +4930,7 @@ class HInvokeInterface final : public HInvoke {
                    uint32_t number_of_arguments,
                    DataType::Type return_type,
                    uint32_t dex_pc,
-                   uint32_t dex_method_index,
+                   MethodReference method_reference,
                    ArtMethod* resolved_method,
                    uint32_t imt_index)
       : HInvoke(kInvokeInterface,
@@ -4923,7 +4939,7 @@ class HInvokeInterface final : public HInvoke {
                 0u,
                 return_type,
                 dex_pc,
-                dex_method_index,
+                method_reference,
                 resolved_method,
                 kInterface),
         imt_index_(imt_index) {

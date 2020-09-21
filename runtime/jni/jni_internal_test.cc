@@ -784,7 +784,7 @@ TEST_F(JniInternalTest, GetMethodID) {
   jclass jlnsme = env_->FindClass("java/lang/NoSuchMethodError");
   jclass jncrbc = env_->FindClass("java/nio/channels/ReadableByteChannel");
 
-  // Sanity check that no exceptions are pending.
+  // Check that no exceptions are pending.
   ASSERT_FALSE(env_->ExceptionCheck());
 
   // Check that java.lang.Object.foo() doesn't exist and NoSuchMethodError is
@@ -905,7 +905,7 @@ TEST_F(JniInternalTest, GetStaticMethodID) {
   jclass jlobject = env_->FindClass("java/lang/Object");
   jclass jlnsme = env_->FindClass("java/lang/NoSuchMethodError");
 
-  // Sanity check that no exceptions are pending
+  // Check that no exceptions are pending
   ASSERT_FALSE(env_->ExceptionCheck());
 
   // Check that java.lang.Object.foo() doesn't exist and NoSuchMethodError is
@@ -1035,7 +1035,7 @@ TEST_F(JniInternalTest, RegisterAndUnregisterNatives) {
   jclass jlnsme = env_->FindClass("java/lang/NoSuchMethodError");
   void* native_function = reinterpret_cast<void*>(BogusMethod);
 
-  // Sanity check that no exceptions are pending.
+  // Check that no exceptions are pending.
   ASSERT_FALSE(env_->ExceptionCheck());
 
   // The following can print errors to the log we'd like to ignore.
@@ -1637,18 +1637,27 @@ TEST_F(JniInternalTest, GetStringRegion_GetStringUTFRegion) {
   env_->GetStringUTFRegion(s, 0x7fffffff, 0x7fffffff, nullptr);
   ExpectException(sioobe_);
 
-  char bytes[4] = { 'x', 'x', 'x', 'x' };
+  char bytes[5] = { 'x', 'x', 'x', 'x', 'x' };
   env_->GetStringUTFRegion(s, 1, 2, &bytes[1]);
   EXPECT_EQ('x', bytes[0]);
   EXPECT_EQ('e', bytes[1]);
   EXPECT_EQ('l', bytes[2]);
-  EXPECT_EQ('x', bytes[3]);
+  // NB: The output string is null terminated so this slot is overwritten.
+  EXPECT_EQ('\0', bytes[3]);
+  EXPECT_EQ('x', bytes[4]);
 
   // It's okay for the buffer to be null as long as the length is 0.
   env_->GetStringUTFRegion(s, 2, 0, nullptr);
   // Even if the offset is invalid...
   env_->GetStringUTFRegion(s, 123, 0, nullptr);
   ExpectException(sioobe_);
+  // If not null we still have a 0 length string
+  env_->GetStringUTFRegion(s, 1, 0, &bytes[1]);
+  EXPECT_EQ('x', bytes[0]);
+  EXPECT_EQ('\0', bytes[1]);
+  EXPECT_EQ('l', bytes[2]);
+  EXPECT_EQ('\0', bytes[3]);
+  EXPECT_EQ('x', bytes[4]);
 }
 
 TEST_F(JniInternalTest, GetStringUTFChars_ReleaseStringUTFChars) {

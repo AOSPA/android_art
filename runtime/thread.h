@@ -49,8 +49,6 @@ class BacktraceMap;
 
 namespace art {
 
-class CodeSimulatorContainer;
-
 namespace gc {
 namespace accounting {
 template<class T> class AtomicStack;
@@ -194,8 +192,6 @@ class Thread {
   // TODO: mark as PURE so the compiler may coalesce and remove?
   static Thread* Current();
 
-  CodeSimulatorContainer* GetSimulator();
-
   // On a runnable thread, check for pending thread suspension request and handle if pending.
   void AllowThreadSuspension() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -253,10 +249,6 @@ class Thread {
   int GetUserCodeSuspendCount() const REQUIRES(Locks::thread_suspend_count_lock_,
                                                Locks::user_code_suspension_lock_) {
     return tls32_.user_code_suspend_count;
-  }
-
-  int GetDebugSuspendCount() const REQUIRES(Locks::thread_suspend_count_lock_) {
-    return tls32_.debug_suspend_count;
   }
 
   bool IsSuspended() const {
@@ -900,7 +892,7 @@ class Thread {
   // Is the given obj in this thread's stack indirect reference table?
   bool HandleScopeContains(jobject obj) const;
 
-  void HandleScopeVisitRoots(RootVisitor* visitor, pid_t thread_id)
+  void HandleScopeVisitRoots(RootVisitor* visitor, uint32_t thread_id)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   BaseHandleScope* GetTopHandleScope() {
@@ -1423,7 +1415,6 @@ class Thread {
       REQUIRES(Locks::runtime_shutdown_lock_);
   void InitCardTable();
   void InitCpu();
-  void InitSimulator();
   void CleanupCpu();
   void InitTlsEntryPoints();
   void InitTid();
@@ -1541,7 +1532,6 @@ class Thread {
 
     explicit tls_32bit_sized_values(bool is_daemon)
         : suspend_count(0),
-          debug_suspend_count(0),
           thin_lock_thread_id(0),
           tid(0),
           daemon(is_daemon),
@@ -1568,10 +1558,6 @@ class Thread {
     // A non-zero value is used to tell the current thread to enter a safe point
     // at the next poll.
     int suspend_count GUARDED_BY(Locks::thread_suspend_count_lock_);
-
-    // How much of 'suspend_count_' is by request of the debugger, used to set things right
-    // when the debugger detaches. Must be <= suspend_count_.
-    int debug_suspend_count GUARDED_BY(Locks::thread_suspend_count_lock_);
 
     // Thin lock thread id. This is a small integer used by the thin lock implementation.
     // This is not to be confused with the native thread's tid, nor is it the value returned
@@ -1688,7 +1674,7 @@ class Thread {
       thread_local_objects(0), mterp_current_ibase(nullptr), thread_local_alloc_stack_top(nullptr),
       thread_local_alloc_stack_end(nullptr),
       flip_function(nullptr), method_verifier(nullptr), thread_local_mark_stack(nullptr),
-      async_exception(nullptr), top_reflective_handle_scope(nullptr), simulator(nullptr) {
+      async_exception(nullptr), top_reflective_handle_scope(nullptr) {
       std::fill(held_mutexes, held_mutexes + kLockLevelCount, nullptr);
     }
 
@@ -1847,9 +1833,6 @@ class Thread {
 
     // Top of the linked-list for reflective-handle scopes or null if none.
     BaseReflectiveHandleScope* top_reflective_handle_scope;
-
-    // A pointer to the simulator container.
-    CodeSimulatorContainer* simulator;
   } tlsPtr_;
 
   // Small thread-local cache to be used from the interpreter.

@@ -75,6 +75,7 @@ jclass WellKnownClasses::java_lang_System;
 jclass WellKnownClasses::java_lang_Thread;
 jclass WellKnownClasses::java_lang_ThreadGroup;
 jclass WellKnownClasses::java_lang_Throwable;
+jclass WellKnownClasses::java_lang_Void;
 jclass WellKnownClasses::java_nio_Buffer;
 jclass WellKnownClasses::java_nio_ByteBuffer;
 jclass WellKnownClasses::java_nio_DirectByteBuffer;
@@ -97,7 +98,9 @@ jmethodID WellKnownClasses::java_lang_ClassNotFoundException_init;
 jmethodID WellKnownClasses::java_lang_Daemons_start;
 jmethodID WellKnownClasses::java_lang_Daemons_stop;
 jmethodID WellKnownClasses::java_lang_Daemons_waitForDaemonStart;
+jmethodID WellKnownClasses::java_lang_Double_doubleToRawLongBits;
 jmethodID WellKnownClasses::java_lang_Double_valueOf;
+jmethodID WellKnownClasses::java_lang_Float_floatToRawIntBits;
 jmethodID WellKnownClasses::java_lang_Float_valueOf;
 jmethodID WellKnownClasses::java_lang_Integer_valueOf;
 jmethodID WellKnownClasses::java_lang_invoke_MethodHandles_lookup;
@@ -364,6 +367,7 @@ void WellKnownClasses::Init(JNIEnv* env) {
   java_lang_Thread = CacheClass(env, "java/lang/Thread");
   java_lang_ThreadGroup = CacheClass(env, "java/lang/ThreadGroup");
   java_lang_Throwable = CacheClass(env, "java/lang/Throwable");
+  java_lang_Void = CacheClass(env, "java/lang/Void");
   java_nio_Buffer = CacheClass(env, "java/nio/Buffer");
   java_nio_ByteBuffer = CacheClass(env, "java/nio/ByteBuffer");
   java_nio_DirectByteBuffer = CacheClass(env, "java/nio/DirectByteBuffer");
@@ -472,6 +476,11 @@ void WellKnownClasses::InitFieldsAndMethodsOnly(JNIEnv* env) {
   java_lang_Integer_valueOf = CachePrimitiveBoxingMethod(env, 'I', "java/lang/Integer");
   java_lang_Long_valueOf = CachePrimitiveBoxingMethod(env, 'J', "java/lang/Long");
   java_lang_Short_valueOf = CachePrimitiveBoxingMethod(env, 'S', "java/lang/Short");
+
+  java_lang_Double_doubleToRawLongBits =
+      CacheMethod(env, "java/lang/Double", /*is_static=*/ true, "doubleToRawLongBits", "(D)J");
+  java_lang_Float_floatToRawIntBits =
+      CacheMethod(env, "java/lang/Float", /*is_static=*/ true, "floatToRawIntBits", "(F)I");
 }
 
 void WellKnownClasses::LateInit(JNIEnv* env) {
@@ -536,6 +545,7 @@ void WellKnownClasses::Clear() {
   java_lang_Thread = nullptr;
   java_lang_ThreadGroup = nullptr;
   java_lang_Throwable = nullptr;
+  java_lang_Void = nullptr;
   java_util_Collections = nullptr;
   java_nio_Buffer = nullptr;
   java_nio_ByteBuffer = nullptr;
@@ -557,7 +567,9 @@ void WellKnownClasses::Clear() {
   java_lang_ClassNotFoundException_init = nullptr;
   java_lang_Daemons_start = nullptr;
   java_lang_Daemons_stop = nullptr;
+  java_lang_Double_doubleToRawLongBits = nullptr;
   java_lang_Double_valueOf = nullptr;
+  java_lang_Float_floatToRawIntBits = nullptr;
   java_lang_Float_valueOf = nullptr;
   java_lang_Integer_valueOf = nullptr;
   java_lang_invoke_MethodHandles_lookup = nullptr;
