@@ -42,6 +42,7 @@
 #include "base/os.h"
 #include "base/runtime_debug.h"
 #include "base/stl_util.h"
+#include "base/string_view_cpp20.h"
 #include "base/unix_file/fd_file.h"
 #include "dex/art_dex_file_loader.h"
 #include "dex/dex_file-inl.h"
@@ -159,7 +160,9 @@ std::string CommonArtTestImpl::GetAndroidBuildTop() {
         break;
       }
       // We are running tests from testcases (extracted from zip) on tradefed.
-      if (path.filename() == std::filesystem::path("testcases")) {
+      // The first path is for remote runs and the second path for local runs.
+      if (path.filename() == std::filesystem::path("testcases") ||
+          StartsWith(path.filename().string(), "host_testcases")) {
         android_build_top = path.append("art_common");
         break;
       }
@@ -211,7 +214,11 @@ std::string CommonArtTestImpl::GetAndroidHostOut() {
   std::filesystem::path expected(android_host_out);
   if (android_host_out_from_env != nullptr) {
     std::filesystem::path from_env(std::filesystem::weakly_canonical(android_host_out_from_env));
-    CHECK_EQ(std::filesystem::weakly_canonical(expected).string(), from_env.string());
+    if (std::filesystem::weakly_canonical(expected).string() != from_env.string()) {
+      LOG(WARNING) << "Execution path (" << expected << ") not below ANDROID_HOST_OUT ("
+                   << from_env << ")! Using env-var.";
+      expected = from_env;
+    }
   } else {
     setenv("ANDROID_HOST_OUT", android_host_out.c_str(), /*overwrite=*/0);
   }

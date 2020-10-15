@@ -57,7 +57,7 @@ static bool BootImageAOTCanEmbedMethod(ArtMethod* method, const CompilerOptions&
   return compiler_options.IsImageClass(dex_file.StringByTypeIdx(klass->GetDexTypeIndex()));
 }
 
-HInvokeStaticOrDirect::DispatchInfo HSharpening::SharpenInvokeStaticOrDirect(
+HInvokeStaticOrDirect::DispatchInfo HSharpening::SharpenLoadMethod(
     ArtMethod* callee, bool has_method_id, CodeGenerator* codegen) {
   if (kIsDebugBuild) {
     ScopedObjectAccess soa(Thread::Current());  // Required for GetDeclaringClass below.
@@ -65,8 +65,8 @@ HInvokeStaticOrDirect::DispatchInfo HSharpening::SharpenInvokeStaticOrDirect(
     DCHECK(!(callee->IsConstructor() && callee->GetDeclaringClass()->IsStringClass()));
   }
 
-  HInvokeStaticOrDirect::MethodLoadKind method_load_kind;
-  HInvokeStaticOrDirect::CodePtrLocation code_ptr_location;
+  MethodLoadKind method_load_kind;
+  CodePtrLocation code_ptr_location;
   uint64_t method_load_data = 0u;
 
   // Note: we never call an ArtMethod through a known code pointer, as
@@ -85,61 +85,62 @@ HInvokeStaticOrDirect::DispatchInfo HSharpening::SharpenInvokeStaticOrDirect(
   const CompilerOptions& compiler_options = codegen->GetCompilerOptions();
   if (callee == codegen->GetGraph()->GetArtMethod() && !codegen->GetGraph()->IsDebuggable()) {
     // Recursive call.
-    method_load_kind = HInvokeStaticOrDirect::MethodLoadKind::kRecursive;
-    code_ptr_location = HInvokeStaticOrDirect::CodePtrLocation::kCallSelf;
+    method_load_kind = MethodLoadKind::kRecursive;
+    code_ptr_location = CodePtrLocation::kCallSelf;
   } else if (compiler_options.IsBootImage() || compiler_options.IsBootImageExtension()) {
     if (!compiler_options.GetCompilePic()) {
       // Test configuration, do not sharpen.
-      method_load_kind = HInvokeStaticOrDirect::MethodLoadKind::kRuntimeCall;
+      method_load_kind = MethodLoadKind::kRuntimeCall;
     } else if (IsInBootImage(callee)) {
       DCHECK(compiler_options.IsBootImageExtension());
-      method_load_kind = HInvokeStaticOrDirect::MethodLoadKind::kBootImageRelRo;
+      method_load_kind = MethodLoadKind::kBootImageRelRo;
     } else if (BootImageAOTCanEmbedMethod(callee, compiler_options)) {
-      method_load_kind = HInvokeStaticOrDirect::MethodLoadKind::kBootImageLinkTimePcRelative;
+      method_load_kind = MethodLoadKind::kBootImageLinkTimePcRelative;
     } else if (!has_method_id) {
-      method_load_kind = HInvokeStaticOrDirect::MethodLoadKind::kRuntimeCall;
+      method_load_kind = MethodLoadKind::kRuntimeCall;
     } else {
+      DCHECK(!callee->IsCopied());
       // Use PC-relative access to the .bss methods array.
-      method_load_kind = HInvokeStaticOrDirect::MethodLoadKind::kBssEntry;
+      method_load_kind = MethodLoadKind::kBssEntry;
     }
-    code_ptr_location = HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod;
+    code_ptr_location = CodePtrLocation::kCallArtMethod;
   } else if (compiler_options.IsJitCompiler()) {
     ScopedObjectAccess soa(Thread::Current());
     if (Runtime::Current()->GetJit()->CanEncodeMethod(
             callee,
             compiler_options.IsJitCompilerForSharedCode())) {
-      method_load_kind = HInvokeStaticOrDirect::MethodLoadKind::kJitDirectAddress;
+      method_load_kind = MethodLoadKind::kJitDirectAddress;
       method_load_data = reinterpret_cast<uintptr_t>(callee);
-      code_ptr_location = HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod;
+      code_ptr_location = CodePtrLocation::kCallArtMethod;
     } else {
       // Do not sharpen.
-      method_load_kind = HInvokeStaticOrDirect::MethodLoadKind::kRuntimeCall;
-      code_ptr_location = HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod;
+      method_load_kind = MethodLoadKind::kRuntimeCall;
+      code_ptr_location = CodePtrLocation::kCallArtMethod;
     }
   } else if (IsInBootImage(callee)) {
     // Use PC-relative access to the .data.bimg.rel.ro methods array.
-    method_load_kind = HInvokeStaticOrDirect::MethodLoadKind::kBootImageRelRo;
-    code_ptr_location = HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod;
+    method_load_kind = MethodLoadKind::kBootImageRelRo;
+    code_ptr_location = CodePtrLocation::kCallArtMethod;
   } else if (!has_method_id) {
-    method_load_kind = HInvokeStaticOrDirect::MethodLoadKind::kRuntimeCall;
-    code_ptr_location = HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod;
+    method_load_kind = MethodLoadKind::kRuntimeCall;
+    code_ptr_location = CodePtrLocation::kCallArtMethod;
   } else {
+    DCHECK(!callee->IsCopied());
     // Use PC-relative access to the .bss methods array.
-    method_load_kind = HInvokeStaticOrDirect::MethodLoadKind::kBssEntry;
-    code_ptr_location = HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod;
+    method_load_kind = MethodLoadKind::kBssEntry;
+    code_ptr_location = CodePtrLocation::kCallArtMethod;
   }
 
-  if (method_load_kind != HInvokeStaticOrDirect::MethodLoadKind::kRuntimeCall &&
-      callee->IsCriticalNative()) {
-    DCHECK_NE(method_load_kind, HInvokeStaticOrDirect::MethodLoadKind::kRecursive);
+  if (method_load_kind != MethodLoadKind::kRuntimeCall && callee->IsCriticalNative()) {
+    DCHECK_NE(method_load_kind, MethodLoadKind::kRecursive);
     DCHECK(callee->IsStatic());
-    code_ptr_location = HInvokeStaticOrDirect::CodePtrLocation::kCallCriticalNative;
+    code_ptr_location = CodePtrLocation::kCallCriticalNative;
   }
 
   if (codegen->GetGraph()->IsDebuggable()) {
     // For debuggable apps always use the code pointer from ArtMethod
     // so that we don't circumvent instrumentation stubs if installed.
-    code_ptr_location = HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod;
+    code_ptr_location = CodePtrLocation::kCallArtMethod;
   }
 
   HInvokeStaticOrDirect::DispatchInfo desired_dispatch_info = {
@@ -157,24 +158,55 @@ HLoadClass::LoadKind HSharpening::ComputeLoadClassKind(
          load_class->GetLoadKind() == HLoadClass::LoadKind::kReferrersClass)
       << load_class->GetLoadKind();
   DCHECK(!load_class->IsInBootImage()) << "HLoadClass should not be optimized before sharpening.";
+  const DexFile& dex_file = load_class->GetDexFile();
+  dex::TypeIndex type_index = load_class->GetTypeIndex();
+  const CompilerOptions& compiler_options = codegen->GetCompilerOptions();
 
-  HLoadClass::LoadKind load_kind = load_class->GetLoadKind();
+  bool is_in_boot_image = false;
+  HLoadClass::LoadKind desired_load_kind = HLoadClass::LoadKind::kInvalid;
 
-  if (load_class->NeedsAccessCheck()) {
-    // We need to call the runtime anyway, so we simply get the class as that call's return value.
-  } else if (load_kind == HLoadClass::LoadKind::kReferrersClass) {
+  if (load_class->GetLoadKind() == HLoadClass::LoadKind::kReferrersClass) {
+    DCHECK(!load_class->NeedsAccessCheck());
     // Loading from the ArtMethod* is the most efficient retrieval in code size.
     // TODO: This may not actually be true for all architectures and
     // locations of target classes. The additional register pressure
     // for using the ArtMethod* should be considered.
+    desired_load_kind = HLoadClass::LoadKind::kReferrersClass;
+  } else if (load_class->NeedsAccessCheck()) {
+    DCHECK_EQ(load_class->GetLoadKind(), HLoadClass::LoadKind::kRuntimeCall);
+    if (klass != nullptr) {
+      // Resolved class that needs access check must be really inaccessible
+      // and the access check is bound to fail. Just emit the runtime call.
+      desired_load_kind = HLoadClass::LoadKind::kRuntimeCall;
+    } else if (compiler_options.IsJitCompiler()) {
+      // Unresolved class while JITting means that either we never hit this
+      // instruction or it failed. Either way, just emit the runtime call.
+      // (Though we could consider emitting Deoptimize instead and
+      // recompile if the instruction succeeds in interpreter.)
+      desired_load_kind = HLoadClass::LoadKind::kRuntimeCall;
+    } else {
+      // For AOT, check if the class is in the same literal package as the
+      // compiling class and pick an appropriate .bss entry.
+      auto package_length = [](const char* descriptor) {
+        const char* slash_pos = strrchr(descriptor, '/');
+        return (slash_pos != nullptr) ? static_cast<size_t>(slash_pos - descriptor) : 0u;
+      };
+      const char* klass_descriptor = dex_file.StringByTypeIdx(type_index);
+      const uint32_t klass_package_length = package_length(klass_descriptor);
+      const DexFile* referrer_dex_file = dex_compilation_unit.GetDexFile();
+      const dex::TypeIndex referrer_type_index =
+          referrer_dex_file->GetClassDef(dex_compilation_unit.GetClassDefIndex()).class_idx_;
+      const char* referrer_descriptor = referrer_dex_file->StringByTypeIdx(referrer_type_index);
+      const uint32_t referrer_package_length = package_length(referrer_descriptor);
+      bool same_package =
+          (referrer_package_length == klass_package_length) &&
+          memcmp(referrer_descriptor, klass_descriptor, referrer_package_length) == 0;
+      desired_load_kind = same_package
+          ? HLoadClass::LoadKind::kBssEntryPackage
+          : HLoadClass::LoadKind::kBssEntryPublic;
+    }
   } else {
-    const DexFile& dex_file = load_class->GetDexFile();
-    dex::TypeIndex type_index = load_class->GetTypeIndex();
-
-    bool is_in_boot_image = false;
-    HLoadClass::LoadKind desired_load_kind = HLoadClass::LoadKind::kInvalid;
     Runtime* runtime = Runtime::Current();
-    const CompilerOptions& compiler_options = codegen->GetCompilerOptions();
     if (compiler_options.IsBootImage() || compiler_options.IsBootImageExtension()) {
       // Compiling boot image or boot image extension. Check if the class is a boot image class.
       DCHECK(!compiler_options.IsJitCompiler());
@@ -226,17 +258,19 @@ HLoadClass::LoadKind HSharpening::ComputeLoadClassKind(
         desired_load_kind = HLoadClass::LoadKind::kBssEntry;
       }
     }
-    DCHECK_NE(desired_load_kind, HLoadClass::LoadKind::kInvalid);
-
-    if (is_in_boot_image) {
-      load_class->MarkInBootImage();
-    }
-    load_kind = codegen->GetSupportedLoadClassKind(desired_load_kind);
   }
+  DCHECK_NE(desired_load_kind, HLoadClass::LoadKind::kInvalid);
+
+  if (is_in_boot_image) {
+    load_class->MarkInBootImage();
+  }
+  HLoadClass::LoadKind load_kind = codegen->GetSupportedLoadClassKind(desired_load_kind);
 
   if (!IsSameDexFile(load_class->GetDexFile(), *dex_compilation_unit.GetDexFile())) {
-    if ((load_kind == HLoadClass::LoadKind::kRuntimeCall) ||
-        (load_kind == HLoadClass::LoadKind::kBssEntry)) {
+    if (load_kind == HLoadClass::LoadKind::kRuntimeCall ||
+        load_kind == HLoadClass::LoadKind::kBssEntry ||
+        load_kind == HLoadClass::LoadKind::kBssEntryPublic ||
+        load_kind == HLoadClass::LoadKind::kBssEntryPackage) {
       // We actually cannot reference this class, we're forced to bail.
       // We cannot reference this class with Bss, as the entrypoint will lookup the class
       // in the caller's dex file, but that dex file does not reference the class.

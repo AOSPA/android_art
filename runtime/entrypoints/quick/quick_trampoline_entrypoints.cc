@@ -1317,20 +1317,6 @@ extern "C" const void* artQuickResolutionTrampoline(
     DCHECK_EQ(caller->GetDexFile(), called_method.dex_file);
     called = linker->ResolveMethod<ClassLinker::ResolveMode::kCheckICCEAndIAE>(
         self, called_method.index, caller, invoke_type);
-
-    // If successful, update .bss entry in oat file if any.
-    if (called != nullptr) {
-      if (invoke_type == kSuper) {
-        if (called->GetDexFile() == called_method.dex_file) {
-          called_method.index = called->GetDexMethodIndex();
-        } else {
-          called_method.index = called->FindDexMethodIndexInOtherDexFile(
-              *called_method.dex_file, called_method.index);
-          DCHECK_NE(called_method.index, dex::kDexNoIndex);
-        }
-      }
-      MaybeUpdateBssMethodEntry(called, called_method);
-    }
   }
   const void* code = nullptr;
   if (LIKELY(!self->IsExceptionPending())) {
@@ -1363,6 +1349,24 @@ extern "C" const void* artQuickResolutionTrampoline(
       CHECK(called != nullptr) << orig_called->PrettyMethod() << " "
                                << mirror::Object::PrettyTypeOf(receiver) << " "
                                << invoke_type << " " << orig_called->GetVtableIndex();
+    }
+    // Now that we know the actual target, update .bss entry in oat file, if
+    // any.
+    if (!called_method_known_on_entry) {
+      // We only put non copied methods in the BSS. Putting a copy can lead to an
+      // odd situation where the ArtMethod being executed is unrelated to the
+      // receiver of the method.
+      called = called->GetCanonicalMethod();
+      if (invoke_type == kSuper) {
+        if (called->GetDexFile() == called_method.dex_file) {
+          called_method.index = called->GetDexMethodIndex();
+        } else {
+          called_method.index = called->FindDexMethodIndexInOtherDexFile(
+              *called_method.dex_file, called_method.index);
+          DCHECK_NE(called_method.index, dex::kDexNoIndex);
+        }
+      }
+      MaybeUpdateBssMethodEntry(called, called_method);
     }
 
     // Static invokes need class initialization check but instance invokes can proceed even if
@@ -2398,7 +2402,7 @@ extern "C" TwoWordReturn artInvokeInterfaceTrampoline(ArtMethod* interface_metho
   ArtMethod* method = nullptr;
   ImTable* imt = cls->GetImt(kRuntimePointerSize);
 
-  if (UNLIKELY(interface_method == nullptr)) {
+  if (UNLIKELY(interface_method == nullptr) || interface_method->IsRuntimeMethod()) {
     // The interface method is unresolved, so resolve it in the dex file of the caller.
     // Fetch the dex_method_idx of the target interface method from the caller.
     uint32_t dex_method_idx;
@@ -2434,6 +2438,7 @@ extern "C" TwoWordReturn artInvokeInterfaceTrampoline(ArtMethod* interface_metho
       CHECK(self->IsExceptionPending());
       return GetTwoWordFailureValue();  // Failure.
     }
+    MaybeUpdateBssMethodEntry(interface_method, MethodReference(&dex_file, dex_method_idx));
   }
 
   // The compiler and interpreter make sure the conflict trampoline is never

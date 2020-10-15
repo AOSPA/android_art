@@ -37,6 +37,7 @@
 #include "lock_word.h"
 #include "mirror/array-inl.h"
 #include "mirror/class-inl.h"
+#include "mirror/var_handle.h"
 #include "offsets.h"
 #include "thread.h"
 #include "utils/arm64/assembler_arm64.h"
@@ -327,8 +328,13 @@ class LoadClassSlowPathARM64 : public SlowPathCodeARM64 {
       DCHECK(IsSameDexFile(cls_->GetDexFile(), arm64_codegen->GetGraph()->GetDexFile()));
       dex::TypeIndex type_index = cls_->GetTypeIndex();
       __ Mov(calling_convention.GetRegisterAt(0).W(), type_index.index_);
-      arm64_codegen->InvokeRuntime(kQuickResolveType, instruction_, dex_pc, this);
-      CheckEntrypointTypes<kQuickResolveType, void*, uint32_t>();
+      if (cls_->NeedsAccessCheck()) {
+        CheckEntrypointTypes<kQuickResolveTypeAndVerifyAccess, void*, uint32_t>();
+        arm64_codegen->InvokeRuntime(kQuickResolveTypeAndVerifyAccess, instruction_, dex_pc, this);
+      } else {
+        CheckEntrypointTypes<kQuickResolveType, void*, uint32_t>();
+        arm64_codegen->InvokeRuntime(kQuickResolveType, instruction_, dex_pc, this);
+      }
       // If we also must_do_clinit, the resolved type is now in the correct register.
     } else {
       DCHECK(must_do_clinit);
@@ -714,9 +720,11 @@ class ReadBarrierForHeapReferenceSlowPathARM64 : public SlowPathCodeARM64 {
         // to an object field within an object.
         DCHECK(instruction_->IsInvoke()) << instruction_->DebugName();
         DCHECK(instruction_->GetLocations()->Intrinsified());
-        DCHECK((instruction_->AsInvoke()->GetIntrinsic() == Intrinsics::kUnsafeGetObject) ||
-               (instruction_->AsInvoke()->GetIntrinsic() == Intrinsics::kUnsafeGetObjectVolatile ||
-               (instruction_->AsInvoke()->GetIntrinsic() == Intrinsics::kVarHandleGet)))
+        Intrinsics intrinsic = instruction_->AsInvoke()->GetIntrinsic();
+        DCHECK(intrinsic == Intrinsics::kUnsafeGetObject ||
+               intrinsic == Intrinsics::kUnsafeGetObjectVolatile ||
+               mirror::VarHandle::GetAccessModeTemplateByIntrinsic(intrinsic) ==
+                   mirror::VarHandle::AccessModeTemplate::kGet)
             << instruction_->AsInvoke()->GetIntrinsic();
         DCHECK_EQ(offset_, 0u);
         DCHECK(index_.IsRegister());
@@ -942,6 +950,8 @@ CodeGeneratorARM64::CodeGeneratorARM64(HGraph* graph,
       method_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       boot_image_type_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       type_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+      public_type_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+      package_type_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       boot_image_string_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       string_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       boot_image_other_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
@@ -4341,6 +4351,10 @@ void LocationsBuilderARM64::HandleInvoke(HInvoke* invoke) {
 
 void LocationsBuilderARM64::VisitInvokeInterface(HInvokeInterface* invoke) {
   HandleInvoke(invoke);
+  if (invoke->GetHiddenArgumentLoadKind() == MethodLoadKind::kRecursive) {
+    // We cannot request ip1 as it's blocked by the register allocator.
+    invoke->GetLocations()->SetInAt(invoke->GetNumberOfArguments() - 1, Location::Any());
+  }
 }
 
 void CodeGeneratorARM64::MaybeGenerateInlineCacheCheck(HInstruction* instruction,
@@ -4411,7 +4425,17 @@ void InstructionCodeGeneratorARM64::VisitInvokeInterface(HInvokeInterface* invok
   MacroAssembler* masm = GetVIXLAssembler();
   UseScratchRegisterScope scratch_scope(masm);
   scratch_scope.Exclude(ip1);
-  __ Mov(ip1, invoke->GetMethodReference().index);
+  if (invoke->GetHiddenArgumentLoadKind() == MethodLoadKind::kRecursive) {
+    Location interface_method = locations->InAt(invoke->GetNumberOfArguments() - 1);
+    if (interface_method.IsStackSlot()) {
+      __ Ldr(ip1, StackOperandFrom(receiver));
+    } else {
+      __ Mov(ip1, XRegisterFrom(interface_method));
+    }
+  } else {
+    codegen_->LoadMethod(
+        invoke->GetHiddenArgumentLoadKind(), Location::RegisterLocation(ip1.GetCode()), invoke);
+  }
 
   __ Ldr(temp,
       MemOperand(temp, mirror::Class::ImtPtrOffset(kArm64PointerSize).Uint32Value()));
@@ -4454,7 +4478,7 @@ void LocationsBuilderARM64::VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* inv
     return;
   }
 
-  if (invoke->GetCodePtrLocation() == HInvokeStaticOrDirect::CodePtrLocation::kCallCriticalNative) {
+  if (invoke->GetCodePtrLocation() == CodePtrLocation::kCallCriticalNative) {
     CriticalNativeCallingConventionVisitorARM64 calling_convention_visitor(
         /*for_register_allocation=*/ true);
     CodeGenerator::CreateCommonInvokeLocationSummary(invoke, &calling_convention_visitor);
@@ -4479,22 +4503,9 @@ HInvokeStaticOrDirect::DispatchInfo CodeGeneratorARM64::GetSupportedInvokeStatic
   return desired_dispatch_info;
 }
 
-void CodeGeneratorARM64::GenerateStaticOrDirectCall(
-    HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path) {
-  // Make sure that ArtMethod* is passed in kArtMethodRegister as per the calling convention.
-  Location callee_method = temp;  // For all kinds except kRecursive, callee will be in temp.
-  switch (invoke->GetMethodLoadKind()) {
-    case HInvokeStaticOrDirect::MethodLoadKind::kStringInit: {
-      uint32_t offset =
-          GetThreadOffset<kArm64PointerSize>(invoke->GetStringInitEntryPoint()).Int32Value();
-      // temp = thread->string_init_entrypoint
-      __ Ldr(XRegisterFrom(temp), MemOperand(tr, offset));
-      break;
-    }
-    case HInvokeStaticOrDirect::MethodLoadKind::kRecursive:
-      callee_method = invoke->GetLocations()->InAt(invoke->GetCurrentMethodIndex());
-      break;
-    case HInvokeStaticOrDirect::MethodLoadKind::kBootImageLinkTimePcRelative: {
+void CodeGeneratorARM64::LoadMethod(MethodLoadKind load_kind, Location temp, HInvoke* invoke) {
+  switch (load_kind) {
+    case MethodLoadKind::kBootImageLinkTimePcRelative: {
       DCHECK(GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension());
       // Add ADRP with its PC-relative method patch.
       vixl::aarch64::Label* adrp_label =
@@ -4506,7 +4517,7 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
       EmitAddPlaceholder(add_label, XRegisterFrom(temp), XRegisterFrom(temp));
       break;
     }
-    case HInvokeStaticOrDirect::MethodLoadKind::kBootImageRelRo: {
+    case MethodLoadKind::kBootImageRelRo: {
       // Add ADRP with its PC-relative .data.bimg.rel.ro patch.
       uint32_t boot_image_offset = GetBootImageOffset(invoke);
       vixl::aarch64::Label* adrp_label = NewBootImageRelRoPatch(boot_image_offset);
@@ -4517,7 +4528,7 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
       EmitLdrOffsetPlaceholder(ldr_label, WRegisterFrom(temp), XRegisterFrom(temp));
       break;
     }
-    case HInvokeStaticOrDirect::MethodLoadKind::kBssEntry: {
+    case MethodLoadKind::kBssEntry: {
       // Add ADRP with its PC-relative .bss entry patch.
       vixl::aarch64::Label* adrp_label = NewMethodBssEntryPatch(invoke->GetMethodReference());
       EmitAdrpPlaceholder(adrp_label, XRegisterFrom(temp));
@@ -4528,13 +4539,46 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
       EmitLdrOffsetPlaceholder(ldr_label, XRegisterFrom(temp), XRegisterFrom(temp));
       break;
     }
-    case HInvokeStaticOrDirect::MethodLoadKind::kJitDirectAddress:
+    case MethodLoadKind::kJitDirectAddress: {
       // Load method address from literal pool.
-      __ Ldr(XRegisterFrom(temp), DeduplicateUint64Literal(invoke->GetMethodAddress()));
+      __ Ldr(XRegisterFrom(temp),
+             DeduplicateUint64Literal(reinterpret_cast<uint64_t>(invoke->GetResolvedMethod())));
       break;
-    case HInvokeStaticOrDirect::MethodLoadKind::kRuntimeCall: {
+    }
+    case MethodLoadKind::kRuntimeCall: {
+      // Test situation, don't do anything.
+      break;
+    }
+    default: {
+      LOG(FATAL) << "Load kind should have already been handled " << load_kind;
+      UNREACHABLE();
+    }
+  }
+}
+
+void CodeGeneratorARM64::GenerateStaticOrDirectCall(
+    HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path) {
+  // Make sure that ArtMethod* is passed in kArtMethodRegister as per the calling convention.
+  Location callee_method = temp;  // For all kinds except kRecursive, callee will be in temp.
+  switch (invoke->GetMethodLoadKind()) {
+    case MethodLoadKind::kStringInit: {
+      uint32_t offset =
+          GetThreadOffset<kArm64PointerSize>(invoke->GetStringInitEntryPoint()).Int32Value();
+      // temp = thread->string_init_entrypoint
+      __ Ldr(XRegisterFrom(temp), MemOperand(tr, offset));
+      break;
+    }
+    case MethodLoadKind::kRecursive: {
+      callee_method = invoke->GetLocations()->InAt(invoke->GetCurrentMethodIndex());
+      break;
+    }
+    case MethodLoadKind::kRuntimeCall: {
       GenerateInvokeStaticOrDirectRuntimeCall(invoke, temp, slow_path);
       return;  // No code pointer retrieval; the runtime performs the call directly.
+    }
+    default: {
+      LoadMethod(invoke->GetMethodLoadKind(), temp, invoke);
+      break;
     }
   }
 
@@ -4552,7 +4596,7 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
     }
   };
   switch (invoke->GetCodePtrLocation()) {
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallSelf:
+    case CodePtrLocation::kCallSelf:
       {
         // Use a scope to help guarantee that `RecordPcInfo()` records the correct pc.
         ExactAssemblyScope eas(GetVIXLAssembler(),
@@ -4562,7 +4606,7 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
         RecordPcInfo(invoke, invoke->GetDexPc(), slow_path);
       }
       break;
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallCriticalNative: {
+    case CodePtrLocation::kCallCriticalNative: {
       size_t out_frame_size =
           PrepareCriticalNativeCall<CriticalNativeCallingConventionVisitorARM64,
                                     kAapcs64StackAlignment,
@@ -4597,7 +4641,7 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
       }
       break;
     }
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod:
+    case CodePtrLocation::kCallArtMethod:
       call_code_pointer_member(ArtMethod::EntryPointFromQuickCompiledCodeOffset(kArm64PointerSize));
       break;
   }
@@ -4733,10 +4777,26 @@ vixl::aarch64::Label* CodeGeneratorARM64::NewBootImageTypePatch(
 }
 
 vixl::aarch64::Label* CodeGeneratorARM64::NewBssEntryTypePatch(
-    const DexFile& dex_file,
-    dex::TypeIndex type_index,
+    HLoadClass* load_class,
     vixl::aarch64::Label* adrp_label) {
-  return NewPcRelativePatch(&dex_file, type_index.index_, adrp_label, &type_bss_entry_patches_);
+  const DexFile& dex_file = load_class->GetDexFile();
+  dex::TypeIndex type_index = load_class->GetTypeIndex();
+  ArenaDeque<PcRelativePatchInfo>* patches = nullptr;
+  switch (load_class->GetLoadKind()) {
+    case HLoadClass::LoadKind::kBssEntry:
+      patches = &type_bss_entry_patches_;
+      break;
+    case HLoadClass::LoadKind::kBssEntryPublic:
+      patches = &public_type_bss_entry_patches_;
+      break;
+    case HLoadClass::LoadKind::kBssEntryPackage:
+      patches = &package_type_bss_entry_patches_;
+      break;
+    default:
+      LOG(FATAL) << "Unexpected load kind: " << load_class->GetLoadKind();
+      UNREACHABLE();
+  }
+  return NewPcRelativePatch(&dex_file, type_index.index_, adrp_label, patches);
 }
 
 vixl::aarch64::Label* CodeGeneratorARM64::NewBootImageStringPatch(
@@ -4916,6 +4976,8 @@ void CodeGeneratorARM64::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* lin
       method_bss_entry_patches_.size() +
       boot_image_type_patches_.size() +
       type_bss_entry_patches_.size() +
+      public_type_bss_entry_patches_.size() +
+      package_type_bss_entry_patches_.size() +
       boot_image_string_patches_.size() +
       string_bss_entry_patches_.size() +
       boot_image_other_patches_.size() +
@@ -4945,6 +5007,10 @@ void CodeGeneratorARM64::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* lin
       method_bss_entry_patches_, linker_patches);
   EmitPcRelativeLinkerPatches<linker::LinkerPatch::TypeBssEntryPatch>(
       type_bss_entry_patches_, linker_patches);
+  EmitPcRelativeLinkerPatches<linker::LinkerPatch::PublicTypeBssEntryPatch>(
+      public_type_bss_entry_patches_, linker_patches);
+  EmitPcRelativeLinkerPatches<linker::LinkerPatch::PackageTypeBssEntryPatch>(
+      package_type_bss_entry_patches_, linker_patches);
   EmitPcRelativeLinkerPatches<linker::LinkerPatch::StringBssEntryPatch>(
       string_bss_entry_patches_, linker_patches);
   for (const PatchInfo<vixl::aarch64::Label>& info : call_entrypoint_patches_) {
@@ -5063,6 +5129,8 @@ HLoadClass::LoadKind CodeGeneratorARM64::GetSupportedLoadClassKind(
     case HLoadClass::LoadKind::kBootImageLinkTimePcRelative:
     case HLoadClass::LoadKind::kBootImageRelRo:
     case HLoadClass::LoadKind::kBssEntry:
+    case HLoadClass::LoadKind::kBssEntryPublic:
+    case HLoadClass::LoadKind::kBssEntryPackage:
       DCHECK(!GetCompilerOptions().IsJitCompiler());
       break;
     case HLoadClass::LoadKind::kJitBootImageAddress:
@@ -5086,7 +5154,9 @@ void LocationsBuilderARM64::VisitLoadClass(HLoadClass* cls) {
     DCHECK(calling_convention.GetRegisterAt(0).Is(vixl::aarch64::x0));
     return;
   }
-  DCHECK(!cls->NeedsAccessCheck());
+  DCHECK_EQ(cls->NeedsAccessCheck(),
+            load_kind == HLoadClass::LoadKind::kBssEntryPublic ||
+                load_kind == HLoadClass::LoadKind::kBssEntryPackage);
 
   const bool requires_read_barrier = kEmitCompilerReadBarrier && !cls->IsInBootImage();
   LocationSummary::CallKind call_kind = (cls->NeedsEnvironment() || requires_read_barrier)
@@ -5120,7 +5190,9 @@ void InstructionCodeGeneratorARM64::VisitLoadClass(HLoadClass* cls) NO_THREAD_SA
     codegen_->MaybeGenerateMarkingRegisterCheck(/* code= */ __LINE__);
     return;
   }
-  DCHECK(!cls->NeedsAccessCheck());
+  DCHECK_EQ(cls->NeedsAccessCheck(),
+            load_kind == HLoadClass::LoadKind::kBssEntryPublic ||
+                load_kind == HLoadClass::LoadKind::kBssEntryPackage);
 
   Location out_loc = cls->GetLocations()->Out();
   Register out = OutputRegister(cls);
@@ -5170,16 +5242,15 @@ void InstructionCodeGeneratorARM64::VisitLoadClass(HLoadClass* cls) NO_THREAD_SA
       codegen_->EmitLdrOffsetPlaceholder(ldr_label, out.W(), out.X());
       break;
     }
-    case HLoadClass::LoadKind::kBssEntry: {
+    case HLoadClass::LoadKind::kBssEntry:
+    case HLoadClass::LoadKind::kBssEntryPublic:
+    case HLoadClass::LoadKind::kBssEntryPackage: {
       // Add ADRP with its PC-relative Class .bss entry patch.
-      const DexFile& dex_file = cls->GetDexFile();
-      dex::TypeIndex type_index = cls->GetTypeIndex();
       vixl::aarch64::Register temp = XRegisterFrom(out_loc);
-      vixl::aarch64::Label* adrp_label = codegen_->NewBssEntryTypePatch(dex_file, type_index);
+      vixl::aarch64::Label* adrp_label = codegen_->NewBssEntryTypePatch(cls);
       codegen_->EmitAdrpPlaceholder(adrp_label, temp);
       // Add LDR with its PC-relative Class .bss entry patch.
-      vixl::aarch64::Label* ldr_label =
-          codegen_->NewBssEntryTypePatch(dex_file, type_index, adrp_label);
+      vixl::aarch64::Label* ldr_label = codegen_->NewBssEntryTypePatch(cls, adrp_label);
       // /* GcRoot<mirror::Class> */ out = *(base_address + offset)  /* PC-relative */
       // All aligned loads are implicitly atomic consume operations on ARM64.
       codegen_->GenerateGcRootFieldLoad(cls,
