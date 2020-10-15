@@ -21,7 +21,6 @@
  */
 #include "asm_support.h"
 #include "arch/arm64/asm_support_arm64.S"
-#include "interpreter/cfi_asm_support.h"
 
 /**
  * ARM64 Runtime register usage conventions.
@@ -363,7 +362,7 @@ END \name
     .cfi_def_cfa_register x13
     mov sp, x14
     str x13, [\refs, #-8]
-    CFI_DEFINE_CFA_DEREF(\cfi_refs, -8, CALLEE_SAVES_SIZE)
+    CFI_DEF_CFA_BREG_PLUS_UCONST \cfi_refs, -8, CALLEE_SAVES_SIZE
 
     // Put nulls in reference frame.
     cbz ip, 2f
@@ -573,7 +572,7 @@ END \name
    // Start executing the method.
    mov xFP, xNEW_FP
    mov xREFS, xNEW_REFS
-   CFI_DEFINE_CFA_DEREF(CFI_REFS, -8, CALLEE_SAVES_SIZE)
+   CFI_DEF_CFA_BREG_PLUS_UCONST CFI_REFS, -8, CALLEE_SAVES_SIZE
    START_EXECUTING_INSTRUCTIONS
 .endm
 
@@ -621,7 +620,7 @@ END \name
    .endif
    mov xFP, xNEW_FP
    mov xREFS, xNEW_REFS
-   CFI_DEFINE_CFA_DEREF(CFI_REFS, -8, CALLEE_SAVES_SIZE)
+   CFI_DEF_CFA_BREG_PLUS_UCONST CFI_REFS, -8, CALLEE_SAVES_SIZE
    START_EXECUTING_INSTRUCTIONS
 .endm
 
@@ -646,13 +645,10 @@ END \name
    ldp x0, x1, [sp], #16
 .endm
 
+// Input:  x0 contains the ArtMethod
 // Output: x8 contains the code item
 .macro GET_CODE_ITEM
-   // TODO: Get code item in a better way.
-   stp x0, x1, [sp, #-16]!
-   bl NterpGetCodeItem
-   mov x8, x0
-   ldp x0, x1, [sp], #16
+   ldr x8, [x0, #ART_METHOD_DATA_OFFSET_64]
 .endm
 
 .macro DO_ENTRY_POINT_CHECK call_compiled_code
@@ -1499,11 +1495,9 @@ OAT_ENTRY ExecuteNterpImpl, EndExecuteNterpImpl
     bl NterpGetShorty
     // Save shorty in callee-save xIBASE.
     mov xIBASE, x0
-    mov x0, xINST
-    bl NterpGetCodeItem
-    mov xPC, x0
 
     RESTORE_ALL_ARGUMENTS
+    ldr xPC, [xINST, #ART_METHOD_DATA_OFFSET_64]
 
     // Setup the stack for executing the method.
     SETUP_STACK_FRAME xPC, xREFS, xFP, CFI_REFS

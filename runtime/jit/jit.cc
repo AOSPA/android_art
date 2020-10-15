@@ -90,8 +90,6 @@ JitCompilerInterface* (*Jit::jit_load_)(void) = nullptr;
 JitOptions* JitOptions::CreateFromRuntimeArguments(const RuntimeArgumentMap& options) {
   auto* jit_options = new JitOptions;
   jit_options->use_jit_compilation_ = options.GetOrDefault(RuntimeArgumentMap::UseJitCompilation);
-  jit_options->use_tiered_jit_compilation_ =
-      options.GetOrDefault(RuntimeArgumentMap::UseTieredJitCompilation);
 
   jit_options->code_cache_initial_capacity_ =
       options.GetOrDefault(RuntimeArgumentMap::JITCodeCacheInitialCapacity);
@@ -104,7 +102,7 @@ JitOptions* JitOptions::CreateFromRuntimeArguments(const RuntimeArgumentMap& opt
   jit_options->thread_pool_pthread_priority_ =
       options.GetOrDefault(RuntimeArgumentMap::JITPoolThreadPthreadPriority);
 
-  // Set default compile threshold to aide with sanity checking defaults.
+  // Set default compile threshold to aid with checking defaults.
   jit_options->compile_threshold_ =
       kIsDebugBuild
       ? (Jit::kSlowMode
@@ -115,7 +113,7 @@ JitOptions* JitOptions::CreateFromRuntimeArguments(const RuntimeArgumentMap& opt
   // When not running in slow-mode, thresholds are quantized to kJitSamplesbatchsize.
   const uint32_t kJitThresholdStep = Jit::kSlowMode ? 1u : kJitSamplesBatchSize;
 
-  // Set default warm-up threshold to aide with sanity checking defaults.
+  // Set default warm-up threshold to aid with checking defaults.
   jit_options->warmup_threshold_ =
       kIsDebugBuild ? (Jit::kSlowMode
                        ? kJitSlowStressDefaultWarmUpThreshold
@@ -333,8 +331,7 @@ bool Jit::CompileMethod(ArtMethod* method,
   // If we get a request to compile a proxy method, we pass the actual Java method
   // of that proxy method, as the compiler does not expect a proxy method.
   ArtMethod* method_to_compile = method->GetInterfaceMethodIfProxy(kRuntimePointerSize);
-  if (!code_cache_->NotifyCompilationOf(
-          method_to_compile, self, compilation_kind, prejit, region)) {
+  if (!code_cache_->NotifyCompilationOf(method_to_compile, self, compilation_kind, prejit)) {
     return false;
   }
 
@@ -760,7 +757,6 @@ void Jit::NotifyZygoteCompilationDone() {
 class JitCompileTask final : public Task {
  public:
   enum class TaskKind {
-    kAllocateProfile,
     kCompile,
     kPreCompile,
   };
@@ -797,12 +793,6 @@ class JitCompileTask final : public Task {
               self,
               compilation_kind_,
               /* prejit= */ (kind_ == TaskKind::kPreCompile));
-          break;
-        }
-        case TaskKind::kAllocateProfile: {
-          if (ProfilingInfo::Create(self, method_, /* retry_allocation= */ true)) {
-            VLOG(jit) << "Start profiling " << ArtMethod::PrettyMethod(method_);
-          }
           break;
         }
       }
@@ -1481,7 +1471,7 @@ uint32_t Jit::CompileMethodsFromProfile(
   return added_to_queue;
 }
 
-static bool IgnoreSamplesForMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_) {
+bool Jit::IgnoreSamplesForMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_) {
   if (method->IsClassInitializer() || !method->IsCompilable() || method->IsPreCompiled()) {
     // We do not want to compile such methods.
     return true;
@@ -1534,45 +1524,14 @@ bool Jit::MaybeCompileMethod(Thread* self,
   DCHECK_GE(PriorityThreadWeight(), 1);
   DCHECK_LE(PriorityThreadWeight(), HotMethodThreshold());
 
-  if (old_count < WarmMethodThreshold() && new_count >= WarmMethodThreshold()) {
-    // Note: Native method have no "warm" state or profiling info.
-    if (!method->IsNative() &&
-        (method->GetProfilingInfo(kRuntimePointerSize) == nullptr) &&
-        code_cache_->CanAllocateProfilingInfo() &&
-        !options_->UseTieredJitCompilation()) {
-      bool success = ProfilingInfo::Create(self, method, /* retry_allocation= */ false);
-      if (success) {
-        VLOG(jit) << "Start profiling " << method->PrettyMethod();
-      }
-
-      if (thread_pool_ == nullptr) {
-        // Calling ProfilingInfo::Create might put us in a suspended state, which could
-        // lead to the thread pool being deleted when we are shutting down.
-        return false;
-      }
-
-      if (!success) {
-        // We failed allocating. Instead of doing the collection on the Java thread, we push
-        // an allocation to a compiler thread, that will do the collection.
-        thread_pool_->AddTask(
-            self,
-            new JitCompileTask(method,
-                               JitCompileTask::TaskKind::kAllocateProfile,
-                               CompilationKind::kOptimized));  // Dummy compilation kind.
-      }
-    }
-  }
   if (UseJitCompilation()) {
     if (old_count < HotMethodThreshold() && new_count >= HotMethodThreshold()) {
       if (!code_cache_->ContainsPc(method->GetEntryPointFromQuickCompiledCode())) {
         DCHECK(thread_pool_ != nullptr);
-        CompilationKind compilation_kind =
-            (options_->UseTieredJitCompilation() || options_->UseBaselineCompiler())
-                ? CompilationKind::kBaseline
-                : CompilationKind::kOptimized;
         thread_pool_->AddTask(
             self,
-            new JitCompileTask(method, JitCompileTask::TaskKind::kCompile, compilation_kind));
+            new JitCompileTask(
+                method, JitCompileTask::TaskKind::kCompile, CompilationKind::kBaseline));
       }
     }
     if (old_count < OSRMethodThreshold() && new_count >= OSRMethodThreshold()) {
@@ -1596,9 +1555,9 @@ void Jit::EnqueueOptimizedCompilation(ArtMethod* method, Thread* self) {
     return;
   }
   // We arrive here after a baseline compiled code has reached its baseline
-  // hotness threshold. If tiered compilation is enabled, enqueue a compilation
+  // hotness threshold. If we're not only using the baseline compiler, enqueue a compilation
   // task that will compile optimize the method.
-  if (options_->UseTieredJitCompilation()) {
+  if (!options_->UseBaselineCompiler()) {
     thread_pool_->AddTask(
         self,
         new JitCompileTask(method,
@@ -1628,10 +1587,6 @@ void Jit::MethodEntered(Thread* thread, ArtMethod* method) {
   if (UNLIKELY(runtime->UseJitCompilation() && JitAtFirstUse())) {
     ArtMethod* np_method = method->GetInterfaceMethodIfProxy(kRuntimePointerSize);
     if (np_method->IsCompilable()) {
-      if (!np_method->IsNative() && GetCodeCache()->CanAllocateProfilingInfo()) {
-        // The compiler requires a ProfilingInfo object for non-native methods.
-        ProfilingInfo::Create(thread, np_method, /* retry_allocation= */ true);
-      }
       // TODO(ngeoffray): For JIT at first use, use kPreCompile. Currently we don't due to
       // conflicts with jitzygote optimizations.
       JitCompileTask compile_task(
@@ -1643,30 +1598,7 @@ void Jit::MethodEntered(Thread* thread, ArtMethod* method) {
     return;
   }
 
-  ProfilingInfo* profiling_info = method->GetProfilingInfo(kRuntimePointerSize);
-  // Update the entrypoint if the ProfilingInfo has one. The interpreter will call it
-  // instead of interpreting the method. We don't update it for instrumentation as the entrypoint
-  // must remain the instrumentation entrypoint.
-  if ((profiling_info != nullptr) &&
-      (profiling_info->GetSavedEntryPoint() != nullptr) &&
-      (method->GetEntryPointFromQuickCompiledCode() != GetQuickInstrumentationEntryPoint())) {
-    Runtime::Current()->GetInstrumentation()->UpdateMethodsCode(
-        method, profiling_info->GetSavedEntryPoint());
-  } else {
-    AddSamples(thread, method, 1, /* with_backedges= */false);
-  }
-}
-
-void Jit::InvokeVirtualOrInterface(ObjPtr<mirror::Object> this_object,
-                                   ArtMethod* caller,
-                                   uint32_t dex_pc,
-                                   ArtMethod* callee ATTRIBUTE_UNUSED) {
-  ScopedAssertNoThreadSuspension ants(__FUNCTION__);
-  DCHECK(this_object != nullptr);
-  ProfilingInfo* info = caller->GetProfilingInfo(kRuntimePointerSize);
-  if (info != nullptr) {
-    info->AddInvokeInfo(dex_pc, this_object->GetClass());
-  }
+  AddSamples(thread, method, 1, /* with_backedges= */false);
 }
 
 void Jit::WaitForCompilationToFinish(Thread* self) {
@@ -1812,6 +1744,7 @@ void Jit::PostZygoteFork() {
     CHECK(code_cache_->GetZygoteMap()->IsCompilationNotified());
   }
   thread_pool_->CreateThreads();
+  thread_pool_->SetPthreadPriority(options_->GetThreadPoolPthreadPriority());
 }
 
 void Jit::BootCompleted() {
@@ -1869,7 +1802,6 @@ void Jit::EnqueueCompilationFromNterp(ArtMethod* method, Thread* self) {
     return;
   }
   if (GetCodeCache()->CanAllocateProfilingInfo()) {
-    ProfilingInfo::Create(self, method, /* retry_allocation= */ false);
     thread_pool_->AddTask(
         self,
         new JitCompileTask(method, JitCompileTask::TaskKind::kCompile, CompilationKind::kBaseline));

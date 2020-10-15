@@ -30,6 +30,7 @@
 #include "gc/accounting/card_table.h"
 #include "gc/space/image_space.h"
 #include "heap_poisoning.h"
+#include "interpreter/mterp/nterp.h"
 #include "intrinsics.h"
 #include "intrinsics_arm_vixl.h"
 #include "linker/linker_patch.h"
@@ -2104,8 +2105,9 @@ void CodeGeneratorARMVIXL::MaybeIncrementHotness(bool is_frame_entry) {
   }
 
   if (GetGraph()->IsCompilingBaseline() && !Runtime::Current()->IsAotCompiler()) {
-    ScopedObjectAccess soa(Thread::Current());
-    ProfilingInfo* info = GetGraph()->GetArtMethod()->GetProfilingInfo(kRuntimePointerSize);
+    ScopedProfilingInfoUse spiu(
+        Runtime::Current()->GetJit(), GetGraph()->GetArtMethod(), Thread::Current());
+    ProfilingInfo* info = spiu.GetProfilingInfo();
     if (info != nullptr) {
       uint32_t address = reinterpret_cast32<uint32_t>(info);
       vixl::aarch32::Label done;
@@ -2118,6 +2120,7 @@ void CodeGeneratorARMVIXL::MaybeIncrementHotness(bool is_frame_entry) {
       __ Mov(r4, address);
       __ Ldrh(ip, MemOperand(r4, ProfilingInfo::BaselineHotnessCountOffset().Int32Value()));
       __ Add(ip, ip, 1);
+      instruction_visitor_.GenerateAndConst(ip, ip, interpreter::kTieredHotnessMask);
       __ Strh(ip, MemOperand(r4, ProfilingInfo::BaselineHotnessCountOffset().Int32Value()));
       if (!is_frame_entry) {
         __ Pop(r4);
@@ -3434,8 +3437,9 @@ void CodeGeneratorARMVIXL::MaybeGenerateInlineCacheCheck(HInstruction* instructi
       GetGraph()->IsCompilingBaseline() &&
       !Runtime::Current()->IsAotCompiler()) {
     DCHECK(!instruction->GetEnvironment()->IsFromInlinedInvoke());
-    ScopedObjectAccess soa(Thread::Current());
-    ProfilingInfo* info = GetGraph()->GetArtMethod()->GetProfilingInfo(kRuntimePointerSize);
+    ScopedProfilingInfoUse spiu(
+        Runtime::Current()->GetJit(), GetGraph()->GetArtMethod(), Thread::Current());
+    ProfilingInfo* info = spiu.GetProfilingInfo();
     if (info != nullptr) {
       InlineCache* cache = info->GetInlineCache(instruction->GetDexPc());
       uint32_t address = reinterpret_cast32<uint32_t>(cache);
@@ -3513,7 +3517,7 @@ void InstructionCodeGeneratorARMVIXL::VisitInvokeInterface(HInvokeInterface* inv
     // internally for the duration of the macro instruction.
     UseScratchRegisterScope temps(GetVIXLAssembler());
     temps.Exclude(hidden_reg);
-    __ Mov(hidden_reg, invoke->GetDexMethodIndex());
+    __ Mov(hidden_reg, invoke->GetMethodReference().index);
   }
   {
     // Ensure the pc position is recorded immediately after the `blx` instruction.
@@ -4241,7 +4245,7 @@ void InstructionCodeGeneratorARMVIXL::DivRemByPowerOfTwo(HBinaryOperation* instr
     }
   };
 
-  if (HasNonNegativeResultOrMinInt(instruction->GetLeft())) {
+  if (HasNonNegativeOrMinIntInputAt(instruction, 0)) {
     // No need to adjust the result for non-negative dividends or the INT32_MIN dividend.
     // NOTE: The generated code for HDiv/HRem correctly works for the INT32_MIN dividend:
     //   imm == 2
@@ -4350,7 +4354,7 @@ void InstructionCodeGeneratorARMVIXL::GenerateDivRemWithAnyConstant(HBinaryOpera
     }
   };
 
-  if (imm > 0 && IsGEZero(instruction->GetLeft())) {
+  if (imm > 0 && HasNonNegativeInputAt(instruction, 0)) {
     // No need to adjust the result for a non-negative dividend and a positive divisor.
     if (instruction->IsDiv()) {
       generate_unsigned_div_code(out, dividend, temp1, temp2);
@@ -4433,7 +4437,7 @@ void LocationsBuilderARMVIXL::VisitDiv(HDiv* div) {
         } else if (IsPowerOfTwo(AbsOrMin(value)) &&
                    value != 2 &&
                    value != -2 &&
-                   !HasNonNegativeResultOrMinInt(div)) {
+                   !HasNonNegativeOrMinIntInputAt(div, 0)) {
           // The "out" register is used as a temporary, so it overlaps with the inputs.
           out_overlaps = Location::kOutputOverlap;
         } else {
@@ -4547,7 +4551,7 @@ void LocationsBuilderARMVIXL::VisitRem(HRem* rem) {
         Location::OutputOverlap out_overlaps = Location::kNoOutputOverlap;
         if (value == 1 || value == 0 || value == -1) {
           // No temp register required.
-        } else if (IsPowerOfTwo(AbsOrMin(value)) && !HasNonNegativeResultOrMinInt(rem)) {
+        } else if (IsPowerOfTwo(AbsOrMin(value)) && !HasNonNegativeOrMinIntInputAt(rem, 0)) {
           // The "out" register is used as a temporary, so it overlaps with the inputs.
           out_overlaps = Location::kOutputOverlap;
         } else {
@@ -9029,29 +9033,24 @@ void CodeGeneratorARMVIXL::GenerateReadBarrierForRootSlow(HInstruction* instruct
 HInvokeStaticOrDirect::DispatchInfo CodeGeneratorARMVIXL::GetSupportedInvokeStaticOrDirectDispatch(
     const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
     ArtMethod* method) {
-  if (desired_dispatch_info.code_ptr_location ==
+  if (method->IsIntrinsic() &&
+      desired_dispatch_info.code_ptr_location ==
           HInvokeStaticOrDirect::CodePtrLocation::kCallCriticalNative) {
-    // TODO: Work around CheckTypeConsistency() in code_generator.cc that does not allow
-    // putting FP values in core registers as we need to do for the soft-float native ABI.
+    // As a work-around for soft-float native ABI interfering with type checks, we are
+    // inserting fake calls to Float.floatToRawIntBits() or Double.doubleToRawLongBits()
+    // when a float or double argument is passed in core registers but we cannot do that
+    // for actual intrinsic implementations that expect them in FP registers. Therefore
+    // we do not use `kCallCriticalNative` for intrinsics with FP arguments; if they are
+    // properly intrinsified, the dispatch type does not matter anyway.
     ScopedObjectAccess soa(Thread::Current());
     uint32_t shorty_len;
     const char* shorty = method->GetShorty(&shorty_len);
-    size_t reg = 0u;
     for (uint32_t i = 1; i != shorty_len; ++i) {
-      size_t next_reg = reg + 1u;
-      if (shorty[i] == 'D' || shorty[i] == 'J') {
-        reg = RoundUp(reg, 2u);
-        next_reg = reg + 2u;
-      }
-      if (reg == 4u) {
-        break;
-      }
       if (shorty[i] == 'D' || shorty[i] == 'F') {
         HInvokeStaticOrDirect::DispatchInfo dispatch_info = desired_dispatch_info;
         dispatch_info.code_ptr_location = HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod;
         return dispatch_info;
       }
-      reg = next_reg;
     }
   }
   return desired_dispatch_info;
@@ -9073,7 +9072,7 @@ void CodeGeneratorARMVIXL::GenerateStaticOrDirectCall(
       break;
     case HInvokeStaticOrDirect::MethodLoadKind::kBootImageLinkTimePcRelative: {
       DCHECK(GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension());
-      PcRelativePatchInfo* labels = NewBootImageMethodPatch(invoke->GetTargetMethod());
+      PcRelativePatchInfo* labels = NewBootImageMethodPatch(invoke->GetResolvedMethodReference());
       vixl32::Register temp_reg = RegisterFrom(temp);
       EmitMovwMovtPlaceholder(labels, temp_reg);
       break;
@@ -9087,8 +9086,7 @@ void CodeGeneratorARMVIXL::GenerateStaticOrDirectCall(
       break;
     }
     case HInvokeStaticOrDirect::MethodLoadKind::kBssEntry: {
-      PcRelativePatchInfo* labels = NewMethodBssEntryPatch(
-          MethodReference(&GetGraph()->GetDexFile(), invoke->GetDexMethodIndex()));
+      PcRelativePatchInfo* labels = NewMethodBssEntryPatch(invoke->GetMethodReference());
       vixl32::Register temp_reg = RegisterFrom(temp);
       EmitMovwMovtPlaceholder(labels, temp_reg);
       // All aligned loads are implicitly atomic consume operations on ARM.
@@ -9353,7 +9351,7 @@ void CodeGeneratorARMVIXL::AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* i
   if (GetCompilerOptions().IsBootImage()) {
     DCHECK_EQ(boot_image_offset, IntrinsicVisitor::IntegerValueOfInfo::kInvalidReference);
     // Load the class the same way as for HLoadClass::LoadKind::kBootImageLinkTimePcRelative.
-    MethodReference target_method = invoke->GetTargetMethod();
+    MethodReference target_method = invoke->GetResolvedMethodReference();
     dex::TypeIndex type_idx = target_method.dex_file->GetMethodId(target_method.index).class_idx_;
     PcRelativePatchInfo* labels = NewBootImageTypePatch(*target_method.dex_file, type_idx);
     EmitMovwMovtPlaceholder(labels, argument);

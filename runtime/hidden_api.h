@@ -38,7 +38,7 @@ namespace hiddenapi {
 enum class EnforcementPolicy {
   kDisabled             = 0,
   kJustWarn             = 1,  // keep checks enabled, but allow everything (enables logging)
-  kEnabled              = 2,  // ban dark grey & blacklist
+  kEnabled              = 2,  // ban conditionally blocked & blocklist
   kMax = kEnabled,
 };
 
@@ -203,8 +203,8 @@ class MemberSignature {
   void LogAccessToEventLog(uint32_t sampled_value, AccessMethod access_method, bool access_denied);
 
   // Calls back into managed code to notify VMRuntime.nonSdkApiUsageConsumer that
-  // |member| was accessed. This is usually called when an API is on the black,
-  // dark grey or light grey lists. Given that the callback can execute arbitrary
+  // |member| was accessed. This is usually called when an API is unsupported,
+  // conditionally or unconditionally blocked. Given that the callback can execute arbitrary
   // code, a call to this method can result in thread suspension.
   void NotifyHiddenApiListener(AccessMethod access_method);
 };
@@ -241,7 +241,7 @@ ALWAYS_INLINE inline uint32_t CreateRuntimeFlags_Impl(uint32_t dex_flags) {
   ApiList api_list(dex_flags);
   DCHECK(api_list.IsValid());
 
-  if (api_list.Contains(ApiList::Whitelist())) {
+  if (api_list.Contains(ApiList::Sdk())) {
     runtime_flags |= kAccPublicApi;
   } else {
     // Only add domain-specific flags for non-public API members.

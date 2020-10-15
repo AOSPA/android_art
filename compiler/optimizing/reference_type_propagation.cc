@@ -166,6 +166,17 @@ void ReferenceTypePropagation::Visit(HInstruction* instruction) {
   instruction->Accept(&visitor);
 }
 
+void ReferenceTypePropagation::Visit(ArrayRef<HInstruction* const> instructions) {
+  RTPVisitor visitor(graph_,
+                     class_loader_,
+                     hint_dex_cache_,
+                     is_first_run_);
+  for (HInstruction* instruction : instructions) {
+    instruction->Accept(&visitor);
+  }
+  visitor.ProcessWorklist();
+}
+
 // Check if we should create a bound type for the given object at the specified
 // position. Because of inlining and the fact we run RTP more than once and we
 // might have a HBoundType already. If we do, we should not create a new one.
@@ -515,8 +526,8 @@ void ReferenceTypePropagation::RTPVisitor::SetClassAsTypeInfo(HInstruction* inst
       ClassLinker* cl = Runtime::Current()->GetClassLinker();
       Thread* self = Thread::Current();
       StackHandleScope<2> hs(self);
-      const DexFile& dex_file = *invoke->GetTargetMethod().dex_file;
-      uint32_t dex_method_index = invoke->GetTargetMethod().index;
+      const DexFile& dex_file = *invoke->GetResolvedMethodReference().dex_file;
+      uint32_t dex_method_index = invoke->GetResolvedMethodReference().index;
       Handle<mirror::DexCache> dex_cache(
           hs.NewHandle(FindDexCacheWithHint(self, dex_file, hint_dex_cache_)));
       // Use a null loader, the target method is in a boot classpath dex file.
@@ -871,6 +882,8 @@ void ReferenceTypePropagation::RTPVisitor::VisitInvoke(HInvoke* instr) {
   }
 
   ScopedObjectAccess soa(Thread::Current());
+  // FIXME: Treat InvokePolymorphic separately, as we can get a more specific return type from
+  // protoId than the one obtained from the resolved method.
   ArtMethod* method = instr->GetResolvedMethod();
   ObjPtr<mirror::Class> klass = (method == nullptr) ? nullptr : method->LookupResolvedReturnType();
   SetClassAsTypeInfo(instr, klass, /* is_exact= */ false);

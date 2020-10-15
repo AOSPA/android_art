@@ -149,22 +149,6 @@ cc_defaults {
     ],
 }
 
-cc_library_headers {
-    name: "dex2oat_headers",
-    visibility: [
-        // TODO(b/133140750): Clean this up.
-        "//frameworks/native/cmds/installd",
-    ],
-    host_supported: true,
-    export_include_dirs: ["include"],
-
-    apex_available: [
-        "//apex_available:platform",
-        "com.android.art.release",
-        "com.android.art.debug",
-    ],
-}
-
 cc_defaults {
     name: "dex2oat-defaults",
     host_supported: true,
@@ -180,7 +164,6 @@ cc_defaults {
         },
     },
     header_libs: [
-        "dex2oat_headers",
         "art_cmdlineparser_headers",
     ],
 }
@@ -360,7 +343,7 @@ cc_defaults {
     ],
     static_libs: [
         "libbase",
-        "libsigchain_dummy",
+        "libsigchain_fake",
         "libz",
     ],
 }
@@ -460,7 +443,11 @@ art_cc_test {
         "linker/oat_writer_test.cc",
         "verifier_deps_test.cc",
     ],
-    required: ["dex2oatd"],
+    target: {
+        host: {
+            required: ["dex2oatd"],
+        },
+    },
 
     codegen: {
         arm: {
@@ -485,7 +472,6 @@ art_cc_test {
         },
     },
 
-    header_libs: ["dex2oat_headers"],
     shared_libs: [
         "libartbased",
         "libartd-compiler",
