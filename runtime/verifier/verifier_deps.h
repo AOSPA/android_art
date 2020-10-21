@@ -44,6 +44,8 @@ class ClassLoader;
 
 namespace verifier {
 
+class RegType;
+
 // Verification dependencies collector class used by the MethodVerifier to record
 // resolution outcomes and type assignability tests of classes/methods/fields
 // not present in the set of compiled DEX files, that is classes/methods/fields
@@ -115,6 +117,14 @@ class VerifierDeps {
                                        ObjPtr<mirror::Class> source,
                                        bool is_strict,
                                        bool is_assignable)
+      REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(!Locks::verifier_deps_lock_);
+
+  // Record that `source` is assignable to `destination`. `dex_file` is the
+  // owner of the method for which MethodVerifier performed the assignability test.
+  static void MaybeRecordAssignability(const DexFile& dex_file,
+                                       const RegType& destination,
+                                       const RegType& source)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::verifier_deps_lock_);
 
@@ -319,6 +329,11 @@ class VerifierDeps {
                         ObjPtr<mirror::Class> source,
                         bool is_strict,
                         bool is_assignable)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void AddAssignability(const DexFile& dex_file,
+                        const RegType& destination,
+                        const RegType& source)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool Equals(const VerifierDeps& rhs) const;
