@@ -578,6 +578,7 @@ class ReleaseChecker:
     self._checker.check_native_library('libc++')
     self._checker.check_native_library('libdt_socket')
     self._checker.check_native_library('libjdwp')
+    self._checker.check_native_library('liblz4')
     self._checker.check_native_library('liblzma')
     self._checker.check_native_library('libnpt')
     self._checker.check_native_library('libunwindstack')
@@ -642,7 +643,7 @@ class ReleaseHostChecker:
     self._checker.check_symlinked_first_executable('dex2oat')
 
     # Check exported native libraries for Managed Core Library.
-    self._checker.check_native_library('libandroidicu-host')
+    self._checker.check_native_library('libicu')
     self._checker.check_native_library('libandroidio')
 
     # Check internal libraries for Managed Core Library.

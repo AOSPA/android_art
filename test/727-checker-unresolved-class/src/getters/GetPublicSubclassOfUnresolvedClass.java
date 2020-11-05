@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 The Android Open Source Project
+ * Copyright (C) 2020 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,20 +14,13 @@
  * limitations under the License.
  */
 
-#ifndef ART_RUNTIME_GC_SPACE_IMAGE_SPACE_LOADING_ORDER_H_
-#define ART_RUNTIME_GC_SPACE_IMAGE_SPACE_LOADING_ORDER_H_
+package getters;
 
-namespace art {
-namespace gc {
-namespace space {
+import resolved.PublicSubclassOfUnresolvedClass;
 
-enum class ImageSpaceLoadingOrder : char {
-  kSystemFirst,
-  kDataFirst,
-};
-
-}  // namespace space
-}  // namespace gc
-}  // namespace art
-
-#endif  // ART_RUNTIME_GC_SPACE_IMAGE_SPACE_LOADING_ORDER_H_
+public class GetPublicSubclassOfUnresolvedClass {
+  // TODO: Make $inline$ when we relax the verifier. b/28313047
+  public static Class<?> get() {
+    return PublicSubclassOfUnresolvedClass.class;
+  }
+}

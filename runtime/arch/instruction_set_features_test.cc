@@ -176,6 +176,28 @@ TEST(InstructionSetFeaturesTest, FeaturesFromAssembly) {
       << "\nFeatures from build: " << *instruction_set_features.get();
 }
 
+TEST(InstructionSetFeaturesTest, FeaturestFromCpuFeatures) {
+  // Test globally disabled on x86 because of cpu_features not detecting SSSE3,
+  // SSE4.1 and SSE4.2 extensions on fugu's CPU
+  // (see https://github.com/google/cpu_features/issues/4)
+  // TODO(b/169921883): Re-enable when cpu_features detects these CPU features
+  // when running on fugu.
+
+  TEST_DISABLED_FOR_X86();
+
+  // Take the default set of instruction features from the build.
+  std::unique_ptr<const InstructionSetFeatures> instruction_set_features(
+      InstructionSetFeatures::FromCppDefines());
+
+  // Check we get the same instruction set features using the cpu_features library
+  std::unique_ptr<const InstructionSetFeatures> library_features(
+      InstructionSetFeatures::FromCpuFeatures());
+
+  EXPECT_TRUE(library_features->HasAtLeast(instruction_set_features.get()))
+      << "Library features: " << *library_features.get()
+      << "\nFeatures from build: " << *instruction_set_features.get();
+}
+
 TEST(InstructionSetFeaturesTest, FeaturesFromRuntimeDetection) {
   if (!InstructionSetFeatures::IsRuntimeDetectionSupported()) {
     EXPECT_EQ(InstructionSetFeatures::FromRuntimeDetection(), nullptr);
