@@ -2945,6 +2945,12 @@ void IntrinsicCodeGeneratorARMVIXL::VisitIntegerValueOf(HInvoke* invoke) {
   vixl32::Register out = RegisterFrom(locations->Out());
   UseScratchRegisterScope temps(assembler->GetVIXLAssembler());
   vixl32::Register temp = temps.Acquire();
+  auto allocate_instance = [&]() {
+    DCHECK(out.Is(InvokeRuntimeCallingConventionARMVIXL().GetRegisterAt(0)));
+    codegen_->LoadIntrinsicDeclaringClass(out, invoke);
+    codegen_->InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
+    CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+  };
   if (invoke->InputAt(0)->IsConstant()) {
     int32_t value = invoke->InputAt(0)->AsIntConstant()->GetValue();
     if (static_cast<uint32_t>(value - info.low) < info.length) {
@@ -2956,12 +2962,10 @@ void IntrinsicCodeGeneratorARMVIXL::VisitIntegerValueOf(HInvoke* invoke) {
       // Allocate and initialize a new j.l.Integer.
       // TODO: If we JIT, we could allocate the j.l.Integer now, and store it in the
       // JIT object table.
-      codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
-                                             info.integer_boot_image_offset);
+      allocate_instance();
       __ Mov(temp, value);
       assembler->StoreToOffset(kStoreWord, temp, out, info.value_offset);
-      // `value` is a final field :-( Ideally, we'd merge this memory barrier with the allocation
-      // one.
+      // `value` is a final field, emit the barrier after we have stored it.
       codegen_->GenerateMemoryBarrier(MemBarrierKind::kStoreStore);
     }
   } else {
@@ -2979,14 +2983,74 @@ void IntrinsicCodeGeneratorARMVIXL::VisitIntegerValueOf(HInvoke* invoke) {
     __ B(&done);
     __ Bind(&allocate);
     // Otherwise allocate and initialize a new j.l.Integer.
-    codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
-                                           info.integer_boot_image_offset);
+    allocate_instance();
     assembler->StoreToOffset(kStoreWord, in, out, info.value_offset);
-    // `value` is a final field :-( Ideally, we'd merge this memory barrier with the allocation
-    // one.
+    // `value` is a final field, emit the barrier after we have stored it.
     codegen_->GenerateMemoryBarrier(MemBarrierKind::kStoreStore);
     __ Bind(&done);
   }
+}
+
+void IntrinsicLocationsBuilderARMVIXL::VisitReferenceGetReferent(HInvoke* invoke) {
+  IntrinsicVisitor::CreateReferenceGetReferentLocations(invoke, codegen_);
+}
+
+void IntrinsicCodeGeneratorARMVIXL::VisitReferenceGetReferent(HInvoke* invoke) {
+  ArmVIXLAssembler* assembler = GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+
+  Location obj = locations->InAt(0);
+  Location out = locations->Out();
+
+  SlowPathCodeARMVIXL* slow_path = new (GetAllocator()) IntrinsicSlowPathARMVIXL(invoke);
+  codegen_->AddSlowPath(slow_path);
+
+  if (kEmitCompilerReadBarrier) {
+    // Check self->GetWeakRefAccessEnabled().
+    UseScratchRegisterScope temps(assembler->GetVIXLAssembler());
+    vixl32::Register temp = temps.Acquire();
+    __ Ldr(temp,
+           MemOperand(tr, Thread::WeakRefAccessEnabledOffset<kArmPointerSize>().Uint32Value()));
+    __ Cmp(temp, 0);
+    __ B(eq, slow_path->GetEntryLabel());
+  }
+
+  {
+    // Load the java.lang.ref.Reference class.
+    UseScratchRegisterScope temps(assembler->GetVIXLAssembler());
+    vixl32::Register temp = temps.Acquire();
+    codegen_->LoadIntrinsicDeclaringClass(temp, invoke);
+
+    // Check static fields java.lang.ref.Reference.{disableIntrinsic,slowPathEnabled} together.
+    MemberOffset disable_intrinsic_offset = IntrinsicVisitor::GetReferenceDisableIntrinsicOffset();
+    DCHECK_ALIGNED(disable_intrinsic_offset.Uint32Value(), 2u);
+    DCHECK_EQ(disable_intrinsic_offset.Uint32Value() + 1u,
+              IntrinsicVisitor::GetReferenceSlowPathEnabledOffset().Uint32Value());
+    __ Ldrh(temp, MemOperand(temp, disable_intrinsic_offset.Uint32Value()));
+    __ Cmp(temp, 0);
+    __ B(ne, slow_path->GetEntryLabel());
+  }
+
+  // Load the value from the field.
+  uint32_t referent_offset = mirror::Reference::ReferentOffset().Uint32Value();
+  if (kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
+    codegen_->GenerateFieldLoadWithBakerReadBarrier(invoke,
+                                                    out,
+                                                    RegisterFrom(obj),
+                                                    referent_offset,
+                                                    /*maybe_temp=*/ Location::NoLocation(),
+                                                    /*needs_null_check=*/ true);
+    codegen_->GenerateMemoryBarrier(MemBarrierKind::kLoadAny);  // `referent` is volatile.
+  } else {
+    {
+      vixl::EmissionCheckScope guard(codegen_->GetVIXLAssembler(), kMaxMacroInstructionSizeInBytes);
+      __ Ldr(RegisterFrom(out), MemOperand(RegisterFrom(obj), referent_offset));
+      codegen_->MaybeRecordImplicitNullCheck(invoke);
+    }
+    codegen_->GenerateMemoryBarrier(MemBarrierKind::kLoadAny);  // `referent` is volatile.
+    codegen_->MaybeGenerateReadBarrierSlow(invoke, out, out, obj, referent_offset);
+  }
+  __ Bind(slow_path->GetExitLabel());
 }
 
 void IntrinsicLocationsBuilderARMVIXL::VisitThreadInterrupted(HInvoke* invoke) {
@@ -3047,7 +3111,6 @@ void IntrinsicCodeGeneratorARMVIXL::VisitIntegerDivideUnsigned(HInvoke* invoke) 
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, MathRoundDouble)   // Could be done by changing rounding mode, maybe?
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeCASLong)     // High register pressure.
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, SystemArrayCopyChar)
-UNIMPLEMENTED_INTRINSIC(ARMVIXL, ReferenceGetReferent)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, LongDivideUnsigned)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, CRC32Update)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, CRC32UpdateBytes)

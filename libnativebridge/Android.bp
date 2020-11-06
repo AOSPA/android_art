@@ -22,8 +22,9 @@ cc_library_headers {
 
     apex_available: [
         "//apex_available:platform",
+        "com.android.art",
         "com.android.art.debug",
-        "com.android.art.release",
+        "com.android.media",
     ],
 }
 
@@ -36,7 +37,7 @@ art_cc_library {
         "//frameworks/base/native/webview/loader/libwebviewchromium_loader",
     ],
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
 
@@ -76,10 +77,15 @@ cc_library {
         "//frameworks/native/opengl/libs",
         "//frameworks/native/vulkan/libvulkan",
     ],
+    apex_available: [
+        "//apex_available:platform",
+        "com.android.media",
+        "com.android.media.swcodec",
+    ],
 
     host_supported: false,
     srcs: ["native_bridge_lazy.cc"],
-    required: ["libnativebridge"],
+    runtime_libs: ["libnativebridge"],
     shared_libs: ["liblog"],
 }
 

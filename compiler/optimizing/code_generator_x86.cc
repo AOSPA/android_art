@@ -1065,6 +1065,7 @@ CodeGeneratorX86::CodeGeneratorX86(HGraph* graph,
       package_type_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       boot_image_string_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       string_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+      boot_image_jni_entrypoint_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       boot_image_other_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       jit_string_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       jit_class_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
@@ -5259,6 +5260,12 @@ void CodeGeneratorX86::GenerateStaticOrDirectCall(
       GenerateInvokeStaticOrDirectRuntimeCall(invoke, temp, slow_path);
       return;  // No code pointer retrieval; the runtime performs the call directly.
     }
+    case MethodLoadKind::kBootImageLinkTimePcRelative:
+      // For kCallCriticalNative we skip loading the method and do the call directly.
+      if (invoke->GetCodePtrLocation() == CodePtrLocation::kCallCriticalNative) {
+        break;
+      }
+      FALLTHROUGH_INTENDED;
     default: {
       LoadMethod(invoke->GetMethodLoadKind(), callee_method, invoke);
     }
@@ -5274,9 +5281,16 @@ void CodeGeneratorX86::GenerateStaticOrDirectCall(
           PrepareCriticalNativeCall<CriticalNativeCallingConventionVisitorX86,
                                     kNativeStackAlignment,
                                     GetCriticalNativeDirectCallFrameSize>(invoke);
-      // (callee_method + offset_of_jni_entry_point)()
-      __ call(Address(callee_method.AsRegister<Register>(),
-                      ArtMethod::EntryPointFromJniOffset(kX86PointerSize).Int32Value()));
+      if (invoke->GetMethodLoadKind() == MethodLoadKind::kBootImageLinkTimePcRelative) {
+        DCHECK(GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension());
+        Register base_reg = GetInvokeExtraParameter(invoke, temp.AsRegister<Register>());
+        __ call(Address(base_reg, CodeGeneratorX86::kPlaceholder32BitOffset));
+        RecordBootImageJniEntrypointPatch(invoke);
+      } else {
+        // (callee_method + offset_of_jni_entry_point)()
+        __ call(Address(callee_method.AsRegister<Register>(),
+                        ArtMethod::EntryPointFromJniOffset(kX86PointerSize).Int32Value()));
+      }
       RecordPcInfo(invoke, invoke->GetDexPc(), slow_path);
       if (out_frame_size == 0u && DataType::IsFloatingPointType(invoke->GetType())) {
         // Create space for conversion.
@@ -5454,6 +5468,16 @@ Label* CodeGeneratorX86::NewStringBssEntryPatch(HLoadString* load_string) {
   return &string_bss_entry_patches_.back().label;
 }
 
+void CodeGeneratorX86::RecordBootImageJniEntrypointPatch(HInvokeStaticOrDirect* invoke) {
+  HX86ComputeBaseMethodAddress* method_address =
+      invoke->InputAt(invoke->GetSpecialInputIndex())->AsX86ComputeBaseMethodAddress();
+  boot_image_jni_entrypoint_patches_.emplace_back(
+      method_address,
+      invoke->GetResolvedMethodReference().dex_file,
+      invoke->GetResolvedMethodReference().index);
+  __ Bind(&boot_image_jni_entrypoint_patches_.back().label);
+}
+
 void CodeGeneratorX86::LoadBootImageAddress(Register reg,
                                             uint32_t boot_image_reference,
                                             HInvokeStaticOrDirect* invoke) {
@@ -5482,29 +5506,24 @@ void CodeGeneratorX86::LoadBootImageAddress(Register reg,
   }
 }
 
-void CodeGeneratorX86::AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* invoke,
-                                                    uint32_t boot_image_offset) {
-  DCHECK(invoke->IsStatic());
-  InvokeRuntimeCallingConvention calling_convention;
-  Register argument = calling_convention.GetRegisterAt(0);
+void CodeGeneratorX86::LoadIntrinsicDeclaringClass(Register reg, HInvokeStaticOrDirect* invoke) {
+  DCHECK_NE(invoke->GetIntrinsic(), Intrinsics::kNone);
   if (GetCompilerOptions().IsBootImage()) {
-    DCHECK_EQ(boot_image_offset, IntrinsicVisitor::IntegerValueOfInfo::kInvalidReference);
     // Load the class the same way as for HLoadClass::LoadKind::kBootImageLinkTimePcRelative.
     HX86ComputeBaseMethodAddress* method_address =
         invoke->InputAt(invoke->GetSpecialInputIndex())->AsX86ComputeBaseMethodAddress();
     DCHECK(method_address != nullptr);
     Register method_address_reg =
         invoke->GetLocations()->InAt(invoke->GetSpecialInputIndex()).AsRegister<Register>();
-    __ leal(argument, Address(method_address_reg, CodeGeneratorX86::kPlaceholder32BitOffset));
+    __ leal(reg, Address(method_address_reg, CodeGeneratorX86::kPlaceholder32BitOffset));
     MethodReference target_method = invoke->GetResolvedMethodReference();
     dex::TypeIndex type_idx = target_method.dex_file->GetMethodId(target_method.index).class_idx_;
     boot_image_type_patches_.emplace_back(method_address, target_method.dex_file, type_idx.index_);
     __ Bind(&boot_image_type_patches_.back().label);
   } else {
-    LoadBootImageAddress(argument, boot_image_offset, invoke);
+    uint32_t boot_image_offset = GetBootImageOffsetOfIntrinsicDeclaringClass(invoke);
+    LoadBootImageAddress(reg, boot_image_offset, invoke);
   }
-  InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
-  CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
 }
 
 // The label points to the end of the "movl" or another instruction but the literal offset
@@ -5544,6 +5563,7 @@ void CodeGeneratorX86::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linke
       package_type_bss_entry_patches_.size() +
       boot_image_string_patches_.size() +
       string_bss_entry_patches_.size() +
+      boot_image_jni_entrypoint_patches_.size() +
       boot_image_other_patches_.size();
   linker_patches->reserve(size);
   if (GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension()) {
@@ -5575,6 +5595,8 @@ void CodeGeneratorX86::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linke
       package_type_bss_entry_patches_, linker_patches);
   EmitPcRelativeLinkerPatches<linker::LinkerPatch::StringBssEntryPatch>(
       string_bss_entry_patches_, linker_patches);
+  EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeJniEntrypointPatch>(
+      boot_image_jni_entrypoint_patches_, linker_patches);
   DCHECK_EQ(size, linker_patches->size());
 }
 
@@ -7120,7 +7142,7 @@ void InstructionCodeGeneratorX86::VisitLoadClass(HLoadClass* cls) NO_THREAD_SAFE
       Register method_address = locations->InAt(0).AsRegister<Register>();
       __ movl(out, Address(method_address, CodeGeneratorX86::kPlaceholder32BitOffset));
       codegen_->RecordBootImageRelRoPatch(cls->InputAt(0)->AsX86ComputeBaseMethodAddress(),
-                                          codegen_->GetBootImageOffset(cls));
+                                          CodeGenerator::GetBootImageOffset(cls));
       break;
     }
     case HLoadClass::LoadKind::kBssEntry:
@@ -7319,7 +7341,7 @@ void InstructionCodeGeneratorX86::VisitLoadString(HLoadString* load) NO_THREAD_S
       Register method_address = locations->InAt(0).AsRegister<Register>();
       __ movl(out, Address(method_address, CodeGeneratorX86::kPlaceholder32BitOffset));
       codegen_->RecordBootImageRelRoPatch(load->InputAt(0)->AsX86ComputeBaseMethodAddress(),
-                                          codegen_->GetBootImageOffset(load));
+                                          CodeGenerator::GetBootImageOffset(load));
       return;
     }
     case HLoadString::LoadKind::kBssEntry: {
