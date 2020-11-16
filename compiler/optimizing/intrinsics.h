@@ -163,9 +163,8 @@ class IntrinsicOptimizations : public ValueObject {
   explicit IntrinsicOptimizations(const HInvoke& invoke)
       : value_(invoke.GetIntrinsicOptimizations()) {}
 
-  static constexpr int kNumberOfGenericOptimizations = 2;
-  GENERIC_OPTIMIZATION(DoesNotNeedDexCache, 0);
-  GENERIC_OPTIMIZATION(DoesNotNeedEnvironment, 1);
+  static constexpr int kNumberOfGenericOptimizations = 1;
+  GENERIC_OPTIMIZATION(DoesNotNeedEnvironment, 0);
 
  protected:
   bool IsBitSet(uint32_t bit) const {
@@ -286,7 +285,12 @@ UNREACHABLE_INTRINSIC(Arch, StringIsEmpty)                      \
 UNREACHABLE_INTRINSIC(Arch, StringLength)                       \
 UNREACHABLE_INTRINSIC(Arch, UnsafeLoadFence)                    \
 UNREACHABLE_INTRINSIC(Arch, UnsafeStoreFence)                   \
-UNREACHABLE_INTRINSIC(Arch, UnsafeFullFence)
+UNREACHABLE_INTRINSIC(Arch, UnsafeFullFence)                    \
+UNREACHABLE_INTRINSIC(Arch, VarHandleFullFence)                 \
+UNREACHABLE_INTRINSIC(Arch, VarHandleAcquireFence)              \
+UNREACHABLE_INTRINSIC(Arch, VarHandleReleaseFence)              \
+UNREACHABLE_INTRINSIC(Arch, VarHandleLoadLoadFence)             \
+UNREACHABLE_INTRINSIC(Arch, VarHandleStoreStoreFence)
 
 template <typename IntrinsicLocationsBuilder, typename Codegenerator>
 bool IsCallFreeIntrinsic(HInvoke* invoke, Codegenerator* codegen) {
