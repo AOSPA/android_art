@@ -355,8 +355,11 @@ static optimizer::DexToDexCompiler::CompilationLevel GetDexToDexCompilationLevel
   if (dex_file.GetContainer() != nullptr && dex_file.GetContainer()->IsReadOnly()) {
     return optimizer::DexToDexCompiler::CompilationLevel::kDontDexToDexCompile;
   }
+  if (!driver.GetCompilerOptions().IsQuickeningCompilationEnabled()) {
+    // b/170086509 Quickening compilation is being deprecated.
+    return optimizer::DexToDexCompiler::CompilationLevel::kDontDexToDexCompile;
+  }
   auto* const runtime = Runtime::Current();
-  DCHECK(driver.GetCompilerOptions().IsQuickeningCompilationEnabled());
   const char* descriptor = dex_file.GetClassDescriptor(class_def);
   ClassLinker* class_linker = runtime->GetClassLinker();
   ObjPtr<mirror::Class> klass = class_linker->FindClass(self, descriptor, class_loader);
@@ -1480,21 +1483,6 @@ bool CompilerDriver::ComputeInstanceFieldInfo(uint32_t field_idx, const DexCompi
   }
 }
 
-bool CompilerDriver::IsSafeCast(const DexCompilationUnit* mUnit, uint32_t dex_pc) {
-  if (!compiler_options_->IsVerificationEnabled()) {
-    // If we didn't verify, every cast has to be treated as non-safe.
-    return false;
-  }
-  DCHECK(mUnit->GetVerifiedMethod() != nullptr);
-  bool result = mUnit->GetVerifiedMethod()->IsSafeCast(dex_pc);
-  if (result) {
-    stats_->SafeCast();
-  } else {
-    stats_->NotASafeCast();
-  }
-  return result;
-}
-
 class CompilationVisitor {
  public:
   virtual ~CompilationVisitor() {}
@@ -1933,12 +1921,13 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
           ClassReference ref(dex_file, accessor.GetClassDefIndex());
           const ClassStatus existing = ClassStatus::kNotReady;
           ClassStateTable::InsertResult result =
-             compiled_classes_.Insert(ref, existing, ClassStatus::kVerified);
+             compiled_classes_.Insert(ref, existing, ClassStatus::kVerifiedNeedsAccessChecks);
           CHECK_EQ(result, ClassStateTable::kInsertResultSuccess) << ref.dex_file->GetLocation();
         } else {
           // Update the class status, so later compilation stages know they don't need to verify
           // the class.
-          LoadAndUpdateStatus(accessor, ClassStatus::kVerified, class_loader, soa.Self());
+          LoadAndUpdateStatus(
+              accessor, ClassStatus::kVerifiedNeedsAccessChecks, class_loader, soa.Self());
           // Create `VerifiedMethod`s for each methods, the compiler expects one for
           // quickening or compiling.
           // Note that this means:

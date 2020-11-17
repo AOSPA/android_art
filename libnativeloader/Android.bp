@@ -19,7 +19,7 @@ art_cc_library {
         "//frameworks/base/native/webview/loader",
     ],
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
     host_supported: true,
@@ -77,9 +77,14 @@ cc_library {
         "//frameworks/native/opengl/libs",
         "//frameworks/native/vulkan/libvulkan",
     ],
+    apex_available: [
+        "//apex_available:platform",
+        "com.android.media",
+        "com.android.media.swcodec",
+    ],
     host_supported: false,
     srcs: ["native_loader_lazy.cpp"],
-    required: ["libnativeloader"],
+    runtime_libs: ["libnativeloader"],
     shared_libs: ["liblog"],
 }
 
@@ -87,8 +92,9 @@ cc_library_headers {
     name: "libnativeloader-headers",
     apex_available: [
         "//apex_available:platform",
+        "com.android.art",
         "com.android.art.debug",
-        "com.android.art.release",
+        "com.android.media",
     ],
     visibility: [
         "//art:__subpackages__",

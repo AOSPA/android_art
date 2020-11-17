@@ -176,7 +176,7 @@ art_cc_library {
         },
     },
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
 }
@@ -273,8 +273,10 @@ cc_library_headers {
 
     apex_available: [
         "//apex_available:platform",
+        "com.android.art",
         "com.android.art.debug",
-        "com.android.art.release",
+        "com.android.media",
+        "com.android.runtime",
     ],
 }
 
@@ -286,8 +288,8 @@ cc_library_headers {
     export_include_dirs: ["."],
 
     apex_available: [
+        "com.android.art",
         "com.android.art.debug",
-        "com.android.art.release",
     ],
 }
 
@@ -330,7 +332,7 @@ art_cc_library {
         "libdexfile",
     ],
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
 }
@@ -388,8 +390,11 @@ art_cc_library {
 
     apex_available: [
         "//apex_available:platform",
+        "com.android.art",
         "com.android.art.debug",
-        "com.android.art.release",
+        "com.android.media",
+        "com.android.media.swcodec",
+        "com.android.runtime",
     ],
 }
 

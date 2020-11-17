@@ -59,15 +59,56 @@ ART_HISTOGRAMS(ART_HISTOGRAM)
 
 void ArtMetrics::ReportAllMetrics(MetricsBackend* backend) const {
 // Dump counters
-#define ART_COUNTER(name) backend->ReportCounter(DatumId::k##name, name()->Value());
+#define ART_COUNTER(name) name()->Report(backend);
   ART_COUNTERS(ART_COUNTER)
 #undef ART_COUNTERS
 
 // Dump histograms
-#define ART_HISTOGRAM(name, num_buckets, low_value, high_value) \
-  backend->ReportHistogram(DatumId::k##name, low_value, high_value, name()->GetBuckets());
+#define ART_HISTOGRAM(name, num_buckets, low_value, high_value) name()->Report(backend);
   ART_HISTOGRAMS(ART_HISTOGRAM)
 #undef ART_HISTOGRAM
+}
+
+void ArtMetrics::DumpForSigQuit(std::ostream& os) const {
+  os << "\n*** ART internal metrics ***\n\n";
+  StreamBackend backend{os};
+  ReportAllMetrics(&backend);
+  os << "\n*** Done dumping ART internal metrics ***\n";
+}
+
+StreamBackend::StreamBackend(std::ostream& os) : os_{os} {}
+
+void StreamBackend::BeginSession([[maybe_unused]] const SessionData& session_data) {
+  // Not needed for now.
+}
+
+void StreamBackend::EndSession() {
+  // Not needed for now.
+}
+
+void StreamBackend::ReportCounter(DatumId counter_type, uint64_t value) {
+  os_ << DatumName(counter_type) << ": count = " << value << "\n";
+}
+
+void StreamBackend::ReportHistogram(DatumId histogram_type,
+                                    int64_t minimum_value_,
+                                    int64_t maximum_value_,
+                                    const std::vector<uint32_t>& buckets) {
+  os_ << DatumName(histogram_type) << ": range = " << minimum_value_ << "..." << maximum_value_;
+  if (buckets.size() > 0) {
+    os_ << ", buckets: ";
+    bool first = true;
+    for (const auto& count : buckets) {
+      if (!first) {
+        os_ << ",";
+      }
+      first = false;
+      os_ << count;
+    }
+    os_ << "\n";
+  } else {
+    os_ << ", no buckets\n";
+  }
 }
 
 }  // namespace metrics
