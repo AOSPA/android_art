@@ -2965,7 +2965,7 @@ void IntrinsicCodeGeneratorARMVIXL::VisitIntegerValueOf(HInvoke* invoke) {
       allocate_instance();
       __ Mov(temp, value);
       assembler->StoreToOffset(kStoreWord, temp, out, info.value_offset);
-      // `value` is a final field, emit the barrier after we have stored it.
+      // Class pointer and `value` final field stores require a barrier before publication.
       codegen_->GenerateMemoryBarrier(MemBarrierKind::kStoreStore);
     }
   } else {
@@ -2985,7 +2985,7 @@ void IntrinsicCodeGeneratorARMVIXL::VisitIntegerValueOf(HInvoke* invoke) {
     // Otherwise allocate and initialize a new j.l.Integer.
     allocate_instance();
     assembler->StoreToOffset(kStoreWord, in, out, info.value_offset);
-    // `value` is a final field, emit the barrier after we have stored it.
+    // Class pointer and `value` final field stores require a barrier before publication.
     codegen_->GenerateMemoryBarrier(MemBarrierKind::kStoreStore);
     __ Bind(&done);
   }
@@ -3150,11 +3150,6 @@ UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndSetInt)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndSetLong)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndSetObject)
 
-UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleFullFence)
-UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleAcquireFence)
-UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleReleaseFence)
-UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleLoadLoadFence)
-UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleStoreStoreFence)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, MethodHandleInvokeExact)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, MethodHandleInvoke)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleCompareAndExchange)
