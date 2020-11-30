@@ -20,6 +20,7 @@
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
+#include "compat_framework.h"
 #include "base/dumpable.h"
 #include "base/file_utils.h"
 #include "dex/class_accessor-inl.h"
@@ -33,11 +34,13 @@
 namespace art {
 namespace hiddenapi {
 
-// Should be the same as dalvik.system.VMRuntime.HIDE_MAXTARGETSDK_P_HIDDEN_APIS and
-// dalvik.system.VMRuntime.HIDE_MAXTARGETSDK_Q_HIDDEN_APIS.
+// Should be the same as dalvik.system.VMRuntime.HIDE_MAXTARGETSDK_P_HIDDEN_APIS,
+// dalvik.system.VMRuntime.HIDE_MAXTARGETSDK_Q_HIDDEN_APIS, and
+// dalvik.system.VMRuntime.EXEMPT_TEST_API_ACCESS_VERIFICATION.
 // Corresponds to bug ids.
 static constexpr uint64_t kHideMaxtargetsdkPHiddenApis = 149997251;
 static constexpr uint64_t kHideMaxtargetsdkQHiddenApis = 149994052;
+static constexpr uint64_t kAllowTestApiAccess = 166236554;
 
 // Set to true if we should always print a warning in logcat for all hidden API accesses, not just
 // conditionally and unconditionally blocked. This can be set to true for developer preview / beta
@@ -476,6 +479,7 @@ template<typename T>
 bool ShouldDenyAccessToMemberImpl(T* member, ApiList api_list, AccessMethod access_method) {
   DCHECK(member != nullptr);
   Runtime* runtime = Runtime::Current();
+  CompatFramework& compatFramework = runtime->GetCompatFramework();
 
   EnforcementPolicy hiddenApiPolicy = runtime->GetHiddenApiEnforcementPolicy();
   DCHECK(hiddenApiPolicy != EnforcementPolicy::kDisabled)
@@ -496,15 +500,17 @@ bool ShouldDenyAccessToMemberImpl(T* member, ApiList api_list, AccessMethod acce
 
   bool deny_access = false;
   if (hiddenApiPolicy == EnforcementPolicy::kEnabled) {
-    if (testApiPolicy == EnforcementPolicy::kDisabled && api_list.IsTestApi()) {
+    if (api_list.IsTestApi() &&
+      (testApiPolicy == EnforcementPolicy::kDisabled ||
+        compatFramework.IsChangeEnabled(kAllowTestApiAccess))) {
       deny_access = false;
     } else {
       switch (api_list.GetMaxAllowedSdkVersion()) {
         case SdkVersion::kP:
-          deny_access = runtime->isChangeEnabled(kHideMaxtargetsdkPHiddenApis);
+          deny_access = compatFramework.IsChangeEnabled(kHideMaxtargetsdkPHiddenApis);
           break;
         case SdkVersion::kQ:
-          deny_access = runtime->isChangeEnabled(kHideMaxtargetsdkQHiddenApis);
+          deny_access = compatFramework.IsChangeEnabled(kHideMaxtargetsdkQHiddenApis);
           break;
         default:
           deny_access = IsSdkVersionSetAndMoreThan(runtime->GetTargetSdkVersion(),

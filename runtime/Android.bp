@@ -78,6 +78,7 @@ libart_cc_defaults {
         "class_root.cc",
         "class_table.cc",
         "common_throws.cc",
+        "compat_framework.cc",
         "compiler_filter.cc",
         "debug_print.cc",
         "debugger.cc",
@@ -770,6 +771,7 @@ genrule {
     tool_files: [
         "interpreter/mterp/gen_mterp.py",
         "interpreter/mterp/common/gen_setup.py",
+        ":art_libdexfile_dex_instruction_list_header",
     ],
     cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
 }
@@ -781,6 +783,7 @@ genrule {
     tool_files: [
         "interpreter/mterp/gen_mterp.py",
         "interpreter/mterp/common/gen_setup.py",
+        ":art_libdexfile_dex_instruction_list_header",
     ],
     cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
 }
@@ -792,6 +795,7 @@ genrule {
     tool_files: [
         "interpreter/mterp/gen_mterp.py",
         "interpreter/mterp/common/gen_setup.py",
+        ":art_libdexfile_dex_instruction_list_header",
     ],
     cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
 }
@@ -803,6 +807,7 @@ genrule {
     tool_files: [
         "interpreter/mterp/gen_mterp.py",
         "interpreter/mterp/common/gen_setup.py",
+        ":art_libdexfile_dex_instruction_list_header",
     ],
     cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
 }
@@ -818,6 +823,7 @@ genrule {
     tool_files: [
         "interpreter/mterp/gen_mterp.py",
         "interpreter/mterp/common/gen_setup.py",
+        ":art_libdexfile_dex_instruction_list_header",
     ],
     cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
 }
@@ -833,6 +839,7 @@ genrule {
     tool_files: [
         "interpreter/mterp/gen_mterp.py",
         "interpreter/mterp/common/gen_setup.py",
+        ":art_libdexfile_dex_instruction_list_header",
     ],
     cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
 }

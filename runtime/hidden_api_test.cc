@@ -34,10 +34,12 @@ using android::base::StringPrintf;
 using hiddenapi::detail::MemberSignature;
 using hiddenapi::detail::ShouldDenyAccessToMemberImpl;
 
-// Should be the same as dalvik.system.VMRuntime.HIDE_MAXTARGETSDK_P_HIDDEN_APIS and
-// dalvik.system.VMRuntime.HIDE_MAXTARGETSDK_Q_HIDDEN_APIS.
+// Should be the same as dalvik.system.VMRuntime.HIDE_MAXTARGETSDK_P_HIDDEN_APIS,
+// dalvik.system.VMRuntime.HIDE_MAXTARGETSDK_Q_HIDDEN_APIS, and
+// dalvik.system.VMRuntime.EXEMPT_TEST_API_ACCESS_VERIFICATION.
 static constexpr uint64_t kHideMaxtargetsdkPHiddenApis = 149997251;
 static constexpr uint64_t kHideMaxtargetsdkQHiddenApis = 149994052;
+static constexpr uint64_t kAllowTestApiAccess = 166236554;
 
 class HiddenApiTest : public CommonRuntimeTest {
  protected:
@@ -83,13 +85,14 @@ class HiddenApiTest : public CommonRuntimeTest {
   }
 
   void setChangeIdState(uint64_t change, bool enabled) {
-    std::set<uint64_t> disabled_changes = runtime_->GetDisabledCompatChanges();
+    CompatFramework& compat_framework = runtime_->GetCompatFramework();
+    std::set<uint64_t> disabled_changes = compat_framework.GetDisabledCompatChanges();
     if (enabled) {
       disabled_changes.erase(change);
     } else {
       disabled_changes.insert(change);
     }
-    runtime_->SetDisabledCompatChanges(disabled_changes);
+    compat_framework.SetDisabledCompatChanges(disabled_changes);
   }
 
   bool ShouldDenyAccess(hiddenapi::ApiList list) REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -214,6 +217,7 @@ TEST_F(HiddenApiTest, CheckTestApiEnforcement) {
 
   // Default case where all TestApis are treated like non-TestApi.
   runtime_->SetTestApiEnforcementPolicy(hiddenapi::EnforcementPolicy::kEnabled);
+  setChangeIdState(kAllowTestApiAccess, false);
   ASSERT_EQ(
       ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::Sdk()), false);
   ASSERT_EQ(
@@ -231,6 +235,25 @@ TEST_F(HiddenApiTest, CheckTestApiEnforcement) {
 
   // A case where we want to allow access to TestApis.
   runtime_->SetTestApiEnforcementPolicy(hiddenapi::EnforcementPolicy::kDisabled);
+  setChangeIdState(kAllowTestApiAccess, false);
+  ASSERT_EQ(
+      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::Sdk()), false);
+  ASSERT_EQ(
+      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::Unsupported()), false);
+  ASSERT_EQ(
+      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::MaxTargetR()), false);
+  ASSERT_EQ(
+      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::MaxTargetQ()), false);
+  ASSERT_EQ(
+      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::MaxTargetP()), false);
+  ASSERT_EQ(
+      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::MaxTargetO()), false);
+  ASSERT_EQ(
+      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::Blocked()), false);
+
+  // A second case where we want to allow access to TestApis.
+  runtime_->SetTestApiEnforcementPolicy(hiddenapi::EnforcementPolicy::kEnabled);
+  setChangeIdState(kAllowTestApiAccess, true);
   ASSERT_EQ(
       ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::Sdk()), false);
   ASSERT_EQ(
