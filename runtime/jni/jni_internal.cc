@@ -17,6 +17,7 @@
 #include "jni_internal.h"
 
 #include <cstdarg>
+#include <log/log.h>
 #include <memory>
 #include <utility>
 
@@ -1916,6 +1917,7 @@ class JNI {
     if (UNLIKELY(utf8_length != 0u && utf16_length == 0u)) {
       // VisitModifiedUtf8Chars() aborted for a bad character.
       // Report the error to logcat but avoid too much spam.
+      android_errorWriteLog(0x534e4554, "172655291");  // Report to SafetyNet.
       static const uint64_t kMinDelay = UINT64_C(10000000000);  // 10s
       static std::atomic<uint64_t> prev_bad_input_time(UINT64_C(0));
       uint64_t prev_time = prev_bad_input_time.load(std::memory_order_relaxed);
