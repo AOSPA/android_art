@@ -223,6 +223,13 @@ void CheckConstants() {
   CHECK_EQ(mirror::Array::kFirstElementOffset, mirror::Array::FirstElementOffset());
 }
 
+metrics::ReportingConfig ParseMetricsReportingConfig(const RuntimeArgumentMap& args) {
+  using M = RuntimeArgumentMap;
+  return {
+      .dump_to_logcat = args.Exists(M::WriteMetricsToLog),
+  };
+}
+
 }  // namespace
 
 Runtime::Runtime()
@@ -1709,6 +1716,9 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // Class-roots are setup, we can now finish initializing the JniIdManager.
   GetJniIdManager()->Init(self);
 
+  metrics_reporter_ =
+      metrics::MetricsReporter::Create(ParseMetricsReportingConfig(runtime_options), &metrics_);
+
   // Runtime initialization is largely done now.
   // We load plugins first since that can modify the runtime state slightly.
   // Load all plugins
@@ -2965,14 +2975,6 @@ class Runtime::NotifyStartupCompletedTask : public gc::HeapTask {
     {
       ScopedTrace trace("Releasing app image spaces metadata");
       ScopedObjectAccess soa(Thread::Current());
-      for (gc::space::ContinuousSpace* space : runtime->GetHeap()->GetContinuousSpaces()) {
-        if (space->IsImageSpace()) {
-          gc::space::ImageSpace* image_space = space->AsImageSpace();
-          if (image_space->GetImageHeader().IsAppImage()) {
-            image_space->DisablePreResolvedStrings();
-          }
-        }
-      }
       // Request empty checkpoints to make sure no threads are accessing the image space metadata
       // section when we madvise it. Use GC exclusion to prevent deadlocks that may happen if
       // multiple threads are attempting to run empty checkpoints at the same time.

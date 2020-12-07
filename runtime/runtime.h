@@ -30,7 +30,6 @@
 #include "base/locks.h"
 #include "base/macros.h"
 #include "base/mem_map.h"
-#include "base/metrics.h"
 #include "base/string_view_cpp20.h"
 #include "compat_framework.h"
 #include "deoptimization_kind.h"
@@ -41,6 +40,7 @@
 #include "jdwp_provider.h"
 #include "jni/jni_id_manager.h"
 #include "jni_id_type.h"
+#include "metrics/metrics.h"
 #include "obj_ptr.h"
 #include "offsets.h"
 #include "process_state.h"
@@ -1322,6 +1322,7 @@ class Runtime {
   bool perfetto_hprof_enabled_;
 
   metrics::ArtMetrics metrics_;
+  std::unique_ptr<metrics::MetricsReporter> metrics_reporter_;
 
   // Note: See comments on GetFaultMessage.
   friend std::string GetFaultMessageForAbortLogging();
