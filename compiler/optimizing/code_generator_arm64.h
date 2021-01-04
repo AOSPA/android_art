@@ -375,9 +375,10 @@ class InstructionCodeGeneratorARM64 : public InstructionCodeGenerator {
                                         int64_t divisor,
                                         // This function may acquire a scratch register.
                                         vixl::aarch64::UseScratchRegisterScope* temps_scope);
+  void GenerateInt64UnsignedDivRemWithAnyPositiveConstant(HBinaryOperation* instruction);
   void GenerateInt64DivRemWithAnyConstant(HBinaryOperation* instruction);
   void GenerateInt32DivRemWithAnyConstant(HBinaryOperation* instruction);
-  void GenerateDivRemWithAnyConstant(HBinaryOperation* instruction);
+  void GenerateDivRemWithAnyConstant(HBinaryOperation* instruction, int64_t divisor);
   void GenerateIntDiv(HDiv* instruction);
   void GenerateIntDivForConstDenom(HDiv *instruction);
   void GenerateIntDivForPower2Denom(HDiv *instruction);
@@ -688,6 +689,7 @@ class CodeGeneratorARM64 : public CodeGenerator {
       const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
       ArtMethod* method) override;
 
+  void LoadMethod(MethodLoadKind load_kind, Location temp, HInvoke* invoke);
   void GenerateStaticOrDirectCall(
       HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path = nullptr) override;
   void GenerateVirtualCall(
@@ -735,8 +737,7 @@ class CodeGeneratorARM64 : public CodeGenerator {
   // to be bound before the instruction. The instruction will be either the
   // ADRP (pass `adrp_label = null`) or the ADD (pass `adrp_label` pointing
   // to the associated ADRP patch label).
-  vixl::aarch64::Label* NewBssEntryTypePatch(const DexFile& dex_file,
-                                             dex::TypeIndex type_index,
+  vixl::aarch64::Label* NewBssEntryTypePatch(HLoadClass* load_class,
                                              vixl::aarch64::Label* adrp_label = nullptr);
 
   // Add a new boot image string patch for an instruction and return the label
@@ -754,6 +755,13 @@ class CodeGeneratorARM64 : public CodeGenerator {
   vixl::aarch64::Label* NewStringBssEntryPatch(const DexFile& dex_file,
                                                dex::StringIndex string_index,
                                                vixl::aarch64::Label* adrp_label = nullptr);
+
+  // Add a new boot image JNI entrypoint patch for an instruction and return the label
+  // to be bound before the instruction. The instruction will be either the
+  // ADRP (pass `adrp_label = null`) or the LDR (pass `adrp_label` pointing
+  // to the associated ADRP patch label).
+  vixl::aarch64::Label* NewBootImageJniEntrypointPatch(MethodReference target_method,
+                                                       vixl::aarch64::Label* adrp_label = nullptr);
 
   // Emit the BL instruction for entrypoint thunk call and record the associated patch for AOT.
   void EmitEntrypointThunkCall(ThreadOffset64 entrypoint_offset);
@@ -779,7 +787,7 @@ class CodeGeneratorARM64 : public CodeGenerator {
                                 vixl::aarch64::Register base);
 
   void LoadBootImageAddress(vixl::aarch64::Register reg, uint32_t boot_image_reference);
-  void AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* invoke, uint32_t boot_image_offset);
+  void LoadIntrinsicDeclaringClass(vixl::aarch64::Register reg, HInvoke* invoke);
 
   void EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linker_patches) override;
   bool NeedsThunkCode(const linker::LinkerPatch& patch) const override;
@@ -845,6 +853,18 @@ class CodeGeneratorARM64 : public CodeGenerator {
   // scratch pool.
   virtual void MaybeGenerateMarkingRegisterCheck(int code,
                                                  Location temp_loc = Location::NoLocation());
+
+  // Create slow path for a read barrier for a heap reference within `instruction`.
+  //
+  // This is a helper function for GenerateReadBarrierSlow() that has the same
+  // arguments. The creation and adding of the slow path is exposed for intrinsics
+  // that cannot use GenerateReadBarrierSlow() from their own slow paths.
+  SlowPathCodeARM64* AddReadBarrierSlowPath(HInstruction* instruction,
+                                            Location out,
+                                            Location ref,
+                                            Location obj,
+                                            uint32_t offset,
+                                            Location index);
 
   // Generate a read barrier for a heap reference within `instruction`
   // using a slow path.
@@ -1047,10 +1067,16 @@ class CodeGeneratorARM64 : public CodeGenerator {
   ArenaDeque<PcRelativePatchInfo> boot_image_type_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> type_bss_entry_patches_;
+  // PC-relative public type patch info for kBssEntryPublic.
+  ArenaDeque<PcRelativePatchInfo> public_type_bss_entry_patches_;
+  // PC-relative package type patch info for kBssEntryPackage.
+  ArenaDeque<PcRelativePatchInfo> package_type_bss_entry_patches_;
   // PC-relative String patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<PcRelativePatchInfo> boot_image_string_patches_;
   // PC-relative String patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> string_bss_entry_patches_;
+  // PC-relative method patch info for kBootImageLinkTimePcRelative+kCallCriticalNative.
+  ArenaDeque<PcRelativePatchInfo> boot_image_jni_entrypoint_patches_;
   // PC-relative patch info for IntrinsicObjects for the boot image,
   // and for method/type/string patches for kBootImageRelRo otherwise.
   ArenaDeque<PcRelativePatchInfo> boot_image_other_patches_;

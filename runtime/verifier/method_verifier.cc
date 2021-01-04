@@ -173,6 +173,7 @@ class MethodVerifier final : public ::art::verifier::MethodVerifier {
                                      class_linker,
                                      arena_pool,
                                      dex_file,
+                                     class_def,
                                      code_item,
                                      method_idx,
                                      can_load_classes,
@@ -184,7 +185,6 @@ class MethodVerifier final : public ::art::verifier::MethodVerifier {
        return_type_(nullptr),
        dex_cache_(dex_cache),
        class_loader_(class_loader),
-       class_def_(class_def),
        declaring_class_(nullptr),
        interesting_dex_pc_(-1),
        monitor_enter_dex_pcs_(nullptr),
@@ -793,7 +793,6 @@ class MethodVerifier final : public ::art::verifier::MethodVerifier {
   Handle<mirror::DexCache> dex_cache_ GUARDED_BY(Locks::mutator_lock_);
   // The class loader for the declaring class of the method.
   Handle<mirror::ClassLoader> class_loader_ GUARDED_BY(Locks::mutator_lock_);
-  const dex::ClassDef& class_def_;  // The class def of the declaring class of the method.
   const RegType* declaring_class_;  // Lazily computed reg type of the method's declaring class.
 
   // The dex PC of a FindLocksAtDexPc request, -1 otherwise.
@@ -1036,7 +1035,8 @@ bool MethodVerifier<kVerifierDebug>::Verify() {
     }
   }
 
-  // Sanity-check the register counts. ins + locals = registers, so make sure that ins <= registers.
+  // Consistency-check of the register counts.
+  // ins + locals = registers, so make sure that ins <= registers.
   if (code_item_accessor_.InsSize() > code_item_accessor_.RegistersSize()) {
     Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "bad register counts (ins="
                                       << code_item_accessor_.InsSize()
@@ -1077,15 +1077,6 @@ bool MethodVerifier<kVerifierDebug>::ComputeWidthsAndCountOps() {
     ++next;
     if (next.IsErrorState()) {
       break;
-    }
-    Instruction::Code opcode = it->Opcode();
-    switch (opcode) {
-      case Instruction::APUT_OBJECT:
-      case Instruction::CHECK_CAST:
-        has_check_casts_ = true;
-        break;
-      default:
-        break;
     }
     GetModifiableInstructionFlags(it.DexPc()).SetIsOpcode();
   }
@@ -1900,7 +1891,7 @@ bool MethodVerifier<kVerifierDebug>::CodeFlowVerifyMethod() {
       work_line_->CopyFromLine(reg_table_.GetLine(insn_idx));
     } else if (kIsDebugBuild) {
       /*
-       * Sanity check: retrieve the stored register line (assuming
+       * Consistency check: retrieve the stored register line (assuming
        * a full table) and make sure it actually matches.
        */
       RegisterLine* register_line = reg_table_.GetLine(insn_idx);
@@ -3755,9 +3746,6 @@ const RegType& MethodVerifier<kVerifierDebug>::ResolveClass(dex::TypeIndex class
     return *result;
   }
 
-  // Record result of class resolution attempt.
-  VerifierDeps::MaybeRecordClassResolution(*dex_file_, class_idx, klass);
-
   // If requested, check if access is allowed. Unresolved types are included in this check, as the
   // interpreter only tests whether access is allowed when a class is not pre-verified and runs in
   // the access-checks interpreter. If result is primitive, skip the access check.
@@ -3892,11 +3880,6 @@ ArtMethod* MethodVerifier<kVerifierDebug>::ResolveMethodAndCheckAccess(
     res_method = class_linker->FindResolvedMethod(
         klass, dex_cache_.Get(), class_loader_.Get(), dex_method_idx);
   }
-
-  // Record result of method resolution attempt. The klass resolution has recorded whether
-  // the class is an interface or not and therefore the type of the lookup performed above.
-  // TODO: Maybe we should not record dependency if the invoke type does not match the lookup type.
-  VerifierDeps::MaybeRecordMethodResolution(*dex_file_, dex_method_idx, res_method);
 
   bool must_fail = false;
   // This is traditional and helps with screwy bytecode. It will tell you that, yes, a method
@@ -4673,9 +4656,6 @@ ArtField* MethodVerifier<kVerifierDebug>::GetStaticField(int field_idx) {
   ClassLinker* class_linker = GetClassLinker();
   ArtField* field = class_linker->ResolveFieldJLS(field_idx, dex_cache_, class_loader_);
 
-  // Record result of the field resolution attempt.
-  VerifierDeps::MaybeRecordFieldResolution(*dex_file_, field_idx, field);
-
   if (field == nullptr) {
     VLOG(verifier) << "Unable to resolve static field " << field_idx << " ("
               << dex_file_->GetFieldName(field_id) << ") in "
@@ -4722,9 +4702,6 @@ ArtField* MethodVerifier<kVerifierDebug>::GetInstanceField(const RegType& obj_ty
   }
   ClassLinker* class_linker = GetClassLinker();
   ArtField* field = class_linker->ResolveFieldJLS(field_idx, dex_cache_, class_loader_);
-
-  // Record result of the field resolution attempt.
-  VerifierDeps::MaybeRecordFieldResolution(*dex_file_, field_idx, field);
 
   if (field == nullptr) {
     VLOG(verifier) << "Unable to resolve instance field " << field_idx << " ("
@@ -5064,6 +5041,7 @@ MethodVerifier::MethodVerifier(Thread* self,
                                ClassLinker* class_linker,
                                ArenaPool* arena_pool,
                                const DexFile* dex_file,
+                               const dex::ClassDef& class_def,
                                const dex::CodeItem* code_item,
                                uint32_t dex_method_idx,
                                bool can_load_classes,
@@ -5078,13 +5056,13 @@ MethodVerifier::MethodVerifier(Thread* self,
       work_insn_idx_(dex::kDexNoIndex),
       dex_method_idx_(dex_method_idx),
       dex_file_(dex_file),
+      class_def_(class_def),
       code_item_accessor_(*dex_file, code_item),
       // TODO: make it designated initialization when we compile as C++20.
       flags_({false, false, false, false, aot_mode}),
       encountered_failure_types_(0),
       can_load_classes_(can_load_classes),
       allow_soft_failures_(allow_soft_failures),
-      has_check_casts_(false),
       class_linker_(class_linker),
       link_(nullptr) {
   self->PushVerifier(this);

@@ -2616,6 +2616,11 @@ void IntrinsicCodeGeneratorX86_64::VisitIntegerValueOf(HInvoke* invoke) {
   CpuRegister out = locations->Out().AsRegister<CpuRegister>();
   InvokeRuntimeCallingConvention calling_convention;
   CpuRegister argument = CpuRegister(calling_convention.GetRegisterAt(0));
+  auto allocate_instance = [&]() {
+    codegen_->LoadIntrinsicDeclaringClass(argument, invoke);
+    codegen_->InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
+    CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+  };
   if (invoke->InputAt(0)->IsIntConstant()) {
     int32_t value = invoke->InputAt(0)->AsIntConstant()->GetValue();
     if (static_cast<uint32_t>(value - info.low) < info.length) {
@@ -2627,8 +2632,7 @@ void IntrinsicCodeGeneratorX86_64::VisitIntegerValueOf(HInvoke* invoke) {
       // Allocate and initialize a new j.l.Integer.
       // TODO: If we JIT, we could allocate the j.l.Integer now, and store it in the
       // JIT object table.
-      codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
-                                             info.integer_boot_image_offset);
+      allocate_instance();
       __ movl(Address(out, info.value_offset), Immediate(value));
     }
   } else {
@@ -2649,11 +2653,63 @@ void IntrinsicCodeGeneratorX86_64::VisitIntegerValueOf(HInvoke* invoke) {
     __ jmp(&done);
     __ Bind(&allocate);
     // Otherwise allocate and initialize a new j.l.Integer.
-    codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
-                                           info.integer_boot_image_offset);
+    allocate_instance();
     __ movl(Address(out, info.value_offset), in);
     __ Bind(&done);
   }
+}
+
+void IntrinsicLocationsBuilderX86_64::VisitReferenceGetReferent(HInvoke* invoke) {
+  IntrinsicVisitor::CreateReferenceGetReferentLocations(invoke, codegen_);
+}
+
+void IntrinsicCodeGeneratorX86_64::VisitReferenceGetReferent(HInvoke* invoke) {
+  X86_64Assembler* assembler = GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+
+  Location obj = locations->InAt(0);
+  Location out = locations->Out();
+
+  SlowPathCode* slow_path = new (GetAllocator()) IntrinsicSlowPathX86_64(invoke);
+  codegen_->AddSlowPath(slow_path);
+
+  if (kEmitCompilerReadBarrier) {
+    // Check self->GetWeakRefAccessEnabled().
+    ThreadOffset64 offset = Thread::WeakRefAccessEnabledOffset<kX86_64PointerSize>();
+    __ gs()->cmpl(Address::Absolute(offset, /* no_rip= */ true), Immediate(0));
+    __ j(kEqual, slow_path->GetEntryLabel());
+  }
+
+  // Load the java.lang.ref.Reference class, use the output register as a temporary.
+  codegen_->LoadIntrinsicDeclaringClass(out.AsRegister<CpuRegister>(), invoke);
+
+  // Check static fields java.lang.ref.Reference.{disableIntrinsic,slowPathEnabled} together.
+  MemberOffset disable_intrinsic_offset = IntrinsicVisitor::GetReferenceDisableIntrinsicOffset();
+  DCHECK_ALIGNED(disable_intrinsic_offset.Uint32Value(), 2u);
+  DCHECK_EQ(disable_intrinsic_offset.Uint32Value() + 1u,
+            IntrinsicVisitor::GetReferenceSlowPathEnabledOffset().Uint32Value());
+  __ cmpw(Address(out.AsRegister<CpuRegister>(), disable_intrinsic_offset.Uint32Value()),
+          Immediate(0));
+  __ j(kNotEqual, slow_path->GetEntryLabel());
+
+  // Load the value from the field.
+  uint32_t referent_offset = mirror::Reference::ReferentOffset().Uint32Value();
+  if (kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
+    codegen_->GenerateFieldLoadWithBakerReadBarrier(invoke,
+                                                    out,
+                                                    obj.AsRegister<CpuRegister>(),
+                                                    referent_offset,
+                                                    /*needs_null_check=*/ true);
+    // Note that the fence is a no-op, thanks to the x86-64 memory model.
+    codegen_->GenerateMemoryBarrier(MemBarrierKind::kLoadAny);  // `referent` is volatile.
+  } else {
+    __ movl(out.AsRegister<CpuRegister>(), Address(obj.AsRegister<CpuRegister>(), referent_offset));
+    codegen_->MaybeRecordImplicitNullCheck(invoke);
+    // Note that the fence is a no-op, thanks to the x86-64 memory model.
+    codegen_->GenerateMemoryBarrier(MemBarrierKind::kLoadAny);  // `referent` is volatile.
+    codegen_->MaybeGenerateReadBarrierSlow(invoke, out, out, obj, referent_offset);
+  }
+  __ Bind(slow_path->GetExitLabel());
 }
 
 void IntrinsicLocationsBuilderX86_64::VisitThreadInterrupted(HInvoke* invoke) {
@@ -2720,7 +2776,6 @@ void IntrinsicCodeGeneratorX86_64::VisitIntegerDivideUnsigned(HInvoke* invoke) {
 }
 
 
-UNIMPLEMENTED_INTRINSIC(X86_64, ReferenceGetReferent)
 UNIMPLEMENTED_INTRINSIC(X86_64, FloatIsInfinite)
 UNIMPLEMENTED_INTRINSIC(X86_64, DoubleIsInfinite)
 UNIMPLEMENTED_INTRINSIC(X86_64, CRC32Update)
@@ -2735,6 +2790,7 @@ UNIMPLEMENTED_INTRINSIC(X86_64, FP16Greater)
 UNIMPLEMENTED_INTRINSIC(X86_64, FP16GreaterEquals)
 UNIMPLEMENTED_INTRINSIC(X86_64, FP16Less)
 UNIMPLEMENTED_INTRINSIC(X86_64, FP16LessEquals)
+UNIMPLEMENTED_INTRINSIC(X86_64, LongDivideUnsigned)
 
 UNIMPLEMENTED_INTRINSIC(X86_64, StringStringIndexOf);
 UNIMPLEMENTED_INTRINSIC(X86_64, StringStringIndexOfAfter);
@@ -2761,11 +2817,6 @@ UNIMPLEMENTED_INTRINSIC(X86_64, UnsafeGetAndSetInt)
 UNIMPLEMENTED_INTRINSIC(X86_64, UnsafeGetAndSetLong)
 UNIMPLEMENTED_INTRINSIC(X86_64, UnsafeGetAndSetObject)
 
-UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleFullFence)
-UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleAcquireFence)
-UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleReleaseFence)
-UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleLoadLoadFence)
-UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleStoreStoreFence)
 UNIMPLEMENTED_INTRINSIC(X86_64, MethodHandleInvokeExact)
 UNIMPLEMENTED_INTRINSIC(X86_64, MethodHandleInvoke)
 UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleCompareAndExchange)

@@ -399,6 +399,7 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
         has_simd_(false),
         has_loops_(false),
         has_irreducible_loops_(false),
+        has_direct_critical_native_call_(false),
         dead_reference_safe_(dead_reference_safe),
         debuggable_(debuggable),
         current_instruction_id_(start_instruction_id),
@@ -677,6 +678,9 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   bool HasIrreducibleLoops() const { return has_irreducible_loops_; }
   void SetHasIrreducibleLoops(bool value) { has_irreducible_loops_ = value; }
 
+  bool HasDirectCriticalNativeCall() const { return has_direct_critical_native_call_; }
+  void SetHasDirectCriticalNativeCall(bool value) { has_direct_critical_native_call_ = value; }
+
   ArtMethod* GetArtMethod() const { return art_method_; }
   void SetArtMethod(ArtMethod* method) { art_method_ = method; }
 
@@ -787,6 +791,10 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   // best effort to keep it up to date in the presence of code elimination
   // so there might be false positives.
   bool has_irreducible_loops_;
+
+  // Flag whether there are any direct calls to native code registered
+  // for @CriticalNative methods.
+  bool has_direct_critical_native_call_;
 
   // Is the code known to be robust against eliminating dead references
   // and the effects of early finalization? If false, dead reference variables
@@ -2235,8 +2243,9 @@ class HInstruction : public ArenaObject<kArenaAllocInstruction> {
     DCHECK(user != nullptr);
     // Note: fixup_end remains valid across push_front().
     auto fixup_end = uses_.empty() ? uses_.begin() : ++uses_.begin();
+    ArenaAllocator* allocator = user->GetBlock()->GetGraph()->GetAllocator();
     HUseListNode<HInstruction*>* new_node =
-        new (GetBlock()->GetGraph()->GetAllocator()) HUseListNode<HInstruction*>(user, index);
+        new (allocator) HUseListNode<HInstruction*>(user, index);
     uses_.push_front(*new_node);
     FixUpUserRecordsAfterUseInsertion(fixup_end);
   }
@@ -2458,10 +2467,6 @@ class HInstruction : public ArenaObject<kArenaAllocInstruction> {
   bool NeedsCurrentMethod() const {
     return NeedsEnvironment() || IsCurrentMethod();
   }
-
-  // Returns whether the code generation of the instruction will require to have access
-  // to the dex cache of the current method's declaring class via the current method.
-  virtual bool NeedsDexCacheOfDeclaringClass() const { return false; }
 
   // Does this instruction have any use in an environment before
   // control flow hits 'other'?
@@ -4346,9 +4351,9 @@ class HNewInstance final : public HExpression<1> {
   QuickEntrypointEnum entrypoint_;
 };
 
-enum IntrinsicNeedsEnvironmentOrCache {
-  kNoEnvironmentOrCache,        // Intrinsic does not require an environment or dex cache.
-  kNeedsEnvironmentOrCache      // Intrinsic requires an environment or requires a dex cache.
+enum IntrinsicNeedsEnvironment {
+  kNoEnvironment,        // Intrinsic does not require an environment.
+  kNeedsEnvironment      // Intrinsic requires an environment.
 };
 
 enum IntrinsicSideEffects {
@@ -4362,6 +4367,57 @@ enum IntrinsicExceptions {
   kNoThrow,  // Intrinsic does not throw any exceptions.
   kCanThrow  // Intrinsic may throw exceptions.
 };
+
+// Determines how to load an ArtMethod*.
+enum class MethodLoadKind {
+  // Use a String init ArtMethod* loaded from Thread entrypoints.
+  kStringInit,
+
+  // Use the method's own ArtMethod* loaded by the register allocator.
+  kRecursive,
+
+  // Use PC-relative boot image ArtMethod* address that will be known at link time.
+  // Used for boot image methods referenced by boot image code.
+  kBootImageLinkTimePcRelative,
+
+  // Load from an entry in the .data.bimg.rel.ro using a PC-relative load.
+  // Used for app->boot calls with relocatable image.
+  kBootImageRelRo,
+
+  // Load from an entry in the .bss section using a PC-relative load.
+  // Used for methods outside boot image referenced by AOT-compiled app and boot image code.
+  kBssEntry,
+
+  // Use ArtMethod* at a known address, embed the direct address in the code.
+  // Used for for JIT-compiled calls.
+  kJitDirectAddress,
+
+  // Make a runtime call to resolve and call the method. This is the last-resort-kind
+  // used when other kinds are unimplemented on a particular architecture.
+  kRuntimeCall,
+};
+
+// Determines the location of the code pointer of an invoke.
+enum class CodePtrLocation {
+  // Recursive call, use local PC-relative call instruction.
+  kCallSelf,
+
+  // Use native pointer from the Artmethod*.
+  // Used for @CriticalNative to avoid going through the compiled stub. This call goes through
+  // a special resolution stub if the class is not initialized or no native code is registered.
+  kCallCriticalNative,
+
+  // Use code pointer from the ArtMethod*.
+  // Used when we don't know the target code. This is also the last-resort-kind used when
+  // other kinds are unimplemented or impractical (i.e. slow) on a particular architecture.
+  kCallArtMethod,
+};
+
+static inline bool IsPcRelativeMethodLoadKind(MethodLoadKind load_kind) {
+  return load_kind == MethodLoadKind::kBootImageLinkTimePcRelative ||
+         load_kind == MethodLoadKind::kBootImageRelRo ||
+         load_kind == MethodLoadKind::kBssEntry;
+}
 
 class HInvoke : public HVariableInputSizeInstruction {
  public:
@@ -4377,8 +4433,6 @@ class HInvoke : public HVariableInputSizeInstruction {
   // inputs at the end of their list of inputs.
   uint32_t GetNumberOfArguments() const { return number_of_arguments_; }
 
-  uint32_t GetDexMethodIndex() const { return dex_method_index_; }
-
   InvokeType GetInvokeType() const {
     return GetPackedField<InvokeTypeField>();
   }
@@ -4388,7 +4442,7 @@ class HInvoke : public HVariableInputSizeInstruction {
   }
 
   void SetIntrinsic(Intrinsics intrinsic,
-                    IntrinsicNeedsEnvironmentOrCache needs_env_or_cache,
+                    IntrinsicNeedsEnvironment needs_env,
                     IntrinsicSideEffects side_effects,
                     IntrinsicExceptions exceptions);
 
@@ -4421,7 +4475,13 @@ class HInvoke : public HVariableInputSizeInstruction {
   bool IsIntrinsic() const { return intrinsic_ != Intrinsics::kNone; }
 
   ArtMethod* GetResolvedMethod() const { return resolved_method_; }
-  void SetResolvedMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
+  void SetResolvedMethod(ArtMethod* method);
+
+  MethodReference GetMethodReference() const { return method_reference_; }
+
+  const MethodReference GetResolvedMethodReference() const {
+    return resolved_method_reference_;
+  }
 
   DECLARE_ABSTRACT_INSTRUCTION(Invoke);
 
@@ -4441,8 +4501,9 @@ class HInvoke : public HVariableInputSizeInstruction {
           uint32_t number_of_other_inputs,
           DataType::Type return_type,
           uint32_t dex_pc,
-          uint32_t dex_method_index,
+          MethodReference method_reference,
           ArtMethod* resolved_method,
+          MethodReference resolved_method_reference,
           InvokeType invoke_type)
     : HVariableInputSizeInstruction(
           kind,
@@ -4453,13 +4514,12 @@ class HInvoke : public HVariableInputSizeInstruction {
           number_of_arguments + number_of_other_inputs,
           kArenaAllocInvokeInputs),
       number_of_arguments_(number_of_arguments),
-      dex_method_index_(dex_method_index),
+      method_reference_(method_reference),
+      resolved_method_reference_(resolved_method_reference),
       intrinsic_(Intrinsics::kNone),
       intrinsic_optimizations_(0) {
     SetPackedField<InvokeTypeField>(invoke_type);
     SetPackedFlag<kFlagCanThrow>(true);
-    // Check mutator lock, constructors lack annotalysis support.
-    Locks::mutator_lock_->AssertNotExclusiveHeld(Thread::Current());
     SetResolvedMethod(resolved_method);
   }
 
@@ -4467,7 +4527,9 @@ class HInvoke : public HVariableInputSizeInstruction {
 
   uint32_t number_of_arguments_;
   ArtMethod* resolved_method_;
-  const uint32_t dex_method_index_;
+  const MethodReference method_reference_;
+  // Cached values of the resolved method, to avoid needing the mutator lock.
+  const MethodReference resolved_method_reference_;
   Intrinsics intrinsic_;
 
   // A magic word holding optimizations for intrinsics. See intrinsics.h.
@@ -4480,7 +4542,7 @@ class HInvokeUnresolved final : public HInvoke {
                     uint32_t number_of_arguments,
                     DataType::Type return_type,
                     uint32_t dex_pc,
-                    uint32_t dex_method_index,
+                    MethodReference method_reference,
                     InvokeType invoke_type)
       : HInvoke(kInvokeUnresolved,
                 allocator,
@@ -4488,8 +4550,9 @@ class HInvokeUnresolved final : public HInvoke {
                 /* number_of_other_inputs= */ 0u,
                 return_type,
                 dex_pc,
-                dex_method_index,
+                method_reference,
                 nullptr,
+                MethodReference(nullptr, 0u),
                 invoke_type) {
   }
 
@@ -4507,24 +4570,34 @@ class HInvokePolymorphic final : public HInvoke {
                      uint32_t number_of_arguments,
                      DataType::Type return_type,
                      uint32_t dex_pc,
-                     uint32_t dex_method_index,
-                     ArtMethod* resolved_method)
+                     MethodReference method_reference,
+                     // resolved_method is the ArtMethod object corresponding to the polymorphic
+                     // method (e.g. VarHandle.get), resolved using the class linker. It is needed
+                     // to pass intrinsic information to the HInvokePolymorphic node.
+                     ArtMethod* resolved_method,
+                     MethodReference resolved_method_reference,
+                     dex::ProtoIndex proto_idx)
       : HInvoke(kInvokePolymorphic,
                 allocator,
                 number_of_arguments,
                 /* number_of_other_inputs= */ 0u,
                 return_type,
                 dex_pc,
-                dex_method_index,
+                method_reference,
                 resolved_method,
-                kVirtual) {
+                resolved_method_reference,
+                kPolymorphic),
+        proto_idx_(proto_idx) {
   }
 
   bool IsClonable() const override { return true; }
 
+  dex::ProtoIndex GetProtoIndex() { return proto_idx_; }
+
   DECLARE_INSTRUCTION(InvokePolymorphic);
 
  protected:
+  dex::ProtoIndex proto_idx_;
   DEFAULT_COPY_CONSTRUCTOR(InvokePolymorphic);
 };
 
@@ -4534,15 +4607,17 @@ class HInvokeCustom final : public HInvoke {
                 uint32_t number_of_arguments,
                 uint32_t call_site_index,
                 DataType::Type return_type,
-                uint32_t dex_pc)
+                uint32_t dex_pc,
+                MethodReference method_reference)
       : HInvoke(kInvokeCustom,
                 allocator,
                 number_of_arguments,
                 /* number_of_other_inputs= */ 0u,
                 return_type,
                 dex_pc,
-                /* dex_method_index= */ dex::kDexNoIndex,
+                method_reference,
                 /* resolved_method= */ nullptr,
+                MethodReference(nullptr, 0u),
                 kStatic),
       call_site_index_(call_site_index) {
   }
@@ -4571,51 +4646,6 @@ class HInvokeStaticOrDirect final : public HInvoke {
     kLast = kImplicit
   };
 
-  // Determines how to load the target ArtMethod*.
-  enum class MethodLoadKind {
-    // Use a String init ArtMethod* loaded from Thread entrypoints.
-    kStringInit,
-
-    // Use the method's own ArtMethod* loaded by the register allocator.
-    kRecursive,
-
-    // Use PC-relative boot image ArtMethod* address that will be known at link time.
-    // Used for boot image methods referenced by boot image code.
-    kBootImageLinkTimePcRelative,
-
-    // Load from an entry in the .data.bimg.rel.ro using a PC-relative load.
-    // Used for app->boot calls with relocatable image.
-    kBootImageRelRo,
-
-    // Load from an entry in the .bss section using a PC-relative load.
-    // Used for methods outside boot image referenced by AOT-compiled app and boot image code.
-    kBssEntry,
-
-    // Use ArtMethod* at a known address, embed the direct address in the code.
-    // Used for for JIT-compiled calls.
-    kJitDirectAddress,
-
-    // Make a runtime call to resolve and call the method. This is the last-resort-kind
-    // used when other kinds are unimplemented on a particular architecture.
-    kRuntimeCall,
-  };
-
-  // Determines the location of the code pointer.
-  enum class CodePtrLocation {
-    // Recursive call, use local PC-relative call instruction.
-    kCallSelf,
-
-    // Use native pointer from the Artmethod*.
-    // Used for @CriticalNative to avoid going through the compiled stub. This call goes through
-    // a special resolution stub if the class is not initialized or no native code is registered.
-    kCallCriticalNative,
-
-    // Use code pointer from the ArtMethod*.
-    // Used when we don't know the target code. This is also the last-resort-kind used when
-    // other kinds are unimplemented or impractical (i.e. slow) on a particular architecture.
-    kCallArtMethod,
-  };
-
   struct DispatchInfo {
     MethodLoadKind method_load_kind;
     CodePtrLocation code_ptr_location;
@@ -4630,11 +4660,11 @@ class HInvokeStaticOrDirect final : public HInvoke {
                         uint32_t number_of_arguments,
                         DataType::Type return_type,
                         uint32_t dex_pc,
-                        uint32_t method_index,
+                        MethodReference method_reference,
                         ArtMethod* resolved_method,
                         DispatchInfo dispatch_info,
                         InvokeType invoke_type,
-                        MethodReference target_method,
+                        MethodReference resolved_method_reference,
                         ClinitCheckRequirement clinit_check_requirement)
       : HInvoke(kInvokeStaticOrDirect,
                 allocator,
@@ -4645,10 +4675,10 @@ class HInvokeStaticOrDirect final : public HInvoke {
                     (clinit_check_requirement == ClinitCheckRequirement::kExplicit ? 1u : 0u),
                 return_type,
                 dex_pc,
-                method_index,
+                method_reference,
                 resolved_method,
+                resolved_method_reference,
                 invoke_type),
-        target_method_(target_method),
         dispatch_info_(dispatch_info) {
     SetPackedField<ClinitCheckRequirementField>(clinit_check_requirement);
   }
@@ -4706,13 +4736,10 @@ class HInvokeStaticOrDirect final : public HInvoke {
   MethodLoadKind GetMethodLoadKind() const { return dispatch_info_.method_load_kind; }
   CodePtrLocation GetCodePtrLocation() const { return dispatch_info_.code_ptr_location; }
   bool IsRecursive() const { return GetMethodLoadKind() == MethodLoadKind::kRecursive; }
-  bool NeedsDexCacheOfDeclaringClass() const override;
   bool IsStringInit() const { return GetMethodLoadKind() == MethodLoadKind::kStringInit; }
   bool HasMethodAddress() const { return GetMethodLoadKind() == MethodLoadKind::kJitDirectAddress; }
   bool HasPcRelativeMethodLoadKind() const {
-    return GetMethodLoadKind() == MethodLoadKind::kBootImageLinkTimePcRelative ||
-           GetMethodLoadKind() == MethodLoadKind::kBootImageRelRo ||
-           GetMethodLoadKind() == MethodLoadKind::kBssEntry;
+    return IsPcRelativeMethodLoadKind(GetMethodLoadKind());
   }
 
   QuickEntrypointEnum GetStringInitEntryPoint() const {
@@ -4734,10 +4761,6 @@ class HInvokeStaticOrDirect final : public HInvoke {
   // Is this instruction a call to a static method?
   bool IsStatic() const {
     return GetInvokeType() == kStatic;
-  }
-
-  MethodReference GetTargetMethod() const {
-    return target_method_;
   }
 
   // Does this method load kind need the current method as an input?
@@ -4838,12 +4861,10 @@ class HInvokeStaticOrDirect final : public HInvoke {
                                                kFieldClinitCheckRequirement,
                                                kFieldClinitCheckRequirementSize>;
 
-  // Cached values of the resolved method, to avoid needing the mutator lock.
-  const MethodReference target_method_;
   DispatchInfo dispatch_info_;
 };
-std::ostream& operator<<(std::ostream& os, HInvokeStaticOrDirect::MethodLoadKind rhs);
-std::ostream& operator<<(std::ostream& os, HInvokeStaticOrDirect::CodePtrLocation rhs);
+std::ostream& operator<<(std::ostream& os, MethodLoadKind rhs);
+std::ostream& operator<<(std::ostream& os, CodePtrLocation rhs);
 std::ostream& operator<<(std::ostream& os, HInvokeStaticOrDirect::ClinitCheckRequirement rhs);
 
 class HInvokeVirtual final : public HInvoke {
@@ -4852,8 +4873,9 @@ class HInvokeVirtual final : public HInvoke {
                  uint32_t number_of_arguments,
                  DataType::Type return_type,
                  uint32_t dex_pc,
-                 uint32_t dex_method_index,
+                 MethodReference method_reference,
                  ArtMethod* resolved_method,
+                 MethodReference resolved_method_reference,
                  uint32_t vtable_index)
       : HInvoke(kInvokeVirtual,
                 allocator,
@@ -4861,8 +4883,9 @@ class HInvokeVirtual final : public HInvoke {
                 0u,
                 return_type,
                 dex_pc,
-                dex_method_index,
+                method_reference,
                 resolved_method,
+                resolved_method_reference,
                 kVirtual),
         vtable_index_(vtable_index) {
   }
@@ -4914,19 +4937,27 @@ class HInvokeInterface final : public HInvoke {
                    uint32_t number_of_arguments,
                    DataType::Type return_type,
                    uint32_t dex_pc,
-                   uint32_t dex_method_index,
+                   MethodReference method_reference,
                    ArtMethod* resolved_method,
-                   uint32_t imt_index)
+                   MethodReference resolved_method_reference,
+                   uint32_t imt_index,
+                   MethodLoadKind load_kind)
       : HInvoke(kInvokeInterface,
                 allocator,
-                number_of_arguments,
+                number_of_arguments + (NeedsCurrentMethod(load_kind) ? 1 : 0),
                 0u,
                 return_type,
                 dex_pc,
-                dex_method_index,
+                method_reference,
                 resolved_method,
+                resolved_method_reference,
                 kInterface),
-        imt_index_(imt_index) {
+        imt_index_(imt_index),
+        hidden_argument_load_kind_(load_kind) {
+  }
+
+  static bool NeedsCurrentMethod(MethodLoadKind load_kind) {
+    return load_kind == MethodLoadKind::kRecursive;
   }
 
   bool IsClonable() const override { return true; }
@@ -4936,12 +4967,16 @@ class HInvokeInterface final : public HInvoke {
     return (obj == InputAt(0)) && !IsIntrinsic();
   }
 
-  bool NeedsDexCacheOfDeclaringClass() const override {
-    // The assembly stub currently needs it.
-    return true;
+  size_t GetSpecialInputIndex() const {
+    return GetNumberOfArguments();
+  }
+
+  void AddSpecialInput(HInstruction* input) {
+    InsertInputAt(GetSpecialInputIndex(), input);
   }
 
   uint32_t GetImtIndex() const { return imt_index_; }
+  MethodLoadKind GetHiddenArgumentLoadKind() const { return hidden_argument_load_kind_; }
 
   DECLARE_INSTRUCTION(InvokeInterface);
 
@@ -4951,6 +4986,9 @@ class HInvokeInterface final : public HInvoke {
  private:
   // Cached value of the resolved method, to avoid needing the mutator lock.
   const uint32_t imt_index_;
+
+  // How the hidden argument (the interface method) is being loaded.
+  const MethodLoadKind hidden_argument_load_kind_;
 };
 
 class HNeg final : public HUnaryOperation {
@@ -6365,6 +6403,21 @@ class HLoadClass final : public HInstruction {
     // Used for classes outside boot image referenced by AOT-compiled app and boot image code.
     kBssEntry,
 
+    // Load from an entry for public class in the .bss section using a PC-relative load.
+    // Used for classes that were unresolved during AOT-compilation outside the literal
+    // package of the compiling class. Such classes are accessible only if they are public
+    // and the .bss entry shall therefore be filled only if the resolved class is public.
+    kBssEntryPublic,
+
+    // Load from an entry for package class in the .bss section using a PC-relative load.
+    // Used for classes that were unresolved during AOT-compilation but within the literal
+    // package of the compiling class. Such classes are accessible if they are public or
+    // in the same package which, given the literal package match, requires only matching
+    // defining class loader and the .bss entry shall therefore be filled only if at least
+    // one of those conditions holds. Note that all code in an oat file belongs to classes
+    // with the same defining class loader.
+    kBssEntryPackage,
+
     // Use a known boot image Class* address, embedded in the code by the codegen.
     // Used for boot image classes referenced by apps in JIT-compiled code.
     kJitBootImageAddress,
@@ -6417,7 +6470,9 @@ class HLoadClass final : public HInstruction {
   bool HasPcRelativeLoadKind() const {
     return GetLoadKind() == LoadKind::kBootImageLinkTimePcRelative ||
            GetLoadKind() == LoadKind::kBootImageRelRo ||
-           GetLoadKind() == LoadKind::kBssEntry;
+           GetLoadKind() == LoadKind::kBssEntry ||
+           GetLoadKind() == LoadKind::kBssEntryPublic ||
+           GetLoadKind() == LoadKind::kBssEntryPackage;
   }
 
   bool CanBeMoved() const override { return true; }
@@ -6433,9 +6488,6 @@ class HLoadClass final : public HInstruction {
   }
 
   void SetMustGenerateClinitCheck(bool generate_clinit_check) {
-    // The entrypoint the code generator is going to call does not do
-    // clinit of the class.
-    DCHECK(!NeedsAccessCheck());
     SetPackedFlag<kFlagGenerateClInitCheck>(generate_clinit_check);
   }
 
@@ -6473,10 +6525,6 @@ class HLoadClass final : public HInstruction {
   dex::TypeIndex GetTypeIndex() const { return type_index_; }
   const DexFile& GetDexFile() const { return dex_file_; }
 
-  bool NeedsDexCacheOfDeclaringClass() const override {
-    return GetLoadKind() == LoadKind::kRuntimeCall;
-  }
-
   static SideEffects SideEffectsForArchRuntimeCalls() {
     return SideEffects::CanTriggerGC();
   }
@@ -6488,9 +6536,14 @@ class HLoadClass final : public HInstruction {
 
   bool MustResolveTypeOnSlowPath() const {
     // Check that this instruction has a slow path.
-    DCHECK(GetLoadKind() != LoadKind::kRuntimeCall);  // kRuntimeCall calls on main path.
-    DCHECK(GetLoadKind() == LoadKind::kBssEntry || MustGenerateClinitCheck());
-    return GetLoadKind() == LoadKind::kBssEntry;
+    LoadKind load_kind = GetLoadKind();
+    DCHECK(load_kind != LoadKind::kRuntimeCall);  // kRuntimeCall calls on main path.
+    bool must_resolve_type_on_slow_path =
+       load_kind == LoadKind::kBssEntry ||
+       load_kind == LoadKind::kBssEntryPublic ||
+       load_kind == LoadKind::kBssEntryPackage;
+    DCHECK(must_resolve_type_on_slow_path || MustGenerateClinitCheck());
+    return must_resolve_type_on_slow_path;
   }
 
   void MarkInBootImage() {
@@ -6532,6 +6585,8 @@ class HLoadClass final : public HInstruction {
     return load_kind == LoadKind::kReferrersClass ||
         load_kind == LoadKind::kBootImageLinkTimePcRelative ||
         load_kind == LoadKind::kBssEntry ||
+        load_kind == LoadKind::kBssEntryPublic ||
+        load_kind == LoadKind::kBssEntryPackage ||
         load_kind == LoadKind::kRuntimeCall;
   }
 
@@ -6539,14 +6594,14 @@ class HLoadClass final : public HInstruction {
 
   // The special input is the HCurrentMethod for kRuntimeCall or kReferrersClass.
   // For other load kinds it's empty or possibly some architecture-specific instruction
-  // for PC-relative loads, i.e. kBssEntry or kBootImageLinkTimePcRelative.
+  // for PC-relative loads, i.e. kBssEntry* or kBootImageLinkTimePcRelative.
   HUserRecord<HInstruction*> special_input_;
 
   // A type index and dex file where the class can be accessed. The dex file can be:
   // - The compiling method's dex file if the class is defined there too.
   // - The compiling method's dex file if the class is referenced there.
   // - The dex file where the class is defined. When the load kind can only be
-  //   kBssEntry or kRuntimeCall, we cannot emit code for this `HLoadClass`.
+  //   kBssEntry* or kRuntimeCall, we cannot emit code for this `HLoadClass`.
   const dex::TypeIndex type_index_;
   const DexFile& dex_file_;
 
@@ -6575,6 +6630,8 @@ inline void HLoadClass::AddSpecialInput(HInstruction* special_input) {
   DCHECK(GetLoadKind() == LoadKind::kBootImageLinkTimePcRelative ||
          GetLoadKind() == LoadKind::kBootImageRelRo ||
          GetLoadKind() == LoadKind::kBssEntry ||
+         GetLoadKind() == LoadKind::kBssEntryPublic ||
+         GetLoadKind() == LoadKind::kBssEntryPackage ||
          GetLoadKind() == LoadKind::kJitBootImageAddress) << GetLoadKind();
   DCHECK(special_input_.GetInstruction() == nullptr);
   special_input_ = HUserRecord<HInstruction*>(special_input);
@@ -6672,10 +6729,6 @@ class HLoadString final : public HInstruction {
       return false;
     }
     return true;
-  }
-
-  bool NeedsDexCacheOfDeclaringClass() const override {
-    return GetLoadKind() == LoadKind::kRuntimeCall;
   }
 
   bool CanBeNull() const override { return false; }

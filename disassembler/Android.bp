@@ -53,8 +53,16 @@ art_cc_library {
         "libvixl",
     ],
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
+    ],
+}
+
+cc_defaults {
+    name: "libart-disassembler_static_defaults",
+    whole_static_libs: [
+        "libart-disassembler",
+        "libvixl",
     ],
 }
 
@@ -70,8 +78,16 @@ art_cc_library {
     ],
 
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
+    ],
+}
+
+cc_defaults {
+    name: "libartd-disassembler_static_defaults",
+    whole_static_libs: [
+        "libartd-disassembler",
+        "libvixld",
     ],
 }
 
@@ -84,6 +100,6 @@ cc_library_headers {
 
     apex_available: [
         "com.android.art.debug",
-        "com.android.art.release",
+        "com.android.art",
     ],
 }

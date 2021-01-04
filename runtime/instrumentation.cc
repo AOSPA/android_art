@@ -928,16 +928,6 @@ void Instrumentation::UpdateMethodsCodeImpl(ArtMethod* method, const void* quick
                  // Proxy.<init> correctly in all cases.
                  method != jni::DecodeArtMethod(WellKnownClasses::java_lang_reflect_Proxy_init)) {
         new_quick_code = GetQuickInstrumentationEntryPoint();
-        if (!method->IsNative() && Runtime::Current()->GetJit() != nullptr) {
-          // Native methods use trampoline entrypoints during interpreter tracing.
-          DCHECK(!Runtime::Current()->GetJit()->GetCodeCache()->GetGarbageCollectCodeUnsafe());
-          ProfilingInfo* profiling_info = method->GetProfilingInfo(kRuntimePointerSize);
-          // Tracing will look at the saved entry point in the profiling info to know the actual
-          // entrypoint, so we store it here.
-          if (profiling_info != nullptr) {
-            profiling_info->SetSavedEntryPoint(quick_code);
-          }
-        }
       } else {
         new_quick_code = quick_code;
       }
@@ -1169,16 +1159,6 @@ const void* Instrumentation::GetCodeForInvoke(ArtMethod* method) const {
   if (!NeedDebugVersionFor(method)) {
     // If we don't need a debug version we should see what the oat file/class linker has to say.
     result = class_linker->GetQuickOatCodeFor(method);
-  }
-  // If both those fail try the jit.
-  if (result == GetQuickToInterpreterBridge()) {
-    jit::Jit* jit = Runtime::Current()->GetJit();
-    if (jit != nullptr) {
-      const void* res = jit->GetCodeCache()->FindCompiledCodeForInstrumentation(method);
-      if (res != nullptr) {
-        result = res;
-      }
-    }
   }
   return result;
 }
@@ -1511,7 +1491,7 @@ TwoWordReturn Instrumentation::PopInstrumentationStackFrame(Thread* self,
   InstrumentationStackFrame instrumentation_frame = it->second;
   stack->erase(it);
 
-  // Set return PC and check the sanity of the stack.
+  // Set return PC and check the consistency of the stack.
   // We don't cache the return pc value in a local as it may change after
   // sending a method exit event.
   *return_pc_addr = instrumentation_frame.return_pc_;

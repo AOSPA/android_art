@@ -17,12 +17,6 @@
 cc_defaults {
     name: "libdexfile_defaults",
     defaults: ["art_defaults"],
-    visibility: [
-        // Visibility for prebuilt dex2oat(d) from the prebuilt of this module.
-        // TODO(b/155921753): Restrict this when prebuilts are in their proper
-        // locations.
-        "//prebuilts:__subpackages__",
-    ],
     host_supported: true,
     srcs: [
         "dex/art_dex_file_loader.cc",
@@ -102,7 +96,7 @@ cc_defaults {
 
 cc_defaults {
     name: "libdexfile_static_base_defaults",
-    static_libs: [
+    whole_static_libs: [
         "libbase",
         "liblog",
         "libz",
@@ -119,7 +113,7 @@ cc_defaults {
     defaults_visibility: [
         "//art:__subpackages__",
     ],
-    static_libs: ["libdexfile"],
+    whole_static_libs: ["libdexfile"],
 }
 
 cc_defaults {
@@ -128,7 +122,7 @@ cc_defaults {
         "libartbased_static_defaults",
         "libdexfile_static_base_defaults",
     ],
-    static_libs: ["libdexfiled"],
+    whole_static_libs: ["libdexfiled"],
 }
 
 gensrcs {
@@ -182,7 +176,7 @@ art_cc_library {
         },
     },
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
 }
@@ -279,8 +273,10 @@ cc_library_headers {
 
     apex_available: [
         "//apex_available:platform",
+        "com.android.art",
         "com.android.art.debug",
-        "com.android.art.release",
+        "com.android.media",
+        "com.android.runtime",
     ],
 }
 
@@ -292,8 +288,8 @@ cc_library_headers {
     export_include_dirs: ["."],
 
     apex_available: [
+        "com.android.art",
         "com.android.art.debug",
-        "com.android.art.release",
     ],
 }
 
@@ -336,7 +332,7 @@ art_cc_library {
         "libdexfile",
     ],
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
 }
@@ -394,13 +390,14 @@ art_cc_library {
 
     apex_available: [
         "//apex_available:platform",
+        "com.android.art",
         "com.android.art.debug",
-        "com.android.art.release",
+        "com.android.media",
+        "com.android.media.swcodec",
+        "com.android.runtime",
     ],
 }
 
-// The same source file is used in two tests here.
-// Its test target is test-art-{host,target}-gtest-art_libdexfile_support_tests.
 art_cc_test {
     name: "art_libdexfile_support_tests",
     defaults: [
@@ -419,66 +416,85 @@ art_cc_test {
     ],
 }
 
-cc_defaults {
-    name: "libdexfile_support_static_defaults",
+cc_library_static {
+    name: "libdexfile_support_static",
     host_supported: true,
     srcs: [
         "external/dex_file_supp.cc",
     ],
     cflags: ["-DSTATIC_LIB"],
-    // Using whole_static_libs here only as a "poor man's transitivity" kludge.
-    whole_static_libs: [
-        "libbase",
-        "liblog",
-        "libz",
-        "libziparchive",
-    ],
     header_libs: ["libdexfile_external_headers"],
     export_header_lib_headers: ["libdexfile_external_headers"],
 }
 
-cc_library_static {
-    name: "libdexfile_support_static",
-    visibility: [
-        "//art:__subpackages__",
-        // Required for the simpleperf binary in the NDK. No other modules than
-        // //system/extras/simpleperf:simpleperf_ndk are allowed to use it.
-        "//system/extras/simpleperf",
-        "//cts/tests/tests/simpleperf",
-    ],
+cc_defaults {
+    name: "libdexfile_support_static_defaults",
     defaults: [
         "libdexfile_static_defaults",
-        "libdexfile_support_static_defaults",
     ],
     whole_static_libs: [
-        "libdexfile",
         "libdexfile_external",
+        "libdexfile_support_static",
     ],
 }
 
-cc_library_static {
-    name: "libdexfiled_support_static",
+cc_defaults {
+    name: "libdexfiled_support_static_defaults",
     defaults: [
-        "libdexfile_support_static_defaults",
         "libdexfiled_static_defaults",
     ],
     whole_static_libs: [
-        "libdexfiled",
+        "libdexfile_support_static",
         "libdexfiled_external",
     ],
 }
 
-// The same source file is used in two tests here.
-// Its test target is test-art-{host,target}-gtest-art_libdexfile_support_static_tests.
 art_cc_test {
     name: "art_libdexfile_support_static_tests",
+    host_supported: true,
+    test_suites: ["general-tests"],
+    defaults: ["libdexfile_support_static_defaults"],
+    srcs: [
+        "external/dex_file_supp_test.cc",
+    ],
+}
+
+// For use by external packages allowed to link in static libdexfile_support.
+// This is not allowed in any module that may end up in an APEX or platform
+// image, so visibility is restrictive.
+cc_library_static {
+    name: "libdexfile_external_static",
+    host_supported: true,
+    visibility: [
+        // Required for simpleperf, libsimpleperf_record, and libsimpleperf_report
+        // in the NDK.
+        "//system/extras/simpleperf",
+        "//cts/tests/tests/simpleperf",
+    ],
+    // Using libdexfile_support_static_defaults will link in external libs like
+    // libbase and libz statically as well, which are likely to cause duplicate
+    // copies in the depending module.
+    // TODO(b/169885605): Avoid exposing symbols from those libs.
+    defaults: [
+        "art_defaults",
+        "libdexfile_support_static_defaults",
+    ],
+}
+
+art_cc_test {
+    name: "art_libdexfile_external_static_tests",
     host_supported: true,
     test_suites: ["general-tests"],
     srcs: [
         "external/dex_file_supp_test.cc",
     ],
     static_libs: [
-        "libbase",
-        "libdexfile_support_static",
+        "libdexfile_external_static",
     ],
+    enabled: false,
+    target: {
+        linux: {
+            enabled: true,
+        },
+    },
 }

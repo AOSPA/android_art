@@ -203,6 +203,10 @@ class HInstructionBuilder : public ValueObject {
                               uint32_t dex_pc);
 
   // Builds a `HInstanceOf`, or a `HCheckCast` instruction.
+  void BuildTypeCheck(bool is_instance_of,
+                      HInstruction* object,
+                      dex::TypeIndex type_index,
+                      uint32_t dex_pc);
   void BuildTypeCheck(const Instruction& instruction,
                       uint8_t destination,
                       uint8_t reference,
@@ -228,7 +232,7 @@ class HInstructionBuilder : public ValueObject {
   Handle<mirror::Class> ResolveClass(ScopedObjectAccess& soa, dex::TypeIndex type_index)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  bool LoadClassNeedsAccessCheck(ObjPtr<mirror::Class> klass)
+  bool LoadClassNeedsAccessCheck(dex::TypeIndex type_index, ObjPtr<mirror::Class> klass)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Builds a `HLoadMethodHandle` loading the given `method_handle_index`.

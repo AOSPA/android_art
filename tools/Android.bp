@@ -38,7 +38,7 @@ sh_binary {
     target: {
         android: {
             required: [
-                "com.android.art.release",
+                "com.android.art",
             ],
         },
         host: {
@@ -46,6 +46,9 @@ sh_binary {
                 "dalvikvm",
                 "dex2oat",
             ],
+        },
+        darwin: {
+            enabled: false,
         },
     },
 }
@@ -58,7 +61,7 @@ sh_binary {
     target: {
         android: {
             required: [
-                "com.android.art.release",
+                "com.android.art",
             ],
         },
         host: {
@@ -66,5 +69,34 @@ sh_binary {
                 "dex2oat",
             ],
         },
+        darwin: {
+            enabled: false,
+        },
     },
+}
+
+sh_binary {
+    name: "compile_bcp.sh",
+    host_supported: false,
+    src: "compile_bcp.sh",
+}
+
+python_binary_host {
+    name: "art-run-test-checker",
+    srcs: [
+        "checker/**/*.py",
+    ],
+    main: "checker/checker.py",
+    version: {
+        py2: {
+            enabled: false,
+        },
+        py3: {
+            enabled: true,
+        },
+    },
+    test_suites: [
+        "general-tests",
+        "mts",
+    ],
 }

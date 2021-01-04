@@ -33,7 +33,6 @@ class CompilerFilter final {
     kAssumeVerified,      // Skip verification but mark all classes as verified anyway.
     kExtract,             // Delay verication to runtime, do not compile anything.
     kVerify,              // Only verify classes.
-    kQuicken,             // Verify, quicken, and compile JNI stubs.
     kSpaceProfile,        // Maximize space savings based on profile.
     kSpace,               // Maximize space savings.
     kSpeedProfile,        // Maximize runtime performance based on profile.
@@ -100,6 +99,8 @@ class CompilerFilter final {
   // valid filter. Returns false if no filter matches that name.
   // 'filter' must be non-null.
   static bool ParseCompilerFilter(const char* name, /*out*/Filter* filter);
+
+  static const char* DescribeOptions();
 
  private:
   DISALLOW_COPY_AND_ASSIGN(CompilerFilter);

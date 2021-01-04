@@ -230,6 +230,7 @@ Heap::Heap(size_t initial_size,
            size_t long_pause_log_threshold,
            size_t long_gc_log_threshold,
            bool ignore_target_footprint,
+           bool always_log_explicit_gcs,
            bool use_tlab,
            bool verify_pre_gc_heap,
            bool verify_pre_sweeping_heap,
@@ -243,8 +244,7 @@ Heap::Heap(size_t initial_size,
            bool use_generational_cc,
            uint64_t min_interval_homogeneous_space_compaction_by_oom,
            bool dump_region_info_before_gc,
-           bool dump_region_info_after_gc,
-           space::ImageSpaceLoadingOrder image_space_loading_order)
+           bool dump_region_info_after_gc)
     : non_moving_space_(nullptr),
       rosalloc_space_(nullptr),
       dlmalloc_space_(nullptr),
@@ -265,6 +265,7 @@ Heap::Heap(size_t initial_size,
       pre_gc_weighted_allocated_bytes_(0.0),
       post_gc_weighted_allocated_bytes_(0.0),
       ignore_target_footprint_(ignore_target_footprint),
+      always_log_explicit_gcs_(always_log_explicit_gcs),
       zygote_creation_lock_("zygote creation lock", kZygoteCreationLock),
       zygote_space_(nullptr),
       large_object_threshold_(large_object_threshold),
@@ -417,7 +418,6 @@ Heap::Heap(size_t initial_size,
                                        boot_class_path_locations,
                                        image_file_name,
                                        image_instruction_set,
-                                       image_space_loading_order,
                                        runtime->ShouldRelocate(),
                                        /*executable=*/ !runtime->IsAotCompiler(),
                                        is_zygote,
@@ -1982,67 +1982,6 @@ void Heap::CountInstances(const std::vector<Handle<mirror::Class>>& classes,
   VisitObjects(instance_counter);
 }
 
-void Heap::GetInstances(VariableSizedHandleScope& scope,
-                        Handle<mirror::Class> h_class,
-                        bool use_is_assignable_from,
-                        int32_t max_count,
-                        std::vector<Handle<mirror::Object>>& instances) {
-  DCHECK_GE(max_count, 0);
-  auto instance_collector = [&](mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (MatchesClass(obj, h_class, use_is_assignable_from)) {
-      if (max_count == 0 || instances.size() < static_cast<size_t>(max_count)) {
-        instances.push_back(scope.NewHandle(obj));
-      }
-    }
-  };
-  VisitObjects(instance_collector);
-}
-
-void Heap::GetReferringObjects(VariableSizedHandleScope& scope,
-                               Handle<mirror::Object> o,
-                               int32_t max_count,
-                               std::vector<Handle<mirror::Object>>& referring_objects) {
-  class ReferringObjectsFinder {
-   public:
-    ReferringObjectsFinder(VariableSizedHandleScope& scope_in,
-                           Handle<mirror::Object> object_in,
-                           int32_t max_count_in,
-                           std::vector<Handle<mirror::Object>>& referring_objects_in)
-        REQUIRES_SHARED(Locks::mutator_lock_)
-        : scope_(scope_in),
-          object_(object_in),
-          max_count_(max_count_in),
-          referring_objects_(referring_objects_in) {}
-
-    // For Object::VisitReferences.
-    void operator()(ObjPtr<mirror::Object> obj,
-                    MemberOffset offset,
-                    bool is_static ATTRIBUTE_UNUSED) const
-        REQUIRES_SHARED(Locks::mutator_lock_) {
-      mirror::Object* ref = obj->GetFieldObject<mirror::Object>(offset);
-      if (ref == object_.Get() && (max_count_ == 0 || referring_objects_.size() < max_count_)) {
-        referring_objects_.push_back(scope_.NewHandle(obj));
-      }
-    }
-
-    void VisitRootIfNonNull(mirror::CompressedReference<mirror::Object>* root ATTRIBUTE_UNUSED)
-        const {}
-    void VisitRoot(mirror::CompressedReference<mirror::Object>* root ATTRIBUTE_UNUSED) const {}
-
-   private:
-    VariableSizedHandleScope& scope_;
-    Handle<mirror::Object> const object_;
-    const uint32_t max_count_;
-    std::vector<Handle<mirror::Object>>& referring_objects_;
-    DISALLOW_COPY_AND_ASSIGN(ReferringObjectsFinder);
-  };
-  ReferringObjectsFinder finder(scope, o, max_count, referring_objects);
-  auto referring_objects_finder = [&](mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_) {
-    obj->VisitReferences(finder, VoidFunctor());
-  };
-  VisitObjects(referring_objects_finder);
-}
-
 void Heap::CollectGarbage(bool clear_soft_references, GcCause cause) {
   // Even if we waited for a GC we still need to do another GC since weaks allocated during the
   // last GC will not have necessarily been cleared.
@@ -2246,8 +2185,9 @@ class ZygoteCompactingCollector final : public collector::SemiSpace {
     if (it == bins_.end()) {
       // No available space in the bins, place it in the target space instead (grows the zygote
       // space).
-      size_t bytes_allocated, dummy;
-      forward_address = to_space_->Alloc(self_, alloc_size, &bytes_allocated, nullptr, &dummy);
+      size_t bytes_allocated, unused_bytes_tl_bulk_allocated;
+      forward_address = to_space_->Alloc(
+          self_, alloc_size, &bytes_allocated, nullptr, &unused_bytes_tl_bulk_allocated);
       if (to_space_live_bitmap_ != nullptr) {
         to_space_live_bitmap_->Set(forward_address);
       } else {
@@ -2398,7 +2338,7 @@ void Heap::PreZygoteFork() {
   // the old alloc space's bitmaps to null.
   RemoveSpace(old_alloc_space);
   if (collector::SemiSpace::kUseRememberedSet) {
-    // Sanity bound check.
+    // Consistency bound check.
     FindRememberedSetFromSpace(old_alloc_space)->AssertAllDirtyCardsAreWithinSpace();
     // Remove the remembered set for the now zygote space (the old
     // non-moving space). Note now that we have compacted objects into
@@ -2699,7 +2639,7 @@ void Heap::LogGC(GcCause gc_cause, collector::GarbageCollector* collector) {
   const std::vector<uint64_t>& pause_times = GetCurrentGcIteration()->GetPauseTimes();
   // Print the GC if it is an explicit GC (e.g. Runtime.gc()) or a slow GC
   // (mutator time blocked >= long_pause_log_threshold_).
-  bool log_gc = kLogAllGCs || gc_cause == kGcCauseExplicit;
+  bool log_gc = kLogAllGCs || (gc_cause == kGcCauseExplicit && always_log_explicit_gcs_);
   if (!log_gc && CareAboutPauseTimes()) {
     // GC for alloc pauses the allocating thread, so consider it as a pause.
     log_gc = duration > long_gc_log_threshold_ ||

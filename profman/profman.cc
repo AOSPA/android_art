@@ -161,7 +161,7 @@ NO_RETURN static void Usage(const char *fmt, ...) {
   UsageError("  --preloaded-class-threshold=percentage between 0 and 100");
   UsageError("      what threshold to apply to the classes when deciding whether or not to");
   UsageError("      include it in the final preloaded classes.");
-  UsageError("  --preloaded-classes-blacklist=file");
+  UsageError("  --preloaded-classes-denylist=file");
   UsageError("      a file listing the classes that should not be preloaded in Zygote");
   UsageError("  --upgrade-startup-to-hot=true|false:");
   UsageError("      whether or not to upgrade startup methods to hot");
@@ -179,6 +179,10 @@ NO_RETURN static void Usage(const char *fmt, ...) {
   UsageError("      In this case, the reference profile must have a boot profile version.");
   UsageError("  --force-merge: performs a forced merge, without analyzing if there is a");
   UsageError("      significant difference between the current profile and the reference profile.");
+  UsageError("  --min-new-methods-percent-change=percentage between 0 and 100 (default 20)");
+  UsageError("      the min percent of new methods to trigger a compilation.");
+  UsageError("  --min-new-classes-percent-change=percentage between 0 and 100 (default 20)");
+  UsageError("      the min percent of new classes to trigger a compilation.");
   UsageError("");
 
   exit(EXIT_FAILURE);
@@ -345,15 +349,15 @@ class ProfMan final {
                         &boot_image_options_.preloaded_class_threshold,
                         0u,
                         100u);
-      } else if (StartsWith(option, "--preloaded-classes-blacklist=")) {
-        std::string preloaded_classes_blacklist =
-            std::string(option.substr(strlen("--preloaded-classes-blacklist=")));
+      } else if (StartsWith(option, "--preloaded-classes-denylist=")) {
+        std::string preloaded_classes_denylist =
+            std::string(option.substr(strlen("--preloaded-classes-denylist=")));
         // Read the user-specified list of methods.
         std::unique_ptr<std::set<std::string>>
-            blacklist(ReadCommentedInputFromFile<std::set<std::string>>(
-                preloaded_classes_blacklist.c_str(), nullptr));  // No post-processing.
-        boot_image_options_.preloaded_classes_blacklist.insert(
-            blacklist->begin(), blacklist->end());
+            denylist(ReadCommentedInputFromFile<std::set<std::string>>(
+                preloaded_classes_denylist.c_str(), nullptr));  // No post-processing.
+        boot_image_options_.preloaded_classes_denylist.insert(
+            denylist->begin(), denylist->end());
       } else if (StartsWith(option, "--upgrade-startup-to-hot=")) {
         ParseBoolOption(raw_option,
                         "--upgrade-startup-to-hot=",
@@ -406,6 +410,24 @@ class ProfMan final {
                         &test_profile_class_percentage_);
       } else if (StartsWith(option, "--generate-test-profile-seed=")) {
         ParseUintOption(raw_option, "--generate-test-profile-seed=", &test_profile_seed_);
+      } else if (StartsWith(option, "--min-new-methods-percent-change=")) {
+        uint32_t min_new_methods_percent_change;
+        ParseUintOption(raw_option,
+                        "--min-new-methods-percent-change=",
+                        &min_new_methods_percent_change,
+                        0u,
+                        100u);
+        profile_assistant_options_.SetMinNewMethodsPercentChangeForCompilation(
+            min_new_methods_percent_change);
+      } else if (StartsWith(option, "--min-new-classes-percent-change=")) {
+        uint32_t min_new_classes_percent_change;
+        ParseUintOption(raw_option,
+                        "--min-new-classes-percent-change=",
+                        &min_new_classes_percent_change,
+                        0u,
+                        100u);
+        profile_assistant_options_.SetMinNewClassesPercentChangeForCompilation(
+            min_new_classes_percent_change);
       } else if (option == "--copy-and-update-profile-key") {
         copy_and_update_profile_key_ = true;
       } else if (option == "--boot-image-merge") {

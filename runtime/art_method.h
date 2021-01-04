@@ -78,7 +78,7 @@ class ArtMethod final {
   // constexpr, and ensure that the value is correct in art_method.cc.
   static constexpr uint32_t kRuntimeMethodDexMethodIndex = 0xFFFFFFFF;
 
-  ArtMethod() : access_flags_(0), dex_code_item_offset_(0), dex_method_index_(0),
+  ArtMethod() : access_flags_(0), dex_method_index_(0),
       method_index_(0), hotness_count_(0) { }
 
   ArtMethod(ArtMethod* src, PointerSize image_pointer_size) {
@@ -314,7 +314,7 @@ class ArtMethod final {
 
   bool IsProxyMethod() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  bool IsPolymorphicSignature() REQUIRES_SHARED(Locks::mutator_lock_);
+  bool IsSignaturePolymorphic() REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool UseFastInterpreterToInterpreterInvoke() const {
     // The bit is applicable only if the method is not intrinsic.
@@ -384,8 +384,6 @@ class ArtMethod final {
     ClearAccessFlags(kAccSkipAccessChecks);
   }
 
-  bool CanBeSimulated() REQUIRES_SHARED(Locks::mutator_lock_);
-
   // Returns true if this method could be overridden by a default method.
   bool IsOverridableByDefaultMethod() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -419,15 +417,6 @@ class ArtMethod final {
 
   static constexpr MemberOffset ImtIndexOffset() {
     return MemberOffset(OFFSETOF_MEMBER(ArtMethod, imt_index_));
-  }
-
-  uint32_t GetCodeItemOffset() const {
-    return dex_code_item_offset_;
-  }
-
-  void SetCodeItemOffset(uint32_t new_code_off) REQUIRES_SHARED(Locks::mutator_lock_) {
-    // Not called within a transaction.
-    dex_code_item_offset_ = new_code_off;
   }
 
   // Number of 32bit registers that would be required to hold all the arguments
@@ -517,27 +506,6 @@ class ArtMethod final {
     SetDataPtrSize(table, pointer_size);
   }
 
-  ProfilingInfo* GetProfilingInfo(PointerSize pointer_size) REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (UNLIKELY(IsNative() || IsProxyMethod() || !IsInvokable())) {
-      return nullptr;
-    }
-    return reinterpret_cast<ProfilingInfo*>(GetDataPtrSize(pointer_size));
-  }
-
-  ALWAYS_INLINE void SetProfilingInfo(ProfilingInfo* info) REQUIRES_SHARED(Locks::mutator_lock_) {
-    SetDataPtrSize(info, kRuntimePointerSize);
-  }
-
-  ALWAYS_INLINE void SetProfilingInfoPtrSize(ProfilingInfo* info, PointerSize pointer_size)
-      REQUIRES_SHARED(Locks::mutator_lock_) {
-    SetDataPtrSize(info, pointer_size);
-  }
-
-  static MemberOffset ProfilingInfoOffset() {
-    DCHECK(IsImagePointerSize(kRuntimePointerSize));
-    return DataOffset(kRuntimePointerSize);
-  }
-
   template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   ALWAYS_INLINE bool HasSingleImplementation() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -609,6 +577,12 @@ class ArtMethod final {
   ALWAYS_INLINE bool IsRuntimeMethod() const {
     return dex_method_index_ == kRuntimeMethodDexMethodIndex;
   }
+
+  bool HasCodeItem() REQUIRES_SHARED(Locks::mutator_lock_) {
+    return !IsRuntimeMethod() && !IsNative() && !IsProxyMethod() && !IsAbstract();
+  }
+
+  void SetCodeItem(const dex::CodeItem* code_item) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Is this a hand crafted method used for something like describing callee saves?
   bool IsCalleeSaveMethod() REQUIRES_SHARED(Locks::mutator_lock_);
@@ -765,7 +739,6 @@ class ArtMethod final {
     DCHECK(IsImagePointerSize(kRuntimePointerSize));
     visitor(this, &declaring_class_, "declaring_class_");
     visitor(this, &access_flags_, "access_flags_");
-    visitor(this, &dex_code_item_offset_, "dex_code_item_offset_");
     visitor(this, &dex_method_index_, "dex_method_index_");
     visitor(this, &method_index_, "method_index_");
     visitor(this, &hotness_count_, "hotness_count_");
@@ -805,9 +778,6 @@ class ArtMethod final {
 
   /* Dex file fields. The defining dex file is available via declaring_class_->dex_cache_ */
 
-  // Offset to the CodeItem.
-  uint32_t dex_code_item_offset_;
-
   // Index into method_ids of the dex file associated with this method.
   uint32_t dex_method_index_;
 
@@ -839,7 +809,8 @@ class ArtMethod final {
     //   - conflict method: ImtConflictTable,
     //   - abstract/interface method: the single-implementation if any,
     //   - proxy method: the original interface method or constructor,
-    //   - other methods: the profiling data.
+    //   - other methods: during AOT the code item offset, at runtime a pointer
+    //                    to the code item.
     void* data_;
 
     // Method dispatch from quick compiled code invokes this pointer which may cause bridging into

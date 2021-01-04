@@ -38,14 +38,13 @@ art_cc_binary {
         "libbase",
     ],
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
 }
 
 art_cc_test {
     name: "art_dexanalyze_tests",
-    required: ["dexanalyze"],
     defaults: [
         "art_gtest_defaults",
     ],
@@ -55,4 +54,9 @@ art_cc_test {
     srcs: [
         "dexanalyze_test.cc",
     ],
+    target: {
+        host: {
+            required: ["dexanalyze"],
+        },
+    },
 }

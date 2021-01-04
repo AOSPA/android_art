@@ -588,8 +588,8 @@ static void HandleDeoptimization(JValue* result,
   // Coming from partial-fragment deopt.
   Thread* self = Thread::Current();
   if (kIsDebugBuild) {
-    // Sanity-check: are the methods as expected? We check that the last shadow frame (the bottom
-    // of the call-stack) corresponds to the called method.
+    // Consistency-check: are the methods as expected? We check that the last shadow frame
+    // (the bottom of the call-stack) corresponds to the called method.
     ShadowFrame* linked = deopt_frame;
     while (linked->GetLink() != nullptr) {
       linked = linked->GetLink();
@@ -617,19 +617,19 @@ static void HandleDeoptimization(JValue* result,
 
   // Ensure that the stack is still in order.
   if (kIsDebugBuild) {
-    class DummyStackVisitor : public StackVisitor {
+    class EntireStackVisitor : public StackVisitor {
      public:
-      explicit DummyStackVisitor(Thread* self_in) REQUIRES_SHARED(Locks::mutator_lock_)
+      explicit EntireStackVisitor(Thread* self_in) REQUIRES_SHARED(Locks::mutator_lock_)
           : StackVisitor(self_in, nullptr, StackVisitor::StackWalkKind::kIncludeInlinedFrames) {}
 
       bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
-        // Nothing to do here. In a debug build, SanityCheckFrame will do the work in the walking
+        // Nothing to do here. In a debug build, ValidateFrame will do the work in the walking
         // logic. Just always say we want to continue.
         return true;
       }
     };
-    DummyStackVisitor dsv(self);
-    dsv.WalkStack();
+    EntireStackVisitor esv(self);
+    esv.WalkStack();
   }
 
   // Restore the exception that was pending before deoptimization then interpret the
@@ -1094,7 +1094,7 @@ extern "C" TwoWordReturn artInstrumentationMethodExitFromCode(Thread* self,
   // Instrumentation exit stub must not be entered with a pending exception.
   CHECK(!self->IsExceptionPending()) << "Enter instrumentation exit stub with pending exception "
                                      << self->GetException()->Dump();
-  // Compute address of return PC and sanity check that it currently holds 0.
+  // Compute address of return PC and check that it currently holds 0.
   constexpr size_t return_pc_offset =
       RuntimeCalleeSaveFrame::GetReturnPcOffset(CalleeSaveType::kSaveEverything);
   uintptr_t* return_pc_addr = reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(sp) +
@@ -1311,17 +1311,12 @@ extern "C" const void* artQuickResolutionTrampoline(
   // Resolve method filling in dex cache.
   if (!called_method_known_on_entry) {
     StackHandleScope<1> hs(self);
-    mirror::Object* dummy = nullptr;
+    mirror::Object* fake_receiver = nullptr;
     HandleWrapper<mirror::Object> h_receiver(
-        hs.NewHandleWrapper(virtual_or_interface ? &receiver : &dummy));
+        hs.NewHandleWrapper(virtual_or_interface ? &receiver : &fake_receiver));
     DCHECK_EQ(caller->GetDexFile(), called_method.dex_file);
     called = linker->ResolveMethod<ClassLinker::ResolveMode::kCheckICCEAndIAE>(
         self, called_method.index, caller, invoke_type);
-
-    // If successful, update .bss entry in oat file if any.
-    if (called != nullptr) {
-      MaybeUpdateBssMethodEntry(called, called_method);
-    }
   }
   const void* code = nullptr;
   if (LIKELY(!self->IsExceptionPending())) {
@@ -1354,6 +1349,24 @@ extern "C" const void* artQuickResolutionTrampoline(
       CHECK(called != nullptr) << orig_called->PrettyMethod() << " "
                                << mirror::Object::PrettyTypeOf(receiver) << " "
                                << invoke_type << " " << orig_called->GetVtableIndex();
+    }
+    // Now that we know the actual target, update .bss entry in oat file, if
+    // any.
+    if (!called_method_known_on_entry) {
+      // We only put non copied methods in the BSS. Putting a copy can lead to an
+      // odd situation where the ArtMethod being executed is unrelated to the
+      // receiver of the method.
+      called = called->GetCanonicalMethod();
+      if (invoke_type == kSuper) {
+        if (called->GetDexFile() == called_method.dex_file) {
+          called_method.index = called->GetDexMethodIndex();
+        } else {
+          called_method.index = called->FindDexMethodIndexInOtherDexFile(
+              *called_method.dex_file, called_method.index);
+          DCHECK_NE(called_method.index, dex::kDexNoIndex);
+        }
+      }
+      MaybeUpdateBssMethodEntry(called, called_method);
     }
 
     // Static invokes need class initialization check but instance invokes can proceed even if
@@ -1433,7 +1446,6 @@ extern "C" const void* artQuickResolutionTrampoline(
 template<class T> class BuildNativeCallFrameStateMachine {
  public:
 #if defined(__arm__)
-  // TODO: These are all dummy values!
   static constexpr bool kNativeSoftFloatAbi = true;
   static constexpr size_t kNumNativeGprArgs = 4;  // 4 arguments passed in GPRs, r0-r3
   static constexpr size_t kNumNativeFprArgs = 0;  // 0 arguments passed in FPRs.
@@ -1458,7 +1470,6 @@ template<class T> class BuildNativeCallFrameStateMachine {
   static constexpr bool kAlignLongOnStack = false;
   static constexpr bool kAlignDoubleOnStack = false;
 #elif defined(__i386__)
-  // TODO: Check these!
   static constexpr bool kNativeSoftFloatAbi = false;  // Not using int registers for fp
   static constexpr size_t kNumNativeGprArgs = 0;  // 0 arguments passed in GPRs.
   static constexpr size_t kNumNativeFprArgs = 0;  // 0 arguments passed in FPRs.
@@ -2391,7 +2402,7 @@ extern "C" TwoWordReturn artInvokeInterfaceTrampoline(ArtMethod* interface_metho
   ArtMethod* method = nullptr;
   ImTable* imt = cls->GetImt(kRuntimePointerSize);
 
-  if (UNLIKELY(interface_method == nullptr)) {
+  if (UNLIKELY(interface_method == nullptr) || interface_method->IsRuntimeMethod()) {
     // The interface method is unresolved, so resolve it in the dex file of the caller.
     // Fetch the dex_method_idx of the target interface method from the caller.
     uint32_t dex_method_idx;
@@ -2427,6 +2438,7 @@ extern "C" TwoWordReturn artInvokeInterfaceTrampoline(ArtMethod* interface_metho
       CHECK(self->IsExceptionPending());
       return GetTwoWordFailureValue();  // Failure.
     }
+    MaybeUpdateBssMethodEntry(interface_method, MethodReference(&dex_file, dex_method_idx));
   }
 
   // The compiler and interpreter make sure the conflict trampoline is never

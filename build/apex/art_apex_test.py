@@ -542,6 +542,7 @@ class ReleaseChecker:
     self._checker.check_native_library('libartpalette')
     self._checker.check_native_library('libdexfile')
     self._checker.check_native_library('libdexfile_support')
+    self._checker.check_native_library('libdt_fd_forward')
     self._checker.check_native_library('libopenjdkjvm')
     self._checker.check_native_library('libopenjdkjvmti')
     self._checker.check_native_library('libprofile')
@@ -575,9 +576,9 @@ class ReleaseChecker:
     self._checker.check_native_library('libbacktrace')
     self._checker.check_native_library('libbase')
     self._checker.check_native_library('libc++')
-    self._checker.check_native_library('libdt_fd_forward')
     self._checker.check_native_library('libdt_socket')
     self._checker.check_native_library('libjdwp')
+    self._checker.check_native_library('liblz4')
     self._checker.check_native_library('liblzma')
     self._checker.check_native_library('libnpt')
     self._checker.check_native_library('libunwindstack')
@@ -613,11 +614,11 @@ class ReleaseTargetChecker:
     # removed in Android R.
 
     # Check binaries for ART.
+    self._checker.check_executable("compile_bcp.sh")
     self._checker.check_executable('oatdump')
     self._checker.check_multilib_executable('dex2oat')
 
     # Check internal libraries for ART.
-    self._checker.check_prefer64_library('libart-disassembler')
     self._checker.check_native_library('libperfetto_hprof')
 
     # Check exported native libraries for Managed Core Library.
@@ -626,12 +627,6 @@ class ReleaseTargetChecker:
     # Check internal native library dependencies.
     self._checker.check_native_library('libcrypto')
     self._checker.check_native_library('libexpat')
-
-    # TODO(b/139046641): Fix proper 2nd arch checks. For now, just ignore these
-    # directories.
-    self._checker.ignore_path('bin/arm')
-    self._checker.ignore_path('lib/arm')
-    self._checker.ignore_path('lib64/arm')
 
 
 class ReleaseHostChecker:
@@ -648,7 +643,7 @@ class ReleaseHostChecker:
     self._checker.check_symlinked_first_executable('dex2oat')
 
     # Check exported native libraries for Managed Core Library.
-    self._checker.check_native_library('libandroidicu-host')
+    self._checker.check_native_library('libicu')
     self._checker.check_native_library('libandroidio')
 
     # Check internal libraries for Managed Core Library.
@@ -678,7 +673,6 @@ class DebugChecker:
 
     # Check internal libraries for ART.
     self._checker.check_native_library('libadbconnectiond')
-    self._checker.check_native_library('libart-disassembler')
     self._checker.check_native_library('libartbased')
     self._checker.check_native_library('libartd')
     self._checker.check_native_library('libartd-compiler')
@@ -759,6 +753,7 @@ class TestingTargetChecker:
 
     # Check ART test (internal) libraries.
     self._checker.check_native_library('libart-gtest')
+    self._checker.check_native_library('libartd-simulator-container')
 
     # Check ART test tools.
     self._checker.check_executable('signal_dumper')
@@ -1063,7 +1058,7 @@ def art_apex_test_default(test_parser):
     sys.exit(1)
   host_out = os.environ['ANDROID_HOST_OUT']
 
-  test_args = test_parser.parse_args(['dummy'])  # For consistency.
+  test_args = test_parser.parse_args(['unused'])  # For consistency.
   test_args.debugfs = '%s/bin/debugfs' % host_out
   test_args.tmpdir = '.'
   test_args.tree = False
@@ -1079,7 +1074,7 @@ def art_apex_test_default(test_parser):
   # TODO: Add host support.
   # TODO: Add support for flattened APEX packages.
   configs = [
-    {'name': 'com.android.art.release', 'flavor': FLAVOR_RELEASE, 'host': False},
+    {'name': 'com.android.art',         'flavor': FLAVOR_RELEASE, 'host': False},
     {'name': 'com.android.art.debug',   'flavor': FLAVOR_DEBUG,   'host': False},
     {'name': 'com.android.art.testing', 'flavor': FLAVOR_TESTING, 'host': False},
   ]

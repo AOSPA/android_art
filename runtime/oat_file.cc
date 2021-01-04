@@ -883,11 +883,17 @@ bool OatFileBase::Setup(int zip_fd,
 
     const IndexBssMapping* method_bss_mapping;
     const IndexBssMapping* type_bss_mapping;
+    const IndexBssMapping* public_type_bss_mapping;
+    const IndexBssMapping* package_type_bss_mapping;
     const IndexBssMapping* string_bss_mapping;
     if (!ReadIndexBssMapping(
             this, &oat, i, dex_file_location, "method", &method_bss_mapping, error_msg) ||
         !ReadIndexBssMapping(
             this, &oat, i, dex_file_location, "type", &type_bss_mapping, error_msg) ||
+        !ReadIndexBssMapping(
+            this, &oat, i, dex_file_location, "type", &public_type_bss_mapping, error_msg) ||
+        !ReadIndexBssMapping(
+            this, &oat, i, dex_file_location, "type", &package_type_bss_mapping, error_msg) ||
         !ReadIndexBssMapping(
             this, &oat, i, dex_file_location, "string", &string_bss_mapping, error_msg)) {
       return false;
@@ -903,6 +909,8 @@ bool OatFileBase::Setup(int zip_fd,
         lookup_table_data,
         method_bss_mapping,
         type_bss_mapping,
+        public_type_bss_mapping,
+        package_type_bss_mapping,
         string_bss_mapping,
         class_offsets_pointer,
         dex_layout_sections);
@@ -1025,7 +1033,7 @@ class DlOpenOatFile final : public OatFileBase {
   // Guarded by host_dlopen_handles_lock_;
   static std::unordered_set<void*> host_dlopen_handles_;
 
-  // Reservation and dummy memory map objects corresponding to the regions mapped by dlopen.
+  // Reservation and placeholder memory map objects corresponding to the regions mapped by dlopen.
   // Note: Must be destroyed after dlclose() as it can hold the owning reservation.
   std::vector<MemMap> dlopen_mmaps_;
 
@@ -1232,7 +1240,7 @@ void DlOpenOatFile::PreSetup(const std::string& elf_filename) {
   LOG(FATAL) << "Should not reach here.";
   UNREACHABLE();
 #else
-  struct DummyMapData {
+  struct PlaceholderMapData {
     const char* name;
     uint8_t* vaddr;
     size_t memsz;
@@ -1264,7 +1272,7 @@ void DlOpenOatFile::PreSetup(const std::string& elf_filename) {
           }
         }
       }
-      // Add dummy mmaps for this file.
+      // Add placeholder mmaps for this file.
       if (contains_begin) {
         for (Elf_Half i = 0; i < info->dlpi_phnum; i++) {
           if (info->dlpi_phdr[i].p_type == PT_LOAD) {
@@ -1272,17 +1280,19 @@ void DlOpenOatFile::PreSetup(const std::string& elf_filename) {
                 info->dlpi_phdr[i].p_vaddr);
             size_t memsz = info->dlpi_phdr[i].p_memsz;
             size_t name_size = strlen(info->dlpi_name) + 1u;
-            std::vector<char>* dummy_maps_names = context->dummy_maps_names_;
+            std::vector<char>* placeholder_maps_names = context->placeholder_maps_names_;
             // We must not allocate any memory in the callback, see b/156312036 .
-            if (name_size < dummy_maps_names->capacity() - dummy_maps_names->size() &&
-                context->dummy_maps_data_->size() < context->dummy_maps_data_->capacity()) {
-              dummy_maps_names->insert(
-                  dummy_maps_names->end(), info->dlpi_name, info->dlpi_name + name_size);
-              const char* name = &(*dummy_maps_names)[dummy_maps_names->size() - name_size];
-              context->dummy_maps_data_->push_back({ name, vaddr, memsz });
+            if (name_size < placeholder_maps_names->capacity() - placeholder_maps_names->size() &&
+                context->placeholder_maps_data_->size() <
+                    context->placeholder_maps_data_->capacity()) {
+              placeholder_maps_names->insert(
+                  placeholder_maps_names->end(), info->dlpi_name, info->dlpi_name + name_size);
+              const char* name =
+                  &(*placeholder_maps_names)[placeholder_maps_names->size() - name_size];
+              context->placeholder_maps_data_->push_back({ name, vaddr, memsz });
             }
-            context->num_dummy_maps_ += 1u;
-            context->dummy_maps_names_size_ += name_size;
+            context->num_placeholder_maps_ += 1u;
+            context->placeholder_maps_names_size_ += name_size;
           }
         }
         return 1;  // Stop iteration and return 1 from dl_iterate_phdr.
@@ -1290,27 +1300,27 @@ void DlOpenOatFile::PreSetup(const std::string& elf_filename) {
       return 0;  // Continue iteration and return 0 from dl_iterate_phdr when finished.
     }
     const uint8_t* const begin_;
-    std::vector<DummyMapData>* dummy_maps_data_;
-    size_t num_dummy_maps_;
-    std::vector<char>* dummy_maps_names_;
-    size_t dummy_maps_names_size_;
+    std::vector<PlaceholderMapData>* placeholder_maps_data_;
+    size_t num_placeholder_maps_;
+    std::vector<char>* placeholder_maps_names_;
+    size_t placeholder_maps_names_size_;
     size_t shared_objects_before;
     size_t shared_objects_seen;
   };
 
   // We must not allocate any memory in the callback, see b/156312036 .
-  // Therefore we pre-allocate storage for the data we need for creating the dummy maps.
-  std::vector<DummyMapData> dummy_maps_data;
-  dummy_maps_data.reserve(32);  // 32 should be enough. If not, we'll retry.
-  std::vector<char> dummy_maps_names;
-  dummy_maps_names.reserve(4 * KB);  // 4KiB should be enough. If not, we'll retry.
+  // Therefore we pre-allocate storage for the data we need for creating the placeholder maps.
+  std::vector<PlaceholderMapData> placeholder_maps_data;
+  placeholder_maps_data.reserve(32);  // 32 should be enough. If not, we'll retry.
+  std::vector<char> placeholder_maps_names;
+  placeholder_maps_names.reserve(4 * KB);  // 4KiB should be enough. If not, we'll retry.
 
   dl_iterate_context context = {
       Begin(),
-      &dummy_maps_data,
-      /*num_dummy_maps_*/ 0u,
-      &dummy_maps_names,
-      /*dummy_maps_names_size_*/ 0u,
+      &placeholder_maps_data,
+      /*num_placeholder_maps_*/ 0u,
+      &placeholder_maps_names,
+      /*placeholder_maps_names_size_*/ 0u,
       shared_objects_before_,
       /*shared_objects_seen*/ 0u
   };
@@ -1320,10 +1330,10 @@ void DlOpenOatFile::PreSetup(const std::string& elf_filename) {
     // before giving up. This should be unusual.
     VLOG(oat) << "Need a second run in PreSetup, didn't find with shared_objects_before="
               << shared_objects_before_;
-    DCHECK(dummy_maps_data.empty());
-    DCHECK_EQ(context.num_dummy_maps_, 0u);
-    DCHECK(dummy_maps_names.empty());
-    DCHECK_EQ(context.dummy_maps_names_size_, 0u);
+    DCHECK(placeholder_maps_data.empty());
+    DCHECK_EQ(context.num_placeholder_maps_, 0u);
+    DCHECK(placeholder_maps_names.empty());
+    DCHECK_EQ(context.placeholder_maps_names_size_, 0u);
     context.shared_objects_before = 0u;
     context.shared_objects_seen = 0u;
     if (dl_iterate_phdr(dl_iterate_context::callback, &context) == 0) {
@@ -1333,26 +1343,27 @@ void DlOpenOatFile::PreSetup(const std::string& elf_filename) {
     }
   }
 
-  if (dummy_maps_data.size() < context.num_dummy_maps_) {
+  if (placeholder_maps_data.size() < context.num_placeholder_maps_) {
     // Insufficient capacity. Reserve more space and retry.
-    dummy_maps_data.clear();
-    dummy_maps_data.reserve(context.num_dummy_maps_);
-    context.num_dummy_maps_ = 0u;
-    dummy_maps_names.clear();
-    dummy_maps_names.reserve(context.dummy_maps_names_size_);
-    context.dummy_maps_names_size_ = 0u;
+    placeholder_maps_data.clear();
+    placeholder_maps_data.reserve(context.num_placeholder_maps_);
+    context.num_placeholder_maps_ = 0u;
+    placeholder_maps_names.clear();
+    placeholder_maps_names.reserve(context.placeholder_maps_names_size_);
+    context.placeholder_maps_names_size_ = 0u;
     context.shared_objects_before = 0u;
     context.shared_objects_seen = 0u;
     bool success = (dl_iterate_phdr(dl_iterate_context::callback, &context) != 0);
     CHECK(success);
   }
 
-  CHECK_EQ(dummy_maps_data.size(), context.num_dummy_maps_);
-  CHECK_EQ(dummy_maps_names.size(), context.dummy_maps_names_size_);
-  DCHECK_EQ(static_cast<size_t>(std::count(dummy_maps_names.begin(), dummy_maps_names.end(), '\0')),
-            context.num_dummy_maps_);
-  for (const DummyMapData& data : dummy_maps_data) {
-    MemMap mmap = MemMap::MapDummy(data.name, data.vaddr, data.memsz);
+  CHECK_EQ(placeholder_maps_data.size(), context.num_placeholder_maps_);
+  CHECK_EQ(placeholder_maps_names.size(), context.placeholder_maps_names_size_);
+  DCHECK_EQ(static_cast<size_t>(std::count(placeholder_maps_names.begin(),
+                                           placeholder_maps_names.end(), '\0')),
+            context.num_placeholder_maps_);
+  for (const PlaceholderMapData& data : placeholder_maps_data) {
+    MemMap mmap = MemMap::MapPlaceholder(data.name, data.vaddr, data.memsz);
     dlopen_mmaps_.push_back(std::move(mmap));
   }
 #endif
@@ -1525,7 +1536,7 @@ class OatFileBackedByVdex final : public OatFileBase {
     // SetVdex will take ownership of the VdexFile.
     SetVdex(vdex_file.release());
 
-    // Create a dummy OatHeader with a key store containing only the compiler
+    // Create a fake OatHeader with a key store containing only the compiler
     // filter (it helps debugging and is required by
     // OatHeader::GetCompilerFilter).
     std::unique_ptr<const InstructionSetFeatures> isa_features =
@@ -1866,6 +1877,8 @@ OatDexFile::OatDexFile(const OatFile* oat_file,
                        const uint8_t* lookup_table_data,
                        const IndexBssMapping* method_bss_mapping_data,
                        const IndexBssMapping* type_bss_mapping_data,
+                       const IndexBssMapping* public_type_bss_mapping_data,
+                       const IndexBssMapping* package_type_bss_mapping_data,
                        const IndexBssMapping* string_bss_mapping_data,
                        const uint32_t* oat_class_offsets_pointer,
                        const DexLayoutSections* dex_layout_sections)
@@ -1877,6 +1890,8 @@ OatDexFile::OatDexFile(const OatFile* oat_file,
       lookup_table_data_(lookup_table_data),
       method_bss_mapping_(method_bss_mapping_data),
       type_bss_mapping_(type_bss_mapping_data),
+      public_type_bss_mapping_(public_type_bss_mapping_data),
+      package_type_bss_mapping_(package_type_bss_mapping_data),
       string_bss_mapping_(string_bss_mapping_data),
       oat_class_offsets_pointer_(oat_class_offsets_pointer),
       lookup_table_(),
@@ -1969,7 +1984,8 @@ OatFile::OatClass OatDexFile::GetOatClass(uint16_t class_def_index) const {
   uint32_t oat_class_offset = GetOatClassOffset(class_def_index);
 
   const uint8_t* oat_class_pointer = oat_file_->Begin() + oat_class_offset;
-  CHECK_LT(oat_class_pointer, oat_file_->End()) << oat_file_->GetLocation();
+  CHECK_LT(reinterpret_cast<const void*>(oat_class_pointer),
+           reinterpret_cast<const void*>(oat_file_->End())) << oat_file_->GetLocation();
 
   const uint8_t* status_pointer = oat_class_pointer;
   CHECK_LT(status_pointer, oat_file_->End()) << oat_file_->GetLocation();

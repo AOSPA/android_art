@@ -355,8 +355,11 @@ static optimizer::DexToDexCompiler::CompilationLevel GetDexToDexCompilationLevel
   if (dex_file.GetContainer() != nullptr && dex_file.GetContainer()->IsReadOnly()) {
     return optimizer::DexToDexCompiler::CompilationLevel::kDontDexToDexCompile;
   }
+  if (!driver.GetCompilerOptions().IsQuickeningCompilationEnabled()) {
+    // b/170086509 Quickening compilation is being deprecated.
+    return optimizer::DexToDexCompiler::CompilationLevel::kDontDexToDexCompile;
+  }
   auto* const runtime = Runtime::Current();
-  DCHECK(driver.GetCompilerOptions().IsQuickeningCompilationEnabled());
   const char* descriptor = dex_file.GetClassDescriptor(class_def);
   ClassLinker* class_linker = runtime->GetClassLinker();
   ObjPtr<mirror::Class> klass = class_linker->FindClass(self, descriptor, class_loader);
@@ -851,6 +854,51 @@ void CompilerDriver::PrepareDexFilesForOatFile(TimingLogger* timings) {
   }
 }
 
+class CreateConflictTablesVisitor : public ClassVisitor {
+ public:
+  explicit CreateConflictTablesVisitor(VariableSizedHandleScope& hs)
+      : hs_(hs) {}
+
+  bool operator()(ObjPtr<mirror::Class> klass) override
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(klass)) {
+      return true;
+    }
+    // Collect handles since there may be thread suspension in future EnsureInitialized.
+    to_visit_.push_back(hs_.NewHandle(klass));
+    return true;
+  }
+
+  void FillAllIMTAndConflictTables() REQUIRES_SHARED(Locks::mutator_lock_) {
+    for (Handle<mirror::Class> c : to_visit_) {
+      // Create the conflict tables.
+      FillIMTAndConflictTables(c.Get());
+    }
+  }
+
+ private:
+  void FillIMTAndConflictTables(ObjPtr<mirror::Class> klass)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (!klass->ShouldHaveImt()) {
+      return;
+    }
+    if (visited_classes_.find(klass) != visited_classes_.end()) {
+      return;
+    }
+    if (klass->HasSuperClass()) {
+      FillIMTAndConflictTables(klass->GetSuperClass());
+    }
+    if (!klass->IsTemp()) {
+      Runtime::Current()->GetClassLinker()->FillIMTAndConflictTables(klass);
+    }
+    visited_classes_.insert(klass);
+  }
+
+  VariableSizedHandleScope& hs_;
+  std::vector<Handle<mirror::Class>> to_visit_;
+  std::unordered_set<ObjPtr<mirror::Class>, HashObjPtr> visited_classes_;
+};
+
 void CompilerDriver::PreCompile(jobject class_loader,
                                 const std::vector<const DexFile*>& dex_files,
                                 TimingLogger* timings,
@@ -926,6 +974,15 @@ void CompilerDriver::PreCompile(jobject class_loader,
       }
       InitializeClasses(class_loader, dex_files, timings);
       VLOG(compiler) << "InitializeClasses: " << GetMemoryUsageString(false);
+    }
+    {
+      // Create conflict tables, as the runtime expects boot image classes to
+      // always have their conflict tables filled.
+      ScopedObjectAccess soa(Thread::Current());
+      VariableSizedHandleScope hs(soa.Self());
+      CreateConflictTablesVisitor visitor(hs);
+      Runtime::Current()->GetClassLinker()->VisitClassesWithoutClassesLock(&visitor);
+      visitor.FillAllIMTAndConflictTables();
     }
 
     UpdateImageClasses(timings, image_classes);
@@ -1426,21 +1483,6 @@ bool CompilerDriver::ComputeInstanceFieldInfo(uint32_t field_idx, const DexCompi
   }
 }
 
-bool CompilerDriver::IsSafeCast(const DexCompilationUnit* mUnit, uint32_t dex_pc) {
-  if (!compiler_options_->IsVerificationEnabled()) {
-    // If we didn't verify, every cast has to be treated as non-safe.
-    return false;
-  }
-  DCHECK(mUnit->GetVerifiedMethod() != nullptr);
-  bool result = mUnit->GetVerifiedMethod()->IsSafeCast(dex_pc);
-  if (result) {
-    stats_->SafeCast();
-  } else {
-    stats_->NotASafeCast();
-  }
-  return result;
-}
-
 class CompilationVisitor {
  public:
   virtual ~CompilationVisitor() {}
@@ -1879,12 +1921,13 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
           ClassReference ref(dex_file, accessor.GetClassDefIndex());
           const ClassStatus existing = ClassStatus::kNotReady;
           ClassStateTable::InsertResult result =
-             compiled_classes_.Insert(ref, existing, ClassStatus::kVerified);
+             compiled_classes_.Insert(ref, existing, ClassStatus::kVerifiedNeedsAccessChecks);
           CHECK_EQ(result, ClassStateTable::kInsertResultSuccess) << ref.dex_file->GetLocation();
         } else {
           // Update the class status, so later compilation stages know they don't need to verify
           // the class.
-          LoadAndUpdateStatus(accessor, ClassStatus::kVerified, class_loader, soa.Self());
+          LoadAndUpdateStatus(
+              accessor, ClassStatus::kVerifiedNeedsAccessChecks, class_loader, soa.Self());
           // Create `VerifiedMethod`s for each methods, the compiler expects one for
           // quickening or compiling.
           // Note that this means:
@@ -2623,56 +2666,6 @@ void CompilerDriver::InitializeClasses(jobject jni_class_loader,
   class_linker->MakeInitializedClassesVisiblyInitialized(Thread::Current(), /*wait=*/ true);
 }
 
-class InitializeArrayClassesAndCreateConflictTablesVisitor : public ClassVisitor {
- public:
-  explicit InitializeArrayClassesAndCreateConflictTablesVisitor(VariableSizedHandleScope& hs)
-      : hs_(hs) {}
-
-  bool operator()(ObjPtr<mirror::Class> klass) override
-      REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(klass)) {
-      return true;
-    }
-    if (klass->IsArrayClass()) {
-      StackHandleScope<1> hs(Thread::Current());
-      auto h_klass = hs.NewHandleWrapper(&klass);
-      Runtime::Current()->GetClassLinker()->EnsureInitialized(hs.Self(), h_klass, true, true);
-    }
-    // Collect handles since there may be thread suspension in future EnsureInitialized.
-    to_visit_.push_back(hs_.NewHandle(klass));
-    return true;
-  }
-
-  void FillAllIMTAndConflictTables() REQUIRES_SHARED(Locks::mutator_lock_) {
-    for (Handle<mirror::Class> c : to_visit_) {
-      // Create the conflict tables.
-      FillIMTAndConflictTables(c.Get());
-    }
-  }
-
- private:
-  void FillIMTAndConflictTables(ObjPtr<mirror::Class> klass)
-      REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (!klass->ShouldHaveImt()) {
-      return;
-    }
-    if (visited_classes_.find(klass) != visited_classes_.end()) {
-      return;
-    }
-    if (klass->HasSuperClass()) {
-      FillIMTAndConflictTables(klass->GetSuperClass());
-    }
-    if (!klass->IsTemp()) {
-      Runtime::Current()->GetClassLinker()->FillIMTAndConflictTables(klass);
-    }
-    visited_classes_.insert(klass);
-  }
-
-  VariableSizedHandleScope& hs_;
-  std::vector<Handle<mirror::Class>> to_visit_;
-  std::unordered_set<ObjPtr<mirror::Class>, HashObjPtr> visited_classes_;
-};
-
 void CompilerDriver::InitializeClasses(jobject class_loader,
                                        const std::vector<const DexFile*>& dex_files,
                                        TimingLogger* timings) {
@@ -2680,20 +2673,6 @@ void CompilerDriver::InitializeClasses(jobject class_loader,
     const DexFile* dex_file = dex_files[i];
     CHECK(dex_file != nullptr);
     InitializeClasses(class_loader, *dex_file, dex_files, timings);
-  }
-  if (GetCompilerOptions().IsBootImage() ||
-      GetCompilerOptions().IsBootImageExtension() ||
-      GetCompilerOptions().IsAppImage()) {
-    // Make sure that we call EnsureIntiailized on all the array classes to call
-    // SetVerificationAttempted so that the access flags are set. If we do not do this they get
-    // changed at runtime resulting in more dirty image pages.
-    // Also create conflict tables.
-    // Only useful if we are compiling an image.
-    ScopedObjectAccess soa(Thread::Current());
-    VariableSizedHandleScope hs(soa.Self());
-    InitializeArrayClassesAndCreateConflictTablesVisitor visitor(hs);
-    Runtime::Current()->GetClassLinker()->VisitClassesWithoutClassesLock(&visitor);
-    visitor.FillAllIMTAndConflictTables();
   }
   if (GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension()) {
     // Prune garbage objects created during aborted transactions.

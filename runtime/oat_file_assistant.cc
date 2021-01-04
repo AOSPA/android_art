@@ -111,9 +111,9 @@ OatFileAssistant::OatFileAssistant(const char* dex_location,
 
   dex_location_.assign(dex_location);
 
-  if (load_executable_ && isa != Runtime::GetQuickCodeISA()) {
+  if (load_executable_ && isa != kRuntimeISA) {
     LOG(WARNING) << "OatFileAssistant: Load executable specified, "
-      << "but isa is not executable isa. Will not attempt to load executable.";
+      << "but isa is not kRuntimeISA. Will not attempt to load executable.";
     load_executable_ = false;
   }
 
@@ -153,13 +153,6 @@ OatFileAssistant::OatFileAssistant(const char* dex_location,
     } else {
       VLOG(oat) << "Dex parent of " << dex_location_ << " is not writable: " << strerror(errno);
     }
-  }
-}
-
-OatFileAssistant::~OatFileAssistant() {
-  // Clean up the lock file.
-  if (flock_.get() != nullptr) {
-    unlink(flock_->GetPath().c_str());
   }
 }
 
@@ -628,7 +621,6 @@ bool OatFileAssistant::ValidateBootClassPathChecksums(const OatFile& oat_file) {
       ArrayRef<const std::string>(runtime->GetBootClassPathLocations()),
       ArrayRef<const std::string>(runtime->GetBootClassPath()),
       isa_,
-      runtime->GetImageSpaceLoadingOrder(),
       &error_msg);
   if (!result) {
     VLOG(oat) << "Failed to verify checksums of oat file " << oat_file.GetLocation()

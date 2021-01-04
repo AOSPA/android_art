@@ -21,7 +21,6 @@
  */
 #include "asm_support.h"
 #include "arch/x86_64/asm_support_x86_64.S"
-#include "interpreter/cfi_asm_support.h"
 
 /**
  * x86_64 ABI general notes:
@@ -74,11 +73,13 @@
 #define rINSTbl  %bl
 #define rIBASE   %r14
 #define rREFS    %r15
+#define rREFS32  %r15d
 #define CFI_REFS 15 // DWARF register number of the reference array (r15).
 
 // Temporary registers while setting up a frame.
 #define rNEW_FP   %r8
 #define rNEW_REFS %r9
+#define rNEW_REFS32 %r9d
 #define CFI_NEW_REFS 9
 
 /*
@@ -255,18 +256,90 @@ END_FUNCTION \name
     GOTO_NEXT
 3:
     movq (%rsp), %rdi
-#if (NTERP_HOTNESS_MASK != 0xffff)
-#error "Nterp x86_64 expects Nterp hotness mask to be 0xffff"
-#endif
     addw $$1, ART_METHOD_HOTNESS_COUNT_OFFSET(%rdi)
+    andw $$(NTERP_HOTNESS_MASK), ART_METHOD_HOTNESS_COUNT_OFFSET(%rdi)
     // If the counter overflows, handle this in the runtime.
-    jo NterpHandleHotnessOverflow
+    jz NterpHandleHotnessOverflow
     // Otherwise, do a suspend check.
     testl   $$(THREAD_SUSPEND_OR_CHECKPOINT_REQUEST), rSELF:THREAD_FLAGS_OFFSET
     jz      2b
     EXPORT_PC
     call    SYMBOL(art_quick_test_suspend)
     jmp 2b
+.endm
+
+// Expects:
+// - r10, and r11 to be available.
+// Outputs:
+// - \registers contains the dex registers size
+// - \outs contains the outs size
+// - if load_ins is 1, \ins contains the ins
+// - \code_item is replace with a pointer to the instructions
+.macro FETCH_CODE_ITEM_INFO code_item, registers, outs, ins, load_ins
+    testq MACRO_LITERAL(1), \code_item
+    je 5f
+    andq $$-2, \code_item  // Remove the extra bit that marks it's a compact dex file.
+    movzwl COMPACT_CODE_ITEM_FIELDS_OFFSET(\code_item), %r10d
+    movl %r10d, \registers
+    sarl $$COMPACT_CODE_ITEM_REGISTERS_SIZE_SHIFT, \registers
+    andl $$0xf, \registers
+    movl %r10d, \outs
+    sarl $$COMPACT_CODE_ITEM_OUTS_SIZE_SHIFT, \outs
+    andl $$0xf, \outs
+    .if \load_ins
+    movl %r10d, \ins
+    sarl $$COMPACT_CODE_ITEM_INS_SIZE_SHIFT, \ins
+    andl $$0xf, \ins
+    .else
+    movl %r10d, %r11d
+    sarl $$COMPACT_CODE_ITEM_INS_SIZE_SHIFT, %r11d
+    andl $$0xf, %r11d
+    addl %r11d, \registers
+    .endif
+    testw $$COMPACT_CODE_ITEM_REGISTERS_INS_OUTS_FLAGS, COMPACT_CODE_ITEM_FLAGS_OFFSET(\code_item)
+    je 4f
+    movq \code_item, %r11
+    testw $$COMPACT_CODE_ITEM_INSNS_FLAG, COMPACT_CODE_ITEM_FLAGS_OFFSET(\code_item)
+    je 1f
+    subq $$4, %r11
+1:
+    testw $$COMPACT_CODE_ITEM_REGISTERS_FLAG, COMPACT_CODE_ITEM_FLAGS_OFFSET(\code_item)
+    je 2f
+    subq $$2, %r11
+    movzwl (%r11), %r10d
+    addl %r10d, \registers
+2:
+    testw $$COMPACT_CODE_ITEM_INS_FLAG, COMPACT_CODE_ITEM_FLAGS_OFFSET(\code_item)
+    je 3f
+    subq $$2, %r11
+    movzwl (%r11), %r10d
+    .if \load_ins
+    addl %r10d, \ins
+    .else
+    addl %r10d, \registers
+    .endif
+3:
+    testw $$COMPACT_CODE_ITEM_OUTS_FLAG, COMPACT_CODE_ITEM_FLAGS_OFFSET(\code_item)
+    je 4f
+    subq $$2, %r11
+    movzwl (%r11), %r10d
+    addl %r10d, \outs
+4:
+    .if \load_ins
+    addl \ins, \registers
+    .endif
+    addq $$COMPACT_CODE_ITEM_INSNS_OFFSET, \code_item
+    jmp 6f
+5:
+    // Fetch dex register size.
+    movzwl CODE_ITEM_REGISTERS_SIZE_OFFSET(\code_item), \registers
+    // Fetch outs size.
+    movzwl CODE_ITEM_OUTS_SIZE_OFFSET(\code_item), \outs
+    .if \load_ins
+    movzwl CODE_ITEM_INS_SIZE_OFFSET(\code_item), \ins
+    .endif
+    addq $$CODE_ITEM_INSNS_OFFSET, \code_item
+6:
 .endm
 
 // Setup the stack to start executing the method. Expects:
@@ -276,11 +349,10 @@ END_FUNCTION \name
 // Outputs
 // - rbx contains the dex registers size
 // - r11 contains the old stack pointer.
-.macro SETUP_STACK_FRAME code_item, refs, fp, cfi_refs
-    // Fetch dex register size.
-    movzwl CODE_ITEM_REGISTERS_SIZE_OFFSET(\code_item), %ebx
-    // Fetch outs size.
-    movzwq CODE_ITEM_OUTS_SIZE_OFFSET(\code_item), \refs
+// - \code_item is replace with a pointer to the instructions
+// - if load_ins is 1, r14 contains the ins
+.macro SETUP_STACK_FRAME code_item, refs, refs32, fp, cfi_refs, load_ins
+    FETCH_CODE_ITEM_INFO \code_item, %ebx, \refs32, %r14d, \load_ins
 
     // Compute required frame size for dex registers: ((2 * ebx) + refs)
     leaq (\refs, %rbx, 2), %r11
@@ -305,7 +377,7 @@ END_FUNCTION \name
     CFI_DEF_CFA_REGISTER(r11)
     movq %r10, %rsp
     movq %r11, -8(\refs)
-    CFI_DEFINE_CFA_DEREF(\cfi_refs, -8, (6 + 4 + 1) * 8)
+    CFI_DEF_CFA_BREG_PLUS_UCONST \cfi_refs, -8, ((6 + 4 + 1) * 8)
 
     // Put nulls in reference frame.
     testl %ebx, %ebx
@@ -744,11 +816,9 @@ END_FUNCTION \name
 // Increase method hotness and do suspend check before starting executing the method.
 .macro START_EXECUTING_INSTRUCTIONS
    movq (%rsp), %rdi
-#if (NTERP_HOTNESS_MASK != 0xffff)
-#error "Nterp x86_64 expects Nterp hotness mask to be 0xffff"
-#endif
    addw $$1, ART_METHOD_HOTNESS_COUNT_OFFSET(%rdi)
-   jo 2f
+   andw $$(NTERP_HOTNESS_MASK), ART_METHOD_HOTNESS_COUNT_OFFSET(%rdi)
+   jz 2f
    testl $$(THREAD_SUSPEND_OR_CHECKPOINT_REQUEST), rSELF:THREAD_FLAGS_OFFSET
    jz 1f
    EXPORT_PC
@@ -789,6 +859,9 @@ END_FUNCTION \name
 // - rPC: the new PC pointer to execute
 // - edi: number of arguments
 // - ecx: first dex register
+//
+// This helper expects:
+// - rax to contain the code item
 .macro SETUP_STACK_FOR_INVOKE
    // We do the same stack overflow check as the compiler. See CanMethodUseNterp
    // in how we limit the maximum nterp frame size.
@@ -799,7 +872,7 @@ END_FUNCTION \name
    SPILL_ALL_CALLEE_SAVES
 
    // Setup the frame.
-   SETUP_STACK_FRAME %rax, rNEW_REFS, rNEW_FP, CFI_NEW_REFS
+   SETUP_STACK_FRAME %rax, rNEW_REFS, rNEW_REFS32, rNEW_FP, CFI_NEW_REFS, load_ins=0
    // Make r11 point to the top of the dex register array.
    leaq (rNEW_FP, %rbx, 4), %r11
 
@@ -808,7 +881,7 @@ END_FUNCTION \name
    movzwl 4(rPC), %ecx
 
    // Set the dex pc pointer.
-   leaq CODE_ITEM_INSNS_OFFSET(%rax), rPC
+   movq %rax, rPC
    CFI_DEFINE_DEX_PC_WITH_OFFSET(CFI_TMP, CFI_DEX, 0)
 .endm
 
@@ -895,7 +968,7 @@ END_FUNCTION \name
    // Start executing the method.
    movq rNEW_FP, rFP
    movq rNEW_REFS, rREFS
-   CFI_DEFINE_CFA_DEREF(CFI_REFS, -8, (6 + 4 + 1) * 8)
+   CFI_DEF_CFA_BREG_PLUS_UCONST CFI_REFS, -8, ((6 + 4 + 1) * 8)
    START_EXECUTING_INSTRUCTIONS
 .endm
 
@@ -941,7 +1014,7 @@ END_FUNCTION \name
    .endif
    movq rNEW_FP, rFP
    movq rNEW_REFS, rREFS
-   CFI_DEFINE_CFA_DEREF(CFI_REFS, -8, (6 + 4 + 1) * 8)
+   CFI_DEF_CFA_BREG_PLUS_UCONST CFI_REFS, -8, ((6 + 4 + 1) * 8)
    START_EXECUTING_INSTRUCTIONS
 .endm
 
@@ -974,13 +1047,7 @@ END_FUNCTION \name
    cmpq %rax, ART_METHOD_QUICK_CODE_OFFSET_64(%rdi)
    jne  VAR(call_compiled_code)
 
-   // TODO: Get code item in a better way and remove below
-   push %rdi
-   push %rsi
-   call SYMBOL(NterpGetCodeItem)
-   pop %rsi
-   pop %rdi
-   // TODO: Get code item in a better way and remove above
+   movq ART_METHOD_DATA_OFFSET_64(%rdi), %rax
 .endm
 
 // Uses r9 and r10 as temporary
@@ -1063,7 +1130,10 @@ END_FUNCTION \name
    call SYMBOL(art_quick_invoke_custom)
    .else
       .if \is_interface
-      movzwl 2(rPC), %eax
+      // Setup hidden argument. As we don't have access to the interface method,
+      // just pass the method from the IMT. If the method is the conflict trampoline,
+      // this will make the stub go to runtime, otherwise the hidden argument is unused.
+      movq %rdi, %rax
       .endif
       call *ART_METHOD_QUICK_CODE_OFFSET_64(%rdi) // Call the method.
    .endif
@@ -1162,7 +1232,10 @@ END_FUNCTION \name
    call SYMBOL(art_quick_invoke_custom)
    .else
      .if \is_interface
-     movzwl 2(rPC), %eax
+     // Setup hidden argument. As we don't have access to the interface method,
+     // just pass the method from the IMT. If the method is the conflict trampoline,
+     // this will make the stub go to runtime, otherwise the hidden argument is unused.
+     movq %rdi, %rax
      .endif
      call *ART_METHOD_QUICK_CODE_OFFSET_64(%rdi) // Call the method.
    .endif
@@ -1389,14 +1462,9 @@ OAT_ENTRY ExecuteNterpImpl, EndExecuteNterpImpl
     movq %xmm6, 48(%rsp)
     movq %xmm7, 56(%rsp)
 
-    // Save method in callee-save rbx.
-    movq %rdi, %rbx
     call SYMBOL(NterpGetShorty)
     // Save shorty in callee-save rbp.
     movq %rax, %rbp
-    movq %rbx, %rdi
-    call SYMBOL(NterpGetCodeItem)
-    movq %rax, rPC
 
     // Restore xmm registers + alignment.
     movq 0(%rsp), %xmm0
@@ -1418,11 +1486,12 @@ OAT_ENTRY ExecuteNterpImpl, EndExecuteNterpImpl
     POP rdi
     // TODO: Get shorty in a better way and remove above
 
+    movq ART_METHOD_DATA_OFFSET_64(%rdi), rPC
+
     // Setup the stack for executing the method.
-    SETUP_STACK_FRAME rPC, rREFS, rFP, CFI_REFS
+    SETUP_STACK_FRAME rPC, rREFS, rREFS32, rFP, CFI_REFS, load_ins=1
 
     // Setup the parameters
-    movzwl CODE_ITEM_INS_SIZE_OFFSET(rPC), %r14d
     testl %r14d, %r14d
     je .Lxmm_setup_finished
 
@@ -1466,8 +1535,6 @@ OAT_ENTRY ExecuteNterpImpl, EndExecuteNterpImpl
     LOOP_OVER_SHORTY_STORING_XMMS xmm7, r10, r14, rdi, .Lxmm_setup_finished
     LOOP_OVER_FPs r10, r14, rdi, r11, .Lxmm_setup_finished
 .Lxmm_setup_finished:
-    // Set the dex pc pointer.
-    addq $$CODE_ITEM_INSNS_OFFSET, rPC
     CFI_DEFINE_DEX_PC_WITH_OFFSET(CFI_TMP, CFI_DEX, 0)
 
     // Set rIBASE
@@ -1498,6 +1565,7 @@ common_errDivideByZero:
     EXPORT_PC
     call art_quick_throw_div_zero
 
+// Expect array in edi, index in esi.
 common_errArrayIndex:
     EXPORT_PC
     movl MIRROR_ARRAY_LENGTH_OFFSET(%edi), %eax

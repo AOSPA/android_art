@@ -117,9 +117,6 @@ class IntrinsicVisitor : public ValueObject {
     // The length of the cache array.
     uint32_t length;
 
-    // Boot image offset of java.lang.Integer for allocating an instance.
-    uint32_t integer_boot_image_offset;  // Set to kInvalidReference when compiling the boot image.
-
     // This union contains references to the boot image. For app AOT or JIT compilation,
     // these are the boot image offsets of the target. For boot image compilation, the
     // location shall be known only at link time, so we encode a symbolic reference using
@@ -138,6 +135,10 @@ class IntrinsicVisitor : public ValueObject {
 
   static IntegerValueOfInfo ComputeIntegerValueOfInfo(
       HInvoke* invoke, const CompilerOptions& compiler_options);
+
+  static MemberOffset GetReferenceDisableIntrinsicOffset();
+  static MemberOffset GetReferenceSlowPathEnabledOffset();
+  static void CreateReferenceGetReferentLocations(HInvoke* invoke, CodeGenerator* codegen);
 
  protected:
   IntrinsicVisitor() {}
@@ -162,9 +163,8 @@ class IntrinsicOptimizations : public ValueObject {
   explicit IntrinsicOptimizations(const HInvoke& invoke)
       : value_(invoke.GetIntrinsicOptimizations()) {}
 
-  static constexpr int kNumberOfGenericOptimizations = 2;
-  GENERIC_OPTIMIZATION(DoesNotNeedDexCache, 0);
-  GENERIC_OPTIMIZATION(DoesNotNeedEnvironment, 1);
+  static constexpr int kNumberOfGenericOptimizations = 1;
+  GENERIC_OPTIMIZATION(DoesNotNeedEnvironment, 0);
 
  protected:
   bool IsBitSet(uint32_t bit) const {
@@ -285,7 +285,12 @@ UNREACHABLE_INTRINSIC(Arch, StringIsEmpty)                      \
 UNREACHABLE_INTRINSIC(Arch, StringLength)                       \
 UNREACHABLE_INTRINSIC(Arch, UnsafeLoadFence)                    \
 UNREACHABLE_INTRINSIC(Arch, UnsafeStoreFence)                   \
-UNREACHABLE_INTRINSIC(Arch, UnsafeFullFence)
+UNREACHABLE_INTRINSIC(Arch, UnsafeFullFence)                    \
+UNREACHABLE_INTRINSIC(Arch, VarHandleFullFence)                 \
+UNREACHABLE_INTRINSIC(Arch, VarHandleAcquireFence)              \
+UNREACHABLE_INTRINSIC(Arch, VarHandleReleaseFence)              \
+UNREACHABLE_INTRINSIC(Arch, VarHandleLoadLoadFence)             \
+UNREACHABLE_INTRINSIC(Arch, VarHandleStoreStoreFence)
 
 template <typename IntrinsicLocationsBuilder, typename Codegenerator>
 bool IsCallFreeIntrinsic(HInvoke* invoke, Codegenerator* codegen) {

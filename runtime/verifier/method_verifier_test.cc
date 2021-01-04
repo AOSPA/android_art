@@ -17,10 +17,11 @@
 #include "method_verifier.h"
 
 #include <stdio.h>
+
 #include <memory>
 
 #include "android-base/strings.h"
-
+#include "base/metrics_test.h"
 #include "base/utils.h"
 #include "class_linker-inl.h"
 #include "class_verifier.h"
@@ -31,6 +32,8 @@
 
 namespace art {
 namespace verifier {
+
+using metrics::test::CounterValue;
 
 class MethodVerifierTest : public CommonRuntimeTest {
  protected:
@@ -69,6 +72,16 @@ TEST_F(MethodVerifierTest, LibCore) {
   ScopedObjectAccess soa(Thread::Current());
   ASSERT_TRUE(java_lang_dex_file_ != nullptr);
   VerifyDexFile(*java_lang_dex_file_);
+}
+
+// Make sure verification time metrics are collected.
+TEST_F(MethodVerifierTest, VerificationTimeMetrics) {
+  ScopedObjectAccess soa(Thread::Current());
+  ASSERT_TRUE(java_lang_dex_file_ != nullptr);
+  auto* class_verification_total_time = GetMetrics()->ClassVerificationTotalTime();
+  const uint64_t original_time = CounterValue(*class_verification_total_time);
+  VerifyDexFile(*java_lang_dex_file_);
+  ASSERT_GT(CounterValue(*class_verification_total_time), original_time);
 }
 
 }  // namespace verifier

@@ -18,10 +18,6 @@ cc_library {
     name: "libsigchain",
     defaults: ["art_defaults"],
     visibility: [
-        // Visibility for prebuilt binaries from the prebuilt of this module.
-        // TODO(b/155921753): Restrict this when prebuilts are in their proper
-        // locations.
-        "//prebuilts:__subpackages__",
         // TODO(b/142944043, b/133140750): Clean this up.
         "//frameworks/base/cmds/app_process",
     ],
@@ -30,7 +26,7 @@ cc_library {
     target: {
         linux: {
             shared: {
-                srcs: ["sigchain_dummy.cc"],
+                srcs: ["sigchain_fake.cc"],
             },
             static: {
                 srcs: ["sigchain.cc"],
@@ -38,7 +34,7 @@ cc_library {
         },
 
         darwin: {
-            srcs: ["sigchain_dummy.cc"],
+            srcs: ["sigchain_fake.cc"],
         },
 
         android: {
@@ -48,7 +44,7 @@ cc_library {
 
     export_include_dirs: ["."],
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
         // TODO(b/142944043) Clean this up. This is due to the dependency from
         // app_process
@@ -56,14 +52,14 @@ cc_library {
     ],
 }
 
-// Create a dummy version of libsigchain which expose the necessary symbols
+// Create a fake version of libsigchain which expose the necessary symbols
 // but throws when called. This can be used to get static binaries which don't
 // need the real functionality of the sig chain but need to please the linker.
 cc_library_static {
-    name: "libsigchain_dummy",
+    name: "libsigchain_fake",
     host_supported: true,
     defaults: ["art_defaults"],
-    srcs: ["sigchain_dummy.cc"],
+    srcs: ["sigchain_fake.cc"],
     target: {
         android: {
             whole_static_libs: ["libasync_safe"],

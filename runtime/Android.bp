@@ -60,12 +60,6 @@ libart_cc_defaults {
 libart_cc_defaults {
     name: "libart_defaults",
     defaults: ["art_defaults"],
-    visibility: [
-        // Visibility for prebuilt binaries from the prebuilt of this module.
-        // TODO(b/155921753): Restrict this when prebuilts are in their proper
-        // locations.
-        "//prebuilts:__subpackages__",
-    ],
     host_supported: true,
     srcs: [
         "aot_class_linker.cc",
@@ -368,11 +362,9 @@ libart_cc_defaults {
                 "runtime_android.cc",
                 "thread_android.cc",
             ],
-            header_libs: [
-                "libandroidicu_headers",
-            ],
             shared_libs: [
                 "libdl_android",
+                "libicu",
                 "libz", // For adler32.
             ],
         },
@@ -410,21 +402,24 @@ libart_cc_defaults {
     export_generated_headers: ["cpp-define-generator-asm-support"],
     header_libs: [
         "art_cmdlineparser_headers",
-        "libart_simulator_headers",
         "cpp-define-generator-definitions",
         "jni_platform_headers",
         "libnativehelper_header_only",
     ],
+    whole_static_libs: [
+        "libcpu_features",
+    ],
     shared_libs: [
         "libartpalette",
+        "libbacktrace",
+        "libbase", // For common macros.
+        "liblog",
+        "liblz4",
+        "liblzma", // libelffile(d) dependency; must be repeated here since it's a static lib.
         "libnativebridge",
         "libnativeloader",
-        "libbacktrace",
-        "liblog",
-        // For common macros.
-        "libbase",
-        "libunwindstack",
         "libsigchain",
+        "libunwindstack",
     ],
     export_include_dirs: ["."],
     // ART's macros.h depends on libbase's macros.h.
@@ -433,47 +428,18 @@ libart_cc_defaults {
     export_shared_lib_headers: ["libbase"],
 }
 
-cc_defaults {
-    name: "libart_pgo",
-
-    pgo: {
-        sampling: true,
-    },
-    target: {
-        android_arm64: {
-            pgo: {
-                profile_file: "art/libart_arm_arm64.profdata",
-            },
-        },
-        android_arm: {
-            pgo: {
-                profile_file: "art/libart_arm_arm64.profdata",
-            },
-        },
-        android_x86_64: {
-            pgo: {
-                profile_file: "art/libart_x86_x86_64.profdata",
-            },
-        },
-        android_x86: {
-            pgo: {
-                profile_file: "art/libart_x86_x86_64.profdata",
-            },
-        },
-    },
-}
-
 libart_static_cc_defaults {
     name: "libart_static_base_defaults",
-    static_libs: [
+    whole_static_libs: [
         "libartpalette",
-        "libart-simulator-container",
         "libbacktrace",
         "libbase",
         "liblog",
+        "liblz4",
+        "liblzma", // libelffile dependency; must be repeated here since it's a static lib.
         "libnativebridge",
         "libnativeloader",
-        "libsigchain_dummy",
+        "libsigchain_fake",
         "libunwindstack",
         "libz",
     ],
@@ -485,11 +451,11 @@ cc_defaults {
         "libart_static_base_defaults",
         "libartbase_static_defaults",
         "libdexfile_static_defaults",
+        "libdexfile_support_static_defaults",
         "libprofile_static_defaults",
     ],
-    static_libs: [
+    whole_static_libs: [
         "libart",
-        "libdexfile_support_static",
         "libelffile",
     ],
 }
@@ -500,11 +466,11 @@ cc_defaults {
         "libart_static_base_defaults",
         "libartbased_static_defaults",
         "libdexfiled_static_defaults",
+        "libdexfiled_support_static_defaults",
         "libprofiled_static_defaults",
     ],
-    static_libs: [
+    whole_static_libs: [
         "libartd",
-        "libdexfiled_support_static",
         "libelffiled",
     ],
 }
@@ -553,13 +519,12 @@ art_cc_library {
     defaults: [
         "libart_defaults",
         "libart_nativeunwind_defaults",
-        "libart_pgo",
+        "art_pgo_defaults",
     ],
     whole_static_libs: [
     ],
     static_libs: [
         "libelffile",
-        "libart-simulator-container",
     ],
     shared_libs: [
         "libartbase",
@@ -579,7 +544,7 @@ art_cc_library {
         },
     },
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
 }
@@ -594,7 +559,6 @@ art_cc_library {
     ],
     static_libs: [
         "libelffiled",
-        "libartd-simulator-container",
     ],
     shared_libs: [
         "libartbased",
@@ -749,7 +713,11 @@ art_cc_test {
         "verifier/method_verifier_test.cc",
         "verifier/reg_type_test.cc",
     ],
-    required: ["dex2oatd"],
+    target: {
+        host: {
+            required: ["dex2oatd"],
+        },
+    },
     shared_libs: [
         "libbacktrace",
     ],
@@ -767,7 +735,11 @@ art_cc_test {
         "reflection_test.cc",
         "module_exclusion_test.cc",
     ],
-    required: ["dex2oatd"],
+    target: {
+        host: {
+            required: ["dex2oatd"],
+        },
+    },
     data: [
         ":art-gtest-jars-Main",
         ":art-gtest-jars-NonStaticLeafMethods",
@@ -786,8 +758,8 @@ cc_library_headers {
     sdk_version: "current",
 
     apex_available: [
+        "com.android.art",
         "com.android.art.debug",
-        "com.android.art.release",
     ],
 }
 

@@ -39,9 +39,10 @@ is actually implemented in the "JAR runner" (`test/etc/run-test-jar`), invoked
 by `test/etc/default-run`.
 
 After the execution of a run-test, the check step's default behavior
-(implemented in `test/etc/default-check`) is to compare its standard output with
-the contents of the `expected.txt` file contained in the test's directory; any
-mismatch triggers a test failure.
+(implemented in `test/etc/default-check`) is to respectively compare its
+standard output and standard error with the contents of the
+`expected-stdout.txt` and `expected-stderr.txt` files contained in the test's
+directory; any mismatch triggers a test failure.
 
 The `test/run-test` script handles the execution of a single run-test in a given
 configuration. The Python script `test/testrunner/testrunner.py` is a convenient
@@ -92,16 +93,42 @@ To see command flags run:
 $ art/test.py -h
 ```
 
+## Building tests
+
+In general all tests require some dependencies to be built before they can be run.
+In general you can pass the `--build-dependencies` flag (also available as short
+option -b) to `art/test.py` program to automatically build required dependencies.
+One can also directly use the various `test-art-...-dependencies` targets listed
+below.
+
 ## Running all tests on the build host
 
 ```sh
+$ # Build test files
+$ m test-art-host-run-test-dependencies
+$ # Run the tests
 $ art/test.py --host
+```
+
+Or:
+
+```
+$ art/test.py -b --host
 ```
 
 ## Running all tests on the target device
 
 ```sh
+$ # Build test files
+$ m test-art-target-run-test-dependencies
+$ # Run the tests
 $ art/test.py --target
+```
+
+Or:
+
+```
+$ art/test.py -b --target
 ```
 
 ## Running all gtests on the build host
@@ -119,7 +146,15 @@ $ art/test.py --target -g
 ## Running all run-tests on the build host
 
 ```sh
+$ # Build test files
+$ m test-art-host-run-test-dependencies
 $ art/test.py --host -r
+```
+
+Or:
+
+```
+$ art/test.py -b --host -r
 ```
 
 ## Running all run-tests on the target device
@@ -131,7 +166,16 @@ $ art/test.py --target -r
 ## Running one run-test on the build host
 
 ```sh
+$ # Build test files
+$ m test-art-host-run-test-dependencies
+$ # Run the tests
 $ art/test.py --host -r -t 001-HelloWorld
+```
+
+Or:
+
+```
+$ art/test.py -b --host -r -t 001-HelloWorld
 ```
 
 ## Running one run-test on the target device

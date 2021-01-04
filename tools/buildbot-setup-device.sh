@@ -101,7 +101,7 @@ $verbose && adb logcat -p
 echo -e "${green}Kill stalled dalvikvm processes${nc}"
 # 'ps' on M can sometimes hang.
 timeout 2s adb shell "ps" >/dev/null
-if [ $? = 124 ]; then
+if [[ $? == 124 ]] && [[ "$ART_TEST_DONT_REBOOT_DEVICE" != true ]]; then
   echo -e "${green}Rebooting device to fix 'ps'${nc}"
   adb reboot
   adb wait-for-device root
@@ -148,7 +148,8 @@ if [[ -n "$ART_TEST_CHROOT" ]]; then
 
   # Populate /etc in chroot with required files.
   adb shell mkdir -p "$ART_TEST_CHROOT/system/etc"
-  adb shell "cd $ART_TEST_CHROOT && ln -sf system/etc etc"
+  adb shell test -L "$ART_TEST_CHROOT/etc" \
+    || adb shell ln -s system/etc "$ART_TEST_CHROOT/etc"
 
   # Provide /proc in chroot.
   adb shell mkdir -p "$ART_TEST_CHROOT/proc"
@@ -175,5 +176,6 @@ if [[ -n "$ART_TEST_CHROOT" ]]; then
   adb shell mkdir -p "$ART_TEST_CHROOT/linkerconfig"
 
   # Create /bin symlink for shebang compatibility.
-  adb shell ln -s system/bin "$ART_TEST_CHROOT/bin"
+  adb shell test -L "$ART_TEST_CHROOT/bin" \
+    || adb shell ln -s system/bin "$ART_TEST_CHROOT/bin"
 fi

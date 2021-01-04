@@ -21,20 +21,20 @@
 #include <stdio.h>
 
 #include <iosfwd>
+#include <memory>
 #include <set>
 #include <string>
 #include <utility>
-#include <memory>
 #include <vector>
 
 #include "base/locks.h"
 #include "base/macros.h"
 #include "base/mem_map.h"
+#include "base/metrics.h"
 #include "base/string_view_cpp20.h"
 #include "deoptimization_kind.h"
 #include "dex/dex_file_types.h"
 #include "experimental_flags.h"
-#include "gc/space/image_space_loading_order.h"
 #include "gc_root.h"
 #include "instrumentation.h"
 #include "jdwp_provider.h"
@@ -461,36 +461,12 @@ class Runtime {
     return OFFSETOF_MEMBER(Runtime, callee_save_methods_[static_cast<size_t>(type)]);
   }
 
-  // There are different kinds of ISAs in runtime:
-  //   1) Runtime ISA: for compiler, frame information
-  //   2) Quick code ISA: for image loading
-  //   3) Simulate ISA: for simulator
   InstructionSet GetInstructionSet() const {
     return instruction_set_;
   }
 
   void SetInstructionSet(InstructionSet instruction_set);
   void ClearInstructionSet();
-
-  static InstructionSet GetQuickCodeISA();
-
-  void SetSimulateISA(InstructionSet instruction_set);
-
-  InstructionSet GetSimulateISA() const {
-    return simulate_isa_;
-  }
-
-  static inline bool SimulatorMode() {
-    if (kIsDebugBuild) {
-      Runtime* runtime = Current();
-      // Disable simulator for compiler.
-      if (runtime == nullptr || runtime->IsCompiler()) {
-        return false;
-      }
-      return runtime->GetSimulateISA() != InstructionSet::kNone;
-    }
-    return false;
-  }
 
   void SetCalleeSaveMethod(ArtMethod* method, CalleeSaveType type);
   void ClearCalleeSaveMethods();
@@ -988,10 +964,6 @@ class Runtime {
   // Return true if startup is already completed.
   bool GetStartupCompleted() const;
 
-  gc::space::ImageSpaceLoadingOrder GetImageSpaceLoadingOrder() const {
-    return image_space_loading_order_;
-  }
-
   bool IsVerifierMissingKThrowFatal() const {
     return verifier_missing_kthrow_fatal_;
   }
@@ -1002,6 +974,8 @@ class Runtime {
 
   // Return true if we should load oat files as executable or not.
   bool GetOatFilesExecutable() const;
+
+  metrics::ArtMetrics* GetMetrics() { return &metrics_; }
 
  private:
   static void InitPlatformSignalHandlers();
@@ -1069,10 +1043,6 @@ class Runtime {
   GcRoot<mirror::Object> sentinel_;
 
   InstructionSet instruction_set_;
-
-  // The ISA of code we are simulating. If it is not kNone, we will run the code with that ISA and
-  // run with a simulator. The code might come from JIT compiler or a pre-built image.
-  InstructionSet simulate_isa_;
 
   CompilerCallbacks* compiler_callbacks_;
   bool is_zygote_;
@@ -1356,11 +1326,10 @@ class Runtime {
   // If startup has completed, must happen at most once.
   std::atomic<bool> startup_completed_ = false;
 
-  gc::space::ImageSpaceLoadingOrder image_space_loading_order_ =
-      gc::space::ImageSpaceLoadingOrder::kSystemFirst;
-
   bool verifier_missing_kthrow_fatal_;
   bool perfetto_hprof_enabled_;
+
+  metrics::ArtMetrics metrics_;
 
   // Note: See comments on GetFaultMessage.
   friend std::string GetFaultMessageForAbortLogging();
@@ -1371,6 +1340,8 @@ class Runtime {
 
   DISALLOW_COPY_AND_ASSIGN(Runtime);
 };
+
+inline metrics::ArtMetrics* GetMetrics() { return Runtime::Current()->GetMetrics(); }
 
 }  // namespace art
 

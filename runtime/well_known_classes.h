@@ -88,6 +88,7 @@ struct WellKnownClasses {
   static jclass java_lang_Thread;
   static jclass java_lang_ThreadGroup;
   static jclass java_lang_Throwable;
+  static jclass java_lang_Void;
   static jclass java_nio_Buffer;
   static jclass java_nio_ByteBuffer;
   static jclass java_nio_DirectByteBuffer;
@@ -110,7 +111,9 @@ struct WellKnownClasses {
   static jmethodID java_lang_Daemons_start;
   static jmethodID java_lang_Daemons_stop;
   static jmethodID java_lang_Daemons_waitForDaemonStart;
+  static jmethodID java_lang_Double_doubleToRawLongBits;
   static jmethodID java_lang_Double_valueOf;
+  static jmethodID java_lang_Float_floatToRawIntBits;
   static jmethodID java_lang_Float_valueOf;
   static jmethodID java_lang_Integer_valueOf;
   static jmethodID java_lang_invoke_MethodHandles_lookup;

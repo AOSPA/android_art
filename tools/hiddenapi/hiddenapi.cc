@@ -187,7 +187,7 @@ class DexMember {
                   GetName() == other.GetName() &&
                   GetSignature() == other.GetSignature();
 
-    // Sanity checks if they do match.
+    // Soundness check that they do match.
     if (equals) {
       CHECK_EQ(IsVirtualMethod(), other.IsVirtualMethod());
     }
@@ -525,18 +525,19 @@ class Hierarchy final {
         continue;
       }
 
-      HierarchyClass* superclass = FindClass(dex_klass.GetSuperclassDescriptor());
-      CHECK(superclass != nullptr)
-          << "Superclass " << dex_klass.GetSuperclassDescriptor()
+      auto add_extends = [&](const std::string_view& extends_desc) {
+        HierarchyClass* extends = FindClass(extends_desc);
+        CHECK(extends != nullptr)
+          << "Superclass/interface " << extends_desc
           << " of class " << dex_klass.GetDescriptor() << " from dex file \""
           << dex_klass.GetDexFile().GetLocation() << "\" was not found. "
-          << "Either the superclass is missing or it appears later in the classpath spec.";
-      klass.AddExtends(*superclass);
+          << "Either it is missing or it appears later in the classpath spec.";
+        klass.AddExtends(*extends);
+      };
 
+      add_extends(dex_klass.GetSuperclassDescriptor());
       for (const std::string_view& iface_desc : dex_klass.GetInterfaceDescriptors()) {
-        HierarchyClass* iface = FindClass(iface_desc);
-        CHECK(iface != nullptr);
-        klass.AddExtends(*iface);
+        add_extends(iface_desc);
       }
     }
   }
@@ -969,7 +970,7 @@ class HiddenApi final {
             bool api_list_found = (it != api_list.end());
             CHECK(!force_assign_all_ || api_list_found)
                 << "Could not find hiddenapi flags for dex entry: " << boot_member.GetApiEntry();
-            builder.WriteFlags(api_list_found ? it->second : ApiList::Whitelist());
+            builder.WriteFlags(api_list_found ? it->second : ApiList::Sdk());
           };
           auto fn_field = [&](const ClassAccessor::Field& boot_field) {
             fn_shared(DexMember(boot_class, boot_field));

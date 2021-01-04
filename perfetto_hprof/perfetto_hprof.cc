@@ -181,6 +181,10 @@ class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
     }
 
     dump_smaps_ = cfg->dump_smaps();
+    for (auto it = cfg->ignored_types(); it; ++it) {
+      std::string name = (*it).ToStdString();
+      ignored_types_.emplace_back(std::move(name));
+    }
 
     uint64_t self_pid = static_cast<uint64_t>(getpid());
     for (auto pid_it = cfg->pid(); pid_it; ++pid_it) {
@@ -243,7 +247,20 @@ class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
     }
   }
 
-  void OnStop(const StopArgs&) override {}
+  // This datasource can be used with a trace config with a short duration_ms
+  // but a long datasource_stop_timeout_ms. In that case, OnStop is called (in
+  // general) before the dump is done. In that case, we handle the stop
+  // asynchronously, and notify the tracing service once we are done.
+  // In case OnStop is called after the dump is done (but before the process)
+  // has exited, we just acknowledge the request.
+  void OnStop(const StopArgs& a) override {
+    art::MutexLock lk(art_thread(), finish_mutex_);
+    if (is_finished_) {
+      return;
+    }
+    is_stopped_ = true;
+    async_stop_ = std::move(a.HandleStopAsynchronously());
+  }
 
   static art::Thread* art_thread() {
     // TODO(fmayer): Attach the Perfetto producer thread to ART and give it a name. This is
@@ -255,10 +272,27 @@ class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
     return nullptr;
   }
 
+  std::vector<std::string> ignored_types() { return ignored_types_; }
+
+  void Finish() {
+    art::MutexLock lk(art_thread(), finish_mutex_);
+    if (is_stopped_) {
+      async_stop_();
+    } else {
+      is_finished_ = true;
+    }
+  }
+
  private:
   bool enabled_ = false;
   bool dump_smaps_ = false;
+  std::vector<std::string> ignored_types_;
   static art::Thread* self_;
+
+  art::Mutex finish_mutex_{"perfetto_hprof_ds_mutex", art::LockLevel::kGenericBottomLock};
+  bool is_finished_ = false;
+  bool is_stopped_ = false;
+  std::function<void()> async_stop_;
 };
 
 art::Thread* JavaHprofDataSource::self_ = nullptr;
@@ -271,6 +305,7 @@ void WaitForDataSource(art::Thread* self) {
 
   perfetto::DataSourceDescriptor dsd;
   dsd.set_name("android.java_hprof");
+  dsd.set_will_notify_on_stop(true);
   JavaHprofDataSource::Register(dsd);
 
   LOG(INFO) << "waiting for data source";
@@ -342,13 +377,18 @@ class Writer {
 class ReferredObjectsFinder {
  public:
   explicit ReferredObjectsFinder(
-      std::vector<std::pair<std::string, art::mirror::Object*>>* referred_objects)
-      : referred_objects_(referred_objects) {}
+      std::vector<std::pair<std::string, art::mirror::Object*>>* referred_objects,
+      art::mirror::Object** min_nonnull_ptr)
+      : referred_objects_(referred_objects), min_nonnull_ptr_(min_nonnull_ptr) {}
 
   // For art::mirror::Object::VisitReferences.
   void operator()(art::ObjPtr<art::mirror::Object> obj, art::MemberOffset offset,
                   bool is_static) const
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    if (offset.Uint32Value() == art::mirror::Object::ClassOffset().Uint32Value()) {
+      // Skip shadow$klass pointer.
+      return;
+    }
     art::mirror::Object* ref = obj->GetFieldObject<art::mirror::Object>(offset);
     art::ArtField* field;
     if (is_static) {
@@ -361,6 +401,9 @@ class ReferredObjectsFinder {
       field_name = field->PrettyField(/*with_type=*/true);
     }
     referred_objects_->emplace_back(std::move(field_name), ref);
+    if (!*min_nonnull_ptr_ || (ref && *min_nonnull_ptr_ > ref)) {
+      *min_nonnull_ptr_ = ref;
+    }
   }
 
   void VisitRootIfNonNull(art::mirror::CompressedReference<art::mirror::Object>* root
@@ -372,6 +415,7 @@ class ReferredObjectsFinder {
   // We can use a raw Object* pointer here, because there are no concurrent GC threads after the
   // fork.
   std::vector<std::pair<std::string, art::mirror::Object*>>* referred_objects_;
+  art::mirror::Object** min_nonnull_ptr_;
 };
 
 class RootFinder : public art::SingleRootVisitor {
@@ -391,37 +435,68 @@ class RootFinder : public art::SingleRootVisitor {
 };
 
 perfetto::protos::pbzero::HeapGraphRoot::Type ToProtoType(art::RootType art_type) {
+  using perfetto::protos::pbzero::HeapGraphRoot;
   switch (art_type) {
     case art::kRootUnknown:
-      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_UNKNOWN;
+      return HeapGraphRoot::ROOT_UNKNOWN;
     case art::kRootJNIGlobal:
-      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_JNI_GLOBAL;
+      return HeapGraphRoot::ROOT_JNI_GLOBAL;
     case art::kRootJNILocal:
-      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_JNI_LOCAL;
+      return HeapGraphRoot::ROOT_JNI_LOCAL;
     case art::kRootJavaFrame:
-      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_JAVA_FRAME;
+      return HeapGraphRoot::ROOT_JAVA_FRAME;
     case art::kRootNativeStack:
-      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_NATIVE_STACK;
+      return HeapGraphRoot::ROOT_NATIVE_STACK;
     case art::kRootStickyClass:
-      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_STICKY_CLASS;
+      return HeapGraphRoot::ROOT_STICKY_CLASS;
     case art::kRootThreadBlock:
-      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_THREAD_BLOCK;
+      return HeapGraphRoot::ROOT_THREAD_BLOCK;
     case art::kRootMonitorUsed:
-      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_MONITOR_USED;
+      return HeapGraphRoot::ROOT_MONITOR_USED;
     case art::kRootThreadObject:
-      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_THREAD_OBJECT;
+      return HeapGraphRoot::ROOT_THREAD_OBJECT;
     case art::kRootInternedString:
-      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_INTERNED_STRING;
+      return HeapGraphRoot::ROOT_INTERNED_STRING;
     case art::kRootFinalizing:
-      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_FINALIZING;
+      return HeapGraphRoot::ROOT_FINALIZING;
     case art::kRootDebugger:
-      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_DEBUGGER;
+      return HeapGraphRoot::ROOT_DEBUGGER;
     case art::kRootReferenceCleanup:
-      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_REFERENCE_CLEANUP;
+      return HeapGraphRoot::ROOT_REFERENCE_CLEANUP;
     case art::kRootVMInternal:
-      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_VM_INTERNAL;
+      return HeapGraphRoot::ROOT_VM_INTERNAL;
     case art::kRootJNIMonitor:
-      return perfetto::protos::pbzero::HeapGraphRoot::ROOT_JNI_MONITOR;
+      return HeapGraphRoot::ROOT_JNI_MONITOR;
+  }
+}
+
+perfetto::protos::pbzero::HeapGraphType::Kind ProtoClassKind(uint32_t class_flags) {
+  using perfetto::protos::pbzero::HeapGraphType;
+  switch (class_flags) {
+    case art::mirror::kClassFlagNormal:
+      return HeapGraphType::KIND_NORMAL;
+    case art::mirror::kClassFlagNoReferenceFields:
+      return HeapGraphType::KIND_NOREFERENCES;
+    case art::mirror::kClassFlagString | art::mirror::kClassFlagNoReferenceFields:
+      return HeapGraphType::KIND_STRING;
+    case art::mirror::kClassFlagObjectArray:
+      return HeapGraphType::KIND_ARRAY;
+    case art::mirror::kClassFlagClass:
+      return HeapGraphType::KIND_CLASS;
+    case art::mirror::kClassFlagClassLoader:
+      return HeapGraphType::KIND_CLASSLOADER;
+    case art::mirror::kClassFlagDexCache:
+      return HeapGraphType::KIND_DEXCACHE;
+    case art::mirror::kClassFlagSoftReference:
+      return HeapGraphType::KIND_SOFT_REFERENCE;
+    case art::mirror::kClassFlagWeakReference:
+      return HeapGraphType::KIND_WEAK_REFERENCE;
+    case art::mirror::kClassFlagFinalizerReference:
+      return HeapGraphType::KIND_FINALIZER_REFERENCE;
+    case art::mirror::kClassFlagPhantomReference:
+      return HeapGraphType::KIND_PHANTOM_REFERENCE;
+    default:
+      return HeapGraphType::KIND_UNKNOWN;
   }
 }
 
@@ -458,6 +533,32 @@ void DumpSmaps(JavaHprofDataSource::TraceContext* ctx) {
 
 uint64_t GetObjectId(const art::mirror::Object* obj) {
   return reinterpret_cast<uint64_t>(obj) / std::alignment_of<art::mirror::Object>::value;
+}
+
+template <typename F>
+void ForInstanceReferenceField(art::mirror::Class* klass, F fn) NO_THREAD_SAFETY_ANALYSIS {
+  for (art::ArtField& af : klass->GetIFields()) {
+    if (af.IsPrimitiveType() ||
+        af.GetOffset().Uint32Value() == art::mirror::Object::ClassOffset().Uint32Value()) {
+      continue;
+    }
+    fn(af.GetOffset());
+  }
+}
+
+bool IsIgnored(const std::vector<std::string>& ignored_types,
+               art::mirror::Object* obj) NO_THREAD_SAFETY_ANALYSIS {
+  if (obj->IsClass()) {
+    return false;
+  }
+  art::mirror::Class* klass = obj->GetClass();
+  return std::find(ignored_types.begin(), ignored_types.end(), PrettyType(klass)) !=
+         ignored_types.end();
+}
+
+size_t EncodedSize(uint64_t n) {
+  if (n == 0) return 1;
+  return 1 + static_cast<size_t>(art::MostSignificantBit(n)) / 7;
 }
 
 void DumpPerfetto(art::Thread* self) {
@@ -518,13 +619,16 @@ void DumpPerfetto(art::Thread* self) {
       [parent_pid, timestamp](JavaHprofDataSource::TraceContext ctx)
           NO_THREAD_SAFETY_ANALYSIS {
             bool dump_smaps;
+            std::vector<std::string> ignored_types;
             {
               auto ds = ctx.GetDataSourceLocked();
               if (!ds || !ds->enabled()) {
+                if (ds) ds->Finish();
                 LOG(INFO) << "skipping irrelevant data source.";
                 return;
               }
               dump_smaps = ds->dump_smaps();
+              ignored_types = ds->ignored_types();
             }
             LOG(INFO) << "dumping heap for " << parent_pid;
             if (dump_smaps) {
@@ -567,8 +671,8 @@ void DumpPerfetto(art::Thread* self) {
                 new protozero::PackedVarInt);
 
             art::Runtime::Current()->GetHeap()->VisitObjectsPaused(
-                [&writer, &interned_fields, &interned_locations,
-                &reference_field_ids, &reference_object_ids, &interned_classes](
+                [&writer, &interned_fields, &interned_locations, &reference_field_ids,
+                 &reference_object_ids, &interned_classes, &ignored_types](
                     art::mirror::Object* obj) REQUIRES_SHARED(art::Locks::mutator_lock_) {
                   if (obj->IsClass()) {
                     art::mirror::Class* klass = obj->AsClass().Ptr();
@@ -579,6 +683,24 @@ void DumpPerfetto(art::Thread* self) {
                     type_proto->set_class_name(PrettyType(klass));
                     type_proto->set_location_id(FindOrAppend(&interned_locations,
                           klass->GetLocation()));
+                    type_proto->set_object_size(klass->GetObjectSize());
+                    type_proto->set_kind(ProtoClassKind(klass->GetClassFlags()));
+                    type_proto->set_classloader_id(GetObjectId(klass->GetClassLoader().Ptr()));
+                    if (klass->GetSuperClass().Ptr()) {
+                      type_proto->set_superclass_id(
+                        FindOrAppend(&interned_classes,
+                                     reinterpret_cast<uintptr_t>(klass->GetSuperClass().Ptr())));
+                    }
+                    ForInstanceReferenceField(
+                        klass, [klass, &reference_field_ids, &interned_fields](
+                                   art::MemberOffset offset) NO_THREAD_SAFETY_ANALYSIS {
+                          auto art_field = art::ArtField::FindInstanceFieldWithOffset(
+                              klass, offset.Uint32Value());
+                          reference_field_ids->Append(
+                              FindOrAppend(&interned_fields, art_field->PrettyField(true)));
+                        });
+                    type_proto->set_reference_field_id(*reference_field_ids);
+                    reference_field_ids->Reset();
                   }
 
                   art::mirror::Class* klass = obj->GetClass();
@@ -600,25 +722,88 @@ void DumpPerfetto(art::Thread* self) {
                           obj->AsClass()->GetLocation()));
                   }
 
+                  if (IsIgnored(ignored_types, obj)) {
+                    return;
+                  }
+
                   auto class_id = FindOrAppend(&interned_classes, class_ptr);
 
                   perfetto::protos::pbzero::HeapGraphObject* object_proto =
                     writer.GetHeapGraph()->add_objects();
                   object_proto->set_id(GetObjectId(obj));
                   object_proto->set_type_id(class_id);
-                  object_proto->set_self_size(obj->SizeOf());
+
+                  // Arrays / strings are magic and have an instance dependent size.
+                  if (obj->SizeOf() != klass->GetObjectSize())
+                    object_proto->set_self_size(obj->SizeOf());
 
                   std::vector<std::pair<std::string, art::mirror::Object*>>
                       referred_objects;
-                  ReferredObjectsFinder objf(&referred_objects);
-                  obj->VisitReferences(objf, art::VoidFunctor());
-                  for (const auto& p : referred_objects) {
-                    reference_field_ids->Append(FindOrAppend(&interned_fields, p.first));
-                    reference_object_ids->Append(GetObjectId(p.second));
+                  art::mirror::Object* min_nonnull_ptr = nullptr;
+                  ReferredObjectsFinder objf(&referred_objects, &min_nonnull_ptr);
+
+                  const bool emit_field_ids =
+                      klass->GetClassFlags() != art::mirror::kClassFlagObjectArray &&
+                      klass->GetClassFlags() != art::mirror::kClassFlagNormal;
+                  if (klass->GetClassFlags() != art::mirror::kClassFlagNormal) {
+                    obj->VisitReferences(objf, art::VoidFunctor());
+                  } else {
+                    for (art::mirror::Class* cls = klass; cls != nullptr;
+                         cls = cls->GetSuperClass().Ptr()) {
+                      ForInstanceReferenceField(
+                          cls, [obj, objf](art::MemberOffset offset) NO_THREAD_SAFETY_ANALYSIS {
+                            objf(art::ObjPtr<art::mirror::Object>(obj), offset,
+                                 /*is_static=*/false);
+                          });
+                    }
                   }
-                  object_proto->set_reference_field_id(*reference_field_ids);
+
+                  uint64_t bytes_saved = 0;
+                  uint64_t base_obj_id = GetObjectId(min_nonnull_ptr);
+                  if (base_obj_id) {
+                    // We need to decrement the base for object ids so that we can tell apart
+                    // null references.
+                    base_obj_id--;
+                  }
+                  if (base_obj_id) {
+                    for (auto& p : referred_objects) {
+                      art::mirror::Object*& referred_obj = p.second;
+                      if (!referred_obj || IsIgnored(ignored_types, referred_obj)) {
+                        referred_obj = nullptr;
+                        continue;
+                      }
+                      uint64_t referred_obj_id = GetObjectId(referred_obj);
+                      bytes_saved +=
+                          EncodedSize(referred_obj_id) - EncodedSize(referred_obj_id - base_obj_id);
+                    }
+                  }
+
+                  // +1 for storing the field id.
+                  if (bytes_saved <= EncodedSize(base_obj_id) + 1) {
+                    // Subtracting the base ptr gains fewer bytes than it takes to store it.
+                    base_obj_id = 0;
+                  }
+
+                  for (auto& p : referred_objects) {
+                    const std::string& field_name = p.first;
+                    art::mirror::Object* referred_obj = p.second;
+                    if (emit_field_ids) {
+                      reference_field_ids->Append(FindOrAppend(&interned_fields, field_name));
+                    }
+                    uint64_t referred_obj_id = GetObjectId(referred_obj);
+                    if (referred_obj_id) {
+                      referred_obj_id -= base_obj_id;
+                    }
+                    reference_object_ids->Append(referred_obj_id);
+                  }
+                  if (emit_field_ids) {
+                    object_proto->set_reference_field_id(*reference_field_ids);
+                    reference_field_ids->Reset();
+                  }
+                  if (base_obj_id) {
+                    object_proto->set_reference_field_id_base(base_obj_id);
+                  }
                   object_proto->set_reference_object_id(*reference_object_ids);
-                  reference_field_ids->Reset();
                   reference_object_ids->Reset();
                 });
 
@@ -644,7 +829,6 @@ void DumpPerfetto(art::Thread* self) {
             }
 
             writer.Finalize();
-
             ctx.Flush([] {
               {
                 art::MutexLock lk(JavaHprofDataSource::art_thread(), GetStateMutex());
@@ -652,12 +836,24 @@ void DumpPerfetto(art::Thread* self) {
                 GetStateCV().Broadcast(JavaHprofDataSource::art_thread());
               }
             });
+            // Wait for the Flush that will happen on the Perfetto thread.
+            {
+              art::MutexLock lk(JavaHprofDataSource::art_thread(), GetStateMutex());
+              while (g_state != State::kEnd) {
+                GetStateCV().Wait(JavaHprofDataSource::art_thread());
+              }
+            }
+            {
+              auto ds = ctx.GetDataSourceLocked();
+              if (ds) {
+                ds->Finish();
+              } else {
+                LOG(ERROR) << "datasource timed out (duration_ms + datasource_stop_timeout_ms) "
+                              "before dump finished";
+              }
+            }
           });
 
-  art::MutexLock lk(self, GetStateMutex());
-  while (g_state != State::kEnd) {
-    GetStateCV().Wait(self);
-  }
   LOG(INFO) << "finished dumping heap for " << parent_pid;
   // Prevent the atexit handlers to run. We do not want to call cleanup
   // functions the parent process has registered.

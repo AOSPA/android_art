@@ -58,7 +58,7 @@ art_cc_binary {
         "libart-compiler",
     ],
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
 }
@@ -85,5 +85,9 @@ art_cc_test {
         "art_gtest_defaults",
     ],
     srcs: ["imgdiag_test.cc"],
-    required: ["imgdiagd"],
+    target: {
+        host: {
+            required: ["imgdiagd"],
+        },
+    },
 }

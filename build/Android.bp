@@ -137,8 +137,6 @@ art_global_defaults {
     target: {
         android: {
             cflags: [
-                "-DART_TARGET",
-
                 // To use oprofile_android --callgraph, uncomment this and recompile with
                 //    mmma -j art
                 // "-fno-omit-frame-pointer",
@@ -225,6 +223,36 @@ art_global_defaults {
     ],
 }
 
+cc_defaults {
+    name: "art_pgo_defaults",
+    visibility: ["//art:__subpackages__"],
+    pgo: {
+        sampling: true,
+    },
+    target: {
+        android_arm64: {
+            pgo: {
+                profile_file: "art/art_arm_arm64.profdata",
+            },
+        },
+        android_arm: {
+            pgo: {
+                profile_file: "art/art_arm_arm64.profdata",
+            },
+        },
+        android_x86_64: {
+            pgo: {
+                profile_file: "art/art_x86_x86_64.profdata",
+            },
+        },
+        android_x86: {
+            pgo: {
+                profile_file: "art/art_x86_x86_64.profdata",
+            },
+        },
+    },
+}
+
 art_debug_defaults {
     name: "art_debug_defaults",
     visibility: ["//art:__subpackages__"],
@@ -265,6 +293,10 @@ java_library {
     target: {
         hostdex: {
             required: ["libjavacrypto"],
+        },
+        darwin: {
+            // required module "libjavacrypto" is disabled on darwin
+            enabled: false,
         },
     },
 }

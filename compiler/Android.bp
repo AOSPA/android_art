@@ -22,12 +22,6 @@
 art_cc_defaults {
     name: "libart-compiler-defaults",
     defaults: ["art_defaults"],
-    visibility: [
-        // Visibility for prebuilt binaries from the prebuilt of this module.
-        // TODO(b/155921753): Restrict this when prebuilts are in their proper
-        // locations.
-        "//prebuilts:__subpackages__",
-    ],
     host_supported: true,
     srcs: [
         "compiled_method.cc",
@@ -103,6 +97,7 @@ art_cc_defaults {
                 "jni/quick/arm/calling_convention_arm.cc",
                 "optimizing/code_generator_arm_vixl.cc",
                 "optimizing/code_generator_vector_arm_vixl.cc",
+                "optimizing/critical_native_abi_fixup_arm.cc",
                 "optimizing/instruction_simplifier_arm.cc",
                 "optimizing/instruction_simplifier_shared.cc",
                 "optimizing/intrinsics_arm_vixl.cc",
@@ -156,9 +151,13 @@ art_cc_defaults {
             ],
         },
     },
+    static: {
+        cflags: ["-DART_STATIC_LIBART_COMPILER"],
+    },
     generated_sources: ["art_compiler_operator_srcs"],
     shared_libs: [
         "libbase",
+        "liblzma", // libelffile(d) dependency; must be repeated here since it's a static lib.
     ],
     header_libs: [
         "art_cmdlineparser_headers", // For compiler_options.
@@ -171,7 +170,7 @@ art_cc_defaults {
 
 cc_defaults {
     name: "libart-compiler_static_base_defaults",
-    static_libs: [
+    whole_static_libs: [
         "libbase",
     ],
 }
@@ -255,7 +254,7 @@ art_cc_library {
         },
     },
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
 }
@@ -264,12 +263,13 @@ cc_defaults {
     name: "libart-compiler_static_defaults",
     defaults: [
         "libart-compiler_static_base_defaults",
+        "libart-disassembler_static_defaults",
         "libart_static_defaults",
         "libartbase_static_defaults",
         "libdexfile_static_defaults",
         "libprofile_static_defaults",
     ],
-    static_libs: ["libart-compiler"],
+    whole_static_libs: ["libart-compiler"],
 }
 
 art_cc_library {
@@ -337,12 +337,13 @@ cc_defaults {
     name: "libartd-compiler_static_defaults",
     defaults: [
         "libart-compiler_static_base_defaults",
-        "libartd_static_defaults",
         "libartbased_static_defaults",
+        "libartd-disassembler_static_defaults",
+        "libartd_static_defaults",
         "libdexfiled_static_defaults",
         "libprofiled_static_defaults",
     ],
-    static_libs: ["libartd-compiler"],
+    whole_static_libs: ["libartd-compiler"],
 }
 
 art_cc_library {
@@ -452,13 +453,10 @@ art_cc_test {
         "libnativehelper_header_only",
     ],
 
-    static_libs: [
-        "libartd-simulator-container",
-    ],
-
     shared_libs: [
         "libprofiled",
         "libartd-compiler",
+        "libartd-simulator-container",
         "libvixld",
 
         "libbacktrace",

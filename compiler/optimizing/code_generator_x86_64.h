@@ -452,6 +452,7 @@ class CodeGeneratorX86_64 : public CodeGenerator {
       const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
       ArtMethod* method) override;
 
+  void LoadMethod(MethodLoadKind load_kind, Location temp, HInvoke* invoke);
   void GenerateStaticOrDirectCall(
       HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path = nullptr) override;
   void GenerateVirtualCall(
@@ -459,12 +460,13 @@ class CodeGeneratorX86_64 : public CodeGenerator {
 
   void RecordBootImageIntrinsicPatch(uint32_t intrinsic_data);
   void RecordBootImageRelRoPatch(uint32_t boot_image_offset);
-  void RecordBootImageMethodPatch(HInvokeStaticOrDirect* invoke);
-  void RecordMethodBssEntryPatch(HInvokeStaticOrDirect* invoke);
+  void RecordBootImageMethodPatch(HInvoke* invoke);
+  void RecordMethodBssEntryPatch(HInvoke* invoke);
   void RecordBootImageTypePatch(HLoadClass* load_class);
   Label* NewTypeBssEntryPatch(HLoadClass* load_class);
   void RecordBootImageStringPatch(HLoadString* load_string);
   Label* NewStringBssEntryPatch(HLoadString* load_string);
+  void RecordBootImageJniEntrypointPatch(HInvokeStaticOrDirect* invoke);
   Label* NewJitRootStringPatch(const DexFile& dex_file,
                                dex::StringIndex string_index,
                                Handle<mirror::String> handle);
@@ -473,7 +475,7 @@ class CodeGeneratorX86_64 : public CodeGenerator {
                               Handle<mirror::Class> handle);
 
   void LoadBootImageAddress(CpuRegister reg, uint32_t boot_image_reference);
-  void AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* invoke, uint32_t boot_image_offset);
+  void LoadIntrinsicDeclaringClass(CpuRegister reg, HInvoke* invoke);
 
   void EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linker_patches) override;
 
@@ -668,10 +670,16 @@ class CodeGeneratorX86_64 : public CodeGenerator {
   ArenaDeque<PatchInfo<Label>> boot_image_type_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<PatchInfo<Label>> type_bss_entry_patches_;
+  // PC-relative public type patch info for kBssEntryPublic.
+  ArenaDeque<PatchInfo<Label>> public_type_bss_entry_patches_;
+  // PC-relative package type patch info for kBssEntryPackage.
+  ArenaDeque<PatchInfo<Label>> package_type_bss_entry_patches_;
   // PC-relative String patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<PatchInfo<Label>> boot_image_string_patches_;
   // PC-relative String patch info for kBssEntry.
   ArenaDeque<PatchInfo<Label>> string_bss_entry_patches_;
+  // PC-relative method patch info for kBootImageLinkTimePcRelative+kCallCriticalNative.
+  ArenaDeque<PatchInfo<Label>> boot_image_jni_entrypoint_patches_;
   // PC-relative patch info for IntrinsicObjects for the boot image,
   // and for method/type/string patches for kBootImageRelRo otherwise.
   ArenaDeque<PatchInfo<Label>> boot_image_other_patches_;

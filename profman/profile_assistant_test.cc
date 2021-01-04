@@ -360,7 +360,9 @@ class ProfileAssistantTest : public CommonRuntimeTest {
   }
 
   int CheckCompilationMethodPercentChange(uint16_t methods_in_cur_profile,
-                                          uint16_t methods_in_ref_profile) {
+                                          uint16_t methods_in_ref_profile,
+                                          const std::vector<const std::string>& extra_args =
+                                              std::vector<const std::string>()) {
     ScratchFile profile;
     ScratchFile reference_profile;
     std::vector<int> profile_fds({ GetFd(profile)});
@@ -380,11 +382,13 @@ class ProfileAssistantTest : public CommonRuntimeTest {
     ProfileCompilationInfo info2;
     SetupBasicProfile(dex1, hot_methods_ref, empty_vector, empty_vector,
         reference_profile,  &info2);
-    return ProcessProfiles(profile_fds, reference_profile_fd);
+    return ProcessProfiles(profile_fds, reference_profile_fd, extra_args);
   }
 
   int CheckCompilationClassPercentChange(uint16_t classes_in_cur_profile,
-                                         uint16_t classes_in_ref_profile) {
+                                         uint16_t classes_in_ref_profile,
+                                         const std::vector<const std::string>& extra_args =
+                                             std::vector<const std::string>()) {
     ScratchFile profile;
     ScratchFile reference_profile;
 
@@ -395,7 +399,7 @@ class ProfileAssistantTest : public CommonRuntimeTest {
     SetupProfile(dex1, dex2, 0, classes_in_cur_profile, profile,  &info1);
     ProfileCompilationInfo info2;
     SetupProfile(dex1, dex2, 0, classes_in_ref_profile, reference_profile, &info2);
-    return ProcessProfiles(profile_fds, reference_profile_fd);
+    return ProcessProfiles(profile_fds, reference_profile_fd, extra_args);
   }
 
   std::unique_ptr<ArenaAllocator> allocator_;
@@ -557,17 +561,33 @@ TEST_F(ProfileAssistantTest, DoNotAdviseCompilation) {
 TEST_F(ProfileAssistantTest, DoNotAdviseCompilationMethodPercentage) {
   const uint16_t kNumberOfMethodsInRefProfile = 6000;
   const uint16_t kNumberOfMethodsInCurProfile = 6100;  // Threshold is 2%.
+  std::vector<const std::string> extra_args({"--min-new-methods-percent-change=2"});
+
   // We should not advise compilation.
   ASSERT_EQ(ProfileAssistant::kSkipCompilation,
             CheckCompilationMethodPercentChange(kNumberOfMethodsInCurProfile,
-                                                kNumberOfMethodsInRefProfile));
+                                                kNumberOfMethodsInRefProfile,
+                                                extra_args));
 }
 
 TEST_F(ProfileAssistantTest, ShouldAdviseCompilationMethodPercentage) {
   const uint16_t kNumberOfMethodsInRefProfile = 6000;
   const uint16_t kNumberOfMethodsInCurProfile = 6200;  // Threshold is 2%.
+  std::vector<const std::string> extra_args({"--min-new-methods-percent-change=2"});
+
   // We should advise compilation.
   ASSERT_EQ(ProfileAssistant::kCompile,
+            CheckCompilationMethodPercentChange(kNumberOfMethodsInCurProfile,
+                                                kNumberOfMethodsInRefProfile,
+                                                extra_args));
+}
+
+TEST_F(ProfileAssistantTest, DoNotAdviseCompilationMethodPercentageWithNewMin) {
+  const uint16_t kNumberOfMethodsInRefProfile = 6000;
+  const uint16_t kNumberOfMethodsInCurProfile = 6200;  // Threshold is 20%.
+
+  // We should not advise compilation.
+  ASSERT_EQ(ProfileAssistant::kSkipCompilation,
             CheckCompilationMethodPercentChange(kNumberOfMethodsInCurProfile,
                                                 kNumberOfMethodsInRefProfile));
 }
@@ -575,17 +595,33 @@ TEST_F(ProfileAssistantTest, ShouldAdviseCompilationMethodPercentage) {
 TEST_F(ProfileAssistantTest, DoNotdviseCompilationClassPercentage) {
   const uint16_t kNumberOfClassesInRefProfile = 6000;
   const uint16_t kNumberOfClassesInCurProfile = 6110;  // Threshold is 2%.
+  std::vector<const std::string> extra_args({"--min-new-classes-percent-change=2"});
+
   // We should not advise compilation.
   ASSERT_EQ(ProfileAssistant::kSkipCompilation,
             CheckCompilationClassPercentChange(kNumberOfClassesInCurProfile,
-                                               kNumberOfClassesInRefProfile));
+                                               kNumberOfClassesInRefProfile,
+                                               extra_args));
 }
 
 TEST_F(ProfileAssistantTest, ShouldAdviseCompilationClassPercentage) {
   const uint16_t kNumberOfClassesInRefProfile = 6000;
   const uint16_t kNumberOfClassesInCurProfile = 6120;  // Threshold is 2%.
+  std::vector<const std::string> extra_args({"--min-new-classes-percent-change=2"});
+
   // We should advise compilation.
   ASSERT_EQ(ProfileAssistant::kCompile,
+            CheckCompilationClassPercentChange(kNumberOfClassesInCurProfile,
+                                               kNumberOfClassesInRefProfile,
+                                               extra_args));
+}
+
+TEST_F(ProfileAssistantTest, DoNotAdviseCompilationClassPercentageWithNewMin) {
+  const uint16_t kNumberOfClassesInRefProfile = 6000;
+  const uint16_t kNumberOfClassesInCurProfile = 6200;  // Threshold is 20%.
+
+  // We should not advise compilation.
+  ASSERT_EQ(ProfileAssistant::kSkipCompilation,
             CheckCompilationClassPercentChange(kNumberOfClassesInCurProfile,
                                                kNumberOfClassesInRefProfile));
 }
@@ -763,8 +799,8 @@ TEST_F(ProfileAssistantTest, TestBootImageProfile) {
       "Ljava/lang/Object;->toString()Ljava/lang/String;";
   // Method used by a special package which will get a different threshold;
   const std::string kUncommonSpecialPackageMethod = "Ljava/lang/Object;->hashCode()I";
-  // Blacklisted class
-  const std::string kPreloadedBlacklistedClass = "Ljava/lang/Thread;";
+  // Denylisted class
+  const std::string kPreloadedDenylistedClass = "Ljava/lang/Thread;";
 
   // Thresholds for this test.
   static const size_t kDirtyThreshold = 100;
@@ -782,42 +818,42 @@ TEST_F(ProfileAssistantTest, TestBootImageProfile) {
       "{dex1}H" + kCommonHotMethod,
       "{dex1}P" + kStartupMethodForUpgrade,
       "{dex1}" + kUncommonDirtyClass,
-      "{dex1}" + kPreloadedBlacklistedClass,
+      "{dex1}" + kPreloadedDenylistedClass,
 
       "{dex2}" + kCleanClass,
       "{dex2}" + kDirtyClass,
       "{dex2}P" + kCommonHotMethod,
       "{dex2}P" + kStartupMethodForUpgrade,
       "{dex2}" + kUncommonDirtyClass,
-      "{dex2}" + kPreloadedBlacklistedClass,
+      "{dex2}" + kPreloadedDenylistedClass,
 
       "{dex3}P" + kUncommonMethod,
       "{dex3}PS" + kStartupMethodForUpgrade,
       "{dex3}S" + kCommonHotMethod,
       "{dex3}S" + kSpecialPackageStartupMethod,
       "{dex3}" + kDirtyClass,
-      "{dex3}" + kPreloadedBlacklistedClass,
+      "{dex3}" + kPreloadedDenylistedClass,
 
       "{dex4}" + kDirtyClass,
       "{dex4}P" + kCommonHotMethod,
       "{dex4}S" + kSpecialPackageStartupMethod,
       "{dex4}P" + kUncommonSpecialPackageMethod,
-      "{dex4}" + kPreloadedBlacklistedClass,
+      "{dex4}" + kPreloadedDenylistedClass,
   };
   std::string input_file_contents = JoinProfileLines(input_data);
 
-  ScratchFile preloaded_class_blacklist;
-  std::string blacklist_content = DescriptorToDot(kPreloadedBlacklistedClass.c_str());
-  EXPECT_TRUE(preloaded_class_blacklist.GetFile()->WriteFully(
-      blacklist_content.c_str(), blacklist_content.length()));
+  ScratchFile preloaded_class_denylist;
+  std::string denylist_content = DescriptorToDot(kPreloadedDenylistedClass.c_str());
+  EXPECT_TRUE(preloaded_class_denylist.GetFile()->WriteFully(
+      denylist_content.c_str(), denylist_content.length()));
 
-  EXPECT_EQ(0, preloaded_class_blacklist.GetFile()->Flush());
-  EXPECT_TRUE(preloaded_class_blacklist.GetFile()->ResetOffset());
+  EXPECT_EQ(0, preloaded_class_denylist.GetFile()->Flush());
+  EXPECT_TRUE(preloaded_class_denylist.GetFile()->ResetOffset());
   // Expected data
   std::vector<std::string> expected_data = {
       kCleanClass,
       kDirtyClass,
-      kPreloadedBlacklistedClass,
+      kPreloadedDenylistedClass,
       "HSP" + kCommonHotMethod,
       "HS" + kSpecialPackageStartupMethod,
       "HSP" + kStartupMethodForUpgrade
@@ -854,7 +890,7 @@ TEST_F(ProfileAssistantTest, TestBootImageProfile) {
   args.push_back("--out-preloaded-classes-path=" + out_preloaded_classes.GetFilename());
   args.push_back("--apk=" + core_dex);
   args.push_back("--dex-location=" + core_dex);
-  args.push_back("--preloaded-classes-blacklist=" + preloaded_class_blacklist.GetFilename());
+  args.push_back("--preloaded-classes-denylist=" + preloaded_class_denylist.GetFilename());
 
   std::string error;
   ASSERT_EQ(ExecAndReturnCode(args, &error), 0) << error;

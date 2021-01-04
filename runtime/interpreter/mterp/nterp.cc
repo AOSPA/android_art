@@ -37,14 +37,24 @@ bool IsNterpSupported() {
 }
 
 bool CanRuntimeUseNterp() REQUIRES_SHARED(Locks::mutator_lock_) {
-  // Nterp has the same restrictions as Mterp.
-  return IsNterpSupported() && CanUseMterp();
+  Runtime* runtime = Runtime::Current();
+  instrumentation::Instrumentation* instr = runtime->GetInstrumentation();
+  // Nterp shares the same restrictions as Mterp.
+  // If the runtime is interpreter only, we currently don't use nterp as some
+  // parts of the runtime (like instrumentation) make assumption on an
+  // interpreter-only runtime to always be in a switch-like interpreter.
+  return IsNterpSupported() && CanUseMterp() && !instr->InterpretOnly();
 }
 
 bool CanMethodUseNterp(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_) {
-  return method->SkipAccessChecks() &&
-      !method->IsNative() &&
-      method->GetDexFile()->IsStandardDexFile() &&
+  return !method->IsNative() &&
+      method->IsInvokable() &&
+      // Nterp supports the same methods the compiler supports.
+      method->IsCompilable() &&
+      !method->MustCountLocks() &&
+      // Proxy methods do not go through the JIT like other methods, so we don't
+      // run them with nterp.
+      !method->IsProxyMethod() &&
       NterpGetFrameSize(method) < kNterpMaxFrame;
 }
 
@@ -69,6 +79,9 @@ void CheckNterpAsmConstants() {
       LOG(FATAL) << "ERROR: unexpected asm interp size " << interp_size
                  << "(did an instruction handler exceed " << width << " bytes?)";
   }
+  static_assert(IsPowerOfTwo(kNterpHotnessMask + 1), "Hotness mask must be a (power of 2) - 1");
+  static_assert(IsPowerOfTwo(kTieredHotnessMask + 1),
+                "Tiered hotness mask must be a (power of 2) - 1");
 }
 
 inline void UpdateHotness(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -274,6 +287,8 @@ extern "C" size_t NterpGetMethod(Thread* self, ArtMethod* caller, uint16_t* dex_
     } else {
       DCHECK(resolved_method->GetDeclaringClass()->IsInterface());
       UpdateCache(self, dex_pc_ptr, resolved_method->GetImtIndex());
+      // TODO: We should pass the resolved method, and have nterp fetch the IMT
+      // index. Unfortunately, this doesn't work for default methods.
       return resolved_method->GetImtIndex();
     }
   } else if (resolved_method->GetDeclaringClass()->IsStringClass()
@@ -523,11 +538,12 @@ static mirror::Object* DoFilledNewArray(Thread* self,
     DCHECK_LE(length, 5);
   }
   uint16_t type_idx = is_range ? inst->VRegB_3rc() : inst->VRegB_35c();
-  ObjPtr<mirror::Class> array_class = ResolveVerifyAndClinit(dex::TypeIndex(type_idx),
-                                                             caller,
-                                                             self,
-                                                             /* can_run_clinit= */ true,
-                                                             /* verify_access= */ false);
+  ObjPtr<mirror::Class> array_class =
+      ResolveVerifyAndClinit(dex::TypeIndex(type_idx),
+                             caller,
+                             self,
+                             /* can_run_clinit= */ true,
+                             /* verify_access= */ !caller->SkipAccessChecks());
   if (UNLIKELY(array_class == nullptr)) {
     DCHECK(self->IsExceptionPending());
     return nullptr;

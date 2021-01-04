@@ -42,6 +42,7 @@
 #include "base/os.h"
 #include "base/runtime_debug.h"
 #include "base/stl_util.h"
+#include "base/string_view_cpp20.h"
 #include "base/unix_file/fd_file.h"
 #include "dex/art_dex_file_loader.h"
 #include "dex/dex_file-inl.h"
@@ -159,7 +160,9 @@ std::string CommonArtTestImpl::GetAndroidBuildTop() {
         break;
       }
       // We are running tests from testcases (extracted from zip) on tradefed.
-      if (path.filename() == std::filesystem::path("testcases")) {
+      // The first path is for remote runs and the second path for local runs.
+      if (path.filename() == std::filesystem::path("testcases") ||
+          StartsWith(path.filename().string(), "host_testcases")) {
         android_build_top = path.append("art_common");
         break;
       }
@@ -172,8 +175,12 @@ std::string CommonArtTestImpl::GetAndroidBuildTop() {
   android_build_top = std::filesystem::path(android_build_top).string();
   CHECK(!android_build_top.empty());
   if (android_build_top_from_env != nullptr) {
-    CHECK_EQ(std::filesystem::weakly_canonical(android_build_top).string(),
-             std::filesystem::weakly_canonical(android_build_top_from_env).string());
+    if (std::filesystem::weakly_canonical(android_build_top).string() !=
+        std::filesystem::weakly_canonical(android_build_top_from_env).string()) {
+      LOG(WARNING) << "Execution path (" << argv << ") not below ANDROID_BUILD_TOP ("
+                   << android_build_top_from_env << ")! Using env-var.";
+      android_build_top = android_build_top_from_env;
+    }
   } else {
     setenv("ANDROID_BUILD_TOP", android_build_top.c_str(), /*overwrite=*/0);
   }
@@ -207,7 +214,11 @@ std::string CommonArtTestImpl::GetAndroidHostOut() {
   std::filesystem::path expected(android_host_out);
   if (android_host_out_from_env != nullptr) {
     std::filesystem::path from_env(std::filesystem::weakly_canonical(android_host_out_from_env));
-    CHECK_EQ(std::filesystem::weakly_canonical(expected).string(), from_env.string());
+    if (std::filesystem::weakly_canonical(expected).string() != from_env.string()) {
+      LOG(WARNING) << "Execution path (" << expected << ") not below ANDROID_HOST_OUT ("
+                   << from_env << ")! Using env-var.";
+      expected = from_env;
+    }
   } else {
     setenv("ANDROID_HOST_OUT", android_host_out.c_str(), /*overwrite=*/0);
   }
@@ -536,10 +547,21 @@ std::unique_ptr<const DexFile> CommonArtTestImpl::OpenTestDexFile(const char* na
   return OpenDexFile(GetTestDexFileName(name).c_str());
 }
 
+std::string CommonArtTestImpl::GetImageDirectory() {
+  std::string path;
+  if (IsHost()) {
+    const char* host_dir = getenv("ANDROID_HOST_OUT");
+    CHECK(host_dir != nullptr);
+    path = std::string(host_dir) + "/apex/art_boot_images";
+  } else {
+    path = std::string(kAndroidArtApexDefaultPath);
+  }
+  return path + "/javalib";
+}
+
 std::string CommonArtTestImpl::GetCoreFileLocation(const char* suffix) {
   CHECK(suffix != nullptr);
-  std::string prefix(IsHost() ? GetAndroidRoot() : "");
-  return StringPrintf("%s%s/javalib/boot.%s", prefix.c_str(), kAndroidArtApexDefaultPath, suffix);
+  return GetImageDirectory() + "/boot." + suffix;
 }
 
 std::string CommonArtTestImpl::CreateClassPath(
