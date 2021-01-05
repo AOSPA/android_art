@@ -2595,8 +2595,9 @@ static void GenerateIntrinsicGet(HInvoke* invoke,
                                  Location maybe_temp,
                                  Location maybe_temp2,
                                  Location maybe_temp3) {
-  bool emit_barrier = (order == std::memory_order_acquire) || (order == std::memory_order_seq_cst);
-  DCHECK(emit_barrier || order == std::memory_order_relaxed);
+  bool seq_cst_barrier = (order == std::memory_order_seq_cst);
+  bool acquire_barrier = seq_cst_barrier || (order == std::memory_order_acquire);
+  DCHECK(acquire_barrier || order == std::memory_order_relaxed);
   DCHECK(atomic || order == std::memory_order_relaxed);
 
   ArmVIXLAssembler* assembler = codegen->GetAssembler();
@@ -2675,8 +2676,9 @@ static void GenerateIntrinsicGet(HInvoke* invoke,
       LOG(FATAL) << "Unexpected type " << type;
       UNREACHABLE();
   }
-  if (emit_barrier) {
-    __ Dmb(vixl32::ISH);
+  if (acquire_barrier) {
+    codegen->GenerateMemoryBarrier(
+        seq_cst_barrier ? MemBarrierKind::kAnyAny : MemBarrierKind::kLoadAny);
   }
   if (type == DataType::Type::kReference && !(kEmitCompilerReadBarrier && kUseBakerReadBarrier)) {
     Location base_loc = LocationFrom(base);
@@ -2814,7 +2816,7 @@ static void GenerateIntrinsicSet(CodeGeneratorARMVIXL* codegen,
 
   ArmVIXLAssembler* assembler = codegen->GetAssembler();
   if (release_barrier) {
-    __ Dmb(vixl32::ISH);
+    codegen->GenerateMemoryBarrier(MemBarrierKind::kAnyStore);
   }
   MemOperand address(base, offset);
   UseScratchRegisterScope temps(assembler->GetVIXLAssembler());
@@ -2883,7 +2885,7 @@ static void GenerateIntrinsicSet(CodeGeneratorARMVIXL* codegen,
       UNREACHABLE();
   }
   if (seq_cst_barrier) {
-    __ Dmb(vixl32::ISH);
+    codegen->GenerateMemoryBarrier(MemBarrierKind::kAnyAny);
   }
 }
 
@@ -3436,7 +3438,8 @@ static void GenUnsafeCas(HInvoke* invoke, DataType::Type type, CodeGeneratorARMV
     cmp_failure = slow_path->GetEntryLabel();
   }
 
-  __ Dmb(vixl32::ISH);
+  // Unsafe CAS operations have std::memory_order_seq_cst semantics.
+  codegen->GenerateMemoryBarrier(MemBarrierKind::kAnyAny);
   __ Add(tmp_ptr, base, offset);
   GenerateCompareAndSet(codegen,
                         type,
@@ -3453,7 +3456,7 @@ static void GenUnsafeCas(HInvoke* invoke, DataType::Type type, CodeGeneratorARMV
                         expected,
                         /*expected2=*/ vixl32::Register());
   __ Bind(exit_loop);
-  __ Dmb(vixl32::ISH);
+  codegen->GenerateMemoryBarrier(MemBarrierKind::kAnyAny);
 
   if (type == DataType::Type::kReference) {
     codegen->MaybeGenerateMarkingRegisterCheck(/*code=*/ 128, /*temp_loc=*/ LocationFrom(tmp_ptr));
@@ -3633,8 +3636,8 @@ static void GenerateSubTypeObjectCheckNoReadBarrier(CodeGeneratorARMVIXL* codege
 }
 
 // Check access mode and the primitive type from VarHandle.varType.
-// Check reference arguments against the VarHandle.varType; this is a subclass check
-// without read barrier, so it can have false negatives which we handle in the slow path.
+// Check reference arguments against the VarHandle.varType; for references this is a subclass
+// check without read barrier, so it can have false negatives which we handle in the slow path.
 static void GenerateVarHandleAccessModeAndVarTypeChecks(HInvoke* invoke,
                                                         CodeGeneratorARMVIXL* codegen,
                                                         SlowPathCodeARMVIXL* slow_path,
@@ -3706,9 +3709,9 @@ static void GenerateVarHandleStaticFieldCheck(HInvoke* invoke,
   __ B(ne, slow_path->GetEntryLabel());
 }
 
-static void GenerateVarHandleInstanceFieldCheck(HInvoke* invoke,
-                                                CodeGeneratorARMVIXL* codegen,
-                                                SlowPathCodeARMVIXL* slow_path) {
+static void GenerateVarHandleInstanceFieldChecks(HInvoke* invoke,
+                                                 CodeGeneratorARMVIXL* codegen,
+                                                 SlowPathCodeARMVIXL* slow_path) {
   ArmVIXLAssembler* assembler = codegen->GetAssembler();
   vixl32::Register varhandle = InputRegisterAt(invoke, 0);
   vixl32::Register object = InputRegisterAt(invoke, 1);
@@ -3716,14 +3719,13 @@ static void GenerateVarHandleInstanceFieldCheck(HInvoke* invoke,
   const MemberOffset coordinate_type0_offset = mirror::VarHandle::CoordinateType0Offset();
   const MemberOffset coordinate_type1_offset = mirror::VarHandle::CoordinateType1Offset();
 
-  // Use the temporary register reserved for offset. It is not used yet at this point.
-  size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
-  vixl32::Register temp =
-      RegisterFrom(invoke->GetLocations()->GetTemp(expected_coordinates_count == 0u ? 1u : 0u));
-
   // Null-check the object.
   __ Cmp(object, 0);
   __ B(eq, slow_path->GetEntryLabel());
+
+  // Use the first temporary register, whether it's for the declaring class or the offset.
+  // It is not used yet at this point.
+  vixl32::Register temp = RegisterFrom(invoke->GetLocations()->GetTemp(0u));
 
   // Check that the VarHandle references an instance field by checking that
   // coordinateType1 == null. coordinateType0 should not be null, but this is handled by the
@@ -3745,15 +3747,102 @@ static void GenerateVarHandleInstanceFieldCheck(HInvoke* invoke,
       codegen, slow_path, object, temp, /*object_can_be_null=*/ false);
 }
 
-static void GenerateVarHandleFieldCheck(HInvoke* invoke,
-                                        CodeGeneratorARMVIXL* codegen,
-                                        SlowPathCodeARMVIXL* slow_path) {
+static DataType::Type GetVarHandleExpectedValueType(HInvoke* invoke,
+                                                    size_t expected_coordinates_count) {
+  DCHECK_EQ(expected_coordinates_count, GetExpectedVarHandleCoordinatesCount(invoke));
+  uint32_t number_of_arguments = invoke->GetNumberOfArguments();
+  DCHECK_GE(number_of_arguments, /* VarHandle object */ 1u + expected_coordinates_count);
+  if (number_of_arguments == /* VarHandle object */ 1u + expected_coordinates_count) {
+    return invoke->GetType();
+  } else {
+    return invoke->InputAt(number_of_arguments - 1u)->GetType();
+  }
+}
+
+static void GenerateVarHandleArrayChecks(HInvoke* invoke,
+                                         CodeGeneratorARMVIXL* codegen,
+                                         SlowPathCodeARMVIXL* slow_path) {
+  ArmVIXLAssembler* assembler = codegen->GetAssembler();
+  vixl32::Register varhandle = InputRegisterAt(invoke, 0);
+  vixl32::Register object = InputRegisterAt(invoke, 1);
+  vixl32::Register index = InputRegisterAt(invoke, 2);
+  DataType::Type value_type =
+      GetVarHandleExpectedValueType(invoke, /*expected_coordinates_count=*/ 2u);
+  Primitive::Type primitive_type = DataTypeToPrimitive(value_type);
+
+  const MemberOffset coordinate_type0_offset = mirror::VarHandle::CoordinateType0Offset();
+  const MemberOffset coordinate_type1_offset = mirror::VarHandle::CoordinateType1Offset();
+  const MemberOffset component_type_offset = mirror::Class::ComponentTypeOffset();
+  const MemberOffset primitive_type_offset = mirror::Class::PrimitiveTypeOffset();
+  const MemberOffset class_offset = mirror::Object::ClassOffset();
+  const MemberOffset array_length_offset = mirror::Array::LengthOffset();
+
+  // Null-check the object.
+  __ Cmp(object, 0);
+  __ B(eq, slow_path->GetEntryLabel());
+
+  // Use the first temporary register, whether it's for the declaring class or the offset.
+  // It is not used yet at this point.
+  vixl32::Register temp = RegisterFrom(invoke->GetLocations()->GetTemp(0u));
+
+  UseScratchRegisterScope temps(assembler->GetVIXLAssembler());
+  vixl32::Register temp2 = temps.Acquire();
+
+  // Check that the VarHandle references an array, byte array view or ByteBuffer by checking
+  // that coordinateType1 != null. If that's true, coordinateType1 shall be int.class and
+  // coordinateType0 shall not be null but we do not explicitly verify that.
+  DCHECK_EQ(coordinate_type0_offset.Int32Value() + 4, coordinate_type1_offset.Int32Value());
+  __ Ldrd(temp, temp2, MemOperand(varhandle, coordinate_type0_offset.Int32Value()));
+  codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp);
+  // No need for read barrier or unpoisoning of coordinateType1 for comparison with null.
+  __ Cmp(temp2, 0);
+  __ B(eq, slow_path->GetEntryLabel());
+
+  // Check that the coordinateType0 is an array type. We do not need a read barrier
+  // for loading constant reference fields (or chains of them) for comparison with null,
+  // or for finally loading a constant primitive field (primitive type) below.
+  __ Ldr(temp2, MemOperand(temp, component_type_offset.Int32Value()));
+  codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp2);
+  __ Cmp(temp2, 0);
+  __ B(eq, slow_path->GetEntryLabel());
+
+  // Check that the array component type matches the primitive type.
+  __ Ldrh(temp2, MemOperand(temp2, primitive_type_offset.Int32Value()));
+  __ Cmp(temp2, static_cast<uint16_t>(primitive_type));
+  __ B(ne, slow_path->GetEntryLabel());
+
+  // Check object class against componentType0.
+  //
+  // This is an exact check and we defer other cases to the runtime. This includes
+  // conversion to array of superclass references, which is valid but subsequently
+  // requires all update operations to check that the value can indeed be stored.
+  // We do not want to perform such extra checks in the intrinsified code.
+  //
+  // We do this check without read barrier, so there can be false negatives which we
+  // defer to the slow path. There shall be no false negatives for array classes in the
+  // boot image (including Object[] and primitive arrays) because they are non-movable.
+  __ Ldr(temp2, MemOperand(object, class_offset.Int32Value()));
+  codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp2);
+  __ Cmp(temp, temp2);
+  __ B(ne, slow_path->GetEntryLabel());
+
+  // Check for array index out of bounds.
+  __ Ldr(temp, MemOperand(object, array_length_offset.Int32Value()));
+  __ Cmp(index, temp);
+  __ B(hs, slow_path->GetEntryLabel());
+}
+
+static void GenerateVarHandleCoordinateChecks(HInvoke* invoke,
+                                              CodeGeneratorARMVIXL* codegen,
+                                              SlowPathCodeARMVIXL* slow_path) {
   size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
-  DCHECK_LE(expected_coordinates_count, 1u);
   if (expected_coordinates_count == 0u) {
     GenerateVarHandleStaticFieldCheck(invoke, codegen, slow_path);
+  } else if (expected_coordinates_count == 1u) {
+    GenerateVarHandleInstanceFieldChecks(invoke, codegen, slow_path);
   } else {
-    GenerateVarHandleInstanceFieldCheck(invoke, codegen, slow_path);
+    DCHECK_EQ(expected_coordinates_count, 2u);
+    GenerateVarHandleArrayChecks(invoke, codegen, slow_path);
   }
 }
 
@@ -3766,50 +3855,75 @@ static VarHandleTarget GenerateVarHandleTarget(HInvoke* invoke, CodeGeneratorARM
   ArmVIXLAssembler* assembler = codegen->GetAssembler();
   vixl32::Register varhandle = InputRegisterAt(invoke, 0);
   size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
-  DCHECK_LE(expected_coordinates_count, 1u);
   LocationSummary* locations = invoke->GetLocations();
 
   VarHandleTarget target;
   // The temporary allocated for loading the offset.
   target.offset = RegisterFrom(locations->GetTemp((expected_coordinates_count == 0u) ? 1u : 0u));
-  // The reference to the object that holds the field to operate on.
+  // The reference to the object that holds the value to operate on.
   target.object = (expected_coordinates_count == 0u)
       ? RegisterFrom(locations->GetTemp(0u))
       : InputRegisterAt(invoke, 1);
 
-  // For static fields, we need to fill the `target.object` with the declaring class,
-  // so we can use `target.object` as temporary for the `ArtMethod*`. For instance fields,
-  // we do not need the declaring class, so we can forget the `ArtMethod*` when
-  // we load the `target.offset`, so use the `target.offset` to hold the `ArtMethod*`.
-  vixl32::Register method = (expected_coordinates_count == 0) ? target.object : target.offset;
+  if (expected_coordinates_count <= 1u) {
+    // For static fields, we need to fill the `target.object` with the declaring class,
+    // so we can use `target.object` as temporary for the `ArtMethod*`. For instance fields,
+    // we do not need the declaring class, so we can forget the `ArtMethod*` when
+    // we load the `target.offset`, so use the `target.offset` to hold the `ArtMethod*`.
+    vixl32::Register method = (expected_coordinates_count == 0) ? target.object : target.offset;
 
-  const MemberOffset art_field_offset = mirror::FieldVarHandle::ArtFieldOffset();
-  const MemberOffset offset_offset = ArtField::OffsetOffset();
+    const MemberOffset art_field_offset = mirror::FieldVarHandle::ArtFieldOffset();
+    const MemberOffset offset_offset = ArtField::OffsetOffset();
 
-  // Load the ArtField, the offset and, if needed, declaring class.
-  __ Ldr(method, MemOperand(varhandle, art_field_offset.Int32Value()));
-  __ Ldr(target.offset, MemOperand(method, offset_offset.Int32Value()));
-  if (expected_coordinates_count == 0u) {
-    codegen->GenerateGcRootFieldLoad(invoke,
-                                     LocationFrom(target.object),
-                                     method,
-                                     ArtField::DeclaringClassOffset().Int32Value(),
-                                     kCompilerReadBarrierOption);
+    // Load the ArtField, the offset and, if needed, declaring class.
+    __ Ldr(method, MemOperand(varhandle, art_field_offset.Int32Value()));
+    __ Ldr(target.offset, MemOperand(method, offset_offset.Int32Value()));
+    if (expected_coordinates_count == 0u) {
+      codegen->GenerateGcRootFieldLoad(invoke,
+                                       LocationFrom(target.object),
+                                       method,
+                                       ArtField::DeclaringClassOffset().Int32Value(),
+                                       kCompilerReadBarrierOption);
+    }
+  } else {
+    DCHECK_EQ(expected_coordinates_count, 2u);
+    DataType::Type value_type =
+        GetVarHandleExpectedValueType(invoke, /*expected_coordinates_count=*/ 2u);
+    uint32_t size_shift = DataType::SizeShift(value_type);
+    MemberOffset data_offset = mirror::Array::DataOffset(DataType::Size(value_type));
+
+    vixl32::Register index = InputRegisterAt(invoke, 2);
+    vixl32::Register shifted_index = index;
+    if (size_shift != 0u) {
+      shifted_index = target.offset;
+      __ Lsl(shifted_index, index, size_shift);
+    }
+    __ Add(target.offset, shifted_index, data_offset.Int32Value());
   }
 
   return target;
 }
 
-static bool IsValidFieldVarHandleExpected(HInvoke* invoke) {
+static bool HasVarHandleIntrinsicImplementation(HInvoke* invoke) {
   size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
-  if (expected_coordinates_count > 1u) {
-    // Only field VarHandle is currently supported.
+  if (expected_coordinates_count > 2u) {
+    // Invalid coordinate count. This invoke shall throw at runtime.
     return false;
   }
-  if (expected_coordinates_count == 1u &&
+  if (expected_coordinates_count != 0u &&
       invoke->InputAt(1)->GetType() != DataType::Type::kReference) {
-    // For an instance field, the object must be a reference.
+    // Except for static fields (no coordinates), the first coordinate must be a reference.
     return false;
+  }
+  if (expected_coordinates_count == 2u) {
+    // For arrays and views, the second coordinate must be convertible to `int`.
+    // In this context, `boolean` is not convertible but we have to look at the shorty
+    // as compiler transformations can give the invoke a valid boolean input.
+    DataType::Type index_type = GetDataTypeFromShorty(invoke, 2);
+    if (index_type == DataType::Type::kBool ||
+        DataType::Kind(index_type) != DataType::Type::kInt32) {
+      return false;
+    }
   }
 
   uint32_t number_of_arguments = invoke->GetNumberOfArguments();
@@ -3875,7 +3989,7 @@ static bool IsValidFieldVarHandleExpected(HInvoke* invoke) {
   return true;
 }
 
-static LocationSummary* CreateVarHandleFieldLocations(HInvoke* invoke) {
+static LocationSummary* CreateVarHandleCommonLocations(HInvoke* invoke) {
   size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
   DataType::Type return_type = invoke->GetType();
 
@@ -3883,10 +3997,12 @@ static LocationSummary* CreateVarHandleFieldLocations(HInvoke* invoke) {
   LocationSummary* locations =
       new (allocator) LocationSummary(invoke, LocationSummary::kCallOnSlowPath, kIntrinsified);
   locations->SetInAt(0, Location::RequiresRegister());
-  if (expected_coordinates_count == 1u) {
-    // For instance fields, this is the source object.
-    locations->SetInAt(1, Location::RequiresRegister());
-  } else {
+  // Require coordinates in registers. These are the object holding the value
+  // to operate on (except for static fields) and index (for arrays and views).
+  for (size_t i = 0; i != expected_coordinates_count; ++i) {
+    locations->SetInAt(/* VarHandle object */ 1u + i, Location::RequiresRegister());
+  }
+  if (expected_coordinates_count == 0u) {
     // Add a temporary to hold the declaring class.
     locations->AddTemp(Location::RequiresRegister());
   }
@@ -3925,7 +4041,7 @@ static LocationSummary* CreateVarHandleFieldLocations(HInvoke* invoke) {
 static void CreateVarHandleGetLocations(HInvoke* invoke,
                                         CodeGeneratorARMVIXL* codegen,
                                         bool atomic) {
-  if (!IsValidFieldVarHandleExpected(invoke)) {
+  if (!HasVarHandleIntrinsicImplementation(invoke)) {
     return;
   }
 
@@ -3939,7 +4055,7 @@ static void CreateVarHandleGetLocations(HInvoke* invoke,
     return;
   }
 
-  LocationSummary* locations = CreateVarHandleFieldLocations(invoke);
+  LocationSummary* locations = CreateVarHandleCommonLocations(invoke);
 
   DataType::Type type = invoke->GetType();
   if (type == DataType::Type::kFloat64 && Use64BitExclusiveLoadStore(atomic, codegen)) {
@@ -3955,9 +4071,6 @@ static void GenerateVarHandleGet(HInvoke* invoke,
                                  CodeGeneratorARMVIXL* codegen,
                                  std::memory_order order,
                                  bool atomic) {
-  // Implemented only for fields.
-  size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
-  DCHECK_LE(expected_coordinates_count, 1u);
   DataType::Type type = invoke->GetType();
   DCHECK_NE(type, DataType::Type::kVoid);
 
@@ -3969,7 +4082,7 @@ static void GenerateVarHandleGet(HInvoke* invoke,
       new (codegen->GetScopedAllocator()) IntrinsicSlowPathARMVIXL(invoke);
   codegen->AddSlowPath(slow_path);
 
-  GenerateVarHandleFieldCheck(invoke, codegen, slow_path);
+  GenerateVarHandleCoordinateChecks(invoke, codegen, slow_path);
   GenerateVarHandleAccessModeAndVarTypeChecks(invoke, codegen, slow_path, type);
 
   VarHandleTarget target = GenerateVarHandleTarget(invoke, codegen);
@@ -4040,11 +4153,11 @@ void IntrinsicCodeGeneratorARMVIXL::VisitVarHandleGetVolatile(HInvoke* invoke) {
 static void CreateVarHandleSetLocations(HInvoke* invoke,
                                         CodeGeneratorARMVIXL* codegen,
                                         bool atomic) {
-  if (!IsValidFieldVarHandleExpected(invoke)) {
+  if (!HasVarHandleIntrinsicImplementation(invoke)) {
     return;
   }
 
-  LocationSummary* locations = CreateVarHandleFieldLocations(invoke);
+  LocationSummary* locations = CreateVarHandleCommonLocations(invoke);
 
   DataType::Type value_type = invoke->InputAt(invoke->GetNumberOfArguments() - 1u)->GetType();
   if (DataType::Is64BitType(value_type) && Use64BitExclusiveLoadStore(atomic, codegen)) {
@@ -4061,9 +4174,6 @@ static void GenerateVarHandleSet(HInvoke* invoke,
                                  CodeGeneratorARMVIXL* codegen,
                                  std::memory_order order,
                                  bool atomic) {
-  // Implemented only for fields.
-  size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
-  DCHECK_LE(expected_coordinates_count, 1u);
   uint32_t value_index = invoke->GetNumberOfArguments() - 1;
   DataType::Type value_type = GetDataTypeFromShorty(invoke, value_index);
 
@@ -4075,7 +4185,7 @@ static void GenerateVarHandleSet(HInvoke* invoke,
       new (codegen->GetScopedAllocator()) IntrinsicSlowPathARMVIXL(invoke);
   codegen->AddSlowPath(slow_path);
 
-  GenerateVarHandleFieldCheck(invoke, codegen, slow_path);
+  GenerateVarHandleCoordinateChecks(invoke, codegen, slow_path);
   GenerateVarHandleAccessModeAndVarTypeChecks(invoke, codegen, slow_path, value_type);
 
   VarHandleTarget target = GenerateVarHandleTarget(invoke, codegen);
@@ -4150,7 +4260,7 @@ void IntrinsicCodeGeneratorARMVIXL::VisitVarHandleSetVolatile(HInvoke* invoke) {
 }
 
 static void CreateVarHandleCompareAndSetOrExchangeLocations(HInvoke* invoke, bool return_success) {
-  if (!IsValidFieldVarHandleExpected(invoke)) {
+  if (!HasVarHandleIntrinsicImplementation(invoke)) {
     return;
   }
 
@@ -4168,11 +4278,12 @@ static void CreateVarHandleCompareAndSetOrExchangeLocations(HInvoke* invoke, boo
     return;
   }
 
-  LocationSummary* locations = CreateVarHandleFieldLocations(invoke);
+  LocationSummary* locations = CreateVarHandleCommonLocations(invoke);
 
   if (kEmitCompilerReadBarrier && !kUseBakerReadBarrier) {
     // We need callee-save registers for both the class object and offset instead of
-    // the temporaries reserved in CreateVarHandleFieldLocations().
+    // the temporaries reserved in CreateVarHandleCommonLocations().
+    static_assert(POPCOUNT(kArmCalleeSaveRefSpills) >= 2u);
     constexpr int first_callee_save = CTZ(kArmCalleeSaveRefSpills);
     constexpr int second_callee_save = CTZ(kArmCalleeSaveRefSpills ^ (1u << first_callee_save));
     if (GetExpectedVarHandleCoordinatesCount(invoke) == 0u) {  // For static fields.
@@ -4209,9 +4320,6 @@ static void GenerateVarHandleCompareAndSetOrExchange(HInvoke* invoke,
                                                      bool strong) {
   DCHECK(return_success || strong);
 
-  // Implemented only for fields.
-  size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
-  DCHECK_LE(expected_coordinates_count, 1u);
   uint32_t expected_index = invoke->GetNumberOfArguments() - 2;
   uint32_t new_value_index = invoke->GetNumberOfArguments() - 1;
   DataType::Type value_type = GetDataTypeFromShorty(invoke, new_value_index);
@@ -4227,19 +4335,19 @@ static void GenerateVarHandleCompareAndSetOrExchange(HInvoke* invoke,
       new (codegen->GetScopedAllocator()) IntrinsicSlowPathARMVIXL(invoke);
   codegen->AddSlowPath(slow_path);
 
-  GenerateVarHandleFieldCheck(invoke, codegen, slow_path);
+  GenerateVarHandleCoordinateChecks(invoke, codegen, slow_path);
   GenerateVarHandleAccessModeAndVarTypeChecks(invoke, codegen, slow_path, value_type);
 
   VarHandleTarget target = GenerateVarHandleTarget(invoke, codegen);
 
-  bool release_barrier =
-      (order == std::memory_order_release) || (order == std::memory_order_seq_cst);
-  bool acquire_barrier =
-      (order == std::memory_order_acquire) || (order == std::memory_order_seq_cst);
+  bool seq_cst_barrier = (order == std::memory_order_seq_cst);
+  bool release_barrier = seq_cst_barrier || (order == std::memory_order_release);
+  bool acquire_barrier = seq_cst_barrier || (order == std::memory_order_acquire);
   DCHECK(release_barrier || acquire_barrier || order == std::memory_order_relaxed);
 
   if (release_barrier) {
-    __ Dmb(vixl32::ISH);
+    codegen->GenerateMemoryBarrier(
+        seq_cst_barrier ? MemBarrierKind::kAnyAny : MemBarrierKind::kAnyStore);
   }
 
   // Calculate the pointer to the value.
@@ -4343,7 +4451,8 @@ static void GenerateVarHandleCompareAndSetOrExchange(HInvoke* invoke,
   __ Bind(exit_loop);
 
   if (acquire_barrier) {
-    __ Dmb(vixl32::ISH);
+    codegen->GenerateMemoryBarrier(
+        seq_cst_barrier ? MemBarrierKind::kAnyAny : MemBarrierKind::kLoadAny);
   }
 
   if (!return_success && value_type == DataType::Type::kFloat64) {
@@ -4438,7 +4547,7 @@ void IntrinsicCodeGeneratorARMVIXL::VisitVarHandleWeakCompareAndSetRelease(HInvo
 
 static void CreateVarHandleGetAndUpdateLocations(HInvoke* invoke,
                                                  GetAndUpdateOp get_and_update_op) {
-  if (!IsValidFieldVarHandleExpected(invoke)) {
+  if (!HasVarHandleIntrinsicImplementation(invoke)) {
     return;
   }
 
@@ -4450,7 +4559,7 @@ static void CreateVarHandleGetAndUpdateLocations(HInvoke* invoke,
     return;
   }
 
-  LocationSummary* locations = CreateVarHandleFieldLocations(invoke);
+  LocationSummary* locations = CreateVarHandleCommonLocations(invoke);
 
   // We can reuse the declaring class (if present) and offset temporary, except for
   // non-Baker read barriers that need them for the slow path.
@@ -4484,9 +4593,6 @@ static void GenerateVarHandleGetAndUpdate(HInvoke* invoke,
                                           CodeGeneratorARMVIXL* codegen,
                                           GetAndUpdateOp get_and_update_op,
                                           std::memory_order order) {
-  // Implemented only for fields.
-  size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
-  DCHECK_LE(expected_coordinates_count, 1u);
   uint32_t arg_index = invoke->GetNumberOfArguments() - 1;
   DataType::Type value_type = GetDataTypeFromShorty(invoke, arg_index);
 
@@ -4499,22 +4605,22 @@ static void GenerateVarHandleGetAndUpdate(HInvoke* invoke,
       new (codegen->GetScopedAllocator()) IntrinsicSlowPathARMVIXL(invoke);
   codegen->AddSlowPath(slow_path);
 
-  GenerateVarHandleFieldCheck(invoke, codegen, slow_path);
+  GenerateVarHandleCoordinateChecks(invoke, codegen, slow_path);
   GenerateVarHandleAccessModeAndVarTypeChecks(invoke, codegen, slow_path, value_type);
 
   VarHandleTarget target = GenerateVarHandleTarget(invoke, codegen);
 
-  bool release_barrier =
-      (order == std::memory_order_release) || (order == std::memory_order_seq_cst);
-  bool acquire_barrier =
-      (order == std::memory_order_acquire) || (order == std::memory_order_seq_cst);
+  bool seq_cst_barrier = (order == std::memory_order_seq_cst);
+  bool release_barrier = seq_cst_barrier || (order == std::memory_order_release);
+  bool acquire_barrier = seq_cst_barrier || (order == std::memory_order_acquire);
   DCHECK(release_barrier || acquire_barrier || order == std::memory_order_relaxed);
 
   if (release_barrier) {
-    __ Dmb(vixl32::ISH);
+    codegen->GenerateMemoryBarrier(
+        seq_cst_barrier ? MemBarrierKind::kAnyAny : MemBarrierKind::kAnyStore);
   }
 
-  // Use the scratch register for the pointer to the field.
+  // Use the scratch register for the pointer to the target location.
   UseScratchRegisterScope temps(assembler->GetVIXLAssembler());
   vixl32::Register tmp_ptr = temps.Acquire();
   __ Add(tmp_ptr, target.object, target.offset);
@@ -4591,7 +4697,8 @@ static void GenerateVarHandleGetAndUpdate(HInvoke* invoke,
                        maybe_vreg_temp);
 
   if (acquire_barrier) {
-    __ Dmb(vixl32::ISH);
+    codegen->GenerateMemoryBarrier(
+        seq_cst_barrier ? MemBarrierKind::kAnyAny : MemBarrierKind::kLoadAny);
   }
 
   if (get_and_update_op == GetAndUpdateOp::kSet && DataType::IsFloatingPointType(value_type)) {
