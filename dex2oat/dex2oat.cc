@@ -517,6 +517,7 @@ class Dex2Oat final {
       input_vdex_file_(nullptr),
       dm_fd_(-1),
       zip_fd_(-1),
+      zip_dup_fd_(-1),
       image_fd_(-1),
       have_multi_image_arg_(false),
       multi_image_(false),
@@ -1064,6 +1065,7 @@ class Dex2Oat final {
     AssignIfExists(args, M::CompilationReason, &compilation_reason_);
     AssignTrueIfExists(args, M::CheckLinkageConditions, &check_linkage_conditions_);
     AssignTrueIfExists(args, M::CrashOnLinkageViolation, &crash_on_linkage_violation_);
+    AssignIfExists(args, M::PublicSdk, &public_sdk_);
 
     AssignIfExists(args, M::Backend, &compiler_kind_);
     parser_options->requested_specific_compiler = args.Exists(M::Backend);
@@ -1329,6 +1331,10 @@ class Dex2Oat final {
           LOG(WARNING) << "Could not open vdex file in DexMetadata archive: " << error_msg;
         } else {
           input_vdex_file_ = std::make_unique<VdexFile>(std::move(input_file));
+          if (input_vdex_file_->HasDexSection()) {
+            LOG(ERROR) << "The dex metadata is not allowed to contain dex files";
+            return false;
+          }
           VLOG(verifier) << "Doing fast verification with vdex from DexMetadata archive";
         }
       }
@@ -1390,6 +1396,19 @@ class Dex2Oat final {
   dex2oat::ReturnCode Setup() {
     TimingLogger::ScopedTiming t("dex2oat Setup", timings_);
 
+    // At this point, file descriptors have been setup. Report that we're starting the compilation.
+    PaletteHooks* hooks = nullptr;
+    if (PaletteGetHooks(&hooks) == PaletteStatus::kOkay) {
+      // We dup the zip file descriptor, as the oat writer will close it in
+      // OatWriter::CloseSources (we still want to close it there for
+      // consistency with other kinds of inputs).
+      zip_dup_fd_ = DupCloexec(zip_fd_);
+      hooks->NotifyStartDex2oatCompilation(zip_dup_fd_,
+                                           IsAppImage() ? app_image_fd_ : image_fd_,
+                                           oat_fd_,
+                                           output_vdex_fd_);
+    }
+
     if (!PrepareDirtyObjects()) {
       return dex2oat::ReturnCode::kOther;
     }
@@ -1439,7 +1458,7 @@ class Dex2Oat final {
             opened_dex_files_maps_.push_back(std::move(map));
           }
           for (std::unique_ptr<const DexFile>& dex_file : opened_dex_files) {
-            dex_file_oat_index_map_.emplace(dex_file.get(), i);
+            dex_file_oat_index_map_.insert(std::make_pair(dex_file.get(), i));
             opened_dex_files_.push_back(std::move(dex_file));
           }
         }
@@ -1600,8 +1619,7 @@ class Dex2Oat final {
       // (because the encoding adds the dex checksum...)
       // TODO(calin): consider redesigning this so we don't have to open the dex files before
       // creating the actual class loader.
-      if (!class_loader_context_->OpenDexFiles(runtime_->GetInstructionSet(),
-                                               classpath_dir_,
+      if (!class_loader_context_->OpenDexFiles(classpath_dir_,
                                                class_loader_context_fds_)) {
         // Do not abort if we couldn't open files from the classpath. They might be
         // apks without dex files and right now are opening flow will fail them.
@@ -1698,16 +1716,6 @@ class Dex2Oat final {
       // Create the main VerifierDeps, here instead of in the compiler since we want to aggregate
       // the results for all the dex files, not just the results for the current dex file.
       callbacks_->SetVerifierDeps(new verifier::VerifierDeps(dex_files));
-    }
-
-    // Now that the FDs have been setup, report that we're starting the
-    // compilation.
-    PaletteHooks* hooks = nullptr;
-    if (PaletteGetHooks(&hooks) == PaletteStatus::kOkay) {
-      hooks->NotifyStartDex2oatCompilation(zip_fd_,
-                                           IsAppImage() ? app_image_fd_ : image_fd_,
-                                           oat_fd_,
-                                           output_vdex_fd_);
     }
 
     return dex2oat::ReturnCode::kNoFailure;
@@ -1883,6 +1891,21 @@ class Dex2Oat final {
     }
     if (!IsBootImage()) {
       callbacks_->SetDexFiles(&dex_files);
+
+      // We need to set this after we create the class loader so that the runtime can access
+      // the hidden fields of the well known class loaders.
+      if (!public_sdk_.empty()) {
+        std::string error_msg;
+        std::unique_ptr<SdkChecker> sdk_checker(SdkChecker::Create(public_sdk_, &error_msg));
+        if (sdk_checker != nullptr) {
+          AotClassLinker* aot_class_linker = down_cast<AotClassLinker*>(class_linker);
+          aot_class_linker->SetSdkChecker(std::move(sdk_checker));
+        } else {
+          LOG(FATAL) << "Failed to create SdkChecker with dex files "
+              << public_sdk_ << " Error: " << error_msg;
+          UNREACHABLE();
+        }
+      }
     }
 
     // Register dex caches and key them to the class loader so that they only unload when the
@@ -2129,14 +2152,15 @@ class Dex2Oat final {
       }
     }
 
-    // Now that the files have been written to, report that we're starting the
+    // Now that the files have been written to, report that we've ended the
     // compilation.
     PaletteHooks* hooks = nullptr;
     if (PaletteGetHooks(&hooks) == PaletteStatus::kOkay) {
-      hooks->NotifyEndDex2oatCompilation(zip_fd_,
+      hooks->NotifyEndDex2oatCompilation(zip_dup_fd_,
                                          IsAppImage() ? app_image_fd_ : image_fd_,
                                          oat_fd_,
                                          output_vdex_fd_);
+      close(zip_dup_fd_);
     }
 
     return true;
@@ -2763,6 +2787,7 @@ class Dex2Oat final {
   std::vector<std::string> dex_filenames_;
   std::vector<std::string> dex_locations_;
   int zip_fd_;
+  int zip_dup_fd_;  // A dup of the zip fd in case we report it to Palette.
   std::string zip_location_;
   std::string boot_image_filename_;
   std::vector<const char*> runtime_args_;
@@ -2806,7 +2831,7 @@ class Dex2Oat final {
   std::unique_ptr<ProfileCompilationInfo> profile_compilation_info_;
   TimingLogger* timings_;
   std::vector<std::vector<const DexFile*>> dex_files_per_oat_file_;
-  std::unordered_map<const DexFile*, size_t> dex_file_oat_index_map_;
+  HashMap<const DexFile*, size_t> dex_file_oat_index_map_;
 
   // Backing storage.
   std::forward_list<std::string> char_backing_storage_;
@@ -2833,6 +2858,9 @@ class Dex2Oat final {
 
   // Whether to force individual compilation.
   bool compile_individually_;
+
+  // The classpath that determines if a given symbol should be resolved at compile time or not.
+  std::string public_sdk_;
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(Dex2Oat);
 };
@@ -2984,6 +3012,8 @@ static dex2oat::ReturnCode Dex2oat(int argc, char** argv) {
 
   // Check early that the result of compilation can be written
   if (!dex2oat->OpenFile()) {
+    // Flush close so that the File Guard checks don't fail the assertions.
+    dex2oat->FlushCloseOutputFiles();
     return dex2oat::ReturnCode::kOther;
   }
 
