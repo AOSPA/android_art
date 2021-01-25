@@ -996,8 +996,26 @@ java_library {
     sdk_version: "core_current",
 }
 
+soong_config_module_type_import {
+    from: "art/build/SoongConfig.bp",
+    module_types: ["art_module_cc_defaults"],
+}
+
+art_module_cc_defaults {
+    name: "art_gtests_defaults",
+
+    // Enable gtests only in source builds, where com.android.art.testing is available.
+    enabled: false,
+    soong_config_variables: {
+        source_build: {
+            enabled: true,
+        },
+    },
+}
+
 art_cc_test {
     name: "ArtGtestsTargetInstallApex",
+    defaults: ["art_gtests_defaults"],
     data: [
         // We need the ART testing apex, which contains all gtest binaries.
         // Note that due to build system and linker constraints the gtests must be in the apex.
@@ -1026,6 +1044,7 @@ art_cc_test {
 
 art_cc_test {
     name: "ArtGtestsTargetChroot",
+    defaults: ["art_gtests_defaults"],
     data: [
         // We need the ART testing apex, which contains all gtest binaries.
         // Note that due to build system and linker constraints the gtests must be in the apex.
@@ -1351,6 +1370,12 @@ java_library {
     defaults: ["art-gtest-jars-defaults"],
 }
 
+java_library {
+    name: "art-gtest-jars-Dex2oatVdexTestDex",
+    srcs: ["Dex2oatVdexTestDex/**/*.java"],
+    defaults: ["art-gtest-jars-defaults"],
+}
+
 // The following cases are non-trivial.
 
 // Uncompress classes.dex files in the jar file.
@@ -1496,4 +1521,11 @@ genrule {
     defaults: ["art-gtest-jars-smali-defaults"],
     srcs: ["LinkageTest/*.smali"],
     out: ["art-gtest-jars-LinkageTest.dex"],
+}
+
+genrule {
+    name: "art-gtest-jars-Dex2oatVdexPublicSdkDex",
+    defaults: ["art-gtest-jars-smali-defaults"],
+    srcs: ["Dex2oatVdexPublicSdkDex/*.smali"],
+    out: ["art-gtest-jars-Dex2oatVdexPublicSdkDex.dex"],
 }
