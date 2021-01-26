@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <functional>
 
 #include "art_method-inl.h"
 #include "base/arena_allocator.h"
@@ -1312,6 +1313,44 @@ void HEnvironment::ReplaceInput(HInstruction* replacement, size_t index) {
   orig_instr->FixUpUserRecordsAfterEnvUseRemoval(before_use_node);
 }
 
+std::ostream& HInstruction::Dump(std::ostream& os, bool dump_args) {
+  HGraph* graph = GetBlock()->GetGraph();
+  HGraphVisualizer::DumpInstruction(&os, graph, this);
+  if (dump_args) {
+    // Allocate memory from local ScopedArenaAllocator.
+    ScopedArenaAllocator allocator(graph->GetArenaStack());
+    // Instructions that we already visited. We print each instruction only once.
+    ArenaBitVector visited(
+        &allocator, graph->GetCurrentInstructionId(), /* expandable= */ false, kArenaAllocMisc);
+    visited.ClearAllBits();
+    visited.SetBit(GetId());
+    // Keep a queue of instructions with their indentations.
+    ScopedArenaDeque<std::pair<HInstruction*, size_t>> queue(allocator.Adapter(kArenaAllocMisc));
+    auto add_args = [&queue](HInstruction* instruction, size_t indentation) {
+      for (HInstruction* arg : ReverseRange(instruction->GetInputs())) {
+        queue.emplace_front(arg, indentation);
+      }
+    };
+    add_args(this, /*indentation=*/ 1u);
+    while (!queue.empty()) {
+      HInstruction* instruction;
+      size_t indentation;
+      std::tie(instruction, indentation) = queue.front();
+      queue.pop_front();
+      if (!visited.IsBitSet(instruction->GetId())) {
+        visited.SetBit(instruction->GetId());
+        os << '\n';
+        for (size_t i = 0; i != indentation; ++i) {
+          os << "  ";
+        }
+        HGraphVisualizer::DumpInstruction(&os, graph, instruction);
+        add_args(instruction, indentation + 1u);
+      }
+    }
+  }
+  return os;
+}
+
 HInstruction* HInstruction::GetNextDisregardingMoves() const {
   HInstruction* next = GetNext();
   while (next != nullptr && next->IsParallelMove()) {
@@ -1914,6 +1953,58 @@ std::ostream& operator<<(std::ostream& os, HInstruction::InstructionKind rhs) {
       break;
   }
 #undef DECLARE_CASE
+  return os;
+}
+
+std::ostream& operator<<(std::ostream& os, const HInstruction::NoArgsDump rhs) {
+  // TODO Really this should be const but that would require const-ifying
+  // graph-visualizer and HGraphVisitor which are tangled up everywhere.
+  return const_cast<HInstruction*>(rhs.ins)->Dump(os, /* dump_args= */ false);
+}
+
+std::ostream& operator<<(std::ostream& os, const HInstruction::ArgsDump rhs) {
+  // TODO Really this should be const but that would require const-ifying
+  // graph-visualizer and HGraphVisitor which are tangled up everywhere.
+  return const_cast<HInstruction*>(rhs.ins)->Dump(os, /* dump_args= */ true);
+}
+
+std::ostream& operator<<(std::ostream& os, const HInstruction& rhs) {
+  return os << rhs.DumpWithoutArgs();
+}
+
+std::ostream& operator<<(std::ostream& os, const HUseList<HInstruction*>& lst) {
+  os << "Instructions[";
+  bool first = true;
+  for (const auto& hi : lst) {
+    if (!first) {
+      os << ", ";
+    }
+    first = false;
+    os << hi.GetUser()->DebugName() << "[id: " << hi.GetUser()->GetId()
+       << ", blk: " << hi.GetUser()->GetBlock()->GetBlockId() << "]@" << hi.GetIndex();
+  }
+  os << "]";
+  return os;
+}
+
+std::ostream& operator<<(std::ostream& os, const HUseList<HEnvironment*>& lst) {
+  os << "Environments[";
+  bool first = true;
+  for (const auto& hi : lst) {
+    if (!first) {
+      os << ", ";
+    }
+    first = false;
+    os << *hi.GetUser()->GetHolder() << "@" << hi.GetIndex();
+  }
+  os << "]";
+  return os;
+}
+
+std::ostream& HGraph::Dump(std::ostream& os,
+                           std::optional<std::reference_wrapper<const BlockNamer>> namer) {
+  HGraphVisualizer vis(&os, this, nullptr, namer);
+  vis.DumpGraphDebug();
   return os;
 }
 
