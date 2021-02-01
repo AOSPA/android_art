@@ -4812,10 +4812,7 @@ class HInvokeVirtual final : public HInvoke {
     }
   }
 
-  bool CanDoImplicitNullCheckOn(HInstruction* obj) const override {
-    // TODO: Add implicit null checks in intrinsics.
-    return (obj == InputAt(0)) && !IsIntrinsic();
-  }
+  bool CanDoImplicitNullCheckOn(HInstruction* obj) const override;
 
   uint32_t GetVTableIndex() const { return vtable_index_; }
 

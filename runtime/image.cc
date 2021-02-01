@@ -29,7 +29,8 @@
 namespace art {
 
 const uint8_t ImageHeader::kImageMagic[] = { 'a', 'r', 't', '\n' };
-const uint8_t ImageHeader::kImageVersion[] = { '0', '8', '8', '\0' };  // Long.divideUnsigned
+// Last change: Reference.refersTo() intrinsic.
+const uint8_t ImageHeader::kImageVersion[] = { '0', '9', '4', '\0' };
 
 ImageHeader::ImageHeader(uint32_t image_reservation_size,
                          uint32_t component_count,
