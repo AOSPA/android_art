@@ -363,6 +363,20 @@ IntrinsicVisitor::IntegerValueOfInfo IntrinsicVisitor::ComputeIntegerValueOfInfo
   return info;
 }
 
+void IntrinsicVisitor::CreateReferenceRefersToLocations(HInvoke* invoke) {
+  if (kEmitCompilerReadBarrier && !kUseBakerReadBarrier) {
+    // Unimplemented for non-Baker read barrier.
+    return;
+  }
+
+  ArenaAllocator* allocator = invoke->GetBlock()->GetGraph()->GetAllocator();
+  LocationSummary* locations =
+      new (allocator) LocationSummary(invoke, LocationSummary::kCallOnSlowPath, kIntrinsified);
+  locations->SetInAt(0, Location::RequiresRegister());
+  locations->SetInAt(1, Location::RequiresRegister());
+  locations->SetOut(Location::RequiresRegister());
+}
+
 void IntrinsicVisitor::AssertNonMovableStringClass() {
   if (kIsDebugBuild) {
     ScopedObjectAccess soa(Thread::Current());
