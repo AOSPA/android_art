@@ -21,6 +21,7 @@
 #include <array>
 #include <type_traits>
 
+#include "base/arena_allocator.h"
 #include "base/arena_bit_vector.h"
 #include "base/arena_containers.h"
 #include "base/arena_object.h"
@@ -387,6 +388,7 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
         blocks_(allocator->Adapter(kArenaAllocBlockList)),
         reverse_post_order_(allocator->Adapter(kArenaAllocReversePostOrder)),
         linear_order_(allocator->Adapter(kArenaAllocLinearOrder)),
+        reachability_graph_(allocator, 0, 0, true, kArenaAllocReachabilityGraph),
         entry_block_(nullptr),
         exit_block_(nullptr),
         maximum_number_of_out_vregs_(0),
@@ -428,6 +430,13 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
 
   const ArenaVector<HBasicBlock*>& GetBlocks() const { return blocks_; }
 
+  // An iterator to only blocks that are still actually in the graph (when
+  // blocks are removed they are replaced with 'nullptr' in GetBlocks to
+  // simplify block-id assignment and avoid memmoves in the block-list).
+  IterationRange<FilterNull<ArenaVector<HBasicBlock*>::const_iterator>> GetActiveBlocks() const {
+    return FilterOutNull(MakeIterationRange(GetBlocks()));
+  }
+
   bool IsInSsaForm() const { return in_ssa_form_; }
   void SetInSsaForm() { in_ssa_form_ = true; }
 
@@ -442,6 +451,8 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
 
   void ComputeDominanceInformation();
   void ClearDominanceInformation();
+  void ComputeReachabilityInformation();
+  void ClearReachabilityInformation();
   void ClearLoopInformation();
   void FindBackEdges(ArenaBitVector* visited);
   GraphAnalysisResult BuildDominatorTree();
@@ -589,6 +600,10 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   void SetHasBoundsChecks(bool value) {
     has_bounds_checks_ = value;
   }
+
+  // Returns true if dest is reachable from source, using either blocks or block-ids.
+  bool PathBetween(const HBasicBlock* source, const HBasicBlock* dest) const;
+  bool PathBetween(uint32_t source_id, uint32_t dest_id) const;
 
   // Is the code known to be robust against eliminating dead references
   // and the effects of early finalization?
@@ -745,6 +760,10 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   // List of blocks to perform a linear order tree traversal. Unlike the reverse
   // post order, this order is not incrementally kept up-to-date.
   ArenaVector<HBasicBlock*> linear_order_;
+
+  // Reachability graph for checking connectedness between nodes. Acts as a partitioned vector where
+  // each RoundUp(blocks_.size(), BitVector::kWordBits) is the reachability of each node.
+  ArenaBitVectorArray reachability_graph_;
 
   HBasicBlock* entry_block_;
   HBasicBlock* exit_block_;

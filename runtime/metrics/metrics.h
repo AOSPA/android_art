@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-#ifndef ART_LIBARTBASE_BASE_METRICS_H_
-#define ART_LIBARTBASE_BASE_METRICS_H_
+#ifndef ART_RUNTIME_METRICS_METRICS_H_
+#define ART_RUNTIME_METRICS_METRICS_H_
 
 #include <stdint.h>
 
@@ -339,9 +339,31 @@ class ArtMetrics {
 // Returns a human readable name for the given DatumId.
 std::string DatumName(DatumId datum);
 
+struct ReportingConfig {
+  bool dump_to_logcat;
+  // TODO(eholk): this will grow to support other configurations, such as logging to a file, or
+  // statsd. There will also be options for reporting after a period of time, or at certain events.
+};
+
+// MetricsReporter handles periodically reporting ART metrics.
+class MetricsReporter {
+ public:
+  // Creates a MetricsReporter instance that matches the options selected in ReportingConfig.
+  static std::unique_ptr<MetricsReporter> Create(ReportingConfig config, const ArtMetrics* metrics);
+
+  ~MetricsReporter();
+
+ private:
+  explicit MetricsReporter(ReportingConfig config, const ArtMetrics* metrics);
+
+  ReportingConfig config_;
+  const ArtMetrics* metrics_;
+};
+
+
 }  // namespace metrics
 }  // namespace art
 
 #pragma clang diagnostic pop  // -Wconversion
 
-#endif  // ART_LIBARTBASE_BASE_METRICS_H_
+#endif  // ART_RUNTIME_METRICS_METRICS_H_

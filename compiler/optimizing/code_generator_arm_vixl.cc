@@ -36,6 +36,7 @@
 #include "linker/linker_patch.h"
 #include "mirror/array-inl.h"
 #include "mirror/class-inl.h"
+#include "mirror/var_handle.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread.h"
 #include "utils/arm/assembler_arm_vixl.h"
@@ -834,14 +835,24 @@ class ReadBarrierForHeapReferenceSlowPathARMVIXL : public SlowPathCodeARMVIXL {
         // to an object field within an object.
         DCHECK(instruction_->IsInvoke()) << instruction_->DebugName();
         DCHECK(instruction_->GetLocations()->Intrinsified());
-        DCHECK((instruction_->AsInvoke()->GetIntrinsic() == Intrinsics::kUnsafeGetObject) ||
-               (instruction_->AsInvoke()->GetIntrinsic() == Intrinsics::kUnsafeGetObjectVolatile))
+        Intrinsics intrinsic = instruction_->AsInvoke()->GetIntrinsic();
+        DCHECK(intrinsic == Intrinsics::kUnsafeGetObject ||
+               intrinsic == Intrinsics::kUnsafeGetObjectVolatile ||
+               mirror::VarHandle::GetAccessModeTemplateByIntrinsic(intrinsic) ==
+                   mirror::VarHandle::AccessModeTemplate::kGet ||
+               mirror::VarHandle::GetAccessModeTemplateByIntrinsic(intrinsic) ==
+                   mirror::VarHandle::AccessModeTemplate::kCompareAndSet ||
+               mirror::VarHandle::GetAccessModeTemplateByIntrinsic(intrinsic) ==
+                   mirror::VarHandle::AccessModeTemplate::kCompareAndExchange ||
+               mirror::VarHandle::GetAccessModeTemplateByIntrinsic(intrinsic) ==
+                   mirror::VarHandle::AccessModeTemplate::kGetAndUpdate)
             << instruction_->AsInvoke()->GetIntrinsic();
         DCHECK_EQ(offset_, 0U);
-        DCHECK(index_.IsRegisterPair());
-        // UnsafeGet's offset location is a register pair, the low
-        // part contains the correct offset.
-        index = index_.ToLow();
+        // Though UnsafeGet's offset location is a register pair, we only pass the low
+        // part (high part is irrelevant for 32-bit addresses) to the slow path.
+        // For VarHandle intrinsics, the index is always just a register.
+        DCHECK(index_.IsRegister());
+        index = index_;
       }
     }
 
@@ -923,7 +934,9 @@ class ReadBarrierForRootSlowPathARMVIXL : public SlowPathCodeARMVIXL {
     vixl32::Register reg_out = RegisterFrom(out_);
     DCHECK(locations->CanCall());
     DCHECK(!locations->GetLiveRegisters()->ContainsCoreRegister(reg_out.GetCode()));
-    DCHECK(instruction_->IsLoadClass() || instruction_->IsLoadString())
+    DCHECK(instruction_->IsLoadClass() ||
+           instruction_->IsLoadString() ||
+           (instruction_->IsInvoke() && instruction_->GetLocations()->Intrinsified()))
         << "Unexpected instruction in read barrier for GC root slow path: "
         << instruction_->DebugName();
 
@@ -2012,18 +2025,22 @@ void CodeGeneratorARMVIXL::Finalize(CodeAllocator* allocator) {
           } else {
             DCHECK_GE(literal_offset, 2u);
             uint32_t prev_insn = GetInsn16(literal_offset - 2u);
-            // LDR (immediate), encoding T1, with correct root_reg.
             const uint32_t root_reg = BakerReadBarrierFirstRegField::Decode(encoded_data);
-            CHECK_EQ(prev_insn & 0xf807u, 0x6800u | root_reg);
+            // Usually LDR (immediate), encoding T1, with correct root_reg but we may have
+            // a `MOV marked, old_value` for intrinsic CAS where `marked` is a low register.
+            if ((prev_insn & 0xff87u) != (0x4600 | root_reg)) {
+              CHECK_EQ(prev_insn & 0xf807u, 0x6800u | root_reg);
+            }
           }
           break;
         }
-        case BakerReadBarrierKind::kUnsafeCas: {
+        case BakerReadBarrierKind::kIntrinsicCas: {
           DCHECK_GE(literal_offset, 4u);
           uint32_t prev_insn = GetInsn32(literal_offset - 4u);
-          // ADD (register), encoding T3, with correct root_reg.
+          // MOV (register), encoding T3, with correct root_reg.
           const uint32_t root_reg = BakerReadBarrierFirstRegField::Decode(encoded_data);
-          CHECK_EQ(prev_insn & 0xfff0fff0u, 0xeb000000u | (root_reg << 8));
+          DCHECK_GE(root_reg, 8u);  // Used only for high registers.
+          CHECK_EQ(prev_insn & 0xfffffff0u, 0xea4f0000u | (root_reg << 8));
           break;
         }
         default:
@@ -3533,6 +3550,11 @@ void InstructionCodeGeneratorARMVIXL::VisitInvokeInterface(HInvokeInterface* inv
       } else {
         __ Mov(RegisterFrom(hidden_reg), RegisterFrom(current_method));
       }
+    } else if (invoke->GetHiddenArgumentLoadKind() == MethodLoadKind::kRuntimeCall) {
+      // We pass the method from the IMT in case of a conflict. This will ensure
+      // we go into the runtime to resolve the actual method.
+      CHECK_NE(temp.GetCode(), lr.GetCode());
+      __ Mov(RegisterFrom(hidden_reg), temp);
     } else {
       codegen_->LoadMethod(invoke->GetHiddenArgumentLoadKind(), hidden_reg, invoke);
     }
@@ -6729,7 +6751,7 @@ void InstructionCodeGeneratorARMVIXL::VisitArraySet(HArraySet* instruction) {
         }
       }
 
-      codegen_->MarkGCCard(temp1, temp2, array, value, /* can_be_null= */ false);
+      codegen_->MarkGCCard(temp1, temp2, array, value, /* value_can_be_null= */ false);
 
       if (can_value_be_null) {
         DCHECK(do_store.IsReferenced());
@@ -6960,10 +6982,10 @@ void CodeGeneratorARMVIXL::MarkGCCard(vixl32::Register temp,
                                       vixl32::Register card,
                                       vixl32::Register object,
                                       vixl32::Register value,
-                                      bool can_be_null) {
+                                      bool value_can_be_null) {
   vixl32::Label is_null;
-  if (can_be_null) {
-    __ CompareAndBranchIfZero(value, &is_null);
+  if (value_can_be_null) {
+    __ CompareAndBranchIfZero(value, &is_null, /* is_far_target=*/ false);
   }
   // Load the address of the card table into `card`.
   GetAssembler()->LoadFromOffset(
@@ -6985,7 +7007,7 @@ void CodeGeneratorARMVIXL::MarkGCCard(vixl32::Register temp,
   // of the card to mark; and 2. to load the `kCardDirty` value) saves a load
   // (no need to explicitly load `kCardDirty` as an immediate value).
   __ Strb(card, MemOperand(card, temp));
-  if (can_be_null) {
+  if (value_can_be_null) {
     __ Bind(&is_null);
   }
 }
@@ -8789,18 +8811,22 @@ void CodeGeneratorARMVIXL::GenerateGcRootFieldLoad(
   MaybeGenerateMarkingRegisterCheck(/* code= */ 20);
 }
 
-void CodeGeneratorARMVIXL::GenerateUnsafeCasOldValueAddWithBakerReadBarrier(
-    vixl::aarch32::Register old_value,
-    vixl::aarch32::Register adjusted_old_value,
-    vixl::aarch32::Register expected) {
+void CodeGeneratorARMVIXL::GenerateIntrinsicCasMoveWithBakerReadBarrier(
+    vixl::aarch32::Register marked_old_value,
+    vixl::aarch32::Register old_value) {
   DCHECK(kEmitCompilerReadBarrier);
   DCHECK(kUseBakerReadBarrier);
 
-  // Similar to the Baker RB path in GenerateGcRootFieldLoad(), with an ADD instead of LDR.
-  uint32_t custom_data = EncodeBakerReadBarrierUnsafeCasData(old_value.GetCode());
+  // Similar to the Baker RB path in GenerateGcRootFieldLoad(), with a MOV instead of LDR.
+  // For low registers, we can reuse the GC root narrow entrypoint, for high registers
+  // we use a specialized entrypoint because the register bits are 8-11 instead of 12-15.
+  bool narrow_mov = marked_old_value.IsLow();
+  uint32_t custom_data = narrow_mov
+      ? EncodeBakerReadBarrierGcRootData(marked_old_value.GetCode(), /*narrow=*/ true)
+      : EncodeBakerReadBarrierIntrinsicCasData(marked_old_value.GetCode());
 
-  size_t narrow_instructions = /* CMP */ (mr.IsLow() ? 1u : 0u);
-  size_t wide_instructions = /* ADR+CMP+ADD+BNE */ 4u - narrow_instructions;
+  size_t narrow_instructions = /* CMP */ (mr.IsLow() ? 1u : 0u) + /* MOV */ (narrow_mov ? 1u : 0u);
+  size_t wide_instructions = /* ADR+CMP+MOV+BNE */ 4u - narrow_instructions;
   size_t exact_size = wide_instructions * vixl32::k32BitT32InstructionSizeInBytes +
                       narrow_instructions * vixl32::k16BitT32InstructionSizeInBytes;
   ExactAssemblyScope guard(GetVIXLAssembler(), exact_size);
@@ -8808,11 +8834,13 @@ void CodeGeneratorARMVIXL::GenerateUnsafeCasOldValueAddWithBakerReadBarrier(
   EmitAdrCode adr(GetVIXLAssembler(), lr, &return_address);
   __ cmp(mr, Operand(0));
   ptrdiff_t old_offset = GetVIXLAssembler()->GetBuffer()->GetCursorOffset();
-  __ add(EncodingSize(Wide), old_value, adjusted_old_value, Operand(expected));  // Preserves flags.
+  __ mov(EncodingSize(narrow_mov ? Narrow : Wide), marked_old_value, old_value);
   EmitBakerReadBarrierBne(custom_data);
   __ bind(&return_address);
   DCHECK_EQ(old_offset - GetVIXLAssembler()->GetBuffer()->GetCursorOffset(),
-            BAKER_MARK_INTROSPECTION_UNSAFE_CAS_ADD_OFFSET);
+            narrow_mov
+                ? BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_NARROW_OFFSET
+                : BAKER_MARK_INTROSPECTION_INTRINSIC_CAS_MOV_OFFSET);
 }
 
 void CodeGeneratorARMVIXL::GenerateFieldLoadWithBakerReadBarrier(HInstruction* instruction,
@@ -8991,6 +9019,18 @@ void CodeGeneratorARMVIXL::MaybeGenerateMarkingRegisterCheck(int code, Location 
   }
 }
 
+SlowPathCodeARMVIXL* CodeGeneratorARMVIXL::AddReadBarrierSlowPath(HInstruction* instruction,
+                                                                  Location out,
+                                                                  Location ref,
+                                                                  Location obj,
+                                                                  uint32_t offset,
+                                                                  Location index) {
+  SlowPathCodeARMVIXL* slow_path = new (GetScopedAllocator())
+      ReadBarrierForHeapReferenceSlowPathARMVIXL(instruction, out, ref, obj, offset, index);
+  AddSlowPath(slow_path);
+  return slow_path;
+}
+
 void CodeGeneratorARMVIXL::GenerateReadBarrierSlow(HInstruction* instruction,
                                                    Location out,
                                                    Location ref,
@@ -9010,9 +9050,8 @@ void CodeGeneratorARMVIXL::GenerateReadBarrierSlow(HInstruction* instruction,
   // not used by the artReadBarrierSlow entry point.
   //
   // TODO: Unpoison `ref` when it is used by artReadBarrierSlow.
-  SlowPathCodeARMVIXL* slow_path = new (GetScopedAllocator())
-      ReadBarrierForHeapReferenceSlowPathARMVIXL(instruction, out, ref, obj, offset, index);
-  AddSlowPath(slow_path);
+  SlowPathCodeARMVIXL* slow_path =
+      AddReadBarrierSlowPath(instruction, out, ref, obj, offset, index);
 
   __ B(slow_path->GetEntryLabel());
   __ Bind(slow_path->GetExitLabel());
@@ -9711,18 +9750,10 @@ void CodeGeneratorARMVIXL::MoveFromReturnRegister(Location trg, DataType::Type t
     return;
   }
 
-  // TODO: Consider pairs in the parallel move resolver, then this could be nicely merged
-  //       with the last branch.
-  if (type == DataType::Type::kInt64) {
-    TODO_VIXL32(FATAL);
-  } else if (type == DataType::Type::kFloat64) {
-    TODO_VIXL32(FATAL);
-  } else {
-    // Let the parallel move resolver take care of all of this.
-    HParallelMove parallel_move(GetGraph()->GetAllocator());
-    parallel_move.AddMove(return_loc, trg, type, nullptr);
-    GetMoveResolver()->EmitNativeCode(&parallel_move);
-  }
+  // Let the parallel move resolver take care of all of this.
+  HParallelMove parallel_move(GetGraph()->GetAllocator());
+  parallel_move.AddMove(return_loc, trg, type, nullptr);
+  GetMoveResolver()->EmitNativeCode(&parallel_move);
 }
 
 void LocationsBuilderARMVIXL::VisitClassTableGet(HClassTableGet* instruction) {
@@ -9928,7 +9959,7 @@ void CodeGeneratorARMVIXL::CompileBakerReadBarrierThunk(ArmVIXLAssembler& assemb
       break;
     }
     case BakerReadBarrierKind::kGcRoot:
-    case BakerReadBarrierKind::kUnsafeCas: {
+    case BakerReadBarrierKind::kIntrinsicCas: {
       // Check if the reference needs to be marked and if so (i.e. not null, not marked yet
       // and it does not have a forwarding address), call the correct introspection entrypoint;
       // otherwise return the reference (or the extracted forwarding address).
@@ -9955,15 +9986,19 @@ void CodeGeneratorARMVIXL::CompileBakerReadBarrierThunk(ArmVIXLAssembler& assemb
       __ Cmp(ip, Operand(0xc0000000));
       __ B(hs, &forwarding_address);
       vixl32::Register ep_reg = LoadReadBarrierMarkIntrospectionEntrypoint(assembler);
-      // Adjust the art_quick_read_barrier_mark_introspection address in kBakerCcEntrypointRegister
-      // to one of art_quick_read_barrier_mark_introspection_{gc_roots_{wide,narrow},unsafe_cas}.
-      DCHECK(kind != BakerReadBarrierKind::kUnsafeCas || width == BakerReadBarrierWidth::kWide);
+      // Adjust the art_quick_read_barrier_mark_introspection address
+      // in kBakerCcEntrypointRegister to one of
+      //     art_quick_read_barrier_mark_introspection_{gc_roots_{wide,narrow},intrinsic_cas}.
+      if (kind == BakerReadBarrierKind::kIntrinsicCas) {
+        DCHECK(width == BakerReadBarrierWidth::kWide);
+        DCHECK(!root_reg.IsLow());
+      }
       int32_t entrypoint_offset =
           (kind == BakerReadBarrierKind::kGcRoot)
               ? (width == BakerReadBarrierWidth::kWide)
                   ? BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_WIDE_ENTRYPOINT_OFFSET
                   : BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_NARROW_ENTRYPOINT_OFFSET
-              : BAKER_MARK_INTROSPECTION_UNSAFE_CAS_ENTRYPOINT_OFFSET;
+              : BAKER_MARK_INTROSPECTION_INTRINSIC_CAS_ENTRYPOINT_OFFSET;
       __ Add(ep_reg, ep_reg, Operand(entrypoint_offset));
       __ Mov(ip, root_reg);
       __ Bx(ep_reg);
@@ -10007,8 +10042,8 @@ void CodeGeneratorARMVIXL::CompileBakerReadBarrierThunk(ArmVIXLAssembler& assemb
         DCHECK_EQ(kBakerReadBarrierInvalidEncodedReg,
                   BakerReadBarrierSecondRegField::Decode(encoded_data));
         break;
-      case BakerReadBarrierKind::kUnsafeCas:
-        oss << "UnsafeCas_r" << BakerReadBarrierFirstRegField::Decode(encoded_data);
+      case BakerReadBarrierKind::kIntrinsicCas:
+        oss << "IntrinsicCas_r" << BakerReadBarrierFirstRegField::Decode(encoded_data);
         DCHECK_EQ(kBakerReadBarrierInvalidEncodedReg,
                   BakerReadBarrierSecondRegField::Decode(encoded_data));
         DCHECK(BakerReadBarrierWidthField::Decode(encoded_data) == BakerReadBarrierWidth::kWide);

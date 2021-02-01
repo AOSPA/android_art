@@ -30,8 +30,8 @@
 #include "base/locks.h"
 #include "base/macros.h"
 #include "base/mem_map.h"
-#include "base/metrics.h"
 #include "base/string_view_cpp20.h"
+#include "compat_framework.h"
 #include "deoptimization_kind.h"
 #include "dex/dex_file_types.h"
 #include "experimental_flags.h"
@@ -40,6 +40,7 @@
 #include "jdwp_provider.h"
 #include "jni/jni_id_manager.h"
 #include "jni_id_type.h"
+#include "metrics/metrics.h"
 #include "obj_ptr.h"
 #include "offsets.h"
 #include "process_state.h"
@@ -672,17 +673,8 @@ class Runtime {
     return target_sdk_version_;
   }
 
-  void SetDisabledCompatChanges(const std::set<uint64_t>& disabled_changes) {
-    disabled_compat_changes_ = disabled_changes;
-  }
-
-  std::set<uint64_t> GetDisabledCompatChanges() const {
-    return disabled_compat_changes_;
-  }
-
-  bool isChangeEnabled(uint64_t change_id) const {
-    // TODO(145743810): add an up call to java to log to statsd
-    return disabled_compat_changes_.count(change_id) == 0;
+  CompatFramework& GetCompatFramework() {
+    return compat_framework_;
   }
 
   uint32_t GetZygoteMaxFailedBoots() const {
@@ -1172,8 +1164,8 @@ class Runtime {
   // Specifies target SDK version to allow workarounds for certain API levels.
   uint32_t target_sdk_version_;
 
-  // A set of disabled compat changes for the running app, all other changes are enabled.
-  std::set<uint64_t> disabled_compat_changes_;
+  // ART counterpart for the compat framework (go/compat-framework).
+  CompatFramework compat_framework_;
 
   // Implicit checks flags.
   bool implicit_null_checks_;       // NullPointer checks are implicit.
@@ -1330,6 +1322,7 @@ class Runtime {
   bool perfetto_hprof_enabled_;
 
   metrics::ArtMetrics metrics_;
+  std::unique_ptr<metrics::MetricsReporter> metrics_reporter_;
 
   // Note: See comments on GetFaultMessage.
   friend std::string GetFaultMessageForAbortLogging();

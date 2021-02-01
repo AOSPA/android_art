@@ -1070,7 +1070,7 @@ void CodeGeneratorARM64::Finalize(CodeAllocator* allocator) {
           uint32_t prev_insn = GetInsn(literal_offset - 4u);
           const uint32_t root_reg = BakerReadBarrierFirstRegField::Decode(encoded_data);
           // Usually LDR (immediate) with correct root_reg but
-          // we may have a "MOV marked, old_value" for UnsafeCASObject.
+          // we may have a "MOV marked, old_value" for intrinsic CAS.
           if ((prev_insn & 0xffe0ffff) != (0x2a0003e0 | root_reg)) {    // MOV?
             CHECK_EQ(prev_insn & 0xffc0001fu, 0xb9400000u | root_reg);  // LDR?
           }
@@ -4436,11 +4436,15 @@ void InstructionCodeGeneratorARM64::VisitInvokeInterface(HInvokeInterface* invok
   if (invoke->GetHiddenArgumentLoadKind() == MethodLoadKind::kRecursive) {
     Location interface_method = locations->InAt(invoke->GetNumberOfArguments() - 1);
     if (interface_method.IsStackSlot()) {
-      __ Ldr(ip1, StackOperandFrom(receiver));
+      __ Ldr(ip1, StackOperandFrom(interface_method));
     } else {
       __ Mov(ip1, XRegisterFrom(interface_method));
     }
-  } else {
+  // If the load kind is through a runtime call, we will pass the method we
+  // fetch the IMT, which will either be a no-op if we don't hit the conflict
+  // stub, or will make us always go through the trampoline when there is a
+  // conflict.
+  } else if (invoke->GetHiddenArgumentLoadKind() != MethodLoadKind::kRuntimeCall) {
     codegen_->LoadMethod(
         invoke->GetHiddenArgumentLoadKind(), Location::RegisterLocation(ip1.GetCode()), invoke);
   }
@@ -4451,6 +4455,11 @@ void InstructionCodeGeneratorARM64::VisitInvokeInterface(HInvokeInterface* invok
       invoke->GetImtIndex(), kArm64PointerSize));
   // temp = temp->GetImtEntryAt(method_offset);
   __ Ldr(temp, MemOperand(temp, method_offset));
+  if (invoke->GetHiddenArgumentLoadKind() == MethodLoadKind::kRuntimeCall) {
+    // We pass the method from the IMT in case of a conflict. This will ensure
+    // we go into the runtime to resolve the actual method.
+    __ Mov(ip1, temp);
+  }
   // lr = temp->GetEntryPoint();
   __ Ldr(lr, MemOperand(temp, entry_point.Int32Value()));
 
@@ -6495,21 +6504,21 @@ void CodeGeneratorARM64::GenerateGcRootFieldLoad(
   MaybeGenerateMarkingRegisterCheck(/* code= */ __LINE__);
 }
 
-void CodeGeneratorARM64::GenerateUnsafeCasOldValueMovWithBakerReadBarrier(
-    vixl::aarch64::Register marked,
+void CodeGeneratorARM64::GenerateIntrinsicCasMoveWithBakerReadBarrier(
+    vixl::aarch64::Register marked_old_value,
     vixl::aarch64::Register old_value) {
   DCHECK(kEmitCompilerReadBarrier);
   DCHECK(kUseBakerReadBarrier);
 
   // Similar to the Baker RB path in GenerateGcRootFieldLoad(), with a MOV instead of LDR.
-  uint32_t custom_data = EncodeBakerReadBarrierGcRootData(marked.GetCode());
+  uint32_t custom_data = EncodeBakerReadBarrierGcRootData(marked_old_value.GetCode());
 
   ExactAssemblyScope guard(GetVIXLAssembler(), 3 * vixl::aarch64::kInstructionSize);
   vixl::aarch64::Label return_address;
   __ adr(lr, &return_address);
   static_assert(BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_OFFSET == -8,
                 "GC root LDR must be 2 instructions (8B) before the return address label.");
-  __ mov(marked, old_value);
+  __ mov(marked_old_value, old_value);
   EmitBakerReadBarrierCbnz(custom_data);
   __ bind(&return_address);
 }
@@ -6913,11 +6922,11 @@ void CodeGeneratorARM64::CompileBakerReadBarrierThunk(Arm64Assembler& assembler,
   switch (kind) {
     case BakerReadBarrierKind::kField:
     case BakerReadBarrierKind::kAcquire: {
-      auto base_reg =
-          Register::GetXRegFromCode(BakerReadBarrierFirstRegField::Decode(encoded_data));
+      Register base_reg =
+          vixl::aarch64::XRegister(BakerReadBarrierFirstRegField::Decode(encoded_data));
       CheckValidReg(base_reg.GetCode());
-      auto holder_reg =
-          Register::GetXRegFromCode(BakerReadBarrierSecondRegField::Decode(encoded_data));
+      Register holder_reg =
+          vixl::aarch64::XRegister(BakerReadBarrierSecondRegField::Decode(encoded_data));
       CheckValidReg(holder_reg.GetCode());
       UseScratchRegisterScope temps(assembler.GetVIXLAssembler());
       temps.Exclude(ip0, ip1);
@@ -6963,8 +6972,8 @@ void CodeGeneratorARM64::CompileBakerReadBarrierThunk(Arm64Assembler& assembler,
       break;
     }
     case BakerReadBarrierKind::kArray: {
-      auto base_reg =
-          Register::GetXRegFromCode(BakerReadBarrierFirstRegField::Decode(encoded_data));
+      Register base_reg =
+          vixl::aarch64::XRegister(BakerReadBarrierFirstRegField::Decode(encoded_data));
       CheckValidReg(base_reg.GetCode());
       DCHECK_EQ(kBakerReadBarrierInvalidEncodedReg,
                 BakerReadBarrierSecondRegField::Decode(encoded_data));
@@ -6992,8 +7001,8 @@ void CodeGeneratorARM64::CompileBakerReadBarrierThunk(Arm64Assembler& assembler,
       // and it does not have a forwarding address), call the correct introspection entrypoint;
       // otherwise return the reference (or the extracted forwarding address).
       // There is no gray bit check for GC roots.
-      auto root_reg =
-          Register::GetWRegFromCode(BakerReadBarrierFirstRegField::Decode(encoded_data));
+      Register root_reg =
+          vixl::aarch64::WRegister(BakerReadBarrierFirstRegField::Decode(encoded_data));
       CheckValidReg(root_reg.GetCode());
       DCHECK_EQ(kBakerReadBarrierInvalidEncodedReg,
                 BakerReadBarrierSecondRegField::Decode(encoded_data));

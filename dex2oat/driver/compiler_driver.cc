@@ -84,7 +84,6 @@
 #include "trampolines/trampoline_compiler.h"
 #include "transaction.h"
 #include "utils/atomic_dex_ref_map-inl.h"
-#include "utils/dex_cache_arrays_layout-inl.h"
 #include "utils/swap_space.h"
 #include "vdex_file.h"
 #include "verifier/class_verifier.h"
@@ -684,11 +683,6 @@ void CompilerDriver::ResolveConstStrings(const std::vector<const DexFile*>& dex_
 
   for (const DexFile* dex_file : dex_files) {
     dex_cache.Assign(class_linker->FindDexCache(soa.Self(), *dex_file));
-    bool added_preresolved_string_array = false;
-    if (only_startup_strings) {
-      // When resolving startup strings, create the preresolved strings array.
-      added_preresolved_string_array = dex_cache->AddPreResolvedStringsArray();
-    }
     TimingLogger::ScopedTiming t("Resolve const-string Strings", timings);
 
     // TODO: Implement a profile-based filter for the boot image. See b/76145463.
@@ -714,7 +708,7 @@ void CompilerDriver::ResolveConstStrings(const std::vector<const DexFile*>& dex_
         if (profile_compilation_info != nullptr && !is_startup_clinit) {
           ProfileCompilationInfo::MethodHotness hotness =
               profile_compilation_info->GetMethodHotness(method.GetReference());
-          if (added_preresolved_string_array ? !hotness.IsStartup() : !hotness.IsInProfile()) {
+          if (only_startup_strings ? !hotness.IsStartup() : !hotness.IsInProfile()) {
             continue;
           }
         }
@@ -732,10 +726,6 @@ void CompilerDriver::ResolveConstStrings(const std::vector<const DexFile*>& dex_
                   : inst->VRegB_31c());
               ObjPtr<mirror::String> string = class_linker->ResolveString(string_index, dex_cache);
               CHECK(string != nullptr) << "Could not allocate a string when forcing determinism";
-              if (added_preresolved_string_array) {
-                dex_cache->GetPreResolvedStrings()[string_index.index_] =
-                    GcRoot<mirror::String>(string);
-              }
               ++num_instructions;
               break;
             }
@@ -1892,9 +1882,6 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
   if (!verifier_deps->ValidateDependencies(
       soa.Self(),
       class_loader,
-      // This returns classpath dex files in no particular order but VerifierDeps
-      // does not care about the order.
-      classpath_classes_.GetDexFiles(),
       &error_msg)) {
     LOG(WARNING) << "Fast verification failed: " << error_msg;
     return false;
@@ -2066,16 +2053,6 @@ class VerifyClassVisitor : public CompilationVisitor {
       }
     } else if (&klass->GetDexFile() != &dex_file) {
       // Skip a duplicate class (as the resolved class is from another, earlier dex file).
-      // Record the information that we skipped this class in the vdex.
-      // If the class resolved to a dex file not covered by the vdex, e.g. boot class path,
-      // it is considered external, dependencies on it will be recorded and the vdex will
-      // remain usable regardless of whether the class remains redefined or not (in the
-      // latter case, this class will be verify-at-runtime).
-      // On the other hand, if the class resolved to a dex file covered by the vdex, i.e.
-      // a different dex file within the same APK, this class will always be eclipsed by it.
-      // Recording that it was redefined is not necessary but will save class resolution
-      // time during fast-verify.
-      verifier::VerifierDeps::MaybeRecordClassRedefinition(dex_file, class_def);
       return;  // Do not update state.
     } else if (!SkipClass(jclass_loader, dex_file, klass.Get())) {
       CHECK(klass->IsResolved()) << klass->PrettyClass();

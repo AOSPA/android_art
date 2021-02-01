@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (C) 2019 The Android Open Source Project
+# Copyright (C) 2020 The Android Open Source Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,9 +20,15 @@
 # $3: Test's expected standard error
 # $4: Test's actual standard error
 
-# Search for the redefinition line and remove unnecessary tags.
-sed -e 's/^dex2oat[d]\?\(\|32\|64\)\ W.*\] \(Fast verification failed: Class L[^;]*; redefines a class in the classpath\).*/\2/g' "$4" > "$4.tmp1"
-# Remove all other dex2oat/dalvikvm log lines.
-grep -v dex2oat "$4.tmp1" | grep -v dalvikvm >> "$4.tmp2"
+# Check that one of the metrics appears in stderr.
+grep 'ClassVerificationTotalTime' "$4" >/dev/null
+MSG_FOUND=$?
 
-./default-check "$1" "$2" "$3" "$4.tmp2"
+if [[ $MSG_FOUND -ne 0 ]] ; then
+  # Print out the log and return with error.
+  cat "$4"
+  exit 1
+fi
+
+# Success.
+exit 0
