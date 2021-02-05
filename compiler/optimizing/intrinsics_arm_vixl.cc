@@ -1417,6 +1417,7 @@ void IntrinsicCodeGeneratorARMVIXL::VisitReferenceRefersTo(HInvoke* invoke) {
     __ ldr(tmp, MemOperand(obj, referent_offset));
     codegen_->MaybeRecordImplicitNullCheck(invoke);
   }
+  assembler->MaybeUnpoisonHeapReference(tmp);
   codegen_->GenerateMemoryBarrier(MemBarrierKind::kLoadAny);  // `referent` is volatile.
 
   if (kEmitCompilerReadBarrier) {
