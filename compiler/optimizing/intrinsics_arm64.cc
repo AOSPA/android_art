@@ -2884,6 +2884,7 @@ void IntrinsicCodeGeneratorARM64::VisitReferenceRefersTo(HInvoke* invoke) {
 
   MemOperand field = HeapOperand(obj, referent_offset);
   codegen_->LoadAcquire(invoke, tmp, field, /*needs_null_check=*/ true);
+  codegen_->GetAssembler()->MaybeUnpoisonHeapReference(tmp);
 
   __ Cmp(tmp, other);
 
