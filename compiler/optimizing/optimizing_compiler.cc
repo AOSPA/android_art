@@ -117,7 +117,7 @@ class PassObserver : public ValueObject {
         visualizer_oss_(),
         visualizer_output_(visualizer_output),
         visualizer_enabled_(!compiler_options.GetDumpCfgFileName().empty()),
-        visualizer_(&visualizer_oss_, graph, *codegen),
+        visualizer_(&visualizer_oss_, graph, codegen),
         codegen_(codegen),
         visualizer_dump_mutex_(dump_mutex),
         graph_in_bad_state_(false) {
@@ -194,7 +194,9 @@ class PassObserver : public ValueObject {
         GraphChecker checker(graph_, codegen_);
         last_seen_graph_size_ = checker.Run(pass_change, last_seen_graph_size_);
         if (!checker.IsValid()) {
-          LOG(FATAL) << "Error after " << pass_name << ": " << Dumpable<GraphChecker>(checker);
+          LOG(FATAL_WITHOUT_ABORT) << "Error after " << pass_name << "(" << graph_->PrettyMethod()
+                                   << "): " << *graph_;
+          LOG(FATAL) << "(" << pass_name <<  "): " << Dumpable<GraphChecker>(checker);
         }
       }
     }

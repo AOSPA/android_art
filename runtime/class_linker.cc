@@ -28,7 +28,6 @@
 #include <string>
 #include <string_view>
 #include <tuple>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -40,6 +39,8 @@
 #include "base/arena_allocator.h"
 #include "base/casts.h"
 #include "base/file_utils.h"
+#include "base/hash_map.h"
+#include "base/hash_set.h"
 #include "base/leb128.h"
 #include "base/logging.h"
 #include "base/mutex-inl.h"
@@ -1381,6 +1382,11 @@ void ClassLinker::AddExtraBootDexFiles(
     std::vector<std::unique_ptr<const DexFile>>&& additional_dex_files) {
   for (std::unique_ptr<const DexFile>& dex_file : additional_dex_files) {
     AppendToBootClassPath(self, dex_file.get());
+    if (kIsDebugBuild) {
+      for (const auto& boot_dex_file : boot_dex_files_) {
+        DCHECK_NE(boot_dex_file->GetLocation(), dex_file->GetLocation());
+      }
+    }
     boot_dex_files_.push_back(std::move(dex_file));
   }
 }
@@ -6216,6 +6222,81 @@ bool ClassLinker::LinkSuperClass(Handle<mirror::Class> klass) {
   return true;
 }
 
+// A wrapper class representing the result of a method translation used for linking methods and
+// updating superclass default methods. For each method in a classes vtable there are 4 states it
+// could be in:
+// 1) No translation is necessary. In this case there is no MethodTranslation object for it. This
+//    is the standard case and is true when the method is not overridable by a default method,
+//    the class defines a concrete implementation of the method, the default method implementation
+//    remains the same, or an abstract method stayed abstract.
+// 2) The method must be translated to a different default method. We note this with
+//    CreateTranslatedMethod.
+// 3) The method must be replaced with a conflict method. This happens when a superclass
+//    implements an interface with a default method and this class implements an unrelated
+//    interface that also defines that default method. We note this with CreateConflictingMethod.
+// 4) The method must be replaced with an abstract miranda method. This happens when a superclass
+//    implements an interface with a default method and this class implements a subinterface of
+//    the superclass's interface which declares the default method abstract. We note this with
+//    CreateAbstractMethod.
+//
+// When a method translation is unnecessary (case #1), we don't put it into the
+// default_translation maps. So an instance of MethodTranslation must be in one of #2-#4.
+class ClassLinker::MethodTranslation {
+ public:
+  MethodTranslation() : translation_(nullptr), type_(Type::kInvalid) {}
+
+  // This slot must become a default conflict method.
+  static MethodTranslation CreateConflictingMethod() {
+    return MethodTranslation(Type::kConflict, /*translation=*/nullptr);
+  }
+
+  // This slot must become an abstract method.
+  static MethodTranslation CreateAbstractMethod() {
+    return MethodTranslation(Type::kAbstract, /*translation=*/nullptr);
+  }
+
+  // Use the given method as the current value for this vtable slot during translation.
+  static MethodTranslation CreateTranslatedMethod(ArtMethod* new_method) {
+    return MethodTranslation(Type::kTranslation, new_method);
+  }
+
+  // Returns true if this is a method that must become a conflict method.
+  bool IsInConflict() const {
+    return type_ == Type::kConflict;
+  }
+
+  // Returns true if this is a method that must become an abstract method.
+  bool IsAbstract() const {
+    return type_ == Type::kAbstract;
+  }
+
+  // Returns true if this is a method that must become a different method.
+  bool IsTranslation() const {
+    return type_ == Type::kTranslation;
+  }
+
+  // Get the translated version of this method.
+  ArtMethod* GetTranslation() const {
+    DCHECK(IsTranslation());
+    DCHECK(translation_ != nullptr);
+    return translation_;
+  }
+
+ private:
+  enum class Type {
+    kInvalid,
+    kTranslation,
+    kConflict,
+    kAbstract,
+  };
+
+  MethodTranslation(Type type, ArtMethod* translation)
+      : translation_(translation), type_(type) {}
+
+  ArtMethod* translation_;
+  Type type_;
+};
+
 // Populate the class vtable and itable. Compute return type indices.
 bool ClassLinker::LinkMethods(Thread* self,
                               Handle<mirror::Class> klass,
@@ -6226,7 +6307,9 @@ bool ClassLinker::LinkMethods(Thread* self,
   // A map from vtable indexes to the method they need to be updated to point to. Used because we
   // need to have default methods be in the virtuals array of each class but we don't set that up
   // until LinkInterfaceMethods.
-  std::unordered_map<size_t, ClassLinker::MethodTranslation> default_translations;
+  constexpr size_t kBufferSize = 8;  // Avoid malloc/free for a few translations.
+  std::pair<size_t, ClassLinker::MethodTranslation> buffer[kBufferSize];
+  HashMap<size_t, ClassLinker::MethodTranslation> default_translations(buffer, kBufferSize);
   // Link virtual methods then interface methods.
   // We set up the interface lookup table first because we need it to determine if we need to update
   // any vtable entries with new default method implementations.
@@ -6359,7 +6442,7 @@ const uint32_t LinkVirtualHashTable::removed_index_ = std::numeric_limits<uint32
 bool ClassLinker::LinkVirtualMethods(
     Thread* self,
     Handle<mirror::Class> klass,
-    /*out*/std::unordered_map<size_t, ClassLinker::MethodTranslation>* default_translations) {
+    /*out*/HashMap<size_t, ClassLinker::MethodTranslation>* default_translations) {
   const size_t num_virtual_methods = klass->NumVirtualMethods();
   if (klass->IsInterface()) {
     // No vtable.
@@ -6771,15 +6854,13 @@ ClassLinker::DefaultMethodSearchResult ClassLinker::FindDefaultMethodImplementat
 ArtMethod* ClassLinker::AddMethodToConflictTable(ObjPtr<mirror::Class> klass,
                                                  ArtMethod* conflict_method,
                                                  ArtMethod* interface_method,
-                                                 ArtMethod* method,
-                                                 bool force_new_conflict_method) {
+                                                 ArtMethod* method) {
   ImtConflictTable* current_table = conflict_method->GetImtConflictTable(kRuntimePointerSize);
   Runtime* const runtime = Runtime::Current();
   LinearAlloc* linear_alloc = GetAllocatorForClassLoader(klass->GetClassLoader());
-  bool new_entry = conflict_method == runtime->GetImtConflictMethod() || force_new_conflict_method;
 
   // Create a new entry if the existing one is the shared conflict method.
-  ArtMethod* new_conflict_method = new_entry
+  ArtMethod* new_conflict_method = (conflict_method == runtime->GetImtConflictMethod())
       ? runtime->CreateImtConflictMethod(linear_alloc)
       : conflict_method;
 
@@ -7058,7 +7139,7 @@ void ClassLinker::FillIMTFromIfTable(ObjPtr<mirror::IfTable> if_table,
 // Simple helper function that checks that no subtypes of 'val' are contained within the 'classes'
 // set.
 static bool NotSubinterfaceOfAny(
-    const std::unordered_set<ObjPtr<mirror::Class>, HashObjPtr>& classes,
+    const HashSet<mirror::Class*>& classes,
     ObjPtr<mirror::Class> val)
     REQUIRES(Roles::uninterruptible_)
     REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -7090,22 +7171,32 @@ static bool NotSubinterfaceOfAny(
 // super_ifcount entries filled in with the transitive closure of the interfaces of the superclass.
 // The other entries are uninitialized.  We will fill in the remaining entries in this function. The
 // iftable must be large enough to hold all interfaces without changing its size.
-static size_t FillIfTable(ObjPtr<mirror::IfTable> iftable,
+static size_t FillIfTable(Thread* self,
+                          ObjPtr<mirror::Class> klass,
+                          ObjPtr<mirror::ObjectArray<mirror::Class>> interfaces,
+                          ObjPtr<mirror::IfTable> iftable,
                           size_t super_ifcount,
-                          const std::vector<ObjPtr<mirror::Class>>& to_process)
-    REQUIRES(Roles::uninterruptible_)
+                          size_t num_interfaces)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  // This is the set of all class's already in the iftable. Used to make checking if a class has
-  // already been added quicker.
-  std::unordered_set<ObjPtr<mirror::Class>, HashObjPtr> classes_in_iftable;
+  ScopedAssertNoThreadSuspension nts(__FUNCTION__);
+  // This is the set of all classes already in the iftable. Used to make checking
+  // if a class has already been added quicker.
+  constexpr size_t kBufferSize = 32;  // 256 bytes on 64-bit architectures.
+  mirror::Class* buffer[kBufferSize];
+  HashSet<mirror::Class*> classes_in_iftable(buffer, kBufferSize);
   // The first super_ifcount elements are from the superclass. We note that they are already added.
   for (size_t i = 0; i < super_ifcount; i++) {
     ObjPtr<mirror::Class> iface = iftable->GetInterface(i);
     DCHECK(NotSubinterfaceOfAny(classes_in_iftable, iface)) << "Bad ordering.";
-    classes_in_iftable.insert(iface);
+    classes_in_iftable.insert(iface.Ptr());
   }
   size_t filled_ifcount = super_ifcount;
-  for (ObjPtr<mirror::Class> interface : to_process) {
+  const bool have_interfaces = interfaces != nullptr;
+  for (size_t i = 0; i != num_interfaces; ++i) {
+    ObjPtr<mirror::Class> interface = have_interfaces
+        ? interfaces->Get(i)
+        : mirror::Class::GetDirectInterface(self, klass, i);
+
     // Let us call the first filled_ifcount elements of iftable the current-iface-list.
     // At this point in the loop current-iface-list has the invariant that:
     //    for every pair of interfaces I,J within it:
@@ -7113,7 +7204,7 @@ static size_t FillIfTable(ObjPtr<mirror::IfTable> iftable,
 
     // If we have already seen this element then all of its super-interfaces must already be in the
     // current-iface-list so we can skip adding it.
-    if (!ContainsElement(classes_in_iftable, interface)) {
+    if (classes_in_iftable.find(interface.Ptr()) == classes_in_iftable.end()) {
       // We haven't seen this interface so add all of its super-interfaces onto the
       // current-iface-list, skipping those already on it.
       int32_t ifcount = interface->GetIfTableCount();
@@ -7121,14 +7212,14 @@ static size_t FillIfTable(ObjPtr<mirror::IfTable> iftable,
         ObjPtr<mirror::Class> super_interface = interface->GetIfTable()->GetInterface(j);
         if (!ContainsElement(classes_in_iftable, super_interface)) {
           DCHECK(NotSubinterfaceOfAny(classes_in_iftable, super_interface)) << "Bad ordering.";
-          classes_in_iftable.insert(super_interface);
+          classes_in_iftable.insert(super_interface.Ptr());
           iftable->SetInterface(filled_ifcount, super_interface);
           filled_ifcount++;
         }
       }
       DCHECK(NotSubinterfaceOfAny(classes_in_iftable, interface)) << "Bad ordering";
       // Place this interface onto the current-iface-list after all of its super-interfaces.
-      classes_in_iftable.insert(interface);
+      classes_in_iftable.insert(interface.Ptr());
       iftable->SetInterface(filled_ifcount, interface);
       filled_ifcount++;
     } else if (kIsDebugBuild) {
@@ -7160,7 +7251,8 @@ static size_t FillIfTable(ObjPtr<mirror::IfTable> iftable,
   return filled_ifcount;
 }
 
-bool ClassLinker::SetupInterfaceLookupTable(Thread* self, Handle<mirror::Class> klass,
+bool ClassLinker::SetupInterfaceLookupTable(Thread* self,
+                                            Handle<mirror::Class> klass,
                                             Handle<mirror::ObjectArray<mirror::Class>> interfaces) {
   StackHandleScope<1> hs(self);
   const bool has_superclass = klass->HasSuperClass();
@@ -7229,18 +7321,8 @@ bool ClassLinker::SetupInterfaceLookupTable(Thread* self, Handle<mirror::Class> 
   // doesn't really do anything.
   self->AllowThreadSuspension();
 
-  size_t new_ifcount;
-  {
-    ScopedAssertNoThreadSuspension nts("Copying mirror::Class*'s for FillIfTable");
-    std::vector<ObjPtr<mirror::Class>> to_add;
-    for (size_t i = 0; i < num_interfaces; i++) {
-      ObjPtr<mirror::Class> interface = have_interfaces ? interfaces->Get(i) :
-          mirror::Class::GetDirectInterface(self, klass.Get(), i);
-      to_add.push_back(interface);
-    }
-
-    new_ifcount = FillIfTable(iftable.Get(), super_ifcount, std::move(to_add));
-  }
+  const size_t new_ifcount = FillIfTable(
+      self, klass.Get(), interfaces.Get(), iftable.Get(), super_ifcount, num_interfaces);
 
   self->AllowThreadSuspension();
 
@@ -7378,7 +7460,7 @@ void CheckVTableHasNoDuplicates(Thread* self, Handle<mirror::Class> klass)
           return BaseHashType::HashCombine(BaseHashType::HashCombine(0, key.first), key.second);
         }
       };
-      std::unordered_map<PairType, int32_t, PairHash> seen;
+      HashMap<PairType, int32_t, DefaultMapEmptyFn<PairType, int32_t>, PairHash> seen;
       seen.reserve(2 * num_entries);
       bool need_slow_path = false;
       bool found_dup = false;
@@ -7404,7 +7486,7 @@ void CheckVTableHasNoDuplicates(Thread* self, Handle<mirror::Class> klass)
             log_fn(it->second, i);
           }
         } else {
-          seen.emplace(pair, i);
+          seen.insert(std::make_pair(pair, i));
         }
       }
       return std::make_pair(need_slow_path, found_dup);
@@ -7421,20 +7503,31 @@ void CheckVTableHasNoDuplicates(Thread* self, Handle<mirror::Class> klass)
   // Need to check across dex files.
   struct Entry {
     size_t cached_hash = 0;
+    uint32_t name_len = 0;
     const char* name = nullptr;
     Signature signature = Signature::NoSignature();
-    uint32_t name_len = 0;
+
+    Entry() = default;
+    Entry(const Entry& other) = default;
+    Entry& operator=(const Entry& other) = default;
 
     Entry(const DexFile* dex_file, const dex::MethodId& mid)
-        : name(dex_file->StringDataAndUtf16LengthByIdx(mid.name_idx_, &name_len)),
+        : name_len(0),  // Explicit to enforce ordering with -Werror,-Wreorder-ctor.
+          // This call writes `name_len` and it is therefore necessary that the
+          // initializer for `name_len` comes before it, otherwise the value
+          // from the call would be overwritten by that initializer.
+          name(dex_file->StringDataAndUtf16LengthByIdx(mid.name_idx_, &name_len)),
           signature(dex_file->GetMethodSignature(mid)) {
+      // The `name_len` has been initialized to the UTF16 length. Calculate length in bytes.
+      if (name[name_len] != 0) {
+        name_len += strlen(name + name_len);
+      }
     }
 
     bool operator==(const Entry& other) const {
-      if (name_len != other.name_len || strcmp(name, other.name) != 0) {
-        return false;
-      }
-      return signature == other.signature;
+      return name_len == other.name_len &&
+             memcmp(name, other.name, name_len) == 0 &&
+             signature == other.signature;
     }
   };
   struct EntryHash {
@@ -7442,7 +7535,7 @@ void CheckVTableHasNoDuplicates(Thread* self, Handle<mirror::Class> klass)
       return key.cached_hash;
     }
   };
-  std::unordered_map<Entry, int32_t, EntryHash> map;
+  HashMap<Entry, int32_t, DefaultMapEmptyFn<Entry, int32_t>, EntryHash> map;
   for (int32_t i = 0; i < num_entries; ++i) {
     // Can use Unchecked here as the first loop already ensured that the arrays are correct
     // wrt/ kPointerSize.
@@ -7468,7 +7561,7 @@ void CheckVTableHasNoDuplicates(Thread* self, Handle<mirror::Class> klass)
     if (it != map.end()) {
       log_fn(it->second, i);
     } else {
-      map.emplace(e, i);
+      map.insert(std::make_pair(e, i));
     }
   }
 }
@@ -7565,7 +7658,7 @@ class ClassLinker::LinkInterfaceMethodsHelper {
   void ReallocMethods() REQUIRES_SHARED(Locks::mutator_lock_);
 
   ObjPtr<mirror::PointerArray> UpdateVtable(
-      const std::unordered_map<size_t, ClassLinker::MethodTranslation>& default_translations,
+      const HashMap<size_t, ClassLinker::MethodTranslation>& default_translations,
       Handle<mirror::PointerArray> old_vtable) REQUIRES_SHARED(Locks::mutator_lock_);
 
   void UpdateIfTable(Handle<mirror::IfTable> iftable) REQUIRES_SHARED(Locks::mutator_lock_);
@@ -7893,7 +7986,7 @@ void ClassLinker::LinkInterfaceMethodsHelper::ReallocMethods() {
 }
 
 ObjPtr<mirror::PointerArray> ClassLinker::LinkInterfaceMethodsHelper::UpdateVtable(
-    const std::unordered_map<size_t, ClassLinker::MethodTranslation>& default_translations,
+    const HashMap<size_t, ClassLinker::MethodTranslation>& default_translations,
     Handle<mirror::PointerArray> old_vtable) {
   // Update the vtable to the new method structures. We can skip this for interfaces since they
   // do not have vtables.
@@ -8018,7 +8111,7 @@ void ClassLinker::LinkInterfaceMethodsHelper::UpdateIMT(ArtMethod** out_imt) {
 bool ClassLinker::LinkInterfaceMethods(
     Thread* self,
     Handle<mirror::Class> klass,
-    const std::unordered_map<size_t, ClassLinker::MethodTranslation>& default_translations,
+    const HashMap<size_t, ClassLinker::MethodTranslation>& default_translations,
     bool* out_new_conflict,
     ArtMethod** out_imt) {
   StackHandleScope<3> hs(self);
@@ -9822,6 +9915,12 @@ bool ClassLinker::DenyAccessBasedOnPublicSdk(ArtField* art_field ATTRIBUTE_UNUSE
 }
 
 bool ClassLinker::DenyAccessBasedOnPublicSdk(const char* type_descriptor ATTRIBUTE_UNUSED) const {
+  // Should not be called on ClassLinker, only on AotClassLinker that overrides this.
+  LOG(FATAL) << "UNREACHABLE";
+  UNREACHABLE();
+}
+
+void ClassLinker::SetEnablePublicSdkChecks(bool enabled ATTRIBUTE_UNUSED) {
   // Should not be called on ClassLinker, only on AotClassLinker that overrides this.
   LOG(FATAL) << "UNREACHABLE";
   UNREACHABLE();

@@ -223,13 +223,6 @@ void CheckConstants() {
   CHECK_EQ(mirror::Array::kFirstElementOffset, mirror::Array::FirstElementOffset());
 }
 
-metrics::ReportingConfig ParseMetricsReportingConfig(const RuntimeArgumentMap& args) {
-  using M = RuntimeArgumentMap;
-  return {
-      .dump_to_logcat = args.Exists(M::WriteMetricsToLog),
-  };
-}
-
 }  // namespace
 
 Runtime::Runtime()
@@ -446,6 +439,9 @@ Runtime::~Runtime() {
   // Deletion ordering is tricky. Null out everything we've deleted.
   delete signal_catcher_;
   signal_catcher_ = nullptr;
+
+  // Shutdown metrics reporting.
+  metrics_reporter_.reset();
 
   // Make sure all other non-daemon threads have terminated, and all daemon threads are suspended.
   // Also wait for daemon threads to quiesce, so that in addition to being "suspended", they
@@ -1073,6 +1069,10 @@ void Runtime::InitNonZygoteOrPostFork(
   // before fork aren't attributed to an app.
   heap_->ResetGcPerformanceInfo();
 
+  if (metrics_reporter_ != nullptr) {
+    metrics_reporter_->MaybeStartBackgroundThread();
+  }
+
   StartSignalCatcher();
 
   ScopedObjectAccess soa(Thread::Current());
@@ -1594,10 +1594,13 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
         GetInternTable()->AddImageStringsToTable(image_space, VoidFunctor());
       }
     }
-    if (heap_->GetBootImageSpaces().size() != GetBootClassPath().size()) {
+
+    const size_t total_components = gc::space::ImageSpace::GetNumberOfComponents(
+        ArrayRef<gc::space::ImageSpace* const>(heap_->GetBootImageSpaces()));
+    if (total_components != GetBootClassPath().size()) {
       // The boot image did not contain all boot class path components. Load the rest.
-      DCHECK_LT(heap_->GetBootImageSpaces().size(), GetBootClassPath().size());
-      size_t start = heap_->GetBootImageSpaces().size();
+      CHECK_LT(total_components, GetBootClassPath().size());
+      size_t start = total_components;
       DCHECK_LT(start, GetBootClassPath().size());
       std::vector<std::unique_ptr<const DexFile>> extra_boot_class_path;
       if (runtime_options.Exists(Opt::BootClassPathDexList)) {
@@ -1716,8 +1719,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // Class-roots are setup, we can now finish initializing the JniIdManager.
   GetJniIdManager()->Init(self);
 
-  metrics_reporter_ =
-      metrics::MetricsReporter::Create(ParseMetricsReportingConfig(runtime_options), &metrics_);
+  InitMetrics(runtime_options);
 
   // Runtime initialization is largely done now.
   // We load plugins first since that can modify the runtime state slightly.
@@ -1815,6 +1817,13 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   }
 
   return true;
+}
+
+void Runtime::InitMetrics(const RuntimeArgumentMap& runtime_options) {
+  auto metrics_config = metrics::ReportingConfig::FromRuntimeArguments(runtime_options);
+  if (metrics_config.ReportingEnabled()) {
+    metrics_reporter_ = metrics::MetricsReporter::Create(metrics_config, this);
+  }
 }
 
 bool Runtime::EnsurePluginLoaded(const char* plugin_name, std::string* error_msg) {
