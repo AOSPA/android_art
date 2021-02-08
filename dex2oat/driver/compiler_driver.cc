@@ -324,6 +324,14 @@ std::unique_ptr<const std::vector<uint8_t>> CompilerDriver::CreateQuickToInterpr
     const {
   CREATE_TRAMPOLINE(QUICK, kQuickAbi, pQuickToInterpreterBridge)
 }
+
+std::unique_ptr<const std::vector<uint8_t>> CompilerDriver::CreateNterpTrampoline()
+    const {
+  // We use QuickToInterpreterBridge to not waste one word in the Thread object.
+  // The Nterp trampoline gets replaced with the nterp entrypoint when loading
+  // an image.
+  CREATE_TRAMPOLINE(QUICK, kQuickAbi, pQuickToInterpreterBridge)
+}
 #undef CREATE_TRAMPOLINE
 
 void CompilerDriver::CompileAll(jobject class_loader,
@@ -2050,6 +2058,11 @@ class VerifyClassVisitor : public CompilationVisitor {
           manager_->GetCompiler()->AddSoftVerifierFailure();
           break;
         }
+        case verifier::FailureKind::kTypeChecksFailure: {
+          // Don't record anything, we will do the type checks from the vdex
+          // file at runtime.
+          break;
+        }
         case verifier::FailureKind::kAccessChecksFailure: {
           manager_->GetCompiler()->RecordClassStatus(ref, ClassStatus::kVerifiedNeedsAccessChecks);
           break;
@@ -2110,7 +2123,8 @@ class VerifyClassVisitor : public CompilationVisitor {
         } else if (klass->IsVerifiedNeedsAccessChecks()) {
           DCHECK_EQ(failure_kind, verifier::FailureKind::kAccessChecksFailure);
         } else if (klass->ShouldVerifyAtRuntime()) {
-          DCHECK_EQ(failure_kind, verifier::FailureKind::kSoftFailure);
+          DCHECK(failure_kind == verifier::FailureKind::kSoftFailure ||
+                 failure_kind == verifier::FailureKind::kTypeChecksFailure);
         } else {
           DCHECK_EQ(failure_kind, verifier::FailureKind::kHardFailure);
         }

@@ -1331,11 +1331,20 @@ class Dex2Oat final {
           LOG(WARNING) << "Could not open vdex file in DexMetadata archive: " << error_msg;
         } else {
           input_vdex_file_ = std::make_unique<VdexFile>(std::move(input_file));
-          if (input_vdex_file_->HasDexSection()) {
-            LOG(ERROR) << "The dex metadata is not allowed to contain dex files";
-            return false;
+          if (!input_vdex_file_->IsValid()) {
+            // Ideally we would do this validation at the framework level but the framework
+            // has not knowledge of the .vdex format and adding new APIs just for it is
+            // overkill.
+            // TODO(calin): include this in dex2oat metrics.
+            LOG(WARNING) << "The dex metadata .vdex is not valid. Ignoring it.";
+            input_vdex_file_ = nullptr;
+          } else {
+            if (input_vdex_file_->HasDexSection()) {
+              LOG(ERROR) << "The dex metadata is not allowed to contain dex files";
+              return false;
+            }
+            VLOG(verifier) << "Doing fast verification with vdex from DexMetadata archive";
           }
-          VLOG(verifier) << "Doing fast verification with vdex from DexMetadata archive";
         }
       }
     }
@@ -1398,7 +1407,7 @@ class Dex2Oat final {
 
     // At this point, file descriptors have been setup. Report that we're starting the compilation.
     PaletteHooks* hooks = nullptr;
-    if (PaletteGetHooks(&hooks) == PaletteStatus::kOkay) {
+    if (PaletteGetHooks(&hooks) == PALETTE_STATUS_OK) {
       // We dup the zip file descriptor, as the oat writer will close it in
       // OatWriter::CloseSources (we still want to close it there for
       // consistency with other kinds of inputs).
@@ -2155,7 +2164,7 @@ class Dex2Oat final {
     // Now that the files have been written to, report that we've ended the
     // compilation.
     PaletteHooks* hooks = nullptr;
-    if (PaletteGetHooks(&hooks) == PaletteStatus::kOkay) {
+    if (PaletteGetHooks(&hooks) == PALETTE_STATUS_OK) {
       hooks->NotifyEndDex2oatCompilation(zip_dup_fd_,
                                          IsAppImage() ? app_image_fd_ : image_fd_,
                                          oat_fd_,

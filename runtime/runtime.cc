@@ -287,7 +287,6 @@ Runtime::Runtime()
       safe_mode_(false),
       hidden_api_policy_(hiddenapi::EnforcementPolicy::kDisabled),
       core_platform_api_policy_(hiddenapi::EnforcementPolicy::kDisabled),
-      test_api_policy_(hiddenapi::EnforcementPolicy::kDisabled),
       dedupe_hidden_api_warnings_(true),
       hidden_api_access_event_log_rate_(0),
       dump_native_stack_on_sig_quit_(true),
@@ -297,7 +296,8 @@ Runtime::Runtime()
       zygote_no_threads_(false),
       verifier_logging_threshold_ms_(100),
       verifier_missing_kthrow_fatal_(false),
-      perfetto_hprof_enabled_(false) {
+      perfetto_hprof_enabled_(false),
+      perfetto_javaheapprof_enabled_(false) {
   static_assert(Runtime::kCalleeSaveSize ==
                     static_cast<uint32_t>(CalleeSaveType::kLastCalleeSaveType), "Unexpected size");
   CheckConstants();
@@ -1086,6 +1086,16 @@ void Runtime::InitNonZygoteOrPostFork(
       LOG(WARNING) << "Failed to load perfetto_hprof: " << err;
     }
   }
+  if (IsPerfettoJavaHeapStackProfEnabled() &&
+      (Dbg::IsJdwpAllowed() || IsProfileableFromShell() || IsJavaDebuggable() ||
+       Runtime::Current()->IsSystemServer())) {
+    std::string err;
+    ScopedTrace tr("perfetto_javaheapprof init.");
+    ScopedThreadSuspension sts(Thread::Current(), ThreadState::kNative);
+    if (!EnsurePerfettoJavaHeapProfPlugin(&err)) {
+      LOG(WARNING) << "Failed to load perfetto_javaheapprof: " << err;
+    }
+  }
   if (LIKELY(automatically_set_jni_ids_indirection_) && CanSetJniIdType()) {
     if (IsJavaDebuggable()) {
       SetJniIdType(JniIdType::kIndices);
@@ -1218,6 +1228,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   verifier_missing_kthrow_fatal_ = runtime_options.GetOrDefault(Opt::VerifierMissingKThrowFatal);
   perfetto_hprof_enabled_ = runtime_options.GetOrDefault(Opt::PerfettoHprof);
+  perfetto_javaheapprof_enabled_ = runtime_options.GetOrDefault(Opt::PerfettoJavaHeapStackProf);
 
   // Try to reserve a dedicated fault page. This is allocated for clobbered registers and sentinels.
   // If we cannot reserve it, log a warning.
@@ -1808,6 +1819,14 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     // subsequent dlopens for the library no-ops.
     dlopen(plugin_name, RTLD_NOW | RTLD_LOCAL);
   }
+  if (IsZygote() && IsPerfettoJavaHeapStackProfEnabled()) {
+    // There is no debug build of heapprofd_client_api.so currently.
+    // Add debug build .so when available.
+    constexpr const char* jhp_plugin_name = "heapprofd_client_api.so";
+    // Load eagerly in Zygote to improve app startup times. This will make
+    // subsequent dlopens for the library no-ops.
+    dlopen(jhp_plugin_name, RTLD_NOW | RTLD_LOCAL);
+  }
 
   VLOG(startup) << "Runtime::Init exiting";
 
@@ -1846,6 +1865,13 @@ bool Runtime::EnsurePerfettoPlugin(std::string* error_msg) {
   constexpr const char* plugin_name = kIsDebugBuild ?
     "libperfetto_hprofd.so" : "libperfetto_hprof.so";
   return EnsurePluginLoaded(plugin_name, error_msg);
+}
+
+bool Runtime::EnsurePerfettoJavaHeapProfPlugin(std::string* error_msg) {
+  // There is no debug build of heapprofd_client_api.so currently.
+  // Add debug build .so when available.
+  constexpr const char* jhp_plugin_name = "heapprofd_client_api.so";
+  return EnsurePluginLoaded(jhp_plugin_name, error_msg);
 }
 
 static bool EnsureJvmtiPlugin(Runtime* runtime,
@@ -3031,6 +3057,10 @@ void Runtime::NotifyStartupCompleted() {
 
   // Notify the profiler saver that startup is now completed.
   ProfileSaver::NotifyStartupCompleted();
+
+  if (metrics_reporter_ != nullptr) {
+    metrics_reporter_->NotifyStartupCompleted();
+  }
 }
 
 bool Runtime::GetStartupCompleted() const {

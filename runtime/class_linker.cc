@@ -129,6 +129,7 @@
 #include "mirror/var_handle.h"
 #include "native/dalvik_system_DexFile.h"
 #include "nativehelper/scoped_local_ref.h"
+#include "nterp_helpers.h"
 #include "oat.h"
 #include "oat_file-inl.h"
 #include "oat_file.h"
@@ -231,7 +232,7 @@ static void ChangeInterpreterBridgeToNterp(ArtMethod* method, ClassLinker* class
     REQUIRES_SHARED(Locks::mutator_lock_) {
   Runtime* runtime = Runtime::Current();
   if (class_linker->IsQuickToInterpreterBridge(method->GetEntryPointFromQuickCompiledCode()) &&
-      interpreter::CanMethodUseNterp(method)) {
+      CanMethodUseNterp(method)) {
     if (method->GetDeclaringClass()->IsVisiblyInitialized() ||
         !NeedsClinitCheckBeforeCall(method)) {
       runtime->GetInstrumentation()->UpdateMethodsCode(method, interpreter::GetNterpEntryPoint());
@@ -606,87 +607,6 @@ static void WrapExceptionInInitializer(Handle<mirror::Class> klass)
   VlogClassInitializationFailure(klass);
 }
 
-// Gap between two fields in object layout.
-struct FieldGap {
-  uint32_t start_offset;  // The offset from the start of the object.
-  uint32_t size;  // The gap size of 1, 2, or 4 bytes.
-};
-struct FieldGapsComparator {
-  FieldGapsComparator() {
-  }
-  bool operator() (const FieldGap& lhs, const FieldGap& rhs)
-      NO_THREAD_SAFETY_ANALYSIS {
-    // Sort by gap size, largest first. Secondary sort by starting offset.
-    // Note that the priority queue returns the largest element, so operator()
-    // should return true if lhs is less than rhs.
-    return lhs.size < rhs.size || (lhs.size == rhs.size && lhs.start_offset > rhs.start_offset);
-  }
-};
-using FieldGaps = std::priority_queue<FieldGap, std::vector<FieldGap>, FieldGapsComparator>;
-
-// Adds largest aligned gaps to queue of gaps.
-static void AddFieldGap(uint32_t gap_start, uint32_t gap_end, FieldGaps* gaps) {
-  DCHECK(gaps != nullptr);
-
-  uint32_t current_offset = gap_start;
-  while (current_offset != gap_end) {
-    size_t remaining = gap_end - current_offset;
-    if (remaining >= sizeof(uint32_t) && IsAligned<4>(current_offset)) {
-      gaps->push(FieldGap {current_offset, sizeof(uint32_t)});
-      current_offset += sizeof(uint32_t);
-    } else if (remaining >= sizeof(uint16_t) && IsAligned<2>(current_offset)) {
-      gaps->push(FieldGap {current_offset, sizeof(uint16_t)});
-      current_offset += sizeof(uint16_t);
-    } else {
-      gaps->push(FieldGap {current_offset, sizeof(uint8_t)});
-      current_offset += sizeof(uint8_t);
-    }
-    DCHECK_LE(current_offset, gap_end) << "Overran gap";
-  }
-}
-// Shuffle fields forward, making use of gaps whenever possible.
-template<int n>
-static void ShuffleForward(size_t* current_field_idx,
-                           MemberOffset* field_offset,
-                           std::deque<ArtField*>* grouped_and_sorted_fields,
-                           FieldGaps* gaps)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  DCHECK(current_field_idx != nullptr);
-  DCHECK(grouped_and_sorted_fields != nullptr);
-  DCHECK(gaps != nullptr);
-  DCHECK(field_offset != nullptr);
-
-  DCHECK(IsPowerOfTwo(n));
-  while (!grouped_and_sorted_fields->empty()) {
-    ArtField* field = grouped_and_sorted_fields->front();
-    Primitive::Type type = field->GetTypeAsPrimitiveType();
-    if (Primitive::ComponentSize(type) < n) {
-      break;
-    }
-    if (!IsAligned<n>(field_offset->Uint32Value())) {
-      MemberOffset old_offset = *field_offset;
-      *field_offset = MemberOffset(RoundUp(field_offset->Uint32Value(), n));
-      AddFieldGap(old_offset.Uint32Value(), field_offset->Uint32Value(), gaps);
-    }
-    CHECK(type != Primitive::kPrimNot) << field->PrettyField();  // should be primitive types
-    grouped_and_sorted_fields->pop_front();
-    if (!gaps->empty() && gaps->top().size >= n) {
-      FieldGap gap = gaps->top();
-      gaps->pop();
-      DCHECK_ALIGNED(gap.start_offset, n);
-      field->SetOffset(MemberOffset(gap.start_offset));
-      if (gap.size > n) {
-        AddFieldGap(gap.start_offset + n, gap.start_offset + gap.size, gaps);
-      }
-    } else {
-      DCHECK_ALIGNED(field_offset->Uint32Value(), n);
-      field->SetOffset(*field_offset);
-      *field_offset = MemberOffset(field_offset->Uint32Value() + n);
-    }
-    ++(*current_field_idx);
-  }
-}
-
 ClassLinker::ClassLinker(InternTable* intern_table, bool fast_class_not_found_exceptions)
     : boot_class_table_(new ClassTable()),
       failed_dex_cache_class_lookups_(0),
@@ -702,6 +622,7 @@ ClassLinker::ClassLinker(InternTable* intern_table, bool fast_class_not_found_ex
       quick_imt_conflict_trampoline_(nullptr),
       quick_generic_jni_trampoline_(nullptr),
       quick_to_interpreter_bridge_trampoline_(nullptr),
+      nterp_trampoline_(nullptr),
       image_pointer_size_(kRuntimePointerSize),
       visibly_initialized_callback_lock_("visibly initialized callback lock"),
       visibly_initialized_callback_(nullptr),
@@ -929,6 +850,7 @@ bool ClassLinker::InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> b
     quick_imt_conflict_trampoline_ = GetQuickImtConflictStub();
     quick_generic_jni_trampoline_ = GetQuickGenericJniStub();
     quick_to_interpreter_bridge_trampoline_ = GetQuickToInterpreterBridge();
+    nterp_trampoline_ = interpreter::GetNterpEntryPoint();
   }
 
   // Object, String, ClassExt and DexCache need to be rerun through FindSystemClass to finish init
@@ -1211,11 +1133,24 @@ void ClassLinker::RunRootClinits(Thread* self) {
   }
 }
 
+static void InitializeObjectVirtualMethodHashes(ObjPtr<mirror::Class> java_lang_Object,
+                                                PointerSize pointer_size,
+                                                /*out*/ ArrayRef<uint32_t> virtual_method_hashes)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  ArraySlice<ArtMethod> virtual_methods = java_lang_Object->GetVirtualMethods(pointer_size);
+  DCHECK_EQ(virtual_method_hashes.size(), virtual_methods.size());
+  for (size_t i = 0; i != virtual_method_hashes.size(); ++i) {
+    const char* name = virtual_methods[i].GetName();
+    virtual_method_hashes[i] = ComputeModifiedUtf8Hash(name);
+  }
+}
+
 struct TrampolineCheckData {
   const void* quick_resolution_trampoline;
   const void* quick_imt_conflict_trampoline;
   const void* quick_generic_jni_trampoline;
   const void* quick_to_interpreter_bridge_trampoline;
+  const void* nterp_trampoline;
   PointerSize pointer_size;
   ArtMethod* m;
   bool error;
@@ -1282,6 +1217,7 @@ bool ClassLinker::InitFromBootImage(std::string* error_msg) {
   quick_imt_conflict_trampoline_ = default_oat_header.GetQuickImtConflictTrampoline();
   quick_generic_jni_trampoline_ = default_oat_header.GetQuickGenericJniTrampoline();
   quick_to_interpreter_bridge_trampoline_ = default_oat_header.GetQuickToInterpreterBridge();
+  nterp_trampoline_ = default_oat_header.GetNterpTrampoline();
   if (kIsDebugBuild) {
     // Check that the other images use the same trampoline.
     for (size_t i = 1; i < oat_files.size(); ++i) {
@@ -1298,12 +1234,15 @@ bool ClassLinker::InitFromBootImage(std::string* error_msg) {
           ith_oat_header.GetQuickGenericJniTrampoline();
       const void* ith_quick_to_interpreter_bridge_trampoline =
           ith_oat_header.GetQuickToInterpreterBridge();
+      const void* ith_nterp_trampoline =
+          ith_oat_header.GetNterpTrampoline();
       if (ith_jni_dlsym_lookup_trampoline_ != jni_dlsym_lookup_trampoline_ ||
           ith_jni_dlsym_lookup_critical_trampoline_ != jni_dlsym_lookup_critical_trampoline_ ||
           ith_quick_resolution_trampoline != quick_resolution_trampoline_ ||
           ith_quick_imt_conflict_trampoline != quick_imt_conflict_trampoline_ ||
           ith_quick_generic_jni_trampoline != quick_generic_jni_trampoline_ ||
-          ith_quick_to_interpreter_bridge_trampoline != quick_to_interpreter_bridge_trampoline_) {
+          ith_quick_to_interpreter_bridge_trampoline != quick_to_interpreter_bridge_trampoline_ ||
+          ith_nterp_trampoline != nterp_trampoline_) {
         // Make sure that all methods in this image do not contain those trampolines as
         // entrypoints. Otherwise the class-linker won't be able to work with a single set.
         TrampolineCheckData data;
@@ -1313,6 +1252,7 @@ bool ClassLinker::InitFromBootImage(std::string* error_msg) {
         data.quick_imt_conflict_trampoline = ith_quick_imt_conflict_trampoline;
         data.quick_generic_jni_trampoline = ith_quick_generic_jni_trampoline;
         data.quick_to_interpreter_bridge_trampoline = ith_quick_to_interpreter_bridge_trampoline;
+        data.nterp_trampoline = ith_nterp_trampoline;
         ReaderMutexLock mu(self, *Locks::heap_bitmap_lock_);
         auto visitor = [&](mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_) {
           if (obj->IsClass()) {
@@ -1371,6 +1311,9 @@ bool ClassLinker::InitFromBootImage(std::string* error_msg) {
   for (const std::unique_ptr<const DexFile>& dex_file : boot_dex_files_) {
     OatDexFile::MadviseDexFile(*dex_file, MadviseState::kMadviseStateAtLoad);
   }
+  InitializeObjectVirtualMethodHashes(GetClassRoot<mirror::Object>(this),
+                                      image_pointer_size_,
+                                      ArrayRef<uint32_t>(object_virtual_method_hashes_));
   FinishInit(self);
 
   VLOG(startup) << __FUNCTION__ << " exiting";
@@ -2037,6 +1980,7 @@ bool ClassLinker::AddImageSpace(
   }
 
   if (!runtime->IsAotCompiler()) {
+    ScopedTrace trace("AppImage:UpdateCodeItemAndNterp");
     bool can_use_nterp = interpreter::CanRuntimeUseNterp();
     header.VisitPackedArtMethods([&](ArtMethod& method) REQUIRES_SHARED(Locks::mutator_lock_) {
       // In the image, the `data` pointer field of the ArtMethod contains the code
@@ -2048,8 +1992,14 @@ bool ClassLinker::AddImageSpace(
       }
       // Set image methods' entry point that point to the interpreter bridge to the
       // nterp entry point.
-      if (can_use_nterp) {
-        ChangeInterpreterBridgeToNterp(&method, this);
+      if (method.GetEntryPointFromQuickCompiledCode() == nterp_trampoline_) {
+        if (can_use_nterp) {
+          DCHECK(!NeedsClinitCheckBeforeCall(&method) ||
+                 method.GetDeclaringClass()->IsVisiblyInitialized());
+          method.SetEntryPointFromQuickCompiledCode(interpreter::GetNterpEntryPoint());
+        } else {
+          method.SetEntryPointFromQuickCompiledCode(GetQuickToInterpreterBridge());
+        }
       }
     }, space->Begin(), image_pointer_size_);
   }
@@ -3392,7 +3342,7 @@ const void* ClassLinker::GetQuickOatCodeFor(ArtMethod* method) {
     return GetQuickGenericJniStub();
   }
 
-  if (interpreter::CanRuntimeUseNterp() && interpreter::CanMethodUseNterp(method)) {
+  if (interpreter::CanRuntimeUseNterp() && CanMethodUseNterp(method)) {
     return interpreter::GetNterpEntryPoint();
   }
 
@@ -3521,7 +3471,7 @@ void ClassLinker::FixupStaticTrampolines(Thread* self, ObjPtr<mirror::Class> kla
 
     if (quick_code == nullptr &&
         interpreter::CanRuntimeUseNterp() &&
-        interpreter::CanMethodUseNterp(method)) {
+        CanMethodUseNterp(method)) {
       quick_code = interpreter::GetNterpEntryPoint();
     }
 
@@ -4121,7 +4071,7 @@ ObjPtr<mirror::DexCache> ClassLinker::RegisterDexFile(const DexFile& dex_file,
   }
   PaletteHooks* hooks = nullptr;
   VLOG(class_linker) << "Registered dex file " << dex_file.GetLocation();
-  if (PaletteGetHooks(&hooks) == PaletteStatus::kOkay) {
+  if (PaletteGetHooks(&hooks) == PALETTE_STATUS_OK) {
     hooks->NotifyDexFileLoaded(dex_file.GetLocation().c_str());
   }
   return h_dex_cache.Get();
@@ -4722,12 +4672,14 @@ verifier::FailureKind ClassLinker::VerifyClass(
       }
     } else {
       CHECK(verifier_failure == verifier::FailureKind::kSoftFailure ||
+            verifier_failure == verifier::FailureKind::kTypeChecksFailure ||
             verifier_failure == verifier::FailureKind::kAccessChecksFailure);
       // Soft failures at compile time should be retried at runtime. Soft
       // failures at runtime will be handled by slow paths in the generated
       // code. Set status accordingly.
       if (Runtime::Current()->IsAotCompiler()) {
-        if (verifier_failure == verifier::FailureKind::kSoftFailure) {
+        if (verifier_failure == verifier::FailureKind::kSoftFailure ||
+            verifier_failure == verifier::FailureKind::kTypeChecksFailure) {
           mirror::Class::SetStatus(klass, ClassStatus::kRetryVerificationAtRuntime, self);
         } else {
           mirror::Class::SetStatus(klass, ClassStatus::kVerifiedNeedsAccessChecks, self);
@@ -6394,10 +6346,9 @@ class LinkVirtualHashTable {
     hash_table_[index] = virtual_method_index;
   }
 
-  uint32_t FindAndRemove(MethodNameAndSignatureComparator* comparator)
+  uint32_t FindAndRemove(MethodNameAndSignatureComparator* comparator, uint32_t hash)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    const char* name = comparator->GetName();
-    uint32_t hash = ComputeModifiedUtf8Hash(name);
+    DCHECK_EQ(hash, ComputeModifiedUtf8Hash(comparator->GetName()));
     size_t index = hash % hash_size_;
     while (true) {
       const uint32_t value = hash_table_[index];
@@ -6567,7 +6518,10 @@ bool ClassLinker::LinkVirtualMethods(
           super_method->GetInterfaceMethodIfProxy(image_pointer_size_));
       // We remove the method so that subsequent lookups will be faster by making the hash-map
       // smaller as we go on.
-      uint32_t hash_index = hash_table.FindAndRemove(&super_method_name_comparator);
+      uint32_t hash = (j < mirror::Object::kVTableLength)
+          ? object_virtual_method_hashes_[j]
+          : ComputeModifiedUtf8Hash(super_method_name_comparator.GetName());
+      uint32_t hash_index = hash_table.FindAndRemove(&super_method_name_comparator, hash);
       if (hash_index != hash_table.GetNotFoundIndex()) {
         ArtMethod* virtual_method = klass->GetVirtualMethodDuringLinking(
             hash_index, image_pointer_size_);
@@ -6678,6 +6632,9 @@ bool ClassLinker::LinkVirtualMethods(
       virtual_method->SetMethodIndex(i & 0xFFFF);
     }
     klass->SetVTable(vtable);
+    InitializeObjectVirtualMethodHashes(klass.Get(),
+                                        image_pointer_size_,
+                                        ArrayRef<uint32_t>(object_virtual_method_hashes_));
   }
   return true;
 }
@@ -8352,54 +8309,192 @@ bool ClassLinker::LinkInterfaceMethods(
   return true;
 }
 
-bool ClassLinker::LinkInstanceFields(Thread* self, Handle<mirror::Class> klass) {
-  CHECK(klass != nullptr);
-  return LinkFields(self, klass, false, nullptr);
-}
+class ClassLinker::LinkFieldsHelper {
+ public:
+  static bool LinkFields(ClassLinker* class_linker,
+                         Thread* self,
+                         Handle<mirror::Class> klass,
+                         bool is_static,
+                         size_t* class_size)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
-bool ClassLinker::LinkStaticFields(Thread* self, Handle<mirror::Class> klass, size_t* class_size) {
-  CHECK(klass != nullptr);
-  return LinkFields(self, klass, true, class_size);
-}
+ private:
+  enum class FieldTypeOrder : uint16_t;
+  class FieldGaps;
 
-struct LinkFieldsComparator {
-  LinkFieldsComparator() REQUIRES_SHARED(Locks::mutator_lock_) {
-  }
-  // No thread safety analysis as will be called from STL. Checked lock held in constructor.
-  bool operator()(ArtField* field1, ArtField* field2)
-      NO_THREAD_SAFETY_ANALYSIS {
-    // First come reference fields, then 64-bit, then 32-bit, and then 16-bit, then finally 8-bit.
-    Primitive::Type type1 = field1->GetTypeAsPrimitiveType();
-    Primitive::Type type2 = field2->GetTypeAsPrimitiveType();
-    if (type1 != type2) {
-      if (type1 == Primitive::kPrimNot) {
-        // Reference always goes first.
-        return true;
-      }
-      if (type2 == Primitive::kPrimNot) {
-        // Reference always goes first.
-        return false;
-      }
-      size_t size1 = Primitive::ComponentSize(type1);
-      size_t size2 = Primitive::ComponentSize(type2);
-      if (size1 != size2) {
-        // Larger primitive types go first.
-        return size1 > size2;
-      }
-      // Primitive types differ but sizes match. Arbitrarily order by primitive type.
-      return type1 < type2;
-    }
-    // Same basic group? Then sort by dex field index. This is guaranteed to be sorted
-    // by name and for equal names by type id index.
-    // NOTE: This works also for proxies. Their static fields are assigned appropriate indexes.
-    return field1->GetDexFieldIndex() < field2->GetDexFieldIndex();
-  }
+  struct FieldTypeOrderAndIndex {
+    FieldTypeOrder field_type_order;
+    uint16_t field_index;
+  };
+
+  static FieldTypeOrder FieldTypeOrderFromFirstDescriptorCharacter(char first_char);
+
+  template <size_t kSize>
+  static MemberOffset AssignFieldOffset(ArtField* field, MemberOffset field_offset)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 };
 
-bool ClassLinker::LinkFields(Thread* self,
-                             Handle<mirror::Class> klass,
-                             bool is_static,
-                             size_t* class_size) {
+// We use the following order of field types for assigning offsets.
+// Some fields can be shuffled forward to fill gaps, see `ClassLinker::LinkFields()`.
+enum class ClassLinker::LinkFieldsHelper::FieldTypeOrder : uint16_t {
+  kReference = 0u,
+  kLong,
+  kDouble,
+  kInt,
+  kFloat,
+  kChar,
+  kShort,
+  kBoolean,
+  kByte,
+
+  kLast64BitType = kDouble,
+  kLast32BitType = kFloat,
+  kLast16BitType = kShort,
+};
+
+ALWAYS_INLINE
+ClassLinker::LinkFieldsHelper::FieldTypeOrder
+ClassLinker::LinkFieldsHelper::FieldTypeOrderFromFirstDescriptorCharacter(char first_char) {
+  switch (first_char) {
+    case 'J':
+      return FieldTypeOrder::kLong;
+    case 'D':
+      return FieldTypeOrder::kDouble;
+    case 'I':
+      return FieldTypeOrder::kInt;
+    case 'F':
+      return FieldTypeOrder::kFloat;
+    case 'C':
+      return FieldTypeOrder::kChar;
+    case 'S':
+      return FieldTypeOrder::kShort;
+    case 'Z':
+      return FieldTypeOrder::kBoolean;
+    case 'B':
+      return FieldTypeOrder::kByte;
+    default:
+      DCHECK(first_char == 'L' || first_char == '[') << first_char;
+      return FieldTypeOrder::kReference;
+  }
+}
+
+// Gaps where we can insert fields in object layout.
+class ClassLinker::LinkFieldsHelper::FieldGaps {
+ public:
+  template <uint32_t kSize>
+  ALWAYS_INLINE MemberOffset AlignFieldOffset(MemberOffset field_offset) {
+    static_assert(kSize == 2u || kSize == 4u || kSize == 8u);
+    if (!IsAligned<kSize>(field_offset.Uint32Value())) {
+      uint32_t gap_start = field_offset.Uint32Value();
+      field_offset = MemberOffset(RoundUp(gap_start, kSize));
+      AddGaps<kSize - 1u>(gap_start, field_offset.Uint32Value());
+    }
+    return field_offset;
+  }
+
+  template <uint32_t kSize>
+  bool HasGap() const {
+    static_assert(kSize == 1u || kSize == 2u || kSize == 4u);
+    return (kSize == 1u && gap1_offset_ != kNoOffset) ||
+           (kSize <= 2u && gap2_offset_ != kNoOffset) ||
+           gap4_offset_ != kNoOffset;
+  }
+
+  template <uint32_t kSize>
+  MemberOffset ReleaseGap() {
+    static_assert(kSize == 1u || kSize == 2u || kSize == 4u);
+    uint32_t result;
+    if (kSize == 1u && gap1_offset_ != kNoOffset) {
+      DCHECK(gap2_offset_ == kNoOffset || gap2_offset_ > gap1_offset_);
+      DCHECK(gap4_offset_ == kNoOffset || gap4_offset_ > gap1_offset_);
+      result = gap1_offset_;
+      gap1_offset_ = kNoOffset;
+    } else if (kSize <= 2u && gap2_offset_ != kNoOffset) {
+      DCHECK(gap4_offset_ == kNoOffset || gap4_offset_ > gap2_offset_);
+      result = gap2_offset_;
+      gap2_offset_ = kNoOffset;
+      if (kSize < 2u) {
+        AddGaps<1u>(result + kSize, result + 2u);
+      }
+    } else {
+      DCHECK_NE(gap4_offset_, kNoOffset);
+      result = gap4_offset_;
+      gap4_offset_ = kNoOffset;
+      if (kSize < 4u) {
+        AddGaps<kSize | 2u>(result + kSize, result + 4u);
+      }
+    }
+    return MemberOffset(result);
+  }
+
+ private:
+  template <uint32_t kGapsToCheck>
+  void AddGaps(uint32_t gap_start, uint32_t gap_end) {
+    if ((kGapsToCheck & 1u) != 0u) {
+      DCHECK_LT(gap_start, gap_end);
+      DCHECK_ALIGNED(gap_end, 2u);
+      if ((gap_start & 1u) != 0u) {
+        DCHECK_EQ(gap1_offset_, kNoOffset);
+        gap1_offset_ = gap_start;
+        gap_start += 1u;
+        if (kGapsToCheck == 1u || gap_start == gap_end) {
+          DCHECK_EQ(gap_start, gap_end);
+          return;
+        }
+      }
+    }
+
+    if ((kGapsToCheck & 2u) != 0u) {
+      DCHECK_LT(gap_start, gap_end);
+      DCHECK_ALIGNED(gap_start, 2u);
+      DCHECK_ALIGNED(gap_end, 4u);
+      if ((gap_start & 2u) != 0u) {
+        DCHECK_EQ(gap2_offset_, kNoOffset);
+        gap2_offset_ = gap_start;
+        gap_start += 2u;
+        if (kGapsToCheck <= 3u || gap_start == gap_end) {
+          DCHECK_EQ(gap_start, gap_end);
+          return;
+        }
+      }
+    }
+
+    if ((kGapsToCheck & 4u) != 0u) {
+      DCHECK_LT(gap_start, gap_end);
+      DCHECK_ALIGNED(gap_start, 4u);
+      DCHECK_ALIGNED(gap_end, 8u);
+      DCHECK_EQ(gap_start + 4u, gap_end);
+      DCHECK_EQ(gap4_offset_, kNoOffset);
+      gap4_offset_ = gap_start;
+      return;
+    }
+
+    DCHECK(false) << "Remaining gap: " << gap_start << " to " << gap_end
+        << " after checking " << kGapsToCheck;
+  }
+
+  static constexpr uint32_t kNoOffset = static_cast<uint32_t>(-1);
+
+  uint32_t gap4_offset_ = kNoOffset;
+  uint32_t gap2_offset_ = kNoOffset;
+  uint32_t gap1_offset_ = kNoOffset;
+};
+
+template <size_t kSize>
+ALWAYS_INLINE
+MemberOffset ClassLinker::LinkFieldsHelper::AssignFieldOffset(ArtField* field,
+                                                              MemberOffset field_offset) {
+  DCHECK_ALIGNED(field_offset.Uint32Value(), kSize);
+  DCHECK_EQ(Primitive::ComponentSize(field->GetTypeAsPrimitiveType()), kSize);
+  field->SetOffset(field_offset);
+  return MemberOffset(field_offset.Uint32Value() + kSize);
+}
+
+bool ClassLinker::LinkFieldsHelper::LinkFields(ClassLinker* class_linker,
+                                               Thread* self,
+                                               Handle<mirror::Class> klass,
+                                               bool is_static,
+                                               size_t* class_size) {
   self->AllowThreadSuspension();
   const size_t num_fields = is_static ? klass->NumStaticFields() : klass->NumInstanceFields();
   LengthPrefixedArray<ArtField>* const fields = is_static ? klass->GetSFieldsPtr() :
@@ -8408,7 +8503,8 @@ bool ClassLinker::LinkFields(Thread* self,
   // Initialize field_offset
   MemberOffset field_offset(0);
   if (is_static) {
-    field_offset = klass->GetFirstReferenceStaticFieldOffsetDuringLinking(image_pointer_size_);
+    field_offset = klass->GetFirstReferenceStaticFieldOffsetDuringLinking(
+        class_linker->GetImagePointerSize());
   } else {
     ObjPtr<mirror::Class> super_class = klass->GetSuperClass();
     if (super_class != nullptr) {
@@ -8434,60 +8530,177 @@ bool ClassLinker::LinkFields(Thread* self,
   // 8) All java boolean (8-bit) integer fields, sorted alphabetically.
   // 9) All java byte (8-bit) integer fields, sorted alphabetically.
   //
-  // Once the fields are sorted in this order we will attempt to fill any gaps that might be present
-  // in the memory layout of the structure. See ShuffleForward for how this is done.
-  std::deque<ArtField*> grouped_and_sorted_fields;
+  // (References are first to increase the chance of reference visiting
+  // being able to take a fast path using a bitmap of references at the
+  // start of the object, see `Class::reference_instance_offsets_`.)
+  //
+  // Once the fields are sorted in this order we will attempt to fill any gaps
+  // that might be present in the memory layout of the structure.
+  // Note that we shall not fill gaps between the superclass fields.
+
+  // Collect fields and their "type order index" (see numbered points above).
   const char* old_no_suspend_cause = self->StartAssertNoThreadSuspension(
-      "Naked ArtField references in deque");
-  for (size_t i = 0; i < num_fields; i++) {
-    grouped_and_sorted_fields.push_back(&fields->At(i));
+      "Using plain ArtField references");
+  constexpr size_t kStackBufferEntries = 64;  // Avoid allocations for small number of fields.
+  FieldTypeOrderAndIndex stack_buffer[kStackBufferEntries];
+  std::vector<FieldTypeOrderAndIndex> heap_buffer;
+  ArrayRef<FieldTypeOrderAndIndex> sorted_fields;
+  if (num_fields <= kStackBufferEntries) {
+    sorted_fields = ArrayRef<FieldTypeOrderAndIndex>(stack_buffer, num_fields);
+  } else {
+    heap_buffer.resize(num_fields);
+    sorted_fields = ArrayRef<FieldTypeOrderAndIndex>(heap_buffer);
   }
-  std::sort(grouped_and_sorted_fields.begin(), grouped_and_sorted_fields.end(),
-            LinkFieldsComparator());
-
-  // References should be at the front.
-  size_t current_field = 0;
   size_t num_reference_fields = 0;
-  FieldGaps gaps;
+  size_t primitive_fields_start = num_fields;
+  DCHECK_LE(num_fields, 1u << 16);
+  for (size_t i = 0; i != num_fields; ++i) {
+    ArtField* field = &fields->At(i);
+    const char* descriptor = field->GetTypeDescriptor();
+    FieldTypeOrder field_type_order = FieldTypeOrderFromFirstDescriptorCharacter(descriptor[0]);
+    uint16_t field_index = dchecked_integral_cast<uint16_t>(i);
+    // Insert references to the start, other fields to the end.
+    DCHECK_LT(num_reference_fields, primitive_fields_start);
+    if (field_type_order == FieldTypeOrder::kReference) {
+      sorted_fields[num_reference_fields] = { field_type_order, field_index };
+      ++num_reference_fields;
+    } else {
+      --primitive_fields_start;
+      sorted_fields[primitive_fields_start] = { field_type_order, field_index };
+    }
+  }
+  DCHECK_EQ(num_reference_fields, primitive_fields_start);
 
-  for (; current_field < num_fields; current_field++) {
-    ArtField* field = grouped_and_sorted_fields.front();
-    Primitive::Type type = field->GetTypeAsPrimitiveType();
-    bool isPrimitive = type != Primitive::kPrimNot;
-    if (isPrimitive) {
-      break;  // past last reference, move on to the next phase
+  // Reference fields are already sorted by field index (and dex field index).
+  DCHECK(std::is_sorted(
+      sorted_fields.begin(),
+      sorted_fields.begin() + num_reference_fields,
+      [fields](const auto& lhs, const auto& rhs) REQUIRES_SHARED(Locks::mutator_lock_) {
+        ArtField* lhs_field = &fields->At(lhs.field_index);
+        ArtField* rhs_field = &fields->At(rhs.field_index);
+        CHECK_EQ(lhs_field->GetTypeAsPrimitiveType(), Primitive::kPrimNot);
+        CHECK_EQ(rhs_field->GetTypeAsPrimitiveType(), Primitive::kPrimNot);
+        CHECK_EQ(lhs_field->GetDexFieldIndex() < rhs_field->GetDexFieldIndex(),
+                 lhs.field_index < rhs.field_index);
+        return lhs_field->GetDexFieldIndex() < rhs_field->GetDexFieldIndex();
+      }));
+  // Primitive fields were stored in reverse order of their field index (and dex field index).
+  DCHECK(std::is_sorted(
+      sorted_fields.begin() + primitive_fields_start,
+      sorted_fields.end(),
+      [fields](const auto& lhs, const auto& rhs) REQUIRES_SHARED(Locks::mutator_lock_) {
+        ArtField* lhs_field = &fields->At(lhs.field_index);
+        ArtField* rhs_field = &fields->At(rhs.field_index);
+        CHECK_NE(lhs_field->GetTypeAsPrimitiveType(), Primitive::kPrimNot);
+        CHECK_NE(rhs_field->GetTypeAsPrimitiveType(), Primitive::kPrimNot);
+        CHECK_EQ(lhs_field->GetDexFieldIndex() > rhs_field->GetDexFieldIndex(),
+                 lhs.field_index > rhs.field_index);
+        return lhs.field_index > rhs.field_index;
+      }));
+  // Sort the primitive fields by the field type order, then field index.
+  std::sort(sorted_fields.begin() + primitive_fields_start,
+            sorted_fields.end(),
+            [](const auto& lhs, const auto& rhs) {
+              if (lhs.field_type_order != rhs.field_type_order) {
+                return lhs.field_type_order < rhs.field_type_order;
+              } else {
+                return lhs.field_index < rhs.field_index;
+              }
+            });
+  // Primitive fields are now sorted by field size (descending), then type, then field index.
+  DCHECK(std::is_sorted(
+      sorted_fields.begin() + primitive_fields_start,
+      sorted_fields.end(),
+      [fields](const auto& lhs, const auto& rhs) REQUIRES_SHARED(Locks::mutator_lock_) {
+        ArtField* lhs_field = &fields->At(lhs.field_index);
+        ArtField* rhs_field = &fields->At(rhs.field_index);
+        Primitive::Type lhs_type = lhs_field->GetTypeAsPrimitiveType();
+        CHECK_NE(lhs_type, Primitive::kPrimNot);
+        Primitive::Type rhs_type = rhs_field->GetTypeAsPrimitiveType();
+        CHECK_NE(rhs_type, Primitive::kPrimNot);
+        if (lhs_type != rhs_type) {
+          size_t lhs_size = Primitive::ComponentSize(lhs_type);
+          size_t rhs_size = Primitive::ComponentSize(rhs_type);
+          return (lhs_size != rhs_size) ? (lhs_size > rhs_size) : (lhs_type < rhs_type);
+        } else {
+          return lhs_field->GetDexFieldIndex() < rhs_field->GetDexFieldIndex();
+        }
+      }));
+
+  // Process reference fields.
+  FieldGaps field_gaps;
+  size_t index = 0u;
+  if (num_reference_fields != 0u) {
+    constexpr size_t kReferenceSize = sizeof(mirror::HeapReference<mirror::Object>);
+    field_offset = field_gaps.AlignFieldOffset<kReferenceSize>(field_offset);
+    for (; index != num_reference_fields; ++index) {
+      ArtField* field = &fields->At(sorted_fields[index].field_index);
+      field_offset = AssignFieldOffset<kReferenceSize>(field, field_offset);
     }
-    if (UNLIKELY(!IsAligned<sizeof(mirror::HeapReference<mirror::Object>)>(
-        field_offset.Uint32Value()))) {
-      MemberOffset old_offset = field_offset;
-      field_offset = MemberOffset(RoundUp(field_offset.Uint32Value(), 4));
-      AddFieldGap(old_offset.Uint32Value(), field_offset.Uint32Value(), &gaps);
-    }
-    DCHECK_ALIGNED(field_offset.Uint32Value(), sizeof(mirror::HeapReference<mirror::Object>));
-    grouped_and_sorted_fields.pop_front();
-    num_reference_fields++;
-    field->SetOffset(field_offset);
-    field_offset = MemberOffset(field_offset.Uint32Value() +
-                                sizeof(mirror::HeapReference<mirror::Object>));
   }
-  // Gaps are stored as a max heap which means that we must shuffle from largest to smallest
-  // otherwise we could end up with suboptimal gap fills.
-  ShuffleForward<8>(&current_field, &field_offset, &grouped_and_sorted_fields, &gaps);
-  ShuffleForward<4>(&current_field, &field_offset, &grouped_and_sorted_fields, &gaps);
-  ShuffleForward<2>(&current_field, &field_offset, &grouped_and_sorted_fields, &gaps);
-  ShuffleForward<1>(&current_field, &field_offset, &grouped_and_sorted_fields, &gaps);
-  if (!grouped_and_sorted_fields.empty()) {
-    std::ostringstream oss;
-    oss << "Missed " << grouped_and_sorted_fields.size() << " fields ";
-    for (ArtField* field : grouped_and_sorted_fields) {
-      oss << field->PrettyField() << " ";
+  // Process 64-bit fields.
+  if (index != num_fields &&
+      sorted_fields[index].field_type_order <= FieldTypeOrder::kLast64BitType) {
+    field_offset = field_gaps.AlignFieldOffset<8u>(field_offset);
+    while (index != num_fields &&
+           sorted_fields[index].field_type_order <= FieldTypeOrder::kLast64BitType) {
+      ArtField* field = &fields->At(sorted_fields[index].field_index);
+      field_offset = AssignFieldOffset<8u>(field, field_offset);
+      ++index;
     }
-    LOG(FATAL) << oss.str();
   }
+  // Process 32-bit fields.
+  if (index != num_fields &&
+      sorted_fields[index].field_type_order <= FieldTypeOrder::kLast32BitType) {
+    field_offset = field_gaps.AlignFieldOffset<4u>(field_offset);
+    if (field_gaps.HasGap<4u>()) {
+      ArtField* field = &fields->At(sorted_fields[index].field_index);
+      AssignFieldOffset<4u>(field, field_gaps.ReleaseGap<4u>());  // Ignore return value.
+      ++index;
+      DCHECK(!field_gaps.HasGap<4u>());  // There can be only one gap for a 32-bit field.
+    }
+    while (index != num_fields &&
+           sorted_fields[index].field_type_order <= FieldTypeOrder::kLast32BitType) {
+      ArtField* field = &fields->At(sorted_fields[index].field_index);
+      field_offset = AssignFieldOffset<4u>(field, field_offset);
+      ++index;
+    }
+  }
+  // Process 16-bit fields.
+  if (index != num_fields &&
+      sorted_fields[index].field_type_order <= FieldTypeOrder::kLast16BitType) {
+    field_offset = field_gaps.AlignFieldOffset<2u>(field_offset);
+    while (index != num_fields &&
+           sorted_fields[index].field_type_order <= FieldTypeOrder::kLast16BitType &&
+           field_gaps.HasGap<2u>()) {
+      ArtField* field = &fields->At(sorted_fields[index].field_index);
+      AssignFieldOffset<2u>(field, field_gaps.ReleaseGap<2u>());  // Ignore return value.
+      ++index;
+    }
+    while (index != num_fields &&
+           sorted_fields[index].field_type_order <= FieldTypeOrder::kLast16BitType) {
+      ArtField* field = &fields->At(sorted_fields[index].field_index);
+      field_offset = AssignFieldOffset<2u>(field, field_offset);
+      ++index;
+    }
+  }
+  // Process 8-bit fields.
+  for (; index != num_fields && field_gaps.HasGap<1u>(); ++index) {
+    ArtField* field = &fields->At(sorted_fields[index].field_index);
+    AssignFieldOffset<1u>(field, field_gaps.ReleaseGap<1u>());  // Ignore return value.
+  }
+  for (; index != num_fields; ++index) {
+    ArtField* field = &fields->At(sorted_fields[index].field_index);
+    field_offset = AssignFieldOffset<1u>(field, field_offset);
+  }
+
   self->EndAssertNoThreadSuspension(old_no_suspend_cause);
 
   // We lie to the GC about the java.lang.ref.Reference.referent field, so it doesn't scan it.
-  if (!is_static && klass->DescriptorEquals("Ljava/lang/ref/Reference;")) {
+  DCHECK(!class_linker->init_done_ || !klass->DescriptorEquals("Ljava/lang/ref/Reference;"));
+  if (!is_static &&
+      UNLIKELY(!class_linker->init_done_) &&
+      klass->DescriptorEquals("Ljava/lang/ref/Reference;")) {
     // We know there are no non-reference fields in the Reference classes, and we know
     // that 'referent' is alphabetically last, so this is easy...
     CHECK_EQ(num_reference_fields, num_fields) << klass->PrettyClass();
@@ -8544,7 +8757,7 @@ bool ClassLinker::LinkFields(Thread* self,
     // Make sure that the fields array is ordered by name but all reference
     // offsets are at the beginning as far as alignment allows.
     MemberOffset start_ref_offset = is_static
-        ? klass->GetFirstReferenceStaticFieldOffsetDuringLinking(image_pointer_size_)
+        ? klass->GetFirstReferenceStaticFieldOffsetDuringLinking(class_linker->image_pointer_size_)
         : klass->GetFirstReferenceInstanceFieldOffset();
     MemberOffset end_ref_offset(start_ref_offset.Uint32Value() +
                                 num_reference_fields *
@@ -8586,6 +8799,16 @@ bool ClassLinker::LinkFields(Thread* self,
     CHECK_EQ(current_ref_offset.Uint32Value(), end_ref_offset.Uint32Value());
   }
   return true;
+}
+
+bool ClassLinker::LinkInstanceFields(Thread* self, Handle<mirror::Class> klass) {
+  CHECK(klass != nullptr);
+  return LinkFieldsHelper::LinkFields(this, self, klass, false, nullptr);
+}
+
+bool ClassLinker::LinkStaticFields(Thread* self, Handle<mirror::Class> klass, size_t* class_size) {
+  CHECK(klass != nullptr);
+  return LinkFieldsHelper::LinkFields(this, self, klass, true, class_size);
 }
 
 //  Set the bitmap of reference instance field offsets.

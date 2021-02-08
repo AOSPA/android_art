@@ -438,6 +438,7 @@ OatWriter::OatWriter(const CompilerOptions& compiler_options,
     size_quick_imt_conflict_trampoline_(0),
     size_quick_resolution_trampoline_(0),
     size_quick_to_interpreter_bridge_(0),
+    size_nterp_trampoline_(0),
     size_trampoline_alignment_(0),
     size_method_header_(0),
     size_code_(0),
@@ -1401,6 +1402,7 @@ class OatWriter::LayoutReserveOffsetCodeMethodVisitor : public OrderedMethodVisi
 
       // Record debug information for this function if we are doing that.
       debug::MethodDebugInfo& info = writer_->method_info_[debug_info_idx];
+      // Simpleperf relies on art_jni_trampoline to detect jni methods.
       info.custom_name = (access_flags & kAccNative) ? "art_jni_trampoline" : "";
       info.dex_file = method_ref.dex_file;
       info.class_def_index = class_def_index;
@@ -2313,6 +2315,7 @@ size_t OatWriter::InitOatCode(size_t offset) {
     DO_TRAMPOLINE(quick_imt_conflict_trampoline_, QuickImtConflictTrampoline);
     DO_TRAMPOLINE(quick_resolution_trampoline_, QuickResolutionTrampoline);
     DO_TRAMPOLINE(quick_to_interpreter_bridge_, QuickToInterpreterBridge);
+    DO_TRAMPOLINE(nterp_trampoline_, NterpTrampoline);
 
     #undef DO_TRAMPOLINE
   } else {
@@ -2322,6 +2325,7 @@ size_t OatWriter::InitOatCode(size_t offset) {
     oat_header_->SetQuickImtConflictTrampolineOffset(0);
     oat_header_->SetQuickResolutionTrampolineOffset(0);
     oat_header_->SetQuickToInterpreterBridgeOffset(0);
+    oat_header_->SetNterpTrampolineOffset(0);
   }
   return offset;
 }
@@ -2808,6 +2812,7 @@ bool OatWriter::CheckOatSize(OutputStream* out, size_t file_offset, size_t relat
     DO_STAT(size_quick_imt_conflict_trampoline_);
     DO_STAT(size_quick_resolution_trampoline_);
     DO_STAT(size_quick_to_interpreter_bridge_);
+    DO_STAT(size_nterp_trampoline_);
     DO_STAT(size_trampoline_alignment_);
     DO_STAT(size_method_header_);
     DO_STAT(size_code_);
@@ -3185,6 +3190,7 @@ size_t OatWriter::WriteCode(OutputStream* out, size_t file_offset, size_t relati
     DO_TRAMPOLINE(quick_imt_conflict_trampoline_);
     DO_TRAMPOLINE(quick_resolution_trampoline_);
     DO_TRAMPOLINE(quick_to_interpreter_bridge_);
+    DO_TRAMPOLINE(nterp_trampoline_);
     #undef DO_TRAMPOLINE
   }
   return relative_offset;

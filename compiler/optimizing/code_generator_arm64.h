@@ -54,9 +54,6 @@ static constexpr size_t kArm64WordSize = static_cast<size_t>(kArm64PointerSize);
 static constexpr int kMaxMacroInstructionSizeInBytes = 15 * vixl::aarch64::kInstructionSize;
 static constexpr int kInvokeCodeMarginSizeInBytes = 6 * kMaxMacroInstructionSizeInBytes;
 
-// SVE is currently not enabled.
-static constexpr bool kArm64AllowSVE = false;
-
 static const vixl::aarch64::Register kParameterCoreRegisters[] = {
   vixl::aarch64::x1,
   vixl::aarch64::x2,
@@ -312,6 +309,10 @@ class InstructionCodeGeneratorARM64 : public InstructionCodeGenerator {
   virtual void LoadSIMDRegFromStack(Location destination, Location source) = 0;
   virtual void MoveSIMDRegToSIMDReg(Location destination, Location source) = 0;
   virtual void MoveToSIMDStackSlot(Location destination, Location source) = 0;
+  virtual void SaveLiveRegistersHelper(LocationSummary* locations,
+                                       int64_t spill_offset) = 0;
+  virtual void RestoreLiveRegistersHelper(LocationSummary* locations,
+                                          int64_t spill_offset) = 0;
 
  protected:
   void GenerateClassInitializationCheck(SlowPathCodeARM64* slow_path,
@@ -388,11 +389,19 @@ class InstructionCodeGeneratorARM64 : public InstructionCodeGenerator {
   void GenerateIntRemForPower2Denom(HRem *instruction);
   void HandleGoto(HInstruction* got, HBasicBlock* successor);
 
-  // Helper to set up locations for vector memory operations. Returns the memory operand and,
+  // Helpers to set up locations for vector memory operations. Returns the memory operand and,
   // if used, sets the output parameter scratch to a temporary register used in this operand,
   // so that the client can release it right after the memory operand use.
   // Neon version.
-  vixl::aarch64::MemOperand VecNeonAddress(
+  vixl::aarch64::MemOperand VecNEONAddress(
+      HVecMemoryOperation* instruction,
+      // This function may acquire a scratch register.
+      vixl::aarch64::UseScratchRegisterScope* temps_scope,
+      size_t size,
+      bool is_string_char_at,
+      /*out*/ vixl::aarch64::Register* scratch);
+  // SVE version.
+  vixl::aarch64::SVEMemOperand VecSVEAddress(
       HVecMemoryOperation* instruction,
       // This function may acquire a scratch register.
       vixl::aarch64::UseScratchRegisterScope* temps_scope,
@@ -457,6 +466,8 @@ class InstructionCodeGeneratorARM64Neon : public InstructionCodeGeneratorARM64 {
   void LoadSIMDRegFromStack(Location destination, Location source) override;
   void MoveSIMDRegToSIMDReg(Location destination, Location source) override;
   void MoveToSIMDStackSlot(Location destination, Location source) override;
+  void SaveLiveRegistersHelper(LocationSummary* locations, int64_t spill_offset) override;
+  void RestoreLiveRegistersHelper(LocationSummary* locations, int64_t spill_offset) override;
 };
 
 class LocationsBuilderARM64Neon : public LocationsBuilderARM64 {
@@ -490,6 +501,21 @@ class InstructionCodeGeneratorARM64Sve : public InstructionCodeGeneratorARM64 {
   void LoadSIMDRegFromStack(Location destination, Location source) override;
   void MoveSIMDRegToSIMDReg(Location destination, Location source) override;
   void MoveToSIMDStackSlot(Location destination, Location source) override;
+  void SaveLiveRegistersHelper(LocationSummary* locations, int64_t spill_offset) override;
+  void RestoreLiveRegistersHelper(LocationSummary* locations, int64_t spill_offset) override;
+
+ private:
+  // Validate that instruction vector length and packed type are compliant with the SIMD
+  // register size (full SIMD register is used).
+  void ValidateVectorLength(HVecOperation* instr) const;
+
+  // Returns default predicate register which is used as governing vector predicate
+  // to implement predicated loop execution.
+  //
+  // TODO: This is a hack to be addressed when register allocator supports SIMD types.
+  static vixl::aarch64::PRegister LoopPReg() {
+    return vixl::aarch64::p0;
+  }
 };
 
 class LocationsBuilderARM64Sve : public LocationsBuilderARM64 {
@@ -565,9 +591,7 @@ class CodeGeneratorARM64 : public CodeGenerator {
     return vixl::aarch64::kDRegSizeInBytes;
   }
 
-  size_t GetSIMDRegisterWidth() const override {
-    return vixl::aarch64::kQRegSizeInBytes;
-  }
+  size_t GetSIMDRegisterWidth() const override;
 
   uintptr_t GetAddressOf(HBasicBlock* block) override {
     vixl::aarch64::Label* block_entry_label = GetLabelOf(block);
