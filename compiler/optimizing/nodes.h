@@ -5112,10 +5112,7 @@ class HInvokeVirtual final : public HInvoke {
     }
   }
 
-  bool CanDoImplicitNullCheckOn(HInstruction* obj) const override {
-    // TODO: Add implicit null checks in intrinsics.
-    return (obj == InputAt(0)) && !IsIntrinsic();
-  }
+  bool CanDoImplicitNullCheckOn(HInstruction* obj) const override;
 
   uint32_t GetVTableIndex() const { return vtable_index_; }
 
@@ -8256,7 +8253,7 @@ class HParallelMove final : public HExpression<0> {
         DCHECK(!destination.OverlapsWith(move.GetDestination()))
             << "Overlapped destination for two moves in a parallel move: "
             << move.GetSource() << " ==> " << move.GetDestination() << " and "
-            << source << " ==> " << destination << " for " << *instruction;
+            << source << " ==> " << destination << " for " << SafePrint(instruction);
       }
     }
     moves_.emplace_back(source, destination, type, instruction);

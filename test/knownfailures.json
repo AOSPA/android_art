@@ -1010,6 +1010,7 @@
           "801-VoidCheckCast",
           "802-deoptimization",
           "804-class-extends-itself",
+          "816-illegal-new-array",
           "900-hello-plugin",
           "901-hello-ti-agent",
           "903-hello-tagging",
@@ -1351,6 +1352,11 @@
         "variant": "jvm",
         "bug": "b/154802847",
         "description": ["Failing on RI. Needs further investigating."]
+    },
+    {
+        "tests": ["122-npe", "160-read-barrier-stress"],
+        "variant": "jvm",
+        "description": ["Reference.refersTo() not supported on old version of RI."]
     },
     {
         "tests": ["2232-write-metrics-to-log"],

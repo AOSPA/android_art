@@ -397,7 +397,7 @@ genrule {
     cmd: "cp -f \$(in) \$(out)",
 }
 EOF
-done <<< $(ls -1 $tests_dir | grep -E '^[0-9]{3,}-')
+done <<< $(ls -1 $tests_dir | LC_ALL=C sort | grep -E '^[0-9]{3,}-')
 
 handled_tests_percentage=$((${#handled_tests[@]} * 100 / num_tests))
 
@@ -415,6 +415,16 @@ cat >TEST_MAPPING <<EOF
 {
 EOF
 
+# Mainline presubmits.
+# TODO(rpl): Progressively add more tests to this test group.
+cat >>TEST_MAPPING <<EOF
+  "mainline-presubmit": [
+    {
+      "name": "art-run-test-001-HelloWorld[com.google.android.art.apex]"
+    }
+  ],
+EOF
+
 # Presubmits.
 cat >>TEST_MAPPING <<EOF
   "presubmit": [
@@ -423,6 +433,9 @@ cat >>TEST_MAPPING <<EOF
     },
     {
       "name": "BootImageProfileTest"
+    },
+    {
+      "name": "ArtServiceTests"
     },
     // ART gtests.
     {
