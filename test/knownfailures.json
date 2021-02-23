@@ -42,7 +42,6 @@
     },
     {
         "tests": ["002-sleep",
-                  "053-wait-some",
                   "055-enum-performance",
                   "133-static-invoke-super"],
         "description": ["Tests that are timing sensitive and flaky on heavily",
@@ -1011,6 +1010,7 @@
           "802-deoptimization",
           "804-class-extends-itself",
           "816-illegal-new-array",
+          "819-verification-runtime",
           "900-hello-plugin",
           "901-hello-ti-agent",
           "903-hello-tagging",
@@ -1367,5 +1367,18 @@
         "tests": ["2232-write-metrics-to-log"],
         "variant": "target",
         "description": ["Checks LOG_STREAM output, which cannot be captured on target."]
+    },
+    {
+        "tests": ["053-wait-some"],
+        "env_vars": {"ART_TEST_DEBUG_GC": "true"},
+        "bug": "b/175435088",
+        "description": ["Test is time-sensitive and fails on debug-gc configuration."]
+    },
+    {
+        "tests": ["053-wait-some"],
+        "variant": "interp-ac",
+        "bug": "b/175435088",
+        "description": ["Test is time-sensitive and fails on interpreter-access-checks",
+                        "configuration."]
     }
 ]
