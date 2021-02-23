@@ -1374,5 +1374,10 @@
         "variant": "gcstress & debuggable & debug & host",
         "bug": "b/149708943",
         "description": ["Timeouts."]
+    },
+    {
+        "tests": ["821-madvise-willneed"],
+        "variant": "jvm",
+        "description": ["Adding custom madvise flags. Not to be tested on default jvm"]
     }
 ]
