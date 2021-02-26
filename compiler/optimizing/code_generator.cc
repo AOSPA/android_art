@@ -38,6 +38,7 @@
 #include "base/casts.h"
 #include "base/leb128.h"
 #include "class_linker.h"
+#include "class_root-inl.h"
 #include "compiled_method.h"
 #include "dex/bytecode_utils.h"
 #include "dex/code_item_accessors-inl.h"
@@ -932,6 +933,12 @@ uint32_t CodeGenerator::GetBootImageOffset(HInvoke* invoke) {
   return GetBootImageOffsetImpl(method, ImageHeader::kSectionArtMethods);
 }
 
+// NO_THREAD_SAFETY_ANALYSIS: Avoid taking the mutator lock, boot image objects are non-moveable.
+uint32_t CodeGenerator::GetBootImageOffset(ClassRoot class_root) NO_THREAD_SAFETY_ANALYSIS {
+  ObjPtr<mirror::Class> klass = GetClassRoot<kWithoutReadBarrier>(class_root);
+  return GetBootImageOffsetImpl(klass.Ptr(), ImageHeader::kSectionObjects);
+}
+
 // NO_THREAD_SAFETY_ANALYSIS: Avoid taking the mutator lock, boot image classes are non-moveable.
 uint32_t CodeGenerator::GetBootImageOffsetOfIntrinsicDeclaringClass(HInvoke* invoke)
     NO_THREAD_SAFETY_ANALYSIS {
@@ -1695,6 +1702,7 @@ void CodeGenerator::ValidateInvokeRuntimeWithoutRecordingPcInfo(HInstruction* in
   // PC-related information.
   DCHECK(kUseBakerReadBarrier);
   DCHECK(instruction->IsInstanceFieldGet() ||
+         instruction->IsPredicatedInstanceFieldGet() ||
          instruction->IsStaticFieldGet() ||
          instruction->IsArrayGet() ||
          instruction->IsArraySet() ||
