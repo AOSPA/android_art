@@ -19,11 +19,11 @@
 #include "android-base/stringprintf.h"
 
 #include "art_method-inl.h"
+#include "base/mem_map.h"
 #include "common_runtime_test.h"
 #include "indirect_reference_table.h"
 #include "java_vm_ext.h"
 #include "jni_env_ext.h"
-#include "mem_map.h"
 #include "mirror/string-inl.h"
 #include "nativehelper/scoped_local_ref.h"
 #include "scoped_thread_state_change-inl.h"
@@ -1554,18 +1554,13 @@ TEST_F(JniInternalTest, NewStringUTF) {
 TEST_F(JniInternalTest, NewStringUTF_Validation) {
   // For the following tests, allocate two pages, one R/W and the next inaccessible.
   std::string error_msg;
-  std::unique_ptr<MemMap> head_map(MemMap::MapAnonymous("head",
-                                                        /*addr=*/ nullptr,
-                                                        2 * kPageSize,
-                                                        PROT_READ | PROT_WRITE,
-                                                        /*low_4gb=*/ false,
-                                                        /*reuse=*/ false,
-                                                        &error_msg));
-  ASSERT_TRUE(head_map != nullptr) << error_msg;
-  std::unique_ptr<MemMap> tail_map(
-      head_map->RemapAtEnd(head_map->Begin() + kPageSize, "tail", PROT_NONE, &error_msg));
-  ASSERT_TRUE(tail_map != nullptr) << error_msg;
-  char* utf_src = reinterpret_cast<char*>(head_map->Begin());
+  MemMap head_map = MemMap::MapAnonymous(
+      "head", 2 * kPageSize, PROT_READ | PROT_WRITE, /*low_4gb=*/ false, &error_msg);
+  ASSERT_TRUE(head_map.IsValid()) << error_msg;
+  MemMap tail_map = head_map.RemapAtEnd(
+      head_map.Begin() + kPageSize, "tail", PROT_NONE, &error_msg);
+  ASSERT_TRUE(tail_map.IsValid()) << error_msg;
+  char* utf_src = reinterpret_cast<char*>(head_map.Begin());
 
   // Prepare for checking the `count` field.
   jclass c = env_->FindClass("java/lang/String");

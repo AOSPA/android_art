@@ -1907,8 +1907,7 @@ class JNI {
       soa.Self()->ThrowOutOfMemoryError(error.c_str());
       return nullptr;
     }
-    std::unique_ptr<char[]> replacement_utf;
-    size_t replacement_utf_pos = 0u;
+    std::optional<std::string> replacement_utf;
     size_t utf16_length = VisitModifiedUtf8Chars(
         utf,
         utf8_length,
@@ -1916,8 +1915,8 @@ class JNI {
         /*bad=*/ []() { return true; });  // Abort processing and return 0 for bad characters.
     if (UNLIKELY(utf8_length != 0u && utf16_length == 0u)) {
       // VisitModifiedUtf8Chars() aborted for a bad character.
-      // Report the error to logcat but avoid too much spam.
       android_errorWriteLog(0x534e4554, "172655291");  // Report to SafetyNet.
+      // Report the error to logcat but avoid too much spam.
       static const uint64_t kMinDelay = UINT64_C(10000000000);  // 10s
       static std::atomic<uint64_t> prev_bad_input_time(UINT64_C(0));
       uint64_t prev_time = prev_bad_input_time.load(std::memory_order_relaxed);
@@ -1927,27 +1926,20 @@ class JNI {
         LOG(ERROR) << "Invalid UTF-8 input to JNI::NewStringUTF()";
       }
       // Copy the input to the `replacement_utf` and replace bad characters.
-      replacement_utf.reset(new char[utf8_length + 1u]);
+      replacement_utf.emplace();
+      replacement_utf->reserve(utf8_length);
       utf16_length = VisitModifiedUtf8Chars(
           utf,
           utf8_length,
           /*good=*/ [&](const char* ptr, size_t length) {
-            DCHECK_GE(utf8_length - replacement_utf_pos, length);
-            memcpy(&replacement_utf[replacement_utf_pos], ptr, length);
-            replacement_utf_pos += length;
+            replacement_utf->append(ptr, length);
           },
           /*bad=*/ [&]() {
-            DCHECK_GE(utf8_length - replacement_utf_pos, sizeof(kBadUtf8ReplacementChar) - 1u);
-            memcpy(&replacement_utf[replacement_utf_pos],
-                   kBadUtf8ReplacementChar,
-                   sizeof(kBadUtf8ReplacementChar) - 1u);
-            replacement_utf_pos += sizeof(kBadUtf8ReplacementChar) - 1u;
+            replacement_utf->append(kBadUtf8ReplacementChar, sizeof(kBadUtf8ReplacementChar) - 1u);
             return false;  // Continue processing.
           });
-      DCHECK_LE(replacement_utf_pos, utf8_length);
-      replacement_utf[replacement_utf_pos] = 0;  // Terminating null.
-      utf = replacement_utf.get();
-      utf8_length = replacement_utf_pos;
+      utf = replacement_utf->c_str();
+      utf8_length = replacement_utf->length();
     }
     DCHECK_LE(utf16_length, utf8_length);
     DCHECK_LE(utf8_length, static_cast<uint32_t>(std::numeric_limits<int32_t>::max()));
