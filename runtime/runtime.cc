@@ -287,6 +287,7 @@ Runtime::Runtime()
       safe_mode_(false),
       hidden_api_policy_(hiddenapi::EnforcementPolicy::kDisabled),
       core_platform_api_policy_(hiddenapi::EnforcementPolicy::kDisabled),
+      test_api_policy_(hiddenapi::EnforcementPolicy::kDisabled),
       dedupe_hidden_api_warnings_(true),
       hidden_api_access_event_log_rate_(0),
       dump_native_stack_on_sig_quit_(true),
@@ -1069,6 +1070,14 @@ void Runtime::InitNonZygoteOrPostFork(
   heap_->ResetGcPerformanceInfo();
 
   if (metrics_reporter_ != nullptr) {
+    if (IsSystemServer() && !metrics_reporter_->IsPeriodicReportingEnabled()) {
+      // For system server, we don't get startup metrics, so make sure we have periodic reporting
+      // enabled.
+      //
+      // Note that this does not override the command line argument if one is given.
+      metrics_reporter_->SetReportingPeriod(kOneHourInSeconds);
+    }
+
     metrics::SessionData session_data{metrics::SessionData::CreateDefault()};
     session_data.session_id = GetRandomNumber<int64_t>(0, std::numeric_limits<int64_t>::max());
     // TODO: set session_data.compilation_reason and session_data.compiler_filter
@@ -1735,7 +1744,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // Class-roots are setup, we can now finish initializing the JniIdManager.
   GetJniIdManager()->Init(self);
 
-  InitMetrics();
+  InitMetrics(runtime_options);
 
   // Runtime initialization is largely done now.
   // We load plugins first since that can modify the runtime state slightly.
@@ -1843,10 +1852,14 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   return true;
 }
 
-void Runtime::InitMetrics() {
-  auto metrics_config = metrics::ReportingConfig::FromFlags();
-  if (metrics_config.ReportingEnabled()) {
-    metrics_reporter_ = metrics::MetricsReporter::Create(metrics_config, this);
+void Runtime::InitMetrics(const RuntimeArgumentMap& runtime_options) {
+  auto metrics_config = metrics::ReportingConfig::FromRuntimeArguments(runtime_options);
+  metrics_reporter_ = metrics::MetricsReporter::Create(metrics_config, this);
+}
+
+void Runtime::RequestMetricsReport(bool synchronous) {
+  if (metrics_reporter_) {
+    metrics_reporter_->RequestMetricsReport(synchronous);
   }
 }
 
