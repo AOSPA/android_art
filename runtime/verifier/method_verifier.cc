@@ -3909,9 +3909,8 @@ ArtMethod* MethodVerifier<kVerifierDebug>::ResolveMethodAndCheckAccess(
   ObjPtr<mirror::Class> klass = klass_type.GetClass();
   const RegType& referrer = GetDeclaringClass();
   ClassLinker* class_linker = GetClassLinker();
-  PointerSize pointer_size = class_linker->GetImagePointerSize();
 
-  ArtMethod* res_method = dex_cache_->GetResolvedMethod(dex_method_idx, pointer_size);
+  ArtMethod* res_method = dex_cache_->GetResolvedMethod(dex_method_idx);
   if (res_method == nullptr) {
     res_method = class_linker->FindResolvedMethod(
         klass, dex_cache_.Get(), class_loader_.Get(), dex_method_idx);
@@ -5543,6 +5542,10 @@ std::ostream& MethodVerifier::Fail(VerifyError error, bool pending_exc) {
       case VERIFY_ERROR_ACCESS_METHOD:
       case VERIFY_ERROR_INSTANTIATION:
       case VERIFY_ERROR_CLASS_CHANGE:
+        if (!IsAotMode()) {
+          // If we fail again at runtime, mark that this instruction would throw.
+          flags_.have_pending_runtime_throw_failure_ = true;
+        }
         // How to handle runtime failures for instructions that are not flagged kThrow.
         //
         // The verifier may fail before we touch any instruction, for the signature of a method. So
@@ -5566,7 +5569,14 @@ std::ostream& MethodVerifier::Fail(VerifyError error, bool pending_exc) {
         break;
 
       case VERIFY_ERROR_FORCE_INTERPRETER:
+        // This will be reported to the runtime as a soft failure.
+        break;
+
       case VERIFY_ERROR_LOCKING:
+        if (!IsAotMode()) {
+          // If we fail again at runtime, mark that this instruction would throw.
+          flags_.have_pending_runtime_throw_failure_ = true;
+        }
         // This will be reported to the runtime as a soft failure.
         break;
 

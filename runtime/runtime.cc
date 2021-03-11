@@ -290,7 +290,6 @@ Runtime::Runtime()
       dedupe_hidden_api_warnings_(true),
       hidden_api_access_event_log_rate_(0),
       dump_native_stack_on_sig_quit_(true),
-      pruned_dalvik_cache_(false),
       // Initially assume we perceive jank in case the process state is never updated.
       process_state_(kProcessStateJankPerceptible),
       zygote_no_threads_(false),
@@ -1070,7 +1069,10 @@ void Runtime::InitNonZygoteOrPostFork(
   heap_->ResetGcPerformanceInfo();
 
   if (metrics_reporter_ != nullptr) {
-    metrics_reporter_->MaybeStartBackgroundThread();
+    metrics::SessionData session_data{metrics::SessionData::CreateDefault()};
+    session_data.session_id = GetRandomNumber<int64_t>(0, std::numeric_limits<int64_t>::max());
+    // TODO: set session_data.compilation_reason and session_data.compiler_filter
+    metrics_reporter_->MaybeStartBackgroundThread(session_data);
   }
 
   StartSignalCatcher();
@@ -1445,6 +1447,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   dump_gc_performance_on_shutdown_ = runtime_options.Exists(Opt::DumpGCPerformanceOnShutdown);
 
+  bool has_explicit_jdwp_options = runtime_options.Get(Opt::JdwpOptions) != nullptr;
   jdwp_options_ = runtime_options.GetOrDefault(Opt::JdwpOptions);
   jdwp_provider_ = CanonicalizeJdwpProvider(runtime_options.GetOrDefault(Opt::JdwpProvider),
                                             IsJavaDebuggable());
@@ -1455,11 +1458,13 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
         bool has_transport = jdwp_options_.find("transport") != std::string::npos;
         std::string adb_connection_args =
             std::string("  -XjdwpProvider:adbconnection -XjdwpOptions:") + jdwp_options_;
-        LOG(WARNING) << "Jdwp options given when jdwp is disabled! You probably want to enable "
-                     << "jdwp with one of:" << std::endl
-                     << "  -Xplugin:libopenjdkjvmti" << (kIsDebugBuild ? "d" : "") << ".so "
-                     << "-agentpath:libjdwp.so=" << jdwp_options_ << std::endl
-                     << (has_transport ? "" : adb_connection_args);
+        if (has_explicit_jdwp_options) {
+          LOG(WARNING) << "Jdwp options given when jdwp is disabled! You probably want to enable "
+                      << "jdwp with one of:" << std::endl
+                      << "  -Xplugin:libopenjdkjvmti" << (kIsDebugBuild ? "d" : "") << ".so "
+                      << "-agentpath:libjdwp.so=" << jdwp_options_ << std::endl
+                      << (has_transport ? "" : adb_connection_args);
+        }
       }
       break;
     }
@@ -1730,7 +1735,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // Class-roots are setup, we can now finish initializing the JniIdManager.
   GetJniIdManager()->Init(self);
 
-  InitMetrics(runtime_options);
+  InitMetrics();
 
   // Runtime initialization is largely done now.
   // We load plugins first since that can modify the runtime state slightly.
@@ -1838,8 +1843,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   return true;
 }
 
-void Runtime::InitMetrics(const RuntimeArgumentMap& runtime_options) {
-  auto metrics_config = metrics::ReportingConfig::FromRuntimeArguments(runtime_options);
+void Runtime::InitMetrics() {
+  auto metrics_config = metrics::ReportingConfig::FromFlags();
   if (metrics_config.ReportingEnabled()) {
     metrics_reporter_ = metrics::MetricsReporter::Create(metrics_config, this);
   }

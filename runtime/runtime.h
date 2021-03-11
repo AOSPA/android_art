@@ -806,14 +806,6 @@ class Runtime {
     return dump_native_stack_on_sig_quit_;
   }
 
-  bool GetPrunedDalvikCache() const {
-    return pruned_dalvik_cache_;
-  }
-
-  void SetPrunedDalvikCache(bool pruned) {
-    pruned_dalvik_cache_ = pruned;
-  }
-
   void UpdateProcessState(ProcessState process_state);
 
   // Returns true if we currently care about long mutator pause.
@@ -978,7 +970,7 @@ class Runtime {
       SHARED_TRYLOCK_FUNCTION(true, Locks::mutator_lock_);
   void InitNativeMethods() REQUIRES(!Locks::mutator_lock_);
   void RegisterRuntimeNativeMethods(JNIEnv* env);
-  void InitMetrics(const RuntimeArgumentMap& runtime_options);
+  void InitMetrics();
 
   void StartDaemonThreads();
   void StartSignalCatcher();
@@ -1259,9 +1251,6 @@ class Runtime {
 
   // Whether threads should dump their native stack on SIGQUIT.
   bool dump_native_stack_on_sig_quit_;
-
-  // Whether the dalvik cache was pruned when initializing the runtime.
-  bool pruned_dalvik_cache_;
 
   // Whether or not we currently care about pause times.
   ProcessState process_state_;
