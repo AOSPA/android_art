@@ -17,6 +17,7 @@
 #include "code_generator_arm64.h"
 
 #include "arch/arm64/instruction_set_features_arm64.h"
+#include "base/bit_utils_iterator.h"
 #include "mirror/array-inl.h"
 #include "mirror/string.h"
 
@@ -25,8 +26,6 @@ using namespace vixl::aarch64;  // NOLINT(build/namespaces)
 namespace art {
 namespace arm64 {
 
-using helpers::ARM64EncodableConstantOrRegister;
-using helpers::Arm64CanEncodeConstantAsImmediate;
 using helpers::DRegisterFrom;
 using helpers::HeapOperand;
 using helpers::InputRegisterAt;
@@ -39,6 +38,38 @@ using helpers::VRegisterFrom;
 using helpers::XRegisterFrom;
 
 #define __ GetVIXLAssembler()->
+
+// Returns whether the value of the constant can be directly encoded into the instruction as
+// immediate.
+inline bool NEONCanEncodeConstantAsImmediate(HConstant* constant, HInstruction* instr) {
+  // TODO: Improve this when IsSIMDConstantEncodable method is implemented in VIXL.
+  if (instr->IsVecReplicateScalar()) {
+    if (constant->IsLongConstant()) {
+      return false;
+    } else if (constant->IsFloatConstant()) {
+      return vixl::aarch64::Assembler::IsImmFP32(constant->AsFloatConstant()->GetValue());
+    } else if (constant->IsDoubleConstant()) {
+      return vixl::aarch64::Assembler::IsImmFP64(constant->AsDoubleConstant()->GetValue());
+    }
+    int64_t value = CodeGenerator::GetInt64ValueOf(constant);
+    return IsUint<8>(value);
+  }
+  return false;
+}
+
+// Returns
+//  - constant location - if 'constant' is an actual constant and its value can be
+//    encoded into the instruction.
+//  - register location otherwise.
+inline Location NEONEncodableConstantOrRegister(HInstruction* constant,
+                                                HInstruction* instr) {
+  if (constant->IsConstant()
+      && NEONCanEncodeConstantAsImmediate(constant->AsConstant(), instr)) {
+    return Location::ConstantLocation(constant->AsConstant());
+  }
+
+  return Location::RequiresRegister();
+}
 
 // Returns whether dot product instructions should be emitted.
 static bool ShouldEmitDotProductInstructions(const CodeGeneratorARM64* codegen_) {
@@ -56,13 +87,13 @@ void LocationsBuilderARM64Neon::VisitVecReplicateScalar(HVecReplicateScalar* ins
     case DataType::Type::kInt16:
     case DataType::Type::kInt32:
     case DataType::Type::kInt64:
-      locations->SetInAt(0, ARM64EncodableConstantOrRegister(input, instruction));
+      locations->SetInAt(0, NEONEncodableConstantOrRegister(input, instruction));
       locations->SetOut(Location::RequiresFpuRegister());
       break;
     case DataType::Type::kFloat32:
     case DataType::Type::kFloat64:
       if (input->IsConstant() &&
-          Arm64CanEncodeConstantAsImmediate(input->AsConstant(), instruction)) {
+          NEONCanEncodeConstantAsImmediate(input->AsConstant(), instruction)) {
         locations->SetInAt(0, Location::ConstantLocation(input->AsConstant()));
         locations->SetOut(Location::RequiresFpuRegister());
       } else {
@@ -1418,7 +1449,7 @@ void InstructionCodeGeneratorARM64Neon::VisitVecLoad(HVecLoad* instruction) {
         temps.Release(length);  // no longer needed
         // Zero extend 8 compressed bytes into 8 chars.
         __ Ldr(DRegisterFrom(locations->Out()).V8B(),
-               VecNeonAddress(instruction, &temps, 1, /*is_string_char_at*/ true, &scratch));
+               VecNEONAddress(instruction, &temps, 1, /*is_string_char_at*/ true, &scratch));
         __ Uxtl(reg.V8H(), reg.V8B());
         __ B(&done);
         if (scratch.IsValid()) {
@@ -1427,7 +1458,7 @@ void InstructionCodeGeneratorARM64Neon::VisitVecLoad(HVecLoad* instruction) {
         // Load 8 direct uncompressed chars.
         __ Bind(&uncompressed_load);
         __ Ldr(reg,
-               VecNeonAddress(instruction, &temps, size, /*is_string_char_at*/ true, &scratch));
+               VecNEONAddress(instruction, &temps, size, /*is_string_char_at*/ true, &scratch));
         __ Bind(&done);
         return;
       }
@@ -1442,7 +1473,7 @@ void InstructionCodeGeneratorARM64Neon::VisitVecLoad(HVecLoad* instruction) {
       DCHECK_LE(2u, instruction->GetVectorLength());
       DCHECK_LE(instruction->GetVectorLength(), 16u);
       __ Ldr(reg,
-             VecNeonAddress(instruction, &temps, size, instruction->IsStringCharAt(), &scratch));
+             VecNEONAddress(instruction, &temps, size, instruction->IsStringCharAt(), &scratch));
       break;
     default:
       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
@@ -1474,7 +1505,7 @@ void InstructionCodeGeneratorARM64Neon::VisitVecStore(HVecStore* instruction) {
       DCHECK_LE(2u, instruction->GetVectorLength());
       DCHECK_LE(instruction->GetVectorLength(), 16u);
       __ Str(reg,
-             VecNeonAddress(instruction, &temps, size, /*is_string_char_at*/ false, &scratch));
+             VecNEONAddress(instruction, &temps, size, /*is_string_char_at*/ false, &scratch));
       break;
     default:
       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
@@ -1483,13 +1514,13 @@ void InstructionCodeGeneratorARM64Neon::VisitVecStore(HVecStore* instruction) {
 }
 
 void LocationsBuilderARM64Neon::VisitVecPredSetAll(HVecPredSetAll* instruction) {
-  LOG(FATAL) << "No SIMD for " << instruction->GetId();
-  UNREACHABLE();
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(instruction);
+  DCHECK(instruction->InputAt(0)->IsIntConstant());
+  locations->SetInAt(0, Location::NoLocation());
+  locations->SetOut(Location::NoLocation());
 }
 
-void InstructionCodeGeneratorARM64Neon::VisitVecPredSetAll(HVecPredSetAll* instruction) {
-  LOG(FATAL) << "No SIMD for " << instruction->GetId();
-  UNREACHABLE();
+void InstructionCodeGeneratorARM64Neon::VisitVecPredSetAll(HVecPredSetAll*) {
 }
 
 void LocationsBuilderARM64Neon::VisitVecPredWhile(HVecPredWhile* instruction) {
@@ -1558,6 +1589,64 @@ void InstructionCodeGeneratorARM64Neon::MoveToSIMDStackSlot(Location destination
       __ Str(temp, StackOperandFrom(destination));
     }
   }
+}
+
+// Calculate memory accessing operand for save/restore live registers.
+template <bool is_save>
+void SaveRestoreLiveRegistersHelperNeonImpl(CodeGeneratorARM64* codegen,
+                                            LocationSummary* locations,
+                                            int64_t spill_offset) {
+  const uint32_t core_spills = codegen->GetSlowPathSpills(locations, /* core_registers= */ true);
+  const uint32_t fp_spills = codegen->GetSlowPathSpills(locations, /* core_registers= */ false);
+  DCHECK(helpers::ArtVixlRegCodeCoherentForRegSet(core_spills,
+                                                  codegen->GetNumberOfCoreRegisters(),
+                                                  fp_spills,
+                                                  codegen->GetNumberOfFloatingPointRegisters()));
+
+  CPURegList core_list = CPURegList(CPURegister::kRegister, kXRegSize, core_spills);
+  const unsigned v_reg_size_in_bits = codegen->GetSlowPathFPWidth() * 8;
+  DCHECK_LE(codegen->GetSIMDRegisterWidth(), kQRegSizeInBytes);
+  CPURegList fp_list = CPURegList(CPURegister::kVRegister, v_reg_size_in_bits, fp_spills);
+
+  MacroAssembler* masm = codegen->GetVIXLAssembler();
+  UseScratchRegisterScope temps(masm);
+
+  Register base = masm->StackPointer();
+  int64_t core_spill_size = core_list.GetTotalSizeInBytes();
+  int64_t fp_spill_size = fp_list.GetTotalSizeInBytes();
+  int64_t reg_size = kXRegSizeInBytes;
+  int64_t max_ls_pair_offset = spill_offset + core_spill_size + fp_spill_size - 2 * reg_size;
+  uint32_t ls_access_size = WhichPowerOf2(reg_size);
+  if (((core_list.GetCount() > 1) || (fp_list.GetCount() > 1)) &&
+      !masm->IsImmLSPair(max_ls_pair_offset, ls_access_size)) {
+    // If the offset does not fit in the instruction's immediate field, use an alternate register
+    // to compute the base address(float point registers spill base address).
+    Register new_base = temps.AcquireSameSizeAs(base);
+    masm->Add(new_base, base, Operand(spill_offset + core_spill_size));
+    base = new_base;
+    spill_offset = -core_spill_size;
+    int64_t new_max_ls_pair_offset = fp_spill_size - 2 * reg_size;
+    DCHECK(masm->IsImmLSPair(spill_offset, ls_access_size));
+    DCHECK(masm->IsImmLSPair(new_max_ls_pair_offset, ls_access_size));
+  }
+
+  if (is_save) {
+    masm->StoreCPURegList(core_list, MemOperand(base, spill_offset));
+    masm->StoreCPURegList(fp_list, MemOperand(base, spill_offset + core_spill_size));
+  } else {
+    masm->LoadCPURegList(core_list, MemOperand(base, spill_offset));
+    masm->LoadCPURegList(fp_list, MemOperand(base, spill_offset + core_spill_size));
+  }
+}
+
+void InstructionCodeGeneratorARM64Neon::SaveLiveRegistersHelper(LocationSummary* locations,
+                                                                int64_t spill_offset) {
+  SaveRestoreLiveRegistersHelperNeonImpl</* is_save= */ true>(codegen_, locations, spill_offset);
+}
+
+void InstructionCodeGeneratorARM64Neon::RestoreLiveRegistersHelper(LocationSummary* locations,
+                                                                   int64_t spill_offset) {
+  SaveRestoreLiveRegistersHelperNeonImpl</* is_save= */ false>(codegen_, locations, spill_offset);
 }
 
 #undef __

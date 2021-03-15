@@ -44,7 +44,7 @@ RUNTIME_OPTIONS_KEY (std::string,         ClassPath)
 RUNTIME_OPTIONS_KEY (std::string,         Image)
 RUNTIME_OPTIONS_KEY (Unit,                CheckJni)
 RUNTIME_OPTIONS_KEY (Unit,                JniOptsForceCopy)
-RUNTIME_OPTIONS_KEY (std::string,         JdwpOptions, "")
+RUNTIME_OPTIONS_KEY (std::string,         JdwpOptions,                    "suspend=n,server=y")
 RUNTIME_OPTIONS_KEY (JdwpProvider,        JdwpProvider,                   JdwpProvider::kUnset)
 RUNTIME_OPTIONS_KEY (MemoryKiB,           MemoryMaximumSize,              gc::Heap::kDefaultMaximumSize)  // -Xmx
 RUNTIME_OPTIONS_KEY (MemoryKiB,           MemoryInitialSize,              gc::Heap::kDefaultInitialSize)  // -Xms
@@ -182,6 +182,9 @@ RUNTIME_OPTIONS_KEY (bool,                VerifierMissingKThrowFatal,     true)
 //
 // This is set to true in frameworks/base/core/jni/AndroidRuntime.cpp.
 RUNTIME_OPTIONS_KEY (bool,                PerfettoHprof,                  false)
+
+// This is to enable/disable Perfetto Java Heap Stack Profiling
+RUNTIME_OPTIONS_KEY (bool,                PerfettoJavaHeapStackProf,      false)
 
 // Whether to dump ART metrics to logcat
 RUNTIME_OPTIONS_KEY (Unit,                WriteMetricsToLog)

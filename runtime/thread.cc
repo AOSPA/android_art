@@ -1852,8 +1852,8 @@ void Thread::DumpState(std::ostream& os, const Thread* thread, pid_t tid) {
   } else if (thread != nullptr) {
     priority = thread->GetNativePriority();
   } else {
-    PaletteStatus status = PaletteSchedGetPriority(tid, &priority);
-    CHECK(status == PaletteStatus::kOkay || status == PaletteStatus::kCheckErrno);
+    palette_status_t status = PaletteSchedGetPriority(tid, &priority);
+    CHECK(status == PALETTE_STATUS_OK || status == PALETTE_STATUS_CHECK_ERRNO);
   }
 
   std::string scheduler_group_name(GetSchedulerGroupName(tid));
@@ -4154,6 +4154,15 @@ void Thread::SetTlab(uint8_t* start, uint8_t* end, uint8_t* limit) {
 }
 
 void Thread::ResetTlab() {
+  gc::Heap* const heap = Runtime::Current()->GetHeap();
+  if (heap->GetHeapSampler().IsEnabled()) {
+    // Note: We always ResetTlab before SetTlab, therefore we can do the sample
+    // offset adjustment here.
+    heap->AdjustSampleOffset(GetTlabPosOffset());
+    VLOG(heap) << "JHP: ResetTlab, Tid: " << GetTid()
+               << " adjustment = "
+               << (tlsPtr_.thread_local_pos - tlsPtr_.thread_local_start);
+  }
   SetTlab(nullptr, nullptr, nullptr);
 }
 
@@ -4314,14 +4323,14 @@ void Thread::ReleaseLongJumpContextInternal() {
 }
 
 void Thread::SetNativePriority(int new_priority) {
-  PaletteStatus status = PaletteSchedSetPriority(GetTid(), new_priority);
-  CHECK(status == PaletteStatus::kOkay || status == PaletteStatus::kCheckErrno);
+  palette_status_t status = PaletteSchedSetPriority(GetTid(), new_priority);
+  CHECK(status == PALETTE_STATUS_OK || status == PALETTE_STATUS_CHECK_ERRNO);
 }
 
 int Thread::GetNativePriority() const {
   int priority = 0;
-  PaletteStatus status = PaletteSchedGetPriority(GetTid(), &priority);
-  CHECK(status == PaletteStatus::kOkay || status == PaletteStatus::kCheckErrno);
+  palette_status_t status = PaletteSchedGetPriority(GetTid(), &priority);
+  CHECK(status == PALETTE_STATUS_OK || status == PALETTE_STATUS_CHECK_ERRNO);
   return priority;
 }
 
