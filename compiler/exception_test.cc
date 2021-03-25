@@ -81,7 +81,7 @@ class ExceptionTest : public CommonRuntimeTest {
     stack_maps.BeginMethod(4 * sizeof(void*), 0u, 0u, 0u);
     stack_maps.BeginStackMapEntry(kDexPc, native_pc_offset);
     stack_maps.EndStackMapEntry();
-    stack_maps.EndMethod();
+    stack_maps.EndMethod(code_size);
     ScopedArenaVector<uint8_t> stack_map = stack_maps.Encode();
 
     const size_t stack_maps_size = stack_map.size();
@@ -94,7 +94,7 @@ class ExceptionTest : public CommonRuntimeTest {
       AlignUp(&fake_header_code_and_maps_[stack_maps_size + header_size], code_alignment);
 
     memcpy(&fake_header_code_and_maps_[0], stack_map.data(), stack_maps_size);
-    OatQuickMethodHeader method_header(code_ptr - fake_header_code_and_maps_.data(), code_size);
+    OatQuickMethodHeader method_header(code_ptr - fake_header_code_and_maps_.data());
     static_assert(std::is_trivially_copyable<OatQuickMethodHeader>::value, "Cannot use memcpy");
     memcpy(code_ptr - header_size, &method_header, header_size);
     memcpy(code_ptr, fake_code_.data(), fake_code_.size());

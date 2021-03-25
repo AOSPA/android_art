@@ -845,83 +845,77 @@ void ArmVIXLJNIMacroAssembler::Copy(FrameOffset dst ATTRIBUTE_UNUSED,
   UNIMPLEMENTED(FATAL);
 }
 
-void ArmVIXLJNIMacroAssembler::CreateHandleScopeEntry(ManagedRegister mout_reg,
-                                                      FrameOffset handle_scope_offset,
-                                                      ManagedRegister min_reg,
-                                                      bool null_allowed) {
+void ArmVIXLJNIMacroAssembler::CreateJObject(ManagedRegister mout_reg,
+                                             FrameOffset spilled_reference_offset,
+                                             ManagedRegister min_reg,
+                                             bool null_allowed) {
   vixl::aarch32::Register out_reg = AsVIXLRegister(mout_reg.AsArm());
   vixl::aarch32::Register in_reg =
       min_reg.AsArm().IsNoRegister() ? vixl::aarch32::Register() : AsVIXLRegister(min_reg.AsArm());
   UseScratchRegisterScope temps(asm_.GetVIXLAssembler());
   temps.Exclude(out_reg);
   if (null_allowed) {
-    // Null values get a handle scope entry value of 0.  Otherwise, the handle scope entry is
-    // the address in the handle scope holding the reference.
-    // e.g. out_reg = (handle == 0) ? 0 : (SP+handle_offset)
+    // Null values get a jobject value null. Otherwise, the jobject is
+    // the address of the spilled reference.
+    // e.g. out_reg = (handle == 0) ? 0 : (SP+spilled_reference_offset)
     if (!in_reg.IsValid()) {
-      asm_.LoadFromOffset(kLoadWord, out_reg, sp, handle_scope_offset.Int32Value());
+      asm_.LoadFromOffset(kLoadWord, out_reg, sp, spilled_reference_offset.Int32Value());
       in_reg = out_reg;
     }
 
     temps.Exclude(in_reg);
     ___ Cmp(in_reg, 0);
 
-    if (asm_.ShifterOperandCanHold(ADD, handle_scope_offset.Int32Value())) {
+    if (asm_.ShifterOperandCanHold(ADD, spilled_reference_offset.Int32Value())) {
       if (!out_reg.Is(in_reg)) {
         ExactAssemblyScope guard(asm_.GetVIXLAssembler(),
                                  3 * vixl32::kMaxInstructionSizeInBytes,
                                  CodeBufferCheckScope::kMaximumSize);
         ___ it(eq, 0xc);
         ___ mov(eq, out_reg, 0);
-        asm_.AddConstantInIt(out_reg, sp, handle_scope_offset.Int32Value(), ne);
+        asm_.AddConstantInIt(out_reg, sp, spilled_reference_offset.Int32Value(), ne);
       } else {
         ExactAssemblyScope guard(asm_.GetVIXLAssembler(),
                                  2 * vixl32::kMaxInstructionSizeInBytes,
                                  CodeBufferCheckScope::kMaximumSize);
         ___ it(ne, 0x8);
-        asm_.AddConstantInIt(out_reg, sp, handle_scope_offset.Int32Value(), ne);
+        asm_.AddConstantInIt(out_reg, sp, spilled_reference_offset.Int32Value(), ne);
       }
     } else {
       // TODO: Implement this (old arm assembler would have crashed here).
       UNIMPLEMENTED(FATAL);
     }
   } else {
-    asm_.AddConstant(out_reg, sp, handle_scope_offset.Int32Value());
+    asm_.AddConstant(out_reg, sp, spilled_reference_offset.Int32Value());
   }
 }
 
-void ArmVIXLJNIMacroAssembler::CreateHandleScopeEntry(FrameOffset out_off,
-                                                      FrameOffset handle_scope_offset,
-                                                      bool null_allowed) {
+void ArmVIXLJNIMacroAssembler::CreateJObject(FrameOffset out_off,
+                                             FrameOffset spilled_reference_offset,
+                                             bool null_allowed) {
   UseScratchRegisterScope temps(asm_.GetVIXLAssembler());
   vixl32::Register scratch = temps.Acquire();
   if (null_allowed) {
-    asm_.LoadFromOffset(kLoadWord, scratch, sp, handle_scope_offset.Int32Value());
-    // Null values get a handle scope entry value of 0.  Otherwise, the handle scope entry is
-    // the address in the handle scope holding the reference.
-    // e.g. scratch = (scratch == 0) ? 0 : (SP+handle_scope_offset)
+    asm_.LoadFromOffset(kLoadWord, scratch, sp, spilled_reference_offset.Int32Value());
+    // Null values get a jobject value null. Otherwise, the jobject is
+    // the address of the spilled reference.
+    // e.g. scratch = (scratch == 0) ? 0 : (SP+spilled_reference_offset)
     ___ Cmp(scratch, 0);
 
-    if (asm_.ShifterOperandCanHold(ADD, handle_scope_offset.Int32Value())) {
+    if (asm_.ShifterOperandCanHold(ADD, spilled_reference_offset.Int32Value())) {
       ExactAssemblyScope guard(asm_.GetVIXLAssembler(),
                                2 * vixl32::kMaxInstructionSizeInBytes,
                                CodeBufferCheckScope::kMaximumSize);
       ___ it(ne, 0x8);
-      asm_.AddConstantInIt(scratch, sp, handle_scope_offset.Int32Value(), ne);
+      asm_.AddConstantInIt(scratch, sp, spilled_reference_offset.Int32Value(), ne);
     } else {
       // TODO: Implement this (old arm assembler would have crashed here).
       UNIMPLEMENTED(FATAL);
     }
   } else {
-    asm_.AddConstant(scratch, sp, handle_scope_offset.Int32Value());
+    asm_.AddConstant(scratch, sp, spilled_reference_offset.Int32Value());
   }
   asm_.StoreToOffset(kStoreWord, scratch, sp, out_off.Int32Value());
-}
-
-void ArmVIXLJNIMacroAssembler::LoadReferenceFromHandleScope(
-    ManagedRegister mout_reg ATTRIBUTE_UNUSED,
-    ManagedRegister min_reg ATTRIBUTE_UNUSED) {
-  UNIMPLEMENTED(FATAL);
 }
 
 void ArmVIXLJNIMacroAssembler::VerifyObject(ManagedRegister src ATTRIBUTE_UNUSED,
@@ -1001,15 +995,26 @@ void ArmVIXLJNIMacroAssembler::TestGcMarking(JNIMacroLabel* label, JNIMacroUnary
   CHECK(label != nullptr);
 
   UseScratchRegisterScope temps(asm_.GetVIXLAssembler());
-  vixl32::Register scratch = temps.Acquire();
+  vixl32::Register test_reg;
   DCHECK_EQ(Thread::IsGcMarkingSize(), 4u);
-  ___ Ldr(scratch, MemOperand(tr, Thread::IsGcMarkingOffset<kArmPointerSize>().Int32Value()));
+  DCHECK(kUseReadBarrier);
+  if (kUseBakerReadBarrier) {
+    // TestGcMarking() is used in the JNI stub entry when the marking register is up to date.
+    if (kIsDebugBuild && emit_run_time_checks_in_debug_mode_) {
+      vixl32::Register temp = temps.Acquire();
+      asm_.GenerateMarkingRegisterCheck(temp);
+    }
+    test_reg = mr;
+  } else {
+    test_reg = temps.Acquire();
+    ___ Ldr(test_reg, MemOperand(tr, Thread::IsGcMarkingOffset<kArmPointerSize>().Int32Value()));
+  }
   switch (cond) {
     case JNIMacroUnaryCondition::kZero:
-      ___ CompareAndBranchIfZero(scratch, ArmVIXLJNIMacroLabel::Cast(label)->AsArm());
+      ___ CompareAndBranchIfZero(test_reg, ArmVIXLJNIMacroLabel::Cast(label)->AsArm());
       break;
     case JNIMacroUnaryCondition::kNotZero:
-      ___ CompareAndBranchIfNonZero(scratch, ArmVIXLJNIMacroLabel::Cast(label)->AsArm());
+      ___ CompareAndBranchIfNonZero(test_reg, ArmVIXLJNIMacroLabel::Cast(label)->AsArm());
       break;
     default:
       LOG(FATAL) << "Not implemented unary condition: " << static_cast<int>(cond);

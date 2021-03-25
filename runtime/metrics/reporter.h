@@ -28,15 +28,16 @@ namespace metrics {
 
 // Defines the set of options for how metrics reporting happens.
 struct ReportingConfig {
-  static ReportingConfig FromFlags();
+  static ReportingConfig FromRuntimeArguments(const RuntimeArgumentMap& args);
 
   // Causes metrics to be written to the log, which makes them show up in logcat.
   bool dump_to_logcat{false};
 
+  // Causes metrics to be written to statsd, which causes them to be uploaded to Westworld.
+  bool dump_to_statsd{false};
+
   // If set, provides a file name to enable metrics logging to a file.
   std::optional<std::string> dump_to_file;
-
-  bool dump_to_statsd{false};
 
   // Indicates whether to report the final state of metrics on shutdown.
   //
@@ -61,7 +62,11 @@ class MetricsReporter {
   ~MetricsReporter();
 
   // Creates and runs the background reporting thread.
-  void MaybeStartBackgroundThread(SessionData session_data);
+  //
+  // Does nothing if the reporting config does not have any outputs enabled.
+  //
+  // Returns true if the thread was started, false otherwise.
+  bool MaybeStartBackgroundThread(SessionData session_data);
 
   // Sends a request to the background thread to shutdown.
   void MaybeStopBackgroundThread();
@@ -69,6 +74,19 @@ class MetricsReporter {
   // Causes metrics to be reported so we can see a snapshot of the metrics after app startup
   // completes.
   void NotifyStartupCompleted();
+
+  bool IsPeriodicReportingEnabled() const;
+
+  // Changes the reporting period.
+  //
+  // This function is not thread safe and may only be called before the background reporting thread
+  // has been started.
+  void SetReportingPeriod(unsigned int period_seconds);
+
+  // Requests a metrics report
+  //
+  // If synchronous is set to true, this function will block until the report has completed.
+  void RequestMetricsReport(bool synchronous = true);
 
   static constexpr const char* kBackgroundThreadName = "Metrics Background Reporting Thread";
 
@@ -84,7 +102,7 @@ class MetricsReporter {
   // Outputs the current state of the metrics to the destination set by config_.
   void ReportMetrics() const;
 
-  const ReportingConfig config_;
+  ReportingConfig config_;
   Runtime* runtime_;
   std::vector<std::unique_ptr<MetricsBackend>> backends_;
   std::optional<std::thread> thread_;
@@ -101,7 +119,24 @@ class MetricsReporter {
   // backends.
   struct BeginSessionMessage{ SessionData session_data; };
 
-  MessageQueue<ShutdownRequestedMessage, StartupCompletedMessage, BeginSessionMessage> messages_;
+  // A message requesting an explicit metrics report.
+  //
+  // The synchronous field specifies whether the reporting thread will send a message back when
+  // reporting is complete.
+  struct RequestMetricsReportMessage {
+    bool synchronous;
+  };
+
+  MessageQueue<ShutdownRequestedMessage,
+               StartupCompletedMessage,
+               BeginSessionMessage,
+               RequestMetricsReportMessage>
+      messages_;
+
+  // A message indicating a requested report has been finished.
+  struct ReportCompletedMessage {};
+
+  MessageQueue<ReportCompletedMessage> thread_to_host_messages_;
 };
 
 }  // namespace metrics

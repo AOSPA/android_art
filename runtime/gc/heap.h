@@ -26,6 +26,7 @@
 
 #include "allocator_type.h"
 #include "base/atomic.h"
+#include "base/histogram.h"
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "base/runtime_debug.h"
@@ -835,16 +836,6 @@ class Heap {
   void DumpBlockingGcCountRateHistogram(std::ostream& os) const REQUIRES(!*gc_complete_lock_);
 
   // Perfetto Art Heap Profiler Support.
-  // HeapID is a heap identifier used by the Perfetto API and is used in allocation reporting
-  // to Perfetto API.
-  void SetPerfettoJavaHeapProfHeapID(uint32_t heapid) {
-    perfetto_javaheapprof_heapid_ = heapid;
-  }
-
-  uint32_t GetPerfettoJavaHeapProfHeapID() const {
-    return perfetto_javaheapprof_heapid_;
-  }
-
   HeapSampler& GetHeapSampler() {
     return heap_sampler_;
   }
@@ -1604,7 +1595,6 @@ class Heap {
   size_t alloc_record_depth_;
 
   // Perfetto Java Heap Profiler support.
-  uint32_t perfetto_javaheapprof_heapid_;
   HeapSampler heap_sampler_;
 
   // GC stress related data structures.
