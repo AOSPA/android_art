@@ -31,6 +31,7 @@
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_types.h"
 #include "dex/dex_instruction-inl.h"
+#include "entrypoints/entrypoint_utils-inl.h"
 #include "lock_word-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
@@ -41,6 +42,8 @@
 #include "thread_list.h"
 #include "verifier/method_verifier.h"
 #include "well_known_classes.h"
+
+static_assert(ART_USE_FUTEXES);
 
 namespace art {
 
@@ -215,7 +218,7 @@ bool Monitor::Install(Thread* self) NO_THREAD_SAFETY_ANALYSIS {
   // than what clang thread safety analysis understands.
   // Monitor is not yet public.
   Thread* owner = owner_.load(std::memory_order_relaxed);
-  CHECK(owner == nullptr || owner == self || (ART_USE_FUTEXES && owner->IsSuspended()));
+  CHECK(owner == nullptr || owner == self || owner->IsSuspended());
   // Propagate the lock state.
   LockWord lw(GetObject()->GetLockWord(false));
   switch (lw.GetState()) {
@@ -224,11 +227,7 @@ bool Monitor::Install(Thread* self) NO_THREAD_SAFETY_ANALYSIS {
       CHECK_EQ(owner->GetThreadId(), lw.ThinLockOwner());
       DCHECK_EQ(monitor_lock_.GetExclusiveOwnerTid(), 0) << " my tid = " << SafeGetTid(self);
       lock_count_ = lw.ThinLockCount();
-#if ART_USE_FUTEXES
       monitor_lock_.ExclusiveLockUncontendedFor(owner);
-#else
-      monitor_lock_.ExclusiveLock(owner);
-#endif
       DCHECK_EQ(monitor_lock_.GetExclusiveOwnerTid(), owner->GetTid())
           << " my tid = " << SafeGetTid(self);
       LockWord fat(this, lw.GCState());
@@ -240,13 +239,7 @@ bool Monitor::Install(Thread* self) NO_THREAD_SAFETY_ANALYSIS {
         }
         return true;
       } else {
-#if ART_USE_FUTEXES
         monitor_lock_.ExclusiveUnlockUncontended();
-#else
-        for (uint32_t i = 0; i <= lockCount; ++i) {
-          monitor_lock_.ExclusiveUnlock(owner);
-        }
-#endif
         return false;
       }
     }
@@ -1105,10 +1098,6 @@ ObjPtr<mirror::Object> Monitor::MonitorEnter(Thread* self,
   constexpr size_t kExtraSpinIters = 100;
   StackHandleScope<1> hs(self);
   Handle<mirror::Object> h_obj(hs.NewHandle(obj));
-#if !ART_USE_FUTEXES
-  // In this case we cannot inflate an unowned monitor, so we sometimes defer inflation.
-  bool should_inflate = false;
-#endif
   while (true) {
     // We initially read the lockword with ordinary Java/relaxed semantics. When stronger
     // semantics are needed, we address it below. Since GetLockWord bottoms out to a relaxed load,
@@ -1119,11 +1108,6 @@ ObjPtr<mirror::Object> Monitor::MonitorEnter(Thread* self,
         // No ordering required for preceding lockword read, since we retest.
         LockWord thin_locked(LockWord::FromThinLockId(thread_id, 0, lock_word.GCState()));
         if (h_obj->CasLockWord(lock_word, thin_locked, CASMode::kWeak, std::memory_order_acquire)) {
-#if !ART_USE_FUTEXES
-          if (should_inflate) {
-            InflateThinLocked(self, h_obj, lock_word, 0);
-          }
-#endif
           AtraceMonitorLock(self, h_obj.Get(), /* is_wait= */ false);
           return h_obj.Get();  // Success!
         }
@@ -1177,16 +1161,9 @@ ObjPtr<mirror::Object> Monitor::MonitorEnter(Thread* self,
               sched_yield();
             }
           } else {
-#if ART_USE_FUTEXES
             contention_count = 0;
             // No ordering required for initial lockword read. Install rereads it anyway.
             InflateThinLocked(self, h_obj, lock_word, 0);
-#else
-            // Can't inflate from non-owning thread. Keep waiting. Bad for power, but this code
-            // isn't used on-device.
-            should_inflate = true;
-            usleep(10);
-#endif
           }
         }
         continue;  // Start from the beginning.
@@ -1464,9 +1441,9 @@ void Monitor::VisitLocks(StackVisitor* stack_visitor,
   // TODO: use the JNI implementation's table of explicit MonitorEnter calls and dump those too.
   if (m->IsNative()) {
     if (m->IsSynchronized()) {
-      ObjPtr<mirror::Object> jni_this =
-          stack_visitor->GetCurrentHandleScope(sizeof(void*))->GetReference(0);
-      callback(jni_this, callback_context);
+      Thread* thread = stack_visitor->GetThread();
+      jobject lock = GetGenericJniSynchronizationObject(thread, m);
+      callback(thread->DecodeJObject(lock), callback_context);
     }
     return;
   }

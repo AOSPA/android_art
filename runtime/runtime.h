@@ -41,7 +41,7 @@
 #include "jdwp_provider.h"
 #include "jni/jni_id_manager.h"
 #include "jni_id_type.h"
-#include "metrics_reporter.h"
+#include "metrics/reporter.h"
 #include "obj_ptr.h"
 #include "offsets.h"
 #include "process_state.h"
@@ -603,6 +603,14 @@ class Runtime {
     return core_platform_api_policy_;
   }
 
+  void SetTestApiEnforcementPolicy(hiddenapi::EnforcementPolicy policy) {
+    test_api_policy_ = policy;
+  }
+
+  hiddenapi::EnforcementPolicy GetTestApiEnforcementPolicy() const {
+    return test_api_policy_;
+  }
+
   void SetHiddenApiExemptions(const std::vector<std::string>& exemptions) {
     hidden_api_exemptions_ = exemptions;
   }
@@ -959,6 +967,8 @@ class Runtime {
 
   metrics::ArtMetrics* GetMetrics() { return &metrics_; }
 
+  void RequestMetricsReport(bool synchronous = true);
+
  private:
   static void InitPlatformSignalHandlers();
 
@@ -970,7 +980,7 @@ class Runtime {
       SHARED_TRYLOCK_FUNCTION(true, Locks::mutator_lock_);
   void InitNativeMethods() REQUIRES(!Locks::mutator_lock_);
   void RegisterRuntimeNativeMethods(JNIEnv* env);
-  void InitMetrics();
+  void InitMetrics(const RuntimeArgumentMap& runtime_options);
 
   void StartDaemonThreads();
   void StartSignalCatcher();
@@ -1230,6 +1240,9 @@ class Runtime {
 
   // Whether access checks on core platform API should be performed.
   hiddenapi::EnforcementPolicy core_platform_api_policy_;
+
+  // Whether access checks on test API should be performed.
+  hiddenapi::EnforcementPolicy test_api_policy_;
 
   // List of signature prefixes of methods that have been removed from the blacklist, and treated
   // as if whitelisted.

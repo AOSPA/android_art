@@ -681,8 +681,12 @@ ImageWriter::Bin ImageWriter::AssignImageBinSlot(mirror::Object* object, size_t 
 
       // Move known dirty objects into their own sections. This includes:
       //   - classes with dirty static fields.
-      if (dirty_image_objects_ != nullptr &&
-          dirty_image_objects_->find(klass->PrettyDescriptor()) != dirty_image_objects_->end()) {
+      auto is_dirty = [&](ObjPtr<mirror::Class> k) REQUIRES_SHARED(Locks::mutator_lock_) {
+        std::string temp;
+        std::string_view descriptor = k->GetDescriptor(&temp);
+        return dirty_image_objects_->find(descriptor) != dirty_image_objects_->end();
+      };
+      if (dirty_image_objects_ != nullptr && is_dirty(klass)) {
         bin = Bin::kKnownDirty;
       } else if (klass->GetStatus() == ClassStatus::kVisiblyInitialized) {
         bin = Bin::kClassInitialized;
@@ -1637,7 +1641,8 @@ class ImageWriter::LayoutHelper::CollectClassesVisitor : public ClassVisitor {
       size_t oat_index = pair.second;
       DCHECK(image_writer->image_infos_[oat_index].class_table_.has_value());
       ClassTable::ClassSet& class_table = *image_writer->image_infos_[oat_index].class_table_;
-      bool inserted = class_table.insert(ClassTable::TableSlot(klass)).second;
+      uint32_t hash = ClassTable::TableSlot::HashDescriptor(klass);
+      bool inserted = class_table.InsertWithHash(ClassTable::TableSlot(klass, hash), hash).second;
       DCHECK(inserted) << "Class " << klass->PrettyDescriptor()
           << " (" << klass.Ptr() << ") already inserted";
     }
@@ -1652,7 +1657,8 @@ class ImageWriter::LayoutHelper::CollectClassesVisitor : public ClassVisitor {
         DCHECK(image_info.class_table_.has_value());
         ClassTable::ClassSet& table = *image_info.class_table_;
         for (mirror::Class* klass : boot_image_classes) {
-          bool inserted = table.insert(ClassTable::TableSlot(klass)).second;
+          uint32_t hash = ClassTable::TableSlot::HashDescriptor(klass);
+          bool inserted = table.InsertWithHash(ClassTable::TableSlot(klass, hash), hash).second;
           DCHECK(inserted) << "Boot image class " << klass->PrettyDescriptor()
               << " (" << klass << ") already inserted";
         }

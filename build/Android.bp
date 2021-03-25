@@ -1,3 +1,12 @@
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "art_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["art_license"],
+}
+
 bootstrap_go_package {
     name: "soong-art",
     pkgPath: "android/soong/art",
@@ -273,6 +282,36 @@ art_debug_defaults {
         },
         host: {
             cflags: ["-Wno-frame-larger-than="],
+        },
+    },
+}
+
+soong_config_module_type_import {
+    from: "art/build/SoongConfig.bp",
+    module_types: ["art_module_cc_defaults"],
+}
+
+// Use this to enable a cc_* module only when building ART from sources.
+// TODO(b/172480617): Clean up when sources are gone from the platform tree and
+// we no longer need to support sources present when prebuilts are used.
+art_module_cc_defaults {
+    name: "art_module_source_build_defaults",
+    defaults_visibility: [
+        "//art:__subpackages__",
+        "//libnativehelper:__subpackages__",
+    ],
+
+    enabled: false,
+    soong_config_variables: {
+        source_build: {
+            enabled: true,
+        },
+    },
+    target: {
+        windows: {
+            // Windows is disabled by default, but if we set enabled:true
+            // globally above we need to disable it explicitly.
+            enabled: false,
         },
     },
 }
