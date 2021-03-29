@@ -779,6 +779,7 @@ cc_library_headers {
         "com.android.art",
         "com.android.art.debug",
     ],
+    min_sdk_version: "S",
 }
 
 genrule {
@@ -877,12 +878,9 @@ genrule {
 
 cc_library_static {
     name: "libstatslog_art",
+    defaults: ["art_defaults"],
     generated_sources: ["statslog_art.cpp"],
     generated_headers: ["statslog_art.h"],
-    cflags: [
-        "-Wall",
-        "-Werror",
-    ],
     export_generated_headers: ["statslog_art.h"],
     shared_libs: [
         "liblog",

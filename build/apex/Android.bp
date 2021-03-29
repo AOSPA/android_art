@@ -54,6 +54,7 @@ art_runtime_base_native_shared_libs = [
     "libnativebridge",
     "libnativehelper",
     "libnativeloader",
+    "libsigchain",
     // libadbconnection is internal and loaded with dlopen(), but it cannot use
     // "required" because of cyclic dependency (b/124505714).
     "libadbconnection",
@@ -247,6 +248,7 @@ apex_defaults {
     compile_multilib: "both",
     manifest: "manifest-art.json",
     boot_images: ["art-boot-image"],
+    compat_configs: ["libcore-platform-compat-config"],
     java_libs: libcore_java_libs + art_java_libs,
     native_shared_libs: art_runtime_base_native_shared_libs +
         art_runtime_base_native_device_only_shared_libs +
@@ -279,6 +281,7 @@ apex_defaults {
             enabled: false,
         },
     },
+    min_sdk_version: "S",
 }
 
 // Default values shared by (device) Debug and Testing ART APEXes.
@@ -311,7 +314,6 @@ art_apex {
     name: "com.android.art",
     defaults: ["com.android.art-device-defaults"],
     certificate: ":com.android.art.certificate",
-    updatable: false,
 }
 
 // "Debug" version of the ART APEX module (containing both release and
@@ -321,7 +323,6 @@ art_apex {
     name: "com.android.art.debug",
     defaults: ["com.android.art-devel-defaults"],
     certificate: ":com.android.art.certificate",
-    updatable: false,
 }
 
 // ART gtests with dependencies on internal ART APEX libraries.

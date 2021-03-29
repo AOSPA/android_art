@@ -481,7 +481,6 @@
             "004-StackWalk",
             "064-field-access",
             "083-compiler-regressions",
-            "098-ddmc",
             "107-int-math2",
             "129-ThreadGetId",
             "135-MirandaDispatch",
@@ -816,7 +815,6 @@
           "088-monitor-verification",
           "091-override-package-private-method",
           "097-duplicate-method",
-          "098-ddmc",
           "099-vmdebug",
           "100-reflect2",
           "104-growth-limit",
@@ -850,7 +848,6 @@
           "158-app-image-class-table",
           "159-app-image-fields",
           "161-final-abstract-class",
-          "162-method-resolution",
           "163-app-image-methods",
           "164-resolution-trampoline-dex-cache",
           "167-visit-locks",
@@ -1140,6 +1137,7 @@
                   "811-checker-invoke-super-secondary",
                   "817-hiddenapi",
                   "820-vdex-multidex",
+                  "821-many-args",
                   "999-redefine-hiddenapi",
                   "1000-non-moving-space-stress",
                   "1001-app-image-regions",
@@ -1378,9 +1376,14 @@
     },
     {
         "tests": ["053-wait-some"],
-        "variant": "interp-ac",
+        "variant": "gcstress | interp-ac",
         "bug": "b/175435088",
-        "description": ["Test is time-sensitive and fails on interpreter-access-checks",
-                        "configuration."]
+        "description": ["Test is time-sensitive and fails on gcstress and",
+                        "interpreter-access-checks configurations."]
+    },
+    {
+        "tests": ["821-madvise-willneed"],
+        "variant": "jvm",
+        "description": ["Adding custom madvise flags. Not to be tested on default jvm"]
     }
 ]

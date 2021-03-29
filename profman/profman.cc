@@ -767,11 +767,13 @@ class ProfMan final {
                                  const dex::MethodId& id,
                                  const DexFile* dex_file,
                                  uint16_t dex_method_idx) {
-    auto method_info = profile_info.GetHotMethodInfo(MethodReference(dex_file, dex_method_idx));
-    if (method_info == nullptr || method_info->inline_caches->empty()) {
+    ProfileCompilationInfo::MethodHotness hotness =
+        profile_info.GetMethodHotness(MethodReference(dex_file, dex_method_idx));
+    DCHECK(!hotness.IsHot() || hotness.GetInlineCacheMap() != nullptr);
+    if (!hotness.IsHot() || hotness.GetInlineCacheMap()->empty()) {
       return "";
     }
-    const ProfileCompilationInfo::InlineCacheMap* inline_caches = method_info->inline_caches;
+    const ProfileCompilationInfo::InlineCacheMap* inline_caches = hotness.GetInlineCacheMap();
     struct IcLineInfo {
       bool is_megamorphic_ = false;
       bool is_missing_types_ = false;
@@ -799,14 +801,13 @@ class ProfMan final {
         val->second.is_missing_types_ = true;
       }
       for (auto cls : ic_data.classes) {
-        auto it = std::find_if(dex_files->begin(), dex_files->end(), [&](const auto& d) {
-          return method_info->dex_references[cls.dex_profile_index].MatchesDex(&*d);
-        });
-        if (it == dex_files->end()) {
+        const DexFile* class_dex_file =
+            profile_info.FindDexFileForProfileIndex(cls.dex_profile_index, *dex_files);
+        if (class_dex_file == nullptr) {
           val->second.is_missing_types_ = true;
           continue;
         }
-        val->second.classes_.insert({ it->get(), cls.type_index });
+        val->second.classes_.insert({ class_dex_file, cls.type_index });
       }
     }
     if (ics.empty()) {
@@ -1108,12 +1109,17 @@ class ProfMan final {
   template <typename Visitor>
   void VisitAllInstructions(const TypeReference& class_ref, uint16_t method_idx, Visitor visitor) {
     const DexFile* dex_file = class_ref.dex_file;
-    uint32_t offset =
-        dex_file->FindCodeItemOffset(*dex_file->FindClassDef(class_ref.TypeIndex()), method_idx);
-    for (const DexInstructionPcPair& inst :
-         CodeItemInstructionAccessor(*dex_file, dex_file->GetCodeItem(offset))) {
-      if (!visitor(inst)) {
-        break;
+    const dex::ClassDef* def = dex_file->FindClassDef(class_ref.TypeIndex());
+    if (def == nullptr) {
+      return;
+    }
+    std::optional<uint32_t> offset = dex_file->GetCodeItemOffset(*def, method_idx);
+    if (offset.has_value()) {
+      for (const DexInstructionPcPair& inst :
+          CodeItemInstructionAccessor(*dex_file, dex_file->GetCodeItem(*offset))) {
+        if (!visitor(inst)) {
+          break;
+        }
       }
     }
   }

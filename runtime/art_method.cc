@@ -149,8 +149,6 @@ uint16_t ArtMethod::FindObsoleteDexClassDefIndex() {
 
 void ArtMethod::ThrowInvocationTimeError() {
   DCHECK(!IsInvokable());
-  // NOTE: IsDefaultConflicting must be first since the actual method might or might not be abstract
-  //       due to the way we select it.
   if (IsDefaultConflicting()) {
     ThrowIncompatibleClassChangeErrorForMethodConflict(this);
   } else {
@@ -532,33 +530,6 @@ bool ArtMethod::EqualParameters(Handle<mirror::ObjectArray<mirror::Class>> param
     }
   }
   return true;
-}
-
-ArrayRef<const uint8_t> ArtMethod::GetQuickenedInfo() {
-  const DexFile& dex_file = *GetDexFile();
-  const OatDexFile* oat_dex_file = dex_file.GetOatDexFile();
-  if (oat_dex_file == nullptr) {
-    return ArrayRef<const uint8_t>();
-  }
-  return oat_dex_file->GetQuickenedInfoOf(dex_file, GetDexMethodIndex());
-}
-
-uint16_t ArtMethod::GetIndexFromQuickening(uint32_t dex_pc) {
-  ArrayRef<const uint8_t> data = GetQuickenedInfo();
-  if (data.empty()) {
-    return DexFile::kDexNoIndex16;
-  }
-  QuickenInfoTable table(data);
-  uint32_t quicken_index = 0;
-  for (const DexInstructionPcPair& pair : DexInstructions()) {
-    if (pair.DexPc() == dex_pc) {
-      return table.GetData(quicken_index);
-    }
-    if (QuickenInfoTable::NeedsIndexForInstruction(&pair.Inst())) {
-      ++quicken_index;
-    }
-  }
-  return DexFile::kDexNoIndex16;
 }
 
 const OatQuickMethodHeader* ArtMethod::GetOatQuickMethodHeader(uintptr_t pc) {

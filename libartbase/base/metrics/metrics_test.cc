@@ -90,6 +90,26 @@ TEST_F(MetricsTest, CounterTimerExplicitStartStop) {
   EXPECT_GT(CounterValue(test_counter), 0u);
 }
 
+TEST_F(MetricsTest, AccumulatorMetric) {
+  MetricsAccumulator<DatumId::kClassLoadingTotalTime, uint64_t, std::max> accumulator;
+
+  std::vector<std::thread> threads;
+
+  constexpr uint64_t kMaxValue = 100;
+
+  for (uint64_t i = 0; i <= kMaxValue; i++) {
+    threads.emplace_back(std::thread{[&accumulator, i]() {
+      accumulator.Add(i);
+    }});
+  }
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  EXPECT_EQ(CounterValue(accumulator), kMaxValue);
+}
+
 TEST_F(MetricsTest, DatumName) {
   EXPECT_EQ("ClassVerificationTotalTime", DatumName(DatumId::kClassVerificationTotalTime));
 }
@@ -212,18 +232,57 @@ TEST_F(MetricsTest, StreamBackendDumpAllMetrics) {
 
   metrics.ReportAllMetrics(&backend);
 
-  // Make sure the resulting string lists all the counters.
+  // Make sure the resulting string lists all the metrics.
   const std::string result = backend.GetAndResetBuffer();
-#define COUNTER(name) \
+#define METRIC(name, type, ...) \
   EXPECT_NE(result.find(DatumName(DatumId::k##name)), std::string::npos);
-  ART_COUNTERS(COUNTER);
-#undef COUNTER
+  ART_METRICS(METRIC);
+#undef METRIC
+}
 
-  // Make sure the resulting string lists all the histograms.
-#define HISTOGRAM(name, num_buckets, minimum_value, maximum_value) \
-  EXPECT_NE(result.find(DatumName(DatumId::k##name)), std::string::npos);
-  ART_HISTOGRAMS(HISTOGRAM);
-#undef HISTOGRAM
+TEST_F(MetricsTest, ResetMetrics) {
+  ArtMetrics metrics;
+
+  // Add something to each of the metrics.
+#define METRIC(name, type, ...) metrics.name()->Add(42);
+  ART_METRICS(METRIC)
+#undef METRIC
+
+  class NonZeroBackend : public TestBackendBase {
+   public:
+    void ReportCounter(DatumId, uint64_t value) override {
+      EXPECT_NE(value, 0u);
+    }
+
+    void ReportHistogram(DatumId, int64_t, int64_t, const std::vector<uint32_t>& buckets) override {
+      bool nonzero = false;
+      for (const auto value : buckets) {
+        nonzero |= (value != 0u);
+      }
+      EXPECT_TRUE(nonzero);
+    }
+  } non_zero_backend;
+
+  // Make sure the metrics all have a nonzero value.
+  metrics.ReportAllMetrics(&non_zero_backend);
+
+  // Reset the metrics and make sure they are all zero again
+  metrics.Reset();
+
+  class ZeroBackend : public TestBackendBase {
+   public:
+    void ReportCounter(DatumId, uint64_t value) override {
+      EXPECT_EQ(value, 0u);
+    }
+
+    void ReportHistogram(DatumId, int64_t, int64_t, const std::vector<uint32_t>& buckets) override {
+      for (const auto value : buckets) {
+        EXPECT_EQ(value, 0u);
+      }
+    }
+  } zero_backend;
+
+  metrics.ReportAllMetrics(&zero_backend);
 }
 
 }  // namespace metrics

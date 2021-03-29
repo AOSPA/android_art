@@ -26,6 +26,7 @@ cc_library {
     // Language library.
 
     name: "libartservice",
+    defaults: ["art_defaults"],
     host_supported: true,
     srcs: [
         "service/native/service.cc",
@@ -39,7 +40,6 @@ cc_library {
         "libbase",
     ],
     export_shared_lib_headers: ["libbase"],
-    cflags: ["-Werror"],
 }
 
 java_library {
@@ -55,8 +55,8 @@ java_library {
         "com.android.art",
         "com.android.art.debug",
     ],
-
     sdk_version: "core_platform",
+    min_sdk_version: "31",
 
     srcs: [
         "service/java/com/android/server/art/ArtService.java",
