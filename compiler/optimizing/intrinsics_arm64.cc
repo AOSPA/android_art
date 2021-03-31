@@ -2883,7 +2883,7 @@ void IntrinsicCodeGeneratorARM64::VisitReferenceRefersTo(HInvoke* invoke) {
   uint32_t monitor_offset = mirror::Object::MonitorOffset().Int32Value();
 
   MemOperand field = HeapOperand(obj, referent_offset);
-  codegen_->LoadAcquire(invoke, DataType::Type::kReference, tmp, field, /*needs_null_check=*/ true);
+  codegen_->LoadAcquire(invoke, tmp, field, /*needs_null_check=*/ true);
 
   __ Cmp(tmp, other);
 

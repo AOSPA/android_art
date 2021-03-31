@@ -29,8 +29,7 @@
 namespace art {
 
 const uint8_t ImageHeader::kImageMagic[] = { 'a', 'r', 't', '\n' };
-// Last change: Math.multiplyHigh intrinsic.
-const uint8_t ImageHeader::kImageVersion[] = { '0', '9', '5', '\0' };
+const uint8_t ImageHeader::kImageVersion[] = { '0', '8', '8', '\0' };  // Long.divideUnsigned
 
 ImageHeader::ImageHeader(uint32_t image_reservation_size,
                          uint32_t component_count,
