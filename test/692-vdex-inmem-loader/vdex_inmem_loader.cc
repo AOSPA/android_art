@@ -90,13 +90,11 @@ extern "C" JNIEXPORT bool JNICALL Java_Main_hasVdexFile(JNIEnv*,
         return true;
       });
 
-  uint32_t location_checksum;
   std::string dex_location;
   std::string vdex_filename;
   std::string error_msg;
   return OatFileAssistant::AnonymousDexVdexLocation(dex_headers,
                                                     kRuntimeISA,
-                                                    &location_checksum,
                                                     &dex_location,
                                                     &vdex_filename) &&
          OS::FileExists(vdex_filename.c_str());
@@ -158,7 +156,7 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_areClassesPreverified(JNIEnv*,
 
       ClassStatus oat_file_class_status(ClassStatus::kNotReady);
       bool is_preverified = class_linker->VerifyClassUsingOatFile(
-          *dex_file, h_class.Get(), oat_file_class_status);
+          soa.Self(), *dex_file, h_class, oat_file_class_status);
 
       if (is_first) {
         all_preverified = is_preverified;
