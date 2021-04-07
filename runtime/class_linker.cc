@@ -3842,6 +3842,30 @@ void ClassLinker::LoadMethod(const DexFile& dex_file,
     dst->SetDataPtrSize(nullptr, image_pointer_size_);
     DCHECK_EQ(method.GetCodeItemOffset(), 0u);
   }
+
+  // Set optimization flags related to the shorty.
+  const char* shorty = dst->GetShorty();
+  bool all_parameters_are_reference = true;
+  bool all_parameters_are_reference_or_int = true;
+  bool return_type_is_fp = (shorty[0] == 'F' || shorty[0] == 'D');
+
+  for (size_t i = 1, e = strlen(shorty); i < e; ++i) {
+    if (shorty[i] != 'L') {
+      all_parameters_are_reference = false;
+      if (shorty[i] == 'F' || shorty[i] == 'D' || shorty[i] == 'J') {
+        all_parameters_are_reference_or_int = false;
+        break;
+      }
+    }
+  }
+
+  if (!dst->IsNative() && all_parameters_are_reference) {
+    dst->SetNterpEntryPointFastPathFlag();
+  }
+
+  if (!return_type_is_fp && all_parameters_are_reference_or_int) {
+    dst->SetNterpInvokeFastPathFlag();
+  }
 }
 
 void ClassLinker::AppendToBootClassPath(Thread* self, const DexFile* dex_file) {
@@ -4464,6 +4488,7 @@ void ClassLinker::LookupClasses(const char* descriptor,
 }
 
 bool ClassLinker::AttemptSupertypeVerification(Thread* self,
+                                               verifier::VerifierDeps* verifier_deps,
                                                Handle<mirror::Class> klass,
                                                Handle<mirror::Class> supertype) {
   DCHECK(self != nullptr);
@@ -4471,7 +4496,7 @@ bool ClassLinker::AttemptSupertypeVerification(Thread* self,
   DCHECK(supertype != nullptr);
 
   if (!supertype->IsVerified() && !supertype->IsErroneous()) {
-    VerifyClass(self, supertype);
+    VerifyClass(self, verifier_deps, supertype);
   }
 
   if (supertype->IsVerified()
@@ -4508,8 +4533,10 @@ bool ClassLinker::AttemptSupertypeVerification(Thread* self,
   return false;
 }
 
-verifier::FailureKind ClassLinker::VerifyClass(
-    Thread* self, Handle<mirror::Class> klass, verifier::HardFailLogMode log_level) {
+verifier::FailureKind ClassLinker::VerifyClass(Thread* self,
+                                               verifier::VerifierDeps* verifier_deps,
+                                               Handle<mirror::Class> klass,
+                                               verifier::HardFailLogMode log_level) {
   {
     // TODO: assert that the monitor on the Class is held
     ObjectLock<mirror::Class> lock(self, klass);
@@ -4577,7 +4604,8 @@ verifier::FailureKind ClassLinker::VerifyClass(
   StackHandleScope<2> hs(self);
   MutableHandle<mirror::Class> supertype(hs.NewHandle(klass->GetSuperClass()));
   // If we have a superclass and we get a hard verification failure we can return immediately.
-  if (supertype != nullptr && !AttemptSupertypeVerification(self, klass, supertype)) {
+  if (supertype != nullptr &&
+      !AttemptSupertypeVerification(self, verifier_deps, klass, supertype)) {
     CHECK(self->IsExceptionPending()) << "Verification error should be pending.";
     return verifier::FailureKind::kHardFailure;
   }
@@ -4603,7 +4631,7 @@ verifier::FailureKind ClassLinker::VerifyClass(
       // We only care if we have default interfaces and can skip if we are already verified...
       if (LIKELY(!iface->HasDefaultMethods() || iface->IsVerified())) {
         continue;
-      } else if (UNLIKELY(!AttemptSupertypeVerification(self, klass, iface))) {
+      } else if (UNLIKELY(!AttemptSupertypeVerification(self, verifier_deps, klass, iface))) {
         // We had a hard failure while verifying this interface. Just return immediately.
         CHECK(self->IsExceptionPending()) << "Verification error should be pending.";
         return verifier::FailureKind::kHardFailure;
@@ -4643,7 +4671,7 @@ verifier::FailureKind ClassLinker::VerifyClass(
   std::string error_msg;
   verifier::FailureKind verifier_failure = verifier::FailureKind::kNoFailure;
   if (!preverified) {
-    verifier_failure = PerformClassVerification(self, klass, log_level, &error_msg);
+    verifier_failure = PerformClassVerification(self, verifier_deps, klass, log_level, &error_msg);
   }
 
   // Verification is done, grab the lock again.
@@ -4728,11 +4756,13 @@ verifier::FailureKind ClassLinker::VerifyClass(
 }
 
 verifier::FailureKind ClassLinker::PerformClassVerification(Thread* self,
+                                                            verifier::VerifierDeps* verifier_deps,
                                                             Handle<mirror::Class> klass,
                                                             verifier::HardFailLogMode log_level,
                                                             std::string* error_msg) {
   Runtime* const runtime = Runtime::Current();
   return verifier::ClassVerifier::VerifyClass(self,
+                                              verifier_deps,
                                               klass.Get(),
                                               runtime->GetCompilerCallbacks(),
                                               runtime->IsAotCompiler(),
@@ -5121,9 +5151,9 @@ void ClassLinker::CreateProxyMethod(Handle<mirror::Class> klass, ArtMethod* prot
 
   // Set class to be the concrete proxy class.
   out->SetDeclaringClass(klass.Get());
-  // Clear the abstract, default and conflict flags to ensure that defaults aren't picked in
+  // Clear the abstract and default flags to ensure that defaults aren't picked in
   // preference to the invocation handler.
-  const uint32_t kRemoveFlags = kAccAbstract | kAccDefault | kAccDefaultConflict;
+  const uint32_t kRemoveFlags = kAccAbstract | kAccDefault;
   // Make the method final.
   // Mark kAccCompileDontBother so that we don't take JIT samples for the method. b/62349349
   const uint32_t kAddFlags = kAccFinal | kAccCompileDontBother;
@@ -5233,7 +5263,7 @@ bool ClassLinker::InitializeClass(Thread* self,
         << klass->PrettyClass() << ": state=" << klass->GetStatus();
 
     if (!klass->IsVerified()) {
-      VerifyClass(self, klass);
+      VerifyClass(self, /*verifier_deps= */ nullptr, klass);
       if (!klass->IsVerified()) {
         // We failed to verify, expect either the klass to be erroneous or verification failed at
         // compile time.
@@ -7881,9 +7911,11 @@ void ClassLinker::LinkInterfaceMethodsHelper::ReallocMethods() {
     ArtMethod* mir_method = miranda_methods_[i];
     ArtMethod& new_method = *out;
     new_method.CopyFrom(mir_method, pointer_size);
-    new_method.SetAccessFlags(new_method.GetAccessFlags() | kAccMiranda | kAccCopied);
-    DCHECK_NE(new_method.GetAccessFlags() & kAccAbstract, 0u)
-        << "Miranda method should be abstract!";
+    uint32_t access_flags = new_method.GetAccessFlags();
+    DCHECK_EQ(access_flags & kAccIntrinsic, 0u) << "Miranda method should not be an intrinsic!";
+    DCHECK_EQ(access_flags & kAccDefault, 0u) << "Miranda method should not be a default method!";
+    DCHECK_NE(access_flags & kAccAbstract, 0u) << "Miranda method should be abstract!";
+    new_method.SetAccessFlags(access_flags | kAccCopied);
     move_table_.emplace(mir_method, &new_method);
     // Update the entry in the method array, as the array will be used for future lookups,
     // where thread suspension is allowed.
@@ -7928,17 +7960,20 @@ void ClassLinker::LinkInterfaceMethodsHelper::ReallocMethods() {
       ArtMethod& new_method = *out;
       new_method.CopyFrom(conf_method, pointer_size);
       // This is a type of default method (there are default method impls, just a conflict) so
-      // mark this as a default, non-abstract method, since thats what it is. Also clear the
-      // kAccSkipAccessChecks bit since this class hasn't been verified yet it shouldn't have
-      // methods that are skipping access checks.
-      // Also clear potential kAccSingleImplementation to avoid CHA trying to inline
-      // the default method.
-      DCHECK_EQ(new_method.GetAccessFlags() & kAccNative, 0u);
-      constexpr uint32_t kSetFlags = kAccDefault | kAccDefaultConflict | kAccCopied;
-      constexpr uint32_t kMaskFlags =
-          ~(kAccAbstract | kAccSkipAccessChecks | kAccSingleImplementation);
-      new_method.SetAccessFlags((new_method.GetAccessFlags() | kSetFlags) & kMaskFlags);
+      // mark this as a default. We use the `kAccAbstract` flag to distinguish it from invokable
+      // copied default method without using a separate access flag but the default conflicting
+      // method is technically not abstract and ArtMethod::IsAbstract() shall return false.
+      // Also clear the kAccSkipAccessChecks bit since this class hasn't been verified yet it
+      // shouldn't have methods that are skipping access checks. Also clear potential
+      // kAccSingleImplementation to avoid CHA trying to inline the default method.
+      uint32_t access_flags = new_method.GetAccessFlags();
+      DCHECK_EQ(access_flags & kAccNative, 0u);
+      DCHECK_EQ(access_flags & kAccIntrinsic, 0u);
+      constexpr uint32_t kSetFlags = kAccDefault | kAccAbstract | kAccCopied;
+      constexpr uint32_t kMaskFlags = ~(kAccSkipAccessChecks | kAccSingleImplementation);
+      new_method.SetAccessFlags((access_flags | kSetFlags) & kMaskFlags);
       DCHECK(new_method.IsDefaultConflicting());
+      DCHECK(!new_method.IsAbstract());
       // The actual method might or might not be marked abstract since we just copied it from a
       // (possibly default) interface method. We need to set it entry point to be the bridge so
       // that the compiler will not invoke the implementation of whatever method we copied from.

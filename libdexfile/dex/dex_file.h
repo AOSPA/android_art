@@ -18,6 +18,7 @@
 #define ART_LIBDEXFILE_DEX_DEX_FILE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -333,6 +334,13 @@ class DexFile {
                                   const dex::StringId& name,
                                   const dex::TypeId& type) const;
 
+  // Return the code-item offset associated with the class and method or nullopt
+  // if the method does not exist or has no code.
+  std::optional<uint32_t> GetCodeItemOffset(const dex::ClassDef& class_def,
+                                            uint32_t dex_method_idx) const;
+
+  // Return the code-item offset associated with the class and method or
+  // LOG(FATAL) if the method does not exist or has no code.
   uint32_t FindCodeItemOffset(const dex::ClassDef& class_def,
                               uint32_t dex_method_idx) const;
 
@@ -750,12 +758,18 @@ class DexFile {
   // when computing the adler32 checksum of the entire file.
   static constexpr uint32_t kNumNonChecksumBytes = OFFSETOF_MEMBER(DexFile::Header, signature_);
 
-  // Returns a human-readable form of the method at an index.
-  std::string PrettyMethod(uint32_t method_idx, bool with_signature = true) const;
+  // Appends a human-readable form of the method at an index.
+  void AppendPrettyMethod(uint32_t method_idx, bool with_signature, std::string* result) const;
   // Returns a human-readable form of the field at an index.
   std::string PrettyField(uint32_t field_idx, bool with_type = true) const;
   // Returns a human-readable form of the type at an index.
   std::string PrettyType(dex::TypeIndex type_idx) const;
+
+  ALWAYS_INLINE std::string PrettyMethod(uint32_t method_idx, bool with_signature = true) const {
+    std::string result;
+    AppendPrettyMethod(method_idx, with_signature, &result);
+    return result;
+  }
 
   // Not virtual for performance reasons.
   ALWAYS_INLINE bool IsCompactDexFile() const {
