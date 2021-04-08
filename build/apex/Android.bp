@@ -248,6 +248,7 @@ apex_defaults {
     compile_multilib: "both",
     manifest: "manifest-art.json",
     boot_images: ["art-boot-image"],
+    bootclasspath_fragments: ["art-bootclasspath-fragment"],
     compat_configs: ["libcore-platform-compat-config"],
     java_libs: libcore_java_libs + art_java_libs,
     native_shared_libs: art_runtime_base_native_shared_libs +
@@ -305,6 +306,15 @@ apex_defaults {
                 art_tools_debug_device_only_binaries,
         },
     },
+}
+
+apex_test {
+    name: "test_com.android.art",
+    defaults: ["com.android.art-devel-defaults"],
+    manifest: "test_apex_manifest.json",
+    file_contexts: ":com.android.art.debug-file_contexts",
+    certificate: ":com.android.art.certificate",
+    installable: false,
 }
 
 // Release version of the ART APEX module (not containing debug

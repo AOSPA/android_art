@@ -2162,6 +2162,7 @@ class InitializeClassVisitor : public CompilationVisitor {
       // Attempt to initialize the class but bail if we either need to initialize the super-class
       // or static fields.
       class_linker->EnsureInitialized(self, klass, false, false);
+      DCHECK(!self->IsExceptionPending());
       old_status = klass->GetStatus();
       if (!klass->IsInitialized()) {
         // We don't want non-trivial class initialization occurring on multiple threads due to
@@ -2182,9 +2183,7 @@ class InitializeClassVisitor : public CompilationVisitor {
             is_boot_image ? true : InitializeDependencies(klass, class_loader, self);
         if (try_initialize_with_superclasses) {
           class_linker->EnsureInitialized(self, klass, false, true);
-          // It's OK to clear the exception here since the compiler is supposed to be fault
-          // tolerant and will silently not initialize classes that have exceptions.
-          self->ClearException();
+          DCHECK(!self->IsExceptionPending());
         }
         // Otherwise it's in app image or boot image extension but superclasses
         // cannot be initialized, no need to proceed.
@@ -2238,7 +2237,7 @@ class InitializeClassVisitor : public CompilationVisitor {
             // compiler and will be pruned by ImageWriter.
             Handle<mirror::Class> exception_class =
                 hs.NewHandle(class_linker->FindClass(self,
-                                                     Transaction::kAbortExceptionSignature,
+                                                     Transaction::kAbortExceptionDescriptor,
                                                      class_loader));
             bool exception_initialized =
                 class_linker->EnsureInitialized(self, exception_class, true, true);
