@@ -418,9 +418,7 @@ ArtMethod* FindMethodJNI(const ScopedObjectAccess& soa,
     // hiddenapi (typically it is declared up the hierarchy and is not an SDK
     // method). Try to find an interface method from the implemented interfaces which is
     // accessible.
-    ArtMethod* itf_method = c->FindAccessibleInterfaceMethod(method,
-                                                             GetJniAccessContext(soa.Self()),
-                                                             pointer_size);
+    ArtMethod* itf_method = c->FindAccessibleInterfaceMethod(method, pointer_size);
     if (itf_method == nullptr) {
       // No interface method. Call ShouldDenyAccessToMember again but this time
       // with AccessMethod::kJNI to ensure that an appropriate warning is

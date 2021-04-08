@@ -14,17 +14,10 @@
  * limitations under the License.
  */
 
-package com.android.server.art;
+package art;
 
-/**
- * This class provides a system API for functionality provided by the ART
- * module.
- */
-@libcore.api.CorePlatformApi
-public final class ArtService {
-    static final String LOG_TAG = "ArtService";
-
-    static String getMsg() {
-        return "Hello world!";
-    }
+public class ClassA {
+  public static String getHello() {
+    return "Hello";
+  }
 }

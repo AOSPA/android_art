@@ -1128,6 +1128,7 @@
                   "689-zygote-jit-deopt",
                   "690-hiddenapi-same-name-methods",
                   "691-hiddenapi-proxy",
+                  "692-vdex-secondary-loader",
                   "692-vdex-inmem-loader",
                   "693-vdex-inmem-loader-evict",
                   "723-string-init-range",
@@ -1385,5 +1386,10 @@
         "tests": ["821-madvise-willneed"],
         "variant": "jvm",
         "description": ["Adding custom madvise flags. Not to be tested on default jvm"]
+    },
+    {
+        "tests": ["692-vdex-secondary-loader"],
+        "env_vars": {"ART_USE_READ_BARRIER": "false"},
+        "description": ["Uses the low-ram flag which does not work with CMS"]
     }
 ]
