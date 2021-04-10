@@ -9028,11 +9028,8 @@ ArtMethod* ClassLinker::FindResolvedMethod(ObjPtr<mirror::Class> klass,
     // The resolved method that we have found cannot be accessed due to
     // hiddenapi (typically it is declared up the hierarchy and is not an SDK
     // method). Try to find an interface method from the implemented interfaces which is
-    // accessible.
-    ArtMethod* itf_method = klass->FindAccessibleInterfaceMethod(
-        resolved,
-        hiddenapi::AccessContext(class_loader, dex_cache),
-        image_pointer_size_);
+    // part of the SDK.
+    ArtMethod* itf_method = klass->FindAccessibleInterfaceMethod(resolved, image_pointer_size_);
     if (itf_method == nullptr) {
       // No interface method. Call ShouldDenyAccessToMember again but this time
       // with AccessMethod::kLinking to ensure that an appropriate warning is
