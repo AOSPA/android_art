@@ -14,6 +14,15 @@
 // limitations under the License.
 //
 
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "art_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["art_license"],
+}
+
 cc_defaults {
     name: "libartbase_defaults",
     defaults: ["art_defaults"],
@@ -28,7 +37,6 @@ cc_defaults {
         "base/enums.cc",
         "base/file_magic.cc",
         "base/file_utils.cc",
-        "base/flags.cc",
         "base/hex_dump.cc",
         "base/hiddenapi_flags.cc",
         "base/logging.cc",
@@ -160,6 +168,12 @@ art_cc_library {
         "art_pgo_defaults",
     ],
     visibility: [
+        // TODO(b/183483755): Please visibility checks when the prebuilt
+        // libartbase is present but not preferred, and the prebuilt libdexfile
+        // hence depends on the source instead.
+        // TODO(b/172480617): Alternatively, clean up when we no longer need to
+        // support both prebuilts and sources present simultaneously.
+        "//prebuilts/module_sdk/art/current/host-exports",
         // TODO(b/133140750): Clean this up.
         "//packages/modules/NetworkStack/tests:__subpackages__",
     ],
@@ -286,4 +300,5 @@ cc_library_headers {
         "com.android.art",
         "com.android.art.debug",
     ],
+    min_sdk_version: "S",
 }

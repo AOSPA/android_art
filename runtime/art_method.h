@@ -192,9 +192,11 @@ class ArtMethod final {
   void SetNotIntrinsic() REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool IsCopied() const {
-    static_assert((kAccCopied & (kAccIntrinsic | kAccIntrinsicBits)) == 0,
-                  "kAccCopied conflicts with intrinsic modifier");
-    const bool copied = (GetAccessFlags() & kAccCopied) != 0;
+    // We do not have intrinsics for any default methods and therefore intrinsics are never copied.
+    // So we are using a flag from the intrinsic flags range and need to check `kAccIntrinsic` too.
+    static_assert((kAccCopied & kAccIntrinsicBits) != 0,
+                  "kAccCopied deliberately overlaps intrinsic bits");
+    const bool copied = (GetAccessFlags() & (kAccIntrinsic | kAccCopied)) == kAccCopied;
     // (IsMiranda() || IsDefaultConflicting()) implies copied
     DCHECK(!(IsMiranda() || IsDefaultConflicting()) || copied)
         << "Miranda or default-conflict methods must always be copied.";
@@ -202,24 +204,41 @@ class ArtMethod final {
   }
 
   bool IsMiranda() const {
-    // The kAccMiranda flag value is used with a different meaning for native methods and methods
-    // marked kAccCompileDontBother, so we need to check these flags as well.
-    return (GetAccessFlags() & (kAccNative | kAccMiranda | kAccCompileDontBother)) == kAccMiranda;
+    // Miranda methods are marked as copied and abstract but not default.
+    // We need to check the kAccIntrinsic too, see `IsCopied()`.
+    static constexpr uint32_t kMask = kAccIntrinsic | kAccCopied | kAccAbstract | kAccDefault;
+    static constexpr uint32_t kValue = kAccCopied | kAccAbstract;
+    return (GetAccessFlags() & kMask) == kValue;
+  }
+
+  // A default conflict method is a special sentinel method that stands for a conflict between
+  // multiple default methods. It cannot be invoked, throwing an IncompatibleClassChangeError
+  // if one attempts to do so.
+  bool IsDefaultConflicting() const {
+    // Default conflct methods are marked as copied, abstract and default.
+    // We need to check the kAccIntrinsic too, see `IsCopied()`.
+    static constexpr uint32_t kMask = kAccIntrinsic | kAccCopied | kAccAbstract | kAccDefault;
+    static constexpr uint32_t kValue = kAccCopied | kAccAbstract | kAccDefault;
+    return (GetAccessFlags() & kMask) == kValue;
   }
 
   // Returns true if invoking this method will not throw an AbstractMethodError or
   // IncompatibleClassChangeError.
   bool IsInvokable() const {
-    return !IsAbstract() && !IsDefaultConflicting();
+    // Default conflicting methods are marked with `kAccAbstract` (as well as `kAccCopied`
+    // and `kAccDefault`) but they are not considered abstract, see `IsAbstract()`.
+    DCHECK_EQ((GetAccessFlags() & kAccAbstract) == 0, !IsDefaultConflicting() && !IsAbstract());
+    return (GetAccessFlags() & kAccAbstract) == 0;
   }
 
   bool IsPreCompiled() const {
-    if (IsIntrinsic()) {
-      // kAccCompileDontBother overlaps with kAccIntrinsicBits.
-      return false;
-    }
-    uint32_t expected = (kAccPreCompiled | kAccCompileDontBother);
-    return (GetAccessFlags() & expected) == expected;
+    // kAccCompileDontBother and kAccPreCompiled overlap with kAccIntrinsicBits.
+    // Intrinsics should be compiled in primary boot image, not pre-compiled by JIT.
+    static_assert((kAccCompileDontBother & kAccIntrinsicBits) != 0);
+    static_assert((kAccPreCompiled & kAccIntrinsicBits) != 0);
+    static constexpr uint32_t kMask = kAccIntrinsic | kAccCompileDontBother | kAccPreCompiled;
+    static constexpr uint32_t kValue = kAccCompileDontBother | kAccPreCompiled;
+    return (GetAccessFlags() & kMask) == kValue;
   }
 
   void SetPreCompiled() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -251,16 +270,6 @@ class ArtMethod final {
   void SetDontCompile() REQUIRES_SHARED(Locks::mutator_lock_) {
     DCHECK(!IsMiranda());
     AddAccessFlags(kAccCompileDontBother);
-  }
-
-  // A default conflict method is a special sentinel method that stands for a conflict between
-  // multiple default methods. It cannot be invoked, throwing an IncompatibleClassChangeError if one
-  // attempts to do so.
-  bool IsDefaultConflicting() const {
-    if (IsIntrinsic()) {
-      return false;
-    }
-    return (GetAccessFlags() & kAccDefaultConflict) != 0u;
   }
 
   // This is set by the class linker.
@@ -301,7 +310,8 @@ class ArtMethod final {
   }
 
   bool IsAbstract() const {
-    return (GetAccessFlags() & kAccAbstract) != 0;
+    // Default confliciting methods have `kAccAbstract` set but they are not actually abstract.
+    return (GetAccessFlags() & kAccAbstract) != 0 && !IsDefaultConflicting();
   }
 
   bool IsSynthetic() const {
@@ -382,6 +392,20 @@ class ArtMethod final {
   void SetMustCountLocks() REQUIRES_SHARED(Locks::mutator_lock_) {
     AddAccessFlags(kAccMustCountLocks);
     ClearAccessFlags(kAccSkipAccessChecks);
+  }
+
+  bool HasNterpEntryPointFastPathFlag() const {
+    constexpr uint32_t mask = kAccNative | kAccNterpEntryPointFastPathFlag;
+    return (GetAccessFlags() & mask) == kAccNterpEntryPointFastPathFlag;
+  }
+
+  void SetNterpEntryPointFastPathFlag() REQUIRES_SHARED(Locks::mutator_lock_) {
+    DCHECK(!IsNative());
+    AddAccessFlags(kAccNterpEntryPointFastPathFlag);
+  }
+
+  void SetNterpInvokeFastPathFlag() REQUIRES_SHARED(Locks::mutator_lock_) {
+    AddAccessFlags(kAccNterpInvokeFastPathFlag);
   }
 
   // Returns true if this method could be overridden by a default method.
@@ -697,9 +721,6 @@ class ArtMethod final {
   static constexpr MemberOffset HotnessCountOffset() {
     return MemberOffset(OFFSETOF_MEMBER(ArtMethod, hotness_count_));
   }
-
-  ArrayRef<const uint8_t> GetQuickenedInfo() REQUIRES_SHARED(Locks::mutator_lock_);
-  uint16_t GetIndexFromQuickening(uint32_t dex_pc) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Returns the method header for the compiled code containing 'pc'. Note that runtime
   // methods will return null for this method, as they are not oat based.

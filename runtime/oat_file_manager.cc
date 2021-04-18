@@ -179,11 +179,15 @@ std::vector<const OatFile*> OatFileManager::RegisterImageOatFiles(
 static bool ClassLoaderContextMatches(
     const OatFile* oat_file,
     const ClassLoaderContext* context,
-    bool* is_special_shared_library,
     /*out*/ std::string* error_msg) {
   DCHECK(oat_file != nullptr);
   DCHECK(error_msg != nullptr);
   DCHECK(context != nullptr);
+
+  if (oat_file->IsBackedByVdexOnly()) {
+    // Only a vdex file, we don't depend on the class loader context.
+    return true;
+  }
 
   if (!CompilerFilter::IsVerificationEnabled(oat_file->GetCompilerFilter())) {
     // If verification is not enabled we don't need to check if class loader context matches
@@ -198,14 +202,9 @@ static bool ClassLoaderContextMatches(
       /*verify_names=*/ true,
       /*verify_checksums=*/ true);
   switch (result) {
-    case ClassLoaderContext::VerificationResult::kForcedToSkipChecks:
-      *is_special_shared_library = true;
-      return true;
     case ClassLoaderContext::VerificationResult::kMismatch:
-      *is_special_shared_library = false;
       return false;
     case ClassLoaderContext::VerificationResult::kVerifies:
-      *is_special_shared_library = false;
       return true;
   }
   LOG(FATAL) << "Unreachable";
@@ -272,7 +271,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
     // Proceed with oat file loading.
     std::unique_ptr<const OatFile> oat_file(oat_file_assistant.GetBestOatFile().release());
     VLOG(oat) << "OatFileAssistant(" << dex_location << ").GetBestOatFile()="
-              << reinterpret_cast<uintptr_t>(oat_file.get())
+              << (oat_file != nullptr ? oat_file->GetLocation() : "")
               << " (executable=" << (oat_file != nullptr ? oat_file->IsExecutable() : false) << ")";
 
     CHECK(oat_file == nullptr || odex_location == oat_file->GetLocation())
@@ -282,14 +281,12 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
 
     const OatFile* source_oat_file = nullptr;
     std::string error_msg;
-    bool is_special_shared_library = false;
     bool class_loader_context_matches = false;
     bool check_context = oat_file != nullptr && context != nullptr;
     if (check_context) {
         class_loader_context_matches =
             ClassLoaderContextMatches(oat_file.get(),
                                       context.get(),
-                                      /*out*/ &is_special_shared_library,
                                       /*out*/ &error_msg);
     }
     ScopedTrace context_results(StringPrintf(
@@ -306,7 +303,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
         // We need to throw away the image space if we are debuggable but the oat-file source of the
         // image is not otherwise we might get classes with inlined methods or other such things.
         std::unique_ptr<gc::space::ImageSpace> image_space;
-        if (!is_special_shared_library && ShouldLoadAppImage(oat_file.get())) {
+        if (ShouldLoadAppImage(oat_file.get())) {
           image_space = oat_file_assistant.OpenImageSpace(oat_file.get());
         }
         if (image_space != nullptr) {
@@ -589,15 +586,6 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat_
   DCHECK(context->OpenDexFiles())
       << "Context created from already opened dex files should not attempt to open again";
 
-  // Check that we can use the vdex against this boot class path and in this class loader context.
-  // Note 1: We do not need a class loader collision check because there is no compiled code.
-  // Note 2: If these checks fail, we cannot fast-verify because the vdex does not contain
-  //         full VerifierDeps.
-  if (!vdex_file->MatchesBootClassPathChecksums() ||
-      !vdex_file->MatchesClassLoaderContext(*context.get())) {
-    return dex_files;
-  }
-
   // Initialize an OatFile instance backed by the loaded vdex.
   std::unique_ptr<OatFile> oat_file(OatFile::OpenFromVdex(MakeNonOwningPointerVector(dex_files),
                                                           std::move(vdex_file),
@@ -730,7 +718,7 @@ class BackgroundVerificationTask final : public Task {
         }
 
         CHECK(h_class->IsResolved()) << h_class->PrettyDescriptor();
-        class_linker->VerifyClass(self, h_class);
+        class_linker->VerifyClass(self, &verifier_deps, h_class);
         if (h_class->IsErroneous()) {
           // ClassLinker::VerifyClass throws, which isn't useful here.
           CHECK(soa.Self()->IsExceptionPending());
@@ -756,7 +744,6 @@ class BackgroundVerificationTask final : public Task {
     if (!VdexFile::WriteToDisk(vdex_path_,
                                dex_files_,
                                verifier_deps,
-                               class_loader_context_,
                                &error_msg)) {
       LOG(ERROR) << "Could not write anonymous vdex " << vdex_path_ << ": " << error_msg;
       return;

@@ -12,6 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "art_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["art_license"],
+}
+
 soong_config_module_type_import {
     from: "art/build/SoongConfig.bp",
     module_types: [
@@ -60,13 +69,11 @@ art_module_sdk {
                 "libnativebridge",
                 "libnativehelper",
                 "libnativeloader",
+                "libsigchain",
             ],
 
             native_libs: [
                 "libdexfile_support",
-
-                // TODO(b/142944043): Convert to APEX stubs and export as a shared lib, once linker support is in place.
-                "libsigchain",
             ],
 
             native_static_libs: [
@@ -76,6 +83,17 @@ art_module_sdk {
         },
 
         android: {
+            boot_images: [
+                "art-boot-image",
+            ],
+            bootclasspath_fragments: [
+                "art-bootclasspath-fragment",
+            ],
+
+            compat_configs: [
+                "libcore-platform-compat-config",
+            ],
+
             // Create placeholder java_import prebuilts for the java boot libraries so that Soong
             // can retrieve their dex implementation jars from the associated prebuilt_apex. All
             // libraries listed in the exported_java_libs property of the ART apex (see
@@ -196,6 +214,12 @@ art_module_exports {
                 "hiddenapi",
                 "dex2oat",
                 "dex2oatd",
+                "profman",
+            ],
+            native_libs: [
+                "libdexfile", // libdexfile_external dependency
+                "libartpalette", // libdexfile dependency
+                "libartbase", // libdexfile dependency
             ],
         },
 

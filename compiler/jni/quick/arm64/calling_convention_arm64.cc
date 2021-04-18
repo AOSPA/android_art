@@ -20,7 +20,6 @@
 
 #include "arch/arm64/jni_frame_arm64.h"
 #include "arch/instruction_set.h"
-#include "handle_scope-inl.h"
 #include "utils/arm64/managed_register_arm64.h"
 
 namespace art {
@@ -233,6 +232,13 @@ uint32_t Arm64JniCallingConvention::FpSpillMask() const {
   return is_critical_native_ ? 0u : kFpCalleeSpillMask;
 }
 
+ManagedRegister Arm64JniCallingConvention::SavedLocalReferenceCookieRegister() const {
+  // The w21 is callee-save register in both managed and native ABIs.
+  // It is saved in the stack frame and it has no special purpose like `tr`.
+  static_assert((kCoreCalleeSpillMask & (1u << W21)) != 0u);  // Managed callee save register.
+  return Arm64ManagedRegister::FromWRegister(W21);
+}
+
 ManagedRegister Arm64JniCallingConvention::ReturnScratchRegister() const {
   return ManagedRegister::NoRegister();
 }
@@ -241,26 +247,25 @@ size_t Arm64JniCallingConvention::FrameSize() const {
   if (is_critical_native_) {
     CHECK(!SpillsMethod());
     CHECK(!HasLocalReferenceSegmentState());
-    CHECK(!HasHandleScope());
     CHECK(!SpillsReturnValue());
     return 0u;  // There is no managed frame for @CriticalNative.
   }
 
   // Method*, callee save area size, local reference segment state
-  CHECK(SpillsMethod());
+  DCHECK(SpillsMethod());
   size_t method_ptr_size = static_cast<size_t>(kFramePointerSize);
   size_t callee_save_area_size = CalleeSaveRegisters().size() * kFramePointerSize;
   size_t total_size = method_ptr_size + callee_save_area_size;
 
-  CHECK(HasLocalReferenceSegmentState());
-  total_size += sizeof(uint32_t);
-
-  CHECK(HasHandleScope());
-  total_size += HandleScope::SizeOf(kArm64PointerSize, ReferenceCount());
+  DCHECK(HasLocalReferenceSegmentState());
+  // Cookie is saved in one of the spilled registers.
 
   // Plus return value spill area size
-  CHECK(SpillsReturnValue());
-  total_size += SizeOfReturnValue();
+  if (SpillsReturnValue()) {
+    // No padding between the method pointer and the return value on arm64.
+    DCHECK_EQ(ReturnValueSaveLocation().SizeValue(), method_ptr_size);
+    total_size += SizeOfReturnValue();
+  }
 
   return RoundUp(total_size, kStackAlignment);
 }

@@ -21,7 +21,6 @@
 #include "arch/instruction_set.h"
 #include "arch/x86_64/jni_frame_x86_64.h"
 #include "base/bit_utils.h"
-#include "handle_scope-inl.h"
 #include "utils/x86_64/managed_register_x86_64.h"
 
 namespace art {
@@ -91,6 +90,13 @@ static constexpr uint32_t kNativeFpCalleeSpillMask =
     CalculateFpCalleeSpillMask(kNativeCalleeSaveRegisters);
 
 // Calling convention
+
+ManagedRegister X86_64JniCallingConvention::SavedLocalReferenceCookieRegister() const {
+  // The RBX is callee-save register in both managed and native ABIs.
+  // It is saved in the stack frame and it has no special purpose like `tr` on arm/arm64.
+  static_assert((kCoreCalleeSpillMask & (1u << RBX)) != 0u);  // Managed callee save register.
+  return X86_64ManagedRegister::FromCpuRegister(RBX);
+}
 
 ManagedRegister X86_64JniCallingConvention::ReturnScratchRegister() const {
   return ManagedRegister::NoRegister();  // No free regs, so assembler uses push/pop
@@ -183,27 +189,26 @@ size_t X86_64JniCallingConvention::FrameSize() const {
   if (is_critical_native_) {
     CHECK(!SpillsMethod());
     CHECK(!HasLocalReferenceSegmentState());
-    CHECK(!HasHandleScope());
     CHECK(!SpillsReturnValue());
     return 0u;  // There is no managed frame for @CriticalNative.
   }
 
   // Method*, PC return address and callee save area size, local reference segment state
-  CHECK(SpillsMethod());
+  DCHECK(SpillsMethod());
   const size_t method_ptr_size = static_cast<size_t>(kX86_64PointerSize);
   const size_t pc_return_addr_size = kFramePointerSize;
   const size_t callee_save_area_size = CalleeSaveRegisters().size() * kFramePointerSize;
   size_t total_size = method_ptr_size + pc_return_addr_size + callee_save_area_size;
 
-  CHECK(HasLocalReferenceSegmentState());
-  total_size += kFramePointerSize;
-
-  CHECK(HasHandleScope());
-  total_size += HandleScope::SizeOf(kX86_64PointerSize, ReferenceCount());
+  DCHECK(HasLocalReferenceSegmentState());
+  // Cookie is saved in one of the spilled registers.
 
   // Plus return value spill area size
-  CHECK(SpillsReturnValue());
-  total_size += SizeOfReturnValue();
+  if (SpillsReturnValue()) {
+    // No padding between the method pointer and the return value on arm64.
+    DCHECK_EQ(ReturnValueSaveLocation().SizeValue(), method_ptr_size);
+    total_size += SizeOfReturnValue();
+  }
 
   return RoundUp(total_size, kStackAlignment);
 }

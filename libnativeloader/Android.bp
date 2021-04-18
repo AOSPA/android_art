@@ -1,5 +1,14 @@
 // Shared library for target
 // ========================================================
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "art_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["art_license"],
+}
+
 cc_defaults {
     name: "libnativeloader-defaults",
     defaults: ["art_defaults"],
@@ -96,6 +105,7 @@ cc_library_headers {
         "com.android.art.debug",
         "com.android.media",
     ],
+    min_sdk_version: "S",
     visibility: [
         "//art:__subpackages__",
         // TODO(b/133140750): Clean this up.

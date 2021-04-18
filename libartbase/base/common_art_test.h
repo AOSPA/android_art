@@ -35,6 +35,7 @@
 #include "dex/art_dex_file_loader.h"
 #include "dex/compact_dex_level.h"
 #include "dex/compact_dex_file.h"
+#include "profile/profile_compilation_info.h"
 
 namespace art {
 
@@ -159,6 +160,34 @@ class FakeDexStorage {
   std::vector<std::unique_ptr<FakeDex>> fake_dex_files;
 };
 
+// Helper class that removes an environment variable whilst in scope.
+class ScopedUnsetEnvironmentVariable {
+ public:
+  explicit ScopedUnsetEnvironmentVariable(const char* variable)
+      : variable_{variable}, old_value_{GetOldValue(variable)} {
+    unsetenv(variable);
+  }
+
+  ~ScopedUnsetEnvironmentVariable() {
+    if (old_value_.has_value()) {
+      static constexpr int kReplace = 1;  // tidy-issue: replace argument has libc dependent name.
+      setenv(variable_, old_value_.value().c_str(), kReplace);
+    } else {
+      unsetenv(variable_);
+    }
+  }
+
+ private:
+  static std::optional<std::string> GetOldValue(const char* variable) {
+    const char* value = getenv(variable);
+    return value != nullptr ? std::optional<std::string>{value} : std::nullopt;
+  }
+
+  const char* variable_;
+  std::optional<std::string> old_value_;
+  DISALLOW_COPY_AND_ASSIGN(ScopedUnsetEnvironmentVariable);
+};
+
 class CommonArtTestImpl {
  public:
   CommonArtTestImpl() = default;
@@ -281,6 +310,10 @@ class CommonArtTestImpl {
 
   std::unique_ptr<const DexFile> OpenTestDexFile(const char* name);
 
+  // Compare different representations of inline caches for equality.
+  static bool EqualInlineCaches(const std::vector<ProfileMethodInfo::ProfileInlineCache>& expected,
+                                const ProfileCompilationInfo::MethodHotness& actual_hotness,
+                                const ProfileCompilationInfo& info);
 
   std::string android_data_;
   std::string android_system_ext_;

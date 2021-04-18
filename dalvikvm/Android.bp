@@ -14,6 +14,15 @@
 // limitations under the License.
 //
 
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "art_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["art_license"],
+}
+
 art_cc_binary {
     name: "dalvikvm",
     host_supported: true,
@@ -28,15 +37,20 @@ art_cc_binary {
     shared_libs: [
         "libnativehelper",
     ],
-    whole_static_libs: ["libsigchain"],
     target: {
         android: {
             shared_libs: [
                 "liblog",
+                "libsigchain",
             ],
         },
         linux: {
             ldflags: ["-Wl,--export-dynamic"],
+        },
+        host: {
+            // TODO(b/183102427): this seems to help asan on host, but libsgichain should
+            // really be in shared_libs.
+            whole_static_libs: ["libsigchain"],
         },
         darwin: {
             enabled: false,
@@ -58,4 +72,5 @@ art_cc_binary {
         "com.android.art",
         "com.android.art.debug",
     ],
+    min_sdk_version: "S",
 }

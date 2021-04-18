@@ -165,9 +165,9 @@ class OatFileBase : public OatFile {
 
   virtual void PreSetup(const std::string& elf_filename) = 0;
 
-  // Setup functions return true on success, false on failure.
   bool Setup(int zip_fd, ArrayRef<const std::string> dex_filenames, std::string* error_msg);
-  bool Setup(const std::vector<const DexFile*>& dex_files);
+
+  void Setup(const std::vector<const DexFile*>& dex_files);
 
   // Setters exposed for ElfOatFile.
 
@@ -276,7 +276,17 @@ bool OatFileBase::ShouldUnquickenVDex() const {
   // We sometimes load oat files without a runtime (eg oatdump) and don't want to do anything in
   // that case. If we are debuggable there are no -quick opcodes to unquicken. If the runtime is not
   // debuggable we don't care whether there are -quick opcodes or not so no need to do anything.
-  return Runtime::Current() != nullptr && !IsDebuggable() && Runtime::Current()->IsJavaDebuggable();
+  Runtime* runtime = Runtime::Current();
+  return (runtime != nullptr && runtime->IsJavaDebuggable()) &&
+         // Note: This is called before `OatFileBase::Setup()` where we validate the
+         // oat file contents. Check that we have at least a valid header, including
+         // oat file version, to avoid parsing the key-value store for a different
+         // version (out-of-date oat file) which can lead to crashes. b/179221298.
+         // TODO: While this is a poor workaround and the correct solution would be
+         // to postpone the unquickening check until after `OatFileBase::Setup()`,
+         // we prefer to avoid larger rewrites because quickening is deprecated and
+         // should be removed completely anyway. b/170086509
+         (GetOatHeader().IsValid() && !IsDebuggable());
 }
 
 bool OatFileBase::LoadVdex(const std::string& vdex_filename,
@@ -465,13 +475,15 @@ static bool ReadIndexBssMapping(OatFile* oat_file,
   return true;
 }
 
-bool OatFileBase::Setup(const std::vector<const DexFile*>& dex_files) {
+void OatFileBase::Setup(const std::vector<const DexFile*>& dex_files) {
   for (const DexFile* dex_file : dex_files) {
     std::string dex_location = dex_file->GetLocation();
     std::string canonical_location = DexFileLoader::GetDexCanonicalLocation(dex_location.c_str());
 
     // Create an OatDexFile and add it to the owning container.
-    OatDexFile* oat_dex_file = new OatDexFile(this, dex_file, dex_location, canonical_location);
+    OatDexFile* oat_dex_file =
+        new OatDexFile(this, dex_file->Begin(), dex_file->GetLocationChecksum(), dex_location, canonical_location);
+    dex_file->SetOatDexFile(oat_dex_file);
     oat_dex_files_storage_.push_back(oat_dex_file);
 
     // Add the location and canonical location (if different) to the oat_dex_files_ table.
@@ -482,8 +494,6 @@ bool OatFileBase::Setup(const std::vector<const DexFile*>& dex_files) {
       oat_dex_files_.Put(canonical_key, oat_dex_file);
     }
   }
-
-  return true;
 }
 
 bool OatFileBase::Setup(int zip_fd,
@@ -1524,17 +1534,76 @@ class OatFileBackedByVdex final : public OatFileBase {
                                    std::unique_ptr<VdexFile>&& vdex_file,
                                    const std::string& location) {
     std::unique_ptr<OatFileBackedByVdex> oat_file(new OatFileBackedByVdex(location));
-    if (!oat_file->Setup(dex_files, std::move(vdex_file))) {
-      return nullptr;
-    }
+    // SetVdex will take ownership of the VdexFile.
+    oat_file->SetVdex(vdex_file.release());
+    oat_file->SetupHeader(dex_files.size());
+    // Initialize OatDexFiles.
+    oat_file->Setup(dex_files);
     return oat_file.release();
   }
 
-  bool Setup(const std::vector<const DexFile*>& dex_files, std::unique_ptr<VdexFile>&& vdex_file) {
-    DCHECK(!IsExecutable());
+  static OatFileBackedByVdex* Open(int zip_fd,
+                                   std::unique_ptr<VdexFile>&& vdex_file,
+                                   const std::string& dex_location,
+                                   std::string* error_msg) {
+    std::unique_ptr<OatFileBackedByVdex> oat_file(new OatFileBackedByVdex(vdex_file->GetName()));
+    if (vdex_file->HasDexSection()) {
+      uint32_t i = 0;
+      for (const uint8_t* dex_file_start = vdex_file->GetNextDexFileData(nullptr, i);
+           dex_file_start != nullptr;
+           dex_file_start = vdex_file->GetNextDexFileData(dex_file_start, ++i)) {
+        // Create the OatDexFile and add it to the owning container.
+        std::string location = DexFileLoader::GetMultiDexLocation(i, dex_location.c_str());
+        std::string canonical_location = DexFileLoader::GetDexCanonicalLocation(location.c_str());
+        OatDexFile* oat_dex_file = new OatDexFile(oat_file.get(),
+                                                  dex_file_start,
+                                                  vdex_file->GetLocationChecksum(i),
+                                                  location,
+                                                  canonical_location);
+        oat_file->oat_dex_files_storage_.push_back(oat_dex_file);
+
+        std::string_view key(oat_dex_file->GetDexFileLocation());
+        oat_file->oat_dex_files_.Put(key, oat_dex_file);
+        if (canonical_location != location) {
+          std::string_view canonical_key(oat_dex_file->GetCanonicalDexFileLocation());
+          oat_file->oat_dex_files_.Put(canonical_key, oat_dex_file);
+        }
+      }
+      oat_file->SetupHeader(oat_file->oat_dex_files_storage_.size());
+    } else {
+      // No need for any verification when loading dex files as we already have
+      // a vdex file.
+      const ArtDexFileLoader dex_file_loader;
+      bool loaded = false;
+      if (zip_fd != -1) {
+        loaded = dex_file_loader.OpenZip(zip_fd,
+                                         dex_location,
+                                         /*verify=*/ false,
+                                         /*verify_checksum=*/ false,
+                                         error_msg,
+                                         &oat_file->external_dex_files_);
+      } else {
+        loaded = dex_file_loader.Open(dex_location.c_str(),
+                                      dex_location,
+                                      /*verify=*/ false,
+                                      /*verify_checksum=*/ false,
+                                      error_msg,
+                                      &oat_file->external_dex_files_);
+      }
+      if (!loaded) {
+        return nullptr;
+      }
+      oat_file->SetupHeader(oat_file->external_dex_files_.size());
+      oat_file->Setup(MakeNonOwningPointerVector(oat_file->external_dex_files_));
+    }
 
     // SetVdex will take ownership of the VdexFile.
-    SetVdex(vdex_file.release());
+    oat_file->SetVdex(vdex_file.release());
+    return oat_file.release();
+  }
+
+  void SetupHeader(size_t number_of_dex_files) {
+    DCHECK(!IsExecutable());
 
     // Create a fake OatHeader with a key store containing only the compiler
     // filter (it helps debugging and is required by
@@ -1543,39 +1612,15 @@ class OatFileBackedByVdex final : public OatFileBase {
         InstructionSetFeatures::FromCppDefines();
     SafeMap<std::string, std::string> store;
     store.Put(OatHeader::kCompilerFilter, CompilerFilter::NameOfFilter(CompilerFilter::kVerify));
+    store.Put(OatHeader::kConcurrentCopying,
+              kUseReadBarrier ? OatHeader::kTrueValue : OatHeader::kFalseValue);
     oat_header_.reset(OatHeader::Create(kRuntimeISA,
                                         isa_features.get(),
-                                        dex_files.size(),
+                                        number_of_dex_files,
                                         &store));
     const uint8_t* begin = reinterpret_cast<const uint8_t*>(oat_header_.get());
     SetBegin(begin);
     SetEnd(begin + oat_header_->GetHeaderSize());
-
-    // Load VerifierDeps from VDEX and copy bit vectors of verified classes.
-    ArrayRef<const uint8_t> deps_data = GetVdexFile()->GetVerifierDepsData();
-    if (!verifier::VerifierDeps::ParseVerifiedClasses(dex_files,
-                                                      deps_data,
-                                                      &verified_classes_per_dex_)) {
-      return false;
-    }
-
-    // Initialize OatDexFiles.
-    if (!OatFileBase::Setup(dex_files)) {
-      return false;
-    }
-
-    return true;
-  }
-
-  bool IsClassVerifiedInVdex(const OatDexFile& oat_dex_file, uint16_t class_def_index) const {
-    // Determine the index of the DexFile, assuming the order of OatDexFiles
-    // in `oat_dex_files_storage_` is the same.
-    const std::vector<const OatDexFile*>& oat_dex_files = GetOatDexFiles();
-    auto oat_dex_file_it = std::find(oat_dex_files.begin(), oat_dex_files.end(), &oat_dex_file);
-    DCHECK(oat_dex_file_it != oat_dex_files.end());
-    size_t dex_index = oat_dex_file_it - oat_dex_files.begin();
-    // Check the bitvector of verified classes from the vdex.
-    return verified_classes_per_dex_[dex_index][class_def_index];
   }
 
  protected:
@@ -1611,7 +1656,6 @@ class OatFileBackedByVdex final : public OatFileBase {
 
  private:
   std::unique_ptr<OatHeader> oat_header_;
-  std::vector<std::vector<bool>> verified_classes_per_dex_;
 
   DISALLOW_COPY_AND_ASSIGN(OatFileBackedByVdex);
 };
@@ -1638,12 +1682,11 @@ OatFile* OatFile::Open(int zip_fd,
 
   std::string vdex_filename = GetVdexFilename(oat_filename);
 
-  // Check that the files even exist, fast-fail.
+  // Check that the vdex file even exists, fast-fail. We don't check the odex
+  // file as we use the absence of an odex file for test the functionality of
+  // vdex-only.
   if (!OS::FileExists(vdex_filename.c_str())) {
     *error_msg = StringPrintf("File %s does not exist.", vdex_filename.c_str());
-    return nullptr;
-  } else if (!OS::FileExists(oat_filename.c_str())) {
-    *error_msg = StringPrintf("File %s does not exist.", oat_filename.c_str());
     return nullptr;
   }
 
@@ -1660,6 +1703,17 @@ OatFile* OatFile::Open(int zip_fd,
                                                                  reservation,
                                                                  error_msg);
   if (with_dlopen != nullptr) {
+    Runtime* runtime = Runtime::Current();
+    // The runtime might not be available at this point if we're running
+    // dex2oat or oatdump.
+    if (runtime != nullptr) {
+      size_t madvise_size_limit = runtime->GetMadviseWillNeedSizeOdex();
+      Runtime::MadviseFileForRange(madvise_size_limit,
+                                   with_dlopen->Size(),
+                                   with_dlopen->Begin(),
+                                   with_dlopen->End(),
+                                   oat_location);
+    }
     return with_dlopen;
   }
   if (kPrintDlOpenErrorMessage) {
@@ -1723,6 +1777,14 @@ OatFile* OatFile::OpenFromVdex(const std::vector<const DexFile*>& dex_files,
                                const std::string& location) {
   CheckLocation(location);
   return OatFileBackedByVdex::Open(dex_files, std::move(vdex_file), location);
+}
+
+OatFile* OatFile::OpenFromVdex(int zip_fd,
+                               std::unique_ptr<VdexFile>&& vdex_file,
+                               const std::string& location,
+                               std::string* error_msg) {
+  CheckLocation(location);
+  return OatFileBackedByVdex::Open(zip_fd, std::move(vdex_file), location, error_msg);
 }
 
 OatFile::OatFile(const std::string& location, bool is_executable)
@@ -1916,15 +1978,15 @@ OatDexFile::OatDexFile(const OatFile* oat_file,
 }
 
 OatDexFile::OatDexFile(const OatFile* oat_file,
-                       const DexFile* dex_file,
+                       const uint8_t* dex_file_pointer,
+                       uint32_t dex_file_location_checksum,
                        const std::string& dex_file_location,
                        const std::string& canonical_dex_file_location)
     : oat_file_(oat_file),
       dex_file_location_(dex_file_location),
       canonical_dex_file_location_(canonical_dex_file_location),
-      dex_file_location_checksum_(dex_file->GetLocationChecksum()),
-      dex_file_pointer_(reinterpret_cast<const uint8_t*>(dex_file)) {
-  dex_file->SetOatDexFile(this);
+      dex_file_location_checksum_(dex_file_location_checksum),
+      dex_file_pointer_(dex_file_pointer) {
   DCHECK(IsBackedByVdexOnly());
 }
 
@@ -1968,13 +2030,12 @@ bool OatDexFile::IsBackedByVdexOnly() const {
 }
 
 OatFile::OatClass OatDexFile::GetOatClass(uint16_t class_def_index) const {
-  // If this is an OatFileBackedByVdex, initialize the OatClass using the vdex's VerifierDeps.
   if (IsBackedByVdexOnly()) {
-    bool is_vdex_verified = down_cast<const OatFileBackedByVdex*>(oat_file_)->IsClassVerifiedInVdex(
-        *this,
-        class_def_index);
+    // If there is only a vdex file, return that the class is not ready. The
+    // caller will have to call `VdexFile::ComputeClassStatus` to compute the
+    // actual class status, because we need to do the assignability type checks.
     return OatFile::OatClass(oat_file_,
-                             is_vdex_verified ? ClassStatus::kVerified : ClassStatus::kNotReady,
+                             ClassStatus::kNotReady,
                              /* type= */ kOatClassNoneCompiled,
                              /* bitmap_size= */ 0u,
                              /* bitmap_pointer= */ nullptr,
@@ -2022,16 +2083,6 @@ OatFile::OatClass OatDexFile::GetOatClass(uint16_t class_def_index) const {
                            bitmap_size,
                            reinterpret_cast<const uint32_t*>(bitmap_pointer),
                            reinterpret_cast<const OatMethodOffsets*>(methods_pointer));
-}
-
-ArrayRef<const uint8_t> OatDexFile::GetQuickenedInfoOf(const DexFile& dex_file,
-                                                       uint32_t dex_method_idx) const {
-  const OatFile* oat_file = GetOatFile();
-  if (oat_file == nullptr) {
-    return ArrayRef<const uint8_t>();
-  } else  {
-    return oat_file->GetVdexFile()->GetQuickenedInfoOf(dex_file, dex_method_idx);
-  }
 }
 
 const dex::ClassDef* OatDexFile::FindClassDef(const DexFile& dex_file,
@@ -2281,6 +2332,10 @@ void OatFile::InitializeRelocations() const {
 
 void OatDexFile::AssertAotCompiler() {
   CHECK(Runtime::Current()->IsAotCompiler());
+}
+
+bool OatFile::IsBackedByVdexOnly() const {
+  return oat_dex_files_storage_.size() >= 1 && oat_dex_files_storage_[0]->IsBackedByVdexOnly();
 }
 
 }  // namespace art

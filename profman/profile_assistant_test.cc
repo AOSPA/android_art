@@ -372,14 +372,14 @@ class ProfileAssistantTest : public CommonRuntimeTest {
                           bool is_megamorphic,
                           bool is_missing_types)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> pmi =
-        info.GetHotMethodInfo(MethodReference(
-            method->GetDexFile(), method->GetDexMethodIndex()));
-    ASSERT_TRUE(pmi != nullptr);
-    ASSERT_TRUE(pmi->inline_caches->find(dex_pc) != pmi->inline_caches->end());
+    ProfileCompilationInfo::MethodHotness hotness =
+        info.GetMethodHotness(MethodReference(method->GetDexFile(), method->GetDexMethodIndex()));
+    ASSERT_TRUE(hotness.IsHot());
+    const ProfileCompilationInfo::InlineCacheMap* inline_caches = hotness.GetInlineCacheMap();
+    ASSERT_TRUE(inline_caches->find(dex_pc) != inline_caches->end());
     AssertInlineCaches(expected_clases,
-                       pmi.get(),
-                       pmi->inline_caches->find(dex_pc)->second,
+                       info,
+                       inline_caches->find(dex_pc)->second,
                        is_megamorphic,
                        is_missing_types);
   }
@@ -389,20 +389,20 @@ class ProfileAssistantTest : public CommonRuntimeTest {
                           bool is_megamorphic,
                           bool is_missing_types)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> pmi =
-        info.GetHotMethodInfo(MethodReference(
-            method->GetDexFile(), method->GetDexMethodIndex()));
-    ASSERT_TRUE(pmi != nullptr);
-    ASSERT_EQ(pmi->inline_caches->size(), 1u);
+    ProfileCompilationInfo::MethodHotness hotness =
+        info.GetMethodHotness(MethodReference(method->GetDexFile(), method->GetDexMethodIndex()));
+    ASSERT_TRUE(hotness.IsHot());
+    const ProfileCompilationInfo::InlineCacheMap* inline_caches = hotness.GetInlineCacheMap();
+    ASSERT_EQ(inline_caches->size(), 1u);
     AssertInlineCaches(expected_clases,
-                       pmi.get(),
-                       pmi->inline_caches->begin()->second,
+                       info,
+                       inline_caches->begin()->second,
                        is_megamorphic,
                        is_missing_types);
   }
 
   void AssertInlineCaches(const TypeReferenceSet& expected_clases,
-                          ProfileCompilationInfo::OfflineProfileMethodInfo* pmi,
+                          const ProfileCompilationInfo& info,
                           const ProfileCompilationInfo::DexPcData& dex_pc_data,
                           bool is_megamorphic,
                           bool is_missing_types)
@@ -413,9 +413,8 @@ class ProfileAssistantTest : public CommonRuntimeTest {
     size_t found = 0;
     for (const TypeReference& type_ref : expected_clases) {
       for (const auto& class_ref : dex_pc_data.classes) {
-        ProfileCompilationInfo::DexReference dex_ref =
-            pmi->dex_references[class_ref.dex_profile_index];
-        if (dex_ref.MatchesDex(type_ref.dex_file) && class_ref.type_index == type_ref.TypeIndex()) {
+        if (class_ref.type_index == type_ref.TypeIndex() &&
+            info.ProfileIndexMatchesDexFile(class_ref.dex_profile_index, type_ref.dex_file)) {
           found++;
         }
       }
@@ -832,9 +831,9 @@ TEST_F(ProfileAssistantTest, TestProfileCreationGenerateMethods) {
   for (ArtMethod& method : klass->GetMethods(kRuntimePointerSize)) {
     if (!method.IsCopied() && method.GetCodeItem() != nullptr) {
       ++method_count;
-      std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> pmi =
-          info.GetHotMethodInfo(MethodReference(method.GetDexFile(), method.GetDexMethodIndex()));
-      ASSERT_TRUE(pmi != nullptr) << method.PrettyMethod();
+      ProfileCompilationInfo::MethodHotness hotness =
+          info.GetMethodHotness(MethodReference(method.GetDexFile(), method.GetDexMethodIndex()));
+      ASSERT_TRUE(hotness.IsHot()) << method.PrettyMethod();
     }
   }
   EXPECT_GT(method_count, 0u);
@@ -1109,11 +1108,11 @@ TEST_F(ProfileAssistantTest, TestProfileRoundTrip) {
     "HLTestInline;->inlineMegamorphic(LSuper;)I+LSubA;,LSubB;,LSubC;,LSubD;,LSubE;",
     "HLTestInline;->inlineMissingTypes(LSuper;)I+missing_types",
     "HLTestInline;->noInlineCache(LSuper;)I",
-    "HLTestInline;->inlineMultiMonomorphic(LSuper;LSecret;)I+[LSuper;LSubA;[LSecret;LSubB;",
-    "HLTestInline;->inlineMultiPolymorphic(LSuper;LSecret;)I+[LSuper;LSubA;,LSubB;,LSubC;[LSecret;LSubB;,LSubC;",
-    "HLTestInline;->inlineMultiMegamorphic(LSuper;LSecret;)I+[LSuper;LSubA;,LSubB;,LSubC;,LSubD;,LSubE;[LSecret;megamorphic_types",
-    "HLTestInline;->inlineMultiMissingTypes(LSuper;LSecret;)I+[LSuper;missing_types[LSecret;missing_types",
-    "HLTestInline;->inlineTriplePolymorphic(LSuper;LSecret;LSecret;)I+[LSuper;LSubA;,LSubB;,LSubC;[LSecret;LSubB;,LSubC;",
+    "HLTestInline;->inlineMultiMonomorphic(LSuper;LSecret;)I+]LSuper;LSubA;]LSecret;LSubB;",
+    "HLTestInline;->inlineMultiPolymorphic(LSuper;LSecret;)I+]LSuper;LSubA;,LSubB;,LSubC;]LSecret;LSubB;,LSubC;",
+    "HLTestInline;->inlineMultiMegamorphic(LSuper;LSecret;)I+]LSuper;LSubA;,LSubB;,LSubC;,LSubD;,LSubE;]LSecret;megamorphic_types",
+    "HLTestInline;->inlineMultiMissingTypes(LSuper;LSecret;)I+]LSuper;missing_types]LSecret;missing_types",
+    "HLTestInline;->inlineTriplePolymorphic(LSuper;LSecret;LSecret;)I+]LSuper;LSubA;,LSubB;,LSubC;]LSecret;LSubB;,LSubC;",
     "HLTestInline;->noInlineCacheMulti(LSuper;LSecret;)I",
   };
   std::ostringstream input_file_contents;
@@ -1151,6 +1150,70 @@ TEST_F(ProfileAssistantTest, TestProfileRoundTrip) {
   ASSERT_EQ(ExecAndReturnCode(args, &error), 0) << error << " from " << text_two;
 }
 
+
+// Test that we can dump profiles in a way they can be re-constituted and
+// annotations don't interfere. Test goes 'txt -> ProfileWithAnnotations -> txt
+// -> prof' and then compares that to one that is 'txt ->
+// prof_without_annotations'.
+TEST_F(ProfileAssistantTest, TestProfileRoundTripWithAnnotations) {
+  // Create the profile content.
+  std::vector<std::string_view> methods = {
+    "HLTestInline;->inlineMonomorphic(LSuper;)I+LSubA;",
+    "HLTestInline;->inlinePolymorphic(LSuper;)I+LSubA;,LSubB;,LSubC;",
+    "HLTestInline;->inlineMegamorphic(LSuper;)I+LSubA;,LSubB;,LSubC;,LSubD;,LSubE;",
+    "HLTestInline;->inlineMissingTypes(LSuper;)I+missing_types",
+    "HLTestInline;->noInlineCache(LSuper;)I",
+    "HLTestInline;->inlineMultiMonomorphic(LSuper;LSecret;)I+]LSuper;LSubA;]LSecret;LSubB;",
+    "HLTestInline;->inlineMultiPolymorphic(LSuper;LSecret;)I+]LSuper;LSubA;,LSubB;,LSubC;]LSecret;LSubB;,LSubC;",
+    "HLTestInline;->inlineMultiMegamorphic(LSuper;LSecret;)I+]LSuper;LSubA;,LSubB;,LSubC;,LSubD;,LSubE;]LSecret;megamorphic_types",
+    "HLTestInline;->inlineMultiMissingTypes(LSuper;LSecret;)I+]LSuper;missing_types]LSecret;missing_types",
+    "HLTestInline;->inlineTriplePolymorphic(LSuper;LSecret;LSecret;)I+]LSuper;LSubA;,LSubB;,LSubC;]LSecret;LSubB;,LSubC;",
+    "HLTestInline;->noInlineCacheMulti(LSuper;LSecret;)I",
+  };
+  std::ostringstream no_annotation_input_file_contents;
+  std::ostringstream with_annotation_input_file_contents;
+  for (const std::string_view& m : methods) {
+    no_annotation_input_file_contents << m << "\n";
+    with_annotation_input_file_contents << "{foobar}" << m << "\n";
+  }
+
+  // Create the profile and save it to disk.
+  ScratchFile with_annotation_profile_file;
+  ASSERT_TRUE(CreateProfile(with_annotation_input_file_contents.str(),
+                            with_annotation_profile_file.GetFilename(),
+                            GetTestDexFileName("ProfileTestMultiDex")));
+  with_annotation_profile_file.GetFile()->ResetOffset();
+
+  ScratchFile no_annotation_profile_file;
+  ASSERT_TRUE(CreateProfile(no_annotation_input_file_contents.str(),
+                            no_annotation_profile_file.GetFilename(),
+                            GetTestDexFileName("ProfileTestMultiDex")));
+  with_annotation_profile_file.GetFile()->ResetOffset();
+
+  // Dump the file back into text.
+  std::string text_two;
+  ASSERT_TRUE(DumpClassesAndMethods(with_annotation_profile_file.GetFilename(),
+                                    &text_two,
+                                    GetTestDexFileName("ProfileTestMultiDex")));
+
+  // Create another profile and save it to the disk as well.
+  ScratchFile profile_two;
+  ASSERT_TRUE(CreateProfile(
+      text_two, profile_two.GetFilename(), GetTestDexFileName("ProfileTestMultiDex")));
+  profile_two.GetFile()->ResetOffset();
+
+  // These two profiles should be bit-identical.
+  // TODO We could compare the 'text_two' to the methods but since the order is
+  // arbitrary for many parts and there are multiple 'correct' dumps we'd need
+  // to basically parse everything and this is simply easier.
+  std::string error;
+  std::vector<std::string> args { kIsTargetBuild ? "/system/bin/cmp" : "/usr/bin/cmp",
+                                  "-s",
+                                  no_annotation_profile_file.GetFilename(),
+                                  profile_two.GetFilename() };
+  ASSERT_EQ(ExecAndReturnCode(args, &error), 0) << error << " from " << text_two;
+}
+
 TEST_F(ProfileAssistantTest, TestProfileCreateInlineCache) {
   // Create the profile content.
   std::vector<std::string_view> methods = {
@@ -1159,11 +1222,11 @@ TEST_F(ProfileAssistantTest, TestProfileCreateInlineCache) {
     "HLTestInline;->inlineMegamorphic(LSuper;)I+LSubA;,LSubB;,LSubC;,LSubD;,LSubE;",
     "HLTestInline;->inlineMissingTypes(LSuper;)I+missing_types",
     "HLTestInline;->noInlineCache(LSuper;)I",
-    "HLTestInline;->inlineMultiMonomorphic(LSuper;LSecret;)I+[LSuper;LSubA;[LSecret;LSubB;",
-    "HLTestInline;->inlineMultiPolymorphic(LSuper;LSecret;)I+[LSuper;LSubA;,LSubB;,LSubC;[LSecret;LSubB;,LSubC;",
-    "HLTestInline;->inlineMultiMegamorphic(LSuper;LSecret;)I+[LSuper;LSubA;,LSubB;,LSubC;,LSubD;,LSubE;[LSecret;LSubA;,LSubB;,LSubC;,LSubD;,LSubE;",
-    "HLTestInline;->inlineMultiMissingTypes(LSuper;LSecret;)I+[LSuper;missing_types[LSecret;missing_types",
-    "HLTestInline;->inlineTriplePolymorphic(LSuper;LSecret;LSecret;)I+[LSuper;LSubA;,LSubB;,LSubC;[LSecret;LSubB;,LSubC;",
+    "HLTestInline;->inlineMultiMonomorphic(LSuper;LSecret;)I+]LSuper;LSubA;]LSecret;LSubB;",
+    "HLTestInline;->inlineMultiPolymorphic(LSuper;LSecret;)I+]LSuper;LSubA;,LSubB;,LSubC;]LSecret;LSubB;,LSubC;",
+    "HLTestInline;->inlineMultiMegamorphic(LSuper;LSecret;)I+]LSuper;LSubA;,LSubB;,LSubC;,LSubD;,LSubE;]LSecret;LSubA;,LSubB;,LSubC;,LSubD;,LSubE;",
+    "HLTestInline;->inlineMultiMissingTypes(LSuper;LSecret;)I+]LSuper;missing_types]LSecret;missing_types",
+    "HLTestInline;->inlineTriplePolymorphic(LSuper;LSecret;LSecret;)I+]LSuper;LSubA;,LSubB;,LSubC;]LSecret;LSubB;,LSubC;",
     "HLTestInline;->noInlineCacheMulti(LSuper;LSecret;)I",
   };
   std::ostringstream input_file_contents;
@@ -1264,11 +1327,10 @@ TEST_F(ProfileAssistantTest, TestProfileCreateInlineCache) {
     // Verify that method noInlineCache has no inline caches in the profile.
     ArtMethod* no_inline_cache = GetVirtualMethod(class_loader, "LTestInline;", "noInlineCache");
     ASSERT_TRUE(no_inline_cache != nullptr);
-    std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> pmi_no_inline_cache =
-        info.GetHotMethodInfo(MethodReference(
-            no_inline_cache->GetDexFile(), no_inline_cache->GetDexMethodIndex()));
-    ASSERT_TRUE(pmi_no_inline_cache != nullptr);
-    ASSERT_TRUE(pmi_no_inline_cache->inline_caches->empty());
+    ProfileCompilationInfo::MethodHotness hotness_no_inline_cache = info.GetMethodHotness(
+        MethodReference(no_inline_cache->GetDexFile(), no_inline_cache->GetDexMethodIndex()));
+    ASSERT_TRUE(hotness_no_inline_cache.IsHot());
+    ASSERT_TRUE(hotness_no_inline_cache.GetInlineCacheMap()->empty());
   }
 
   {
@@ -1405,11 +1467,10 @@ TEST_F(ProfileAssistantTest, TestProfileCreateInlineCache) {
     ArtMethod* no_inline_cache =
         GetVirtualMethod(class_loader, "LTestInline;", "noInlineCacheMulti");
     ASSERT_TRUE(no_inline_cache != nullptr);
-    std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> pmi_no_inline_cache =
-        info.GetHotMethodInfo(
-            MethodReference(no_inline_cache->GetDexFile(), no_inline_cache->GetDexMethodIndex()));
-    ASSERT_TRUE(pmi_no_inline_cache != nullptr);
-    ASSERT_TRUE(pmi_no_inline_cache->inline_caches->empty());
+    ProfileCompilationInfo::MethodHotness hotness_no_inline_cache = info.GetMethodHotness(
+        MethodReference(no_inline_cache->GetDexFile(), no_inline_cache->GetDexMethodIndex()));
+    ASSERT_TRUE(hotness_no_inline_cache.IsHot());
+    ASSERT_TRUE(hotness_no_inline_cache.GetInlineCacheMap()->empty());
   }
 }
 
@@ -1488,11 +1549,12 @@ TEST_F(ProfileAssistantTest, TestProfileCreateWithInvalidData) {
   const DexFile* dex_file = inline_monomorphic->GetDexFile();
 
   // Verify that the inline cache contains the invalid type.
-  std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> pmi =
-      info.GetHotMethodInfo(MethodReference(dex_file, inline_monomorphic->GetDexMethodIndex()));
-  ASSERT_TRUE(pmi != nullptr);
-  ASSERT_EQ(pmi->inline_caches->size(), 1u);
-  const ProfileCompilationInfo::DexPcData& dex_pc_data = pmi->inline_caches->begin()->second;
+  ProfileCompilationInfo::MethodHotness hotness =
+      info.GetMethodHotness(MethodReference(dex_file, inline_monomorphic->GetDexMethodIndex()));
+  ASSERT_TRUE(hotness.IsHot());
+  const ProfileCompilationInfo::InlineCacheMap* inline_caches = hotness.GetInlineCacheMap();
+  ASSERT_EQ(inline_caches->size(), 1u);
+  const ProfileCompilationInfo::DexPcData& dex_pc_data = inline_caches->begin()->second;
   dex::TypeIndex invalid_class_index(std::numeric_limits<uint16_t>::max() - 1);
   ASSERT_EQ(1u, dex_pc_data.classes.size());
   ASSERT_EQ(invalid_class_index, dex_pc_data.classes.begin()->type_index);
@@ -1704,12 +1766,11 @@ TEST_F(ProfileAssistantTest, CopyAndUpdateProfileKey) {
 
   // Verify that the renaming was done.
   for (uint16_t i = 0; i < num_methods_to_add; i ++) {
-    std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> pmi;
-    ASSERT_TRUE(result.GetHotMethodInfo(MethodReference(&d1, i)) != nullptr) << i;
-    ASSERT_TRUE(result.GetHotMethodInfo(MethodReference(&d2, i)) != nullptr) << i;
+    ASSERT_TRUE(result.GetMethodHotness(MethodReference(&d1, i)).IsHot()) << i;
+    ASSERT_TRUE(result.GetMethodHotness(MethodReference(&d2, i)).IsHot()) << i;
 
-    ASSERT_TRUE(result.GetHotMethodInfo(MethodReference(dex_to_be_updated1, i)) == nullptr);
-    ASSERT_TRUE(result.GetHotMethodInfo(MethodReference(dex_to_be_updated2, i)) == nullptr);
+    ASSERT_FALSE(result.GetMethodHotness(MethodReference(dex_to_be_updated1, i)).IsHot()) << i;
+    ASSERT_FALSE(result.GetMethodHotness(MethodReference(dex_to_be_updated2, i)).IsHot()) << i;
   }
 }
 

@@ -98,19 +98,25 @@ TEST_ART_ADB_ROOT_AND_REMOUNT := \
 
 # "mm test-art" to build and run all tests on host and device
 .PHONY: test-art
-test-art: test-art-host test-art-target
+test-art:
 	$(hide) $(call ART_TEST_PREREQ_FINISHED,$@)
 
 .PHONY: test-art-gtest
-test-art-gtest: test-art-host-gtest test-art-target-gtest
+test-art-gtest:
 	$(hide) $(call ART_TEST_PREREQ_FINISHED,$@)
 
 .PHONY: test-art-run-test
-test-art-run-test: test-art-host-run-test test-art-target-run-test
+test-art-run-test:
 	$(hide) $(call ART_TEST_PREREQ_FINISHED,$@)
 
 ########################################################################
 # host test rules
+
+ifeq (true,$(my_art_module_source_build))
+
+test-art: test-art-host
+test-art-gtest: test-art-host-gtest
+test-art-run-test: test-art-host-run-test
 
 VIXL_TEST_DEPENDENCY :=
 # We can only run the vixl tests on 64-bit hosts (vixl testing issue) when its a
@@ -201,8 +207,14 @@ endif
 test-art-host-dexdump: $(addprefix $(HOST_OUT_EXECUTABLES)/, dexdump dexlist)
 	ANDROID_HOST_OUT=$(realpath $(HOST_OUT)) art/test/dexdump/run-all-tests
 
+endif # ifeq (true,$(my_art_module_source_build))
+
 ########################################################################
 # target test rules
+
+test-art: test-art-target
+test-art-gtest: test-art-target-gtest
+test-art-run-test: test-art-target-run-test
 
 # "mm test-art-target" to build and run all target tests.
 .PHONY: test-art-target
@@ -326,6 +338,9 @@ art_apex_manifest_file :=
 
 include $(CLEAR_VARS)
 LOCAL_MODULE := art-runtime
+LOCAL_LICENSE_KINDS := SPDX-license-identifier-Apache-2.0 SPDX-license-identifier-BSD SPDX-license-identifier-GPL-2.0
+LOCAL_LICENSE_CONDITIONS := notice restricted
+LOCAL_NOTICE_FILE := $(LOCAL_PATH)/NOTICE
 
 # Reference the libraries and binaries in the appropriate APEX module, because
 # they don't have platform variants. However if
@@ -349,6 +364,7 @@ LOCAL_REQUIRED_MODULES := \
     $(call art_module_lib,libart-compiler) \
     $(call art_module_lib,libopenjdkjvm) \
     $(call art_module_lib,libopenjdkjvmti) \
+    $(call art_module_lib,odrefresh) \
     $(call art_module_lib,profman) \
     $(call art_module_lib,libadbconnection) \
     $(call art_module_lib,libperfetto_hprof) \
@@ -390,6 +406,9 @@ include $(BUILD_PHONY_PACKAGE)
 ifneq ($(HOST_OS),darwin)
 include $(CLEAR_VARS)
 LOCAL_MODULE := art-tools
+LOCAL_LICENSE_KINDS := SPDX-license-identifier-Apache-2.0 SPDX-license-identifier-BSD SPDX-license-identifier-GPL-2.0
+LOCAL_LICENSE_CONDITIONS := notice restricted
+LOCAL_NOTICE_FILE := $(LOCAL_PATH)/NOTICE
 LOCAL_IS_HOST_MODULE := true
 LOCAL_REQUIRED_MODULES := \
     ahat \
@@ -425,6 +444,9 @@ ifneq ($(HOST_OS),darwin)
 ifeq ($(ART_BUILD_HOST_DEBUG),true)
 include $(CLEAR_VARS)
 LOCAL_MODULE := art-libartd-libopenjdkd-host-dependency
+LOCAL_LICENSE_KINDS := SPDX-license-identifier-Apache-2.0 SPDX-license-identifier-BSD SPDX-license-identifier-GPL-2.0
+LOCAL_LICENSE_CONDITIONS := notice restricted
+LOCAL_NOTICE_FILE := $(LOCAL_PATH)/NOTICE
 LOCAL_MULTILIB := both
 LOCAL_REQUIRED_MODULES := libopenjdkd
 LOCAL_IS_HOST_MODULE := true
@@ -435,7 +457,10 @@ endif # HOST_OS != darwin
 ########################################################################
 # "m build-art" for quick minimal build
 .PHONY: build-art
-build-art: build-art-host build-art-target
+
+ifeq (true,$(my_art_module_source_build))
+
+build-art: build-art-host
 
 # For host, we extract the ICU data from the apex and install it to HOST_OUT/I18N_APEX.
 $(HOST_I18N_DATA): $(TARGET_OUT)/apex/$(I18N_APEX).apex $(HOST_OUT)/bin/deapexer
@@ -454,6 +479,10 @@ $(HOST_TZDATA_DATA): $(TARGET_OUT)/apex/$(TZDATA_APEX).apex $(HOST_OUT)/bin/deap
 
 .PHONY: build-art-host
 build-art-host:   $(HOST_OUT_EXECUTABLES)/art $(ART_HOST_DEPENDENCIES) $(HOST_CORE_IMG_OUTS) $(HOST_I18N_DATA) $(HOST_TZDATA_DATA)
+
+endif # ifeq (true,$(my_art_module_source_build))
+
+build-art: build-art-target
 
 .PHONY: build-art-target
 build-art-target: $(TARGET_OUT_EXECUTABLES)/art $(ART_TARGET_DEPENDENCIES) $(TARGET_CORE_IMG_OUTS)
@@ -564,6 +593,10 @@ PRIVATE_I18N_APEX_DEPENDENCY_LIBS := \
   lib64/libicu_jni.so \
   lib64/libicuuc.so \
 
+PRIVATE_STATSD_APEX_DEPENDENCY_LIBS := \
+  lib/libstatssocket.so \
+  lib64/libstatssocket.so \
+
 # Extracts files from an APEX into a location. The APEX can be either a .apex
 # file in $(TARGET_OUT)/apex, or a directory in the same location. Files are
 # extracted to $(TARGET_OUT) with the same relative paths as under the APEX
@@ -611,6 +644,7 @@ standalone-apex-files: deapexer \
                        $(RUNTIME_APEX) \
                        $(CONSCRYPT_APEX) \
                        $(I18N_APEX) \
+                       $(STATSD_APEX) \
                        $(TZDATA_APEX)
 	$(call extract-from-apex,$(RELEASE_ART_APEX),\
 	  $(PRIVATE_ART_APEX_DEPENDENCY_LIBS) $(PRIVATE_ART_APEX_DEPENDENCY_FILES))
@@ -633,36 +667,39 @@ standalone-apex-files: deapexer \
 	  $(PRIVATE_CONSCRYPT_APEX_DEPENDENCY_LIBS))
 	$(call extract-from-apex,$(I18N_APEX),\
 	  $(PRIVATE_I18N_APEX_DEPENDENCY_LIBS))
+	$(call extract-from-apex,$(STATSD_APEX),\
+	  $(PRIVATE_STATSD_APEX_DEPENDENCY_LIBS))
 	$(call extract-from-apex,$(TZDATA_APEX),)
 
 ########################################################################
 # Phony target for only building what go/lem requires for pushing ART on /data.
 
 .PHONY: build-art-target-golem
+
+# TODO(b/129332183): Clean this up when Golem runs can mount the APEXes directly
+# in the chroot.
+
+ART_TARGET_PLATFORM_DEPENDENCIES := \
+  $(TARGET_OUT)/etc/public.libraries.txt \
+  $(TARGET_OUT_SHARED_LIBRARIES)/heapprofd_client_api.so \
+  $(TARGET_OUT_SHARED_LIBRARIES)/libartpalette-system.so \
+  $(TARGET_OUT_SHARED_LIBRARIES)/libcutils.so \
+  $(TARGET_OUT_SHARED_LIBRARIES)/liblz4.so \
+  $(TARGET_OUT_SHARED_LIBRARIES)/libprocessgroup.so \
+  $(TARGET_OUT_SHARED_LIBRARIES)/libprocinfo.so \
+  $(TARGET_OUT_SHARED_LIBRARIES)/libselinux.so \
+  $(TARGET_OUT_SHARED_LIBRARIES)/libtombstoned_client.so \
+  $(TARGET_OUT_SHARED_LIBRARIES)/libz.so \
+
 # Also include libartbenchmark, we always include it when running golem.
 # libstdc++ is needed when building for ART_TARGET_LINUX.
-
-# Also include the Bionic libraries (libc, libdl, libdl_android, libm) and
-# linker.
-#
-# TODO(b/129332183): Remove this when Golem has full support for the
-# ART APEX.
-
 ART_TARGET_SHARED_LIBRARY_BENCHMARK := $(TARGET_OUT_SHARED_LIBRARIES)/libartbenchmark.so
-ART_TARGET_SHARED_LIBRARY_PALETTE_DEPENDENCIES := \
-    $(TARGET_OUT_SHARED_LIBRARIES)/libcutils.so \
-    $(TARGET_OUT_SHARED_LIBRARIES)/libprocessgroup.so \
-    $(TARGET_OUT_SHARED_LIBRARIES)/libtombstoned_client.so
 
 build-art-target-golem: $(RELEASE_ART_APEX) com.android.runtime $(CONSCRYPT_APEX) \
                         $(TARGET_OUT_EXECUTABLES)/art \
                         $(TARGET_OUT_EXECUTABLES)/dex2oat_wrapper \
-                        $(TARGET_OUT)/etc/public.libraries.txt \
+                        $(ART_TARGET_PLATFORM_DEPENDENCIES) \
                         $(ART_TARGET_SHARED_LIBRARY_BENCHMARK) \
-                        $(ART_TARGET_SHARED_LIBRARY_PALETTE_DEPENDENCIES) \
-                        $(TARGET_OUT_SHARED_LIBRARIES)/libz.so \
-                        $(TARGET_OUT_SHARED_LIBRARIES)/liblz4.so \
-                        libartpalette-system \
                         standalone-apex-files
 	# remove debug libraries from public.libraries.txt because golem builds
 	# won't have it.
@@ -673,12 +710,17 @@ build-art-target-golem: $(RELEASE_ART_APEX) com.android.runtime $(CONSCRYPT_APEX
 
 ########################################################################
 # Phony target for building what go/lem requires on host.
+
+ifeq (true,$(my_art_module_source_build))
+
 .PHONY: build-art-host-golem
 # Also include libartbenchmark, we always include it when running golem.
 ART_HOST_SHARED_LIBRARY_BENCHMARK := $(ART_HOST_OUT_SHARED_LIBRARIES)/libartbenchmark.so
 build-art-host-golem: build-art-host \
                       $(ART_HOST_SHARED_LIBRARY_BENCHMARK) \
                       $(HOST_OUT_EXECUTABLES)/dex2oat_wrapper
+
+endif # ifeq (true,$(my_art_module_source_build))
 
 ########################################################################
 # Phony target for building what go/lem requires for syncing /system to target.
@@ -689,8 +731,12 @@ build-art-unbundled-golem: art-runtime linker oatdump $(art_apex_jars) conscrypt
 ########################################################################
 # Rules for building all dependencies for tests.
 
+ifeq (true,$(my_art_module_source_build))
+
 .PHONY: build-art-host-tests
 build-art-host-tests:   build-art-host $(TEST_ART_RUN_TEST_DEPENDENCIES) $(ART_TEST_HOST_RUN_TEST_DEPENDENCIES) $(ART_TEST_HOST_GTEST_DEPENDENCIES) | $(TEST_ART_RUN_TEST_ORDERONLY_DEPENDENCIES)
+
+endif # ifeq (true,$(my_art_module_source_build))
 
 .PHONY: build-art-target-tests
 build-art-target-tests:   build-art-target $(TEST_ART_RUN_TEST_DEPENDENCIES) $(ART_TEST_TARGET_RUN_TEST_DEPENDENCIES) $(ART_TEST_TARGET_GTEST_DEPENDENCIES) | $(TEST_ART_RUN_TEST_ORDERONLY_DEPENDENCIES)
@@ -858,4 +904,3 @@ public_sdk_stubs: $(STUB_ZIP_FILES)
 
 MIN_SDK_VERSION :=
 SDK_VERSIONS :=
-

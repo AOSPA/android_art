@@ -32,6 +32,7 @@
 #include <time.h>
 
 #include <limits>
+#include <optional>
 #include <type_traits>
 
 #include "gc/heap-visit-objects-inl.h"
@@ -584,10 +585,14 @@ void DumpPerfetto(art::Thread* self) {
   // We need to do this before the fork, because otherwise it can deadlock
   // waiting for the GC, as all other threads get terminated by the clone, but
   // their locks are not released.
-  art::gc::ScopedGCCriticalSection gcs(self, art::gc::kGcCauseHprof,
-                                       art::gc::kCollectorTypeHprof);
+  // This does not perfectly solve all fork-related issues, as there could still be threads that
+  // are unaffected by ScopedSuspendAll and in a non-fork-friendly situation
+  // (e.g. inside a malloc holding a lock). This situation is quite rare, and in that case we will
+  // hit the watchdog in the grand-child process if it gets stuck.
+  std::optional<art::gc::ScopedGCCriticalSection> gcs(std::in_place, self, art::gc::kGcCauseHprof,
+                                                      art::gc::kCollectorTypeHprof);
 
-  art::ScopedSuspendAll ssa(__FUNCTION__, /* long_suspend=*/ true);
+  std::optional<art::ScopedSuspendAll> ssa(std::in_place, __FUNCTION__, /* long_suspend=*/ true);
 
   pid_t pid = fork();
   if (pid == -1) {
@@ -597,10 +602,34 @@ void DumpPerfetto(art::Thread* self) {
   }
   if (pid != 0) {
     // Parent
-    int stat_loc;
-    for (;;) {
-      if (waitpid(pid, &stat_loc, 0) != -1 || errno != EINTR) {
+    // Stop the thread suspension as soon as possible to allow the rest of the application to
+    // continue while we waitpid here.
+    ssa.reset();
+    gcs.reset();
+    for (size_t i = 0;; ++i) {
+      if (i == 1000) {
+        // The child hasn't exited for 1 second (and all it was supposed to do was fork itself).
+        // Give up and SIGKILL it. The next waitpid should succeed.
+        LOG(ERROR) << "perfetto_hprof child timed out. Sending SIGKILL.";
+        kill(pid, SIGKILL);
+      }
+      // Busy waiting here will introduce some extra latency, but that is okay because we have
+      // already unsuspended all other threads. This runs on the perfetto_hprof_listener, which
+      // is not needed for progress of the app itself.
+      int stat_loc;
+      pid_t wait_result = waitpid(pid, &stat_loc, WNOHANG);
+      if (wait_result == -1 && errno != EINTR) {
+        if (errno != ECHILD) {
+          // This hopefully never happens (should only be EINVAL).
+          PLOG(FATAL_WITHOUT_ABORT) << "waitpid";
+        }
+        // If we get ECHILD, the parent process was handling SIGCHLD, or did a wildcard wait.
+        // The child is no longer here either way, so that's good enough for us.
         break;
+      } else if (wait_result > 0) {
+        break;
+      } else {  // wait_result == 0 || errno == EINTR.
+        usleep(1000);
       }
     }
     return;
@@ -690,9 +719,11 @@ void DumpPerfetto(art::Thread* self) {
             std::unique_ptr<protozero::PackedVarInt> reference_object_ids(
                 new protozero::PackedVarInt);
 
+            uint64_t prev_object_id = 0;
+
             art::Runtime::Current()->GetHeap()->VisitObjectsPaused(
                 [&writer, &interned_fields, &interned_locations, &reference_field_ids,
-                 &reference_object_ids, &interned_classes, &ignored_types](
+                 &reference_object_ids, &interned_classes, &ignored_types, &prev_object_id](
                     art::mirror::Object* obj) REQUIRES_SHARED(art::Locks::mutator_lock_) {
                   if (obj->IsClass()) {
                     art::mirror::Class* klass = obj->AsClass().Ptr();
@@ -748,9 +779,15 @@ void DumpPerfetto(art::Thread* self) {
 
                   auto class_id = FindOrAppend(&interned_classes, class_ptr);
 
+                  uint64_t object_id = GetObjectId(obj);
                   perfetto::protos::pbzero::HeapGraphObject* object_proto =
                     writer.GetHeapGraph()->add_objects();
-                  object_proto->set_id(GetObjectId(obj));
+                  if (prev_object_id && prev_object_id < object_id) {
+                    object_proto->set_id_delta(object_id - prev_object_id);
+                  } else {
+                    object_proto->set_id(object_id);
+                  }
+                  prev_object_id = object_id;
                   object_proto->set_type_id(class_id);
 
                   // Arrays / strings are magic and have an instance dependent size.
@@ -827,16 +864,6 @@ void DumpPerfetto(art::Thread* self) {
                   reference_object_ids->Reset();
                 });
 
-            for (const auto& p : interned_fields) {
-              const std::string& str = p.first;
-              uint64_t id = p.second;
-
-              perfetto::protos::pbzero::InternedString* field_proto =
-                writer.GetHeapGraph()->add_field_names();
-              field_proto->set_iid(id);
-              field_proto->set_str(
-                  reinterpret_cast<const uint8_t*>(str.c_str()), str.size());
-            }
             for (const auto& p : interned_locations) {
               const std::string& str = p.first;
               uint64_t id = p.second;
@@ -846,6 +873,16 @@ void DumpPerfetto(art::Thread* self) {
               location_proto->set_iid(id);
               location_proto->set_str(reinterpret_cast<const uint8_t*>(str.c_str()),
                                   str.size());
+            }
+            for (const auto& p : interned_fields) {
+              const std::string& str = p.first;
+              uint64_t id = p.second;
+
+              perfetto::protos::pbzero::InternedString* field_proto =
+                writer.GetHeapGraph()->add_field_names();
+              field_proto->set_iid(id);
+              field_proto->set_str(
+                  reinterpret_cast<const uint8_t*>(str.c_str()), str.size());
             }
 
             writer.Finalize();

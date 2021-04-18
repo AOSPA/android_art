@@ -14,12 +14,20 @@
 // limitations under the License.
 //
 
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "art_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["art_license"],
+}
+
 art_cc_defaults {
     name: "libart-dex2oat-defaults",
     defaults: ["art_defaults"],
     host_supported: true,
     srcs: [
-        "dex/dex_to_dex_compiler.cc",
         "dex/quick_compiler_callbacks.cc",
         "driver/compiler_driver.cc",
         "linker/elf_writer.cc",
@@ -80,7 +88,6 @@ gensrcs {
     cmd: "$(location generate_operator_out) art/dex2oat $(in) > $(out)",
     tools: ["generate_operator_out"],
     srcs: [
-        "dex/dex_to_dex_compiler.h",
         "linker/image_writer.h",
     ],
     output_extension: "operator_out.cc",

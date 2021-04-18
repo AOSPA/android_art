@@ -21,7 +21,6 @@
 #include "arch/arm/jni_frame_arm.h"
 #include "arch/instruction_set.h"
 #include "base/macros.h"
-#include "handle_scope-inl.h"
 #include "utils/arm/managed_register_arm.h"
 
 namespace art {
@@ -386,6 +385,13 @@ uint32_t ArmJniCallingConvention::FpSpillMask() const {
   return is_critical_native_ ? 0u : kFpCalleeSpillMask;
 }
 
+ManagedRegister ArmJniCallingConvention::SavedLocalReferenceCookieRegister() const {
+  // The r5 is callee-save register in both managed and native ABIs.
+  // It is saved in the stack frame and it has no special purpose like `tr`.
+  static_assert((kCoreCalleeSpillMask & (1u << R5)) != 0u);  // Managed callee save register.
+  return ArmManagedRegister::FromCoreRegister(R5);
+}
+
 ManagedRegister ArmJniCallingConvention::ReturnScratchRegister() const {
   return ArmManagedRegister::FromCoreRegister(R2);
 }
@@ -394,28 +400,31 @@ size_t ArmJniCallingConvention::FrameSize() const {
   if (UNLIKELY(is_critical_native_)) {
     CHECK(!SpillsMethod());
     CHECK(!HasLocalReferenceSegmentState());
-    CHECK(!HasHandleScope());
     CHECK(!SpillsReturnValue());
     return 0u;  // There is no managed frame for @CriticalNative.
   }
 
   // Method*, callee save area size, local reference segment state
-  CHECK(SpillsMethod());
+  DCHECK(SpillsMethod());
   const size_t method_ptr_size = static_cast<size_t>(kArmPointerSize);
   const size_t callee_save_area_size = CalleeSaveRegisters().size() * kFramePointerSize;
   size_t total_size = method_ptr_size + callee_save_area_size;
 
-  CHECK(HasLocalReferenceSegmentState());
-  // local reference segment state
-  total_size += kFramePointerSize;
-  // TODO: Probably better to use sizeof(IRTSegmentState) here...
-
-  CHECK(HasHandleScope());
-  total_size += HandleScope::SizeOf(kArmPointerSize, ReferenceCount());
+  DCHECK(HasLocalReferenceSegmentState());
+  // Cookie is saved in one of the spilled registers.
 
   // Plus return value spill area size
-  CHECK(SpillsReturnValue());
-  total_size += SizeOfReturnValue();
+  if (SpillsReturnValue()) {
+    // For 64-bit return values there shall be a 4B alignment gap between
+    // the method pointer and the saved return value.
+    size_t padding = ReturnValueSaveLocation().SizeValue() - method_ptr_size;
+    DCHECK_EQ(padding,
+              (GetReturnType() == Primitive::kPrimLong || GetReturnType() == Primitive::kPrimDouble)
+                  ? 4u
+                  : 0u);
+    total_size += padding;
+    total_size += SizeOfReturnValue();
+  }
 
   return RoundUp(total_size, kStackAlignment);
 }

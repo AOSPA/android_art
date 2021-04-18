@@ -12,11 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "art_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["art_license"],
+}
+
 boot_image {
     name: "art-boot-image",
     image_name: "art",
     visibility: [
         "//art/build/apex",
+        "//art/build/sdk",
+    ],
+    apex_available: [
+        "com.android.art",
+        "com.android.art.debug",
+    ],
+}
+
+bootclasspath_fragment {
+    name: "art-bootclasspath-fragment",
+    image_name: "art",
+    visibility: [
+        "//art/build/apex",
+        "//art/build/sdk",
     ],
     apex_available: [
         "com.android.art",

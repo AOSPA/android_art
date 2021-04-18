@@ -171,7 +171,8 @@ std::string ProfileCompilationInfo::GetProfileDexFileAugmentedKey(
 // Note: this is OK because we don't store profiles of different apps into the same file.
 // Apps with split apks don't cause trouble because each split has a different name and will not
 // collide with other entries.
-std::string ProfileCompilationInfo::GetProfileDexFileBaseKey(const std::string& dex_location) {
+std::string_view ProfileCompilationInfo::GetProfileDexFileBaseKeyView(
+    std::string_view dex_location) {
   DCHECK(!dex_location.empty());
   size_t last_sep_index = dex_location.find_last_of('/');
   if (last_sep_index == std::string::npos) {
@@ -182,10 +183,21 @@ std::string ProfileCompilationInfo::GetProfileDexFileBaseKey(const std::string& 
   }
 }
 
-std::string ProfileCompilationInfo::GetBaseKeyFromAugmentedKey(
-    const std::string& profile_key) {
+std::string ProfileCompilationInfo::GetProfileDexFileBaseKey(const std::string& dex_location) {
+  // Note: Conversions between std::string and std::string_view.
+  return std::string(GetProfileDexFileBaseKeyView(dex_location));
+}
+
+std::string_view ProfileCompilationInfo::GetBaseKeyViewFromAugmentedKey(
+    std::string_view profile_key) {
   size_t pos = profile_key.rfind(kSampleMetadataSeparator);
   return (pos == std::string::npos) ? profile_key : profile_key.substr(0, pos);
+}
+
+std::string ProfileCompilationInfo::GetBaseKeyFromAugmentedKey(
+    const std::string& profile_key) {
+  // Note: Conversions between std::string and std::string_view.
+  return std::string(GetBaseKeyViewFromAugmentedKey(profile_key));
 }
 
 std::string ProfileCompilationInfo::MigrateAnnotationInfo(
@@ -681,9 +693,9 @@ const ProfileCompilationInfo::DexFileData* ProfileCompilationInfo::FindDexDataUs
       const DexFile* dex_file,
       const ProfileSampleAnnotation& annotation) const {
   if (annotation == ProfileSampleAnnotation::kNone) {
-    std::string profile_key = GetProfileDexFileBaseKey(dex_file->GetLocation());
+    std::string_view profile_key = GetProfileDexFileBaseKeyView(dex_file->GetLocation());
     for (const DexFileData* dex_data : info_) {
-      if (profile_key == GetBaseKeyFromAugmentedKey(dex_data->profile_key)) {
+      if (profile_key == GetBaseKeyViewFromAugmentedKey(dex_data->profile_key)) {
         if (!ChecksumMatch(dex_data->checksum, dex_file->GetLocationChecksum())) {
           return nullptr;
         }
@@ -701,9 +713,9 @@ const ProfileCompilationInfo::DexFileData* ProfileCompilationInfo::FindDexDataUs
 void ProfileCompilationInfo::FindAllDexData(
     const DexFile* dex_file,
     /*out*/ std::vector<const ProfileCompilationInfo::DexFileData*>* result) const {
-  std::string profile_key = GetProfileDexFileBaseKey(dex_file->GetLocation());
+  std::string_view profile_key = GetProfileDexFileBaseKeyView(dex_file->GetLocation());
   for (const DexFileData* dex_data : info_) {
-    if (profile_key == GetBaseKeyFromAugmentedKey(dex_data->profile_key)) {
+    if (profile_key == GetBaseKeyViewFromAugmentedKey(dex_data->profile_key)) {
       if (ChecksumMatch(dex_data->checksum, dex_file->GetLocationChecksum())) {
         result->push_back(dex_data);
       }
@@ -1105,13 +1117,13 @@ bool ProfileCompilationInfo::Load(
 }
 
 bool ProfileCompilationInfo::VerifyProfileData(const std::vector<const DexFile*>& dex_files) {
-  std::unordered_map<std::string, const DexFile*> key_to_dex_file;
+  std::unordered_map<std::string_view, const DexFile*> key_to_dex_file;
   for (const DexFile* dex_file : dex_files) {
-    key_to_dex_file.emplace(GetProfileDexFileBaseKey(dex_file->GetLocation()), dex_file);
+    key_to_dex_file.emplace(GetProfileDexFileBaseKeyView(dex_file->GetLocation()), dex_file);
   }
   for (const DexFileData* dex_data : info_) {
     // We need to remove any annotation from the key during verification.
-    const auto it = key_to_dex_file.find(GetBaseKeyFromAugmentedKey(dex_data->profile_key));
+    const auto it = key_to_dex_file.find(GetBaseKeyViewFromAugmentedKey(dex_data->profile_key));
     if (it == key_to_dex_file.end()) {
       // It is okay if profile contains data for additional dex files.
       continue;
@@ -1602,28 +1614,6 @@ ProfileCompilationInfo::MethodHotness ProfileCompilationInfo::GetMethodHotness(
       : MethodHotness();
 }
 
-std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo>
-ProfileCompilationInfo::GetHotMethodInfo(const MethodReference& method_ref,
-                                         const ProfileSampleAnnotation& annotation) const {
-  MethodHotness hotness(GetMethodHotness(method_ref, annotation));
-  if (!hotness.IsHot()) {
-    return nullptr;
-  }
-  const InlineCacheMap* inline_caches = hotness.GetInlineCacheMap();
-  DCHECK(inline_caches != nullptr);
-  std::unique_ptr<OfflineProfileMethodInfo> pmi(new OfflineProfileMethodInfo(inline_caches));
-
-  pmi->dex_references.resize(info_.size());
-  for (const DexFileData* dex_data : info_) {
-    pmi->dex_references[dex_data->profile_index].profile_key = dex_data->profile_key;
-    pmi->dex_references[dex_data->profile_index].dex_checksum = dex_data->checksum;
-    pmi->dex_references[dex_data->profile_index].num_method_ids = dex_data->num_method_ids;
-  }
-
-  return pmi;
-}
-
-
 bool ProfileCompilationInfo::ContainsClass(const DexFile& dex_file,
                                            dex::TypeIndex type_idx,
                                            const ProfileSampleAnnotation& annotation) const {
@@ -1681,7 +1671,7 @@ std::string ProfileCompilationInfo::DumpInfo(const std::vector<const DexFile*>& 
     os << " [checksum=" << std::hex << dex_data->checksum << "]" << std::dec;
     const DexFile* dex_file = nullptr;
     for (const DexFile* current : dex_files) {
-      if (GetBaseKeyFromAugmentedKey(dex_data->profile_key) == current->GetLocation() &&
+      if (GetBaseKeyViewFromAugmentedKey(dex_data->profile_key) == current->GetLocation() &&
           dex_data->checksum == current->GetLocationChecksum()) {
         dex_file = current;
       }
@@ -1892,111 +1882,6 @@ bool ProfileCompilationInfo::GenerateTestProfile(
     }
   }
   return info.Save(fd);
-}
-
-bool ProfileCompilationInfo::OfflineProfileMethodInfo::operator==(
-      const OfflineProfileMethodInfo& other) const {
-  if (inline_caches->size() != other.inline_caches->size()) {
-    return false;
-  }
-
-  // We can't use a simple equality test because we need to match the dex files
-  // of the inline caches which might have different profile indexes.
-  for (const auto& inline_cache_it : *inline_caches) {
-    uint16_t dex_pc = inline_cache_it.first;
-    const DexPcData dex_pc_data = inline_cache_it.second;
-    const auto& other_it = other.inline_caches->find(dex_pc);
-    if (other_it == other.inline_caches->end()) {
-      return false;
-    }
-    const DexPcData& other_dex_pc_data = other_it->second;
-    if (dex_pc_data.is_megamorphic != other_dex_pc_data.is_megamorphic ||
-        dex_pc_data.is_missing_types != other_dex_pc_data.is_missing_types) {
-      return false;
-    }
-    for (const ClassReference& class_ref : dex_pc_data.classes) {
-      bool found = false;
-      for (const ClassReference& other_class_ref : other_dex_pc_data.classes) {
-        CHECK_LE(class_ref.dex_profile_index, dex_references.size());
-        CHECK_LE(other_class_ref.dex_profile_index, other.dex_references.size());
-        const DexReference& dex_ref = dex_references[class_ref.dex_profile_index];
-        const DexReference& other_dex_ref = other.dex_references[other_class_ref.dex_profile_index];
-        if (class_ref.type_index == other_class_ref.type_index &&
-            dex_ref == other_dex_ref) {
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
-bool ProfileCompilationInfo::OfflineProfileMethodInfo::operator==(
-      const std::vector<ProfileMethodInfo::ProfileInlineCache>& runtime_caches) const {
-  if (inline_caches->size() != runtime_caches.size()) {
-    return false;
-  }
-
-  for (const auto& inline_cache_it : *inline_caches) {
-    uint16_t dex_pc = inline_cache_it.first;
-    const DexPcData dex_pc_data = inline_cache_it.second;
-
-    // Find the corresponding inline cahce.
-    const ProfileMethodInfo::ProfileInlineCache* runtime_cache = nullptr;
-    for (const ProfileMethodInfo::ProfileInlineCache& pic : runtime_caches) {
-      if (pic.dex_pc == dex_pc) {
-        runtime_cache = &pic;
-        break;
-      }
-    }
-    // If not found, returnb false.
-    if (runtime_cache == nullptr) {
-      return false;
-    }
-    // Check that the inline cache properties match up.
-    if (dex_pc_data.is_missing_types) {
-      if (!runtime_cache->is_missing_types) {
-        return false;
-      } else {
-        // If the inline cache is megamorphic do not check the classes (they don't matter).
-        continue;
-      }
-    }
-
-    if (dex_pc_data.is_megamorphic) {
-      if (runtime_cache->classes.size() < ProfileCompilationInfo::kIndividualInlineCacheSize) {
-        return false;
-      } else {
-        // If the inline cache is megamorphic do not check the classes (they don't matter).
-        continue;
-      }
-    }
-
-    if (dex_pc_data.classes.size() != runtime_cache->classes.size()) {
-      return false;
-    }
-    // Verify that all classes matches.
-    for (const ClassReference& class_ref : dex_pc_data.classes) {
-      bool found = false;
-      const DexReference& dex_ref = dex_references[class_ref.dex_profile_index];
-      for (const TypeReference& type_ref : runtime_cache->classes) {
-        if (class_ref.type_index == type_ref.TypeIndex() &&
-            dex_ref.MatchesDex(type_ref.dex_file)) {
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        return false;
-      }
-    }
-  }
-  // If we didn't fail until now, then the two inline caches are equal.
-  return true;
 }
 
 bool ProfileCompilationInfo::IsEmpty() const {
@@ -2239,10 +2124,10 @@ size_t ProfileCompilationInfo::GetSizeErrorThresholdBytes() const {
 }
 
 std::ostream& operator<<(std::ostream& stream,
-                         const ProfileCompilationInfo::DexReference& dex_ref) {
-  stream << "[profile_key=" << dex_ref.profile_key
-         << ",dex_checksum=" << std::hex << dex_ref.dex_checksum << std::dec
-         << ",num_method_ids=" << dex_ref.num_method_ids
+                         ProfileCompilationInfo::DexReferenceDumper dumper) {
+  stream << "[profile_key=" << dumper.GetProfileKey()
+         << ",dex_checksum=" << std::hex << dumper.GetDexChecksum() << std::dec
+         << ",num_method_ids=" << dumper.GetNumMethodIds()
          << "]";
   return stream;
 }

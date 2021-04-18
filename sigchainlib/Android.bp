@@ -14,23 +14,34 @@
 // limitations under the License.
 //
 
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "art_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    //   SPDX-license-identifier-BSD
+    default_applicable_licenses: ["art_license"],
+}
+
 cc_library {
     name: "libsigchain",
     defaults: ["art_defaults"],
     visibility: [
-        // TODO(b/142944043, b/133140750): Clean this up.
         "//frameworks/base/cmds/app_process",
     ],
+    //  Make libsigchain symbols global, so that an app library which
+    //  is loaded in a classloader linker namespace looks for
+    //  libsigchain symbols before libc.
+    //  -z,global marks the binary with the DF_1_GLOBAL flag which puts the symbols
+    //  in the global group. It does not affect their visibilities like the version
+    //  script does.
+    ldflags: ["-Wl,-z,global"],
 
     host_supported: true,
     target: {
         linux: {
-            shared: {
-                srcs: ["sigchain_fake.cc"],
-            },
-            static: {
-                srcs: ["sigchain.cc"],
-            },
+            srcs: ["sigchain.cc"],
         },
 
         darwin: {
@@ -38,7 +49,7 @@ cc_library {
         },
 
         android: {
-            whole_static_libs: ["libasync_safe"],
+            static_libs: ["libasync_safe"],
         },
     },
 
@@ -46,10 +57,11 @@ cc_library {
     apex_available: [
         "com.android.art",
         "com.android.art.debug",
-        // TODO(b/142944043) Clean this up. This is due to the dependency from
-        // app_process
-        "//apex_available:platform",
     ],
+    stubs: {
+        symbol_file: "libsigchain.map.txt",
+        versions: ["1"],
+    },
 }
 
 // Create a fake version of libsigchain which expose the necessary symbols
@@ -62,7 +74,7 @@ cc_library_static {
     srcs: ["sigchain_fake.cc"],
     target: {
         android: {
-            whole_static_libs: ["libasync_safe"],
+            static_libs: ["libasync_safe"],
         },
     },
 
@@ -75,5 +87,5 @@ art_cc_test {
         "art_gtest_defaults",
     ],
     srcs: ["sigchain_test.cc"],
-    whole_static_libs: ["libsigchain"],
+    shared_libs: ["libsigchain"],
 }

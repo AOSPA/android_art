@@ -606,8 +606,9 @@ bool OatWriter::AddVdexDexFilesSource(const VdexFile& vdex_file,
   DCHECK(write_state_ == WriteState::kAddingDexFileSources);
   DCHECK(vdex_file.HasDexSection());
   const uint8_t* current_dex_data = nullptr;
-  for (size_t i = 0; i < vdex_file.GetVerifierDepsHeader().GetNumberOfDexFiles(); ++i) {
-    current_dex_data = vdex_file.GetNextDexFileData(current_dex_data);
+  size_t i = 0;
+  for (; i < vdex_file.GetNumberOfDexFiles(); ++i) {
+    current_dex_data = vdex_file.GetNextDexFileData(current_dex_data, i);
     if (current_dex_data == nullptr) {
       LOG(ERROR) << "Unexpected number of dex files in vdex " << location;
       return false;
@@ -629,7 +630,7 @@ bool OatWriter::AddVdexDexFilesSource(const VdexFile& vdex_file,
         header->file_size_);
   }
 
-  if (vdex_file.GetNextDexFileData(current_dex_data) != nullptr) {
+  if (vdex_file.GetNextDexFileData(current_dex_data, i) != nullptr) {
     LOG(ERROR) << "Unexpected number of dex files in vdex " << location;
     return false;
   }
@@ -693,9 +694,10 @@ bool OatWriter::WriteAndOpenDexFiles(
     /*out*/ std::vector<std::unique_ptr<const DexFile>>* opened_dex_files) {
   CHECK(write_state_ == WriteState::kAddingDexFileSources);
 
-  // Reserve space for Vdex header and checksums.
-  vdex_size_ = sizeof(VdexFile::VerifierDepsHeader) +
-      oat_dex_files_.size() * sizeof(VdexFile::VdexChecksum);
+  size_vdex_header_ = sizeof(VdexFile::VdexFileHeader) +
+      VdexSection::kNumberOfSections * sizeof(VdexFile::VdexSectionHeader);
+  // Reserve space for Vdex header, sections, and checksums.
+  vdex_size_ = size_vdex_header_ + oat_dex_files_.size() * sizeof(VdexFile::VdexChecksum);
 
   // Write DEX files into VDEX, mmap and open them.
   std::vector<MemMap> dex_files_map;
@@ -890,12 +892,6 @@ class OatWriter::OatDexMethodVisitor : public DexMethodVisitor {
 
 static bool HasCompiledCode(const CompiledMethod* method) {
   return method != nullptr && !method->GetQuickCode().empty();
-}
-
-static bool HasQuickeningInfo(const CompiledMethod* method) {
-  // The dextodexcompiler puts the quickening info table into the CompiledMethod
-  // for simplicity.
-  return method != nullptr && method->GetQuickCode().empty() && !method->GetVmapTable().empty();
 }
 
 class OatWriter::InitBssLayoutMethodVisitor : public DexMethodVisitor {
@@ -1375,18 +1371,16 @@ class OatWriter::LayoutReserveOffsetCodeMethodVisitor : public OrderedMethodVisi
     // Update quick method header.
     DCHECK_LT(method_offsets_index_, oat_class->method_headers_.size());
     OatQuickMethodHeader* method_header = &oat_class->method_headers_[method_offsets_index_];
-    uint32_t vmap_table_offset = method_header->GetVmapTableOffset();
-    // The code offset was 0 when the mapping/vmap table offset was set, so it's set
-    // to 0-offset and we need to adjust it by code_offset.
+    uint32_t code_info_offset = method_header->GetCodeInfoOffset();
     uint32_t code_offset = quick_code_offset - thumb_offset;
     CHECK(!compiled_method->GetQuickCode().empty());
     // If the code is compiled, we write the offset of the stack map relative
-    // to the code.
-    if (vmap_table_offset != 0u) {
-      vmap_table_offset += code_offset;
-      DCHECK_LT(vmap_table_offset, code_offset);
+    // to the code. The offset was previously stored relative to start of file.
+    if (code_info_offset != 0u) {
+      DCHECK_LT(code_info_offset, code_offset);
+      code_info_offset = code_offset - code_info_offset;
     }
-    *method_header = OatQuickMethodHeader(vmap_table_offset, code_size);
+    *method_header = OatQuickMethodHeader(code_info_offset);
 
     if (!deduped) {
       // Update offsets. (Checksum is updated when writing.)
@@ -1511,7 +1505,7 @@ class OatWriter::InitMapMethodVisitor : public OatDexMethodVisitor {
 
     if (HasCompiledCode(compiled_method)) {
       DCHECK_LT(method_offsets_index_, oat_class->method_offsets_.size());
-      DCHECK_EQ(oat_class->method_headers_[method_offsets_index_].GetVmapTableOffset(), 0u);
+      DCHECK_EQ(oat_class->method_headers_[method_offsets_index_].GetCodeInfoOffset(), 0u);
 
       ArrayRef<const uint8_t> map = compiled_method->GetVmapTable();
       if (map.size() != 0u) {
@@ -1519,9 +1513,9 @@ class OatWriter::InitMapMethodVisitor : public OatDexMethodVisitor {
           // Deduplicate the inner BitTable<>s within the CodeInfo.
           return offset_ + dedupe_bit_table_.Dedupe(map.data());
         });
-        // Code offset is not initialized yet, so set the map offset to 0u-offset.
+        // Code offset is not initialized yet, so set file offset for now.
         DCHECK_EQ(oat_class->method_offsets_[method_offsets_index_].code_offset_, 0u);
-        oat_class->method_headers_[method_offsets_index_].SetVmapTableOffset(0u - offset);
+        oat_class->method_headers_[method_offsets_index_].SetCodeInfoOffset(offset);
       }
       ++method_offsets_index_;
     }
@@ -2525,165 +2519,10 @@ bool OatWriter::WriteRodata(OutputStream* out) {
   return true;
 }
 
-class OatWriter::WriteQuickeningInfoMethodVisitor {
- public:
-  WriteQuickeningInfoMethodVisitor(OatWriter* writer, /*out*/std::vector<uint8_t>* buffer)
-      : writer_(writer),
-        buffer_(buffer) {}
-
-  void VisitDexMethods(const std::vector<const DexFile*>& dex_files) {
-    // Map of offsets for quicken info related to method indices.
-    SafeMap<const uint8_t*, uint32_t> offset_map;
-    // Use method index order to minimize the encoded size of the offset table.
-    for (const DexFile* dex_file : dex_files) {
-      std::vector<uint32_t>* const offsets =
-          &quicken_info_offset_indices_.Put(dex_file, std::vector<uint32_t>())->second;
-      for (uint32_t method_idx = 0; method_idx < dex_file->NumMethodIds(); ++method_idx) {
-        uint32_t offset = 0u;
-        MethodReference method_ref(dex_file, method_idx);
-        CompiledMethod* compiled_method = writer_->compiler_driver_->GetCompiledMethod(method_ref);
-        if (compiled_method != nullptr && HasQuickeningInfo(compiled_method)) {
-          ArrayRef<const uint8_t> map = compiled_method->GetVmapTable();
-
-          // Record each index if required. written_bytes_ is the offset from the start of the
-          // quicken info data.
-          // May be already inserted for duplicate items.
-          // Add offset of one to make sure 0 represents unused.
-          auto pair = offset_map.emplace(map.data(), written_bytes_ + 1);
-          offset = pair.first->second;
-          // Write out the map if it's not already written.
-          if (pair.second) {
-            static_assert(sizeof(map[0]) == 1u);
-            buffer_->insert(buffer_->end(), map.begin(), map.end());
-            written_bytes_ += map.size();
-          }
-        }
-        offsets->push_back(offset);
-      }
-    }
-  }
-
-  size_t GetNumberOfWrittenBytes() const {
-    return written_bytes_;
-  }
-
-  SafeMap<const DexFile*, std::vector<uint32_t>>& GetQuickenInfoOffsetIndices() {
-    return quicken_info_offset_indices_;
-  }
-
- private:
-  OatWriter* const writer_;
-  std::vector<uint8_t>* const buffer_;
-  size_t written_bytes_ = 0u;
-  SafeMap<const DexFile*, std::vector<uint32_t>> quicken_info_offset_indices_;
-};
-
-class OatWriter::WriteQuickeningInfoOffsetsMethodVisitor {
- public:
-  WriteQuickeningInfoOffsetsMethodVisitor(
-      /*out*/std::vector<uint8_t>* buffer,
-      uint32_t start_offset,
-      SafeMap<const DexFile*, std::vector<uint32_t>>* quicken_info_offset_indices,
-      std::vector<uint32_t>* out_table_offsets)
-      : buffer_(buffer),
-        start_offset_(start_offset),
-        quicken_info_offset_indices_(quicken_info_offset_indices),
-        out_table_offsets_(out_table_offsets) {}
-
-  void VisitDexMethods(const std::vector<const DexFile*>& dex_files) {
-    for (const DexFile* dex_file : dex_files) {
-      auto it = quicken_info_offset_indices_->find(dex_file);
-      DCHECK(it != quicken_info_offset_indices_->end()) << "Failed to find dex file "
-                                                        << dex_file->GetLocation();
-      const std::vector<uint32_t>* const offsets = &it->second;
-
-      const uint32_t current_offset = start_offset_ + written_bytes_;
-      CHECK_ALIGNED_PARAM(current_offset, CompactOffsetTable::kAlignment);
-
-      // Generate and write the data.
-      std::vector<uint8_t> table_data;
-      CompactOffsetTable::Build(*offsets, &table_data);
-
-      // Store the offset since we need to put those after the dex file. Table offsets are relative
-      // to the start of the quicken info section.
-      out_table_offsets_->push_back(current_offset);
-
-      static_assert(sizeof(table_data[0]) == 1u);
-      buffer_->insert(buffer_->end(), table_data.begin(), table_data.end());
-      written_bytes_ += table_data.size();
-    }
-  }
-
-  size_t GetNumberOfWrittenBytes() const {
-    return written_bytes_;
-  }
-
- private:
-  std::vector<uint8_t>* const buffer_;
-  const uint32_t start_offset_;
-  size_t written_bytes_ = 0u;
-  // Maps containing the offsets for the tables.
-  SafeMap<const DexFile*, std::vector<uint32_t>>* const quicken_info_offset_indices_;
-  std::vector<uint32_t>* const out_table_offsets_;
-};
-
-void OatWriter::WriteQuickeningInfo(/*out*/std::vector<uint8_t>* buffer) {
-  if (!extract_dex_files_into_vdex_ || !GetCompilerOptions().IsQuickeningCompilationEnabled()) {
-    // Nothing to write. Leave `vdex_size_` untouched and unaligned.
-    vdex_quickening_info_offset_ = vdex_size_;
-    size_quickening_info_alignment_ = 0;
-    return;
-  }
-
-  TimingLogger::ScopedTiming split("VDEX quickening info", timings_);
-
-  // Make sure the table is properly aligned.
-  size_t start_offset = RoundUp(vdex_size_, 4u);
-  const size_t padding_bytes = start_offset - vdex_size_;
-  buffer->resize(buffer->size() + padding_bytes, 0u);
-
-  WriteQuickeningInfoMethodVisitor write_quicken_info_visitor(this, buffer);
-  write_quicken_info_visitor.VisitDexMethods(*dex_files_);
-
-  uint32_t quicken_info_offset = write_quicken_info_visitor.GetNumberOfWrittenBytes();
-  uint32_t extra_bytes_offset = start_offset + quicken_info_offset;
-  size_t current_offset = RoundUp(extra_bytes_offset, CompactOffsetTable::kAlignment);
-  const size_t extra_bytes = current_offset - extra_bytes_offset;
-  buffer->resize(buffer->size() + extra_bytes, 0u);
-  quicken_info_offset += extra_bytes;
-
-  std::vector<uint32_t> table_offsets;
-  WriteQuickeningInfoOffsetsMethodVisitor table_visitor(
-      buffer,
-      quicken_info_offset,
-      &write_quicken_info_visitor.GetQuickenInfoOffsetIndices(),
-      /*out*/ &table_offsets);
-  table_visitor.VisitDexMethods(*dex_files_);
-
-  CHECK_EQ(table_offsets.size(), dex_files_->size());
-
-  current_offset += table_visitor.GetNumberOfWrittenBytes();
-
-  // Store the offset table offset as a preheader for each dex.
-  size_t index = 0;
-  for (const OatDexFile& oat_dex_file : oat_dex_files_) {
-    auto* quickening_table_offset = reinterpret_cast<VdexFile::QuickeningTableOffsetType*>(
-        vdex_begin_ + oat_dex_file.dex_file_offset_ - sizeof(VdexFile::QuickeningTableOffsetType));
-    *quickening_table_offset = table_offsets[index];
-    ++index;
-  }
-  size_quickening_info_ = current_offset - start_offset;
-
-  if (size_quickening_info_ == 0) {
-    // Nothing was written. Leave `vdex_size_` untouched and unaligned.
-    buffer->resize(buffer->size() - padding_bytes);  // Drop the padding data.
-    vdex_quickening_info_offset_ = vdex_size_;
-    size_quickening_info_alignment_ = 0;
-  } else {
-    size_quickening_info_alignment_ = padding_bytes;
-    vdex_quickening_info_offset_ = start_offset;
-    vdex_size_ = start_offset + size_quickening_info_;
-  }
+void OatWriter::WriteQuickeningInfo(/*out*/std::vector<uint8_t>* ATTRIBUTE_UNUSED) {
+  // Nothing to write. Leave `vdex_size_` untouched and unaligned.
+  vdex_quickening_info_offset_ = vdex_size_;
+  size_quickening_info_alignment_ = 0;
 }
 
 void OatWriter::WriteVerifierDeps(verifier::VerifierDeps* verifier_deps,
@@ -3296,8 +3135,6 @@ bool OatWriter::WriteDexFiles(File* file,
   }
 
   if (extract_dex_files_into_vdex_) {
-    // Add the dex section header.
-    vdex_size_ += sizeof(VdexFile::DexSectionHeader);
     vdex_dex_files_offset_ = vdex_size_;
 
     // Perform dexlayout if requested.
@@ -3318,8 +3155,6 @@ bool OatWriter::WriteDexFiles(File* file,
     for (OatDexFile& oat_dex_file : oat_dex_files_) {
       // Dex files are required to be 4 byte aligned.
       vdex_size_with_dex_files = RoundUp(vdex_size_with_dex_files, 4u);
-      // Leave extra room for the quicken table offset.
-      vdex_size_with_dex_files += sizeof(VdexFile::QuickeningTableOffsetType);
       // Record offset for the dex file.
       oat_dex_file.dex_file_offset_ = vdex_size_with_dex_files;
       // Add the size of the dex file.
@@ -3399,18 +3234,9 @@ bool OatWriter::WriteDexFiles(File* file,
     // Write dex files.
     for (OatDexFile& oat_dex_file : oat_dex_files_) {
       // Dex files are required to be 4 byte aligned.
-      size_t quickening_table_offset_offset = RoundUp(vdex_size_, 4u);
-      if (!update_input_vdex) {
-        // Clear the padding.
-        memset(vdex_begin_ + vdex_size_, 0, quickening_table_offset_offset - vdex_size_);
-        // Initialize the quickening table offset to 0.
-        auto* quickening_table_offset = reinterpret_cast<VdexFile::QuickeningTableOffsetType*>(
-            vdex_begin_ + quickening_table_offset_offset);
-        *quickening_table_offset = 0u;
-      }
-      size_dex_file_alignment_ += quickening_table_offset_offset - vdex_size_;
-      size_quickening_table_offset_ += sizeof(VdexFile::QuickeningTableOffsetType);
-      vdex_size_ = quickening_table_offset_offset + sizeof(VdexFile::QuickeningTableOffsetType);
+      size_t old_vdex_size = vdex_size_;
+      vdex_size_ = RoundUp(vdex_size_, 4u);
+      size_dex_file_alignment_ += vdex_size_ - old_vdex_size;
       // Write the actual dex file.
       if (!WriteDexFile(file, &oat_dex_file, update_input_vdex)) {
         return false;
@@ -3892,8 +3718,6 @@ bool OatWriter::FinishVdexFile(File* vdex_file, verifier::VerifierDeps* verifier
   buffer.reserve(64 * KB);
   WriteVerifierDeps(verifier_deps, &buffer);
   DCHECK_EQ(vdex_size_, old_vdex_size + buffer.size());
-  WriteQuickeningInfo(&buffer);
-  DCHECK_EQ(vdex_size_, old_vdex_size + buffer.size());
 
   // Resize the vdex file.
   if (vdex_file->SetLength(vdex_size_) != 0) {
@@ -3951,7 +3775,7 @@ bool OatWriter::FinishVdexFile(File* vdex_file, verifier::VerifierDeps* verifier
   }
 
   // Write checksums
-  off_t checksums_offset = sizeof(VdexFile::VerifierDepsHeader);
+  off_t checksums_offset = VdexFile::GetChecksumsOffset();
   VdexFile::VdexChecksum* checksums_data =
       reinterpret_cast<VdexFile::VdexChecksum*>(vdex_begin + checksums_offset);
   for (size_t i = 0, size = oat_dex_files_.size(); i != size; ++i) {
@@ -3960,24 +3784,29 @@ bool OatWriter::FinishVdexFile(File* vdex_file, verifier::VerifierDeps* verifier
     size_vdex_checksums_ += sizeof(VdexFile::VdexChecksum);
   }
 
-  // Maybe write dex section header.
-  DCHECK_NE(vdex_verifier_deps_offset_, 0u);
-  DCHECK_NE(vdex_quickening_info_offset_, 0u);
+  // Write sections.
+  uint8_t* ptr = vdex_begin + sizeof(VdexFile::VdexFileHeader);
 
-  bool has_dex_section = extract_dex_files_into_vdex_;
-  if (has_dex_section) {
-    DCHECK_NE(vdex_dex_files_offset_, 0u);
-    size_t dex_section_size = vdex_dex_shared_data_offset_ - vdex_dex_files_offset_;
-    size_t dex_shared_data_size = vdex_verifier_deps_offset_ - vdex_dex_shared_data_offset_;
-    size_t quickening_info_section_size = vdex_size_ - vdex_quickening_info_offset_;
+  // Checksums section.
+  new (ptr) VdexFile::VdexSectionHeader(VdexSection::kChecksumSection,
+                                        checksums_offset,
+                                        size_vdex_checksums_);
+  ptr += sizeof(VdexFile::VdexFileHeader);
 
-    void* dex_section_header_storage = checksums_data + oat_dex_files_.size();
-    new (dex_section_header_storage) VdexFile::DexSectionHeader(dex_section_size,
-                                                                dex_shared_data_size,
-                                                                quickening_info_section_size);
-    size_vdex_header_ += sizeof(VdexFile::DexSectionHeader);
-  }
+  // Dex section.
+  new (ptr) VdexFile::VdexSectionHeader(
+      VdexSection::kDexFileSection,
+      extract_dex_files_into_vdex_ ? vdex_dex_files_offset_ : 0u,
+      extract_dex_files_into_vdex_ ? vdex_verifier_deps_offset_ - vdex_dex_files_offset_ : 0u);
+  ptr += sizeof(VdexFile::VdexFileHeader);
 
+  // VerifierDeps section.
+  new (ptr) VdexFile::VdexSectionHeader(VdexSection::kVerifierDepsSection,
+                                        vdex_verifier_deps_offset_,
+                                        vdex_size_ - vdex_verifier_deps_offset_);
+
+  // All the contents (except the header) of the vdex file has been emitted in memory. Flush it
+  // to disk.
   {
     TimingLogger::ScopedTiming split("VDEX flush contents", timings_);
     // Sync the data to the disk while the header is invalid. We do not want to end up with
@@ -3996,14 +3825,10 @@ bool OatWriter::FinishVdexFile(File* vdex_file, verifier::VerifierDeps* verifier
     }
   }
 
-  // Write header.
-  // TODO: Use `size_quickening_info_` instead of `verifier_deps_section_size` which
-  // includes `size_quickening_info_alignment_`, adjust code in VdexFile.
-  size_t verifier_deps_section_size = vdex_quickening_info_offset_ - vdex_verifier_deps_offset_;
-
-  new (vdex_begin) VdexFile::VerifierDepsHeader(
-      oat_dex_files_.size(), verifier_deps_section_size, has_dex_section);
-  size_vdex_header_ += sizeof(VdexFile::VerifierDepsHeader);
+  // Now that we know all contents have been flushed to disk, we can write
+  // the header which will mke the vdex usable.
+  bool has_dex_section = extract_dex_files_into_vdex_;
+  new (vdex_begin) VdexFile::VdexFileHeader(has_dex_section);
 
   // Note: If `extract_dex_files_into_vdex_`, we passed the ownership of the vdex dex file
   // MemMap to the caller, so we need to use msync() for the range explicitly.

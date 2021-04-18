@@ -1613,6 +1613,7 @@ bool Redefiner::ClassRedefinition::CheckVerification(const RedefinitionDataIter&
   // TODO Make verification log level lower
   art::verifier::FailureKind failure =
       art::verifier::ClassVerifier::VerifyClass(driver_->self_,
+                                                /*verifier_deps=*/nullptr,
                                                 dex_file_.get(),
                                                 hs.NewHandle(iter.GetNewDexCache()),
                                                 hs.NewHandle(GetClassLoader()),
@@ -2487,9 +2488,11 @@ jvmtiError Redefiner::Run() {
   // At this point we can no longer fail without corrupting the runtime state.
   for (RedefinitionDataIter data = holder.begin(); data != holder.end(); ++data) {
     art::ClassLinker* cl = runtime_->GetClassLinker();
-    cl->RegisterExistingDexCache(data.GetNewDexCache(), data.GetSourceClassLoader());
     if (data.GetSourceClassLoader() == nullptr) {
+      // AppendToBootClassPath includes dex file registration.
       cl->AppendToBootClassPath(self_, &data.GetRedefinition().GetDexFile());
+    } else {
+      cl->RegisterExistingDexCache(data.GetNewDexCache(), data.GetSourceClassLoader());
     }
   }
   UnregisterAllBreakpoints();

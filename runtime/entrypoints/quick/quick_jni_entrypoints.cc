@@ -31,20 +31,20 @@ static_assert(std::is_trivial<IRTSegmentState>::value, "IRTSegmentState not triv
 
 static inline void GoToRunnableFast(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_);
 
-extern void ReadBarrierJni(mirror::CompressedReference<mirror::Object>* handle_on_stack,
+extern void ReadBarrierJni(mirror::CompressedReference<mirror::Class>* declaring_class,
                            Thread* self ATTRIBUTE_UNUSED) {
   DCHECK(kUseReadBarrier);
   if (kUseBakerReadBarrier) {
-    DCHECK(handle_on_stack->AsMirrorPtr() != nullptr)
+    DCHECK(declaring_class->AsMirrorPtr() != nullptr)
         << "The class of a static jni call must not be null";
     // Check the mark bit and return early if it's already marked.
-    if (LIKELY(handle_on_stack->AsMirrorPtr()->GetMarkBit() != 0)) {
+    if (LIKELY(declaring_class->AsMirrorPtr()->GetMarkBit() != 0)) {
       return;
     }
   }
   // Call the read barrier and update the handle.
-  mirror::Object* to_ref = ReadBarrier::BarrierForRoot(handle_on_stack);
-  handle_on_stack->Assign(to_ref);
+  mirror::Class* to_ref = ReadBarrier::BarrierForRoot(declaring_class);
+  declaring_class->Assign(to_ref);
 }
 
 // Called on entry to fast JNI, push a new local reference table only.
@@ -68,14 +68,14 @@ extern uint32_t JniMethodStart(Thread* self) {
   DCHECK(env != nullptr);
   uint32_t saved_local_ref_cookie = bit_cast<uint32_t>(env->GetLocalRefCookie());
   env->SetLocalRefCookie(env->GetLocalsSegmentState());
-  ArtMethod* native_method = *self->GetManagedStack()->GetTopQuickFrame();
-  // TODO: Introduce special entrypoint for synchronized @FastNative methods?
-  //       Or ban synchronized @FastNative outright to avoid the extra check here?
-  DCHECK(!native_method->IsFastNative() || native_method->IsSynchronized());
-  if (!native_method->IsFastNative()) {
-    // When not fast JNI we transition out of runnable.
-    self->TransitionFromRunnableToSuspended(kNative);
+
+  if (kIsDebugBuild) {
+    ArtMethod* native_method = *self->GetManagedStack()->GetTopQuickFrame();
+    CHECK(!native_method->IsFastNative()) << native_method->PrettyMethod();
   }
+
+  // Transition out of runnable.
+  self->TransitionFromRunnableToSuspended(kNative);
   return saved_local_ref_cookie;
 }
 
@@ -86,13 +86,12 @@ extern uint32_t JniMethodStartSynchronized(jobject to_lock, Thread* self) {
 
 // TODO: NO_THREAD_SAFETY_ANALYSIS due to different control paths depending on fast JNI.
 static void GoToRunnable(Thread* self) NO_THREAD_SAFETY_ANALYSIS {
-  ArtMethod* native_method = *self->GetManagedStack()->GetTopQuickFrame();
-  bool is_fast = native_method->IsFastNative();
-  if (!is_fast) {
-    self->TransitionFromSuspendedToRunnable();
-  } else {
-    GoToRunnableFast(self);
+  if (kIsDebugBuild) {
+    ArtMethod* native_method = *self->GetManagedStack()->GetTopQuickFrame();
+    CHECK(!native_method->IsFastNative()) << native_method->PrettyMethod();
   }
+
+  self->TransitionFromSuspendedToRunnable();
 }
 
 ALWAYS_INLINE static inline void GoToRunnableFast(Thread* self) {
@@ -120,7 +119,6 @@ static void PopLocalReferences(uint32_t saved_local_ref_cookie, Thread* self)
   }
   env->SetLocalSegmentState(env->GetLocalRefCookie());
   env->SetLocalRefCookie(bit_cast<IRTSegmentState>(saved_local_ref_cookie));
-  self->PopHandleScope();
 }
 
 // TODO: annotalysis disabled as monitor semantics are maintained in Java code.
@@ -223,16 +221,18 @@ extern uint64_t GenericJniMethodEnd(Thread* self,
   bool fast_native = called->IsFastNative();
   bool normal_native = !critical_native && !fast_native;
 
-  // @Fast and @CriticalNative do not do a state transition.
+  // @CriticalNative does not do a state transition. @FastNative usually does not do a state
+  // transition either but it performs a suspend check that may do state transitions.
   if (LIKELY(normal_native)) {
     GoToRunnable(self);
+  } else if (fast_native) {
+    GoToRunnableFast(self);
   }
   // We need the mutator lock (i.e., calling GoToRunnable()) before accessing the shorty or the
   // locked object.
   if (called->IsSynchronized()) {
     DCHECK(normal_native) << "@FastNative/@CriticalNative and synchronize is not supported";
-    HandleScope* handle_scope = down_cast<HandleScope*>(self->GetTopHandleScope());
-    jobject lock = handle_scope->GetHandle(0).ToJObject();
+    jobject lock = GetGenericJniSynchronizationObject(self, called);
     DCHECK(lock != nullptr);
     UnlockJniSynchronizedMethod(lock, self);
   }
@@ -242,7 +242,7 @@ extern uint64_t GenericJniMethodEnd(Thread* self,
         result.l, saved_local_ref_cookie, self));
   } else {
     if (LIKELY(!critical_native)) {
-      PopLocalReferences(saved_local_ref_cookie, self);  // Invalidates top handle scope.
+      PopLocalReferences(saved_local_ref_cookie, self);
     }
     switch (return_shorty_char) {
       case 'F': {

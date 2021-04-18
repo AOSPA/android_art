@@ -153,6 +153,7 @@ class MethodVerifier final : public ::art::verifier::MethodVerifier {
   MethodVerifier(Thread* self,
                  ClassLinker* class_linker,
                  ArenaPool* arena_pool,
+                 VerifierDeps* verifier_deps,
                  const DexFile* dex_file,
                  const dex::CodeItem* code_item,
                  uint32_t method_idx,
@@ -172,6 +173,7 @@ class MethodVerifier final : public ::art::verifier::MethodVerifier {
      : art::verifier::MethodVerifier(self,
                                      class_linker,
                                      arena_pool,
+                                     verifier_deps,
                                      dex_file,
                                      class_def,
                                      code_item,
@@ -732,32 +734,13 @@ class MethodVerifier final : public ::art::verifier::MethodVerifier {
   // Returns the method index of an invoke instruction.
   uint16_t GetMethodIdxOfInvoke(const Instruction* inst)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    switch (inst->Opcode()) {
-      case Instruction::INVOKE_VIRTUAL_RANGE_QUICK:
-      case Instruction::INVOKE_VIRTUAL_QUICK: {
-        DCHECK(Runtime::Current()->IsStarted() || verify_to_dump_)
-            << dex_file_->PrettyMethod(dex_method_idx_, true) << "@" << work_insn_idx_;
-        DCHECK(method_being_verified_ != nullptr);
-        uint16_t method_idx = method_being_verified_->GetIndexFromQuickening(work_insn_idx_);
-        CHECK_NE(method_idx, DexFile::kDexNoIndex16);
-        return method_idx;
-      }
-      default: {
-        return inst->VRegB();
-      }
-    }
+    return inst->VRegB();
   }
   // Returns the field index of a field access instruction.
   uint16_t GetFieldIdxOfFieldAccess(const Instruction* inst, bool is_static)
       REQUIRES_SHARED(Locks::mutator_lock_) {
     if (is_static) {
       return inst->VRegB_21c();
-    } else if (inst->IsQuickened()) {
-      DCHECK(Runtime::Current()->IsStarted() || verify_to_dump_);
-      DCHECK(method_being_verified_ != nullptr);
-      uint16_t field_idx = method_being_verified_->GetIndexFromQuickening(work_insn_idx_);
-      CHECK_NE(field_idx, DexFile::kDexNoIndex16);
-      return field_idx;
     } else {
       return inst->VRegC_22c();
     }
@@ -2861,61 +2844,47 @@ bool MethodVerifier<kVerifierDebug>::CodeFlowVerifyInstruction(uint32_t* start_g
       break;
 
     case Instruction::IGET_BOOLEAN:
-    case Instruction::IGET_BOOLEAN_QUICK:
       VerifyISFieldAccess<FieldAccessType::kAccGet>(inst, reg_types_.Boolean(), true, false);
       break;
     case Instruction::IGET_BYTE:
-    case Instruction::IGET_BYTE_QUICK:
       VerifyISFieldAccess<FieldAccessType::kAccGet>(inst, reg_types_.Byte(), true, false);
       break;
     case Instruction::IGET_CHAR:
-    case Instruction::IGET_CHAR_QUICK:
       VerifyISFieldAccess<FieldAccessType::kAccGet>(inst, reg_types_.Char(), true, false);
       break;
     case Instruction::IGET_SHORT:
-    case Instruction::IGET_SHORT_QUICK:
       VerifyISFieldAccess<FieldAccessType::kAccGet>(inst, reg_types_.Short(), true, false);
       break;
     case Instruction::IGET:
-    case Instruction::IGET_QUICK:
       VerifyISFieldAccess<FieldAccessType::kAccGet>(inst, reg_types_.Integer(), true, false);
       break;
     case Instruction::IGET_WIDE:
-    case Instruction::IGET_WIDE_QUICK:
       VerifyISFieldAccess<FieldAccessType::kAccGet>(inst, reg_types_.LongLo(), true, false);
       break;
     case Instruction::IGET_OBJECT:
-    case Instruction::IGET_OBJECT_QUICK:
       VerifyISFieldAccess<FieldAccessType::kAccGet>(inst, reg_types_.JavaLangObject(false), false,
                                                     false);
       break;
 
     case Instruction::IPUT_BOOLEAN:
-    case Instruction::IPUT_BOOLEAN_QUICK:
       VerifyISFieldAccess<FieldAccessType::kAccPut>(inst, reg_types_.Boolean(), true, false);
       break;
     case Instruction::IPUT_BYTE:
-    case Instruction::IPUT_BYTE_QUICK:
       VerifyISFieldAccess<FieldAccessType::kAccPut>(inst, reg_types_.Byte(), true, false);
       break;
     case Instruction::IPUT_CHAR:
-    case Instruction::IPUT_CHAR_QUICK:
       VerifyISFieldAccess<FieldAccessType::kAccPut>(inst, reg_types_.Char(), true, false);
       break;
     case Instruction::IPUT_SHORT:
-    case Instruction::IPUT_SHORT_QUICK:
       VerifyISFieldAccess<FieldAccessType::kAccPut>(inst, reg_types_.Short(), true, false);
       break;
     case Instruction::IPUT:
-    case Instruction::IPUT_QUICK:
       VerifyISFieldAccess<FieldAccessType::kAccPut>(inst, reg_types_.Integer(), true, false);
       break;
     case Instruction::IPUT_WIDE:
-    case Instruction::IPUT_WIDE_QUICK:
       VerifyISFieldAccess<FieldAccessType::kAccPut>(inst, reg_types_.LongLo(), true, false);
       break;
     case Instruction::IPUT_OBJECT:
-    case Instruction::IPUT_OBJECT_QUICK:
       VerifyISFieldAccess<FieldAccessType::kAccPut>(inst, reg_types_.JavaLangObject(false), false,
                                                     false);
       break;
@@ -2969,12 +2938,9 @@ bool MethodVerifier<kVerifierDebug>::CodeFlowVerifyInstruction(uint32_t* start_g
     case Instruction::INVOKE_VIRTUAL:
     case Instruction::INVOKE_VIRTUAL_RANGE:
     case Instruction::INVOKE_SUPER:
-    case Instruction::INVOKE_SUPER_RANGE:
-    case Instruction::INVOKE_VIRTUAL_QUICK:
-    case Instruction::INVOKE_VIRTUAL_RANGE_QUICK: {
+    case Instruction::INVOKE_SUPER_RANGE: {
       bool is_range = (inst->Opcode() == Instruction::INVOKE_VIRTUAL_RANGE ||
-                       inst->Opcode() == Instruction::INVOKE_SUPER_RANGE ||
-                       inst->Opcode() == Instruction::INVOKE_VIRTUAL_RANGE_QUICK);
+                       inst->Opcode() == Instruction::INVOKE_SUPER_RANGE);
       bool is_super = (inst->Opcode() == Instruction::INVOKE_SUPER ||
                        inst->Opcode() == Instruction::INVOKE_SUPER_RANGE);
       MethodType type = is_super ? METHOD_SUPER : METHOD_VIRTUAL;
@@ -3486,7 +3452,7 @@ bool MethodVerifier<kVerifierDebug>::CodeFlowVerifyInstruction(uint32_t* start_g
 
     /* These should never appear during verification. */
     case Instruction::UNUSED_3E ... Instruction::UNUSED_43:
-    case Instruction::UNUSED_F3 ... Instruction::UNUSED_F9:
+    case Instruction::UNUSED_E3 ... Instruction::UNUSED_F9:
     case Instruction::UNUSED_79:
     case Instruction::UNUSED_7A:
       Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "Unexpected opcode " << inst->DumpString(dex_file_);
@@ -5075,6 +5041,7 @@ const RegType& MethodVerifier<kVerifierDebug>::DetermineCat1Constant(int32_t val
 MethodVerifier::MethodVerifier(Thread* self,
                                ClassLinker* class_linker,
                                ArenaPool* arena_pool,
+                               VerifierDeps* verifier_deps,
                                const DexFile* dex_file,
                                const dex::ClassDef& class_def,
                                const dex::CodeItem* code_item,
@@ -5099,6 +5066,7 @@ MethodVerifier::MethodVerifier(Thread* self,
       can_load_classes_(can_load_classes),
       allow_soft_failures_(allow_soft_failures),
       class_linker_(class_linker),
+      verifier_deps_(verifier_deps),
       link_(nullptr) {
   self->PushVerifier(this);
 }
@@ -5111,6 +5079,7 @@ MethodVerifier::~MethodVerifier() {
 MethodVerifier::FailureData MethodVerifier::VerifyMethod(Thread* self,
                                                          ClassLinker* class_linker,
                                                          ArenaPool* arena_pool,
+                                                         VerifierDeps* verifier_deps,
                                                          uint32_t method_idx,
                                                          const DexFile* dex_file,
                                                          Handle<mirror::DexCache> dex_cache,
@@ -5131,6 +5100,7 @@ MethodVerifier::FailureData MethodVerifier::VerifyMethod(Thread* self,
     return VerifyMethod<true>(self,
                               class_linker,
                               arena_pool,
+                              verifier_deps,
                               method_idx,
                               dex_file,
                               dex_cache,
@@ -5151,6 +5121,7 @@ MethodVerifier::FailureData MethodVerifier::VerifyMethod(Thread* self,
     return VerifyMethod<false>(self,
                                class_linker,
                                arena_pool,
+                               verifier_deps,
                                method_idx,
                                dex_file,
                                dex_cache,
@@ -5190,6 +5161,7 @@ template <bool kVerifierDebug>
 MethodVerifier::FailureData MethodVerifier::VerifyMethod(Thread* self,
                                                          ClassLinker* class_linker,
                                                          ArenaPool* arena_pool,
+                                                         VerifierDeps* verifier_deps,
                                                          uint32_t method_idx,
                                                          const DexFile* dex_file,
                                                          Handle<mirror::DexCache> dex_cache,
@@ -5212,6 +5184,7 @@ MethodVerifier::FailureData MethodVerifier::VerifyMethod(Thread* self,
   impl::MethodVerifier<kVerifierDebug> verifier(self,
                                                 class_linker,
                                                 arena_pool,
+                                                verifier_deps,
                                                 dex_file,
                                                 code_item,
                                                 method_idx,
@@ -5367,6 +5340,7 @@ MethodVerifier* MethodVerifier::CalculateVerificationInfo(
       new impl::MethodVerifier<false>(self,
                                       Runtime::Current()->GetClassLinker(),
                                       Runtime::Current()->GetArenaPool(),
+                                      /* verifier_deps= */ nullptr,
                                       method->GetDexFile(),
                                       method->GetCodeItem(),
                                       method->GetDexMethodIndex(),
@@ -5414,6 +5388,7 @@ MethodVerifier* MethodVerifier::VerifyMethodAndDump(Thread* self,
       self,
       Runtime::Current()->GetClassLinker(),
       Runtime::Current()->GetArenaPool(),
+      /* verifier_deps= */ nullptr,
       dex_file,
       code_item,
       dex_method_idx,
@@ -5455,6 +5430,7 @@ void MethodVerifier::FindLocksAtDexPc(
   impl::MethodVerifier<false> verifier(hs.Self(),
                                        Runtime::Current()->GetClassLinker(),
                                        Runtime::Current()->GetArenaPool(),
+                                       /* verifier_deps= */ nullptr,
                                        m->GetDexFile(),
                                        m->GetCodeItem(),
                                        m->GetDexMethodIndex(),
@@ -5477,6 +5453,7 @@ void MethodVerifier::FindLocksAtDexPc(
 }
 
 MethodVerifier* MethodVerifier::CreateVerifier(Thread* self,
+                                               VerifierDeps* verifier_deps,
                                                const DexFile* dex_file,
                                                Handle<mirror::DexCache> dex_cache,
                                                Handle<mirror::ClassLoader> class_loader,
@@ -5494,6 +5471,7 @@ MethodVerifier* MethodVerifier::CreateVerifier(Thread* self,
   return new impl::MethodVerifier<false>(self,
                                          Runtime::Current()->GetClassLinker(),
                                          Runtime::Current()->GetArenaPool(),
+                                         verifier_deps,
                                          dex_file,
                                          code_item,
                                          method_idx,

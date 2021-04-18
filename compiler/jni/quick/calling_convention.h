@@ -21,7 +21,6 @@
 #include "base/array_ref.h"
 #include "base/enums.h"
 #include "dex/primitive.h"
-#include "handle_scope.h"
 #include "thread.h"
 #include "utils/managed_register.h"
 
@@ -81,7 +80,6 @@ class CallingConvention : public DeletableArenaObject<kArenaAllocCallingConventi
       : itr_slots_(0), itr_refs_(0), itr_args_(0), itr_longs_and_doubles_(0),
         itr_float_and_doubles_(0), displacement_(0),
         frame_pointer_size_(frame_pointer_size),
-        handle_scope_pointer_size_(sizeof(StackReference<mirror::Object>)),
         is_static_(is_static), is_synchronized_(is_synchronized),
         shorty_(shorty) {
     num_args_ = (is_static ? 0 : 1) + strlen(shorty) - 1;
@@ -211,8 +209,6 @@ class CallingConvention : public DeletableArenaObject<kArenaAllocCallingConventi
   FrameOffset displacement_;
   // The size of a pointer.
   const PointerSize frame_pointer_size_;
-  // The size of a reference entry within the handle scope.
-  const size_t handle_scope_pointer_size_;
 
  private:
   const bool is_static_;
@@ -308,8 +304,6 @@ class JniCallingConvention : public CallingConvention {
   virtual size_t OutFrameSize() const = 0;
   // Number of references in stack indirect reference table
   size_t ReferenceCount() const;
-  // Location where the segment state of the local indirect reference table is saved
-  FrameOffset SavedLocalReferenceCookieOffset() const;
   // Location where the return value of a call can be squirreled if another
   // call is made following the native call
   FrameOffset ReturnValueSaveLocation() const;
@@ -321,12 +315,16 @@ class JniCallingConvention : public CallingConvention {
   // Callee save registers to spill prior to native code (which may clobber)
   virtual ArrayRef<const ManagedRegister> CalleeSaveRegisters() const = 0;
 
-  // Spill mask values
-  virtual uint32_t CoreSpillMask() const = 0;
-  virtual uint32_t FpSpillMask() const = 0;
+  // Register where the segment state of the local indirect reference table is saved.
+  // This must be a native callee-save register without another special purpose.
+  virtual ManagedRegister SavedLocalReferenceCookieRegister() const = 0;
 
   // An extra scratch register live after the call
   virtual ManagedRegister ReturnScratchRegister() const = 0;
+
+  // Spill mask values
+  virtual uint32_t CoreSpillMask() const = 0;
+  virtual uint32_t FpSpillMask() const = 0;
 
   // Iterator interface
   bool HasNext();
@@ -345,31 +343,11 @@ class JniCallingConvention : public CallingConvention {
   virtual ManagedRegister CurrentParamRegister() = 0;
   virtual FrameOffset CurrentParamStackOffset() = 0;
 
-  // Iterator interface extension for JNI
-  FrameOffset CurrentParamHandleScopeEntryOffset();
-
-  // Position of handle scope and interior fields
-  FrameOffset HandleScopeOffset() const {
-    return FrameOffset(this->displacement_.Int32Value() + static_cast<size_t>(frame_pointer_size_));
-    // above Method reference
-  }
-
-  FrameOffset HandleScopeLinkOffset() const {
-    return FrameOffset(HandleScopeOffset().Int32Value() +
-                       HandleScope::LinkOffset(frame_pointer_size_));
-  }
-
-  FrameOffset HandleScopeNumRefsOffset() const {
-    return FrameOffset(HandleScopeOffset().Int32Value() +
-                       HandleScope::NumberOfReferencesOffset(frame_pointer_size_));
-  }
-
-  FrameOffset HandleReferencesOffset() const {
-    return FrameOffset(HandleScopeOffset().Int32Value() +
-                       HandleScope::ReferencesOffset(frame_pointer_size_));
-  }
-
   virtual ~JniCallingConvention() {}
+
+  static constexpr size_t SavedLocalReferenceCookieSize() {
+    return 4u;
+  }
 
   bool IsCriticalNative() const {
     return is_critical_native_;
@@ -397,6 +375,13 @@ class JniCallingConvention : public CallingConvention {
            return_type == Primitive::kPrimChar;
   }
 
+  // Does the transition back spill the return value in the stack frame?
+  bool SpillsReturnValue() const {
+    // Exclude return value for @CriticalNative methods for optimization speed.
+    // References are passed directly to the "end method" and there is nothing to save for `void`.
+    return !IsCriticalNative() && !IsReturnAReference() && SizeOfReturnValue() != 0u;
+  }
+
  protected:
   // Named iterator positions
   enum IteratorPos {
@@ -415,21 +400,9 @@ class JniCallingConvention : public CallingConvention {
  protected:
   size_t NumberOfExtraArgumentsForJni() const;
 
-  // Does the transition have a StackHandleScope?
-  bool HasHandleScope() const {
-    // Exclude HandleScope for @CriticalNative methods for optimization speed.
-    return !IsCriticalNative();
-  }
-
   // Does the transition have a local reference segment state?
   bool HasLocalReferenceSegmentState() const {
     // Exclude local reference segment states for @CriticalNative methods for optimization speed.
-    return !IsCriticalNative();
-  }
-
-  // Does the transition back spill the return value in the stack frame?
-  bool SpillsReturnValue() const {
-    // Exclude return value for @CriticalNative methods for optimization speed.
     return !IsCriticalNative();
   }
 

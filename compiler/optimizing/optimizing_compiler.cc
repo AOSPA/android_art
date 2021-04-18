@@ -784,7 +784,6 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* allocator,
   CodeItemDebugInfoAccessor code_item_accessor(dex_file, code_item, method_idx);
 
   bool dead_reference_safe;
-  ArrayRef<const uint8_t> interpreter_metadata;
   // For AOT compilation, we may not get a method, for example if its class is erroneous,
   // possibly due to an unavailable superclass.  JIT should always have a method.
   DCHECK(Runtime::Current()->IsAotCompiler() || method != nullptr);
@@ -793,7 +792,6 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* allocator,
     {
       ScopedObjectAccess soa(Thread::Current());
       containing_class = &method->GetClassDef();
-      interpreter_metadata = method->GetQuickenedInfo();
     }
     // MethodContainsRSensitiveAccess is currently slow, but HasDeadReferenceSafeAnnotation()
     // is currently rarely true.
@@ -845,8 +843,7 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* allocator,
                           &dex_compilation_unit,
                           &dex_compilation_unit,
                           codegen.get(),
-                          compilation_stats_.get(),
-                          interpreter_metadata);
+                          compilation_stats_.get());
     GraphAnalysisResult result = builder.BuildGraph();
     if (result != kAnalysisSuccess) {
       switch (result) {
@@ -970,8 +967,7 @@ CodeGenerator* OptimizingCompiler::TryCompileIntrinsic(
                           &dex_compilation_unit,
                           &dex_compilation_unit,
                           codegen.get(),
-                          compilation_stats_.get(),
-                          /* interpreter_metadata= */ ArrayRef<const uint8_t>());
+                          compilation_stats_.get());
     builder.BuildIntrinsicGraph(method);
   }
 
@@ -1131,7 +1127,8 @@ CompiledMethod* OptimizingCompiler::Compile(const dex::CodeItem* code_item,
 }
 
 static ScopedArenaVector<uint8_t> CreateJniStackMap(ScopedArenaAllocator* allocator,
-                                                    const JniCompiledMethod& jni_compiled_method) {
+                                                    const JniCompiledMethod& jni_compiled_method,
+                                                    size_t code_size) {
   // StackMapStream is quite large, so allocate it using the ScopedArenaAllocator
   // to stay clear of the frame size limit.
   std::unique_ptr<StackMapStream> stack_map_stream(
@@ -1142,7 +1139,7 @@ static ScopedArenaVector<uint8_t> CreateJniStackMap(ScopedArenaAllocator* alloca
       jni_compiled_method.GetFpSpillMask(),
       /* num_dex_registers= */ 0,
       /* baseline= */ false);
-  stack_map_stream->EndMethod();
+  stack_map_stream->EndMethod(code_size);
   return stack_map_stream->Encode();
 }
 
@@ -1203,8 +1200,8 @@ CompiledMethod* OptimizingCompiler::JniCompile(uint32_t access_flags,
   MaybeRecordStat(compilation_stats_.get(), MethodCompilationStat::kCompiledNativeStub);
 
   ScopedArenaAllocator stack_map_allocator(&arena_stack);  // Will hold the stack map.
-  ScopedArenaVector<uint8_t> stack_map = CreateJniStackMap(&stack_map_allocator,
-                                                           jni_compiled_method);
+  ScopedArenaVector<uint8_t> stack_map = CreateJniStackMap(
+      &stack_map_allocator, jni_compiled_method, jni_compiled_method.GetCode().size());
   return CompiledMethod::SwapAllocCompiledMethod(
       GetCompiledMethodStorage(),
       jni_compiled_method.GetInstructionSet(),
@@ -1262,8 +1259,8 @@ bool OptimizingCompiler::JitCompile(Thread* self,
     ArenaStack arena_stack(runtime->GetJitArenaPool());
     // StackMapStream is large and it does not fit into this frame, so we need helper method.
     ScopedArenaAllocator stack_map_allocator(&arena_stack);  // Will hold the stack map.
-    ScopedArenaVector<uint8_t> stack_map = CreateJniStackMap(&stack_map_allocator,
-                                                             jni_compiled_method);
+    ScopedArenaVector<uint8_t> stack_map = CreateJniStackMap(
+        &stack_map_allocator, jni_compiled_method, jni_compiled_method.GetCode().size());
 
     ArrayRef<const uint8_t> reserved_code;
     ArrayRef<const uint8_t> reserved_data;

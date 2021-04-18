@@ -284,9 +284,13 @@ Runtime::Runtime()
       experimental_flags_(ExperimentalFlags::kNone),
       oat_file_manager_(nullptr),
       is_low_memory_mode_(false),
+      madvise_willneed_vdex_filesize_(0),
+      madvise_willneed_odex_filesize_(0),
+      madvise_willneed_art_filesize_(0),
       safe_mode_(false),
       hidden_api_policy_(hiddenapi::EnforcementPolicy::kDisabled),
       core_platform_api_policy_(hiddenapi::EnforcementPolicy::kDisabled),
+      test_api_policy_(hiddenapi::EnforcementPolicy::kDisabled),
       dedupe_hidden_api_warnings_(true),
       hidden_api_access_event_log_rate_(0),
       dump_native_stack_on_sig_quit_(true),
@@ -1064,11 +1068,20 @@ void Runtime::InitNonZygoteOrPostFork(
     thread_pool_->StartWorkers(Thread::Current());
   }
 
-  // Reset the gc performance data at zygote fork so that the GCs
+  // Reset the gc performance data and metrics at zygote fork so that the events from
   // before fork aren't attributed to an app.
   heap_->ResetGcPerformanceInfo();
+  GetMetrics()->Reset();
 
   if (metrics_reporter_ != nullptr) {
+    if (IsSystemServer() && !metrics_reporter_->IsPeriodicReportingEnabled()) {
+      // For system server, we don't get startup metrics, so make sure we have periodic reporting
+      // enabled.
+      //
+      // Note that this does not override the command line argument if one is given.
+      metrics_reporter_->SetReportingPeriod(kOneHourInSeconds);
+    }
+
     metrics::SessionData session_data{metrics::SessionData::CreateDefault()};
     session_data.session_id = GetRandomNumber<int64_t>(0, std::numeric_limits<int64_t>::max());
     // TODO: set session_data.compilation_reason and session_data.compiler_filter
@@ -1378,6 +1391,9 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   experimental_flags_ = runtime_options.GetOrDefault(Opt::Experimental);
   is_low_memory_mode_ = runtime_options.Exists(Opt::LowMemoryMode);
   madvise_random_access_ = runtime_options.GetOrDefault(Opt::MadviseRandomAccess);
+  madvise_willneed_vdex_filesize_ = runtime_options.GetOrDefault(Opt::MadviseWillNeedVdexFileSize);
+  madvise_willneed_odex_filesize_ = runtime_options.GetOrDefault(Opt::MadviseWillNeedOdexFileSize);
+  madvise_willneed_art_filesize_ = runtime_options.GetOrDefault(Opt::MadviseWillNeedArtFileSize);
 
   jni_ids_indirection_ = runtime_options.GetOrDefault(Opt::OpaqueJniIds);
   automatically_set_jni_ids_indirection_ =
@@ -1735,7 +1751,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // Class-roots are setup, we can now finish initializing the JniIdManager.
   GetJniIdManager()->Init(self);
 
-  InitMetrics();
+  InitMetrics(runtime_options);
 
   // Runtime initialization is largely done now.
   // We load plugins first since that can modify the runtime state slightly.
@@ -1843,10 +1859,14 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   return true;
 }
 
-void Runtime::InitMetrics() {
-  auto metrics_config = metrics::ReportingConfig::FromFlags();
-  if (metrics_config.ReportingEnabled()) {
-    metrics_reporter_ = metrics::MetricsReporter::Create(metrics_config, this);
+void Runtime::InitMetrics(const RuntimeArgumentMap& runtime_options) {
+  auto metrics_config = metrics::ReportingConfig::FromRuntimeArguments(runtime_options);
+  metrics_reporter_ = metrics::MetricsReporter::Create(metrics_config, this);
+}
+
+void Runtime::RequestMetricsReport(bool synchronous) {
+  if (metrics_reporter_) {
+    metrics_reporter_->RequestMetricsReport(synchronous);
   }
 }
 
@@ -2938,27 +2958,6 @@ void Runtime::DeoptimizeBootImage() {
       jit->GetCodeCache()->TransitionToDebuggable();
     }
   }
-  // Also de-quicken all -quick opcodes. We do this for both BCP and non-bcp so if we are swapping
-  // debuggable during startup by a plugin (eg JVMTI) even non-BCP code has its vdex files deopted.
-  std::unordered_set<const VdexFile*> vdexs;
-  GetClassLinker()->VisitKnownDexFiles(Thread::Current(), [&](const art::DexFile* df) {
-    const OatDexFile* odf = df->GetOatDexFile();
-    if (odf == nullptr) {
-      return;
-    }
-    const OatFile* of = odf->GetOatFile();
-    if (of == nullptr || of->IsDebuggable()) {
-      // no Oat or already debuggable so no -quick.
-      return;
-    }
-    vdexs.insert(of->GetVdexFile());
-  });
-  LOG(INFO) << "Unquickening " << vdexs.size() << " vdex files!";
-  for (const VdexFile* vf : vdexs) {
-    vf->AllowWriting(true);
-    vf->UnquickenInPlace(/*decompile_return_instruction=*/true);
-    vf->AllowWriting(false);
-  }
 }
 
 Runtime::ScopedThreadPoolUsage::ScopedThreadPoolUsage()
@@ -3111,6 +3110,52 @@ void Runtime::ProcessWeakClass(GcRoot<mirror::Class>* root_ptr,
     } else {
       // The class loader is not live, clear the entry.
       *root_ptr = GcRoot<mirror::Class>(update);
+    }
+  }
+}
+
+void Runtime::MadviseFileForRange(size_t madvise_size_limit_bytes,
+                                  size_t map_size_bytes,
+                                  const uint8_t* map_begin,
+                                  const uint8_t* map_end,
+                                  const std::string& file_name) {
+  // Ideal blockTransferSize for madvising files (128KiB)
+  static constexpr size_t kIdealIoTransferSizeBytes = 128*1024;
+
+  size_t target_size_bytes = std::min<size_t>(map_size_bytes, madvise_size_limit_bytes);
+
+  if (target_size_bytes > 0) {
+    ScopedTrace madvising_trace("madvising "
+                                + file_name
+                                + " size="
+                                + std::to_string(target_size_bytes));
+
+    // Based on requested size (target_size_bytes)
+    const uint8_t* target_pos = map_begin + target_size_bytes;
+
+    // Clamp endOfFile if its past map_end
+    if (target_pos > map_end) {
+        target_pos = map_end;
+    }
+
+    // Madvise the whole file up to target_pos in chunks of
+    // kIdealIoTransferSizeBytes (to MADV_WILLNEED)
+    // Note:
+    // madvise(MADV_WILLNEED) will prefetch max(fd readahead size, optimal
+    // block size for device) per call, hence the need for chunks. (128KB is a
+    // good default.)
+    for (const uint8_t* madvise_start = map_begin;
+         madvise_start < target_pos;
+         madvise_start += kIdealIoTransferSizeBytes) {
+      void* madvise_addr = const_cast<void*>(reinterpret_cast<const void*>(madvise_start));
+      size_t madvise_length = std::min(kIdealIoTransferSizeBytes,
+                                       static_cast<size_t>(target_pos - madvise_start));
+      int status = madvise(madvise_addr, madvise_length, MADV_WILLNEED);
+      // In case of error we stop madvising rest of the file
+      if (status < 0) {
+        LOG(ERROR) << "Failed to madvise file:" << file_name << " for size:" << map_size_bytes;
+        break;
+      }
     }
   }
 }
