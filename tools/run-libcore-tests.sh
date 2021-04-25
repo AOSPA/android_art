@@ -267,7 +267,8 @@ if [ $execution_mode = "device" ]; then
   # the default timeout.
   if $gcstress; then
     if $debug; then
-      default_timeout_secs=1440
+      # Increasing for unwinding changes (b/185305054).
+      default_timeout_secs=1800
     else
       default_timeout_secs=1200
     fi
@@ -313,6 +314,11 @@ if [ $execution_mode = "device" -o $execution_mode = "host" ]; then
     # of -XX:AlwayLogExplicitGcs:false.
     vogar_args="$vogar_args --vm-arg -XX:LongPauseLogThreshold=15" # 15 ms (default: 5ms)
   else
+    # Include debug expectations if not on fugu.
+    if $debug && $getrandom; then
+      expectations="$expectations --expectations art/tools/libcore_debug_failures.txt"
+    fi
+
     # We only run this package when user has not specified packages
     # to run and not under gcstress / debug as it can cause timeouts. See
     # b/78228743 and b/178351808.
