@@ -95,6 +95,7 @@ known_failing_tests = [
   "086-null-super",
   "087-gc-after-link",
   "096-array-copy-concurrent-gc",
+  "1004-checker-volatile-ref-load",
   "115-native-bridge",
   "116-nodex2oat",
   "1336-short-finalizer-timeout",
@@ -596,11 +597,8 @@ class Generator:
         "BootImageProfileTest",
         "ArtServiceTests",
     ]
-    art_gtests = [
-        "ArtGtestsTarget",
-    ]
     presubmit_run_tests = run_test_module_names[0:num_presubmit_run_tests]
-    presubmit_tests = other_presubmit_tests + art_gtests + presubmit_run_tests
+    presubmit_tests = other_presubmit_tests + presubmit_run_tests
     presubmit_tests_dict = [{"name": t} for t in presubmit_tests]
 
     # Postsubmits.
