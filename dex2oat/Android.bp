@@ -112,6 +112,9 @@ art_cc_library_static {
         "com.android.art.release",
         "com.android.art.debug",
     ],
+    lto: {
+        never: true,
+    }
 }
 
 cc_defaults {
