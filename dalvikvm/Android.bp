@@ -29,6 +29,9 @@ art_cc_binary {
         "libnativehelper",
     ],
     whole_static_libs: ["libsigchain"],
+    header_libs: [
+        "art_libartbase_headers", // For base/fast_exit.h
+    ],
     target: {
         android: {
             shared_libs: [

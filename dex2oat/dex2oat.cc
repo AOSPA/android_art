@@ -51,6 +51,7 @@
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "base/os.h"
+#include "base/fast_exit.h"
 #include "base/scoped_flock.h"
 #include "base/stl_util.h"
 #include "base/time_utils.h"
@@ -3301,7 +3302,7 @@ int main(int argc, char** argv) {
   // time (bug 10645725) unless we're a debug or instrumented build or running on a memory tool.
   // Note: The Dex2Oat class should not destruct the runtime in this case.
   if (!art::kIsDebugBuild && !art::kIsPGOInstrumentation && !art::kRunningOnMemoryTool) {
-    _exit(result);
+    art::FastExit(result);
   }
   return result;
 }

@@ -19,6 +19,7 @@
 #include "perfetto_hprof.h"
 
 #include <android-base/logging.h>
+#include <base/fast_exit.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <sched.h>
@@ -659,9 +660,9 @@ void DumpPerfetto(art::Thread* self) {
     GetStateCV().Wait(self);
   }
   LOG(INFO) << "finished dumping heap for " << parent_pid;
-  // Prevent the atexit handlers to run. We do not want to call cleanup
+  // Prevent the `atexit` handlers from running. We do not want to call cleanup
   // functions the parent process has registered.
-  _exit(0);
+  art::FastExit(0);
 }
 
 // The plugin initialization function.
