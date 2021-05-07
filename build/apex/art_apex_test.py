@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 # Copyright (C) 2019 The Android Open Source Project
@@ -527,7 +527,7 @@ class ReleaseChecker:
     self._checker.check_symlinked_multilib_executable('dalvikvm')
 
     # Check exported libraries for ART.
-    self._checker.check_native_library('libdexfile_external')
+    self._checker.check_native_library('libdexfile')
     self._checker.check_native_library('libnativebridge')
     self._checker.check_native_library('libnativehelper')
     self._checker.check_native_library('libnativeloader')
@@ -542,7 +542,6 @@ class ReleaseChecker:
     self._checker.check_native_library('libartpalette')
     self._checker.check_native_library('libartservice')
     self._checker.check_native_library('libarttools')
-    self._checker.check_native_library('libdexfile')
     self._checker.check_native_library('libdexfile_support')
     self._checker.check_native_library('libdt_fd_forward')
     self._checker.check_native_library('libopenjdkjvm')
@@ -677,6 +676,9 @@ class DebugChecker:
     self._checker.check_symlinked_multilib_executable('imgdiagd')
     self._checker.check_executable('profmand')
 
+    # Check exported libraries for ART.
+    self._checker.check_native_library('libdexfiled')
+
     # Check internal libraries for ART.
     self._checker.check_native_library('libadbconnectiond')
     self._checker.check_native_library('libartbased')
@@ -684,7 +686,6 @@ class DebugChecker:
     self._checker.check_native_library('libartd-compiler')
     self._checker.check_native_library('libartd-dexlayout')
     self._checker.check_native_library('libartd-disassembler')
-    self._checker.check_native_library('libdexfiled')
     self._checker.check_native_library('libopenjdkjvmd')
     self._checker.check_native_library('libopenjdkjvmtid')
     self._checker.check_native_library('libprofiled')
@@ -707,7 +708,6 @@ class DebugTargetChecker:
     self._checker.check_executable('oatdumpd')
 
     # Check ART internal libraries.
-    self._checker.check_native_library('libdexfiled_external')
     self._checker.check_native_library('libperfetto_hprofd')
 
     # Check internal native library dependencies.
@@ -969,13 +969,21 @@ def art_apex_test_main(test_args):
     # Device APEX.
     if test_args.flavor == FLAVOR_AUTO:
       logging.warning('--flavor=auto, trying to autodetect. This may be incorrect!')
-      for flavor in [ FLAVOR_RELEASE, FLAVOR_DEBUG, FLAVOR_TESTING ]:
-        flavor_pattern = '*.%s*' % flavor
+      # The order of flavors in the list below matters, as the release tag (empty string) will
+      # match any package name.
+      for flavor in [ FLAVOR_DEBUG, FLAVOR_TESTING, FLAVOR_RELEASE ]:
+        flavor_tag = flavor
+        # Special handling for the release flavor, whose name is no longer part of the Release ART
+        # APEX file name (`com.android.art.apex` / `com.android.art`).
+        if flavor == FLAVOR_RELEASE:
+          flavor_tag = ''
+        flavor_pattern = '*.%s*' % flavor_tag
         if fnmatch.fnmatch(test_args.apex, flavor_pattern):
           test_args.flavor = flavor
+          logging.warning('  Detected %s flavor', flavor)
           break
       if test_args.flavor == FLAVOR_AUTO:
-        logging.error('  Could not detect APEX flavor, neither \'%s\', \'%s\' nor \'%s\' in \'%s\'',
+        logging.error('  Could not detect APEX flavor, neither %s, %s nor %s for \'%s\'',
                     FLAVOR_RELEASE, FLAVOR_DEBUG, FLAVOR_TESTING, test_args.apex)
         return 1
 
