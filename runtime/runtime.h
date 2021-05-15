@@ -132,7 +132,6 @@ class Runtime {
 
   bool EnsurePluginLoaded(const char* plugin_name, std::string* error_msg);
   bool EnsurePerfettoPlugin(std::string* error_msg);
-  bool EnsurePerfettoJavaHeapProfPlugin(std::string* error_msg);
 
   // IsAotCompiler for compilers that don't have a running runtime. Only dex2oat currently.
   bool IsAotCompiler() const {
@@ -724,6 +723,14 @@ class Runtime {
     return is_profileable_from_shell_;
   }
 
+  void SetProfileable(bool value) {
+    is_profileable_ = value;
+  }
+
+  bool IsProfileable() const {
+    return is_profileable_;
+  }
+
   void SetJavaDebuggable(bool value);
 
   // Deoptimize the boot image, called for Java debuggable apps.
@@ -987,6 +994,10 @@ class Runtime {
                                   const uint8_t* map_end,
                                   const std::string& file_name);
 
+  const std::string& GetApexVersions() const {
+    return apex_versions_;
+  }
+
  private:
   static void InitPlatformSignalHandlers();
 
@@ -1026,6 +1037,10 @@ class Runtime {
 
   ThreadPool* AcquireThreadPool() REQUIRES(!Locks::runtime_thread_pool_lock_);
   void ReleaseThreadPool() REQUIRES(!Locks::runtime_thread_pool_lock_);
+
+  // Parses /apex/apex-info-list.xml to initialize a string containing versions
+  // of boot classpath jars and encoded into .oat files.
+  void InitializeApexVersions();
 
   // A pointer to the active runtime or null.
   static Runtime* instance_;
@@ -1224,7 +1239,13 @@ class Runtime {
   // Whether Java code needs to be debuggable.
   bool is_java_debuggable_;
 
+  // Whether or not this application can be profiled by the shell user,
+  // even when running on a device that is running in user mode.
   bool is_profileable_from_shell_ = false;
+
+  // Whether or not this application can be profiled by system services on a
+  // device running in user mode, but not necessarily by the shell user.
+  bool is_profileable_ = false;
 
   // The maximum number of failed boots we allow before pruning the dalvik cache
   // and trying again. This option is only inspected when we're running as a
@@ -1352,6 +1373,14 @@ class Runtime {
 
   metrics::ArtMetrics metrics_;
   std::unique_ptr<metrics::MetricsReporter> metrics_reporter_;
+
+  // Apex versions of boot classpath jars concatenated in a string. The format
+  // is of the type:
+  // '/apex1_version/apex2_version//'
+  //
+  // When the apex is the factory version, we don't encode it (for example in
+  // the third entry in the example above).
+  std::string apex_versions_;
 
   // Note: See comments on GetFaultMessage.
   friend std::string GetFaultMessageForAbortLogging();

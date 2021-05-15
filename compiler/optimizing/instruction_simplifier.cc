@@ -611,7 +611,16 @@ static bool TypeCheckHasKnownOutcome(ReferenceTypeInfo class_rti,
 
   if (!class_rti.IsValid()) {
     // Happens when the loaded class is unresolved.
-    return false;
+    if (obj_rti.IsExact()) {
+      // outcome == 'true' && obj_rti is valid implies that class_rti is valid.
+      // Since that's a contradiction we must not pass this check.
+      *outcome = false;
+      return true;
+    } else {
+      // We aren't able to say anything in particular since we don't know the
+      // exact type of the object.
+      return false;
+    }
   }
   DCHECK(class_rti.IsExact());
   if (class_rti.IsSupertypeOf(obj_rti)) {
@@ -633,12 +642,6 @@ static bool TypeCheckHasKnownOutcome(ReferenceTypeInfo class_rti,
 
 void InstructionSimplifierVisitor::VisitCheckCast(HCheckCast* check_cast) {
   HInstruction* object = check_cast->InputAt(0);
-  if (check_cast->GetTypeCheckKind() != TypeCheckKind::kBitstringCheck &&
-      check_cast->GetTargetClass()->NeedsAccessCheck()) {
-    // If we need to perform an access check we cannot remove the instruction.
-    return;
-  }
-
   if (CanEnsureNotNullAt(object, check_cast)) {
     check_cast->ClearMustDoNullCheck();
   }
@@ -649,6 +652,11 @@ void InstructionSimplifierVisitor::VisitCheckCast(HCheckCast* check_cast) {
     return;
   }
 
+  // Minor correctness check.
+  DCHECK(check_cast->GetTargetClass()->StrictlyDominates(check_cast))
+      << "Illegal graph!\n"
+      << check_cast->DumpWithArgs();
+
   // Historical note: The `outcome` was initialized to please Valgrind - the compiler can reorder
   // the return value check with the `outcome` check, b/27651442.
   bool outcome = false;
@@ -658,27 +666,23 @@ void InstructionSimplifierVisitor::VisitCheckCast(HCheckCast* check_cast) {
       MaybeRecordStat(stats_, MethodCompilationStat::kRemovedCheckedCast);
       if (check_cast->GetTypeCheckKind() != TypeCheckKind::kBitstringCheck) {
         HLoadClass* load_class = check_cast->GetTargetClass();
-        if (!load_class->HasUses()) {
+        if (!load_class->HasUses() && !load_class->NeedsAccessCheck()) {
           // We cannot rely on DCE to remove the class because the `HLoadClass` thinks it can throw.
-          // However, here we know that it cannot because the checkcast was successfull, hence
+          // However, here we know that it cannot because the checkcast was successful, hence
           // the class was already loaded.
           load_class->GetBlock()->RemoveInstruction(load_class);
         }
       }
     } else {
-      // Don't do anything for exceptional cases for now. Ideally we should remove
-      // all instructions and blocks this instruction dominates.
+      // TODO Don't do anything for exceptional cases for now. Ideally we should
+      // remove all instructions and blocks this instruction dominates and
+      // replace it with a manual throw.
     }
   }
 }
 
 void InstructionSimplifierVisitor::VisitInstanceOf(HInstanceOf* instruction) {
   HInstruction* object = instruction->InputAt(0);
-  if (instruction->GetTypeCheckKind() != TypeCheckKind::kBitstringCheck &&
-      instruction->GetTargetClass()->NeedsAccessCheck()) {
-    // If we need to perform an access check we cannot remove the instruction.
-    return;
-  }
 
   bool can_be_null = true;
   if (CanEnsureNotNullAt(object, instruction)) {
@@ -694,6 +698,11 @@ void InstructionSimplifierVisitor::VisitInstanceOf(HInstanceOf* instruction) {
     RecordSimplification();
     return;
   }
+
+  // Minor correctness check.
+  DCHECK(instruction->GetTargetClass()->StrictlyDominates(instruction))
+      << "Illegal graph!\n"
+      << instruction->DumpWithArgs();
 
   // Historical note: The `outcome` was initialized to please Valgrind - the compiler can reorder
   // the return value check with the `outcome` check, b/27651442.
@@ -713,10 +722,11 @@ void InstructionSimplifierVisitor::VisitInstanceOf(HInstanceOf* instruction) {
     instruction->GetBlock()->RemoveInstruction(instruction);
     if (outcome && instruction->GetTypeCheckKind() != TypeCheckKind::kBitstringCheck) {
       HLoadClass* load_class = instruction->GetTargetClass();
-      if (!load_class->HasUses()) {
-        // We cannot rely on DCE to remove the class because the `HLoadClass` thinks it can throw.
-        // However, here we know that it cannot because the instanceof check was successfull, hence
-        // the class was already loaded.
+      if (!load_class->HasUses() && !load_class->NeedsAccessCheck()) {
+        // We cannot rely on DCE to remove the class because the `HLoadClass`
+        // thinks it can throw. However, here we know that it cannot because the
+        // instanceof check was successful and we don't need to check the
+        // access, hence the class was already loaded.
         load_class->GetBlock()->RemoveInstruction(load_class);
       }
     }
@@ -939,36 +949,12 @@ void InstructionSimplifierVisitor::VisitPredicatedInstanceFieldGet(
     HPredicatedInstanceFieldGet* pred_get) {
   HInstruction* target = pred_get->GetTarget();
   HInstruction* default_val = pred_get->GetDefaultValue();
-  // TODO Technically we could end up with a case where the target isn't a phi
-  // (allowing us to eliminate the instruction and replace with either a
-  // InstanceFieldGet or the default) but due to the ordering of compilation
-  // passes this can't happen in ART.
-  if (!target->IsPhi() || !default_val->IsPhi() || default_val->GetBlock() != target->GetBlock()) {
-    // Already reduced the target or the phi selection will differ between the
-    // target and default.
+  if (target->IsNullConstant()) {
+    pred_get->ReplaceWith(default_val);
+    pred_get->GetBlock()->RemoveInstruction(pred_get);
+    RecordSimplification();
     return;
-  }
-  DCHECK_EQ(default_val->InputCount(), target->InputCount());
-  // In the same block both phis only one non-null we can remove the phi from default_val.
-  HInstruction* single_value = nullptr;
-  auto inputs = target->GetInputs();
-  for (auto [input, idx] : ZipCount(MakeIterationRange(inputs))) {
-    if (input->CanBeNull()) {
-      if (single_value == nullptr) {
-        single_value = default_val->InputAt(idx);
-      } else if (single_value != default_val->InputAt(idx) &&
-                !single_value->Equals(default_val->InputAt(idx))) {
-        // Multiple values are associated with potential nulls, can't combine.
-        return;
-      }
-    }
-  }
-  if (single_value == nullptr) {
-    // None of the inputs can be null so we can just remove the predicatedness
-    // of this instruction.
-    DCHECK(std::none_of(inputs.cbegin(), inputs.cend(), [](const HInstruction* input) {
-      return input->CanBeNull();
-    }));
+  } else if (!target->CanBeNull()) {
     HInstruction* replace_with = new (GetGraph()->GetAllocator())
         HInstanceFieldGet(pred_get->GetTarget(),
                           pred_get->GetFieldInfo().GetField(),
@@ -986,7 +972,32 @@ void InstructionSimplifierVisitor::VisitPredicatedInstanceFieldGet(
     pred_get->ReplaceWith(replace_with);
     pred_get->GetBlock()->RemoveInstruction(pred_get);
     RecordSimplification();
-  } else if (single_value->StrictlyDominates(pred_get)) {
+    return;
+  }
+  if (!target->IsPhi() || !default_val->IsPhi() || default_val->GetBlock() != target->GetBlock()) {
+    // The iget has already been reduced. We know the target or the phi
+    // selection will differ between the target and default.
+    return;
+  }
+  DCHECK_EQ(default_val->InputCount(), target->InputCount());
+  // In the same block both phis only one non-null we can remove the phi from default_val.
+  HInstruction* single_value = nullptr;
+  auto inputs = target->GetInputs();
+  for (auto [input, idx] : ZipCount(MakeIterationRange(inputs))) {
+    if (input->CanBeNull()) {
+      if (single_value == nullptr) {
+        single_value = default_val->InputAt(idx);
+      } else if (single_value != default_val->InputAt(idx) &&
+                 !single_value->Equals(default_val->InputAt(idx))) {
+        // Multiple values are associated with potential nulls, can't combine.
+        return;
+      }
+    }
+  }
+  DCHECK(single_value != nullptr) << "All target values are non-null but the phi as a whole still"
+                                  << " can be null? This should not be possible." << std::endl
+                                  << pred_get->DumpWithArgs();
+  if (single_value->StrictlyDominates(pred_get)) {
     // Combine all the maybe null values into one.
     pred_get->ReplaceInput(single_value, 0);
     RecordSimplification();

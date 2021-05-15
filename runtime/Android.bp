@@ -93,7 +93,6 @@ libart_cc_defaults {
         "debugger.cc",
         "dex/dex_file_annotations.cc",
         "dex_register_location.cc",
-        "dex_to_dex_decompiler.cc",
         "elf_file.cc",
         "exec_utils.cc",
         "fault_handler.cc",
@@ -385,6 +384,10 @@ libart_cc_defaults {
             ],
             static_libs: [
                 "libstatslog_art",
+                "libxml2",
+            ],
+            generated_sources: [
+                "apex-info-list",
             ],
         },
         android_arm: {
@@ -414,7 +417,9 @@ libart_cc_defaults {
         },
     },
     cflags: ["-DBUILDING_LIBART=1"],
-    generated_sources: ["art_operator_srcs"],
+    generated_sources: [
+        "art_operator_srcs"
+    ],
     // asm_support_gen.h (used by asm_support.h) is generated with cpp-define-generator
     generated_headers: ["cpp-define-generator-asm-support"],
     // export our headers so the libart-gtest targets can use it as well.
@@ -440,6 +445,7 @@ libart_cc_defaults {
         "libsigchain",
         "libunwindstack",
     ],
+    static_libs: ["libodrstatslog"],
     export_include_dirs: ["."],
     // ART's macros.h depends on libbase's macros.h.
     // Note: runtime_options.h depends on cmdline. But we don't really want to export this
@@ -458,6 +464,7 @@ libart_static_cc_defaults {
         "liblzma", // libelffile dependency; must be repeated here since it's a static lib.
         "libnativebridge",
         "libnativeloader",
+        "libodrstatslog",
         "libsigchain_fake",
         "libunwindstack",
         "libz",

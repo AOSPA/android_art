@@ -150,6 +150,7 @@
 #include "oat_file_manager.h"
 #include "oat_quick_method_header.h"
 #include "object_callbacks.h"
+#include "odr_statslog/odr_statslog.h"
 #include "parsed_options.h"
 #include "quick/quick_method_frame_info.h"
 #include "reflection.h"
@@ -172,6 +173,9 @@
 
 #ifdef ART_TARGET_ANDROID
 #include <android/set_abort_message.h>
+#include "com_android_apex.h"
+namespace apex = com::android::apex;
+
 #endif
 
 // Static asserts to check the values of generated assembly-support macros.
@@ -1092,7 +1096,7 @@ void Runtime::InitNonZygoteOrPostFork(
 
   ScopedObjectAccess soa(Thread::Current());
   if (IsPerfettoHprofEnabled() &&
-      (Dbg::IsJdwpAllowed() || IsProfileableFromShell() || IsJavaDebuggable() ||
+      (Dbg::IsJdwpAllowed() || IsProfileable() || IsProfileableFromShell() || IsJavaDebuggable() ||
        Runtime::Current()->IsSystemServer())) {
     std::string err;
     ScopedTrace tr("perfetto_hprof init.");
@@ -1102,15 +1106,21 @@ void Runtime::InitNonZygoteOrPostFork(
     }
   }
   if (IsPerfettoJavaHeapStackProfEnabled() &&
-      (Dbg::IsJdwpAllowed() || IsProfileableFromShell() || IsJavaDebuggable() ||
+      (Dbg::IsJdwpAllowed() || IsProfileable() || IsProfileableFromShell() || IsJavaDebuggable() ||
        Runtime::Current()->IsSystemServer())) {
-    std::string err;
+    // Marker used for dev tracing similar to above markers.
     ScopedTrace tr("perfetto_javaheapprof init.");
+  }
+  if (Runtime::Current()->IsSystemServer()) {
+    std::string err;
+    ScopedTrace tr("odrefresh stats logging");
     ScopedThreadSuspension sts(Thread::Current(), ThreadState::kNative);
-    if (!EnsurePerfettoJavaHeapProfPlugin(&err)) {
-      LOG(WARNING) << "Failed to load perfetto_javaheapprof: " << err;
+    // Report stats if available. This should be moved into ART Services when they are ready.
+    if (!odrefresh::UploadStatsIfAvailable(&err)) {
+      LOG(WARNING) << "Failed to upload odrefresh metrics: " << err;
     }
   }
+
   if (LIKELY(automatically_set_jni_ids_indirection_) && CanSetJniIdType()) {
     if (IsJavaDebuggable()) {
       SetJniIdType(JniIdType::kIndices);
@@ -1222,6 +1232,52 @@ static inline void CreatePreAllocatedException(Thread* self,
       throwable->FindDeclaredInstanceField("detailMessage", "Ljava/lang/String;");
   CHECK(detailMessageField != nullptr);
   detailMessageField->SetObject</* kTransactionActive= */ false>(exception->Read(), message);
+}
+
+void Runtime::InitializeApexVersions() {
+  std::vector<std::string_view> bcp_apexes;
+  for (std::string_view jar : Runtime::Current()->GetBootClassPathLocations()) {
+    if (LocationIsOnApex(jar)) {
+      size_t start = jar.find('/', 1);
+      if (start == std::string::npos) {
+        continue;
+      }
+      size_t end = jar.find('/', start + 1);
+      if (end == std::string::npos) {
+        continue;
+      }
+      std::string_view apex = jar.substr(start + 1, end - start - 1);
+      bcp_apexes.push_back(apex);
+    }
+  }
+  std::string result;
+  static const char* kApexFileName = "/apex/apex-info-list.xml";
+  // When running on host or chroot, we just encode empty markers.
+  if (!kIsTargetBuild || !OS::FileExists(kApexFileName)) {
+    for (uint32_t i = 0; i < bcp_apexes.size(); ++i) {
+      result += '/';
+    }
+  } else {
+#ifdef ART_TARGET_ANDROID
+    auto info_list = apex::readApexInfoList(kApexFileName);
+    CHECK(info_list.has_value());
+    std::map<std::string_view, const apex::ApexInfo*> apex_infos;
+    for (const apex::ApexInfo& info : info_list->getApexInfo()) {
+      if (info.getIsActive()) {
+        apex_infos.emplace(info.getModuleName(), &info);
+      }
+    }
+    for (const std::string_view& str : bcp_apexes) {
+      auto info = apex_infos.find(str);
+      if (info == apex_infos.end() || info->second->getIsFactory()) {
+        result += '/';
+      } else {
+        android::base::StringAppendF(&result, "/%" PRIu64, info->second->getVersionCode());
+      }
+    }
+#endif
+  }
+  apex_versions_ = result;
 }
 
 bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
@@ -1675,6 +1731,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     }
   }
 
+  InitializeApexVersions();
+
   CHECK(class_linker_ != nullptr);
 
   verifier::ClassVerifier::Init(class_linker_);
@@ -1840,14 +1898,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     // subsequent dlopens for the library no-ops.
     dlopen(plugin_name, RTLD_NOW | RTLD_LOCAL);
   }
-  if (IsZygote() && IsPerfettoJavaHeapStackProfEnabled()) {
-    // There is no debug build of heapprofd_client_api.so currently.
-    // Add debug build .so when available.
-    constexpr const char* jhp_plugin_name = "heapprofd_client_api.so";
-    // Load eagerly in Zygote to improve app startup times. This will make
-    // subsequent dlopens for the library no-ops.
-    dlopen(jhp_plugin_name, RTLD_NOW | RTLD_LOCAL);
-  }
 
   VLOG(startup) << "Runtime::Init exiting";
 
@@ -1890,13 +1940,6 @@ bool Runtime::EnsurePerfettoPlugin(std::string* error_msg) {
   constexpr const char* plugin_name = kIsDebugBuild ?
     "libperfetto_hprofd.so" : "libperfetto_hprof.so";
   return EnsurePluginLoaded(plugin_name, error_msg);
-}
-
-bool Runtime::EnsurePerfettoJavaHeapProfPlugin(std::string* error_msg) {
-  // There is no debug build of heapprofd_client_api.so currently.
-  // Add debug build .so when available.
-  constexpr const char* jhp_plugin_name = "heapprofd_client_api.so";
-  return EnsurePluginLoaded(jhp_plugin_name, error_msg);
 }
 
 static bool EnsureJvmtiPlugin(Runtime* runtime,

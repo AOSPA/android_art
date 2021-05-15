@@ -2590,6 +2590,8 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
   if (self->IsHandlingStackOverflow()) {
     // If we are throwing a stack overflow error we probably don't have enough remaining stack
     // space to run the GC.
+    // Count this as a GC in case someone is waiting for it to complete.
+    gcs_completed_.fetch_add(1, std::memory_order_release);
     return collector::kGcTypeNone;
   }
   bool compacting_gc;
@@ -2607,9 +2609,12 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
     // GC can be disabled if someone has a used GetPrimitiveArrayCritical.
     if (compacting_gc && disable_moving_gc_count_ != 0) {
       LOG(WARNING) << "Skipping GC due to disable moving GC count " << disable_moving_gc_count_;
+      // Again count this as a GC.
+      gcs_completed_.fetch_add(1, std::memory_order_release);
       return collector::kGcTypeNone;
     }
     if (gc_disabled_for_shutdown_) {
+      gcs_completed_.fetch_add(1, std::memory_order_release);
       return collector::kGcTypeNone;
     }
     collector_type_running_ = collector_type_;
@@ -3962,9 +3967,9 @@ inline void Heap::CheckGCForNative(Thread* self) {
         }
         // Count how many times we do this, so we can warn if this becomes excessive.
         // Stop after a while out of excessive caution.
-        static constexpr int kGcWaitIters = 50;
+        static constexpr int kGcWaitIters = 20;
         for (int i = 1; i <= kGcWaitIters; ++i) {
-          if (GCNumberLt(starting_gc_num, starting_gc_num)
+          if (!GCNumberLt(GetCurrentGcNum(), gcs_requested_.load(std::memory_order_relaxed))
               || WaitForGcToComplete(kGcCauseForNativeAlloc, self) != collector::kGcTypeNone) {
             break;
           }
