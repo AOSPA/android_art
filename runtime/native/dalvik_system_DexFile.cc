@@ -18,6 +18,7 @@
 
 #include <sstream>
 
+#include "android-base/file.h"
 #include "android-base/stringprintf.h"
 
 #include "base/casts.h"
@@ -326,27 +327,10 @@ static jobject DexFile_openDexFileNative(JNIEnv* env,
   return CreateCookieFromOatFileManagerResult(env, dex_files, oat_file, error_msgs);
 }
 
-static jstring DexFile_getClassLoaderContext(JNIEnv* env,
-                                            jclass,
-                                            jobject class_loader,
-                                            jobjectArray dex_elements) {
-  CHECK(class_loader != nullptr);
-  constexpr const char* kBaseDir = "";
-  std::unique_ptr<ClassLoaderContext> context =
-  ClassLoaderContext::CreateContextForClassLoader(class_loader, dex_elements);
-  if (context == nullptr || !context->OpenDexFiles(kBaseDir)) {
-    LOG(WARNING) << "Could not establish class loader context";
-    return nullptr;
-  }
-  std::string str_context = context->EncodeContextForOatFile(kBaseDir);
-  return env->NewStringUTF(str_context.c_str());
-}
-
 static void DexFile_verifyInBackgroundNative(JNIEnv* env,
                                              jclass,
                                              jobject cookie,
-                                             jobject class_loader,
-                                             jstring class_loader_context) {
+                                             jobject class_loader) {
   CHECK(cookie != nullptr);
   CHECK(class_loader != nullptr);
 
@@ -359,17 +343,10 @@ static void DexFile_verifyInBackgroundNative(JNIEnv* env,
   }
   CHECK(oat_file == nullptr) << "Called verifyInBackground on a dex file backed by oat";
 
-  ScopedUtfChars class_loader_context_utf(env, class_loader_context);
-  if (env->ExceptionCheck()) {
-    LOG(ERROR) << "Failed to unwrap class loader context string";
-    return;
-  }
-
   // Hand over to OatFileManager to spawn a verification thread.
   Runtime::Current()->GetOatFileManager().RunBackgroundVerification(
       dex_files,
-      class_loader,
-      class_loader_context_utf.c_str());
+      class_loader);
 }
 
 static jboolean DexFile_closeDexFile(JNIEnv* env, jclass, jobject cookie) {
@@ -565,22 +542,26 @@ static jint GetDexOptNeeded(JNIEnv* env,
       env->ThrowNew(iae.get(), message.c_str());
       return -1;
     }
+    std::vector<int> context_fds;
+    context->OpenDexFiles(android::base::Dirname(filename),
+                          context_fds,
+                          /*only_read_checksums*/ true);
   }
 
   // TODO: Verify the dex location is well formed, and throw an IOException if
   // not?
 
-  OatFileAssistant oat_file_assistant(filename, target_instruction_set, false);
+  OatFileAssistant oat_file_assistant(filename,
+                                      target_instruction_set,
+                                      context.get(),
+                                      /* load_executable= */ false);
 
   // Always treat elements of the bootclasspath as up-to-date.
   if (oat_file_assistant.IsInBootClassPath()) {
     return OatFileAssistant::kNoDexOptNeeded;
   }
 
-  std::vector<int> context_fds;
   return oat_file_assistant.GetDexOptNeeded(filter,
-                                            context.get(),
-                                            context_fds,
                                             profile_changed,
                                             downgrade);
 }
@@ -608,7 +589,9 @@ static jstring DexFile_getDexFileStatus(JNIEnv* env,
     return nullptr;
   }
 
-  OatFileAssistant oat_file_assistant(filename.c_str(), target_instruction_set,
+  OatFileAssistant oat_file_assistant(filename.c_str(),
+                                      target_instruction_set,
+                                      /* context= */ nullptr,
                                       /* load_executable= */ false);
   return env->NewStringUTF(oat_file_assistant.GetStatusDump().c_str());
 }
@@ -715,7 +698,10 @@ static jboolean DexFile_isDexOptNeeded(JNIEnv* env, jclass, jstring javaFilename
     return JNI_FALSE;
   }
 
-  OatFileAssistant oat_file_assistant(filename, kRuntimeISA, false);
+  OatFileAssistant oat_file_assistant(filename,
+                                      kRuntimeISA,
+                                      /* context= */ nullptr,
+                                      /* load_executable= */ false);
   return oat_file_assistant.IsUpToDate() ? JNI_FALSE : JNI_TRUE;
 }
 
@@ -852,10 +838,11 @@ static jobjectArray DexFile_getDexFileOutputPaths(JNIEnv* env,
     }
   }
 
-  // If did not find a boot classpath oat file, lookup the oat file for an app.
+  // If we did not find a boot classpath oat file, lookup the oat file for an app.
   if (oat_filename.empty()) {
     OatFileAssistant oat_file_assistant(filename.c_str(),
                                         target_instruction_set,
+                                        /* context= */ nullptr,
                                         /* load_executable= */ false);
 
     std::unique_ptr<OatFile> best_oat_file = oat_file_assistant.GetBestOatFile();
@@ -954,14 +941,9 @@ static JNINativeMethod gMethods[] = {
                 "Ljava/lang/ClassLoader;"
                 "[Ldalvik/system/DexPathList$Element;"
                 ")Ljava/lang/Object;"),
-  NATIVE_METHOD(DexFile, getClassLoaderContext,
-                "(Ljava/lang/ClassLoader;"
-                "[Ldalvik/system/DexPathList$Element;"
-                ")Ljava/lang/String;"),
   NATIVE_METHOD(DexFile, verifyInBackgroundNative,
                 "(Ljava/lang/Object;"
                 "Ljava/lang/ClassLoader;"
-                "Ljava/lang/String;"
                 ")V"),
   NATIVE_METHOD(DexFile, isValidCompilerFilter, "(Ljava/lang/String;)Z"),
   NATIVE_METHOD(DexFile, isProfileGuidedCompilerFilter, "(Ljava/lang/String;)Z"),

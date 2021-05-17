@@ -81,6 +81,8 @@ using StringDexCacheType = std::atomic<StringDexCachePair>;
 // C++ mirror of java.lang.Class
 class MANAGED Class final : public Object {
  public:
+  MIRROR_CLASS("Ljava/lang/Class;");
+
   // A magic value for reference_instance_offsets_. Ignore the bits and walk the super chain when
   // this is the value.
   // [This is an unlikely "natural" value, since it would be 30 non-ref instance fields followed by
@@ -923,13 +925,10 @@ class MANAGED Class final : public Object {
                                  PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Return the first accessible method from the list of interfaces implemented by
-  // this. For knowing if a method is accessible, we call through
-  // `hiddenapi::ShouldDenyAccessToMember`.
-  ArtMethod* FindAccessibleInterfaceMethod(
-      ArtMethod* implementation_method,
-      const hiddenapi::AccessContext& access_context,
-      PointerSize pointer_size)
+  // Return the first public SDK method from the list of interfaces implemented by
+  // this class.
+  ArtMethod* FindAccessibleInterfaceMethod(ArtMethod* implementation_method,
+                                           PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Find a method with the given name and signature in a non-interface class.

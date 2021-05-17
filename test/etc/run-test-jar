@@ -789,32 +789,27 @@ fi
 
 if [ "$INTERPRETER" = "y" ]; then
     INT_OPTS="${INT_OPTS} -Xint"
-    if [ "$VERIFY" = "y" ] ; then
-      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=quicken"
-      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=quicken"
-    elif [ "$VERIFY" = "s" ]; then
-      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=extract"
-      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=extract"
-      DEX_VERIFY="${DEX_VERIFY} -Xverify:softfail"
-    else # VERIFY = "n"
-      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=assume-verified"
-      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=assume-verified"
-      DEX_VERIFY="${DEX_VERIFY} -Xverify:none"
-    fi
 fi
 
 if [ "$JIT" = "y" ]; then
     INT_OPTS="${INT_OPTS} -Xusejit:true"
-    if [ "$VERIFY" = "y" ] ; then
-      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=quicken"
-      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=quicken"
-    else
-      INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=assume-verified"
-      COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=assume-verified"
-      DEX_VERIFY="${DEX_VERIFY} -Xverify:none"
-    fi
 else
     INT_OPTS="${INT_OPTS} -Xusejit:false"
+fi
+
+if [ "$INTERPRETER" = "y" ] || [ "$JIT" = "y" ]; then
+  if [ "$VERIFY" = "y" ] ; then
+    INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=verify"
+    COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=verify"
+  elif [ "$VERIFY" = "s" ]; then
+    INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=extract"
+    COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=extract"
+    DEX_VERIFY="${DEX_VERIFY} -Xverify:softfail"
+  else # VERIFY = "n"
+    INT_OPTS="${INT_OPTS} -Xcompiler-option --compiler-filter=assume-verified"
+    COMPILE_FLAGS="${COMPILE_FLAGS} --compiler-filter=assume-verified"
+    DEX_VERIFY="${DEX_VERIFY} -Xverify:none"
+  fi
 fi
 
 JNI_OPTS="-Xjnigreflimit:512 -Xcheck:jni"
@@ -883,6 +878,7 @@ linkroot_cmdline="true"
 linkroot_overlay_cmdline="true"
 setupapex_cmdline="true"
 installapex_cmdline="true"
+installapex_test_cmdline="true"
 
 linkdirs() {
   find "$1" -maxdepth 1 -mindepth 1 -type d | xargs -i ln -sf '{}' "$2"
@@ -916,6 +912,8 @@ elif [ "$USE_EXTRACTED_ZIPAPEX" = "y" ]; then
   if [ "$DEV_MODE" = "y" ]; then
     ln_options="--verbose"
   fi
+  # If the ${RUN} is executed multiple times we don't need to recreate the link
+  installapex_test_cmdline="test -L ${DEX_LOCATION}/zipapex"
   installapex_cmdline="ln -s -f ${ln_options} ${EXTRACTED_ZIPAPEX_LOC} ${DEX_LOCATION}/zipapex"
 fi
 
@@ -1339,7 +1337,7 @@ else
         echo EXPORT $var=${!var}
       done
       echo "$(declare -f linkdirs)"
-      echo "mkdir -p ${mkdir_locations} && $setupapex_cmdline && $installapex_cmdline && $linkroot_cmdline && $linkroot_overlay_cmdline && $profman_cmdline && $dex2oat_cmdline && $dm_cmdline && $vdex_cmdline && $strip_cmdline && $sync_cmdline && $cmdline"
+      echo "mkdir -p ${mkdir_locations} && $setupapex_cmdline && ( $installapex_test_cmdline || $installapex_cmdline ) && $linkroot_cmdline && $linkroot_overlay_cmdline && $profman_cmdline && $dex2oat_cmdline && $dm_cmdline && $vdex_cmdline && $strip_cmdline && $sync_cmdline && $cmdline"
     fi
 
     cd $ANDROID_BUILD_TOP
@@ -1354,7 +1352,7 @@ else
 
     mkdir -p ${mkdir_locations} || exit 1
     $setupapex_cmdline || { echo "zipapex extraction failed." >&2 ; exit 2; }
-    $installapex_cmdline || { echo "zipapex install failed. cmd was: ${installapex_cmdline}." >&2; find ${mkdir_locations} -type f >&2; exit 2; }
+    $installapex_test_cmdline || $installapex_cmdline || { echo "zipapex install failed. cmd was: ${installapex_test_cmdline} || ${installapex_cmdline}." >&2; find ${mkdir_locations} -type f >&2; exit 2; }
     $linkroot_cmdline || { echo "create symlink android-root failed." >&2 ; exit 2; }
     $linkroot_overlay_cmdline || { echo "overlay android-root failed." >&2 ; exit 2; }
     $profman_cmdline || { echo "Profman failed." >&2 ; exit 2; }

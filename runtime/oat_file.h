@@ -63,10 +63,10 @@ class FakeOatFile;
 // save even one OatMethodOffsets struct, the more complicated encoding
 // using a bitmap pays for itself since few classes will have 160
 // methods.
-enum OatClassType {
-  kOatClassAllCompiled = 0,   // OatClass is followed by an OatMethodOffsets for each method.
-  kOatClassSomeCompiled = 1,  // A bitmap of OatMethodOffsets that are present follows the OatClass.
-  kOatClassNoneCompiled = 2,  // All methods are interpreted so no OatMethodOffsets are necessary.
+enum class OatClassType : uint8_t {
+  kAllCompiled = 0,   // OatClass is followed by an OatMethodOffsets for each method.
+  kSomeCompiled = 1,  // A bitmap of OatMethodOffsets that are present follows the OatClass.
+  kNoneCompiled = 2,  // All methods are interpreted so no OatMethodOffsets are necessary.
   kOatClassMax = 3,
 };
 
@@ -273,7 +273,7 @@ class OatFile {
     static OatClass Invalid() {
       return OatClass(/* oat_file= */ nullptr,
                       ClassStatus::kErrorUnresolved,
-                      kOatClassNoneCompiled,
+                      OatClassType::kNoneCompiled,
                       /* bitmap_size= */ 0,
                       /* bitmap_pointer= */ nullptr,
                       /* methods_pointer= */ nullptr);
@@ -283,18 +283,15 @@ class OatFile {
     OatClass(const OatFile* oat_file,
              ClassStatus status,
              OatClassType type,
-             uint32_t bitmap_size,
+             uint32_t num_methods,
              const uint32_t* bitmap_pointer,
              const OatMethodOffsets* methods_pointer);
 
     const OatFile* const oat_file_;
-
     const ClassStatus status_;
-
     const OatClassType type_;
-
+    const uint32_t num_methods_;
     const uint32_t* const bitmap_;
-
     const OatMethodOffsets* const methods_pointer_;
 
     friend class art::OatDexFile;
@@ -588,9 +585,11 @@ class OatDexFile final {
              const uint8_t* dex_file_pointer,
              uint32_t dex_file_checksum,
              const std::string& dex_file_location,
-             const std::string& canonical_dex_file_location);
+             const std::string& canonical_dex_file_location,
+             const uint8_t* lookup_table_data);
 
   bool IsBackedByVdexOnly() const;
+  void InitializeTypeLookupTable();
 
   static void AssertAotCompiler();
 

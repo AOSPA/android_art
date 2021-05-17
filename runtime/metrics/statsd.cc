@@ -75,6 +75,9 @@ constexpr std::optional<int32_t> EncodeDatumId(DatumId datum_id) {
     case DatumId::kFullGcThroughput:
       return std::make_optional(
           statsd::ART_DATUM_REPORTED__KIND__ART_DATUM_GC_FULL_HEAP_COLLECTION_THROUGHPUT);
+    case DatumId::kJitMethodCompileCount:
+      return std::make_optional(
+          statsd::ART_DATUM_REPORTED__KIND__ART_DATUM_JIT_METHOD_COMPILE_COUNT);
   }
 }
 
@@ -114,8 +117,6 @@ constexpr int32_t EncodeCompilationReason(CompilationReason reason) {
       return statsd::ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_AB_OTA;
     case CompilationReason::kBgDexopt:
       return statsd::ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_BG_DEXOPT;
-    case CompilationReason::kBoot:
-      return statsd::ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_BOOT;
     case CompilationReason::kError:
       return statsd::ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_ERROR;
     case CompilationReason::kFirstBoot:
@@ -129,6 +130,23 @@ constexpr int32_t EncodeCompilationReason(CompilationReason reason) {
           ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_INSTALL_WITH_DEX_METADATA;
     case CompilationReason::kShared:
       return statsd::ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_SHARED;
+    case CompilationReason::kPostBoot:
+      return statsd::ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_POST_BOOT;
+    case CompilationReason::kInstallBulk:
+      return statsd::ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_INSTALL_BULK;
+    case CompilationReason::kInstallBulkSecondary:
+      return statsd::
+          ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_INSTALL_BULK_SECONDARY;
+    case CompilationReason::kInstallBulkDowngraded:
+      return statsd::
+          ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_INSTALL_BULK_DOWNGRADED;
+    case CompilationReason::kInstallBulkSecondaryDowngraded:
+      return statsd::
+          ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_INSTALL_BULK_SECONDARY_DOWNGRADED;
+    case CompilationReason::kBootAfterOTA:
+      return statsd::ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_BOOT_AFTER_OTA;
+    case CompilationReason::kInstallFast:
+      return statsd::ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_INSTALL_FAST;
   }
 }
 

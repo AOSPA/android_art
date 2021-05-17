@@ -104,11 +104,211 @@ static bool ChecksumMatch(uint32_t dex_file_checksum, uint32_t checksum) {
   return kDebugIgnoreChecksum || dex_file_checksum == checksum;
 }
 
+namespace {
+
+// Deflate the input buffer `in_buffer`. It returns a buffer of
+// compressed data for the input buffer of `*compressed_data_size` size.
+std::unique_ptr<uint8_t[]> DeflateBuffer(ArrayRef<const uint8_t> in_buffer,
+                                         /*out*/ uint32_t* compressed_data_size) {
+  z_stream strm;
+  strm.zalloc = Z_NULL;
+  strm.zfree = Z_NULL;
+  strm.opaque = Z_NULL;
+  int init_ret = deflateInit(&strm, 1);
+  if (init_ret != Z_OK) {
+    return nullptr;
+  }
+
+  uint32_t out_size = dchecked_integral_cast<uint32_t>(deflateBound(&strm, in_buffer.size()));
+
+  std::unique_ptr<uint8_t[]> compressed_buffer(new uint8_t[out_size]);
+  strm.avail_in = in_buffer.size();
+  strm.next_in = const_cast<uint8_t*>(in_buffer.data());
+  strm.avail_out = out_size;
+  strm.next_out = &compressed_buffer[0];
+  int ret = deflate(&strm, Z_FINISH);
+  if (ret == Z_STREAM_ERROR) {
+    return nullptr;
+  }
+  *compressed_data_size = out_size - strm.avail_out;
+
+  int end_ret = deflateEnd(&strm);
+  if (end_ret != Z_OK) {
+    return nullptr;
+  }
+
+  return compressed_buffer;
+}
+
+// Inflate the data from `in_buffer` into `out_buffer`. The `out_buffer.size()`
+// is the expected output size of the buffer. It returns Z_STREAM_END on success.
+// On error, it returns Z_STREAM_ERROR if the compressed data is inconsistent
+// and Z_DATA_ERROR if the stream ended prematurely or the stream has extra data.
+int InflateBuffer(ArrayRef<const uint8_t> in_buffer, /*out*/ ArrayRef<uint8_t> out_buffer) {
+  /* allocate inflate state */
+  z_stream strm;
+  strm.zalloc = Z_NULL;
+  strm.zfree = Z_NULL;
+  strm.opaque = Z_NULL;
+  strm.avail_in = in_buffer.size();
+  strm.next_in = const_cast<uint8_t*>(in_buffer.data());
+  strm.avail_out = out_buffer.size();
+  strm.next_out = out_buffer.data();
+
+  int init_ret = inflateInit(&strm);
+  if (init_ret != Z_OK) {
+    return init_ret;
+  }
+
+  int ret = inflate(&strm, Z_NO_FLUSH);
+  if (strm.avail_in != 0 || strm.avail_out != 0) {
+    return Z_DATA_ERROR;
+  }
+
+  int end_ret = inflateEnd(&strm);
+  if (end_ret != Z_OK) {
+    return end_ret;
+  }
+
+  return ret;
+}
+
+}  // anonymous namespace
+
+/**
+ * Encapsulate the source of profile data for loading.
+ * The source can be either a plain file or a zip file.
+ * For zip files, the profile entry will be extracted to
+ * the memory map.
+ */
+class ProfileCompilationInfo::ProfileSource {
+ public:
+  /**
+   * Create a profile source for the given fd. The ownership of the fd
+   * remains to the caller; as this class will not attempt to close it at any
+   * point.
+   */
+  static ProfileSource* Create(int32_t fd) {
+    DCHECK_GT(fd, -1);
+    return new ProfileSource(fd, MemMap::Invalid());
+  }
+
+  /**
+   * Create a profile source backed by a memory map. The map can be null in
+   * which case it will the treated as an empty source.
+   */
+  static ProfileSource* Create(MemMap&& mem_map) {
+    return new ProfileSource(/*fd*/ -1, std::move(mem_map));
+  }
+
+  /**
+   * Read bytes from this source.
+   * Reading will advance the current source position so subsequent
+   * invocations will read from the las position.
+   */
+  ProfileLoadStatus Read(uint8_t* buffer,
+                         size_t byte_count,
+                         const std::string& debug_stage,
+                         std::string* error);
+
+  /** Return true if the source has 0 data. */
+  bool HasEmptyContent() const;
+
+  /** Return true if all the information from this source has been read. */
+  bool HasConsumedAllData() const;
+
+ private:
+  ProfileSource(int32_t fd, MemMap&& mem_map)
+      : fd_(fd), mem_map_(std::move(mem_map)), mem_map_cur_(0) {}
+
+  bool IsMemMap() const {
+    return fd_ == -1;
+  }
+
+  int32_t fd_;  // The fd is not owned by this class.
+  MemMap mem_map_;
+  size_t mem_map_cur_;  // Current position in the map to read from.
+};
+
+// A helper structure to make sure we don't read past our buffers in the loops.
+class ProfileCompilationInfo::SafeBuffer {
+ public:
+  explicit SafeBuffer(size_t size)
+      : storage_(new uint8_t[size]),
+        ptr_current_(storage_.get()),
+        ptr_end_(ptr_current_ + size) {}
+
+  // Reads the content of the descriptor at the current position.
+  ProfileLoadStatus Fill(ProfileSource& source,
+                         const std::string& debug_stage,
+                         /*out*/std::string* error) {
+    size_t byte_count = (ptr_end_ - ptr_current_) * sizeof(*ptr_current_);
+    uint8_t* buffer = ptr_current_;
+    return source.Read(buffer, byte_count, debug_stage, error);
+  }
+
+  // Reads an uint value and advances the current pointer.
+  template <typename T>
+  bool ReadUintAndAdvance(/*out*/ T* value) {
+    static_assert(std::is_unsigned<T>::value, "Type is not unsigned");
+    if (sizeof(T) > CountUnreadBytes()) {
+      return false;
+    }
+    *value = 0;
+    for (size_t i = 0; i < sizeof(T); i++) {
+      *value += ptr_current_[i] << (i * kBitsPerByte);
+    }
+    ptr_current_ += sizeof(T);
+    return true;
+  }
+
+  // Compares the given data with the content at the current pointer.
+  // If the contents are equal it advances the current pointer by data_size.
+  bool CompareAndAdvance(const uint8_t* data, size_t data_size) {
+    if (data_size > CountUnreadBytes()) {
+      return false;
+    }
+    if (memcmp(ptr_current_, data, data_size) == 0) {
+      ptr_current_ += data_size;
+      return true;
+    }
+    return false;
+  }
+
+  // Advances current pointer by data_size.
+  void Advance(size_t data_size) {
+    DCHECK_LE(data_size, CountUnreadBytes());
+    ptr_current_ += data_size;
+  }
+
+  // Returns the count of unread bytes.
+  size_t CountUnreadBytes() {
+    DCHECK_LE(static_cast<void*>(ptr_current_), static_cast<void*>(ptr_end_));
+    return (ptr_end_ - ptr_current_) * sizeof(*ptr_current_);
+  }
+
+  // Returns the current pointer.
+  const uint8_t* GetCurrentPtr() {
+    return ptr_current_;
+  }
+
+  // Get the underlying raw buffer.
+  uint8_t* Get() {
+    return storage_.get();
+  }
+
+ private:
+  std::unique_ptr<uint8_t[]> storage_;
+  uint8_t* ptr_current_;
+  uint8_t* ptr_end_;
+};
+
 ProfileCompilationInfo::ProfileCompilationInfo(ArenaPool* custom_arena_pool, bool for_boot_image)
     : default_arena_pool_(),
       allocator_(custom_arena_pool),
       info_(allocator_.Adapter(kArenaAllocProfile)),
-      profile_key_map_(std::less<const std::string>(), allocator_.Adapter(kArenaAllocProfile)) {
+      profile_key_map_(std::less<const std::string_view>(),
+                       allocator_.Adapter(kArenaAllocProfile)) {
   memcpy(version_,
          for_boot_image ? kProfileVersionForBootImage : kProfileVersion,
          kProfileVersionSize);
@@ -125,7 +325,6 @@ ProfileCompilationInfo::ProfileCompilationInfo(bool for_boot_image)
 
 ProfileCompilationInfo::~ProfileCompilationInfo() {
   VLOG(profiler) << Dumpable<MemStats>(allocator_.GetMemStats());
-  ClearData();
 }
 
 void ProfileCompilationInfo::DexPcData::AddClass(uint16_t dex_profile_idx,
@@ -246,7 +445,7 @@ bool ProfileCompilationInfo::MergeWith(const std::string& filename) {
   int fd = profile_file->Fd();
 
   ProfileLoadStatus status = LoadInternal(fd, &error);
-  if (status == kProfileLoadSuccess) {
+  if (status == ProfileLoadStatus::kSuccess) {
     return true;
   }
 
@@ -281,12 +480,13 @@ bool ProfileCompilationInfo::Load(const std::string& filename, bool clear_if_inv
   int fd = profile_file->Fd();
 
   ProfileLoadStatus status = LoadInternal(fd, &error);
-  if (status == kProfileLoadSuccess) {
+  if (status == ProfileLoadStatus::kSuccess) {
     return true;
   }
 
   if (clear_if_invalid &&
-      ((status == kProfileLoadVersionMismatch) || (status == kProfileLoadBadData))) {
+      ((status == ProfileLoadStatus::kVersionMismatch) ||
+       (status == ProfileLoadStatus::kBadData))) {
     LOG(WARNING) << "Clearing bad or obsolete profile data from file "
                  << filename << ": " << error;
     if (profile_file->ClearContent()) {
@@ -416,7 +616,7 @@ bool ProfileCompilationInfo::Save(int fd) {
   WriteProfileIndex(&buffer, static_cast<ProfileIndexType>(info_.size()));
 
   uint32_t required_capacity = 0;
-  for (const DexFileData* dex_data_ptr : info_) {
+  for (const std::unique_ptr<DexFileData>& dex_data_ptr : info_) {
     const DexFileData& dex_data = *dex_data_ptr;
     uint32_t methods_region_size = GetMethodsRegionSize(dex_data);
     required_capacity += kLineHeaderSize +
@@ -447,7 +647,7 @@ bool ProfileCompilationInfo::Save(int fd) {
   // Dex files must be written in the order of their profile index. This
   // avoids writing the index in the output file and simplifies the parsing logic.
   // Write profile line headers.
-  for (const DexFileData* dex_data_ptr : info_) {
+  for (const std::unique_ptr<DexFileData>& dex_data_ptr : info_) {
     const DexFileData& dex_data = *dex_data_ptr;
 
     if (dex_data.profile_key.size() >= kMaxDexFileKeyLength) {
@@ -469,7 +669,7 @@ bool ProfileCompilationInfo::Save(int fd) {
     AddStringToBuffer(&buffer, dex_data.profile_key);
   }
 
-  for (const DexFileData* dex_data_ptr : info_) {
+  for (const std::unique_ptr<DexFileData>& dex_data_ptr : info_) {
     const DexFileData& dex_data = *dex_data_ptr;
 
     // Note that we allow dex files without any methods or classes, so that
@@ -501,10 +701,9 @@ bool ProfileCompilationInfo::Save(int fd) {
                   dex_data.bitmap_storage.end());
   }
 
+  ArrayRef<const uint8_t> in_buffer(buffer.data(), required_capacity);
   uint32_t output_size = 0;
-  std::unique_ptr<uint8_t[]> compressed_buffer = DeflateBuffer(buffer.data(),
-                                                               required_capacity,
-                                                               &output_size);
+  std::unique_ptr<uint8_t[]> compressed_buffer = DeflateBuffer(in_buffer, &output_size);
 
   if (output_size > GetSizeWarningThresholdBytes()) {
     LOG(WARNING) << "Profile data size exceeds "
@@ -621,31 +820,37 @@ ProfileCompilationInfo::DexFileData* ProfileCompilationInfo::GetOrAddDexFileData
     const std::string& profile_key,
     uint32_t checksum,
     uint32_t num_method_ids) {
-  const auto profile_index_it = profile_key_map_.FindOrAdd(profile_key, profile_key_map_.size());
-  if (profile_key_map_.size() > MaxProfileIndex()) {
-    // Allow only a limited number dex files to be profiled. This allows us to save bytes
-    // when encoding. For regular profiles this 2^8, and for boot profiles is 2^16
-    // (well above what we expect for normal applications).
-    if (kIsDebugBuild) {
-      LOG(ERROR) << "Exceeded the maximum number of dex file. Something went wrong";
+  DCHECK_EQ(profile_key_map_.size(), info_.size());
+  auto profile_index_it = profile_key_map_.lower_bound(profile_key);
+  if (profile_index_it == profile_key_map_.end() || profile_index_it->first != profile_key) {
+    // We did not find the key. Create a new DexFileData if we did not reach the limit.
+    DCHECK_LE(profile_key_map_.size(), MaxProfileIndex());
+    if (profile_key_map_.size() == MaxProfileIndex()) {
+      // Allow only a limited number dex files to be profiled. This allows us to save bytes
+      // when encoding. For regular profiles this 2^8, and for boot profiles is 2^16
+      // (well above what we expect for normal applications).
+      if (kIsDebugBuild) {
+        LOG(ERROR) << "Exceeded the maximum number of dex file. Something went wrong";
+      }
+      return nullptr;
     }
-    profile_key_map_.erase(profile_key);
-    return nullptr;
-  }
-
-  ProfileIndexType profile_index = profile_index_it->second;
-  if (info_.size() <= profile_index) {
-    // This is a new addition. Add it to the info_ array.
-    DexFileData* dex_file_data = new (&allocator_) DexFileData(
+    ProfileIndexType new_profile_index = dchecked_integral_cast<ProfileIndexType>(info_.size());
+    std::unique_ptr<DexFileData> dex_file_data(new (&allocator_) DexFileData(
         &allocator_,
         profile_key,
         checksum,
-        profile_index,
+        new_profile_index,
         num_method_ids,
-        IsForBootImage());
-    info_.push_back(dex_file_data);
+        IsForBootImage()));
+    // Record the new data in `profile_key_map_` and `info_`.
+    std::string_view new_key(dex_file_data->profile_key);
+    profile_index_it = profile_key_map_.PutBefore(profile_index_it, new_key, new_profile_index);
+    info_.push_back(std::move(dex_file_data));
+    DCHECK_EQ(profile_key_map_.size(), info_.size());
   }
-  DexFileData* result = info_[profile_index];
+
+  ProfileIndexType profile_index = profile_index_it->second;
+  DexFileData* result = info_[profile_index].get();
 
   // Check that the checksum matches.
   // This may different if for example the dex file was updated and we had a record of the old one.
@@ -680,7 +885,7 @@ const ProfileCompilationInfo::DexFileData* ProfileCompilationInfo::FindDexData(
   }
 
   ProfileIndexType profile_index = profile_index_it->second;
-  const DexFileData* result = info_[profile_index];
+  const DexFileData* result = info_[profile_index].get();
   if (verify_checksum && !ChecksumMatch(result->checksum, checksum)) {
     return nullptr;
   }
@@ -694,12 +899,12 @@ const ProfileCompilationInfo::DexFileData* ProfileCompilationInfo::FindDexDataUs
       const ProfileSampleAnnotation& annotation) const {
   if (annotation == ProfileSampleAnnotation::kNone) {
     std::string_view profile_key = GetProfileDexFileBaseKeyView(dex_file->GetLocation());
-    for (const DexFileData* dex_data : info_) {
+    for (const std::unique_ptr<DexFileData>& dex_data : info_) {
       if (profile_key == GetBaseKeyViewFromAugmentedKey(dex_data->profile_key)) {
         if (!ChecksumMatch(dex_data->checksum, dex_file->GetLocationChecksum())) {
           return nullptr;
         }
-        return dex_data;
+        return dex_data.get();
       }
     }
   } else {
@@ -714,10 +919,10 @@ void ProfileCompilationInfo::FindAllDexData(
     const DexFile* dex_file,
     /*out*/ std::vector<const ProfileCompilationInfo::DexFileData*>* result) const {
   std::string_view profile_key = GetProfileDexFileBaseKeyView(dex_file->GetLocation());
-  for (const DexFileData* dex_data : info_) {
+  for (const std::unique_ptr<DexFileData>& dex_data : info_) {
     if (profile_key == GetBaseKeyViewFromAugmentedKey(dex_data->profile_key)) {
       if (ChecksumMatch(dex_data->checksum, dex_file->GetLocationChecksum())) {
-        result->push_back(dex_data);
+        result->push_back(dex_data.get());
       }
     }
   }
@@ -913,53 +1118,6 @@ static int testEOF(int fd) {
   return TEMP_FAILURE_RETRY(read(fd, buffer, 1));
 }
 
-// Reads an uint value previously written with AddUintToBuffer.
-template <typename T>
-bool ProfileCompilationInfo::SafeBuffer::ReadUintAndAdvance(/*out*/T* value) {
-  static_assert(std::is_unsigned<T>::value, "Type is not unsigned");
-  if (ptr_current_ + sizeof(T) > ptr_end_) {
-    return false;
-  }
-  *value = 0;
-  for (size_t i = 0; i < sizeof(T); i++) {
-    *value += ptr_current_[i] << (i * kBitsPerByte);
-  }
-  ptr_current_ += sizeof(T);
-  return true;
-}
-
-bool ProfileCompilationInfo::SafeBuffer::CompareAndAdvance(const uint8_t* data, size_t data_size) {
-  if (ptr_current_ + data_size > ptr_end_) {
-    return false;
-  }
-  if (memcmp(ptr_current_, data, data_size) == 0) {
-    ptr_current_ += data_size;
-    return true;
-  }
-  return false;
-}
-
-ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::SafeBuffer::Fill(
-      ProfileSource& source,
-      const std::string& debug_stage,
-      /*out*/ std::string* error) {
-  size_t byte_count = (ptr_end_ - ptr_current_) * sizeof(*ptr_current_);
-  uint8_t* buffer = ptr_current_;
-  return source.Read(buffer, byte_count, debug_stage, error);
-}
-
-size_t ProfileCompilationInfo::SafeBuffer::CountUnreadBytes() {
-  return (ptr_end_ - ptr_current_) * sizeof(*ptr_current_);
-}
-
-const uint8_t* ProfileCompilationInfo::SafeBuffer::GetCurrentPtr() {
-  return ptr_current_;
-}
-
-void ProfileCompilationInfo::SafeBuffer::Advance(size_t data_size) {
-  ptr_current_ += data_size;
-}
-
 ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::ReadProfileHeader(
       ProfileSource& source,
       /*out*/ProfileIndexType* number_of_dex_files,
@@ -973,23 +1131,23 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::ReadProfileHea
   SafeBuffer safe_buffer_version(kMagicVersionSize);
 
   ProfileLoadStatus status = safe_buffer_version.Fill(source, "ReadProfileHeaderVersion", error);
-  if (status != kProfileLoadSuccess) {
+  if (status != ProfileLoadStatus::kSuccess) {
     return status;
   }
 
   if (!safe_buffer_version.CompareAndAdvance(kProfileMagic, sizeof(kProfileMagic))) {
     *error = "Profile missing magic";
-    return kProfileLoadVersionMismatch;
+    return ProfileLoadStatus::kVersionMismatch;
   }
   if (safe_buffer_version.CountUnreadBytes() < kProfileVersionSize) {
      *error = "Cannot read profile version";
-     return kProfileLoadBadData;
+     return ProfileLoadStatus::kBadData;
   }
   memcpy(version_, safe_buffer_version.GetCurrentPtr(), kProfileVersionSize);
   if ((memcmp(version_, kProfileVersion, kProfileVersionSize) != 0) &&
       (memcmp(version_, kProfileVersionForBootImage, kProfileVersionSize) != 0)) {
     *error = "Profile version mismatch";
-    return kProfileLoadVersionMismatch;
+    return ProfileLoadStatus::kVersionMismatch;
   }
 
   const size_t kProfileHeaderDataSize =
@@ -999,23 +1157,23 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::ReadProfileHea
   SafeBuffer safe_buffer_header_data(kProfileHeaderDataSize);
 
   status = safe_buffer_header_data.Fill(source, "ReadProfileHeaderData", error);
-  if (status != kProfileLoadSuccess) {
+  if (status != ProfileLoadStatus::kSuccess) {
     return status;
   }
 
   if (!ReadProfileIndex(safe_buffer_header_data, number_of_dex_files)) {
     *error = "Cannot read the number of dex files";
-    return kProfileLoadBadData;
+    return ProfileLoadStatus::kBadData;
   }
   if (!safe_buffer_header_data.ReadUintAndAdvance<uint32_t>(uncompressed_data_size)) {
     *error = "Cannot read the size of uncompressed data";
-    return kProfileLoadBadData;
+    return ProfileLoadStatus::kBadData;
   }
   if (!safe_buffer_header_data.ReadUintAndAdvance<uint32_t>(compressed_data_size)) {
     *error = "Cannot read the size of compressed data";
-    return kProfileLoadBadData;
+    return ProfileLoadStatus::kBadData;
   }
-  return kProfileLoadSuccess;
+  return ProfileLoadStatus::kSuccess;
 }
 
 bool ProfileCompilationInfo::ReadProfileLineHeaderElements(SafeBuffer& buffer,
@@ -1036,29 +1194,29 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::ReadProfileLin
     /*out*/std::string* error) {
   if (buffer.CountUnreadBytes() < kLineHeaderSize) {
     *error += "Profile EOF reached prematurely for ReadProfileLineHeader";
-    return kProfileLoadBadData;
+    return ProfileLoadStatus::kBadData;
   }
 
   uint16_t profile_key_size;
   if (!ReadProfileLineHeaderElements(buffer, &profile_key_size, line_header, error)) {
-    return kProfileLoadBadData;
+    return ProfileLoadStatus::kBadData;
   }
 
   if (profile_key_size == 0 || profile_key_size > kMaxDexFileKeyLength) {
     *error = "ProfileKey has an invalid size: " +
         std::to_string(static_cast<uint32_t>(profile_key_size));
-    return kProfileLoadBadData;
+    return ProfileLoadStatus::kBadData;
   }
 
   if (buffer.CountUnreadBytes() < profile_key_size) {
     *error += "Profile EOF reached prematurely for ReadProfileHeaderDexLocation";
-    return kProfileLoadBadData;
+    return ProfileLoadStatus::kBadData;
   }
   const uint8_t* base_ptr = buffer.GetCurrentPtr();
   line_header->profile_key.assign(
       reinterpret_cast<const char*>(base_ptr), profile_key_size);
   buffer.Advance(profile_key_size);
-  return kProfileLoadSuccess;
+  return ProfileLoadStatus::kSuccess;
 }
 
 ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::ReadProfileLine(
@@ -1074,30 +1232,30 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::ReadProfileLin
   if (data == nullptr) {
     *error = "Error when reading profile file line header: checksum mismatch for "
         + line_header.profile_key;
-    return kProfileLoadBadData;
+    return ProfileLoadStatus::kBadData;
   }
 
   if (!ReadMethods(buffer, number_of_dex_files, line_header, dex_profile_index_remap, error)) {
-    return kProfileLoadBadData;
+    return ProfileLoadStatus::kBadData;
   }
 
   if (merge_classes) {
     if (!ReadClasses(buffer, line_header, error)) {
-      return kProfileLoadBadData;
+      return ProfileLoadStatus::kBadData;
     }
   }
 
   // Read method bitmap.
   const size_t bytes = data->bitmap_storage.size();
   if (buffer.CountUnreadBytes() < bytes) {
-    *error += "Profile EOF reached prematurely for ReadProfileHeaderDexLocation";
-    return kProfileLoadBadData;
+    *error += "Profile EOF reached prematurely for method bitmap";
+    return ProfileLoadStatus::kBadData;
   }
   const uint8_t* base_ptr = buffer.GetCurrentPtr();
   std::copy_n(base_ptr, bytes, data->bitmap_storage.data());
   buffer.Advance(bytes);
 
-  return kProfileLoadSuccess;
+  return ProfileLoadStatus::kSuccess;
 }
 
 // TODO(calin): Fix this API. ProfileCompilationInfo::Load should be static and
@@ -1108,7 +1266,7 @@ bool ProfileCompilationInfo::Load(
 
   ProfileLoadStatus status = LoadInternal(fd, &error, merge_classes, filter_fn);
 
-  if (status == kProfileLoadSuccess) {
+  if (status == ProfileLoadStatus::kSuccess) {
     return true;
   } else {
     LOG(WARNING) << "Error when reading profile: " << error;
@@ -1121,7 +1279,7 @@ bool ProfileCompilationInfo::VerifyProfileData(const std::vector<const DexFile*>
   for (const DexFile* dex_file : dex_files) {
     key_to_dex_file.emplace(GetProfileDexFileBaseKeyView(dex_file->GetLocation()), dex_file);
   }
-  for (const DexFileData* dex_data : info_) {
+  for (const std::unique_ptr<DexFileData>& dex_data : info_) {
     // We need to remove any annotation from the key during verification.
     const auto it = key_to_dex_file.find(GetBaseKeyViewFromAugmentedKey(dex_data->profile_key));
     if (it == key_to_dex_file.end()) {
@@ -1215,13 +1373,13 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::OpenSource(
     /*out*/ std::string* error) {
   if (IsProfileFile(fd)) {
     source->reset(ProfileSource::Create(fd));
-    return kProfileLoadSuccess;
+    return ProfileLoadStatus::kSuccess;
   } else {
     std::unique_ptr<ZipArchive> zip_archive(
         ZipArchive::OpenFromFd(DupCloexec(fd), "profile", error));
     if (zip_archive.get() == nullptr) {
       *error = "Could not open the profile zip archive";
-      return kProfileLoadBadData;
+      return ProfileLoadStatus::kBadData;
     }
     std::unique_ptr<ZipEntry> zip_entry(zip_archive->Find(kDexMetadataProfileEntry, error));
     if (zip_entry == nullptr) {
@@ -1231,11 +1389,11 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::OpenSource(
       LOG(WARNING) << "Could not find entry " << kDexMetadataProfileEntry
           << " in the zip archive. Creating an empty profile.";
       source->reset(ProfileSource::Create(MemMap::Invalid()));
-      return kProfileLoadSuccess;
+      return ProfileLoadStatus::kSuccess;
     }
     if (zip_entry->GetUncompressedLength() == 0) {
       *error = "Empty profile entry in the zip archive.";
-      return kProfileLoadBadData;
+      return ProfileLoadStatus::kBadData;
     }
 
     // TODO(calin) pass along file names to assist with debugging.
@@ -1244,9 +1402,9 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::OpenSource(
 
     if (map.IsValid()) {
       source->reset(ProfileSource::Create(std::move(map)));
-      return kProfileLoadSuccess;
+      return ProfileLoadStatus::kSuccess;
     } else {
-      return kProfileLoadBadData;
+      return ProfileLoadStatus::kBadData;
     }
   }
 }
@@ -1258,7 +1416,7 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::ProfileSource:
     std::string* error) {
   if (IsMemMap()) {
     if (mem_map_cur_ + byte_count > mem_map_.Size()) {
-      return kProfileLoadBadData;
+      return ProfileLoadStatus::kBadData;
     }
     for (size_t i = 0; i < byte_count; i++) {
       buffer[i] = *(mem_map_.Begin() + mem_map_cur_);
@@ -1269,16 +1427,16 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::ProfileSource:
       int bytes_read = TEMP_FAILURE_RETRY(read(fd_, buffer, byte_count));;
       if (bytes_read == 0) {
         *error += "Profile EOF reached prematurely for " + debug_stage;
-        return kProfileLoadBadData;
+        return ProfileLoadStatus::kBadData;
       } else if (bytes_read < 0) {
         *error += "Profile IO error for " + debug_stage + strerror(errno);
-        return kProfileLoadIOError;
+        return ProfileLoadStatus::kIOError;
       }
       byte_count -= bytes_read;
       buffer += bytes_read;
     }
   }
-  return kProfileLoadSuccess;
+  return ProfileLoadStatus::kSuccess;
 }
 
 bool ProfileCompilationInfo::ProfileSource::HasConsumedAllData() const {
@@ -1310,7 +1468,7 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::LoadInternal(
 
   std::unique_ptr<ProfileSource> source;
   ProfileLoadStatus status = OpenSource(fd, &source, error);
-  if (status != kProfileLoadSuccess) {
+  if (status != ProfileLoadStatus::kSuccess) {
     return status;
   }
 
@@ -1318,7 +1476,7 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::LoadInternal(
   // Profiles may be created by ActivityManager or installd before we manage to
   // process them in the runtime or profman.
   if (source->HasEmptyContent()) {
-    return kProfileLoadSuccess;
+    return ProfileLoadStatus::kSuccess;
   }
 
   // Read profile header: magic + version + number_of_dex_files.
@@ -1331,7 +1489,7 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::LoadInternal(
                              &compressed_data_size,
                              error);
 
-  if (status != kProfileLoadSuccess) {
+  if (status != ProfileLoadStatus::kSuccess) {
     return status;
   }
   // Allow large profiles for non target builds for the case where we are merging many profiles
@@ -1340,7 +1498,7 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::LoadInternal(
     LOG(ERROR) << "Profile data size exceeds "
                << GetSizeErrorThresholdBytes()
                << " bytes. It has " << uncompressed_data_size << " bytes.";
-    return kProfileLoadBadData;
+    return ProfileLoadStatus::kBadData;
   }
   if (uncompressed_data_size > GetSizeWarningThresholdBytes()) {
     LOG(WARNING) << "Profile data size exceeds "
@@ -1350,26 +1508,25 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::LoadInternal(
 
   std::unique_ptr<uint8_t[]> compressed_data(new uint8_t[compressed_data_size]);
   status = source->Read(compressed_data.get(), compressed_data_size, "ReadContent", error);
-  if (status != kProfileLoadSuccess) {
+  if (status != ProfileLoadStatus::kSuccess) {
     *error += "Unable to read compressed profile data";
     return status;
   }
 
   if (!source->HasConsumedAllData()) {
     *error += "Unexpected data in the profile file.";
-    return kProfileLoadBadData;
+    return ProfileLoadStatus::kBadData;
   }
 
   SafeBuffer uncompressed_data(uncompressed_data_size);
 
-  int ret = InflateBuffer(compressed_data.get(),
-                          compressed_data_size,
-                          uncompressed_data_size,
-                          uncompressed_data.Get());
+  ArrayRef<const uint8_t> in_buffer(compressed_data.get(), compressed_data_size);
+  ArrayRef<uint8_t> out_buffer(uncompressed_data.Get(), uncompressed_data_size);
+  int ret = InflateBuffer(in_buffer, out_buffer);
 
   if (ret != Z_STREAM_END) {
     *error += "Error reading uncompressed profile data";
-    return kProfileLoadBadData;
+    return ProfileLoadStatus::kBadData;
   }
 
   std::vector<ProfileLineHeader> profile_line_headers;
@@ -1379,7 +1536,7 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::LoadInternal(
 
     // First, read the line header to get the amount of data we need to read.
     status = ReadProfileLineHeader(uncompressed_data, &line_header, error);
-    if (status != kProfileLoadSuccess) {
+    if (status != ProfileLoadStatus::kSuccess) {
       return status;
     }
     profile_line_headers.push_back(line_header);
@@ -1387,7 +1544,7 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::LoadInternal(
 
   SafeMap<ProfileIndexType, ProfileIndexType> dex_profile_index_remap;
   if (!RemapProfileIndex(profile_line_headers, filter_fn, &dex_profile_index_remap)) {
-    return kProfileLoadBadData;
+    return ProfileLoadStatus::kBadData;
   }
 
   for (ProfileIndexType k = 0; k < number_of_dex_files; k++) {
@@ -1407,7 +1564,7 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::LoadInternal(
                                dex_profile_index_remap,
                                merge_classes,
                                error);
-      if (status != kProfileLoadSuccess) {
+      if (status != ProfileLoadStatus::kSuccess) {
         return status;
       }
     }
@@ -1417,9 +1574,9 @@ ProfileCompilationInfo::ProfileLoadStatus ProfileCompilationInfo::LoadInternal(
   if (uncompressed_data.CountUnreadBytes() > 0) {
     *error = "Unexpected content in the profile file: " +
         std::to_string(uncompressed_data.CountUnreadBytes()) + " extra bytes";
-    return kProfileLoadBadData;
+    return ProfileLoadStatus::kBadData;
   } else {
-    return kProfileLoadSuccess;
+    return ProfileLoadStatus::kSuccess;
   }
 }
 
@@ -1462,60 +1619,6 @@ bool ProfileCompilationInfo::RemapProfileIndex(
   return true;
 }
 
-std::unique_ptr<uint8_t[]> ProfileCompilationInfo::DeflateBuffer(const uint8_t* in_buffer,
-                                                                 uint32_t in_size,
-                                                                 uint32_t* compressed_data_size) {
-  z_stream strm;
-  strm.zalloc = Z_NULL;
-  strm.zfree = Z_NULL;
-  strm.opaque = Z_NULL;
-  int ret = deflateInit(&strm, 1);
-  if (ret != Z_OK) {
-    return nullptr;
-  }
-
-  uint32_t out_size = deflateBound(&strm, in_size);
-
-  std::unique_ptr<uint8_t[]> compressed_buffer(new uint8_t[out_size]);
-  strm.avail_in = in_size;
-  strm.next_in = const_cast<uint8_t*>(in_buffer);
-  strm.avail_out = out_size;
-  strm.next_out = &compressed_buffer[0];
-  ret = deflate(&strm, Z_FINISH);
-  if (ret == Z_STREAM_ERROR) {
-    return nullptr;
-  }
-  *compressed_data_size = out_size - strm.avail_out;
-  deflateEnd(&strm);
-  return compressed_buffer;
-}
-
-int ProfileCompilationInfo::InflateBuffer(const uint8_t* in_buffer,
-                                          uint32_t in_size,
-                                          uint32_t expected_uncompressed_data_size,
-                                          uint8_t* out_buffer) {
-  z_stream strm;
-
-  /* allocate inflate state */
-  strm.zalloc = Z_NULL;
-  strm.zfree = Z_NULL;
-  strm.opaque = Z_NULL;
-  strm.avail_in = in_size;
-  strm.next_in = const_cast<uint8_t*>(in_buffer);
-  strm.avail_out = expected_uncompressed_data_size;
-  strm.next_out = out_buffer;
-
-  int ret;
-  inflateInit(&strm);
-  ret = inflate(&strm, Z_NO_FLUSH);
-
-  if (strm.avail_in != 0 || strm.avail_out != 0) {
-    return Z_DATA_ERROR;
-  }
-  inflateEnd(&strm);
-  return ret;
-}
-
 bool ProfileCompilationInfo::MergeWith(const ProfileCompilationInfo& other,
                                        bool merge_classes) {
   if (!SameVersion(other)) {
@@ -1527,7 +1630,7 @@ bool ProfileCompilationInfo::MergeWith(const ProfileCompilationInfo& other,
   // the current profile info.
   // Note that the number of elements should be very small, so this should not
   // be a performance issue.
-  for (const DexFileData* other_dex_data : other.info_) {
+  for (const std::unique_ptr<DexFileData>& other_dex_data : other.info_) {
     // verify_checksum is false because we want to differentiate between a missing dex data and
     // a mismatched checksum.
     const DexFileData* dex_data = FindDexData(other_dex_data->profile_key,
@@ -1551,7 +1654,7 @@ bool ProfileCompilationInfo::MergeWith(const ProfileCompilationInfo& other,
   // First, build a mapping from other_dex_profile_index to this_dex_profile_index.
   // This will make sure that the ClassReferences  will point to the correct dex file.
   SafeMap<ProfileIndexType, ProfileIndexType> dex_profile_index_remap;
-  for (const DexFileData* other_dex_data : other.info_) {
+  for (const std::unique_ptr<DexFileData>& other_dex_data : other.info_) {
     const DexFileData* dex_data = GetOrAddDexFileData(other_dex_data->profile_key,
                                                       other_dex_data->checksum,
                                                       other_dex_data->num_method_ids);
@@ -1562,7 +1665,7 @@ bool ProfileCompilationInfo::MergeWith(const ProfileCompilationInfo& other,
   }
 
   // Merge the actual profile data.
-  for (const DexFileData* other_dex_data : other.info_) {
+  for (const std::unique_ptr<DexFileData>& other_dex_data : other.info_) {
     DexFileData* dex_data = const_cast<DexFileData*>(FindDexData(other_dex_data->profile_key,
                                                                  other_dex_data->checksum));
     DCHECK(dex_data != nullptr);
@@ -1623,7 +1726,7 @@ bool ProfileCompilationInfo::ContainsClass(const DexFile& dex_file,
 
 uint32_t ProfileCompilationInfo::GetNumberOfMethods() const {
   uint32_t total = 0;
-  for (const DexFileData* dex_data : info_) {
+  for (const std::unique_ptr<DexFileData>& dex_data : info_) {
     total += dex_data->method_map.size();
   }
   return total;
@@ -1631,7 +1734,7 @@ uint32_t ProfileCompilationInfo::GetNumberOfMethods() const {
 
 uint32_t ProfileCompilationInfo::GetNumberOfResolvedClasses() const {
   uint32_t total = 0;
-  for (const DexFileData* dex_data : info_) {
+  for (const std::unique_ptr<DexFileData>& dex_data : info_) {
     total += dex_data->class_set.size();
   }
   return total;
@@ -1657,7 +1760,7 @@ std::string ProfileCompilationInfo::DumpInfo(const std::vector<const DexFile*>& 
 
   const std::string kFirstDexFileKeySubstitute = "!classes.dex";
 
-  for (const DexFileData* dex_data : info_) {
+  for (const std::unique_ptr<DexFileData>& dex_data : info_) {
     os << "\n";
     if (print_full_dex_location) {
       os << dex_data->profile_key;
@@ -2057,7 +2160,7 @@ bool ProfileCompilationInfo::IsProfileFile(int fd) {
 bool ProfileCompilationInfo::UpdateProfileKeys(
       const std::vector<std::unique_ptr<const DexFile>>& dex_files) {
   for (const std::unique_ptr<const DexFile>& dex_file : dex_files) {
-    for (DexFileData* dex_data : info_) {
+    for (const std::unique_ptr<DexFileData>& dex_data : info_) {
       if (dex_data->checksum == dex_file->GetLocationChecksum()
           && dex_data->num_method_ids == dex_file->NumMethodIds()) {
         std::string new_profile_key = GetProfileDexFileBaseKey(dex_file->GetLocation());
@@ -2072,9 +2175,8 @@ bool ProfileCompilationInfo::UpdateProfileKeys(
           profile_key_map_.erase(dex_data->profile_key);
           // Retain the annotation (if any) during the renaming by re-attaching the info
           // form the old key.
-          profile_key_map_.Put(MigrateAnnotationInfo(new_profile_key, dex_data->profile_key),
-                               dex_data->profile_index);
-          dex_data->profile_key = new_profile_key;
+          dex_data->profile_key = MigrateAnnotationInfo(new_profile_key, dex_data->profile_key);
+          profile_key_map_.Put(dex_data->profile_key, dex_data->profile_index);
         }
       }
     }
@@ -2089,11 +2191,8 @@ bool ProfileCompilationInfo::ProfileFilterFnAcceptAll(
 }
 
 void ProfileCompilationInfo::ClearData() {
-  for (DexFileData* data : info_) {
-    delete data;
-  }
-  info_.clear();
   profile_key_map_.clear();
+  info_.clear();
 }
 
 void ProfileCompilationInfo::ClearDataAndAdjustVersion(bool for_boot_image) {
@@ -2130,11 +2229,6 @@ std::ostream& operator<<(std::ostream& stream,
          << ",num_method_ids=" << dumper.GetNumMethodIds()
          << "]";
   return stream;
-}
-
-bool ProfileCompilationInfo::ProfileSampleAnnotation::operator==(
-      const ProfileSampleAnnotation& other) const {
-  return origin_package_name_ == other.origin_package_name_;
 }
 
 void ProfileCompilationInfo::WriteProfileIndex(

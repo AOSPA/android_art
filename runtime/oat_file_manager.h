@@ -23,6 +23,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "base/compiler_filter.h"
 #include "base/locks.h"
 #include "base/macros.h"
 #include "jni.h"
@@ -70,8 +71,10 @@ class OatFileManager {
   // Returns the boot image oat files.
   std::vector<const OatFile*> GetBootOatFiles() const;
 
-  // Returns the first non-image oat file in the class path.
-  const OatFile* GetPrimaryOatFile() const REQUIRES(!Locks::oat_file_manager_lock_);
+  // Fetches information from the primary oat file.
+  bool GetPrimaryOatFileInfo(std::string* compilation_reason,
+                             CompilerFilter::Filter* compiler_filter)
+      const REQUIRES(!Locks::oat_file_manager_lock_);
 
   // Returns the oat files for the images, registers the oat files.
   // Takes ownership of the imagespace's underlying oat files.
@@ -124,8 +127,7 @@ class OatFileManager {
 
   // Spawn a background thread which verifies all classes in the given dex files.
   void RunBackgroundVerification(const std::vector<const DexFile*>& dex_files,
-                                 jobject class_loader,
-                                 const char* class_loader_context);
+                                 jobject class_loader);
 
   // Wait for thread pool workers to be created. This is used during shutdown as
   // threads are not allowed to attach while runtime is in shutdown lock.

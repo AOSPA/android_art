@@ -477,7 +477,7 @@ TEST_F(OatTest, WriteRead) {
 
     const OatFile::OatClass oat_class = oat_dex_file->GetOatClass(accessor.GetClassDefIndex());
     CHECK_EQ(ClassStatus::kNotReady, oat_class.GetStatus()) << descriptor;
-    CHECK_EQ(kCompile ? OatClassType::kOatClassAllCompiled : OatClassType::kOatClassNoneCompiled,
+    CHECK_EQ(kCompile ? OatClassType::kAllCompiled : OatClassType::kNoneCompiled,
              oat_class.GetType()) << descriptor;
 
     size_t method_index = 0;
@@ -590,8 +590,8 @@ void OatTest::TestDexFileInput(bool verify, bool low_4gb, bool use_profile) {
 
   ScratchFile dex_file1;
   TestDexFileBuilder builder1;
-  builder1.AddField("Lsome.TestClass;", "int", "someField");
-  builder1.AddMethod("Lsome.TestClass;", "()I", "foo");
+  builder1.AddField("Lsome/TestClass;", "int", "someField");
+  builder1.AddMethod("Lsome/TestClass;", "()I", "foo");
   std::unique_ptr<const DexFile> dex_file1_data = builder1.Build(dex_file1.GetFilename());
 
   MaybeModifyDexFileToFail(verify, dex_file1_data);
@@ -607,8 +607,8 @@ void OatTest::TestDexFileInput(bool verify, bool low_4gb, bool use_profile) {
 
   ScratchFile dex_file2;
   TestDexFileBuilder builder2;
-  builder2.AddField("Land.AnotherTestClass;", "boolean", "someOtherField");
-  builder2.AddMethod("Land.AnotherTestClass;", "()J", "bar");
+  builder2.AddField("Land/AnotherTestClass;", "boolean", "someOtherField");
+  builder2.AddMethod("Land/AnotherTestClass;", "()J", "bar");
   std::unique_ptr<const DexFile> dex_file2_data = builder2.Build(dex_file2.GetFilename());
 
   MaybeModifyDexFileToFail(verify, dex_file2_data);
@@ -714,8 +714,8 @@ void OatTest::TestZipFileInput(bool verify, CopyOption copy) {
 
   ScratchFile dex_file1;
   TestDexFileBuilder builder1;
-  builder1.AddField("Lsome.TestClass;", "long", "someField");
-  builder1.AddMethod("Lsome.TestClass;", "()D", "foo");
+  builder1.AddField("Lsome/TestClass;", "long", "someField");
+  builder1.AddMethod("Lsome/TestClass;", "()D", "foo");
   std::unique_ptr<const DexFile> dex_file1_data = builder1.Build(dex_file1.GetFilename());
 
   MaybeModifyDexFileToFail(verify, dex_file1_data);
@@ -732,8 +732,8 @@ void OatTest::TestZipFileInput(bool verify, CopyOption copy) {
 
   ScratchFile dex_file2;
   TestDexFileBuilder builder2;
-  builder2.AddField("Land.AnotherTestClass;", "boolean", "someOtherField");
-  builder2.AddMethod("Land.AnotherTestClass;", "()J", "bar");
+  builder2.AddField("Land/AnotherTestClass;", "boolean", "someOtherField");
+  builder2.AddMethod("Land/AnotherTestClass;", "()J", "bar");
   std::unique_ptr<const DexFile> dex_file2_data = builder2.Build(dex_file2.GetFilename());
 
   MaybeModifyDexFileToFail(verify, dex_file2_data);

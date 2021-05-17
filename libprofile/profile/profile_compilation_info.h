@@ -20,6 +20,7 @@
 #include <array>
 #include <list>
 #include <set>
+#include <string_view>
 #include <vector>
 
 #include "base/arena_containers.h"
@@ -274,7 +275,9 @@ class ProfileCompilationInfo {
 
     const std::string& GetOriginPackageName() const { return origin_package_name_; }
 
-    bool operator==(const ProfileSampleAnnotation& other) const;
+    bool operator==(const ProfileSampleAnnotation& other) const {
+      return origin_package_name_ == other.origin_package_name_;
+    }
 
     bool operator<(const ProfileSampleAnnotation& other) const {
       return origin_package_name_ < other.origin_package_name_;
@@ -443,7 +446,7 @@ class ProfileCompilationInfo {
     static_assert(std::is_same_v<typename Container::value_type, const DexFile*> ||
                   std::is_same_v<typename Container::value_type, std::unique_ptr<const DexFile>>);
     DCHECK_LE(profile_index, info_.size());
-    const DexFileData* dex_file_data = info_[profile_index];
+    const DexFileData* dex_file_data = info_[profile_index].get();
     DCHECK(dex_file_data != nullptr);
     uint32_t dex_checksum = dex_file_data->checksum;
     std::string_view base_key = GetBaseKeyViewFromAugmentedKey(dex_file_data->profile_key);
@@ -454,13 +457,6 @@ class ProfileCompilationInfo {
       }
     }
     return nullptr;
-  }
-
-  // Helper function for tests.
-  bool ProfileIndexMatchesDexFile(ProfileIndexType profile_index, const DexFile* dex_file) const {
-    DCHECK(dex_file != nullptr);
-    std::array<const DexFile*, 1u> dex_files{dex_file};
-    return dex_file == FindDexFileForProfileIndex(profile_index, dex_files);
   }
 
   DexReferenceDumper DumpDexReference(ProfileIndexType profile_index) const;
@@ -573,20 +569,22 @@ class ProfileCompilationInfo {
       const std::vector<std::unique_ptr<const DexFile>>& dex_files) const;
 
  private:
-  enum ProfileLoadStatus {
-    kProfileLoadWouldOverwiteData,
-    kProfileLoadIOError,
-    kProfileLoadVersionMismatch,
-    kProfileLoadBadData,
-    kProfileLoadSuccess
+  // Helper classes.
+  class ProfileSource;
+  class SafeBuffer;
+
+  enum class ProfileLoadStatus : uint32_t {
+    kSuccess,
+    kIOError,
+    kVersionMismatch,
+    kBadData,
   };
 
   // Internal representation of the profile information belonging to a dex file.
-  // Note that we could do without profile_key (the key used to encode the dex
-  // file in the profile) and profile_index (the index of the dex file in the
-  // profile) fields in this struct because we can infer them from
-  // profile_key_map_ and info_. However, it makes the profiles logic much
-  // simpler if we have references here as well.
+  // Note that we could do without the profile_index (the index of the dex file
+  // in the profile) field in this struct because we can infer it from
+  // `profile_key_map_` and `info_`. However, it makes the profiles logic much
+  // simpler if we have the profile index here as well.
   struct DexFileData : public DeletableArenaObject<kArenaAllocProfile> {
     DexFileData(ArenaAllocator* allocator,
                 const std::string& key,
@@ -707,21 +705,6 @@ class ProfileCompilationInfo {
       const DexFile* dex_file,
       /*out*/ std::vector<const ProfileCompilationInfo::DexFileData*>* result) const;
 
-  // Inflate the input buffer (in_buffer) of size in_size. It returns a buffer of
-  // compressed data for the input buffer of "compressed_data_size" size.
-  std::unique_ptr<uint8_t[]> DeflateBuffer(const uint8_t* in_buffer,
-                                           uint32_t in_size,
-                                           /*out*/uint32_t* compressed_data_size);
-
-  // Inflate the input buffer(in_buffer) of size in_size. out_size is the expected output
-  // size of the buffer. It puts the output in out_buffer. It returns Z_STREAM_END on
-  // success. On error, it returns Z_STREAM_ERROR if the compressed data is inconsistent
-  // and Z_DATA_ERROR if the stream ended prematurely or the stream has extra data.
-  int InflateBuffer(const uint8_t* in_buffer,
-                    uint32_t in_size,
-                    uint32_t out_size,
-                    /*out*/uint8_t* out_buffer);
-
   // Parsing functionality.
 
   // The information present in the header of each profile line.
@@ -731,97 +714,6 @@ class ProfileCompilationInfo {
     uint32_t method_region_size_bytes;
     uint32_t checksum;
     uint32_t num_method_ids;
-  };
-
-  /**
-   * Encapsulate the source of profile data for loading.
-   * The source can be either a plain file or a zip file.
-   * For zip files, the profile entry will be extracted to
-   * the memory map.
-   */
-  class ProfileSource {
-   public:
-    /**
-     * Create a profile source for the given fd. The ownership of the fd
-     * remains to the caller; as this class will not attempt to close it at any
-     * point.
-     */
-    static ProfileSource* Create(int32_t fd) {
-      DCHECK_GT(fd, -1);
-      return new ProfileSource(fd, MemMap::Invalid());
-    }
-
-    /**
-     * Create a profile source backed by a memory map. The map can be null in
-     * which case it will the treated as an empty source.
-     */
-    static ProfileSource* Create(MemMap&& mem_map) {
-      return new ProfileSource(/*fd*/ -1, std::move(mem_map));
-    }
-
-    /**
-     * Read bytes from this source.
-     * Reading will advance the current source position so subsequent
-     * invocations will read from the las position.
-     */
-    ProfileLoadStatus Read(uint8_t* buffer,
-                           size_t byte_count,
-                           const std::string& debug_stage,
-                           std::string* error);
-
-    /** Return true if the source has 0 data. */
-    bool HasEmptyContent() const;
-    /** Return true if all the information from this source has been read. */
-    bool HasConsumedAllData() const;
-
-   private:
-    ProfileSource(int32_t fd, MemMap&& mem_map)
-        : fd_(fd), mem_map_(std::move(mem_map)), mem_map_cur_(0) {}
-
-    bool IsMemMap() const { return fd_ == -1; }
-
-    int32_t fd_;  // The fd is not owned by this class.
-    MemMap mem_map_;
-    size_t mem_map_cur_;  // Current position in the map to read from.
-  };
-
-  // A helper structure to make sure we don't read past our buffers in the loops.
-  struct SafeBuffer {
-   public:
-    explicit SafeBuffer(size_t size) : storage_(new uint8_t[size]) {
-      ptr_current_ = storage_.get();
-      ptr_end_ = ptr_current_ + size;
-    }
-
-    // Reads the content of the descriptor at the current position.
-    ProfileLoadStatus Fill(ProfileSource& source,
-                           const std::string& debug_stage,
-                           /*out*/std::string* error);
-
-    // Reads an uint value (high bits to low bits) and advances the current pointer
-    // with the number of bits read.
-    template <typename T> bool ReadUintAndAdvance(/*out*/ T* value);
-
-    // Compares the given data with the content current pointer. If the contents are
-    // equal it advances the current pointer by data_size.
-    bool CompareAndAdvance(const uint8_t* data, size_t data_size);
-
-    // Advances current pointer by data_size.
-    void Advance(size_t data_size);
-
-    // Returns the count of unread bytes.
-    size_t CountUnreadBytes();
-
-    // Returns the current pointer.
-    const uint8_t* GetCurrentPtr();
-
-    // Get the underlying raw buffer.
-    uint8_t* Get() { return storage_.get(); }
-
-   private:
-    std::unique_ptr<uint8_t[]> storage_;
-    uint8_t* ptr_end_;
-    uint8_t* ptr_current_;
   };
 
   ProfileLoadStatus OpenSource(int32_t fd,
@@ -957,12 +849,13 @@ class ProfileCompilationInfo {
   // Vector containing the actual profile info.
   // The vector index is the profile index of the dex data and
   // matched DexFileData::profile_index.
-  ArenaVector<DexFileData*> info_;
+  ArenaVector<std::unique_ptr<DexFileData>> info_;
 
   // Cache mapping profile keys to profile index.
   // This is used to speed up searches since it avoids iterating
   // over the info_ vector when searching by profile key.
-  ArenaSafeMap<const std::string, ProfileIndexType> profile_key_map_;
+  // The backing storage for the `string_view` is the associated `DexFileData`.
+  ArenaSafeMap<const std::string_view, ProfileIndexType> profile_key_map_;
 
   // The version of the profile.
   uint8_t version_[kProfileVersionSize];
@@ -1032,7 +925,7 @@ class FlattenProfileData {
   // Class data.
   SafeMap<TypeReference, ItemMetadata> class_metadata_;
   // Maximum aggregation counter for all methods.
-  // This is essentially a cache equal to the max size of any method's annation set.
+  // This is essentially a cache equal to the max size of any method's annotation set.
   // It avoids the traversal of all the methods which can be quite expensive.
   uint32_t max_aggregation_for_methods_;
   // Maximum aggregation counter for all classes.
@@ -1060,7 +953,7 @@ struct ProfileCompilationInfo::DexReferenceDumper {
 
 inline ProfileCompilationInfo::DexReferenceDumper ProfileCompilationInfo::DumpDexReference(
     ProfileIndexType profile_index) const {
-  return DexReferenceDumper{info_[profile_index]};
+  return DexReferenceDumper{info_[profile_index].get()};
 }
 
 std::ostream& operator<<(std::ostream& stream, ProfileCompilationInfo::DexReferenceDumper dumper);

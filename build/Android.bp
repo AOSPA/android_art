@@ -292,7 +292,10 @@ art_debug_defaults {
 
 soong_config_module_type_import {
     from: "art/build/SoongConfig.bp",
-    module_types: ["art_module_cc_defaults"],
+    module_types: [
+        "art_module_cc_defaults",
+        "art_module_java_defaults",
+    ],
 }
 
 // Use this to enable a cc_* module only when building ART from sources.
@@ -320,13 +323,38 @@ art_module_cc_defaults {
     },
 }
 
+// Use this to enable a java_* module only when building ART from sources.
+// TODO(b/172480617): Clean up when sources are gone from the platform tree and
+// we no longer need to support sources present when prebuilts are used.
+art_module_java_defaults {
+    name: "art_module_source_build_java_defaults",
+    defaults_visibility: [
+        "//art:__subpackages__",
+        "//libnativehelper:__subpackages__",
+    ],
+
+    enabled: false,
+    soong_config_variables: {
+        source_build: {
+            enabled: true,
+        },
+    },
+    target: {
+        windows: {
+            // Windows is disabled by default, but if we set enabled:true
+            // globally above we need to disable it explicitly.
+            enabled: false,
+        },
+    },
+}
+
 // A version of conscrypt only for enabling the "-hostdex" version to test ART on host.
 java_library {
     // We need our own name to not clash with the conscrypt library.
     name: "conscrypt-host",
     installable: true,
     hostdex: true,
-    static_libs: ["conscrypt"],
+    static_libs: ["conscrypt-for-host"],
 
     // Tests and build files rely on this file to be installed as "conscrypt-hostdex",
     // therefore set a stem. Without it, the file would be installed as
@@ -350,7 +378,7 @@ java_library {
     name: "core-icu4j-host",
     installable: true,
     hostdex: true,
-    static_libs: ["core-icu4j"],
+    static_libs: ["core-icu4j-for-host"],
 
     // Tests and build files rely on this file to be installed as "core-icu4j-hostdex",
     // therefore set a stem. Without it, the file would be installed as

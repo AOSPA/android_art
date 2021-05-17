@@ -1002,12 +1002,14 @@
           "707-checker-invalid-profile",
           "714-invoke-custom-lambda-metafactory",
           "716-jli-jit-samples",
+          "729-checker-polymorphic-intrinsic",
           "800-smali",
           "801-VoidCheckCast",
           "802-deoptimization",
           "804-class-extends-itself",
           "816-illegal-new-array",
           "819-verification-runtime",
+          "823-cha-inlining",
           "900-hello-plugin",
           "901-hello-ti-agent",
           "903-hello-tagging",
@@ -1128,6 +1130,7 @@
                   "689-zygote-jit-deopt",
                   "690-hiddenapi-same-name-methods",
                   "691-hiddenapi-proxy",
+                  "692-vdex-secondary-loader",
                   "692-vdex-inmem-loader",
                   "693-vdex-inmem-loader-evict",
                   "723-string-init-range",
@@ -1138,6 +1141,7 @@
                   "817-hiddenapi",
                   "820-vdex-multidex",
                   "821-many-args",
+                  "822-hiddenapi-future",
                   "999-redefine-hiddenapi",
                   "1000-non-moving-space-stress",
                   "1001-app-image-regions",
@@ -1385,5 +1389,10 @@
         "tests": ["821-madvise-willneed"],
         "variant": "jvm",
         "description": ["Adding custom madvise flags. Not to be tested on default jvm"]
+    },
+    {
+        "tests": ["692-vdex-secondary-loader"],
+        "env_vars": {"ART_USE_READ_BARRIER": "false"},
+        "description": ["Uses the low-ram flag which does not work with CMS"]
     }
 ]

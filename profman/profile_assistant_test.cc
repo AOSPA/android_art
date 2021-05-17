@@ -15,6 +15,8 @@
  */
 
 #include <gtest/gtest.h>
+#include <sstream>
+#include <string>
 
 #include "android-base/file.h"
 #include "android-base/strings.h"
@@ -24,6 +26,7 @@
 #include "base/utils.h"
 #include "common_runtime_test.h"
 #include "dex/descriptors_names.h"
+#include "dex/dex_file_structs.h"
 #include "dex/dex_instruction-inl.h"
 #include "dex/dex_instruction_iterator.h"
 #include "dex/type_reference.h"
@@ -32,59 +35,31 @@
 #include "mirror/class-inl.h"
 #include "obj_ptr-inl.h"
 #include "profile/profile_compilation_info.h"
+#include "profile/profile_test_helper.h"
 #include "profile_assistant.h"
 #include "scoped_thread_state_change-inl.h"
 
 namespace art {
 
-using Hotness = ProfileCompilationInfo::MethodHotness;
 using TypeReferenceSet = std::set<TypeReference, TypeReferenceValueComparator>;
-using ProfileInlineCache = ProfileMethodInfo::ProfileInlineCache;
 
 // TODO(calin): These tests share a lot with the ProfileCompilationInfo tests.
 // we should introduce a better abstraction to extract the common parts.
-class ProfileAssistantTest : public CommonRuntimeTest {
+class ProfileAssistantTest : public CommonRuntimeTest, public ProfileTestHelper {
  public:
   void PostRuntimeCreate() override {
     allocator_.reset(new ArenaAllocator(Runtime::Current()->GetArenaPool()));
 
-    dex1 = fake_dex_storage.AddFakeDex("location1", /* checksum= */ 1, /* num_method_ids= */ 10001);
-    dex2 = fake_dex_storage.AddFakeDex("location2", /* checksum= */ 2, /* num_method_ids= */ 10002);
-    dex3 = fake_dex_storage.AddFakeDex("location3", /* checksum= */ 3, /* num_method_ids= */ 10003);
-    dex4 = fake_dex_storage.AddFakeDex("location4", /* checksum= */ 4, /* num_method_ids= */ 10004);
+    dex1 = BuildDex("location1", /* checksum= */ 1, "LUnique1;", /* num_method_ids= */ 10001);
+    dex2 = BuildDex("location2", /* checksum= */ 2, "LUnique2;", /* num_method_ids= */ 10002);
+    dex3 = BuildDex("location3", /* checksum= */ 3, "LUnique3;", /* num_method_ids= */ 10003);
+    dex4 = BuildDex("location4", /* checksum= */ 4, "LUnique4;", /* num_method_ids= */ 10004);
 
-    dex1_checksum_missmatch = fake_dex_storage.AddFakeDex(
-        "location1", /* checksum= */ 12, /* num_method_ids= */ 10001);
+    dex1_checksum_missmatch =
+        BuildDex("location1", /* checksum= */ 12, "LUnique1;", /* num_method_ids= */ 10001);
   }
 
  protected:
-  bool AddMethod(ProfileCompilationInfo* info,
-                const DexFile* dex,
-                uint16_t method_idx,
-                const std::vector<ProfileInlineCache>& inline_caches,
-                Hotness::Flag flags) {
-    return info->AddMethod(
-        ProfileMethodInfo(MethodReference(dex, method_idx), inline_caches), flags);
-  }
-
-  bool AddMethod(ProfileCompilationInfo* info,
-                 const DexFile* dex,
-                 uint16_t method_idx,
-                 Hotness::Flag flags,
-                 const ProfileCompilationInfo::ProfileSampleAnnotation& annotation
-                    = ProfileCompilationInfo::ProfileSampleAnnotation::kNone) {
-    return info->AddMethod(ProfileMethodInfo(MethodReference(dex, method_idx)),
-                           flags,
-                           annotation);
-  }
-
-  bool AddClass(ProfileCompilationInfo* info,
-                const DexFile* dex,
-                dex::TypeIndex type_index) {
-    std::vector<dex::TypeIndex> classes = {type_index};
-    return info->AddClassesForDex(dex, classes.begin(), classes.end());
-  }
-
   void SetupProfile(const DexFile* dex_file1,
                     const DexFile* dex_file2,
                     uint16_t number_of_methods,
@@ -414,7 +389,7 @@ class ProfileAssistantTest : public CommonRuntimeTest {
     for (const TypeReference& type_ref : expected_clases) {
       for (const auto& class_ref : dex_pc_data.classes) {
         if (class_ref.type_index == type_ref.TypeIndex() &&
-            info.ProfileIndexMatchesDexFile(class_ref.dex_profile_index, type_ref.dex_file)) {
+            ProfileIndexMatchesDexFile(info, class_ref.dex_profile_index, type_ref.dex_file)) {
           found++;
         }
       }
@@ -473,7 +448,6 @@ class ProfileAssistantTest : public CommonRuntimeTest {
   const DexFile* dex3;
   const DexFile* dex4;
   const DexFile* dex1_checksum_missmatch;
-  FakeDexStorage fake_dex_storage;
 };
 
 TEST_F(ProfileAssistantTest, AdviseCompilationEmptyReferences) {
@@ -1514,6 +1488,99 @@ TEST_F(ProfileAssistantTest, MergeProfilesWithDifferentDexOrder) {
   CheckProfileInfo(profile1, info1);
 }
 
+TEST_F(ProfileAssistantTest, TestProfileCreateWithSubtype) {
+  // Create the profile content.
+  std::vector<std::string> profile_methods = {
+      "HLTestInlineSubtype;->inlineMonomorphic(LSuper;)I+]LSuper;LSubA;",
+  };
+  std::string input_file_contents;
+  for (std::string& m : profile_methods) {
+    input_file_contents += m + std::string("\n");
+  }
+
+  // Create the profile and save it to disk.
+  ScratchFile profile_file;
+  std::string dex_filename = GetTestDexFileName("ProfileTestMultiDex");
+  ASSERT_TRUE(CreateProfile(input_file_contents, profile_file.GetFilename(), dex_filename));
+
+  // Load the profile from disk.
+  ProfileCompilationInfo info;
+  profile_file.GetFile()->ResetOffset();
+  ASSERT_TRUE(info.Load(GetFd(profile_file)));
+  LOG(ERROR) << profile_file.GetFilename();
+
+  // Load the dex files and verify that the profile contains the expected
+  // methods info.
+  ScopedObjectAccess soa(Thread::Current());
+  jobject class_loader = LoadDex("ProfileTestMultiDex");
+  ASSERT_NE(class_loader, nullptr);
+
+  // NB This is the supertype of the declared line!
+  ArtMethod* inline_monomorphic_super =
+      GetVirtualMethod(class_loader, "LTestInline;", "inlineMonomorphic");
+  const DexFile* dex_file = inline_monomorphic_super->GetDexFile();
+
+  // Verify that the inline cache is present in the superclass
+  ProfileCompilationInfo::MethodHotness hotness_super = info.GetMethodHotness(
+      MethodReference(dex_file, inline_monomorphic_super->GetDexMethodIndex()));
+  ASSERT_TRUE(hotness_super.IsHot());
+  const ProfileCompilationInfo::InlineCacheMap* inline_caches = hotness_super.GetInlineCacheMap();
+  ASSERT_EQ(inline_caches->size(), 1u);
+  const ProfileCompilationInfo::DexPcData& dex_pc_data = inline_caches->begin()->second;
+  dex::TypeIndex target_type_index(dex_file->GetIndexForTypeId(*dex_file->FindTypeId("LSubA;")));
+  ASSERT_EQ(1u, dex_pc_data.classes.size());
+  ASSERT_EQ(target_type_index, dex_pc_data.classes.begin()->type_index);
+
+  // Verify that the method is present in subclass but there are no
+  // inline-caches (since there is no code).
+  const dex::MethodId& super_method_id =
+      dex_file->GetMethodId(inline_monomorphic_super->GetDexMethodIndex());
+  uint32_t sub_method_index = dex_file->GetIndexForMethodId(
+      *dex_file->FindMethodId(*dex_file->FindTypeId("LTestInlineSubtype;"),
+                              dex_file->GetStringId(super_method_id.name_idx_),
+                              dex_file->GetProtoId(super_method_id.proto_idx_)));
+  ProfileCompilationInfo::MethodHotness hotness_sub =
+      info.GetMethodHotness(MethodReference(dex_file, sub_method_index));
+  ASSERT_TRUE(hotness_sub.IsHot());
+  ASSERT_EQ(hotness_sub.GetInlineCacheMap()->size(), 0u);
+}
+
+TEST_F(ProfileAssistantTest, TestProfileCreateWithSubtypeAndDump) {
+  // Create the profile content.
+  std::vector<std::string> profile_methods = {
+      "HLTestInlineSubtype;->inlineMonomorphic(LSuper;)I+]LSuper;LSubA;",
+  };
+  std::string input_file_contents;
+  for (std::string& m : profile_methods) {
+    input_file_contents += m + std::string("\n");
+  }
+
+  // Create the profile and save it to disk.
+  ScratchFile profile_file;
+  std::string dex_filename = GetTestDexFileName("ProfileTestMultiDex");
+  ASSERT_TRUE(CreateProfile(input_file_contents, profile_file.GetFilename(), dex_filename));
+
+  std::string dump_ic;
+  ASSERT_TRUE(DumpClassesAndMethods(
+      profile_file.GetFilename(), &dump_ic, GetTestDexFileName("ProfileTestMultiDex")));
+
+  std::vector<std::string> lines;
+  std::stringstream dump_stream(dump_ic);
+  std::string cur;
+  while (std::getline(dump_stream, cur, '\n')) {
+    lines.push_back(std::move(cur));
+  }
+
+  EXPECT_EQ(lines.size(), 2u);
+  EXPECT_TRUE(std::find(lines.cbegin(),
+                        lines.cend(),
+                        "HLTestInline;->inlineMonomorphic(LSuper;)I+]LSuper;LSubA;") !=
+              lines.cend());
+  EXPECT_TRUE(std::find(lines.cbegin(),
+                        lines.cend(),
+                        "HLTestInlineSubtype;->inlineMonomorphic(LSuper;)I") != lines.cend());
+}
+
 TEST_F(ProfileAssistantTest, TestProfileCreateWithInvalidData) {
   // Create the profile content.
   std::vector<std::string> profile_methods = {
@@ -1731,11 +1798,10 @@ TEST_F(ProfileAssistantTest, CopyAndUpdateProfileKey) {
   ProfileCompilationInfo info1;
   uint16_t num_methods_to_add = std::min(d1.NumMethodIds(), d2.NumMethodIds());
 
-  FakeDexStorage local_storage;
-  const DexFile* dex_to_be_updated1 = local_storage.AddFakeDex(
-      "fake-location1", d1.GetLocationChecksum(), d1.NumMethodIds());
-  const DexFile* dex_to_be_updated2 = local_storage.AddFakeDex(
-      "fake-location2", d2.GetLocationChecksum(), d2.NumMethodIds());
+  const DexFile* dex_to_be_updated1 =
+      BuildDex("fake-location1", d1.GetLocationChecksum(), "LC;", d1.NumMethodIds());
+  const DexFile* dex_to_be_updated2 =
+      BuildDex("fake-location2", d2.GetLocationChecksum(), "LC;", d2.NumMethodIds());
   SetupProfile(dex_to_be_updated1,
                dex_to_be_updated2,
                num_methods_to_add,

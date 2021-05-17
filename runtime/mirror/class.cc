@@ -72,40 +72,9 @@ bool Class::IsMirrored() {
   if (IsPrimitive() || IsArrayClass() || IsProxyClass()) {
     return true;
   }
-  // TODO Have this list automatically populated.
-  std::unordered_set<std::string_view> mirror_types = {
-    "Ljava/lang/Class;",
-    "Ljava/lang/ClassLoader;",
-    "Ljava/lang/ClassNotFoundException;",
-    "Ljava/lang/DexCache;",
-    "Ljava/lang/Object;",
-    "Ljava/lang/StackTraceElement;",
-    "Ljava/lang/String;",
-    "Ljava/lang/Throwable;",
-    "Ljava/lang/invoke/ArrayElementVarHandle;",
-    "Ljava/lang/invoke/ByteArrayViewVarHandle;",
-    "Ljava/lang/invoke/ByteBufferViewVarHandle;",
-    "Ljava/lang/invoke/CallSite;",
-    "Ljava/lang/invoke/FieldVarHandle;",
-    "Ljava/lang/invoke/MethodHandle;",
-    "Ljava/lang/invoke/MethodHandleImpl;",
-    "Ljava/lang/invoke/MethodHandles$Lookup;",
-    "Ljava/lang/invoke/MethodType;",
-    "Ljava/lang/invoke/VarHandle;",
-    "Ljava/lang/ref/FinalizerReference;",
-    "Ljava/lang/ref/Reference;",
-    "Ljava/lang/reflect/AccessibleObject;",
-    "Ljava/lang/reflect/Constructor;",
-    "Ljava/lang/reflect/Executable;",
-    "Ljava/lang/reflect/Field;",
-    "Ljava/lang/reflect/Method;",
-    "Ljava/lang/reflect/Proxy;",
-    "Ldalvik/system/ClassExt;",
-    "Ldalvik/system/EmulatedStackFrame;",
-  };
   std::string name_storage;
-  const std::string name(this->GetDescriptor(&name_storage));
-  return mirror_types.find(name) != mirror_types.end();
+  const std::string_view name(this->GetDescriptor(&name_storage));
+  return IsMirroredDescriptor(name);
 }
 
 ObjPtr<mirror::Class> Class::GetPrimitiveClass(ObjPtr<mirror::String> name) {
@@ -1794,10 +1763,8 @@ size_t Class::GetMethodIdOffset(ArtMethod* method, PointerSize pointer_size) {
   return res;
 }
 
-ArtMethod* Class::FindAccessibleInterfaceMethod(
-    ArtMethod* implementation_method,
-    const hiddenapi::AccessContext& access_context,
-    PointerSize pointer_size)
+ArtMethod* Class::FindAccessibleInterfaceMethod(ArtMethod* implementation_method,
+                                                PointerSize pointer_size)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   ObjPtr<mirror::IfTable> iftable = GetIfTable();
   for (int32_t i = 0, iftable_count = iftable->Count(); i < iftable_count; ++i) {
@@ -1809,11 +1776,8 @@ ArtMethod* Class::FindAccessibleInterfaceMethod(
       if (implementation_method == methods->GetElementPtrSize<ArtMethod*>(j, pointer_size)) {
         ObjPtr<mirror::Class> iface = iftable->GetInterface(i);
         ArtMethod* interface_method = &iface->GetVirtualMethodsSlice(pointer_size)[j];
-        // Pass AccessMethod::kNone to not warn on the access. The caller is responsible
-        // for eventually logging a warning.
-        if (!hiddenapi::ShouldDenyAccessToMember(interface_method,
-                                                 access_context,
-                                                 hiddenapi::AccessMethod::kNone)) {
+        // If the interface method is part of the public SDK, return it.
+        if ((hiddenapi::GetRuntimeFlags(interface_method) & kAccPublicApi) != 0) {
           return interface_method;
         }
       }

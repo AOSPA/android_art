@@ -38,39 +38,12 @@
 
 namespace art {
 
-struct InstructionDumper {
- public:
-  HInstruction* ins_;
-};
-
-bool operator==(const InstructionDumper& a, const InstructionDumper& b) {
-  return a.ins_ == b.ins_;
-}
-bool operator!=(const InstructionDumper& a, const InstructionDumper& b) {
-  return !(a == b);
-}
-
-std::ostream& operator<<(std::ostream& os, const InstructionDumper& id) {
-  if (id.ins_ == nullptr) {
-    return os << "NULL";
-  } else {
-    return os << "(" << id.ins_ << "): " << id.ins_->DumpWithArgs();
-  }
-}
-
 #define CHECK_SUBROUTINE_FAILURE() \
   do {                             \
     if (HasFatalFailure()) {       \
       return;                      \
     }                              \
   } while (false)
-
-#define EXPECT_INS_EQ(a, b) EXPECT_EQ(InstructionDumper{a}, InstructionDumper{b})
-#define EXPECT_INS_REMOVED(a) EXPECT_TRUE(IsRemoved(a)) << "Not removed: " << (InstructionDumper{a})
-#define EXPECT_INS_RETAINED(a) EXPECT_FALSE(IsRemoved(a)) << "Removed: " << (InstructionDumper{a})
-#define ASSERT_INS_EQ(a, b) ASSERT_EQ(InstructionDumper{a}, InstructionDumper{b})
-#define ASSERT_INS_REMOVED(a) ASSERT_TRUE(IsRemoved(a)) << "Not removed: " << (InstructionDumper{a})
-#define ASSERT_INS_RETAINED(a) ASSERT_FALSE(IsRemoved(a)) << "Removed: " << (InstructionDumper{a})
 
 template <typename SuperTest>
 class LoadStoreEliminationTestBase : public SuperTest, public OptimizingUnitTestHelper {
@@ -83,12 +56,6 @@ class LoadStoreEliminationTestBase : public SuperTest, public OptimizingUnitTest
   void TearDown() override {
     SuperTest::TearDown();
     gLogVerbosity.compiler = false;
-  }
-
-  AdjacencyListGraph SetupFromAdjacencyList(const std::string_view entry_name,
-                                            const std::string_view exit_name,
-                                            const std::vector<AdjacencyListGraph::Edge>& adj) {
-    return AdjacencyListGraph(graph_, GetAllocator(), entry_name, exit_name, adj);
   }
 
   void PerformLSE(bool with_partial = true) {
@@ -300,134 +267,6 @@ class LoadStoreEliminationTestBase : public SuperTest, public OptimizingUnitTest
     j_ = parameters_.back();
   }
 
-  void ManuallyBuildEnvFor(HInstruction* ins, const std::initializer_list<HInstruction*>& env) {
-    ArenaVector<HInstruction*> current_locals(env, GetAllocator()->Adapter(kArenaAllocInstruction));
-    OptimizingUnitTestHelper::ManuallyBuildEnvFor(ins, &current_locals);
-  }
-
-  HLoadClass* MakeClassLoad(std::optional<dex::TypeIndex> ti = std::nullopt) {
-    return new (GetAllocator()) HLoadClass(graph_->GetCurrentMethod(),
-                                           ti ? *ti : dex::TypeIndex(class_idx_++),
-                                           graph_->GetDexFile(),
-                                           /* klass= */ null_klass_,
-                                           /* is_referrers_class= */ false,
-                                           /* dex_pc= */ 0,
-                                           /* needs_access_check= */ false);
-  }
-
-  HNewInstance* MakeNewInstance(HInstruction* cls, uint32_t dex_pc = 0u) {
-    EXPECT_TRUE(cls->IsLoadClass() || cls->IsClinitCheck()) << *cls;
-    HLoadClass* load =
-        cls->IsLoadClass() ? cls->AsLoadClass() : cls->AsClinitCheck()->GetLoadClass();
-    return new (GetAllocator()) HNewInstance(cls,
-                                             dex_pc,
-                                             load->GetTypeIndex(),
-                                             graph_->GetDexFile(),
-                                             /* finalizable= */ false,
-                                             QuickEntrypointEnum::kQuickAllocObjectInitialized);
-  }
-
-  HInstanceFieldSet* MakeIFieldSet(HInstruction* inst,
-                                   HInstruction* data,
-                                   MemberOffset off,
-                                   uint32_t dex_pc = 0u) {
-    return new (GetAllocator()) HInstanceFieldSet(inst,
-                                                  data,
-                                                  /* field= */ nullptr,
-                                                  /* field_type= */ data->GetType(),
-                                                  /* field_offset= */ off,
-                                                  /* is_volatile= */ false,
-                                                  /* field_idx= */ 0,
-                                                  /* declaring_class_def_index= */ 0,
-                                                  graph_->GetDexFile(),
-                                                  dex_pc);
-  }
-
-  HInstanceFieldGet* MakeIFieldGet(HInstruction* inst,
-                                   DataType::Type type,
-                                   MemberOffset off,
-                                   uint32_t dex_pc = 0u) {
-    return new (GetAllocator()) HInstanceFieldGet(inst,
-                                                  /* field= */ nullptr,
-                                                  /* field_type= */ type,
-                                                  /* field_offset= */ off,
-                                                  /* is_volatile= */ false,
-                                                  /* field_idx= */ 0,
-                                                  /* declaring_class_def_index= */ 0,
-                                                  graph_->GetDexFile(),
-                                                  dex_pc);
-  }
-
-  HInvokeStaticOrDirect* MakeInvoke(DataType::Type return_type,
-                                    const std::vector<HInstruction*>& args) {
-    MethodReference method_reference{/* file= */ &graph_->GetDexFile(), /* index= */ method_idx_++};
-    HInvokeStaticOrDirect* res = new (GetAllocator())
-        HInvokeStaticOrDirect(GetAllocator(),
-                              args.size(),
-                              return_type,
-                              /* dex_pc= */ 0,
-                              method_reference,
-                              /* resolved_method= */ nullptr,
-                              HInvokeStaticOrDirect::DispatchInfo{},
-                              InvokeType::kStatic,
-                              /* resolved_method_reference= */ method_reference,
-                              HInvokeStaticOrDirect::ClinitCheckRequirement::kNone);
-    for (auto [ins, idx] : ZipCount(MakeIterationRange(args))) {
-      res->SetRawInputAt(idx, ins);
-    }
-    return res;
-  }
-
-  HPhi* MakePhi(const std::vector<HInstruction*>& ins) {
-    EXPECT_GE(ins.size(), 2u) << "Phi requires at least 2 inputs";
-    HPhi* phi =
-        new (GetAllocator()) HPhi(GetAllocator(), kNoRegNumber, ins.size(), ins[0]->GetType());
-    for (auto [i, idx] : ZipCount(MakeIterationRange(ins))) {
-      phi->SetRawInputAt(idx, i);
-    }
-    return phi;
-  }
-
-  void SetupExit(HBasicBlock* exit) {
-    exit->AddInstruction(new (GetAllocator()) HExit());
-  }
-
-  dex::TypeIndex DefaultTypeIndexForType(DataType::Type type) {
-    switch (type) {
-      case DataType::Type::kBool:
-        return dex::TypeIndex(1);
-      case DataType::Type::kUint8:
-      case DataType::Type::kInt8:
-        return dex::TypeIndex(2);
-      case DataType::Type::kUint16:
-      case DataType::Type::kInt16:
-        return dex::TypeIndex(3);
-      case DataType::Type::kUint32:
-      case DataType::Type::kInt32:
-        return dex::TypeIndex(4);
-      case DataType::Type::kUint64:
-      case DataType::Type::kInt64:
-        return dex::TypeIndex(5);
-      case DataType::Type::kReference:
-        return dex::TypeIndex(6);
-      case DataType::Type::kFloat32:
-        return dex::TypeIndex(7);
-      case DataType::Type::kFloat64:
-        return dex::TypeIndex(8);
-      case DataType::Type::kVoid:
-        EXPECT_TRUE(false) << "No type for void!";
-        return dex::TypeIndex(1000);
-    }
-  }
-
-  // Creates a parameter. The instruction is automatically added to the entry-block
-  HParameterValue* MakeParam(DataType::Type type, std::optional<dex::TypeIndex> ti = std::nullopt) {
-    HParameterValue* val = new (GetAllocator()) HParameterValue(
-        graph_->GetDexFile(), ti ? *ti : DefaultTypeIndexForType(type), param_count_++, type);
-    graph_->GetEntryBlock()->AddInstruction(val);
-    return val;
-  }
-
   HBasicBlock* pre_header_;
   HBasicBlock* loop_;
 
@@ -439,12 +278,6 @@ class LoadStoreEliminationTestBase : public SuperTest, public OptimizingUnitTest
   HInstruction* suspend_check_;
 
   HPhi* phi_;
-
-  size_t param_count_ = 0;
-  size_t class_idx_ = 42;
-  uint32_t method_idx_ = 100;
-
-  ScopedNullHandle<mirror::Class> null_klass_;
 };
 
 class LoadStoreEliminationTest : public LoadStoreEliminationTestBase<CommonCompilerTest> {};
@@ -2312,156 +2145,6 @@ TEST_F(LoadStoreEliminationTest, PartialLoadElimination2) {
   EXPECT_INS_REMOVED(write_right);
   EXPECT_INS_RETAINED(write_left);
   EXPECT_INS_RETAINED(call_left);
-}
-
-class PatternMatchGraphVisitor : public HGraphVisitor {
- private:
-  struct HandlerWrapper {
-   public:
-    virtual ~HandlerWrapper() {}
-    virtual void operator()(HInstruction* h) = 0;
-  };
-
-  template <HInstruction::InstructionKind kKind, typename F>
-  struct KindWrapper;
-
-#define GEN_HANDLER(nm, unused)                                                         \
-  template <typename F>                                                                 \
-  struct KindWrapper<HInstruction::InstructionKind::k##nm, F> : public HandlerWrapper { \
-   public:                                                                              \
-    explicit KindWrapper(F f) : f_(f) {}                                                \
-    void operator()(HInstruction* h) override {                                         \
-      if constexpr (std::is_invocable_v<F, H##nm*>) {                                   \
-        f_(h->As##nm());                                                                \
-      } else {                                                                          \
-        LOG(FATAL) << "Incorrect call with " << #nm;                                    \
-      }                                                                                 \
-    }                                                                                   \
-                                                                                        \
-   private:                                                                             \
-    F f_;                                                                               \
-  };
-
-  FOR_EACH_CONCRETE_INSTRUCTION(GEN_HANDLER)
-#undef GEN_HANDLER
-
-  template <typename F>
-  std::unique_ptr<HandlerWrapper> GetWrapper(HInstruction::InstructionKind kind, F f) {
-    switch (kind) {
-#define GEN_GETTER(nm, unused)               \
-  case HInstruction::InstructionKind::k##nm: \
-    return std::unique_ptr<HandlerWrapper>(  \
-        new KindWrapper<HInstruction::InstructionKind::k##nm, F>(f));
-      FOR_EACH_CONCRETE_INSTRUCTION(GEN_GETTER)
-#undef GEN_GETTER
-      default:
-        LOG(FATAL) << "Unable to handle kind " << kind;
-        return nullptr;
-    }
-  }
-
- public:
-  template <typename... Inst>
-  explicit PatternMatchGraphVisitor(HGraph* graph, Inst... handlers) : HGraphVisitor(graph) {
-    FillHandlers(handlers...);
-  }
-
-  void VisitInstruction(HInstruction* instruction) override {
-    auto& h = handlers_[instruction->GetKind()];
-    if (h.get() != nullptr) {
-      (*h)(instruction);
-    }
-  }
-
- private:
-  template <typename Func>
-  constexpr HInstruction::InstructionKind GetKind() {
-#define CHECK_INST(nm, unused)                       \
-    if constexpr (std::is_invocable_v<Func, H##nm*>) { \
-      return HInstruction::InstructionKind::k##nm;     \
-    }
-    FOR_EACH_CONCRETE_INSTRUCTION(CHECK_INST);
-#undef CHECK_INST
-    static_assert(!std::is_invocable_v<Func, HInstruction*>,
-                  "Use on generic HInstruction not allowed");
-#define STATIC_ASSERT_ABSTRACT(nm, unused) && !std::is_invocable_v<Func, H##nm*>
-    static_assert(true FOR_EACH_ABSTRACT_INSTRUCTION(STATIC_ASSERT_ABSTRACT),
-                  "Must not be abstract instruction");
-#undef STATIC_ASSERT_ABSTRACT
-#define STATIC_ASSERT_CONCRETE(nm, unused) || std::is_invocable_v<Func, H##nm*>
-    static_assert(false FOR_EACH_CONCRETE_INSTRUCTION(STATIC_ASSERT_CONCRETE),
-                  "Must be a concrete instruction");
-#undef STATIC_ASSERT_CONCRETE
-    return HInstruction::InstructionKind::kLastInstructionKind;
-  }
-  template <typename First>
-  void FillHandlers(First h1) {
-    HInstruction::InstructionKind type = GetKind<First>();
-    CHECK_NE(type, HInstruction::kLastInstructionKind)
-        << "Unknown instruction kind. Only concrete ones please.";
-    handlers_[type] = GetWrapper(type, h1);
-  }
-
-  template <typename First, typename... Inst>
-  void FillHandlers(First h1, Inst... handlers) {
-    FillHandlers(h1);
-    FillHandlers<Inst...>(handlers...);
-  }
-
-  std::array<std::unique_ptr<HandlerWrapper>, HInstruction::InstructionKind::kLastInstructionKind>
-      handlers_;
-};
-
-template <typename... Target>
-std::tuple<std::vector<Target*>...> FindAllInstructions(
-    HGraph* graph,
-    std::variant<std::nullopt_t, HBasicBlock*, std::initializer_list<HBasicBlock*>> blks =
-        std::nullopt) {
-  std::tuple<std::vector<Target*>...> res;
-  PatternMatchGraphVisitor vis(
-      graph, [&](Target* t) { std::get<std::vector<Target*>>(res).push_back(t); }...);
-
-  if (std::holds_alternative<std::initializer_list<HBasicBlock*>>(blks)) {
-    for (HBasicBlock* blk : std::get<std::initializer_list<HBasicBlock*>>(blks)) {
-      vis.VisitBasicBlock(blk);
-    }
-  } else if (std::holds_alternative<std::nullopt_t>(blks)) {
-    vis.VisitInsertionOrder();
-  } else {
-    vis.VisitBasicBlock(std::get<HBasicBlock*>(blks));
-  }
-  return res;
-}
-
-template <typename... Target>
-std::tuple<Target*...> FindSingleInstructions(
-    HGraph* graph,
-    std::variant<std::nullopt_t, HBasicBlock*, std::initializer_list<HBasicBlock*>> blks =
-        std::nullopt) {
-  std::tuple<Target*...> res;
-  PatternMatchGraphVisitor vis(graph, [&](Target* t) {
-    EXPECT_EQ(std::get<Target*>(res), nullptr)
-        << *std::get<Target*>(res) << " already found but found " << *t << "!";
-    std::get<Target*>(res) = t;
-  }...);
-  if (std::holds_alternative<std::initializer_list<HBasicBlock*>>(blks)) {
-    for (HBasicBlock* blk : std::get<std::initializer_list<HBasicBlock*>>(blks)) {
-      vis.VisitBasicBlock(blk);
-    }
-  } else if (std::holds_alternative<std::nullopt_t>(blks)) {
-    vis.VisitInsertionOrder();
-  } else {
-    vis.VisitBasicBlock(std::get<HBasicBlock*>(blks));
-  }
-  return res;
-}
-
-template <typename Target>
-Target* FindSingleInstruction(
-    HGraph* graph,
-    std::variant<std::nullopt_t, HBasicBlock*, std::initializer_list<HBasicBlock*>> blks =
-        std::nullopt) {
-  return std::get<Target*>(FindSingleInstructions<Target>(graph, blks));
 }
 
 template<typename Iter, typename Func>
@@ -6183,6 +5866,152 @@ TEST_F(LoadStoreEliminationTest, MultiPredicatedLoad3) {
   EXPECT_INS_EQ(bottom_phi->InputAt(1), moved_ni2);
 }
 
+// // ENTRY
+// obj = new Obj();
+// if (param1) {
+//   obj.field = 3;
+//   noescape();
+// } else {
+//   obj.field = 2;
+//   noescape();
+// }
+// int abc;
+// if (parameter_value) {
+//   // LEFT
+//   abc = 4;
+//   escape(obj);
+// } else {
+//   // RIGHT
+//   // ELIMINATE
+//   noescape();
+//   abc = obj.field + 4;
+// }
+// abc = phi
+// EXIT
+// predicated-ELIMINATE
+// return obj.field + abc
+TEST_F(LoadStoreEliminationTest, PredicatedLoad4) {
+  VariableSizedHandleScope vshs(Thread::Current());
+  CreateGraph(/*handles=*/&vshs);
+  AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
+                                                 "exit",
+                                                 {{"entry", "start_left"},
+                                                  {"entry", "start_right"},
+                                                  {"start_left", "mid"},
+                                                  {"start_right", "mid"},
+                                                  {"mid", "left"},
+                                                  {"mid", "right"},
+                                                  {"left", "breturn"},
+                                                  {"right", "breturn"},
+                                                  {"breturn", "exit"}}));
+#define GET_BLOCK(name) HBasicBlock* name = blks.Get(#name)
+  GET_BLOCK(entry);
+  GET_BLOCK(exit);
+  GET_BLOCK(breturn);
+  GET_BLOCK(left);
+  GET_BLOCK(right);
+  GET_BLOCK(mid);
+  GET_BLOCK(start_left);
+  GET_BLOCK(start_right);
+#undef GET_BLOCK
+  EnsurePredecessorOrder(breturn, {left, right});
+  EnsurePredecessorOrder(mid, {start_left, start_right});
+  HInstruction* bool_value = MakeParam(DataType::Type::kBool);
+  HInstruction* bool_value2 = MakeParam(DataType::Type::kBool);
+  HInstruction* null_const = graph_->GetNullConstant();
+  HInstruction* c2 = graph_->GetIntConstant(2);
+  HInstruction* c3 = graph_->GetIntConstant(3);
+  HInstruction* c4 = graph_->GetIntConstant(4);
+
+  HInstruction* cls = MakeClassLoad();
+  HInstruction* new_inst = MakeNewInstance(cls);
+  HInstruction* if_inst = new (GetAllocator()) HIf(bool_value);
+  entry->AddInstruction(cls);
+  entry->AddInstruction(new_inst);
+  entry->AddInstruction(if_inst);
+  ManuallyBuildEnvFor(cls, {});
+  new_inst->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HInstruction* write_start_left = MakeIFieldSet(new_inst, c3, MemberOffset(32));
+  HInstruction* call_start_left = MakeInvoke(DataType::Type::kVoid, { });
+  start_left->AddInstruction(write_start_left);
+  start_left->AddInstruction(call_start_left);
+  start_left->AddInstruction(new (GetAllocator()) HGoto());
+  call_start_left->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HInstruction* write_start_right = MakeIFieldSet(new_inst, c2, MemberOffset(32));
+  HInstruction* call_start_right = MakeInvoke(DataType::Type::kVoid, { });
+  start_right->AddInstruction(write_start_right);
+  start_right->AddInstruction(call_start_right);
+  start_right->AddInstruction(new (GetAllocator()) HGoto());
+  call_start_right->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  mid->AddInstruction(new (GetAllocator()) HIf(bool_value2));
+
+  HInstruction* call_left = MakeInvoke(DataType::Type::kVoid, { new_inst });
+  HInstruction* goto_left = new (GetAllocator()) HGoto();
+  left->AddInstruction(call_left);
+  left->AddInstruction(goto_left);
+  call_left->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HInstruction* call_right = MakeInvoke(DataType::Type::kVoid, { });
+  HInstruction* read_right = MakeIFieldGet(new_inst, DataType::Type::kInt32, MemberOffset(32));
+  HInstruction* add_right = new (GetAllocator()) HAdd(DataType::Type::kInt32, read_right, c4);
+  HInstruction* goto_right = new (GetAllocator()) HGoto();
+  right->AddInstruction(call_right);
+  right->AddInstruction(read_right);
+  right->AddInstruction(add_right);
+  right->AddInstruction(goto_right);
+  call_right->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HPhi* phi_bottom = MakePhi({c4, add_right});
+  HInstruction* read_bottom = MakeIFieldGet(new_inst, DataType::Type::kInt32, MemberOffset(32));
+  HInstruction* add_bottom =
+      new (GetAllocator()) HAdd(DataType::Type::kInt32, read_bottom, phi_bottom);
+  HInstruction* return_exit = new (GetAllocator()) HReturn(add_bottom);
+  breturn->AddPhi(phi_bottom);
+  breturn->AddInstruction(read_bottom);
+  breturn->AddInstruction(add_bottom);
+  breturn->AddInstruction(return_exit);
+
+  SetupExit(exit);
+
+  // PerformLSE expects this to be empty.
+  graph_->ClearDominanceInformation();
+  LOG(INFO) << "Pre LSE " << blks;
+  PerformLSEWithPartial();
+  LOG(INFO) << "Post LSE " << blks;
+
+  EXPECT_INS_REMOVED(read_bottom);
+  EXPECT_INS_REMOVED(read_right);
+  EXPECT_INS_RETAINED(call_left);
+  EXPECT_INS_RETAINED(call_right);
+  EXPECT_INS_RETAINED(call_start_left);
+  EXPECT_INS_RETAINED(call_start_right);
+  std::vector<HPhi*> merges;
+  HPredicatedInstanceFieldGet* pred_get =
+      FindSingleInstruction<HPredicatedInstanceFieldGet>(graph_, breturn);
+  std::tie(merges) = FindAllInstructions<HPhi>(graph_, breturn);
+  ASSERT_EQ(merges.size(), 3u);
+  HPhi* merge_value_return = FindOrNull(merges.begin(), merges.end(), [&](HPhi* p) {
+    return p != phi_bottom && p->GetType() == DataType::Type::kInt32;
+  });
+  HPhi* merge_alloc = FindOrNull(merges.begin(), merges.end(), [](HPhi* p) {
+    return p->GetType() == DataType::Type::kReference;
+  });
+  ASSERT_NE(merge_alloc, nullptr);
+  EXPECT_TRUE(merge_alloc->InputAt(0)->IsNewInstance()) << *merge_alloc;
+  EXPECT_EQ(merge_alloc->InputAt(0)->InputAt(0), cls) << *merge_alloc << " cls? " << *cls;
+  EXPECT_EQ(merge_alloc->InputAt(1), null_const);
+  ASSERT_NE(pred_get, nullptr);
+  EXPECT_INS_EQ(pred_get->GetTarget(), merge_alloc);
+  EXPECT_INS_EQ(pred_get->GetDefaultValue(), merge_value_return) << " pred-get is: " << *pred_get;
+  EXPECT_INS_EQ(merge_value_return->InputAt(0), graph_->GetIntConstant(0))
+      << " merge val is: " << *merge_value_return;
+  EXPECT_INS_EQ(merge_value_return->InputAt(1), FindSingleInstruction<HPhi>(graph_, mid))
+      << " merge val is: " << *merge_value_return;
+}
+
 // Based on structure seen in `java.util.Set java.util.Collections$UnmodifiableMap.entrySet()`
 // We end up having to update a PHI generated by normal LSE.
 // // ENTRY
@@ -6555,6 +6384,89 @@ TEST_F(LoadStoreEliminationTest, PredicatedLoad3) {
   EXPECT_INS_EQ(merge_value_merge->InputAt(0), graph_->GetIntConstant(0))
       << " phi is: " << *merge_value_merge;
   EXPECT_INS_EQ(merge_value_merge->InputAt(1), c2) << " phi is: " << *merge_value_merge;
+}
+
+// // ENTRY
+// obj = new Obj();
+// if (parameter_value) {
+//   // LEFT
+//   obj.field = 3;
+//   escape(obj);
+// } else {
+//   // RIGHT - Leave it as default value
+// }
+// EXIT
+// predicated-ELIMINATE
+// return obj.field
+TEST_F(LoadStoreEliminationTest, PredicatedLoadDefaultValue) {
+  VariableSizedHandleScope vshs(Thread::Current());
+  CreateGraph(/*handles=*/&vshs);
+  AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
+                                                 "exit",
+                                                 {{"entry", "left"},
+                                                  {"entry", "right"},
+                                                  {"left", "breturn"},
+                                                  {"right", "breturn"},
+                                                  {"breturn", "exit"}}));
+#define GET_BLOCK(name) HBasicBlock* name = blks.Get(#name)
+  GET_BLOCK(entry);
+  GET_BLOCK(exit);
+  GET_BLOCK(breturn);
+  GET_BLOCK(left);
+  GET_BLOCK(right);
+#undef GET_BLOCK
+  EnsurePredecessorOrder(breturn, {left, right});
+  HInstruction* bool_value = MakeParam(DataType::Type::kBool);
+  HInstruction* null_const = graph_->GetNullConstant();
+  HInstruction* c0 = graph_->GetIntConstant(0);
+  HInstruction* c3 = graph_->GetIntConstant(3);
+
+  HInstruction* cls = MakeClassLoad();
+  HInstruction* new_inst = MakeNewInstance(cls);
+  HInstruction* if_inst = new (GetAllocator()) HIf(bool_value);
+  entry->AddInstruction(cls);
+  entry->AddInstruction(new_inst);
+  entry->AddInstruction(if_inst);
+  ManuallyBuildEnvFor(cls, {});
+  new_inst->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HInstruction* write_left = MakeIFieldSet(new_inst, c3, MemberOffset(32));
+  HInstruction* call_left = MakeInvoke(DataType::Type::kVoid, { new_inst });
+  HInstruction* goto_left = new (GetAllocator()) HGoto();
+  left->AddInstruction(write_left);
+  left->AddInstruction(call_left);
+  left->AddInstruction(goto_left);
+  call_left->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HInstruction* goto_right = new (GetAllocator()) HGoto();
+  right->AddInstruction(goto_right);
+
+  HInstruction* read_bottom = MakeIFieldGet(new_inst, DataType::Type::kInt32, MemberOffset(32));
+  HInstruction* return_exit = new (GetAllocator()) HReturn(read_bottom);
+  breturn->AddInstruction(read_bottom);
+  breturn->AddInstruction(return_exit);
+
+  SetupExit(exit);
+
+  // PerformLSE expects this to be empty.
+  graph_->ClearDominanceInformation();
+  LOG(INFO) << "Pre LSE " << blks;
+  PerformLSEWithPartial();
+  LOG(INFO) << "Post LSE " << blks;
+
+  EXPECT_INS_REMOVED(read_bottom);
+  EXPECT_INS_RETAINED(write_left);
+  EXPECT_INS_RETAINED(call_left);
+  HPredicatedInstanceFieldGet* pred_get =
+      FindSingleInstruction<HPredicatedInstanceFieldGet>(graph_, breturn);
+  HPhi* merge_alloc = FindSingleInstruction<HPhi>(graph_, breturn);
+  ASSERT_NE(merge_alloc, nullptr);
+  EXPECT_TRUE(merge_alloc->InputAt(0)->IsNewInstance()) << *merge_alloc;
+  EXPECT_EQ(merge_alloc->InputAt(0)->InputAt(0), cls) << *merge_alloc << " cls? " << *cls;
+  EXPECT_EQ(merge_alloc->InputAt(1), null_const);
+  ASSERT_NE(pred_get, nullptr);
+  EXPECT_INS_EQ(pred_get->GetTarget(), merge_alloc);
+  EXPECT_INS_EQ(pred_get->GetDefaultValue(), c0) << " pred-get is: " << *pred_get;
 }
 
 // // ENTRY
@@ -7368,6 +7280,170 @@ TEST_F(LoadStoreEliminationTest, PartialLoopPhis5) {
   EXPECT_INS_EQ(mat_set->InputAt(1), loop_header_phi);
   EXPECT_INS_REMOVED(write_loop_right) << *write_loop_right;
   EXPECT_INS_REMOVED(write_pre_header) << *write_pre_header;
+}
+
+// // ENTRY
+// obj = new Obj();
+// obj.field = 3;
+// if (param) {
+//   while (!test()) {
+//     if (test2()) {
+//       noescape();
+//     } else {
+//       abc = obj.field;
+//       obj.field = abc + 5;
+//       noescape();
+//     }
+//   }
+//   escape(obj);
+// } else {
+// }
+// return obj.field
+TEST_F(LoadStoreEliminationTest, PartialLoopPhis6) {
+  VariableSizedHandleScope vshs(Thread::Current());
+  CreateGraph(/*handles=*/&vshs);
+  AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
+                                                 "exit",
+                                                 {{"entry", "start"},
+                                                  {"start", "left"},
+                                                  {"start", "right"},
+                                                  {"left", "loop_pre_header"},
+
+                                                  {"loop_pre_header", "loop_header"},
+                                                  {"loop_header", "escape"},
+                                                  {"loop_header", "loop_body"},
+                                                  {"loop_body", "loop_if_left"},
+                                                  {"loop_body", "loop_if_right"},
+                                                  {"loop_if_left", "loop_header"},
+                                                  {"loop_if_right", "loop_header"},
+
+                                                  {"escape", "breturn"},
+                                                  {"right", "breturn"},
+                                                  {"breturn", "exit"}}));
+#define GET_BLOCK(name) HBasicBlock* name = blks.Get(#name)
+  GET_BLOCK(entry);
+  GET_BLOCK(exit);
+  GET_BLOCK(breturn);
+  GET_BLOCK(left);
+  GET_BLOCK(right);
+  GET_BLOCK(start);
+  GET_BLOCK(escape);
+
+  GET_BLOCK(loop_pre_header);
+  GET_BLOCK(loop_header);
+  GET_BLOCK(loop_body);
+  GET_BLOCK(loop_if_left);
+  GET_BLOCK(loop_if_right);
+#undef GET_BLOCK
+  EnsurePredecessorOrder(breturn, {escape, right});
+  EnsurePredecessorOrder(loop_header, {loop_pre_header, loop_if_left, loop_if_right});
+  CHECK_SUBROUTINE_FAILURE();
+  HInstruction* bool_val = MakeParam(DataType::Type::kBool);
+  HInstruction* c3 = graph_->GetIntConstant(3);
+  HInstruction* c5 = graph_->GetIntConstant(5);
+
+  HInstruction* cls = MakeClassLoad();
+  HInstruction* new_inst = MakeNewInstance(cls);
+  HInstruction* write_entry = MakeIFieldSet(new_inst, c3, MemberOffset(32));
+  HInstruction* entry_goto = new (GetAllocator()) HGoto();
+  entry->AddInstruction(cls);
+  entry->AddInstruction(new_inst);
+  entry->AddInstruction(write_entry);
+  entry->AddInstruction(entry_goto);
+  ManuallyBuildEnvFor(cls, {});
+  new_inst->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  start->AddInstruction(new (GetAllocator()) HIf(bool_val));
+
+  HInstruction* left_goto = new (GetAllocator()) HGoto();
+  left->AddInstruction(left_goto);
+
+  HInstruction* goto_preheader = new (GetAllocator()) HGoto();
+  loop_pre_header->AddInstruction(goto_preheader);
+
+  HInstruction* suspend_check_header = new (GetAllocator()) HSuspendCheck();
+  HInstruction* call_header = MakeInvoke(DataType::Type::kBool, {});
+  HInstruction* if_header = new (GetAllocator()) HIf(call_header);
+  loop_header->AddInstruction(suspend_check_header);
+  loop_header->AddInstruction(call_header);
+  loop_header->AddInstruction(if_header);
+  call_header->CopyEnvironmentFrom(cls->GetEnvironment());
+  suspend_check_header->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HInstruction* call_loop_body = MakeInvoke(DataType::Type::kBool, {});
+  HInstruction* if_loop_body = new (GetAllocator()) HIf(call_loop_body);
+  loop_body->AddInstruction(call_loop_body);
+  loop_body->AddInstruction(if_loop_body);
+  call_loop_body->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HInstruction* call_loop_left = MakeInvoke(DataType::Type::kVoid, {});
+  HInstruction* goto_loop_left = new (GetAllocator()) HGoto();
+  loop_if_left->AddInstruction(call_loop_left);
+  loop_if_left->AddInstruction(goto_loop_left);
+  call_loop_left->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HInstruction* read_loop_right = MakeIFieldGet(new_inst, DataType::Type::kInt32, MemberOffset(32));
+  HInstruction* add_loop_right =
+      new (GetAllocator()) HAdd(DataType::Type::kInt32, c5, read_loop_right);
+  HInstruction* write_loop_right = MakeIFieldSet(new_inst, add_loop_right, MemberOffset(32));
+  HInstruction* call_loop_right = MakeInvoke(DataType::Type::kVoid, {});
+  HInstruction* goto_loop_right = new (GetAllocator()) HGoto();
+  loop_if_right->AddInstruction(read_loop_right);
+  loop_if_right->AddInstruction(add_loop_right);
+  loop_if_right->AddInstruction(write_loop_right);
+  loop_if_right->AddInstruction(call_loop_right);
+  loop_if_right->AddInstruction(goto_loop_right);
+  call_loop_right->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HInstruction* call_escape = MakeInvoke(DataType::Type::kVoid, { new_inst });
+  HInstruction* goto_escape = new (GetAllocator()) HGoto();
+  escape->AddInstruction(call_escape);
+  escape->AddInstruction(goto_escape);
+  call_escape->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HInstruction* goto_right = new (GetAllocator()) HGoto();
+  right->AddInstruction(goto_right);
+
+  HInstruction* read_bottom = MakeIFieldGet(new_inst, DataType::Type::kInt32, MemberOffset(32));
+  HInstruction* return_exit = new (GetAllocator()) HReturn(read_bottom);
+  breturn->AddInstruction(read_bottom);
+  breturn->AddInstruction(return_exit);
+
+  SetupExit(exit);
+
+  // PerformLSE expects this to be empty.
+  graph_->ClearDominanceInformation();
+  LOG(INFO) << "Pre LSE " << blks;
+  PerformLSEWithPartial();
+  LOG(INFO) << "Post LSE " << blks;
+
+  HPredicatedInstanceFieldGet* pred_get =
+      FindSingleInstruction<HPredicatedInstanceFieldGet>(graph_, breturn);
+  EXPECT_INS_REMOVED(read_bottom) << *read_bottom;
+  ASSERT_TRUE(pred_get != nullptr);
+  HPhi* inst_return_phi = pred_get->GetTarget()->AsPhi();
+  ASSERT_TRUE(inst_return_phi != nullptr) << pred_get->GetTarget()->DumpWithArgs();
+  EXPECT_INS_EQ(inst_return_phi->InputAt(0),
+                FindSingleInstruction<HNewInstance>(graph_, escape->GetSinglePredecessor()));
+  EXPECT_INS_EQ(inst_return_phi->InputAt(1), graph_->GetNullConstant());
+  EXPECT_INS_EQ(pred_get->GetDefaultValue()->InputAt(0), graph_->GetIntConstant(0));
+  EXPECT_INS_EQ(pred_get->GetDefaultValue()->InputAt(1), c3);
+  HPhi* loop_header_phi = FindSingleInstruction<HPhi>(graph_, loop_header);
+  ASSERT_NE(loop_header_phi, nullptr);
+  EXPECT_INS_EQ(loop_header_phi->InputAt(0), c3);
+  EXPECT_INS_EQ(loop_header_phi->InputAt(1), loop_header_phi);
+  EXPECT_INS_EQ(loop_header_phi->InputAt(2), add_loop_right);
+  EXPECT_INS_EQ(add_loop_right->InputAt(0), c5);
+  EXPECT_INS_EQ(add_loop_right->InputAt(1), loop_header_phi);
+  HInstanceFieldSet* mat_set =
+      FindSingleInstruction<HInstanceFieldSet>(graph_, escape->GetSinglePredecessor());
+  ASSERT_NE(mat_set, nullptr);
+  EXPECT_INS_EQ(mat_set->InputAt(1), loop_header_phi);
+  EXPECT_INS_REMOVED(write_loop_right);
+  EXPECT_INS_REMOVED(write_entry);
+  EXPECT_INS_RETAINED(call_header);
+  EXPECT_INS_RETAINED(call_loop_left);
+  EXPECT_INS_RETAINED(call_loop_right);
 }
 
 // TODO This should really be in an Instruction simplifier Gtest but (1) that

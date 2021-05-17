@@ -65,7 +65,7 @@ art_module_sdk {
 
             native_shared_libs: [
                 "libandroidio",
-                "libdexfile_external",
+                "libdexfile",
                 "libnativebridge",
                 "libnativehelper",
                 "libnativeloader",
@@ -77,15 +77,12 @@ art_module_sdk {
             ],
 
             native_static_libs: [
-                "libdexfile_external_static",
+                "libdexfile_static",
                 "libnativehelper_lazy",
             ],
         },
 
         android: {
-            boot_images: [
-                "art-boot-image",
-            ],
             bootclasspath_fragments: [
                 "art-bootclasspath-fragment",
             ],
@@ -103,11 +100,9 @@ art_module_sdk {
             java_boot_libs: [
                 "apache-xml",
                 "bouncycastle",
+                "core-libart",
                 "core-oj",
-                // The following are boot libs that are provided as java_libs in
-                // art-module-test-exports.
-                // "core-libart",
-                // "okhttp",
+                "okhttp",
             ],
 
             java_header_libs: [
@@ -176,8 +171,6 @@ art_module_sdk {
 art_module_exports {
     name: "art-module-host-exports",
     host_supported: true,
-    // TODO(b/173186484) - remove once art-notices-for-framework-stubs-jar has been removed.
-    device_supported: true,
 
     // Enable if SOONG_CONFIG_art_module_source_build is true.
     enabled: false,
@@ -190,14 +183,6 @@ art_module_exports {
     prebuilt_visibility: prebuilt_visibility,
 
     target: {
-        android: {
-            java_libs: [
-                // TODO(b/173186484) - embed notices in stubs and remove this.
-                // Needed for android_stubs_current et al.
-                "art-notices-for-framework-stubs-jar",
-            ],
-        },
-
         host: {
             // Set in target.host because the top level compile_multilib
             // property is fixed to "both" in the sdk/module_exports
@@ -217,7 +202,6 @@ art_module_exports {
                 "profman",
             ],
             native_libs: [
-                "libdexfile", // libdexfile_external dependency
                 "libartpalette", // libdexfile dependency
                 "libartbase", // libdexfile dependency
             ],
@@ -260,8 +244,8 @@ art_module_exports {
         "expected_cts_outputs",
 
         // Needed for robolectric.
-        "core-libart",
-        "okhttp",
+        "core-libart-for-host",
+        "okhttp-for-host",
 
         // Needed for CtsLibcore...TestCases
         "libcore-expectations-knownfailures-jar",

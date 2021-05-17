@@ -233,13 +233,18 @@ bool LoadNativeBridge(const char* nb_library_filename,
             // Store the handle for later.
             native_bridge_handle = handle;
           } else {
+            ALOGW("Unsupported native bridge API in %s (is version %d not compatible with %d)",
+                  nb_library_filename, callbacks->version, NAMESPACE_VERSION);
             callbacks = nullptr;
             dlclose(handle);
-            ALOGW("Unsupported native bridge interface.");
           }
         } else {
           dlclose(handle);
+          ALOGW("Unsupported native bridge API in %s: %s not found",
+                nb_library_filename, kNativeBridgeInterfaceSymbol);
         }
+      } else {
+        ALOGW("Failed to load native bridge implementation: %s", dlerror());
       }
 
       // Two failure conditions: could not find library (dlopen failed), or could not find native
