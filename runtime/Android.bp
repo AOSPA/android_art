@@ -520,7 +520,6 @@ art_cc_library {
     defaults: [
         "libart_defaults",
         "libart_nativeunwind_defaults",
-        "art_pgo_defaults",
     ],
     whole_static_libs: [
     ],
