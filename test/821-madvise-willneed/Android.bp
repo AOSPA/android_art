@@ -2,15 +2,6 @@
 
 // Build rules for ART run-test `821-madvise-willneed`.
 
-package {
-    // See: http://go/android-license-faq
-    // A large-scale-change added 'default_applicable_licenses' to import
-    // all of the 'license_kinds' from "art_license"
-    // to get the below license kinds:
-    //   SPDX-license-identifier-Apache-2.0
-    default_applicable_licenses: ["art_license"],
-}
-
 // Test's Dex code.
 java_test {
     name: "art-run-test-821-madvise-willneed",
