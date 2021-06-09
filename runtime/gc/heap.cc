@@ -2590,6 +2590,8 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
   if (self->IsHandlingStackOverflow()) {
     // If we are throwing a stack overflow error we probably don't have enough remaining stack
     // space to run the GC.
+    // Count this as a GC in case someone is waiting for it to complete.
+    gcs_completed_.fetch_add(1, std::memory_order_release);
     return collector::kGcTypeNone;
   }
   bool compacting_gc;
@@ -2607,9 +2609,12 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
     // GC can be disabled if someone has a used GetPrimitiveArrayCritical.
     if (compacting_gc && disable_moving_gc_count_ != 0) {
       LOG(WARNING) << "Skipping GC due to disable moving GC count " << disable_moving_gc_count_;
+      // Again count this as a GC.
+      gcs_completed_.fetch_add(1, std::memory_order_release);
       return collector::kGcTypeNone;
     }
     if (gc_disabled_for_shutdown_) {
+      gcs_completed_.fetch_add(1, std::memory_order_release);
       return collector::kGcTypeNone;
     }
     collector_type_running_ = collector_type_;
@@ -3960,20 +3965,7 @@ inline void Heap::CheckGCForNative(Thread* self) {
         if (VLOG_IS_ON(heap) || VLOG_IS_ON(startup)) {
           LOG(INFO) << "Stopping for native allocation, urgency: " << gc_urgency;
         }
-        // Count how many times we do this, so we can warn if this becomes excessive.
-        // Stop after a while out of excessive caution.
-        static constexpr int kGcWaitIters = 50;
-        for (int i = 1; i <= kGcWaitIters; ++i) {
-          if (GCNumberLt(starting_gc_num, starting_gc_num)
-              || WaitForGcToComplete(kGcCauseForNativeAlloc, self) != collector::kGcTypeNone) {
-            break;
-          }
-          if (i % 10 == 0) {
-            LOG(WARNING) << "Slept " << i << " times in native allocation, waiting for GC";
-          }
-          static constexpr int kGcWaitSleepMicros = 2000;
-          usleep(kGcWaitSleepMicros);  // Encourage our requested GC to start.
-        }
+        WaitForGcToComplete(kGcCauseForNativeAlloc, self);
       }
     } else {
       CollectGarbageInternal(NonStickyGcType(), kGcCauseForNativeAlloc, false, starting_gc_num + 1);

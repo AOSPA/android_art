@@ -826,7 +826,7 @@ class Heap {
 
   // Request asynchronous GC. Observed_gc_num is the value of GetCurrentGcNum() when we started to
   // evaluate the GC triggering condition. If a GC has been completed since then, we consider our
-  // job done.
+  // job done. Ensures that gcs_completed_ will eventually be incremented beyond observed_gc_num.
   void RequestConcurrentGC(Thread* self, GcCause cause, bool force_full, uint32_t observed_gc_num)
       REQUIRES(!*pending_task_lock_);
 
@@ -1565,7 +1565,8 @@ class Heap {
   Atomic<size_t> count_performed_homogeneous_space_compaction_;
 
   // The number of garbage collections (either young or full, not trims or the like) we have
-  // completed since heap creation. We guard against wrapping, though that's unlikely.
+  // completed since heap creation. We include requests that turned out to be impossible
+  // because they were disabled. We guard against wrapping, though that's unlikely.
   // Increment is guarded by gc_complete_lock_.
   Atomic<uint32_t> gcs_completed_;
 

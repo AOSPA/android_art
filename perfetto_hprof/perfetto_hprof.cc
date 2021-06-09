@@ -23,6 +23,7 @@
 #include <inttypes.h>
 #include <sched.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -151,20 +152,6 @@ bool ShouldSampleSmapsEntry(const perfetto::profiling::SmapsEntry& e) {
   return false;
 }
 
-bool CanConnectToSocket(const char* name) {
-  struct sockaddr_un addr = {};
-  addr.sun_family = AF_UNIX;
-  strncpy(addr.sun_path, name, sizeof(addr.sun_path) - 1);
-  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-  if (fd == -1) {
-    PLOG(ERROR) << "failed to create socket";
-    return false;
-  }
-  bool connected = connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0;
-  close(fd);
-  return connected;
-}
-
 constexpr size_t kMaxCmdlineSize = 512;
 
 class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
@@ -186,12 +173,6 @@ class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
     std::unique_ptr<perfetto::protos::pbzero::JavaHprofConfig::Decoder> cfg(
         new perfetto::protos::pbzero::JavaHprofConfig::Decoder(
           args.config->java_hprof_config_raw()));
-
-    if (args.config->enable_extra_guardrails() && !CanConnectToSocket("/dev/socket/heapprofd")) {
-      LOG(ERROR) << "rejecting extra guardrails";
-      enabled_ = false;
-      return;
-    }
 
     dump_smaps_ = cfg->dump_smaps();
     for (auto it = cfg->ignored_types(); it; ++it) {
@@ -913,8 +894,10 @@ void DumpPerfetto(art::Thread* self) {
 
   LOG(INFO) << "finished dumping heap for " << parent_pid;
   // Prevent the atexit handlers to run. We do not want to call cleanup
-  // functions the parent process has registered.
-  _exit(0);
+  // functions the parent process has registered. However, have functions
+  // registered with `at_quick_exit` (for instance LLVM's code coverage profile
+  // dumping routine) be called before exiting.
+  quick_exit(0);
 }
 
 // The plugin initialization function.
