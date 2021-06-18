@@ -14,15 +14,31 @@
  * limitations under the License.
  */
 
-package com.android.server.art;
+class SuperClass {
+  public int doInvoke() {
+    synchronized (this) {
+      return 42;
+    }
+  }
+}
 
-/**
- * This class provides a system API for functionality provided by the ART
- * module.
- */
-@libcore.api.CorePlatformApi(status = libcore.api.CorePlatformApi.Status.STABLE)
-public final class ArtManagerLocal {
-    static final String LOG_TAG = "ArtService";
+public class Main extends SuperClass {
 
-    public ArtManagerLocal() {}
+  public static void main(String[] args) {
+    Main m = new Main();
+    int value = doInvokeTypedSuperClass(m);
+    if (value != 43) {
+      throw new Error("Expected 43, got " + value);
+    }
+  }
+
+  public static int doInvokeTypedSuperClass(SuperClass sc) {
+    return sc.doInvoke();
+  }
+
+  public int doInvoke() {
+    synchronized (this) {
+      return super.doInvoke() + 1;
+    }
+  }
 }
