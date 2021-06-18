@@ -525,7 +525,8 @@ class Runtime {
   }
 
   void RegisterAppInfo(const std::vector<std::string>& code_paths,
-                       const std::string& profile_output_filename);
+                       const std::string& profile_output_filename,
+                       const std::string& ref_profile_filename);
 
   // Transaction support.
   bool IsActiveTransaction() const;
@@ -1004,6 +1005,17 @@ class Runtime {
   const std::string& GetApexVersions() const {
     return apex_versions_;
   }
+
+  // Trigger a flag reload from system properties or device congfigs.
+  //
+  // Should only be called from runtime init and zygote post fork as
+  // we don't want to change the runtime config midway during execution.
+  //
+  // The caller argument should be the name of the function making this call
+  // and will be used to enforce the appropriate names.
+  //
+  // See Flags::ReloadAllFlags as well.
+  static void ReloadAllFlags(const std::string& caller);
 
  private:
   static void InitPlatformSignalHandlers();

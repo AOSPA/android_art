@@ -144,7 +144,7 @@ enum {
   DEBUG_NATIVE_DEBUGGABLE             = 1 << 7,
   DEBUG_JAVA_DEBUGGABLE               = 1 << 8,
   DISABLE_VERIFIER                    = 1 << 9,
-  ONLY_USE_SYSTEM_OAT_FILES           = 1 << 10,
+  ONLY_USE_TRUSTED_OAT_FILES          = 1 << 10,  // Formerly ONLY_USE_SYSTEM_OAT_FILES
   DEBUG_GENERATE_MINI_DEBUG_INFO      = 1 << 11,
   HIDDEN_API_ENFORCEMENT_POLICY_MASK  = (1 << 12)
                                       | (1 << 13),
@@ -269,6 +269,9 @@ static void ZygoteHooks_nativePostZygoteFork(JNIEnv*, jclass) {
 static void ZygoteHooks_nativePostForkSystemServer(JNIEnv* env ATTRIBUTE_UNUSED,
                                                    jclass klass ATTRIBUTE_UNUSED,
                                                    jint runtime_flags) {
+  // Reload the current flags first. In case we need to take actions based on them.
+  Runtime::Current()->ReloadAllFlags(__FUNCTION__);
+
   // Set the runtime state as the first thing, in case JIT and other services
   // start querying it.
   Runtime::Current()->SetAsSystemServer();
@@ -296,7 +299,9 @@ static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
                                             jboolean is_zygote,
                                             jstring instruction_set) {
   DCHECK(!(is_system_server && is_zygote));
-  // Set the runtime state as the first thing, in case JIT and other services
+  // Reload the current flags first. In case we need to take any updated actions.
+  Runtime::Current()->ReloadAllFlags(__FUNCTION__);
+  // Then, set the runtime state, in case JIT and other services
   // start querying it.
   Runtime::Current()->SetAsZygoteChild(is_system_server, is_zygote);
 
@@ -313,9 +318,9 @@ static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
     runtime_flags &= ~DISABLE_VERIFIER;
   }
 
-  if ((runtime_flags & ONLY_USE_SYSTEM_OAT_FILES) != 0 || is_system_server) {
-    runtime->GetOatFileManager().SetOnlyUseSystemOatFiles();
-    runtime_flags &= ~ONLY_USE_SYSTEM_OAT_FILES;
+  if ((runtime_flags & ONLY_USE_TRUSTED_OAT_FILES) != 0 || is_system_server) {
+    runtime->GetOatFileManager().SetOnlyUseTrustedOatFiles();
+    runtime_flags &= ~ONLY_USE_TRUSTED_OAT_FILES;
   }
 
   api_enforcement_policy = hiddenapi::EnforcementPolicyFromInt(
