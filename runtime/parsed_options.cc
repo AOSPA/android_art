@@ -23,6 +23,7 @@
 #include <android-base/strings.h>
 
 #include "base/file_utils.h"
+#include "base/flags.h"
 #include "base/indenter.h"
 #include "base/macros.h"
 #include "base/utils.h"
@@ -288,6 +289,7 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       // TODO This should be redone.
       .Define({"-Xps-_",
                "-Xps-min-save-period-ms:_",
+               "-Xps-min-first-save-ms:_",
                "-Xps-save-resolved-classes-delayed-ms:_",
                "-Xps-hot-startup-method-samples:_",
                "-Xps-min-methods-to-save:_",
@@ -430,7 +432,7 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .WithType<unsigned int>()
           .IntoKey(M::MetricsReportingPeriod)
       .Define("-Xonly-use-system-oat-files")
-          .IntoKey(M::OnlyUseSystemOatFiles)
+          .IntoKey(M::OnlyUseTrustedOatFiles)
       .Define("-Xverifier-logging-threshold=_")
           .WithType<unsigned int>()
           .IntoKey(M::VerifierLoggingThreshold)
@@ -463,8 +465,11 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-XX:PerfettoJavaHeapStackProf=_")
           .WithType<bool>()
           .WithValueMap({{"false", false}, {"true", true}})
-          .IntoKey(M::PerfettoJavaHeapStackProf)
-      .Ignore({
+          .IntoKey(M::PerfettoJavaHeapStackProf);
+
+      FlagBase::AddFlagsToCmdlineParser(parser_builder.get());
+
+      parser_builder->Ignore({
           "-ea", "-da", "-enableassertions", "-disableassertions", "--runtime-arg", "-esa",
           "-dsa", "-enablesystemassertions", "-disablesystemassertions", "-Xrs", "-Xint:_",
           "-Xdexopt:_", "-Xnoquithandler", "-Xjnigreflimit:_", "-Xgenregmap", "-Xnogenregmap",
