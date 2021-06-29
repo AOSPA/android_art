@@ -4092,8 +4092,11 @@ ObjPtr<mirror::DexCache> ClassLinker::RegisterDexFile(const DexFile& dex_file,
     // remembered sets and generational GCs.
     WriteBarrier::ForEveryFieldWrite(h_class_loader.Get());
   }
+  PaletteHooks* hooks = nullptr;
   VLOG(class_linker) << "Registered dex file " << dex_file.GetLocation();
-  PaletteNotifyDexFileLoaded(dex_file.GetLocation().c_str());
+  if (PaletteGetHooks(&hooks) == PALETTE_STATUS_OK) {
+    hooks->NotifyDexFileLoaded(dex_file.GetLocation().c_str());
+  }
   return h_dex_cache.Get();
 }
 
@@ -8945,16 +8948,6 @@ ObjPtr<mirror::Class> ClassLinker::DoLookupResolvedType(dex::TypeIndex type_idx,
                                                         ObjPtr<mirror::ClassLoader> class_loader) {
   const DexFile& dex_file = *dex_cache->GetDexFile();
   const char* descriptor = dex_file.StringByTypeIdx(type_idx);
-  ObjPtr<mirror::Class> type = LookupResolvedType(descriptor, class_loader);
-  if (type != nullptr) {
-    DCHECK(type->IsResolved());
-    dex_cache->SetResolvedType(type_idx, type);
-  }
-  return type;
-}
-
-ObjPtr<mirror::Class> ClassLinker::LookupResolvedType(const char* descriptor,
-                                                      ObjPtr<mirror::ClassLoader> class_loader) {
   DCHECK_NE(*descriptor, '\0') << "descriptor is empty string";
   ObjPtr<mirror::Class> type = nullptr;
   if (descriptor[1] == '\0') {
@@ -8968,7 +8961,14 @@ ObjPtr<mirror::Class> ClassLinker::LookupResolvedType(const char* descriptor,
     // Find the class in the loaded classes table.
     type = LookupClass(self, descriptor, hash, class_loader);
   }
-  return (type != nullptr && type->IsResolved()) ? type : nullptr;
+  if (type != nullptr) {
+    if (type->IsResolved()) {
+      dex_cache->SetResolvedType(type_idx, type);
+    } else {
+      type = nullptr;
+    }
+  }
+  return type;
 }
 
 template <typename RefType>

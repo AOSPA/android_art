@@ -152,8 +152,8 @@ class RosAllocSpace : public MallocSpace {
 
   virtual ~RosAllocSpace();
 
-  bool LogFragmentationAllocFailure(std::ostream& os, size_t failed_alloc_bytes) override {
-    return rosalloc_->LogFragmentationAllocFailure(os, failed_alloc_bytes);
+  void LogFragmentationAllocFailure(std::ostream& os, size_t failed_alloc_bytes) override {
+    rosalloc_->LogFragmentationAllocFailure(os, failed_alloc_bytes);
   }
 
   void DumpStats(std::ostream& os);

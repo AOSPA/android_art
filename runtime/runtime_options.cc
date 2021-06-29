@@ -18,7 +18,6 @@
 
 #include <memory>
 
-#include "base/fast_exit.h"
 #include "base/sdk_version.h"
 #include "base/utils.h"
 #include "debugger.h"

@@ -111,7 +111,7 @@ size_t ZygoteSpace::FreeList(Thread*, size_t, mirror::Object**) {
   UNREACHABLE();
 }
 
-bool ZygoteSpace::LogFragmentationAllocFailure(std::ostream&, size_t) {
+void ZygoteSpace::LogFragmentationAllocFailure(std::ostream&, size_t) {
   UNIMPLEMENTED(FATAL);
   UNREACHABLE();
 }

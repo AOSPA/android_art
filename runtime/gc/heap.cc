@@ -171,10 +171,6 @@ static constexpr size_t kVerifyObjectAllocationStackSize = 16 * KB /
 static constexpr size_t kDefaultAllocationStackSize = 8 * MB /
     sizeof(mirror::HeapReference<mirror::Object>);
 
-// After a GC (due to allocation failure) we should retrieve at least this
-// fraction of the current max heap size. Otherwise throw OOME.
-static constexpr double kMinFreeHeapAfterGcForAlloc = 0.01;
-
 // For deterministic compilation, we need the heap to be at a well-known address.
 static constexpr uint32_t kAllocSpaceBeginForDeterministicAoT = 0x40000000;
 // Dump the rosalloc stats on SIGQUIT.
@@ -371,7 +367,7 @@ Heap::Heap(size_t initial_size,
           min_interval_homogeneous_space_compaction_by_oom),
       last_time_homogeneous_space_compaction_by_oom_(NanoTime()),
       gcs_completed_(0u),
-      max_gc_requested_(0u),
+      gcs_requested_(0u),
       pending_collector_transition_(nullptr),
       pending_heap_trim_(nullptr),
       use_homogeneous_space_compaction_for_oom_(use_homogeneous_space_compaction_for_oom),
@@ -1450,16 +1446,7 @@ void Heap::ThrowOutOfMemoryError(Thread* self, size_t byte_count, AllocatorType 
       CHECK(space != nullptr) << "allocator_type:" << allocator_type
                               << " byte_count:" << byte_count
                               << " total_bytes_free:" << total_bytes_free;
-      // LogFragmentationAllocFailure returns true if byte_count is greater than
-      // the largest free contiguous chunk in the space. Return value false
-      // means that we are throwing OOME because the amount of free heap after
-      // GC is less than kMinFreeHeapAfterGcForAlloc in proportion of the heap-size.
-      // Log an appropriate message in that case.
-      if (!space->LogFragmentationAllocFailure(oss, byte_count)) {
-        oss << "; giving up on allocation because <"
-            << kMinFreeHeapAfterGcForAlloc * 100
-            << "% of heap free after GC.";
-      }
+      space->LogFragmentationAllocFailure(oss, byte_count);
     }
   }
   self->ThrowOutOfMemoryError(oss.str().c_str());
@@ -1801,6 +1788,9 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
                                              size_t* usable_size,
                                              size_t* bytes_tl_bulk_allocated,
                                              ObjPtr<mirror::Class>* klass) {
+  // After a GC (due to allocation failure) we should retrieve at least this
+  // fraction of the current max heap size. Otherwise throw OOME.
+  constexpr double kMinFreeHeapAfterGcForAlloc = 0.01;
   bool was_default_allocator = allocator == GetCurrentAllocator();
   // Make sure there is no pending exception since we may need to throw an OOME.
   self->AssertNoPendingException();
@@ -2569,9 +2559,8 @@ size_t Heap::GetNativeBytes() {
   // other things. It seems risky to trigger GCs as a result of such changes.
 }
 
-static inline bool GCNumberLt(uint32_t gc_num1, uint32_t gc_num2) {
-  // unsigned comparison, assuming a non-huge difference, but dealing correctly with wrapping.
-  uint32_t difference = gc_num2 - gc_num1;
+static inline bool GCNumberLt(uint32_t gcs_completed, uint32_t gcs_requested) {
+  uint32_t difference = gcs_requested - gcs_completed;
   bool completed_more_than_requested = difference > 0x80000000;
   return difference > 0 && !completed_more_than_requested;
 }
@@ -2587,7 +2576,6 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
   switch (gc_type) {
     case collector::kGcTypePartial: {
       if (!HasZygoteSpace()) {
-        // Do not increment gcs_completed_ . We should retry with kGcTypeFull.
         return collector::kGcTypeNone;
       }
       break;
@@ -3712,11 +3700,8 @@ class Heap::ConcurrentGCTask : public HeapTask {
   ConcurrentGCTask(uint64_t target_time, GcCause cause, bool force_full, uint32_t gc_num)
       : HeapTask(target_time), cause_(cause), force_full_(force_full), my_gc_num_(gc_num) {}
   void Run(Thread* self) override {
-    Runtime* runtime = Runtime::Current();
-    gc::Heap* heap = runtime->GetHeap();
-    DCHECK(GCNumberLt(my_gc_num_, heap->GetCurrentGcNum() + 2));  // <= current_gc_num + 1
+    gc::Heap* heap = Runtime::Current()->GetHeap();
     heap->ConcurrentGC(self, cause_, force_full_, my_gc_num_);
-    CHECK(!GCNumberLt(heap->GetCurrentGcNum(), my_gc_num_) || runtime->IsShuttingDown(self));
   }
 
  private:
@@ -3731,55 +3716,43 @@ static bool CanAddHeapTask(Thread* self) REQUIRES(!Locks::runtime_shutdown_lock_
       !self->IsHandlingStackOverflow();
 }
 
-bool Heap::RequestConcurrentGC(Thread* self,
+void Heap::RequestConcurrentGC(Thread* self,
                                GcCause cause,
                                bool force_full,
                                uint32_t observed_gc_num) {
-  uint32_t max_gc_requested = max_gc_requested_.load(std::memory_order_relaxed);
-  if (!GCNumberLt(observed_gc_num, max_gc_requested)) {
-    // observed_gc_num >= max_gc_requested: Nobody beat us to requesting the next gc.
-    if (CanAddHeapTask(self)) {
-      // Since observed_gc_num >= max_gc_requested, this increases max_gc_requested_, if successful.
-      if (max_gc_requested_.CompareAndSetStrongRelaxed(max_gc_requested, observed_gc_num + 1)) {
-        task_processor_->AddTask(self, new ConcurrentGCTask(NanoTime(),  // Start straight away.
-                                                            cause,
-                                                            force_full,
-                                                            observed_gc_num + 1));
-      }
-      DCHECK(GCNumberLt(observed_gc_num, max_gc_requested_.load(std::memory_order_relaxed)));
-      // If we increased max_gc_requested_, then we added a task that will eventually cause
-      // gcs_completed_ to be incremented (to at least observed_gc_num + 1).
-      // If the CAS failed, somebody else did.
-      return true;
+  uint32_t gcs_requested = gcs_requested_.load(std::memory_order_relaxed);
+  if (!GCNumberLt(observed_gc_num, gcs_requested)) {
+    // Nobody beat us to requesting the next gc after observed_gc_num.
+    if (CanAddHeapTask(self)
+        && gcs_requested_.CompareAndSetStrongRelaxed(gcs_requested, observed_gc_num + 1)) {
+      task_processor_->AddTask(self, new ConcurrentGCTask(NanoTime(),  // Start straight away.
+                                                          cause,
+                                                          force_full,
+                                                          observed_gc_num + 1));
     }
-    return false;
   }
-  return true;  // Vacuously.
 }
 
 void Heap::ConcurrentGC(Thread* self, GcCause cause, bool force_full, uint32_t requested_gc_num) {
   if (!Runtime::Current()->IsShuttingDown(self)) {
-    // Wait for any GCs currently running to finish. If this incremented GC number, we're done.
-    WaitForGcToComplete(cause, self);
-    if (GCNumberLt(GetCurrentGcNum(), requested_gc_num)) {
+    // Wait for any GCs currently running to finish.
+    if (WaitForGcToComplete(cause, self) == collector::kGcTypeNone) {
+      // If we can't run the GC type we wanted to run, find the next appropriate one and try
+      // that instead. E.g. can't do partial, so do full instead.
       collector::GcType next_gc_type = next_gc_type_;
       // If forcing full and next gc type is sticky, override with a non-sticky type.
       if (force_full && next_gc_type == collector::kGcTypeSticky) {
         next_gc_type = NonStickyGcType();
       }
-      // If we can't run the GC type we wanted to run, find the next appropriate one and try
-      // that instead. E.g. can't do partial, so do full instead.
-      // We must ensure that we run something that ends up inrementing gcs_completed_.
-      // In the kGcTypePartial case, the initial CollectGarbageInternal call may not have that
-      // effect, but the subsequent KGcTypeFull call will.
       if (CollectGarbageInternal(next_gc_type, cause, false, requested_gc_num)
           == collector::kGcTypeNone) {
         for (collector::GcType gc_type : gc_plan_) {
-          if (!GCNumberLt(GetCurrentGcNum(), requested_gc_num)) {
+          // Attempt to run the collector, if we succeed, we are done.
+          uint32_t gcs_completed = GetCurrentGcNum();
+          if (!GCNumberLt(gcs_completed, requested_gc_num)) {
             // Somebody did it for us.
             break;
           }
-          // Attempt to run the collector, if we succeed, we are done.
           if (gc_type > next_gc_type &&
               CollectGarbageInternal(gc_type, cause, false, requested_gc_num)
               != collector::kGcTypeNone) {
@@ -3985,19 +3958,14 @@ inline void Heap::CheckGCForNative(Thread* self) {
   float gc_urgency = NativeMemoryOverTarget(current_native_bytes, is_gc_concurrent);
   if (UNLIKELY(gc_urgency >= 1.0)) {
     if (is_gc_concurrent) {
-      bool requested =
-          RequestConcurrentGC(self, kGcCauseForNativeAlloc, /*force_full=*/true, starting_gc_num);
+      RequestConcurrentGC(self, kGcCauseForNativeAlloc, /*force_full=*/true, starting_gc_num);
       if (gc_urgency > kStopForNativeFactor
           && current_native_bytes > stop_for_native_allocs_) {
         // We're in danger of running out of memory due to rampant native allocation.
         if (VLOG_IS_ON(heap) || VLOG_IS_ON(startup)) {
           LOG(INFO) << "Stopping for native allocation, urgency: " << gc_urgency;
         }
-        if (WaitForGcToComplete(kGcCauseForNativeAlloc, self) == collector::kGcTypeNone) {
-          DCHECK(!requested
-                 || GCNumberLt(starting_gc_num, max_gc_requested_.load(std::memory_order_relaxed)));
-          // TODO: Eventually sleep here again.
-        }
+        WaitForGcToComplete(kGcCauseForNativeAlloc, self);
       }
     } else {
       CollectGarbageInternal(NonStickyGcType(), kGcCauseForNativeAlloc, false, starting_gc_num + 1);
@@ -4178,11 +4146,11 @@ int Heap::CheckPerfettoJHPEnabled() {
   return GetHeapSampler().IsEnabled();
 }
 
-void Heap::JHPCheckNonTlabSampleAllocation(Thread* self, mirror::Object* obj, size_t alloc_size) {
+void Heap::JHPCheckNonTlabSampleAllocation(Thread* self, mirror::Object* ret, size_t alloc_size) {
   bool take_sample = false;
   size_t bytes_until_sample = 0;
   HeapSampler& prof_heap_sampler = GetHeapSampler();
-  if (obj != nullptr && prof_heap_sampler.IsEnabled()) {
+  if (ret != nullptr && prof_heap_sampler.IsEnabled()) {
     // An allocation occurred, sample it, even if non-Tlab.
     // In case take_sample is already set from the previous GetSampleOffset
     // because we tried the Tlab allocation first, we will not use this value.
@@ -4195,9 +4163,9 @@ void Heap::JHPCheckNonTlabSampleAllocation(Thread* self, mirror::Object* obj, si
                                       &bytes_until_sample);
     prof_heap_sampler.SetBytesUntilSample(bytes_until_sample);
     if (take_sample) {
-      prof_heap_sampler.ReportSample(obj, alloc_size);
+      prof_heap_sampler.ReportSample(ret, alloc_size);
     }
-    VLOG(heap) << "JHP:NonTlab Non-moving or Large Allocation";
+    VLOG(heap) << "JHP:NonTlab:AllocNonvirtual";
   }
 }
 

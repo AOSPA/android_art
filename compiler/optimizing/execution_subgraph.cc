@@ -28,15 +28,17 @@
 
 namespace art {
 
-ExecutionSubgraph::ExecutionSubgraph(HGraph* graph, ScopedArenaAllocator* allocator)
+ExecutionSubgraph::ExecutionSubgraph(HGraph* graph,
+                                     bool analysis_possible,
+                                     ScopedArenaAllocator* allocator)
     : graph_(graph),
       allocator_(allocator),
-      allowed_successors_(graph_->GetBlocks().size(),
+      allowed_successors_(analysis_possible ? graph_->GetBlocks().size() : 0,
                           ~(std::bitset<kMaxFilterableSuccessors> {}),
                           allocator_->Adapter(kArenaAllocLSA)),
       unreachable_blocks_(
-          allocator_, graph_->GetBlocks().size(), /*expandable=*/ false, kArenaAllocLSA),
-      valid_(true),
+          allocator_, analysis_possible ? graph_->GetBlocks().size() : 0, false, kArenaAllocLSA),
+      valid_(analysis_possible),
       needs_prune_(false),
       finalized_(false) {
   if (valid_) {

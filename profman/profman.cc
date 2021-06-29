@@ -54,7 +54,6 @@
 #include "dex/class_accessor-inl.h"
 #include "dex/class_reference.h"
 #include "dex/code_item_accessors-inl.h"
-#include "dex/descriptors_names.h"
 #include "dex/dex_file.h"
 #include "dex/dex_file_loader.h"
 #include "dex/dex_file_structs.h"
@@ -153,7 +152,7 @@ NO_RETURN static void Usage(const char *fmt, ...) {
   UsageError("");
   UsageError("  --apk-fd=<number>: file descriptor containing an open APK to");
   UsageError("      search for dex files");
-  UsageError("  --apk=<filename>: an APK to search for dex files");
+  UsageError("  --apk-=<filename>: an APK to search for dex files");
   UsageError("  --skip-apk-verification: do not attempt to verify APKs");
   UsageError("");
   UsageError("  --generate-boot-image-profile: Generate a boot image profile based on input");
@@ -206,6 +205,8 @@ static constexpr uint16_t kDefaultTestProfileClassPercentage = 5;
 static const std::string kMethodSep = "->";  // NOLINT [runtime/string] [4]
 static const std::string kMissingTypesMarker = "missing_types";  // NOLINT [runtime/string] [4]
 static const std::string kMegamorphicTypesMarker = "megamorphic_types";  // NOLINT [runtime/string] [4]
+static const std::string kInvalidClassDescriptor = "invalid_class";  // NOLINT [runtime/string] [4]
+static const std::string kInvalidMethod = "invalid_method";  // NOLINT [runtime/string] [4]
 static const std::string kClassAllMethods = "*";  // NOLINT [runtime/string] [4]
 static constexpr char kAnnotationStart = '{';
 static constexpr char kAnnotationEnd = '}';
@@ -664,9 +665,7 @@ class ProfMan final {
 #endif
   }
 
-  std::unique_ptr<const ProfileCompilationInfo> LoadProfile(const std::string& filename,
-                                                            int fd,
-                                                            bool for_boot_image) {
+  std::unique_ptr<const ProfileCompilationInfo> LoadProfile(const std::string& filename, int fd) {
     if (!filename.empty()) {
 #ifdef _WIN32
       int flags = O_RDWR;
@@ -679,7 +678,7 @@ class ProfMan final {
         return nullptr;
       }
     }
-    std::unique_ptr<ProfileCompilationInfo> info(new ProfileCompilationInfo(for_boot_image));
+    std::unique_ptr<ProfileCompilationInfo> info(new ProfileCompilationInfo);
     if (!info->Load(fd)) {
       LOG(ERROR) << "Cannot load profile info from fd=" << fd << "\n";
       return nullptr;
@@ -692,12 +691,7 @@ class ProfMan final {
                      int fd,
                      const std::vector<std::unique_ptr<const DexFile>>* dex_files,
                      std::string* dump) {
-    // For dumping, try loading as app profile and if that fails try loading as boot profile.
-    std::unique_ptr<const ProfileCompilationInfo> info =
-        LoadProfile(filename, fd, /*for_boot_image=*/ false);
-    if (info == nullptr) {
-      info = LoadProfile(filename, fd, /*for_boot_image=*/ true);
-    }
+    std::unique_ptr<const ProfileCompilationInfo> info(LoadProfile(filename, fd));
     if (info == nullptr) {
       LOG(ERROR) << "Cannot load profile info from filename=" << filename << " fd=" << fd;
       return -1;
@@ -792,6 +786,7 @@ class ProfMan final {
   // followed by an IC description matching the format described by ProcessLine
   // below. Note that this will collapse all ICs with the same receiver type.
   std::string GetInlineCacheLine(const ProfileCompilationInfo& profile_info,
+                                 std::vector<std::unique_ptr<const DexFile>>* dex_files,
                                  const dex::MethodId& id,
                                  const DexFile* dex_file,
                                  uint16_t dex_method_idx) {
@@ -805,7 +800,7 @@ class ProfMan final {
     struct IcLineInfo {
       bool is_megamorphic_ = false;
       bool is_missing_types_ = false;
-      std::set<dex::TypeIndex> classes_;
+      std::set<TypeReference> classes_;
     };
     std::unordered_map<dex::TypeIndex, IcLineInfo> ics;
     CodeItemInstructionAccessor accessor(
@@ -828,8 +823,14 @@ class ProfMan final {
       if (ic_data.is_missing_types) {
         val->second.is_missing_types_ = true;
       }
-      for (dex::TypeIndex type_index : ic_data.classes) {
-        val->second.classes_.insert(type_index);
+      for (auto cls : ic_data.classes) {
+        const DexFile* class_dex_file =
+            profile_info.FindDexFileForProfileIndex(cls.dex_profile_index, *dex_files);
+        if (class_dex_file == nullptr) {
+          val->second.is_missing_types_ = true;
+          continue;
+        }
+        val->second.classes_.insert({ class_dex_file, cls.type_index });
       }
     }
     if (ics.empty()) {
@@ -846,21 +847,27 @@ class ProfMan final {
         dump_ic << kMegamorphicTypesMarker;
       } else {
         bool first = true;
-        for (dex::TypeIndex type_index : dex_data.classes_) {
+        for (const auto& klass : dex_data.classes_) {
           if (!first) {
             dump_ic << kProfileParsingTypeSep;
           }
           first = false;
-          dump_ic << profile_info.GetTypeDescriptor(dex_file, type_index);
+          dump_ic << klass.dex_file->GetTypeDescriptor(
+              klass.dex_file->GetTypeId(klass.TypeIndex()));
         }
       }
     }
     return dump_ic.str();
   }
 
-  bool GetClassNamesAndMethods(const ProfileCompilationInfo& profile_info,
+  bool GetClassNamesAndMethods(int fd,
                                std::vector<std::unique_ptr<const DexFile>>* dex_files,
                                std::set<std::string>* out_lines) {
+    ProfileCompilationInfo profile_info;
+    if (!profile_info.Load(fd)) {
+      LOG(ERROR) << "Cannot load profile info";
+      return false;
+    }
     for (const std::unique_ptr<const DexFile>& dex_file : *dex_files) {
       std::set<dex::TypeIndex> class_types;
       std::set<uint16_t> hot_methods;
@@ -873,7 +880,8 @@ class ProfMan final {
                                             &startup_methods,
                                             &post_startup_methods)) {
         for (const dex::TypeIndex& type_index : class_types) {
-          out_lines->insert(profile_info.GetTypeDescriptor(dex_file.get(), type_index));
+          const dex::TypeId& type_id = dex_file->GetTypeId(type_index);
+          out_lines->insert(std::string(dex_file->GetTypeDescriptor(type_id)));
         }
         combined_methods = hot_methods;
         combined_methods.insert(startup_methods.begin(), startup_methods.end());
@@ -894,27 +902,13 @@ class ProfMan final {
             flags_string += kMethodFlagStringPostStartup;
           }
           std::string inline_cache_string =
-              GetInlineCacheLine(profile_info, id, dex_file.get(), dex_method_idx);
+              GetInlineCacheLine(profile_info, dex_files, id, dex_file.get(), dex_method_idx);
           out_lines->insert(flags_string + type_string + kMethodSep + method_name +
                             signature_string + inline_cache_string);
         }
       }
     }
     return true;
-  }
-
-  bool GetClassNamesAndMethods(int fd,
-                               std::vector<std::unique_ptr<const DexFile>>* dex_files,
-                               std::set<std::string>* out_lines) {
-    // For dumping, try loading as app profile and if that fails try loading as boot profile.
-    for (bool for_boot_image : {false, true}) {
-      ProfileCompilationInfo profile_info(for_boot_image);
-      if (profile_info.Load(fd)) {
-        return GetClassNamesAndMethods(profile_info, dex_files, out_lines);
-      }
-    }
-    LOG(ERROR) << "Cannot load profile info";
-    return false;
   }
 
   bool GetClassNamesAndMethods(const std::string& profile_file,
@@ -1035,56 +1029,81 @@ class ProfMan final {
     return output.release();
   }
 
-  // Find class definition for a descriptor.
-  const dex::ClassDef* FindClassDef(const std::vector<std::unique_ptr<const DexFile>>& dex_files,
-                                    std::string_view klass_descriptor,
-                                    /*out*/ TypeReference* class_ref) {
-    for (const std::unique_ptr<const DexFile>& dex_file : dex_files) {
-      const dex::TypeId* type_id = dex_file->FindTypeId(klass_descriptor);
-      if (type_id != nullptr) {
-        dex::TypeIndex type_index = dex_file->GetIndexForTypeId(*type_id);
-        const dex::ClassDef* class_def = dex_file->FindClassDef(type_index);
-        if (class_def != nullptr) {
-          *class_ref = TypeReference(dex_file.get(), type_index);
-          return class_def;
-        }
-      }
-    }
-    return nullptr;
-  }
-
   // Find class klass_descriptor in the given dex_files and store its reference
   // in the out parameter class_ref.
-  // Return true if a reference of the class was found in any of the dex_files.
+  // Return true if the definition or a reference of the class was found in any
+  // of the dex_files.
   bool FindClass(const std::vector<std::unique_ptr<const DexFile>>& dex_files,
-                 std::string_view klass_descriptor,
+                 const std::string_view& klass_descriptor,
                  /*out*/ TypeReference* class_ref) {
+    return FindClass(
+        ArrayRef<const std::unique_ptr<const DexFile>>(dex_files), klass_descriptor, class_ref);
+  }
+
+  bool FindClass(ArrayRef<const std::unique_ptr<const DexFile>> dex_files,
+                 const std::string_view& klass_descriptor,
+                 /*out*/TypeReference* class_ref) {
+    constexpr uint16_t kInvalidTypeIndex = std::numeric_limits<uint16_t>::max() - 1;
     for (const std::unique_ptr<const DexFile>& dex_file_ptr : dex_files) {
       const DexFile* dex_file = dex_file_ptr.get();
-      const dex::TypeId* type_id = dex_file->FindTypeId(klass_descriptor);
-      if (type_id != nullptr) {
-        *class_ref = TypeReference(dex_file, dex_file->GetIndexForTypeId(*type_id));
-        return true;
+      if (klass_descriptor == kInvalidClassDescriptor) {
+        if (kInvalidTypeIndex >= dex_file->NumTypeIds()) {
+          // The dex file does not contain all possible type ids which leaves us room
+          // to add an "invalid" type id.
+          *class_ref = TypeReference(dex_file, dex::TypeIndex(kInvalidTypeIndex));
+          return true;
+        } else {
+          // The dex file contains all possible type ids. We don't have any free type id
+          // that we can use as invalid.
+          continue;
+        }
       }
+
+      const dex::TypeId* type_id = dex_file->FindTypeId(klass_descriptor);
+      if (type_id == nullptr) {
+        continue;
+      }
+      dex::TypeIndex type_index = dex_file->GetIndexForTypeId(*type_id);
+      *class_ref = TypeReference(dex_file, type_index);
+
+      if (dex_file->FindClassDef(type_index) == nullptr) {
+        // Class is only referenced in the current dex file but not defined in it.
+        // We use its current type reference, but keep looking for its
+        // definition.
+        // Note that array classes fall into that category, as they do not have
+        // a class definition.
+        continue;
+      }
+      return true;
     }
-    return false;
+    // If we arrive here, we haven't found a class definition. If the dex file
+    // of the class reference is not null, then we have found a type reference,
+    // and we return that to the caller.
+    return (class_ref->dex_file != nullptr);
   }
 
   // Find the method specified by method_spec in the class class_ref.
   uint32_t FindMethodIndex(const TypeReference& class_ref,
-                           std::string_view method_spec) {
+                           const std::string& method_spec) {
     const DexFile* dex_file = class_ref.dex_file;
+    if (method_spec == kInvalidMethod) {
+      constexpr uint16_t kInvalidMethodIndex = std::numeric_limits<uint16_t>::max() - 1;
+      return kInvalidMethodIndex >= dex_file->NumMethodIds()
+             ? kInvalidMethodIndex
+             : dex::kDexNoIndex;
+    }
 
-    size_t signature_start = method_spec.find(kProfileParsingFirstCharInSignature);
-    if (signature_start == std::string_view::npos) {
-      LOG(ERROR) << "Invalid method name and signature: " << method_spec;
+    std::vector<std::string> name_and_signature;
+    Split(method_spec, kProfileParsingFirstCharInSignature, &name_and_signature);
+    if (name_and_signature.size() != 2) {
+      LOG(ERROR) << "Invalid method name and signature " << method_spec;
       return dex::kDexNoIndex;
     }
 
-    const std::string_view name = method_spec.substr(0u, signature_start);
-    const std::string_view signature = method_spec.substr(signature_start);
+    const std::string& name = name_and_signature[0];
+    const std::string& signature = kProfileParsingFirstCharInSignature + name_and_signature[1];
 
-    const dex::StringId* name_id = dex_file->FindStringId(std::string(name).c_str());
+    const dex::StringId* name_id = dex_file->FindStringId(name.c_str());
     if (name_id == nullptr) {
       LOG(WARNING) << "Could not find name: "  << name;
       return dex::kDexNoIndex;
@@ -1092,7 +1111,7 @@ class ProfMan final {
     dex::TypeIndex return_type_idx;
     std::vector<dex::TypeIndex> param_type_idxs;
     if (!dex_file->CreateTypeList(signature, &return_type_idx, &param_type_idxs)) {
-      LOG(WARNING) << "Could not create type list: " << signature;
+      LOG(WARNING) << "Could not create type list" << signature;
       return dex::kDexNoIndex;
     }
     const dex::ProtoId* proto_id = dex_file->FindProtoId(return_type_idx, param_type_idxs);
@@ -1329,24 +1348,28 @@ class ProfMan final {
   // The possible line formats are:
   // "LJustTheClass;".
   // "LTestInline;->inlinePolymorphic(LSuper;)I+LSubA;,LSubB;,LSubC;".
+  // "LTestInline;->inlinePolymorphic(LSuper;)I+LSubA;,LSubB;,invalid_class".
   // "LTestInline;->inlineMissingTypes(LSuper;)I+missing_types".
   // // Note no ',' after [LTarget;
   // "LTestInline;->multiInlinePolymorphic(LSuper;)I+]LTarget1;LResA;,LResB;]LTarget2;LResC;,LResD;".
+  // "LTestInline;->multiInlinePolymorphic(LSuper;)I+]LTarget1;LResA;,invalid_class]LTarget2;LResC;,LResD;".
   // "LTestInline;->multiInlinePolymorphic(LSuper;)I+]LTarget1;missing_types]LTarget2;LResC;,LResD;".
   // "{annotation}LTestInline;->inlineNoInlineCaches(LSuper;)I".
   // "LTestInline;->*".
+  // "invalid_class".
+  // "LTestInline;->invalid_method".
   // The method and classes are searched only in the given dex files.
   bool ProcessLine(const std::vector<std::unique_ptr<const DexFile>>& dex_files,
-                   std::string_view maybe_annotated_line,
+                   const std::string& maybe_annotated_line,
                    /*out*/ProfileCompilationInfo* profile) {
     // First, process the annotation.
     if (maybe_annotated_line.empty()) {
       return true;
     }
     // Working line variable which will contain the user input without the annotations.
-    std::string_view line = maybe_annotated_line;
+    std::string line = maybe_annotated_line;
 
-    std::string_view annotation_string;
+    std::string annotation_string;
     if (maybe_annotated_line[0] == kAnnotationStart) {
       size_t end_pos = maybe_annotated_line.find(kAnnotationEnd, 0);
       if (end_pos == std::string::npos || end_pos == 0) {
@@ -1360,17 +1383,17 @@ class ProfMan final {
 
     ProfileSampleAnnotation annotation = annotation_string.empty()
         ? ProfileSampleAnnotation::kNone
-        : ProfileSampleAnnotation(std::string(annotation_string));
+        : ProfileSampleAnnotation(annotation_string);
 
-    // Now process the rest of the line.
-    std::string_view klass;
-    std::string_view method_str;
+    // Now process the rest of the lines.
+    std::string klass;
+    std::string method_str;
     bool is_hot = false;
     bool is_startup = false;
     bool is_post_startup = false;
     const size_t method_sep_index = line.find(kMethodSep, 0);
     if (method_sep_index == std::string::npos) {
-      klass = line;
+      klass = line.substr(0);
     } else {
       // The method prefix flags are only valid for method strings.
       size_t start_index = 0;
@@ -1392,41 +1415,6 @@ class ProfMan final {
       method_str = line.substr(method_sep_index + kMethodSep.size());
     }
 
-    if (!IsValidDescriptor(std::string(klass).c_str())) {
-      LOG(ERROR) << "Invalid descriptor: " << klass;
-      return false;
-    }
-
-    if (method_str.empty()) {
-      auto array_it = std::find_if(klass.begin(), klass.end(), [](char c) { return c != '['; });
-      size_t array_dim = std::distance(klass.begin(), array_it);
-      if (klass.size() == array_dim + 1u) {
-        // Attribute primitive types and their arrays to the first dex file.
-        profile->AddClass(*dex_files[0], klass, annotation);
-        return true;
-      }
-      // Attribute non-primitive classes and their arrays to the dex file with the definition.
-      TypeReference class_ref(/* dex_file= */ nullptr, dex::TypeIndex());
-      if (FindClassDef(dex_files, klass.substr(array_dim), &class_ref) == nullptr) {
-        LOG(WARNING) << "Could not find class definition: " << klass.substr(array_dim);
-        return false;
-      }
-      if (array_dim != 0) {
-        // Let the ProfileCompilationInfo find the type index or add an extra descriptor.
-        return profile->AddClass(*class_ref.dex_file, klass, annotation);
-      } else {
-        return profile->AddClass(*class_ref.dex_file, class_ref.TypeIndex(), annotation);
-      }
-    }
-
-    DCHECK_NE(klass[0], '[');
-    TypeReference class_ref(/* dex_file= */ nullptr, dex::TypeIndex());
-    const dex::ClassDef* class_def = FindClassDef(dex_files, klass, &class_ref);
-    if (class_def == nullptr) {
-      LOG(WARNING) << "Could not find class definition: " << klass;
-      return false;
-    }
-
     uint32_t flags = 0;
     if (is_hot) {
       flags |= ProfileCompilationInfo::MethodHotness::kFlagHot;
@@ -1438,21 +1426,33 @@ class ProfMan final {
       flags |= ProfileCompilationInfo::MethodHotness::kFlagPostStartup;
     }
 
-    if (method_str == kClassAllMethods) {
+    TypeReference class_ref(/* dex_file= */ nullptr, dex::TypeIndex());
+    if (!FindClass(dex_files, klass, &class_ref)) {
+      LOG(WARNING) << "Could not find class: " << klass;
+      return false;
+    }
+
+    if (method_str.empty() || method_str == kClassAllMethods) {
       // Start by adding the class.
-      profile->AddClass(*class_ref.dex_file, class_ref.TypeIndex(), annotation);
-      uint16_t class_def_index = class_ref.dex_file->GetIndexForClassDef(*class_def);
-      ClassAccessor accessor(*class_ref.dex_file, class_def_index);
+      const DexFile* dex_file = class_ref.dex_file;
       std::vector<ProfileMethodInfo> methods;
-      for (const ClassAccessor::Method& method : accessor.GetMethods()) {
-        if (method.GetCodeItemOffset() != 0) {
-          // Add all of the methods that have code to the profile.
-          methods.push_back(ProfileMethodInfo(method.GetReference()));
+      if (method_str == kClassAllMethods) {
+        ClassAccessor accessor(
+            *dex_file,
+            dex_file->GetIndexForClassDef(*dex_file->FindClassDef(class_ref.TypeIndex())));
+        for (const ClassAccessor::Method& method : accessor.GetMethods()) {
+          if (method.GetCodeItemOffset() != 0) {
+            // Add all of the methods that have code to the profile.
+            methods.push_back(ProfileMethodInfo(method.GetReference()));
+          }
         }
       }
-      // TODO: Check return value?
+      // TODO: Check return values?
       profile->AddMethods(
           methods, static_cast<ProfileCompilationInfo::MethodHotness::Flag>(flags), annotation);
+      std::set<dex::TypeIndex> classes;
+      classes.insert(class_ref.TypeIndex());
+      profile->AddClassesForDex(dex_file, classes.begin(), classes.end(), annotation);
       return true;
     }
 
@@ -1460,12 +1460,11 @@ class ProfMan final {
     std::string method_spec;
 
     // If none of the flags are set, default to hot.
-    // TODO: Why is this done after we have already calculated `flags`?
     is_hot = is_hot || (!is_hot && !is_startup && !is_post_startup);
 
+    std::vector<std::string> method_elems;
     // Lifetime of segments is same as method_elems since it contains pointers into the string-data
     std::vector<InlineCacheSegment> segments;
-    std::vector<std::string_view> method_elems;
     Split(method_str, kProfileParsingInlineChacheSep, &method_elems);
     if (method_elems.size() == 2) {
       method_spec = method_elems[0];
@@ -1491,7 +1490,7 @@ class ProfMan final {
     // examine. If we couldn't resolve the method don't bother trying to create
     // inline-caches.
     if (resolved_class_method_ref) {
-      for (const InlineCacheSegment& segment : segments) {
+      for (const InlineCacheSegment &segment : segments) {
         std::vector<uint32_t> dex_pcs;
         if (segment.IsSingleReceiver()) {
           DCHECK_EQ(segments.size(), 1u);
@@ -1524,20 +1523,16 @@ class ProfMan final {
         bool missing_types = segment.GetIcTargets()[0] == kMissingTypesMarker;
         bool megamorphic_types =
             segment.GetIcTargets()[0] == kMegamorphicTypesMarker;
-        std::vector<TypeReference> classes;
+        std::vector<TypeReference> classes(
+            missing_types || megamorphic_types ? 0u : segment.NumIcTargets(),
+            TypeReference(/* dex_file= */ nullptr, dex::TypeIndex()));
         if (!missing_types && !megamorphic_types) {
-          classes.reserve(segment.NumIcTargets());
-          for (const std::string_view& ic_class : segment.GetIcTargets()) {
+          size_t class_it = 0;
+          for (const std::string_view &ic_class : segment.GetIcTargets()) {
             if (ic_class.empty()) {
               break;
             }
-            if (!IsValidDescriptor(std::string(ic_class).c_str())) {
-              LOG(ERROR) << "Invalid descriptor for inline cache: " << ic_class;
-              return false;
-            }
-            // TODO: Allow referencing classes without a `dex::TypeId` in any of the dex files.
-            TypeReference ic_class_ref(/* dex_file= */ nullptr, dex::TypeIndex());
-            if (!FindClass(dex_files, ic_class, &ic_class_ref)) {
+            if (!FindClass(dex_files, ic_class, &(classes[class_it++]))) {
               LOG(segment.IsSingleReceiver() ? ERROR : WARNING)
                   << "Could not find class: " << ic_class << " in " << segment;
               if (segment.IsSingleReceiver()) {
@@ -1549,11 +1544,13 @@ class ProfMan final {
                 break;
               }
             }
-            classes.push_back(ic_class_ref);
           }
+          // Make sure we are actually the correct size
+          classes.resize(class_it, TypeReference(nullptr, dex::TypeIndex()));
         }
         for (size_t dex_pc : dex_pcs) {
-          inline_caches.emplace_back(dex_pc, missing_types, classes, megamorphic_types);
+          inline_caches.emplace_back(dex_pc, missing_types, classes,
+                                     megamorphic_types);
         }
       }
     }
@@ -1602,19 +1599,15 @@ class ProfMan final {
   }
 
   bool ProcessBootLine(const std::vector<std::unique_ptr<const DexFile>>& dex_files,
-                       std::string_view line,
+                       const std::string& line,
                        ProfileBootInfo* boot_profiling_info) {
     const size_t method_sep_index = line.find(kMethodSep, 0);
-    if (method_sep_index == std::string_view::npos) {
-      LOG(ERROR) << "Invalid boot line: " << line;
-      return false;
-    }
-    std::string_view klass_str = line.substr(0, method_sep_index);
-    std::string_view method_str = line.substr(method_sep_index + kMethodSep.size());
+    std::string klass_str = line.substr(0, method_sep_index);
+    std::string method_str = line.substr(method_sep_index + kMethodSep.size());
 
     TypeReference class_ref(/* dex_file= */ nullptr, dex::TypeIndex());
-    if (FindClassDef(dex_files, klass_str, &class_ref) == nullptr) {
-      LOG(WARNING) << "Could not find class definition: " << klass_str;
+    if (!FindClass(dex_files, klass_str, &class_ref)) {
+      LOG(WARNING) << "Could not find class: " << klass_str;
       return false;
     }
 
@@ -1734,17 +1727,6 @@ class ProfMan final {
     // Process the lines one by one and add the successful ones to the profile.
     bool for_boot_image = GetOutputProfileType() == OutputProfileType::kBoot;
     ProfileCompilationInfo info(for_boot_image);
-
-    if (for_boot_image) {
-      // Add all dex files to the profile. This is needed for jitzygote to indicate
-      // which dex files are part of the boot image extension to compile in memory.
-      for (const std::unique_ptr<const DexFile>& dex_file : dex_files) {
-        if (info.FindOrAddDexFile(*dex_file) == info.MaxProfileIndex()) {
-          LOG(ERROR) << "Failed to add dex file to boot image profile: " << dex_file->GetLocation();
-          return -1;
-        }
-      }
-    }
 
     for (const auto& line : *user_lines) {
       ProcessLine(dex_files, line, &info);

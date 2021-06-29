@@ -68,11 +68,14 @@ static constexpr bool kEnableAppImage = true;
 const OatFile* OatFileManager::RegisterOatFile(std::unique_ptr<const OatFile> oat_file) {
   // Use class_linker vlog to match the log for dex file registration.
   VLOG(class_linker) << "Registered oat file " << oat_file->GetLocation();
-  PaletteNotifyOatFileLoaded(oat_file->GetLocation().c_str());
+  PaletteHooks* hooks = nullptr;
+  if (PaletteGetHooks(&hooks) == PALETTE_STATUS_OK) {
+    hooks->NotifyOatFileLoaded(oat_file->GetLocation().c_str());
+  }
 
   WriterMutexLock mu(Thread::Current(), *Locks::oat_file_manager_lock_);
   CHECK(!only_use_system_oat_files_ ||
-        LocationIsTrusted(oat_file->GetLocation()) ||
+        LocationIsOnSystem(oat_file->GetLocation().c_str()) ||
         !oat_file->IsExecutable())
       << "Registering a non /system oat file: " << oat_file->GetLocation();
   DCHECK(oat_file != nullptr);
@@ -344,7 +347,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
       }
       if (dex_files.empty()) {
         ScopedTrace failed_to_open_dex_files("FailedToOpenDexFilesFromOat");
-        error_msgs->push_back("Failed to open dex files from " + odex_location);
+        error_msgs->push_back("Failed to open dex files from " + oat_file->GetLocation());
       } else {
         // Opened dex files from an oat file, madvise them to their loaded state.
          for (const std::unique_ptr<const DexFile>& dex_file : dex_files) {
@@ -800,7 +803,7 @@ void OatFileManager::WaitForBackgroundVerificationTasks() {
   }
 }
 
-void OatFileManager::SetOnlyUseTrustedOatFiles() {
+void OatFileManager::SetOnlyUseSystemOatFiles() {
   ReaderMutexLock mu(Thread::Current(), *Locks::oat_file_manager_lock_);
   // Make sure all files that were loaded up to this point are on /system.
   // Skip the image files as they can encode locations that don't exist (eg not
@@ -810,8 +813,8 @@ void OatFileManager::SetOnlyUseTrustedOatFiles() {
 
   for (const std::unique_ptr<const OatFile>& oat_file : oat_files_) {
     if (boot_set.find(oat_file.get()) == boot_set.end()) {
-      if (!LocationIsTrusted(oat_file->GetLocation())) {
-        // When the file is not in a trusted location, we check whether the oat file has any
+      if (!LocationIsOnSystem(oat_file->GetLocation().c_str())) {
+        // When the file is not on system, we check whether the oat file has any
         // AOT or DEX code. It is a fatal error if it has.
         if (CompilerFilter::IsAotCompilationEnabled(oat_file->GetCompilerFilter()) ||
             oat_file->ContainsDexCode()) {

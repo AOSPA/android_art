@@ -72,8 +72,11 @@ art_module_sdk {
                 "libsigchain",
             ],
 
-            native_static_libs: [
+            native_libs: [
                 "libdexfile_support",
+            ],
+
+            native_static_libs: [
                 "libdexfile_static",
                 "libnativehelper_lazy",
             ],
@@ -177,13 +180,10 @@ art_module_exports {
                 "okhttp-norepackage",
             ],
             native_binaries: [
+                "hiddenapi",
                 "dex2oat",
                 "dex2oatd",
-                "dexdump",
-                "hiddenapi",
-                "oatdump",
                 "profman",
-                "veridex",
             ],
             native_libs: [
                 "libartpalette", // libdexfile dependency
@@ -260,9 +260,6 @@ art_module_exports {
         "libjavacoretests",
     ],
     native_static_libs: [
-        // TODO(b/187288515): Providing this as a prebuilt introduces an issue
-        // with sdk_version propagation. Temporarily use the source library
-        // instead.
-        //"libctstiagent",
+        "libctstiagent",
     ],
 }

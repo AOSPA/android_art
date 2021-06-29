@@ -22,19 +22,18 @@
 #include "indirect_reference_table.h"
 #include "mirror/object-inl.h"
 #include "palette/palette.h"
+#include "palette/palette_hooks.h"
 #include "thread-inl.h"
 #include "verify_object.h"
 
 // For methods that monitor JNI invocations and report their begin/end to
 // palette hooks.
-#define MONITOR_JNI(kind)                                \
-  {                                                      \
-    bool should_report = false;                          \
-    PaletteShouldReportJniInvocations(&should_report);   \
-    if (should_report) {                                 \
-      kind(self->GetJniEnv());                           \
-    }                                                    \
-  }
+#define MONITOR_JNI(kind)                               \
+  PaletteHooks* hooks = nullptr;                        \
+  if (PaletteGetHooks(&hooks) == PALETTE_STATUS_OK &&   \
+      hooks->ShouldReportJniInvocations()) {            \
+    hooks->kind(self->GetJniEnv());                     \
+  }                                                     \
 
 namespace art {
 
@@ -236,7 +235,7 @@ extern uint64_t GenericJniMethodEnd(Thread* self,
   // @CriticalNative does not do a state transition. @FastNative usually does not do a state
   // transition either but it performs a suspend check that may do state transitions.
   if (LIKELY(normal_native)) {
-    MONITOR_JNI(PaletteNotifyEndJniInvocation);
+    MONITOR_JNI(NotifyEndJniInvocation);
     GoToRunnable(self);
   } else if (fast_native) {
     GoToRunnableFast(self);
@@ -292,32 +291,32 @@ extern uint64_t GenericJniMethodEnd(Thread* self,
 
 extern uint32_t JniMonitoredMethodStart(Thread* self) {
   uint32_t result = JniMethodStart(self);
-  MONITOR_JNI(PaletteNotifyBeginJniInvocation);
+  MONITOR_JNI(NotifyBeginJniInvocation);
   return result;
 }
 
 extern uint32_t JniMonitoredMethodStartSynchronized(jobject to_lock, Thread* self) {
   uint32_t result = JniMethodStartSynchronized(to_lock, self);
-  MONITOR_JNI(PaletteNotifyBeginJniInvocation);
+  MONITOR_JNI(NotifyBeginJniInvocation);
   return result;
 }
 
 extern void JniMonitoredMethodEnd(uint32_t saved_local_ref_cookie, Thread* self) {
-  MONITOR_JNI(PaletteNotifyEndJniInvocation);
+  MONITOR_JNI(NotifyEndJniInvocation);
   return JniMethodEnd(saved_local_ref_cookie, self);
 }
 
 extern void JniMonitoredMethodEndSynchronized(uint32_t saved_local_ref_cookie,
                                              jobject locked,
                                              Thread* self) {
-  MONITOR_JNI(PaletteNotifyEndJniInvocation);
+  MONITOR_JNI(NotifyEndJniInvocation);
   return JniMethodEndSynchronized(saved_local_ref_cookie, locked, self);
 }
 
 extern mirror::Object* JniMonitoredMethodEndWithReference(jobject result,
                                                           uint32_t saved_local_ref_cookie,
                                                           Thread* self) {
-  MONITOR_JNI(PaletteNotifyEndJniInvocation);
+  MONITOR_JNI(NotifyEndJniInvocation);
   return JniMethodEndWithReference(result, saved_local_ref_cookie, self);
 }
 
@@ -326,7 +325,7 @@ extern mirror::Object* JniMonitoredMethodEndWithReferenceSynchronized(
     uint32_t saved_local_ref_cookie,
     jobject locked,
     Thread* self) {
-  MONITOR_JNI(PaletteNotifyEndJniInvocation);
+  MONITOR_JNI(NotifyEndJniInvocation);
   return JniMethodEndWithReferenceSynchronized(result, saved_local_ref_cookie, locked, self);
 }
 

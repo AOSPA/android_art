@@ -127,8 +127,7 @@ class InstanceOfInstructionSimplifierTestGroup
 // target_phi = PHI[param2, param3, obj2]
 // return PredFieldGet[val_phi, target_phi] => PredFieldGet[val_phi, target_phi]
 TEST_F(InstructionSimplifierTest, SimplifyPredicatedFieldGetNoMerge) {
-  ScopedObjectAccess soa(Thread::Current());
-  VariableSizedHandleScope vshs(soa.Self());
+  VariableSizedHandleScope vshs(Thread::Current());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -220,8 +219,7 @@ TEST_F(InstructionSimplifierTest, SimplifyPredicatedFieldGetNoMerge) {
 // target_phi = PHI[param2, param3, obj2]
 // return PredFieldGet[val_phi, target_phi] => PredFieldGet[3, target_phi]
 TEST_F(InstructionSimplifierTest, SimplifyPredicatedFieldGetMerge) {
-  ScopedObjectAccess soa(Thread::Current());
-  VariableSizedHandleScope vshs(soa.Self());
+  VariableSizedHandleScope vshs(Thread::Current());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -310,8 +308,7 @@ TEST_F(InstructionSimplifierTest, SimplifyPredicatedFieldGetMerge) {
 // target_phi = PHI[obj1, obj2]
 // return PredFieldGet[val_phi, target_phi] => FieldGet[target_phi]
 TEST_F(InstructionSimplifierTest, SimplifyPredicatedFieldGetNoNull) {
-  ScopedObjectAccess soa(Thread::Current());
-  VariableSizedHandleScope vshs(soa.Self());
+  VariableSizedHandleScope vshs(Thread::Current());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -397,8 +394,7 @@ TEST_F(InstructionSimplifierTest, SimplifyPredicatedFieldGetNoNull) {
 // EXIT
 // return obj.field
 TEST_P(InstanceOfInstructionSimplifierTestGroup, ExactClassInstanceOfOther) {
-  ScopedObjectAccess soa(Thread::Current());
-  VariableSizedHandleScope vshs(soa.Self());
+  VariableSizedHandleScope vshs(Thread::Current());
   InitGraph(/*handles=*/&vshs);
 
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
@@ -487,8 +483,7 @@ TEST_P(InstanceOfInstructionSimplifierTestGroup, ExactClassInstanceOfOther) {
 // EXIT
 // return obj
 TEST_P(InstanceOfInstructionSimplifierTestGroup, ExactClassCheckCastOther) {
-  ScopedObjectAccess soa(Thread::Current());
-  VariableSizedHandleScope vshs(soa.Self());
+  VariableSizedHandleScope vshs(Thread::Current());
   InitGraph(/*handles=*/&vshs);
 
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry", "exit", {{"entry", "exit"}}));

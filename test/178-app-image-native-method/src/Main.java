@@ -52,7 +52,6 @@ public class Main {
     $noinline$opt$testCriticalSignatures();
 
     $noinline$regressionTestB181736463();
-    $noinline$regressionTestB189235039();
 
     new CriticalClinitCheck();
     sTestCriticalClinitCheckOtherThread.join();
@@ -381,10 +380,6 @@ public class Main {
     }
   }
 
-  static void $noinline$regressionTestB189235039() {
-    assertEquals(42, new Main().b189235039CallThrough());
-  }
-
   static void initializingCriticalClinitCheck() {
     // Called from CriticalClinitCheck.<clinit>().
     // Test @CriticalNative calls on the initializing thread.
@@ -430,9 +425,6 @@ public class Main {
   }
 
   public static native void makeVisiblyInitialized();
-
-  public native synchronized int b189235039CallThrough();
-  public static native int b189235039CheckLocks(int placeholder, Main m);
 }
 
 class Test {

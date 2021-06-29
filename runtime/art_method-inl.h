@@ -413,12 +413,12 @@ inline CodeItemDebugInfoAccessor ArtMethod::DexInstructionDebugInfo() {
 }
 
 inline void ArtMethod::SetCounter(uint16_t hotness_count) {
-  DCHECK(!IsAbstract());
+  DCHECK(!IsAbstract()) << PrettyMethod();
   hotness_count_ = hotness_count;
 }
 
 inline uint16_t ArtMethod::GetCounter() {
-  DCHECK(!IsAbstract());
+  DCHECK(!IsAbstract()) << PrettyMethod();
   return hotness_count_;
 }
 

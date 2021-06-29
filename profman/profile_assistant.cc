@@ -53,7 +53,7 @@ ProfileAssistant::ProcessingResult ProfileAssistant::ProcessProfilesInternal(
 
   // Merge all current profiles.
   for (size_t i = 0; i < profile_files.size(); i++) {
-    ProfileCompilationInfo cur_info(options.IsBootImageMerge());
+    ProfileCompilationInfo cur_info;
     if (!cur_info.Load(profile_files[i]->Fd(), /*merge_classes=*/ true, filter_fn)) {
       LOG(WARNING) << "Could not load profile file at index " << i;
       if (options.IsForceMerge()) {
@@ -62,12 +62,22 @@ ProfileAssistant::ProcessingResult ProfileAssistant::ProcessProfilesInternal(
         // cleared lazily.
         continue;
       }
-      // TODO: Do we really need to use a different error code for version mismatch?
-      ProfileCompilationInfo wrong_info(!options.IsBootImageMerge());
-      if (wrong_info.Load(profile_files[i]->Fd(), /*merge_classes=*/ true, filter_fn)) {
+      return kErrorBadProfiles;
+    }
+
+    // Check version mismatch.
+    // This may happen during profile analysis if one profile is regular and
+    // the other one is for the boot image. For example when switching on-off
+    // the boot image profiles.
+    if (!info.SameVersion(cur_info)) {
+      if (options.IsForceMerge()) {
+        // If we have to merge forcefully, ignore the current profile and
+        // continue to the next one.
+        continue;
+      } else {
+        // Otherwise, return an error.
         return kErrorDifferentVersions;
       }
-      return kErrorBadProfiles;
     }
 
     if (!info.MergeWith(cur_info)) {

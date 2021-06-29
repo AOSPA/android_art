@@ -21,7 +21,6 @@
 #include <list>
 #include <ostream>
 
-#include "android-base/parsebool.h"
 #include "android-base/stringprintf.h"
 #include "cmdline_type_parser.h"
 #include "detail/cmdline_debug_detail.h"
@@ -65,22 +64,6 @@ struct CmdlineType<Unit> : CmdlineTypeParser<Unit> {
     }
     return Result::Failure("Unexpected extra characters " + args);
   }
-};
-
-template <>
-struct CmdlineType<bool> : CmdlineTypeParser<bool> {
-  Result Parse(const std::string& args) {
-    switch (::android::base::ParseBool(args)) {
-      case ::android::base::ParseBoolResult::kError:
-        return Result::Failure("Could not parse '" + args + "' as boolean");
-      case ::android::base::ParseBoolResult::kTrue:
-        return Result::Success(true);
-      case ::android::base::ParseBoolResult::kFalse:
-        return Result::Success(false);
-    }
-  }
-
-  static const char* DescribeType() { return "true|false|1|0|y|n|yes|no|on|off"; }
 };
 
 template <>
@@ -763,12 +746,6 @@ struct CmdlineType<ProfileSaverOptions> : CmdlineTypeParser<ProfileSaverOptions>
       CmdlineType<unsigned int> type_parser;
       return ParseInto(existing,
              &ProfileSaverOptions::min_save_period_ms_,
-             type_parser.Parse(suffix));
-    }
-    if (android::base::StartsWith(option, "min-first-save-ms:")) {
-      CmdlineType<unsigned int> type_parser;
-      return ParseInto(existing,
-             &ProfileSaverOptions::min_first_save_ms_,
              type_parser.Parse(suffix));
     }
     if (android::base::StartsWith(option, "save-resolved-classes-delay-ms:")) {

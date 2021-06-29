@@ -926,7 +926,6 @@ TEST_F(LoadStoreAnalysisTest, PartialEscape) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
-  ASSERT_TRUE(info->IsPartialSingleton());
   const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
 
   ASSERT_TRUE(esg->IsValid());
@@ -1035,7 +1034,6 @@ TEST_F(LoadStoreAnalysisTest, PartialEscape2) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
-  ASSERT_TRUE(info->IsPartialSingleton());
   const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
 
   ASSERT_TRUE(esg->IsValid());
@@ -1158,7 +1156,6 @@ TEST_F(LoadStoreAnalysisTest, PartialEscape3) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
-  ASSERT_TRUE(info->IsPartialSingleton());
   const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
 
   ASSERT_TRUE(esg->IsValid());
@@ -1238,7 +1235,6 @@ TEST_F(LoadStoreAnalysisTest, PartialEscape4) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
-  ASSERT_TRUE(info->IsPartialSingleton());
   const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
 
   ASSERT_TRUE(esg->IsValid());
@@ -1269,8 +1265,7 @@ TEST_F(LoadStoreAnalysisTest, PartialEscape4) {
 // // EXIT
 // obj.field;
 TEST_F(LoadStoreAnalysisTest, PartialEscape5) {
-  ScopedObjectAccess soa(Thread::Current());
-  VariableSizedHandleScope vshs(soa.Self());
+  VariableSizedHandleScope vshs(Thread::Current());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList(
       "entry",
@@ -1326,7 +1321,6 @@ TEST_F(LoadStoreAnalysisTest, PartialEscape5) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
-  ASSERT_TRUE(info->IsPartialSingleton());
   const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
 
   ASSERT_TRUE(esg->IsValid());
@@ -1442,7 +1436,18 @@ TEST_F(LoadStoreAnalysisTest, TotalEscapeAdjacentNoPredicated) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
-  ASSERT_FALSE(info->IsPartialSingleton());
+  const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
+
+  EXPECT_FALSE(esg->IsValid()) << esg->GetExcludedCohorts();
+  EXPECT_FALSE(IsValidSubgraph(esg));
+  std::unordered_set<const HBasicBlock*> contents(esg->ReachableBlocks().begin(),
+                                                  esg->ReachableBlocks().end());
+
+  EXPECT_EQ(contents.size(), 0u);
+  EXPECT_TRUE(contents.find(blks.Get("left")) == contents.end());
+  EXPECT_TRUE(contents.find(blks.Get("right")) == contents.end());
+  EXPECT_TRUE(contents.find(blks.Get("entry")) == contents.end());
+  EXPECT_TRUE(contents.find(blks.Get("exit")) == contents.end());
 }
 
 // With predicated-set we can (partially) remove the store as well.
@@ -1542,7 +1547,6 @@ TEST_F(LoadStoreAnalysisTest, TotalEscapeAdjacent) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
-  ASSERT_TRUE(info->IsPartialSingleton());
   const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
 
   EXPECT_TRUE(esg->IsValid()) << esg->GetExcludedCohorts();
@@ -1663,7 +1667,18 @@ TEST_F(LoadStoreAnalysisTest, TotalEscape) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
-  ASSERT_FALSE(info->IsPartialSingleton());
+  const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
+
+  ASSERT_FALSE(esg->IsValid());
+  ASSERT_FALSE(IsValidSubgraph(esg));
+  std::unordered_set<const HBasicBlock*> contents(esg->ReachableBlocks().begin(),
+                                                  esg->ReachableBlocks().end());
+
+  ASSERT_EQ(contents.size(), 0u);
+  ASSERT_TRUE(contents.find(blks.Get("left")) == contents.end());
+  ASSERT_TRUE(contents.find(blks.Get("right")) == contents.end());
+  ASSERT_TRUE(contents.find(blks.Get("entry")) == contents.end());
+  ASSERT_TRUE(contents.find(blks.Get("exit")) == contents.end());
 }
 
 // // ENTRY
@@ -1718,7 +1733,16 @@ TEST_F(LoadStoreAnalysisTest, TotalEscape2) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
-  ASSERT_FALSE(info->IsPartialSingleton());
+  const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
+
+  ASSERT_FALSE(esg->IsValid());
+  ASSERT_FALSE(IsValidSubgraph(esg));
+  std::unordered_set<const HBasicBlock*> contents(esg->ReachableBlocks().begin(),
+                                                  esg->ReachableBlocks().end());
+
+  ASSERT_EQ(contents.size(), 0u);
+  ASSERT_TRUE(contents.find(blks.Get("entry")) == contents.end());
+  ASSERT_TRUE(contents.find(blks.Get("exit")) == contents.end());
 }
 
 // // ENTRY
@@ -1891,7 +1915,14 @@ TEST_F(LoadStoreAnalysisTest, DoubleDiamondEscape) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
-  ASSERT_FALSE(info->IsPartialSingleton());
+  const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
+
+  ASSERT_FALSE(esg->IsValid());
+  ASSERT_FALSE(IsValidSubgraph(esg));
+  std::unordered_set<const HBasicBlock*> contents(esg->ReachableBlocks().begin(),
+                                                  esg->ReachableBlocks().end());
+
+  ASSERT_EQ(contents.size(), 0u);
 }
 
 // // ENTRY
@@ -2055,6 +2086,11 @@ TEST_F(LoadStoreAnalysisTest, PartialPhiPropagation1) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
-  ASSERT_FALSE(info->IsPartialSingleton());
+  const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
+  std::unordered_set<const HBasicBlock*> contents(esg->ReachableBlocks().begin(),
+                                                  esg->ReachableBlocks().end());
+
+  ASSERT_EQ(contents.size(), 0u);
+  ASSERT_FALSE(esg->IsValid());
 }
 }  // namespace art

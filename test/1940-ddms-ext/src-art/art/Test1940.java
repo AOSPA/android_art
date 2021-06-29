@@ -65,8 +65,8 @@ public class Test1940 {
   }
 
   private static final class MyDdmHandler extends ChunkHandler {
-    public void onConnected() {}
-    public void onDisconnected() {}
+    public void connected() {}
+    public void disconnected() {}
     public Chunk handleChunk(Chunk req) {
       System.out.println("MyDdmHandler: Chunk received: " + printChunk(req));
       if (req.type == MY_DDMS_TYPE) {
@@ -222,14 +222,14 @@ public class Test1940 {
         }
       });
     CURRENT_HANDLER = wait_thd;
-    DdmVmInternal.setThreadNotifyEnabled(true);
+    DdmVmInternal.threadNotify(true);
     System.out.println("threadNotify started!");
     final Thread thr = new Thread(() -> { return; }, "THREAD");
     thr.start();
     System.out.println("Target thread started!");
     thr.join();
     System.out.println("Target thread finished!");
-    DdmVmInternal.setThreadNotifyEnabled(false);
+    DdmVmInternal.threadNotify(false);
     System.out.println("threadNotify Disabled!");
     wait_thd.Await();
     // Make sure we saw at least one of Thread-create, Thread name, & thread death.

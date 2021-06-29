@@ -149,7 +149,7 @@ class DlMallocSpace : public MallocSpace {
     return this;
   }
 
-  bool LogFragmentationAllocFailure(std::ostream& os, size_t failed_alloc_bytes) override
+  void LogFragmentationAllocFailure(std::ostream& os, size_t failed_alloc_bytes) override
       REQUIRES_SHARED(Locks::mutator_lock_);
 
  protected:

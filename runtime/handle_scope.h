@@ -195,10 +195,15 @@ class PACKED(4) FixedSizeHandleScope : public HandleScope {
   }
 
  private:
+  explicit ALWAYS_INLINE FixedSizeHandleScope(BaseHandleScope* link);
   explicit ALWAYS_INLINE FixedSizeHandleScope(BaseHandleScope* link,
-                                              ObjPtr<mirror::Object> fill_value = nullptr)
+                                              ObjPtr<mirror::Object> fill_value)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  ALWAYS_INLINE ~FixedSizeHandleScope() REQUIRES_SHARED(Locks::mutator_lock_) {}
+
+  ALWAYS_INLINE ~FixedSizeHandleScope() {}
+
+  // Helper to set references to null without any mutator-locks.
+  ALWAYS_INLINE void SetReferenceToNull(size_t i);
 
   template<class T>
   ALWAYS_INLINE MutableHandle<T> GetHandle(size_t i) REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -221,10 +226,8 @@ template<size_t kNumReferences>
 class PACKED(4) StackHandleScope final : public FixedSizeHandleScope<kNumReferences> {
  public:
   explicit ALWAYS_INLINE StackHandleScope(Thread* self,
-                                          ObjPtr<mirror::Object> fill_value = nullptr)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  ALWAYS_INLINE ~StackHandleScope() REQUIRES_SHARED(Locks::mutator_lock_);
+                                          ObjPtr<mirror::Object> fill_value = nullptr);
+  ALWAYS_INLINE ~StackHandleScope();
 
   Thread* Self() const {
     return self_;
@@ -243,8 +246,8 @@ class PACKED(4) StackHandleScope final : public FixedSizeHandleScope<kNumReferen
 // list.
 class VariableSizedHandleScope : public BaseHandleScope {
  public:
-  explicit VariableSizedHandleScope(Thread* const self) REQUIRES_SHARED(Locks::mutator_lock_);
-  ~VariableSizedHandleScope() REQUIRES_SHARED(Locks::mutator_lock_);
+  explicit VariableSizedHandleScope(Thread* const self);
+  ~VariableSizedHandleScope();
 
   template<class T>
   MutableHandle<T> NewHandle(T* object) REQUIRES_SHARED(Locks::mutator_lock_);
