@@ -21,6 +21,7 @@ package {
     default_applicable_licenses: ["art_license"],
 }
 
+// Encapsulate the contributions made by the com.android.art to the bootclasspath.
 bootclasspath_fragment {
     name: "art-bootclasspath-fragment",
     image_name: "art",
