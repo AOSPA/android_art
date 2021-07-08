@@ -330,7 +330,10 @@ cc_library_headers {
 
 art_cc_test {
     name: "art_libdexfile_external_tests",
-    host_supported: true,
+    defaults: [
+        "art_module_source_build_defaults",
+        "art_test_defaults",
+    ],
     test_suites: ["general-tests"],
     srcs: [
         "external/dex_file_ext_c_test.c",
@@ -349,11 +352,11 @@ art_cc_test {
 // Support library with a C++ API for accessing the libdexfile API for external
 // (non-ART) users.
 //
-// This library dlopens libdexfile_external on first use, so there is no build
-// time dependency on dex file logic. It is therefore safe to use from binaries
+// This library dlopens libdexfile(d).so on first use, so there is no build time
+// dependency on dex file logic. It is therefore safe to use from binaries
 // compiled without dex file support, given they won't encounter any dex file
 // stack frames.
-art_cc_library {
+art_cc_library_static {
     name: "libdexfile_support",
     visibility: ["//visibility:public"],
     host_supported: true,
@@ -382,6 +385,7 @@ art_cc_library {
 art_cc_test {
     name: "art_libdexfile_support_tests",
     defaults: [
+        "art_module_source_build_defaults",
         "art_test_defaults",
     ],
     host_supported: true,
@@ -393,6 +397,9 @@ art_cc_test {
         "libartbase",
         "libbase",
         "libdexfile",
+        "liblog",
+    ],
+    static_libs: [
         "libdexfile_support",
     ],
 }
@@ -432,9 +439,12 @@ cc_defaults {
 
 art_cc_test {
     name: "art_libdexfile_support_static_tests",
-    host_supported: true,
     test_suites: ["general-tests"],
-    defaults: ["libdexfile_support_static_defaults"],
+    defaults: [
+        "art_module_source_build_defaults",
+        "art_test_defaults",
+        "libdexfile_support_static_defaults",
+    ],
     srcs: [
         "external/dex_file_supp_test.cc",
     ],
@@ -464,7 +474,7 @@ cc_library_static {
 
 art_cc_test {
     name: "art_libdexfile_static_tests",
-    host_supported: true,
+    defaults: ["art_test_defaults"],
     test_suites: ["general-tests"],
     srcs: [
         "external/dex_file_supp_test.cc",

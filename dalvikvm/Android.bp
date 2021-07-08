@@ -31,12 +31,15 @@ art_cc_binary {
 
     srcs: ["dalvikvm.cc"],
     shared_libs: [
+        "liblog",
         "libnativehelper",
+    ],
+    header_libs: [
+        "art_libartbase_headers", // For base/fast_exit.h
     ],
     target: {
         android: {
             shared_libs: [
-                "liblog",
                 "libsigchain",
             ],
         },

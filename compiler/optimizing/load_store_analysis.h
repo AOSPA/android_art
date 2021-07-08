@@ -50,15 +50,15 @@ class ReferenceInfo : public DeletableArenaObject<kArenaAllocLSA> {
         is_singleton_and_not_returned_(true),
         is_singleton_and_not_deopt_visible_(true),
         allocator_(allocator),
-        subgraph_(reference->GetBlock()->GetGraph(),
-                  elimination_type != LoadStoreAnalysisType::kBasic,
-                  allocator_) {
+        subgraph_(nullptr) {
     // TODO We can do this in one pass.
     // TODO NewArray is possible but will need to get a handle on how to deal with the dynamic loads
     // for now just ignore it.
     bool can_be_partial = elimination_type != LoadStoreAnalysisType::kBasic &&
                           (/* reference_->IsNewArray() || */ reference_->IsNewInstance());
     if (can_be_partial) {
+      subgraph_.reset(
+          new (allocator) ExecutionSubgraph(reference->GetBlock()->GetGraph(), allocator));
       CollectPartialEscapes(reference_->GetBlock()->GetGraph());
     }
     CalculateEscape(reference_,
@@ -73,14 +73,16 @@ class ReferenceInfo : public DeletableArenaObject<kArenaAllocLSA> {
         //      to see if the additional branches are worth it.
         PrunePartialEscapeWrites();
       }
-      subgraph_.Finalize();
+      DCHECK(subgraph_ != nullptr);
+      subgraph_->Finalize();
     } else {
-      subgraph_.Invalidate();
+      DCHECK(subgraph_ == nullptr);
     }
   }
 
   const ExecutionSubgraph* GetNoEscapeSubgraph() const {
-    return &subgraph_;
+    DCHECK(IsPartialSingleton());
+    return subgraph_.get();
   }
 
   HInstruction* GetReference() const {
@@ -103,7 +105,9 @@ class ReferenceInfo : public DeletableArenaObject<kArenaAllocLSA> {
     auto ref = GetReference();
     // TODO NewArray is possible but will need to get a handle on how to deal with the dynamic loads
     // for now just ignore it.
-    return (/* ref->IsNewArray() || */ ref->IsNewInstance()) && GetNoEscapeSubgraph()->IsValid();
+    return (/* ref->IsNewArray() || */ ref->IsNewInstance()) &&
+           subgraph_ != nullptr &&
+           subgraph_->IsValid();
   }
 
   // Returns true if reference_ is a singleton and not returned to the caller or
@@ -123,7 +127,8 @@ class ReferenceInfo : public DeletableArenaObject<kArenaAllocLSA> {
  private:
   void CollectPartialEscapes(HGraph* graph);
   void HandleEscape(HBasicBlock* escape) {
-    subgraph_.RemoveBlock(escape);
+    DCHECK(subgraph_ != nullptr);
+    subgraph_->RemoveBlock(escape);
   }
   void HandleEscape(HInstruction* escape) {
     HandleEscape(escape->GetBlock());
@@ -145,7 +150,7 @@ class ReferenceInfo : public DeletableArenaObject<kArenaAllocLSA> {
 
   ScopedArenaAllocator* allocator_;
 
-  ExecutionSubgraph subgraph_;
+  std::unique_ptr<ExecutionSubgraph> subgraph_;
 
   DISALLOW_COPY_AND_ASSIGN(ReferenceInfo);
 };
@@ -264,8 +269,10 @@ class HeapLocationCollector : public HGraphVisitor {
     ref_info_array_.clear();
   }
 
-  size_t GetNumberOfReferenceInfos() const {
-    return ref_info_array_.size();
+  size_t CountPartialSingletons() const {
+    return std::count_if(ref_info_array_.begin(),
+                         ref_info_array_.end(),
+                         [](ReferenceInfo* ri) { return ri->IsPartialSingleton(); });
   }
 
   size_t GetNumberOfHeapLocations() const {
@@ -417,20 +424,7 @@ class HeapLocationCollector : public HGraphVisitor {
     }
   }
 
- private:
-  // An allocation cannot alias with a name which already exists at the point
-  // of the allocation, such as a parameter or a load happening before the allocation.
-  bool MayAliasWithPreexistenceChecking(ReferenceInfo* ref_info1, ReferenceInfo* ref_info2) const {
-    if (ref_info1->GetReference()->IsNewInstance() || ref_info1->GetReference()->IsNewArray()) {
-      // Any reference that can alias with the allocation must appear after it in the block/in
-      // the block's successors. In reverse post order, those instructions will be visited after
-      // the allocation.
-      return ref_info2->GetPosition() >= ref_info1->GetPosition();
-    }
-    return true;
-  }
-
-  bool CanReferencesAlias(ReferenceInfo* ref_info1, ReferenceInfo* ref_info2) const {
+  static bool CanReferencesAlias(ReferenceInfo* ref_info1, ReferenceInfo* ref_info2) {
     if (ref_info1 == ref_info2) {
       return true;
     } else if (ref_info1->IsSingleton()) {
@@ -440,6 +434,19 @@ class HeapLocationCollector : public HGraphVisitor {
     } else if (!MayAliasWithPreexistenceChecking(ref_info1, ref_info2) ||
         !MayAliasWithPreexistenceChecking(ref_info2, ref_info1)) {
       return false;
+    }
+    return true;
+  }
+
+ private:
+  // An allocation cannot alias with a name which already exists at the point
+  // of the allocation, such as a parameter or a load happening before the allocation.
+  static bool MayAliasWithPreexistenceChecking(ReferenceInfo* ref_info1, ReferenceInfo* ref_info2) {
+    if (ref_info1->GetReference()->IsNewInstance() || ref_info1->GetReference()->IsNewArray()) {
+      // Any reference that can alias with the allocation must appear after it in the block/in
+      // the block's successors. In reverse post order, those instructions will be visited after
+      // the allocation.
+      return ref_info2->GetPosition() >= ref_info1->GetPosition();
     }
     return true;
   }
@@ -560,7 +567,7 @@ class HeapLocationCollector : public HGraphVisitor {
   }
 
   void VisitPredicatedInstanceFieldGet(HPredicatedInstanceFieldGet* instruction) override {
-    VisitFieldAccess(instruction->InputAt(0), instruction->GetFieldInfo());
+    VisitFieldAccess(instruction->GetTarget(), instruction->GetFieldInfo());
     CreateReferenceInfoForReferenceType(instruction);
   }
   void VisitInstanceFieldGet(HInstanceFieldGet* instruction) override {
