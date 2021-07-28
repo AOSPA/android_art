@@ -1309,7 +1309,13 @@ void Runtime::InitializeApexVersions() {
       if (info == apex_infos.end() || info->second->getIsFactory()) {
         result += '/';
       } else {
-        android::base::StringAppendF(&result, "/%" PRIu64, info->second->getVersionCode());
+        // In case lastUpdateMillis field is populated in apex-info-list.xml, we
+        // prefer to use it as version scheme. If the field is missing we
+        // fallback to the version code of the APEX.
+        uint64_t version = info->second->hasLastUpdateMillis()
+            ? info->second->getLastUpdateMillis()
+            : info->second->getVersionCode();
+        android::base::StringAppendF(&result, "/%" PRIu64, version);
       }
     }
 #endif
