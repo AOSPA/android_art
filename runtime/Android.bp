@@ -71,6 +71,7 @@ libart_cc_defaults {
     defaults: ["art_defaults"],
     host_supported: true,
     srcs: [
+        "app_info.cc",
         "aot_class_linker.cc",
         "art_field.cc",
         "sdk_checker.cc",
@@ -367,6 +368,7 @@ libart_cc_defaults {
             },
         },
     },
+
     target: {
         android: {
             srcs: [
@@ -419,6 +421,7 @@ libart_cc_defaults {
             ],
         },
     },
+
     generated_sources: [
         "art_operator_srcs",
     ],
@@ -426,6 +429,7 @@ libart_cc_defaults {
     generated_headers: ["cpp-define-generator-asm-support"],
     // export our headers so the libart-gtest targets can use it as well.
     export_generated_headers: ["cpp-define-generator-asm-support"],
+
     header_libs: [
         "art_cmdlineparser_headers",
         "cpp-define-generator-definitions",
@@ -448,6 +452,20 @@ libart_cc_defaults {
         "libunwindstack",
     ],
     static_libs: ["libodrstatslog"],
+
+    runtime_libs: [
+        // Libraries loaded at runtime. Exceptions:
+        // - libart(d)-compiler.so and libopenjdk(d).so cannot be listed here
+        //   due to cyclic dependency.
+        // - libicu_jni.so is only loaded to handle dependency order in VM
+        //   startup (see Runtime::InitNativeMethods), but its API is internal
+        //   to com.android.i18n and not used by ART/libcore. Therefore it's not
+        //   listed here to avoid visibility issues. Instead it's linked from
+        //   the ART module namespace through an entry in requireNativeLibs in
+        //   manifest-art.json.
+        "libjavacore",
+    ],
+
     export_include_dirs: ["."],
     // ART's macros.h depends on libbase's macros.h.
     // Note: runtime_options.h depends on cmdline. But we don't really want to export this
@@ -674,6 +692,7 @@ art_cc_test {
         ":art-gtest-jars-XandY",
     ],
     srcs: [
+        "app_info_test.cc",
         "arch/arch_test.cc",
         "arch/instruction_set_features_test.cc",
         "arch/memcmp16_test.cc",
@@ -725,6 +744,7 @@ art_cc_test {
         "jni/java_vm_ext_test.cc",
         "jni/jni_internal_test.cc",
         "method_handles_test.cc",
+        "metrics/reporter_test.cc",
         "mirror/dex_cache_test.cc",
         "mirror/method_type_test.cc",
         "mirror/object_test.cc",
