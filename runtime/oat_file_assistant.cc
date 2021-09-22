@@ -657,9 +657,10 @@ bool OatFileAssistant::ValidateBootClassPathChecksums(const OatFile& oat_file) {
     result = gc::space::ImageSpace::VerifyBootClassPathChecksums(
         oat_boot_class_path_checksums_view,
         oat_boot_class_path_view,
-        runtime->GetImageLocation(),
+        ArrayRef<const std::string>(runtime->GetImageLocations()),
         ArrayRef<const std::string>(runtime->GetBootClassPathLocations()),
         ArrayRef<const std::string>(runtime->GetBootClassPath()),
+        ArrayRef<const int>(runtime->GetBootClassPathFds()),
         isa_,
         &error_msg);
   }
@@ -876,6 +877,7 @@ const OatFile* OatFileAssistant::OatFileInfo::GetFile() {
                                   executable,
                                   /*low_4gb=*/ false,
                                   dex_locations,
+                                  /*dex_fds=*/ ArrayRef<const int>(),
                                   /*reservation=*/ nullptr,
                                   &error_msg));
       }

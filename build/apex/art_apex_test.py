@@ -468,6 +468,7 @@ class ReleaseChecker:
     self._checker.check_native_library('libnativeloader')
 
     # Check internal libraries for ART.
+    self._checker.check_prefer64_library('artd-aidl-ndk')
     self._checker.check_native_library('libadbconnection')
     self._checker.check_native_library('libart')
     self._checker.check_native_library('libart-compiler')
@@ -475,6 +476,8 @@ class ReleaseChecker:
     self._checker.check_native_library('libart-disassembler')
     self._checker.check_native_library('libartbase')
     self._checker.check_native_library('libartpalette')
+    self._checker.check_native_library('libartservice')
+    self._checker.check_native_library('libarttools')
     self._checker.check_native_library('libdt_fd_forward')
     self._checker.check_native_library('libopenjdkjvm')
     self._checker.check_native_library('libopenjdkjvmti')
@@ -546,12 +549,16 @@ class ReleaseTargetChecker:
     # removed in Android R.
 
     # Check binaries for ART.
+    self._checker.check_executable('artd')
     self._checker.check_multilib_executable('dex2oat')
     self._checker.check_executable('oatdump')
     self._checker.check_executable("odrefresh")
 
     # Check internal libraries for ART.
     self._checker.check_native_library('libperfetto_hprof')
+
+    # Check internal Java libraries
+    self._checker.check_java_library("service-art")
 
     # Check exported native libraries for Managed Core Library.
     self._checker.check_native_library('libandroidio')
@@ -675,6 +682,8 @@ class TestingTargetChecker:
     self._checker.check_art_test_executable('art_imgdiag_tests')
     self._checker.check_art_test_executable('art_libartbase_tests')
     self._checker.check_art_test_executable('art_libartpalette_tests')
+    self._checker.check_art_test_executable('art_libartservice_tests')
+    self._checker.check_art_test_executable('art_libarttools_tests')
     self._checker.check_art_test_executable('art_libdexfile_support_tests')
     self._checker.check_art_test_executable('art_libdexfile_tests')
     self._checker.check_art_test_executable('art_libprofile_tests')

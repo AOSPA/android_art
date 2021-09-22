@@ -98,7 +98,7 @@ class ClassTable {
 
     // Data contains the class pointer GcRoot as well as the low bits of the descriptor hash.
     mutable Atomic<uint32_t> data_;
-    static const uint32_t kHashMask = kObjectAlignment - 1;
+    static constexpr uint32_t kHashMask = kObjectAlignment - 1;
   };
 
   using DescriptorHashPair = std::pair<const char*, uint32_t>;
@@ -134,11 +134,11 @@ class ClassTable {
 
   // Hash set that hashes class descriptor, and compares descriptors and class loaders. Results
   // should be compared for a matching class descriptor and class loader.
-  typedef HashSet<TableSlot,
-                  TableSlotEmptyFn,
-                  ClassDescriptorHash,
-                  ClassDescriptorEquals,
-                  TrackingAllocator<TableSlot, kAllocatorTagClassTable>> ClassSet;
+  using ClassSet = HashSet<TableSlot,
+                           TableSlotEmptyFn,
+                           ClassDescriptorHash,
+                           ClassDescriptorEquals,
+                           TrackingAllocator<TableSlot, kAllocatorTagClassTable>>;
 
   ClassTable();
 

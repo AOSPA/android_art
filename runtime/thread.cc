@@ -74,7 +74,6 @@
 #include "indirect_reference_table-inl.h"
 #include "instrumentation.h"
 #include "interpreter/interpreter.h"
-#include "interpreter/mterp/mterp.h"
 #include "interpreter/shadow_frame-inl.h"
 #include "java_frame_root_info.h"
 #include "jni/java_vm_ext.h"
@@ -944,10 +943,6 @@ bool Thread::Init(ThreadList* thread_list, JavaVMExt* java_vm, JNIEnvExt* jni_en
   RemoveSuspendTrigger();
   InitCardTable();
   InitTid();
-  {
-    ScopedTrace trace2("InitInterpreterTls");
-    interpreter::InitInterpreterTls(this);
-  }
 
 #ifdef __BIONIC__
   __get_tls()[TLS_SLOT_ART_THREAD_SELF] = this;
@@ -2325,12 +2320,7 @@ Thread::Thread(bool daemon)
   tlsPtr_.flip_function = nullptr;
   tlsPtr_.thread_local_mark_stack = nullptr;
   tls32_.is_transitioning_to_runnable = false;
-  tls32_.use_mterp = false;
   ResetTlab();
-}
-
-void Thread::NotifyInTheadList() {
-  tls32_.use_mterp = interpreter::CanUseMterp();
 }
 
 bool Thread::CanLoadClasses() const {
@@ -3158,14 +3148,14 @@ jobjectArray Thread::CreateAnnotatedStackTrace(const ScopedObjectAccessAlreadyRu
     return nullptr;
   }
 
-  ArtField* stack_trace_element_field = h_aste_class->FindField(
-      soa.Self(), h_aste_class.Get(), "stackTraceElement", "Ljava/lang/StackTraceElement;");
+  ArtField* stack_trace_element_field =
+      h_aste_class->FindDeclaredInstanceField("stackTraceElement", "Ljava/lang/StackTraceElement;");
   DCHECK(stack_trace_element_field != nullptr);
-  ArtField* held_locks_field = h_aste_class->FindField(
-        soa.Self(), h_aste_class.Get(), "heldLocks", "[Ljava/lang/Object;");
+  ArtField* held_locks_field =
+      h_aste_class->FindDeclaredInstanceField("heldLocks", "[Ljava/lang/Object;");
   DCHECK(held_locks_field != nullptr);
-  ArtField* blocked_on_field = h_aste_class->FindField(
-        soa.Self(), h_aste_class.Get(), "blockedOn", "Ljava/lang/Object;");
+  ArtField* blocked_on_field =
+      h_aste_class->FindDeclaredInstanceField("blockedOn", "Ljava/lang/Object;");
   DCHECK(blocked_on_field != nullptr);
 
   int32_t length = static_cast<int32_t>(dumper.stack_trace_elements_.size());
@@ -4466,6 +4456,12 @@ bool Thread::IsSystemDaemon() const {
   }
   return jni::DecodeArtField(
       WellKnownClasses::java_lang_Thread_systemDaemon)->GetBoolean(GetPeer());
+}
+
+std::string Thread::StateAndFlagsAsHexString() const {
+  std::stringstream result_stream;
+  result_stream << std::hex << tls32_.state_and_flags.as_atomic_int.load();
+  return result_stream.str();
 }
 
 ScopedExceptionStorage::ScopedExceptionStorage(art::Thread* self)
