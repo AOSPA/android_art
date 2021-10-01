@@ -660,6 +660,20 @@ void JavaVMExt::CheckGlobalRefAllocationTracking() {
   }
 }
 
+void JavaVMExt::MaybeTraceGlobals() {
+  if (global_ref_report_counter_++ == kGlobalRefReportInterval) {
+    global_ref_report_counter_ = 1;
+    ATraceIntegerValue("JNI Global Refs", globals_.NEntriesForGlobal());
+  }
+}
+
+void JavaVMExt::MaybeTraceWeakGlobals() {
+  if (weak_global_ref_report_counter_++ == kGlobalRefReportInterval) {
+    weak_global_ref_report_counter_ = 1;
+    ATraceIntegerValue("JNI Weak Global Refs", weak_globals_.NEntriesForGlobal());
+  }
+}
+
 jobject JavaVMExt::AddGlobalRef(Thread* self, ObjPtr<mirror::Object> obj) {
   // Check for null after decoding the object to handle cleared weak globals.
   if (obj == nullptr) {
@@ -670,6 +684,7 @@ jobject JavaVMExt::AddGlobalRef(Thread* self, ObjPtr<mirror::Object> obj) {
   {
     WriterMutexLock mu(self, *Locks::jni_globals_lock_);
     ref = globals_.Add(kIRTFirstSegment, obj, &error_msg);
+    MaybeTraceGlobals();
   }
   if (UNLIKELY(ref == nullptr)) {
     LOG(FATAL) << error_msg;
@@ -677,6 +692,19 @@ jobject JavaVMExt::AddGlobalRef(Thread* self, ObjPtr<mirror::Object> obj) {
   }
   CheckGlobalRefAllocationTracking();
   return reinterpret_cast<jobject>(ref);
+}
+
+void JavaVMExt::WaitForWeakGlobalsAccess(Thread* self) {
+  if (UNLIKELY(!MayAccessWeakGlobals(self))) {
+    ATraceBegin("Blocking on WeakGlobal access");
+    do {
+      // Check and run the empty checkpoint before blocking so the empty checkpoint will work in the
+      // presence of threads blocking for weak ref access.
+      self->CheckEmptyCheckpointFromWeakRefAccess(Locks::jni_weak_globals_lock_);
+      weak_globals_add_condition_.WaitHoldingLocks(self);
+    } while (!MayAccessWeakGlobals(self));
+    ATraceEnd();
+  }
 }
 
 jweak JavaVMExt::AddWeakGlobalRef(Thread* self, ObjPtr<mirror::Object> obj) {
@@ -687,14 +715,12 @@ jweak JavaVMExt::AddWeakGlobalRef(Thread* self, ObjPtr<mirror::Object> obj) {
   // CMS needs this to block for concurrent reference processing because an object allocated during
   // the GC won't be marked and concurrent reference processing would incorrectly clear the JNI weak
   // ref. But CC (kUseReadBarrier == true) doesn't because of the to-space invariant.
-  while (!kUseReadBarrier && UNLIKELY(!MayAccessWeakGlobals(self))) {
-    // Check and run the empty checkpoint before blocking so the empty checkpoint will work in the
-    // presence of threads blocking for weak ref access.
-    self->CheckEmptyCheckpointFromWeakRefAccess(Locks::jni_weak_globals_lock_);
-    weak_globals_add_condition_.WaitHoldingLocks(self);
+  if (!kUseReadBarrier) {
+    WaitForWeakGlobalsAccess(self);
   }
   std::string error_msg;
   IndirectRef ref = weak_globals_.Add(kIRTFirstSegment, obj, &error_msg);
+  MaybeTraceWeakGlobals();
   if (UNLIKELY(ref == nullptr)) {
     LOG(FATAL) << error_msg;
     UNREACHABLE();
@@ -712,6 +738,7 @@ void JavaVMExt::DeleteGlobalRef(Thread* self, jobject obj) {
       LOG(WARNING) << "JNI WARNING: DeleteGlobalRef(" << obj << ") "
                    << "failed to find entry";
     }
+    MaybeTraceGlobals();
   }
   CheckGlobalRefAllocationTracking();
 }
@@ -725,6 +752,7 @@ void JavaVMExt::DeleteWeakGlobalRef(Thread* self, jweak obj) {
     LOG(WARNING) << "JNI WARNING: DeleteWeakGlobalRef(" << obj << ") "
                  << "failed to find entry";
   }
+  MaybeTraceWeakGlobals();
 }
 
 static void ThreadEnableCheckJni(Thread* thread, void* arg) {
@@ -829,12 +857,7 @@ ObjPtr<mirror::Object> JavaVMExt::DecodeWeakGlobalLocked(Thread* self, IndirectR
   if (kDebugLocking) {
     Locks::jni_weak_globals_lock_->AssertHeld(self);
   }
-  while (UNLIKELY(!MayAccessWeakGlobals(self))) {
-    // Check and run the empty checkpoint before blocking so the empty checkpoint will work in the
-    // presence of threads blocking for weak ref access.
-    self->CheckEmptyCheckpointFromWeakRefAccess(Locks::jni_weak_globals_lock_);
-    weak_globals_add_condition_.WaitHoldingLocks(self);
-  }
+  WaitForWeakGlobalsAccess(self);
   return weak_globals_.Get(ref);
 }
 
@@ -854,12 +877,7 @@ ObjPtr<mirror::Object> JavaVMExt::DecodeWeakGlobalDuringShutdown(Thread* self, I
 bool JavaVMExt::IsWeakGlobalCleared(Thread* self, IndirectRef ref) {
   DCHECK_EQ(IndirectReferenceTable::GetIndirectRefKind(ref), kWeakGlobal);
   MutexLock mu(self, *Locks::jni_weak_globals_lock_);
-  while (UNLIKELY(!MayAccessWeakGlobals(self))) {
-    // Check and run the empty checkpoint before blocking so the empty checkpoint will work in the
-    // presence of threads blocking for weak ref access.
-    self->CheckEmptyCheckpointFromWeakRefAccess(Locks::jni_weak_globals_lock_);
-    weak_globals_add_condition_.WaitHoldingLocks(self);
-  }
+  WaitForWeakGlobalsAccess(self);
   // When just checking a weak ref has been cleared, avoid triggering the read barrier in decode
   // (DecodeWeakGlobal) so that we won't accidentally mark the object alive. Since the cleared
   // sentinel is a non-moving object, we can compare the ref to it without the read barrier and

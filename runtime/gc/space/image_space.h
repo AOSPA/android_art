@@ -124,7 +124,11 @@ class ImageSpace : public MemMapSpace {
   static bool LoadBootImage(
       const std::vector<std::string>& boot_class_path,
       const std::vector<std::string>& boot_class_path_locations,
-      const std::string& image_location,
+      const std::vector<int>& boot_class_path_fds,
+      const std::vector<int>& boot_class_path_image_fds,
+      const std::vector<int>& boot_class_path_vdex_fds,
+      const std::vector<int>& boot_class_path_oat_fds,
+      const std::vector<std::string>& image_locations,
       const InstructionSet image_isa,
       bool relocate,
       bool executable,
@@ -233,9 +237,10 @@ class ImageSpace : public MemMapSpace {
   // The boot image and dex files do not need to be loaded in memory.
   static bool VerifyBootClassPathChecksums(std::string_view oat_checksums,
                                            std::string_view oat_boot_class_path,
-                                           const std::string& image_location,
+                                           ArrayRef<const std::string> image_locations,
                                            ArrayRef<const std::string> boot_class_path_locations,
                                            ArrayRef<const std::string> boot_class_path,
+                                           ArrayRef<const int> boot_class_path_fds,
                                            InstructionSet image_isa,
                                            /*out*/std::string* error_msg);
 

@@ -39,7 +39,10 @@ import org.junit.runners.MethodSorters;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
 import java.util.stream.Collectors;
 
 @RunWith(DeviceJUnit4ClassRunner.class)
@@ -54,6 +57,8 @@ public class OnDeviceSigningHostTest extends BaseHostJUnit4Test {
     private static final String ODREFRESH_COMPILATION_LOG =
             "/data/misc/odrefresh/compilation-log.txt";
 
+    private static final String CACHE_INFO_FILE = ART_APEX_DALVIK_CACHE_DIRNAME + "/cache-info.xml";
+
     private final String[] APP_ARTIFACT_EXTENSIONS = new String[] {".art", ".odex", ".vdex"};
 
     private final String[] BCP_ARTIFACT_EXTENSIONS = new String[] {".art", ".oat", ".vdex"};
@@ -65,6 +70,12 @@ public class OnDeviceSigningHostTest extends BaseHostJUnit4Test {
 
     private static final Duration BOOT_COMPLETE_TIMEOUT = Duration.ofMinutes(2);
 
+    private final String[] ZYGOTE_NAMES = new String[] {"zygote", "zygote64"};
+
+    private Set<String> mZygoteArtifacts;
+    private Set<String> mSystemServerArtifacts;
+    private long mBootTimeMs;
+
     @Before
     public void setUp() throws Exception {
         assumeTrue("Updating APEX is not supported", mInstallUtils.isApexUpdateSupported());
@@ -72,6 +83,13 @@ public class OnDeviceSigningHostTest extends BaseHostJUnit4Test {
         mInstallUtils.installApexes(APEX_FILENAME);
         removeCompilationLogToAvoidBackoff();
         reboot();
+
+        mZygoteArtifacts = new HashSet<>();
+        for (String zygoteName : ZYGOTE_NAMES) {
+            mZygoteArtifacts.addAll(getZygoteLoadedArtifacts(zygoteName).orElse(new HashSet<>()));
+        }
+        mSystemServerArtifacts = getSystemServerLoadedArtifacts();
+        mBootTimeMs = getDevice().getDeviceDate();
     }
 
     @After
@@ -113,10 +131,36 @@ public class OnDeviceSigningHostTest extends BaseHostJUnit4Test {
         return mappedFiles;
     }
 
+    /**
+     * Returns the mapped artifacts of the Zygote process, or {@code Optional.empty()} if the
+     * process does not exist.
+     */
+    private Optional<Set<String>> getZygoteLoadedArtifacts(String zygoteName) throws Exception {
+        final CommandResult pgrepResult = getDevice().executeShellV2Command("pidof " + zygoteName);
+        if (pgrepResult.getExitCode() != 0) {
+            return Optional.empty();
+        }
+        final String zygotePid = pgrepResult.getStdout();
+
+        final String grepPattern = ART_APEX_DALVIK_CACHE_DIRNAME + ".*boot-framework";
+        return Optional.of(getMappedArtifacts(zygotePid, grepPattern));
+    }
+
+    private Set<String> getSystemServerLoadedArtifacts() throws Exception {
+        String systemServerPid = getDevice().executeShellCommand("pidof system_server");
+        assertTrue(systemServerPid != null);
+
+        // system_server artifacts are in the APEX data dalvik cache and names all contain
+        // the word "@classes". Look for mapped files that match this pattern in the proc map for
+        // system_server.
+        final String grepPattern = ART_APEX_DALVIK_CACHE_DIRNAME + ".*@classes";
+        return getMappedArtifacts(systemServerPid, grepPattern);
+    }
+
     private String[] getSystemServerClasspath() throws Exception {
         String systemServerClasspath =
                 getDevice().executeShellCommand("echo $SYSTEMSERVERCLASSPATH");
-        return systemServerClasspath.split(":");
+        return systemServerClasspath.trim().split(":");
     }
 
     private String getSystemServerIsa(String mappedArtifact) {
@@ -132,56 +176,34 @@ public class OnDeviceSigningHostTest extends BaseHostJUnit4Test {
         String[] classpathElements = getSystemServerClasspath();
         assertTrue("SYSTEMSERVERCLASSPATH is empty", classpathElements.length > 0);
 
-        String systemServerPid = getDevice().executeShellCommand("pgrep system_server");
-        assertTrue(systemServerPid != null);
-
-        // system_server artifacts are in the APEX data dalvik cache and names all contain
-        // the word "@classes". Look for mapped files that match this pattern in the proc map for
-        // system_server.
-        final String grepPattern = ART_APEX_DALVIK_CACHE_DIRNAME + ".*@classes";
-        final Set<String> mappedArtifacts = getMappedArtifacts(systemServerPid, grepPattern);
+        final Set<String> mappedArtifacts = getSystemServerLoadedArtifacts();
         assertTrue(
                 "No mapped artifacts under " + ART_APEX_DALVIK_CACHE_DIRNAME,
                 mappedArtifacts.size() > 0);
         final String isa = getSystemServerIsa(mappedArtifacts.iterator().next());
         final String isaCacheDirectory = String.format("%s/%s", ART_APEX_DALVIK_CACHE_DIRNAME, isa);
 
-        // Check the non-APEX components in the system_server classpath have mapped artifacts.
+        // Check components in the system_server classpath have mapped artifacts.
         for (String element : classpathElements) {
-            // Skip system_server classpath elements from APEXes as these are not currently
-            // compiled.
-            if (element.startsWith("/apex")) {
-                continue;
-            }
-            String escapedPath = element.substring(1).replace('/', '@');
-            for (String extension : APP_ARTIFACT_EXTENSIONS) {
-                final String fullArtifactPath =
-                        String.format("%s/%s@classes%s", isaCacheDirectory, escapedPath, extension);
-                assertTrue(
-                        "Missing " + fullArtifactPath, mappedArtifacts.contains(fullArtifactPath));
-            }
+          String escapedPath = element.substring(1).replace('/', '@');
+          for (String extension : APP_ARTIFACT_EXTENSIONS) {
+            final String fullArtifactPath =
+                String.format("%s/%s@classes%s", isaCacheDirectory, escapedPath, extension);
+            assertTrue("Missing " + fullArtifactPath, mappedArtifacts.contains(fullArtifactPath));
+          }
         }
 
         for (String mappedArtifact : mappedArtifacts) {
-            // Check no APEX JAR artifacts are mapped for system_server since if there
-            // are, then the policy around not compiling APEX jars for system_server has
-            // changed and this test needs updating here and in the system_server classpath
-            // check above.
-            assertTrue(
-                    "Unexpected mapped artifact: " + mappedArtifact,
-                    mappedArtifact.contains("/apex"));
-
-            // Check the mapped artifact has a .art, .odex or .vdex extension.
-            final boolean knownArtifactKind =
-                    Arrays.stream(APP_ARTIFACT_EXTENSIONS)
-                            .anyMatch(e -> mappedArtifact.endsWith(e));
-            assertTrue("Unknown artifact kind: " + mappedArtifact, knownArtifactKind);
+          // Check the mapped artifact has a .art, .odex or .vdex extension.
+          final boolean knownArtifactKind =
+              Arrays.stream(APP_ARTIFACT_EXTENSIONS).anyMatch(e -> mappedArtifact.endsWith(e));
+          assertTrue("Unknown artifact kind: " + mappedArtifact, knownArtifactKind);
         }
     }
 
-    private void verifyZygoteLoadedArtifacts(String zygoteName, String zygotePid) throws Exception {
+    private void verifyZygoteLoadedArtifacts(String zygoteName, Set<String> mappedArtifacts)
+            throws Exception {
         final String bootExtensionName = "boot-framework";
-        final Set<String> mappedArtifacts = getMappedArtifacts(zygotePid, bootExtensionName);
 
         assertTrue("Expect 3 boot-framework artifacts", mappedArtifacts.size() == 3);
 
@@ -198,14 +220,12 @@ public class OnDeviceSigningHostTest extends BaseHostJUnit4Test {
         // instances 32-bit and 64-bit unspecialized app_process processes.
         // (frameworks/base/cmds/app_process).
         int zygoteCount = 0;
-        for (String zygoteName : new String[] {"zygote", "zygote64"}) {
-            final CommandResult pgrepResult =
-                    getDevice().executeShellV2Command("pgrep " + zygoteName);
-            if (pgrepResult.getExitCode() != 0) {
+        for (String zygoteName : ZYGOTE_NAMES) {
+            final Optional<Set<String>> mappedArtifacts = getZygoteLoadedArtifacts(zygoteName);
+            if (!mappedArtifacts.isPresent()) {
                 continue;
             }
-            final String zygotePid = pgrepResult.getStdout();
-            verifyZygoteLoadedArtifacts(zygoteName, zygotePid);
+            verifyZygoteLoadedArtifacts(zygoteName, mappedArtifacts.get());
             zygoteCount += 1;
         }
         assertTrue("No zygote processes found", zygoteCount > 0);
@@ -229,62 +249,151 @@ public class OnDeviceSigningHostTest extends BaseHostJUnit4Test {
     }
 
     @Test
-    public void verifyGeneratedArtifactsLoadedForSamegradeUpdate() throws Exception {
-        // Install the same APEX effecting a samegrade update. The setUp method has installed it
-        // before us.
-        mInstallUtils.installApexes(APEX_FILENAME);
+    public void verifyGeneratedArtifactsLoadedAfterReboot() throws Exception {
         reboot();
+        verifyGeneratedArtifactsLoaded();
+    }
 
-        final boolean adbEnabled = getDevice().enableAdbRoot();
-        assertTrue("ADB root failed and required to get odrefresh compilation log", adbEnabled);
-
-        // Check that odrefresh logged a compilation attempt due to samegrade ART APEX install.
-        String[] logLines = getDevice().pullFileContents(ODREFRESH_COMPILATION_LOG).split("\n");
-        assertTrue(
-                "Expected 3 lines in " + ODREFRESH_COMPILATION_LOG + ", found " + logLines.length,
-                logLines.length == 3);
-
-        // Check that the compilation log entries are reasonable, ie times move forward.
-        // The first line of the log is the log format version number.
-        String[] firstUpdateEntry = logLines[1].split(" ");
-        String[] secondUpdateEntry = logLines[2].split(" ");
-        final int LOG_ENTRY_FIELDS = 5;
-        assertTrue(
-                "Unexpected number of fields: " + firstUpdateEntry.length + " != " +
-                LOG_ENTRY_FIELDS,
-                firstUpdateEntry.length == LOG_ENTRY_FIELDS);
-        assertTrue(firstUpdateEntry.length == secondUpdateEntry.length);
-
-        final int LAST_UPDATE_MILLIS_INDEX = 1;
-        final int COMPILATION_TIME_INDEX = 3;
-        for (int i = 0; i < firstUpdateEntry.length; ++i) {
-            final long firstField = Long.parseLong(firstUpdateEntry[i]);
-            final long secondField = Long.parseLong(secondUpdateEntry[i]);
-            if (i == LAST_UPDATE_MILLIS_INDEX) {
-                // The second APEX lastUpdateMillis should be after the first, but a clock
-                // adjustment might reverse the order so we can't assert this (b/194365586).
-                assertTrue(
-                        "Last update times are expected to differ, but they are equal " +
-                        firstField + " == " + secondField,
-                        firstField != secondField);
-            } else if (i == COMPILATION_TIME_INDEX) {
-                // The second compilation time should be after the first compilation time, but
-                // a clock adjustment might reverse the order so we can't assert this
-                // (b/194365586).
-                assertTrue(
-                        "Compilation times are expected to differ, but they are equal " +
-                        firstField + " == " + secondField,
-                        firstField != secondField);
+    /**
+     * Checks the input line by line and replaces all lines that match the regex with the given
+     * replacement.
+     */
+    String replaceLine(String input, String regex, String replacement) {
+        StringBuffer output = new StringBuffer();
+        Pattern p = Pattern.compile(regex);
+        for (String line : input.split("\n")) {
+            Matcher m = p.matcher(line);
+            if (m.matches()) {
+                m.appendReplacement(output, replacement);
+                output.append("\n");
             } else {
-                // The remaining fields should be the same, ie trigger for compilation.
-                assertTrue(
-                        "Compilation entries differ for position " + i + ": " +
-                        firstField + " != " + secondField,
-                        firstField == secondField);
+                output.append(line + "\n");
             }
         }
+        return output.toString();
+    }
 
-        verifyGeneratedArtifactsLoaded();
+    /**
+     * Simulates that there is an OTA that updates a boot classpath jar.
+     */
+    void simulateBootClasspathOta() throws Exception {
+        String cacheInfo = getDevice().pullFileContents(CACHE_INFO_FILE);
+        // Replace the cached checksum of /system/framework/framework.jar with "aaaaaaaa".
+        cacheInfo = replaceLine(
+                cacheInfo,
+                "(.*/system/framework/framework\\.jar.*checksums=\").*?(\".*)",
+                "$1aaaaaaaa$2");
+        getDevice().pushString(cacheInfo, CACHE_INFO_FILE);
+    }
+
+    /**
+     * Simulates that there is an OTA that updates a system server jar.
+     */
+    void simulateSystemServerOta() throws Exception {
+        String cacheInfo = getDevice().pullFileContents(CACHE_INFO_FILE);
+        // Replace the cached checksum of /system/framework/services.jar with "aaaaaaaa".
+        cacheInfo = replaceLine(
+                cacheInfo,
+                "(.*/system/framework/services\\.jar.*checksums=\").*?(\".*)",
+                "$1aaaaaaaa$2");
+        getDevice().pushString(cacheInfo, CACHE_INFO_FILE);
+    }
+
+    /**
+     * Simulates that an ART APEX has been upgraded.
+     */
+    void simulateArtApexUpgrade() throws Exception {
+        String apexInfo = getDevice().pullFileContents(CACHE_INFO_FILE);
+        // Replace the lastUpdateMillis of com.android.art with "1".
+        apexInfo = replaceLine(
+                apexInfo,
+                "(.*com\\.android\\.art.*lastUpdateMillis=\").*?(\".*)",
+                "$11$2");
+        getDevice().pushString(apexInfo, CACHE_INFO_FILE);
+    }
+
+    /**
+     * Simulates that an APEX has been upgraded. We could install a real APEX, but that would
+     * introduce an extra dependency to this test, which we want to avoid.
+     */
+    void simulateApexUpgrade() throws Exception {
+        String apexInfo = getDevice().pullFileContents(CACHE_INFO_FILE);
+        // Replace the lastUpdateMillis of com.android.wifi with "1".
+        apexInfo = replaceLine(
+                apexInfo,
+                "(.*com\\.android\\.wifi.*lastUpdateMillis=\").*?(\".*)",
+                "$11$2");
+        getDevice().pushString(apexInfo, CACHE_INFO_FILE);
+    }
+
+    long getModifiedTimeMs(String filename) throws Exception {
+        String timeStr = getDevice()
+                .executeShellCommand(String.format("stat -c '%%.3Y' '%s'", filename))
+                .trim();
+        return (long)(Double.parseDouble(timeStr) * 1000);
+    }
+
+    void assertArtifactsModifiedAfter(Set<String> artifacts, long timeMs) throws Exception {
+        for (String artifact : artifacts) {
+            assertTrue("Artifact " + artifact + " is not re-compiled",
+                    getModifiedTimeMs(artifact) > timeMs);
+        }
+    }
+
+    void assertArtifactsNotModifiedAfter(Set<String> artifacts, long timeMs) throws Exception {
+        for (String artifact : artifacts) {
+            assertTrue("Artifact " + artifact + " is unexpectedly re-compiled",
+                    getModifiedTimeMs(artifact) < timeMs);
+        }
+    }
+
+    @Test
+    public void verifyArtSamegradeUpdateTriggersCompilation() throws Exception {
+        simulateArtApexUpgrade();
+        removeCompilationLogToAvoidBackoff();
+        getDevice().executeShellV2Command("odrefresh --compile");
+
+        assertArtifactsModifiedAfter(mZygoteArtifacts, mBootTimeMs);
+        assertArtifactsModifiedAfter(mSystemServerArtifacts, mBootTimeMs);
+    }
+
+    @Test
+    public void verifyOtherApexSamegradeUpdateTriggersCompilation() throws Exception {
+        simulateApexUpgrade();
+        removeCompilationLogToAvoidBackoff();
+        getDevice().executeShellV2Command("odrefresh --compile");
+
+        assertArtifactsNotModifiedAfter(mZygoteArtifacts, mBootTimeMs);
+        assertArtifactsModifiedAfter(mSystemServerArtifacts, mBootTimeMs);
+    }
+
+    @Test
+    public void verifyBootClasspathOtaTriggersCompilation() throws Exception {
+        simulateBootClasspathOta();
+        removeCompilationLogToAvoidBackoff();
+        getDevice().executeShellV2Command("odrefresh --compile");
+
+        assertArtifactsModifiedAfter(mZygoteArtifacts, mBootTimeMs);
+        assertArtifactsModifiedAfter(mSystemServerArtifacts, mBootTimeMs);
+    }
+
+    @Test
+    public void verifySystemServerOtaTriggersCompilation() throws Exception {
+        simulateSystemServerOta();
+        removeCompilationLogToAvoidBackoff();
+        getDevice().executeShellV2Command("odrefresh --compile");
+
+        assertArtifactsNotModifiedAfter(mZygoteArtifacts, mBootTimeMs);
+        assertArtifactsModifiedAfter(mSystemServerArtifacts, mBootTimeMs);
+    }
+
+    @Test
+    public void verifyNoCompilationWhenCacheIsGood() throws Exception {
+        removeCompilationLogToAvoidBackoff();
+        getDevice().executeShellV2Command("odrefresh --compile");
+
+        assertArtifactsNotModifiedAfter(mZygoteArtifacts, mBootTimeMs);
+        assertArtifactsNotModifiedAfter(mSystemServerArtifacts, mBootTimeMs);
     }
 
     private boolean haveCompilationLog() throws Exception {

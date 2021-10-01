@@ -1154,6 +1154,12 @@
       "name": "art_standalone_libartpalette_tests[com.google.android.art.apex]"
     },
     {
+      "name": "art_standalone_libartservice_tests[com.google.android.art.apex]"
+    },
+    {
+      "name": "art_standalone_libarttools_tests[com.google.android.art.apex]"
+    },
+    {
       "name": "art_standalone_libdexfile_support_tests[com.google.android.art.apex]"
     },
     {
@@ -1187,6 +1193,9 @@
     },
     {
       "name": "BootImageProfileTest"
+    },
+    {
+      "name": "ArtServiceTests"
     },
     {
       "name": "art-run-test-001-HelloWorld"
@@ -2339,6 +2348,12 @@
     },
     {
       "name": "art_standalone_libartpalette_tests"
+    },
+    {
+      "name": "art_standalone_libartservice_tests"
+    },
+    {
+      "name": "art_standalone_libarttools_tests"
     },
     {
       "name": "art_standalone_libdexfile_support_tests"

@@ -148,7 +148,6 @@
 #include "native_stack_dump.h"
 #include "nativehelper/scoped_local_ref.h"
 #include "oat.h"
-#include "oat_file.h"
 #include "oat_file_manager.h"
 #include "oat_quick_method_header.h"
 #include "object_callbacks.h"
@@ -882,7 +881,7 @@ bool Runtime::Start() {
 
   self->TransitionFromRunnableToSuspended(kNative);
 
-  DoAndMaybeSwitchInterpreter([=](){ started_ = true; });
+  started_ = true;
 
   if (!IsImageDex2OatEnabled() || !GetHeap()->HasBootImageSpace()) {
     ScopedObjectAccess soa(self);
@@ -1207,6 +1206,7 @@ void Runtime::StartDaemonThreads() {
 
 static size_t OpenBootDexFiles(ArrayRef<const std::string> dex_filenames,
                                ArrayRef<const std::string> dex_locations,
+                               ArrayRef<const int> dex_fds,
                                std::vector<std::unique_ptr<const DexFile>>* dex_files) {
   DCHECK(dex_files != nullptr) << "OpenDexFiles: out-param is nullptr";
   size_t failure_count = 0;
@@ -1214,20 +1214,23 @@ static size_t OpenBootDexFiles(ArrayRef<const std::string> dex_filenames,
   for (size_t i = 0; i < dex_filenames.size(); i++) {
     const char* dex_filename = dex_filenames[i].c_str();
     const char* dex_location = dex_locations[i].c_str();
+    const int dex_fd = i < dex_fds.size() ? dex_fds[i] : -1;
     static constexpr bool kVerifyChecksum = true;
     std::string error_msg;
-    if (!OS::FileExists(dex_filename)) {
+    if (!OS::FileExists(dex_filename) && dex_fd < 0) {
       LOG(WARNING) << "Skipping non-existent dex file '" << dex_filename << "'";
       continue;
     }
     bool verify = Runtime::Current()->IsVerificationEnabled();
     if (!dex_file_loader.Open(dex_filename,
+                              dex_fd,
                               dex_location,
                               verify,
                               kVerifyChecksum,
                               &error_msg,
                               dex_files)) {
-      LOG(WARNING) << "Failed to open .dex from file '" << dex_filename << "': " << error_msg;
+      LOG(WARNING) << "Failed to open .dex from file '" << dex_filename << "' / fd " << dex_fd
+                   << ": " << error_msg;
       ++failure_count;
     }
   }
@@ -1395,7 +1398,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   Monitor::Init(runtime_options.GetOrDefault(Opt::LockProfThreshold),
                 runtime_options.GetOrDefault(Opt::StackDumpLockProfThreshold));
 
-  image_location_ = runtime_options.GetOrDefault(Opt::Image);
+  image_locations_ = runtime_options.ReleaseOrDefault(Opt::Image);
 
   SetInstructionSet(runtime_options.GetOrDefault(Opt::ImageInstructionSet));
   boot_class_path_ = runtime_options.ReleaseOrDefault(Opt::BootClassPath);
@@ -1403,49 +1406,26 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   DCHECK(boot_class_path_locations_.empty() ||
          boot_class_path_locations_.size() == boot_class_path_.size());
   if (boot_class_path_.empty()) {
-    // Try to extract the boot class path from the system boot image.
-    if (image_location_.empty()) {
-      LOG(ERROR) << "Empty boot class path, cannot continue without image.";
-      return false;
-    }
-    std::string system_oat_filename = ImageHeader::GetOatLocationFromImageLocation(
-        GetSystemImageFilename(image_location_.c_str(), instruction_set_));
-    std::string system_oat_location = ImageHeader::GetOatLocationFromImageLocation(
-        image_location_);
-
-    if (deny_art_apex_data_files_ && (LocationIsOnArtApexData(system_oat_filename) ||
-                                      LocationIsOnArtApexData(system_oat_location))) {
-      // This code path exists for completeness, but we don't expect it to be hit.
-      //
-      // `deny_art_apex_data_files` defaults to false unless set at the command-line. The image
-      // locations come from the -Ximage argument and it would need to be specified as being on
-      // the ART APEX data directory. This combination of flags would say apexdata is compromised,
-      // use apexdata to load image files, which is obviously not a good idea.
-      LOG(ERROR) << "Could not open boot oat file from untrusted location: " << system_oat_filename;
-      return false;
-    }
-
-    std::string error_msg;
-    std::unique_ptr<OatFile> oat_file(OatFile::Open(/*zip_fd=*/ -1,
-                                                    system_oat_filename,
-                                                    system_oat_location,
-                                                    /*executable=*/ false,
-                                                    /*low_4gb=*/ false,
-                                                    &error_msg));
-    if (oat_file == nullptr) {
-      LOG(ERROR) << "Could not open boot oat file for extracting boot class path: " << error_msg;
-      return false;
-    }
-    const OatHeader& oat_header = oat_file->GetOatHeader();
-    const char* oat_boot_class_path = oat_header.GetStoreValueByKey(OatHeader::kBootClassPathKey);
-    if (oat_boot_class_path != nullptr) {
-      Split(oat_boot_class_path, ':', &boot_class_path_);
-    }
-    if (boot_class_path_.empty()) {
-      LOG(ERROR) << "Boot class path missing from boot image oat file " << oat_file->GetLocation();
-      return false;
-    }
+    LOG(ERROR) << "Boot classpath is empty";
+    return false;
   }
+
+  boot_class_path_fds_ = runtime_options.ReleaseOrDefault(Opt::BootClassPathFds);
+  if (!boot_class_path_fds_.empty() && boot_class_path_fds_.size() != boot_class_path_.size()) {
+    LOG(ERROR) << "Number of FDs specified in -Xbootclasspathfds must match the number of JARs in "
+               << "-Xbootclasspath.";
+    return false;
+  }
+
+  boot_class_path_image_fds_ = runtime_options.ReleaseOrDefault(Opt::BootClassPathImageFds);
+  boot_class_path_vdex_fds_ = runtime_options.ReleaseOrDefault(Opt::BootClassPathVdexFds);
+  boot_class_path_oat_fds_ = runtime_options.ReleaseOrDefault(Opt::BootClassPathOatFds);
+  CHECK(boot_class_path_image_fds_.empty() ||
+        boot_class_path_image_fds_.size() == boot_class_path_fds_.size());
+  CHECK(boot_class_path_vdex_fds_.empty() ||
+        boot_class_path_vdex_fds_.size() == boot_class_path_fds_.size());
+  CHECK(boot_class_path_oat_fds_.empty() ||
+        boot_class_path_oat_fds_.size() == boot_class_path_fds_.size());
 
   class_path_string_ = runtime_options.ReleaseOrDefault(Opt::ClassPath);
   properties_ = runtime_options.ReleaseOrDefault(Opt::PropertiesList);
@@ -1570,7 +1550,11 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        runtime_options.GetOrDefault(Opt::NonMovingSpaceCapacity),
                        GetBootClassPath(),
                        GetBootClassPathLocations(),
-                       image_location_,
+                       GetBootClassPathFds(),
+                       GetBootClassPathImageFds(),
+                       GetBootClassPathVdexFds(),
+                       GetBootClassPathOatFds(),
+                       image_locations_,
                        instruction_set_,
                        // Override the collector type to CC if the read barrier config.
                        kUseReadBarrier ? gc::kCollectorTypeCC : xgc_option.collector_type_,
@@ -1777,8 +1761,12 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
       if (runtime_options.Exists(Opt::BootClassPathDexList)) {
         extra_boot_class_path.swap(*runtime_options.GetOrDefault(Opt::BootClassPathDexList));
       } else {
+        ArrayRef<const int> bcp_fds = start < GetBootClassPathFds().size()
+            ? ArrayRef<const int>(GetBootClassPathFds()).SubArray(start)
+            : ArrayRef<const int>();
         OpenBootDexFiles(ArrayRef<const std::string>(GetBootClassPath()).SubArray(start),
                          ArrayRef<const std::string>(GetBootClassPathLocations()).SubArray(start),
+                         bcp_fds,
                          &extra_boot_class_path);
       }
       class_linker_->AddExtraBootDexFiles(self, std::move(extra_boot_class_path));
@@ -1797,6 +1785,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     } else {
       OpenBootDexFiles(ArrayRef<const std::string>(GetBootClassPath()),
                        ArrayRef<const std::string>(GetBootClassPathLocations()),
+                       ArrayRef<const int>(GetBootClassPathFds()),
                        &boot_class_path);
     }
     if (!class_linker_->InitWithoutImage(std::move(boot_class_path), &error_msg)) {
@@ -2414,8 +2403,8 @@ void Runtime::VisitConcurrentRoots(RootVisitor* visitor, VisitRootFlags flags) {
 }
 
 void Runtime::VisitTransactionRoots(RootVisitor* visitor) {
-  for (auto& transaction : preinitialization_transactions_) {
-    transaction->VisitRoots(visitor);
+  for (Transaction& transaction : preinitialization_transactions_) {
+    transaction.VisitRoots(visitor);
   }
 }
 
@@ -2666,26 +2655,33 @@ bool Runtime::IsActiveTransaction() const {
 
 void Runtime::EnterTransactionMode(bool strict, mirror::Class* root) {
   DCHECK(IsAotCompiler());
+  ArenaPool* arena_pool = nullptr;
+  ArenaStack* arena_stack = nullptr;
   if (preinitialization_transactions_.empty()) {  // Top-level transaction?
     // Make initialized classes visibly initialized now. If that happened during the transaction
     // and then the transaction was aborted, we would roll back the status update but not the
     // ClassLinker's bookkeeping structures, so these classes would never be visibly initialized.
     GetClassLinker()->MakeInitializedClassesVisiblyInitialized(Thread::Current(), /*wait=*/ true);
+    // Pass the runtime `ArenaPool` to the transaction.
+    arena_pool = GetArenaPool();
+  } else {
+    // Pass the `ArenaStack` from previous transaction to the new one.
+    arena_stack = preinitialization_transactions_.front().GetArenaStack();
   }
-  preinitialization_transactions_.push_back(std::make_unique<Transaction>(strict, root));
+  preinitialization_transactions_.emplace_front(strict, root, arena_stack, arena_pool);
 }
 
 void Runtime::ExitTransactionMode() {
   DCHECK(IsAotCompiler());
   DCHECK(IsActiveTransaction());
-  preinitialization_transactions_.pop_back();
+  preinitialization_transactions_.pop_front();
 }
 
 void Runtime::RollbackAndExitTransactionMode() {
   DCHECK(IsAotCompiler());
   DCHECK(IsActiveTransaction());
-  preinitialization_transactions_.back()->Rollback();
-  preinitialization_transactions_.pop_back();
+  preinitialization_transactions_.front().Rollback();
+  preinitialization_transactions_.pop_front();
 }
 
 bool Runtime::IsTransactionAborted() const {
@@ -2709,9 +2705,14 @@ bool Runtime::IsActiveStrictTransactionMode() const {
   return IsActiveTransaction() && GetTransaction()->IsStrict();
 }
 
-const std::unique_ptr<Transaction>& Runtime::GetTransaction() const {
+const Transaction* Runtime::GetTransaction() const {
   DCHECK(!preinitialization_transactions_.empty());
-  return preinitialization_transactions_.back();
+  return &preinitialization_transactions_.front();
+}
+
+Transaction* Runtime::GetTransaction() {
+  DCHECK(!preinitialization_transactions_.empty());
+  return &preinitialization_transactions_.front();
 }
 
 void Runtime::AbortTransactionAndThrowAbortError(Thread* self, const std::string& abort_message) {
@@ -2733,43 +2734,55 @@ void Runtime::ThrowTransactionAbortError(Thread* self) {
   GetTransaction()->ThrowAbortError(self, nullptr);
 }
 
-void Runtime::RecordWriteFieldBoolean(mirror::Object* obj, MemberOffset field_offset,
-                                      uint8_t value, bool is_volatile) const {
+void Runtime::RecordWriteFieldBoolean(mirror::Object* obj,
+                                      MemberOffset field_offset,
+                                      uint8_t value,
+                                      bool is_volatile) {
   DCHECK(IsAotCompiler());
   DCHECK(IsActiveTransaction());
   GetTransaction()->RecordWriteFieldBoolean(obj, field_offset, value, is_volatile);
 }
 
-void Runtime::RecordWriteFieldByte(mirror::Object* obj, MemberOffset field_offset,
-                                   int8_t value, bool is_volatile) const {
+void Runtime::RecordWriteFieldByte(mirror::Object* obj,
+                                   MemberOffset field_offset,
+                                   int8_t value,
+                                   bool is_volatile) {
   DCHECK(IsAotCompiler());
   DCHECK(IsActiveTransaction());
   GetTransaction()->RecordWriteFieldByte(obj, field_offset, value, is_volatile);
 }
 
-void Runtime::RecordWriteFieldChar(mirror::Object* obj, MemberOffset field_offset,
-                                   uint16_t value, bool is_volatile) const {
+void Runtime::RecordWriteFieldChar(mirror::Object* obj,
+                                   MemberOffset field_offset,
+                                   uint16_t value,
+                                   bool is_volatile) {
   DCHECK(IsAotCompiler());
   DCHECK(IsActiveTransaction());
   GetTransaction()->RecordWriteFieldChar(obj, field_offset, value, is_volatile);
 }
 
-void Runtime::RecordWriteFieldShort(mirror::Object* obj, MemberOffset field_offset,
-                                    int16_t value, bool is_volatile) const {
+void Runtime::RecordWriteFieldShort(mirror::Object* obj,
+                                    MemberOffset field_offset,
+                                    int16_t value,
+                                    bool is_volatile) {
   DCHECK(IsAotCompiler());
   DCHECK(IsActiveTransaction());
   GetTransaction()->RecordWriteFieldShort(obj, field_offset, value, is_volatile);
 }
 
-void Runtime::RecordWriteField32(mirror::Object* obj, MemberOffset field_offset,
-                                 uint32_t value, bool is_volatile) const {
+void Runtime::RecordWriteField32(mirror::Object* obj,
+                                 MemberOffset field_offset,
+                                 uint32_t value,
+                                 bool is_volatile) {
   DCHECK(IsAotCompiler());
   DCHECK(IsActiveTransaction());
   GetTransaction()->RecordWriteField32(obj, field_offset, value, is_volatile);
 }
 
-void Runtime::RecordWriteField64(mirror::Object* obj, MemberOffset field_offset,
-                                 uint64_t value, bool is_volatile) const {
+void Runtime::RecordWriteField64(mirror::Object* obj,
+                                 MemberOffset field_offset,
+                                 uint64_t value,
+                                 bool is_volatile) {
   DCHECK(IsAotCompiler());
   DCHECK(IsActiveTransaction());
   GetTransaction()->RecordWriteField64(obj, field_offset, value, is_volatile);
@@ -2778,50 +2791,54 @@ void Runtime::RecordWriteField64(mirror::Object* obj, MemberOffset field_offset,
 void Runtime::RecordWriteFieldReference(mirror::Object* obj,
                                         MemberOffset field_offset,
                                         ObjPtr<mirror::Object> value,
-                                        bool is_volatile) const {
+                                        bool is_volatile) {
   DCHECK(IsAotCompiler());
   DCHECK(IsActiveTransaction());
-  GetTransaction()->RecordWriteFieldReference(obj,
-                                                            field_offset,
-                                                            value.Ptr(),
-                                                            is_volatile);
+  GetTransaction()->RecordWriteFieldReference(obj, field_offset, value.Ptr(), is_volatile);
 }
 
-void Runtime::RecordWriteArray(mirror::Array* array, size_t index, uint64_t value) const {
+void Runtime::RecordWriteArray(mirror::Array* array, size_t index, uint64_t value) {
   DCHECK(IsAotCompiler());
   DCHECK(IsActiveTransaction());
   GetTransaction()->RecordWriteArray(array, index, value);
 }
 
-void Runtime::RecordStrongStringInsertion(ObjPtr<mirror::String> s) const {
+void Runtime::RecordStrongStringInsertion(ObjPtr<mirror::String> s) {
   DCHECK(IsAotCompiler());
   DCHECK(IsActiveTransaction());
   GetTransaction()->RecordStrongStringInsertion(s);
 }
 
-void Runtime::RecordWeakStringInsertion(ObjPtr<mirror::String> s) const {
+void Runtime::RecordWeakStringInsertion(ObjPtr<mirror::String> s) {
   DCHECK(IsAotCompiler());
   DCHECK(IsActiveTransaction());
   GetTransaction()->RecordWeakStringInsertion(s);
 }
 
-void Runtime::RecordStrongStringRemoval(ObjPtr<mirror::String> s) const {
+void Runtime::RecordStrongStringRemoval(ObjPtr<mirror::String> s) {
   DCHECK(IsAotCompiler());
   DCHECK(IsActiveTransaction());
   GetTransaction()->RecordStrongStringRemoval(s);
 }
 
-void Runtime::RecordWeakStringRemoval(ObjPtr<mirror::String> s) const {
+void Runtime::RecordWeakStringRemoval(ObjPtr<mirror::String> s) {
   DCHECK(IsAotCompiler());
   DCHECK(IsActiveTransaction());
   GetTransaction()->RecordWeakStringRemoval(s);
 }
 
 void Runtime::RecordResolveString(ObjPtr<mirror::DexCache> dex_cache,
-                                  dex::StringIndex string_idx) const {
+                                  dex::StringIndex string_idx) {
   DCHECK(IsAotCompiler());
   DCHECK(IsActiveTransaction());
   GetTransaction()->RecordResolveString(dex_cache, string_idx);
+}
+
+void Runtime::RecordResolveMethodType(ObjPtr<mirror::DexCache> dex_cache,
+                                      dex::ProtoIndex proto_idx) {
+  DCHECK(IsAotCompiler());
+  DCHECK(IsActiveTransaction());
+  GetTransaction()->RecordResolveMethodType(dex_cache, proto_idx);
 }
 
 void Runtime::SetFaultMessage(const std::string& message) {
@@ -2907,7 +2924,7 @@ void Runtime::CreateJit() {
   }
 
   jit::Jit* jit = jit::Jit::Create(jit_code_cache_.get(), jit_options_.get());
-  DoAndMaybeSwitchInterpreter([=](){ jit_.reset(jit); });
+  jit_.reset(jit);
   if (jit == nullptr) {
     LOG(WARNING) << "Failed to allocate JIT";
     // Release JIT code cache resources (several MB of memory).

@@ -151,8 +151,6 @@
 #include "verifier/verifier_deps.h"
 #include "well_known_classes.h"
 
-#include "interpreter/interpreter_mterp_impl.h"
-
 namespace art {
 
 using android::base::StringPrintf;
@@ -171,63 +169,35 @@ static void ThrowNoClassDefFoundError(const char* fmt, ...) {
   va_end(args);
 }
 
-static bool HasInitWithString(Thread* self, ClassLinker* class_linker, const char* descriptor)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  ArtMethod* method = self->GetCurrentMethod(nullptr);
-  StackHandleScope<1> hs(self);
-  Handle<mirror::ClassLoader> class_loader(hs.NewHandle(method != nullptr ?
-      method->GetDeclaringClass()->GetClassLoader() : nullptr));
-  ObjPtr<mirror::Class> exception_class = class_linker->FindClass(self, descriptor, class_loader);
-
-  if (exception_class == nullptr) {
-    // No exc class ~ no <init>-with-string.
-    CHECK(self->IsExceptionPending());
-    self->ClearException();
-    return false;
-  }
-
-  ArtMethod* exception_init_method = exception_class->FindConstructor(
-      "(Ljava/lang/String;)V", class_linker->GetImagePointerSize());
-  return exception_init_method != nullptr;
-}
-
-static ObjPtr<mirror::Object> GetVerifyError(ObjPtr<mirror::Class> c)
+static ObjPtr<mirror::Object> GetErroneousStateError(ObjPtr<mirror::Class> c)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   ObjPtr<mirror::ClassExt> ext(c->GetExtData());
   if (ext == nullptr) {
     return nullptr;
   } else {
-    return ext->GetVerifyError();
+    return ext->GetErroneousStateError();
   }
 }
 
-// Helper for ThrowEarlierClassFailure. Throws the stored error.
-static void HandleEarlierVerifyError(Thread* self,
-                                     ClassLinker* class_linker,
-                                     ObjPtr<mirror::Class> c)
+static bool IsVerifyError(ObjPtr<mirror::Object> obj)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  ObjPtr<mirror::Object> obj = GetVerifyError(c);
+  // This is slow, but we only use it for rethrowing an error, and for DCHECK.
+  return obj->GetClass()->DescriptorEquals("Ljava/lang/VerifyError;");
+}
+
+// Helper for ThrowEarlierClassFailure. Throws the stored error.
+static void HandleEarlierErroneousStateError(Thread* self,
+                                             ClassLinker* class_linker,
+                                             ObjPtr<mirror::Class> c)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  ObjPtr<mirror::Object> obj = GetErroneousStateError(c);
   DCHECK(obj != nullptr);
   self->AssertNoPendingException();
-  if (obj->IsClass()) {
-    // Previous error has been stored as class. Create a new exception of that type.
-
-    // It's possible the exception doesn't have a <init>(String).
-    std::string temp;
-    const char* descriptor = obj->AsClass()->GetDescriptor(&temp);
-
-    if (HasInitWithString(self, class_linker, descriptor)) {
-      self->ThrowNewException(descriptor, c->PrettyDescriptor().c_str());
-    } else {
-      self->ThrowNewException(descriptor, nullptr);
-    }
-  } else {
-    // Previous error has been stored as an instance. Just rethrow.
-    ObjPtr<mirror::Class> throwable_class = GetClassRoot<mirror::Throwable>(class_linker);
-    ObjPtr<mirror::Class> error_class = obj->GetClass();
-    CHECK(throwable_class->IsAssignableFrom(error_class));
-    self->SetException(obj->AsThrowable());
-  }
+  DCHECK(!obj->IsClass());
+  ObjPtr<mirror::Class> throwable_class = GetClassRoot<mirror::Throwable>(class_linker);
+  ObjPtr<mirror::Class> error_class = obj->GetClass();
+  CHECK(throwable_class->IsAssignableFrom(error_class));
+  self->SetException(obj->AsThrowable());
   self->AssertPendingException();
 }
 
@@ -247,22 +217,21 @@ static void ChangeInterpreterBridgeToNterp(ArtMethod* method, ClassLinker* class
   }
 }
 
-// Ensures that methods have the kAccSkipAccessChecks bit set. We use the
-// kAccVerificationAttempted bit on the class access flags to determine whether this has been done
-// before.
-static void EnsureSkipAccessChecksMethods(Handle<mirror::Class> klass, PointerSize pointer_size)
+static void UpdateClassAfterVerification(Handle<mirror::Class> klass,
+                                         PointerSize pointer_size,
+                                         verifier::FailureKind failure_kind)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   Runtime* runtime = Runtime::Current();
   ClassLinker* class_linker = runtime->GetClassLinker();
-  if (!klass->WasVerificationAttempted()) {
+  if (failure_kind == verifier::FailureKind::kNoFailure) {
     klass->SetSkipAccessChecksFlagOnAllMethods(pointer_size);
-    klass->SetVerificationAttempted();
-    // Now that the class has passed verification, try to set nterp entrypoints
-    // to methods that currently use the switch interpreter.
-    if (interpreter::CanRuntimeUseNterp()) {
-      for (ArtMethod& m : klass->GetMethods(pointer_size)) {
-        ChangeInterpreterBridgeToNterp(&m, class_linker);
-      }
+  }
+
+  // Now that the class has passed verification, try to set nterp entrypoints
+  // to methods that currently use the switch interpreter.
+  if (interpreter::CanRuntimeUseNterp()) {
+    for (ArtMethod& m : klass->GetMethods(pointer_size)) {
+      ChangeInterpreterBridgeToNterp(&m, class_linker);
     }
   }
 }
@@ -530,13 +499,10 @@ void ClassLinker::ThrowEarlierClassFailure(ObjPtr<mirror::Class> c,
   Runtime* const runtime = Runtime::Current();
   if (!runtime->IsAotCompiler()) {  // Give info if this occurs at runtime.
     std::string extra;
-    ObjPtr<mirror::Object> verify_error = GetVerifyError(c);
+    ObjPtr<mirror::Object> verify_error = GetErroneousStateError(c);
     if (verify_error != nullptr) {
-      if (verify_error->IsClass()) {
-        extra = mirror::Class::PrettyDescriptor(verify_error->AsClass());
-      } else {
-        extra = verify_error->AsThrowable()->Dump();
-      }
+      DCHECK(!verify_error->IsClass());
+      extra = verify_error->AsThrowable()->Dump();
     }
     if (log) {
       LOG(INFO) << "Rejecting re-init on previously-failed class " << c->PrettyClass()
@@ -551,15 +517,16 @@ void ClassLinker::ThrowEarlierClassFailure(ObjPtr<mirror::Class> c,
     ObjPtr<mirror::Throwable> pre_allocated = runtime->GetPreAllocatedNoClassDefFoundError();
     self->SetException(pre_allocated);
   } else {
-    ObjPtr<mirror::Object> verify_error = GetVerifyError(c);
-    if (verify_error != nullptr) {
+    ObjPtr<mirror::Object> erroneous_state_error = GetErroneousStateError(c);
+    if (erroneous_state_error != nullptr) {
       // Rethrow stored error.
-      HandleEarlierVerifyError(self, this, c);
+      HandleEarlierErroneousStateError(self, this, c);
     }
     // TODO This might be wrong if we hit an OOME while allocating the ClassExt. In that case we
     // might have meant to go down the earlier if statement with the original error but it got
     // swallowed by the OOM so we end up here.
-    if (verify_error == nullptr || wrap_in_no_class_def) {
+    if (erroneous_state_error == nullptr ||
+        (wrap_in_no_class_def && !IsVerifyError(erroneous_state_error))) {
       // If there isn't a recorded earlier error, or this is a repeat throw from initialization,
       // the top-level exception must be a NoClassDefFoundError. The potentially already pending
       // exception will be a cause.
@@ -897,15 +864,11 @@ bool ClassLinker::InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> b
   object_array_class->GetIfTable()->SetInterface(0, java_lang_Cloneable.Get());
   object_array_class->GetIfTable()->SetInterface(1, java_io_Serializable.Get());
 
-  // Check Class[] and Object[]'s interfaces. GetDirectInterface may cause thread suspension.
-  CHECK_EQ(java_lang_Cloneable.Get(),
-           mirror::Class::GetDirectInterface(self, class_array_class.Get(), 0));
-  CHECK_EQ(java_io_Serializable.Get(),
-           mirror::Class::GetDirectInterface(self, class_array_class.Get(), 1));
-  CHECK_EQ(java_lang_Cloneable.Get(),
-           mirror::Class::GetDirectInterface(self, object_array_class.Get(), 0));
-  CHECK_EQ(java_io_Serializable.Get(),
-           mirror::Class::GetDirectInterface(self, object_array_class.Get(), 1));
+  // Check Class[] and Object[]'s interfaces.
+  CHECK_EQ(java_lang_Cloneable.Get(), class_array_class->GetDirectInterface(0));
+  CHECK_EQ(java_io_Serializable.Get(), class_array_class->GetDirectInterface(1));
+  CHECK_EQ(java_lang_Cloneable.Get(), object_array_class->GetDirectInterface(0));
+  CHECK_EQ(java_io_Serializable.Get(), object_array_class->GetDirectInterface(1));
 
   CHECK_EQ(object_array_string.Get(),
            FindSystemClass(self, GetClassRootDescriptor(ClassRoot::kJavaLangStringArrayClass)));
@@ -972,6 +935,11 @@ bool ClassLinker::InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> b
   class_root = FindSystemClass(self, "Ljava/lang/invoke/FieldVarHandle;");
   CHECK(class_root != nullptr);
   SetClassRoot(ClassRoot::kJavaLangInvokeFieldVarHandle, class_root);
+
+  // Create java.lang.invoke.StaticFieldVarHandle.class root
+  class_root = FindSystemClass(self, "Ljava/lang/invoke/StaticFieldVarHandle;");
+  CHECK(class_root != nullptr);
+  SetClassRoot(ClassRoot::kJavaLangInvokeStaticFieldVarHandle, class_root);
 
   // Create java.lang.invoke.ArrayElementVarHandle.class root
   class_root = FindSystemClass(self, "Ljava/lang/invoke/ArrayElementVarHandle;");
@@ -1143,7 +1111,7 @@ static void InitializeObjectVirtualMethodHashes(ObjPtr<mirror::Class> java_lang_
   ArraySlice<ArtMethod> virtual_methods = java_lang_Object->GetVirtualMethods(pointer_size);
   DCHECK_EQ(virtual_method_hashes.size(), virtual_methods.size());
   for (size_t i = 0; i != virtual_method_hashes.size(); ++i) {
-    const char* name = virtual_methods[i].GetName();
+    std::string_view name = virtual_methods[i].GetNameView();
     virtual_method_hashes[i] = ComputeModifiedUtf8Hash(name);
   }
 }
@@ -1859,10 +1827,9 @@ static void VerifyAppImage(const ImageHeader& header,
       return true;
     };
     class_table->Visit(verify_direct_interfaces_in_table);
-    Thread* self = Thread::Current();
     for (ObjPtr<mirror::Class> klass : classes) {
       for (uint32_t i = 0, num = klass->NumDirectInterfaces(); i != num; ++i) {
-        CHECK(klass->GetDirectInterface(self, klass, i) != nullptr)
+        CHECK(klass->GetDirectInterface(i) != nullptr)
             << klass->PrettyDescriptor() << " iface #" << i;
       }
     }
@@ -2471,9 +2438,6 @@ void ClassLinker::FinishArrayClassSetup(ObjPtr<mirror::Class> array_class) {
   array_class->PopulateEmbeddedVTable(image_pointer_size_);
   ImTable* object_imt = java_lang_Object->GetImt(image_pointer_size_);
   array_class->SetImt(object_imt, image_pointer_size_);
-  // Skip EnsureSkipAccessChecksMethods(). We can skip the verified status,
-  // the kAccVerificationAttempted flag is added below, and there are no
-  // methods that need the kAccSkipAccessChecks flag.
   DCHECK_EQ(array_class->NumMethods(), 0u);
 
   // don't need to set new_class->SetObjectSize(..)
@@ -2499,8 +2463,6 @@ void ClassLinker::FinishArrayClassSetup(ObjPtr<mirror::Class> array_class) {
   // and remove "interface".
   access_flags |= kAccAbstract | kAccFinal;
   access_flags &= ~kAccInterface;
-  // Arrays are access-checks-clean and preverified.
-  access_flags |= kAccVerificationAttempted;
 
   array_class->SetAccessFlagsDuringLinking(access_flags);
 
@@ -3536,8 +3498,14 @@ static void LinkCode(ClassLinker* class_linker,
   // stub only if we have compiled code and the method needs a class initialization
   // check.
   if (quick_code == nullptr) {
-    method->SetEntryPointFromQuickCompiledCode(
-        method->IsNative() ? GetQuickGenericJniStub() : GetQuickToInterpreterBridge());
+    if (method->IsNative()) {
+      method->SetEntryPointFromQuickCompiledCode(GetQuickGenericJniStub());
+    } else {
+      // Note we cannot use the nterp entrypoint because we do not know if the
+      // method will need the slow interpreter for lock verification. This will
+      // be updated in EnsureSkipAccessChecksMethods.
+      method->SetEntryPointFromQuickCompiledCode(GetQuickToInterpreterBridge());
+    }
   } else if (enter_interpreter) {
     method->SetEntryPointFromQuickCompiledCode(GetQuickToInterpreterBridge());
   } else if (NeedsClinitCheckBeforeCall(method)) {
@@ -4157,13 +4125,9 @@ void ClassLinker::CreatePrimitiveClass(Thread* self,
   CHECK(primitive_class != nullptr) << "OOM for primitive class " << type;
   // Do not hold lock on the primitive class object, the initialization of
   // primitive classes is done while the process is still single threaded.
-  primitive_class->SetAccessFlagsDuringLinking(
-      kAccPublic | kAccFinal | kAccAbstract | kAccVerificationAttempted);
+  primitive_class->SetAccessFlagsDuringLinking(kAccPublic | kAccFinal | kAccAbstract);
   primitive_class->SetPrimitiveType(type);
   primitive_class->SetIfTable(GetClassRoot<mirror::Object>(this)->GetIfTable());
-  // Skip EnsureSkipAccessChecksMethods(). We can skip the verified status,
-  // the kAccVerificationAttempted flag was added above, and there are no
-  // methods that need the kAccSkipAccessChecks flag.
   DCHECK_EQ(primitive_class->NumMethods(), 0u);
   // Primitive classes are initialized during single threaded startup, so visibly initialized.
   primitive_class->SetStatusForPrimitiveOrArray(ClassStatus::kVisiblyInitialized);
@@ -4557,7 +4521,6 @@ verifier::FailureKind ClassLinker::VerifyClass(Thread* self,
 
     // Don't attempt to re-verify if already verified.
     if (klass->IsVerified()) {
-      EnsureSkipAccessChecksMethods(klass, image_pointer_size_);
       if (verifier_deps != nullptr &&
           verifier_deps->ContainsDexFile(klass->GetDexFile()) &&
           !verifier_deps->HasRecordedVerifiedStatus(klass->GetDexFile(), *klass->GetClassDef()) &&
@@ -4580,8 +4543,7 @@ verifier::FailureKind ClassLinker::VerifyClass(Thread* self,
     if (klass->IsVerifiedNeedsAccessChecks()) {
       if (!Runtime::Current()->IsAotCompiler()) {
         // Mark the class as having a verification attempt to avoid re-running
-        // the verifier and avoid calling EnsureSkipAccessChecksMethods.
-        klass->SetVerificationAttempted();
+        // the verifier.
         mirror::Class::SetStatus(klass, ClassStatus::kVerified, self);
       }
       return verifier::FailureKind::kAccessChecksFailure;
@@ -4600,7 +4562,7 @@ verifier::FailureKind ClassLinker::VerifyClass(Thread* self,
     // Skip verification if disabled.
     if (!Runtime::Current()->IsVerificationEnabled()) {
       mirror::Class::SetStatus(klass, ClassStatus::kVerified, self);
-      EnsureSkipAccessChecksMethods(klass, image_pointer_size_);
+      UpdateClassAfterVerification(klass, image_pointer_size_, verifier::FailureKind::kNoFailure);
       return verifier::FailureKind::kNoFailure;
     }
   }
@@ -4672,95 +4634,61 @@ verifier::FailureKind ClassLinker::VerifyClass(Thread* self,
                      << preverified
                      << "( " << oat_file_class_status << ")";
 
-  // If the oat file says the class had an error, re-run the verifier. That way we will get a
-  // precise error message. To ensure a rerun, test:
-  //     mirror::Class::IsErroneous(oat_file_class_status) => !preverified
+  // If the oat file says the class had an error, re-run the verifier. That way we will either:
+  // 1) Be successful at runtime, or
+  // 2) Get a precise error message.
   DCHECK(!mirror::Class::IsErroneous(oat_file_class_status) || !preverified);
 
   std::string error_msg;
   verifier::FailureKind verifier_failure = verifier::FailureKind::kNoFailure;
   if (!preverified) {
     verifier_failure = PerformClassVerification(self, verifier_deps, klass, log_level, &error_msg);
+  } else if (oat_file_class_status == ClassStatus::kVerifiedNeedsAccessChecks) {
+    verifier_failure = verifier::FailureKind::kAccessChecksFailure;
   }
 
   // Verification is done, grab the lock again.
   ObjectLock<mirror::Class> lock(self, klass);
+  self->AssertNoPendingException();
 
-  if (preverified || verifier_failure != verifier::FailureKind::kHardFailure) {
-    if (!preverified && verifier_failure != verifier::FailureKind::kNoFailure) {
-      VLOG(class_linker) << "Soft verification failure in class "
-                         << klass->PrettyDescriptor()
-                         << " in " << klass->GetDexCache()->GetLocation()->ToModifiedUtf8()
-                         << " because: " << error_msg;
-    }
-    self->AssertNoPendingException();
-    // Make sure all classes referenced by catch blocks are resolved.
-    ResolveClassExceptionHandlerTypes(klass);
-    if (verifier_failure == verifier::FailureKind::kNoFailure) {
-      // Even though there were no verifier failures we need to respect whether the super-class and
-      // super-default-interfaces were verified or requiring runtime reverification.
-      if (supertype == nullptr
-          || supertype->IsVerified()
-          || supertype->IsVerifiedNeedsAccessChecks()) {
-        mirror::Class::SetStatus(klass, ClassStatus::kVerified, self);
-      } else {
-        CHECK(Runtime::Current()->IsAotCompiler());
-        CHECK_EQ(supertype->GetStatus(), ClassStatus::kRetryVerificationAtRuntime);
-        mirror::Class::SetStatus(klass, ClassStatus::kRetryVerificationAtRuntime, self);
-        // Pretend a soft failure occurred so that we don't consider the class verified below.
-        verifier_failure = verifier::FailureKind::kSoftFailure;
-      }
-    } else {
-      CHECK(verifier_failure == verifier::FailureKind::kSoftFailure ||
-            verifier_failure == verifier::FailureKind::kTypeChecksFailure ||
-            verifier_failure == verifier::FailureKind::kAccessChecksFailure);
-      // Soft failures at compile time should be retried at runtime. Soft
-      // failures at runtime will be handled by slow paths in the generated
-      // code. Set status accordingly.
-      if (Runtime::Current()->IsAotCompiler()) {
-        if (verifier_failure == verifier::FailureKind::kSoftFailure ||
-            verifier_failure == verifier::FailureKind::kTypeChecksFailure) {
-          mirror::Class::SetStatus(klass, ClassStatus::kRetryVerificationAtRuntime, self);
-        } else {
-          mirror::Class::SetStatus(klass, ClassStatus::kVerifiedNeedsAccessChecks, self);
-        }
-      } else {
-        mirror::Class::SetStatus(klass, ClassStatus::kVerified, self);
-        // As this is a fake verified status, make sure the methods are _not_ marked
-        // kAccSkipAccessChecks later.
-        klass->SetVerificationAttempted();
-      }
-    }
-  } else {
+  if (verifier_failure == verifier::FailureKind::kHardFailure) {
     VLOG(verifier) << "Verification failed on class " << klass->PrettyDescriptor()
                   << " in " << klass->GetDexCache()->GetLocation()->ToModifiedUtf8()
                   << " because: " << error_msg;
-    self->AssertNoPendingException();
     ThrowVerifyError(klass.Get(), "%s", error_msg.c_str());
     mirror::Class::SetStatus(klass, ClassStatus::kErrorResolved, self);
+    return verifier_failure;
   }
-  if (preverified || verifier_failure == verifier::FailureKind::kNoFailure) {
-    if (oat_file_class_status == ClassStatus::kVerifiedNeedsAccessChecks ||
-        UNLIKELY(Runtime::Current()->IsVerificationSoftFail())) {
-      // Never skip access checks if the verification soft fail is forced.
-      // Mark the class as having a verification attempt to avoid re-running the verifier.
-      klass->SetVerificationAttempted();
-    } else {
-      // Class is verified so we don't need to do any access check on its methods.
-      // Let the interpreter know it by setting the kAccSkipAccessChecks flag onto each
-      // method.
-      // Note: we're going here during compilation and at runtime. When we set the
-      // kAccSkipAccessChecks flag when compiling image classes, the flag is recorded
-      // in the image and is set when loading the image.
-      EnsureSkipAccessChecksMethods(klass, image_pointer_size_);
-    }
-  }
-  // Done verifying. Notify the compiler about the verification status, in case the class
-  // was verified implicitly (eg super class of a compiled class).
+
+  // Make sure all classes referenced by catch blocks are resolved.
+  ResolveClassExceptionHandlerTypes(klass);
+
   if (Runtime::Current()->IsAotCompiler()) {
+    if (supertype != nullptr && supertype->ShouldVerifyAtRuntime()) {
+      // Regardless of our own verification result, we need to verify the class
+      // at runtime if the super class is not verified. This is required in case
+      // we generate an app/boot image.
+      verifier_failure = verifier::FailureKind::kSoftFailure;
+      mirror::Class::SetStatus(klass, ClassStatus::kRetryVerificationAtRuntime, self);
+    } else if (verifier_failure == verifier::FailureKind::kNoFailure) {
+      mirror::Class::SetStatus(klass, ClassStatus::kVerified, self);
+    } else if (verifier_failure == verifier::FailureKind::kSoftFailure ||
+               verifier_failure == verifier::FailureKind::kTypeChecksFailure) {
+      mirror::Class::SetStatus(klass, ClassStatus::kRetryVerificationAtRuntime, self);
+    } else {
+      mirror::Class::SetStatus(klass, ClassStatus::kVerifiedNeedsAccessChecks, self);
+    }
+    // Notify the compiler about the verification status, in case the class
+    // was verified implicitly (eg super class of a compiled class). When the
+    // compiler unloads dex file after compilation, we still want to keep
+    // verification states.
     Runtime::Current()->GetCompilerCallbacks()->UpdateClassState(
         ClassReference(&klass->GetDexFile(), klass->GetDexClassDefIndex()), klass->GetStatus());
+  } else {
+    mirror::Class::SetStatus(klass, ClassStatus::kVerified, self);
   }
+
+  UpdateClassAfterVerification(klass, image_pointer_size_, verifier_failure);
   return verifier_failure;
 }
 
@@ -4770,9 +4698,16 @@ verifier::FailureKind ClassLinker::PerformClassVerification(Thread* self,
                                                             verifier::HardFailLogMode log_level,
                                                             std::string* error_msg) {
   Runtime* const runtime = Runtime::Current();
+  StackHandleScope<2> hs(self);
+  Handle<mirror::DexCache> dex_cache(hs.NewHandle(klass->GetDexCache()));
+  Handle<mirror::ClassLoader> class_loader(hs.NewHandle(klass->GetClassLoader()));
   return verifier::ClassVerifier::VerifyClass(self,
                                               verifier_deps,
-                                              klass.Get(),
+                                              dex_cache->GetDexFile(),
+                                              klass,
+                                              dex_cache,
+                                              class_loader,
+                                              *klass->GetClassDef(),
                                               runtime->GetCompilerCallbacks(),
                                               runtime->IsAotCompiler(),
                                               log_level,
@@ -4816,8 +4751,9 @@ bool ClassLinker::VerifyClassUsingOatFile(Thread* self,
   // Check the class status with the vdex file.
   const OatFile* oat_file = oat_dex_file->GetOatFile();
   if (oat_file != nullptr) {
-    oat_file_class_status = oat_file->GetVdexFile()->ComputeClassStatus(self, klass);
-    if (oat_file_class_status >= ClassStatus::kVerifiedNeedsAccessChecks) {
+    ClassStatus vdex_status = oat_file->GetVdexFile()->ComputeClassStatus(self, klass);
+    if (vdex_status >= ClassStatus::kVerifiedNeedsAccessChecks) {
+      oat_file_class_status = vdex_status;
       return true;
     }
   }
@@ -4832,8 +4768,8 @@ bool ClassLinker::VerifyClassUsingOatFile(Thread* self,
       << klass->PrettyClass() << " " << dex_file.GetLocation();
 
   if (mirror::Class::IsErroneous(oat_file_class_status)) {
-    // Compile time verification failed with a hard error. This is caused by invalid instructions
-    // in the class. These errors are unrecoverable.
+    // Compile time verification failed with a hard error. We'll re-run
+    // verification, which might be successful at runtime.
     return false;
   }
   if (oat_file_class_status == ClassStatus::kNotReady) {
@@ -4914,8 +4850,7 @@ ObjPtr<mirror::Class> ClassLinker::CreateProxyClass(ScopedObjectAccessAlreadyRun
   temp_klass->SetObjectSize(sizeof(mirror::Proxy));
   // Set the class access flags incl. VerificationAttempted, so we do not try to set the flag on
   // the methods.
-  temp_klass->SetAccessFlagsDuringLinking(
-      kAccClassIsProxy | kAccPublic | kAccFinal | kAccVerificationAttempted);
+  temp_klass->SetAccessFlagsDuringLinking(kAccClassIsProxy | kAccPublic | kAccFinal);
   temp_klass->SetClassLoader(soa.Decode<mirror::ClassLoader>(loader));
   DCHECK_EQ(temp_klass->GetPrimitiveType(), Primitive::kPrimNot);
   temp_klass->SetName(soa.Decode<mirror::String>(name));
@@ -5081,7 +5016,6 @@ ObjPtr<mirror::Class> ClassLinker::CreateProxyClass(ScopedObjectAccessAlreadyRun
   {
     // Lock on klass is released. Lock new class object.
     ObjectLock<mirror::Class> initialization_lock(self, klass);
-    EnsureSkipAccessChecksMethods(klass, image_pointer_size_);
     // Conservatively go through the ClassStatus::kInitialized state.
     callback = MarkClassInitialized(self, klass);
   }
@@ -5284,8 +5218,7 @@ bool ClassLinker::InitializeClass(Thread* self,
           // whether an exception is already pending.
           if (self->IsExceptionPending()) {
             // Check that it's a VerifyError.
-            DCHECK_EQ("java.lang.Class<java.lang.VerifyError>",
-                      mirror::Class::PrettyClass(self->GetException()->GetClass()));
+            DCHECK(IsVerifyError(self->GetException()));
           } else {
             // Check that another thread attempted initialization.
             DCHECK_NE(0, klass->GetClinitThreadId());
@@ -5403,7 +5336,7 @@ bool ClassLinker::InitializeClass(Thread* self,
       StackHandleScope<1> hs_iface(self);
       MutableHandle<mirror::Class> handle_scope_iface(hs_iface.NewHandle<mirror::Class>(nullptr));
       for (size_t i = 0; i < num_direct_interfaces; i++) {
-        handle_scope_iface.Assign(mirror::Class::GetDirectInterface(self, klass.Get(), i));
+        handle_scope_iface.Assign(klass->GetDirectInterface(i));
         CHECK(handle_scope_iface != nullptr) << klass->PrettyDescriptor() << " iface #" << i;
         CHECK(handle_scope_iface->IsInterface());
         if (handle_scope_iface->HasBeenRecursivelyInitialized()) {
@@ -5556,7 +5489,7 @@ bool ClassLinker::InitializeDefaultInterfaceRecursive(Thread* self,
     MutableHandle<mirror::Class> handle_super_iface(hs.NewHandle<mirror::Class>(nullptr));
     // First we initialize all of iface's super-interfaces recursively.
     for (size_t i = 0; i < num_direct_ifaces; i++) {
-      ObjPtr<mirror::Class> super_iface = mirror::Class::GetDirectInterface(self, iface.Get(), i);
+      ObjPtr<mirror::Class> super_iface = iface->GetDirectInterface(i);
       CHECK(super_iface != nullptr) << iface->PrettyDescriptor() << " iface #" << i;
       if (!super_iface->HasBeenRecursivelyInitialized()) {
         // Recursive step
@@ -5851,7 +5784,6 @@ bool ClassLinker::EnsureInitialized(Thread* self,
         MakeInitializedClassesVisiblyInitialized(self, /*wait=*/ false);
       }
     }
-    DCHECK(c->WasVerificationAttempted()) << c->PrettyClassAndClassLoader();
     return true;
   }
   // SubtypeCheckInfo::Initialized must happen-before any new-instance for that type.
@@ -6337,15 +6269,15 @@ class MethodNameAndSignatureComparator final : public ValueObject {
   explicit MethodNameAndSignatureComparator(ArtMethod* method)
       REQUIRES_SHARED(Locks::mutator_lock_) :
       dex_file_(method->GetDexFile()), mid_(&dex_file_->GetMethodId(method->GetDexMethodIndex())),
-      name_(nullptr), name_len_(0) {
+      name_view_() {
     DCHECK(!method->IsProxyMethod()) << method->PrettyMethod();
   }
 
-  const char* GetName() {
-    if (name_ == nullptr) {
-      name_ = dex_file_->StringDataAndUtf16LengthByIdx(mid_->name_idx_, &name_len_);
+  ALWAYS_INLINE std::string_view GetNameView() {
+    if (name_view_.empty()) {
+      name_view_ = dex_file_->StringViewByIdx(mid_->name_idx_);
     }
-    return name_;
+    return name_view_;
   }
 
   bool HasSameNameAndSignature(ArtMethod* other)
@@ -6356,14 +6288,8 @@ class MethodNameAndSignatureComparator final : public ValueObject {
     if (dex_file_ == other_dex_file) {
       return mid_->name_idx_ == other_mid.name_idx_ && mid_->proto_idx_ == other_mid.proto_idx_;
     }
-    GetName();  // Only used to make sure its calculated.
-    uint32_t other_name_len;
-    const char* other_name = other_dex_file->StringDataAndUtf16LengthByIdx(other_mid.name_idx_,
-                                                                           &other_name_len);
-    if (name_len_ != other_name_len || strcmp(name_, other_name) != 0) {
-      return false;
-    }
-    return dex_file_->GetMethodSignature(*mid_) == other_dex_file->GetMethodSignature(other_mid);
+    return GetNameView() == other_dex_file->StringViewByIdx(other_mid.name_idx_) &&
+           dex_file_->GetMethodSignature(*mid_) == other_dex_file->GetMethodSignature(other_mid);
   }
 
  private:
@@ -6372,9 +6298,7 @@ class MethodNameAndSignatureComparator final : public ValueObject {
   // MethodId for the method to compare against.
   const dex::MethodId* const mid_;
   // Lazily computed name from the dex file's strings.
-  const char* name_;
-  // Lazily computed name length.
-  uint32_t name_len_;
+  std::string_view name_view_;
 };
 
 class LinkVirtualHashTable {
@@ -6393,8 +6317,9 @@ class LinkVirtualHashTable {
   void Add(uint32_t virtual_method_index) REQUIRES_SHARED(Locks::mutator_lock_) {
     ArtMethod* local_method = klass_->GetVirtualMethodDuringLinking(
         virtual_method_index, image_pointer_size_);
-    const char* name = local_method->GetInterfaceMethodIfProxy(image_pointer_size_)->GetName();
-    uint32_t hash = ComputeModifiedUtf8Hash(name);
+    std::string_view name_view =
+        local_method->GetInterfaceMethodIfProxy(image_pointer_size_)->GetNameView();
+    uint32_t hash = ComputeModifiedUtf8Hash(name_view);
     uint32_t index = hash % hash_size_;
     // Linear probe until we have an empty slot.
     while (hash_table_[index] != invalid_index_) {
@@ -6407,7 +6332,7 @@ class LinkVirtualHashTable {
 
   uint32_t FindAndRemove(MethodNameAndSignatureComparator* comparator, uint32_t hash)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK_EQ(hash, ComputeModifiedUtf8Hash(comparator->GetName()));
+    DCHECK_EQ(hash, ComputeModifiedUtf8Hash(comparator->GetNameView()));
     size_t index = hash % hash_size_;
     while (true) {
       const uint32_t value = hash_table_[index];
@@ -6579,7 +6504,7 @@ bool ClassLinker::LinkVirtualMethods(
       // smaller as we go on.
       uint32_t hash = (j < mirror::Object::kVTableLength)
           ? object_virtual_method_hashes_[j]
-          : ComputeModifiedUtf8Hash(super_method_name_comparator.GetName());
+          : ComputeModifiedUtf8Hash(super_method_name_comparator.GetNameView());
       uint32_t hash_index = hash_table.FindAndRemove(&super_method_name_comparator, hash);
       if (hash_index != hash_table.GetNotFoundIndex()) {
         ArtMethod* virtual_method = klass->GetVirtualMethodDuringLinking(
@@ -7187,8 +7112,7 @@ static bool NotSubinterfaceOfAny(
 // super_ifcount entries filled in with the transitive closure of the interfaces of the superclass.
 // The other entries are uninitialized.  We will fill in the remaining entries in this function. The
 // iftable must be large enough to hold all interfaces without changing its size.
-static size_t FillIfTable(Thread* self,
-                          ObjPtr<mirror::Class> klass,
+static size_t FillIfTable(ObjPtr<mirror::Class> klass,
                           ObjPtr<mirror::ObjectArray<mirror::Class>> interfaces,
                           ObjPtr<mirror::IfTable> iftable,
                           size_t super_ifcount,
@@ -7209,9 +7133,8 @@ static size_t FillIfTable(Thread* self,
   size_t filled_ifcount = super_ifcount;
   const bool have_interfaces = interfaces != nullptr;
   for (size_t i = 0; i != num_interfaces; ++i) {
-    ObjPtr<mirror::Class> interface = have_interfaces
-        ? interfaces->Get(i)
-        : mirror::Class::GetDirectInterface(self, klass, i);
+    ObjPtr<mirror::Class> interface =
+        have_interfaces ? interfaces->Get(i) : klass->GetDirectInterface(i);
 
     // Let us call the first filled_ifcount elements of iftable the current-iface-list.
     // At this point in the loop current-iface-list has the invariant that:
@@ -7303,9 +7226,8 @@ bool ClassLinker::SetupInterfaceLookupTable(Thread* self,
   size_t ifcount = super_ifcount + num_interfaces;
   // Check that every class being implemented is an interface.
   for (size_t i = 0; i < num_interfaces; i++) {
-    ObjPtr<mirror::Class> interface = have_interfaces
-        ? interfaces->GetWithoutChecks(i)
-        : mirror::Class::GetDirectInterface(self, klass.Get(), i);
+    ObjPtr<mirror::Class> interface =
+        have_interfaces ? interfaces->GetWithoutChecks(i) : klass->GetDirectInterface(i);
     DCHECK(interface != nullptr);
     if (UNLIKELY(!interface->IsInterface())) {
       std::string temp;
@@ -7337,8 +7259,8 @@ bool ClassLinker::SetupInterfaceLookupTable(Thread* self,
   // doesn't really do anything.
   self->AllowThreadSuspension();
 
-  const size_t new_ifcount = FillIfTable(
-      self, klass.Get(), interfaces.Get(), iftable.Get(), super_ifcount, num_interfaces);
+  const size_t new_ifcount =
+      FillIfTable(klass.Get(), interfaces.Get(), iftable.Get(), super_ifcount, num_interfaces);
 
   self->AllowThreadSuspension();
 
@@ -9315,21 +9237,8 @@ ArtField* ClassLinker::FindResolvedField(ObjPtr<mirror::Class> klass,
                                          ObjPtr<mirror::ClassLoader> class_loader,
                                          uint32_t field_idx,
                                          bool is_static) {
-  ArtField* resolved = nullptr;
-  Thread* self = is_static ? Thread::Current() : nullptr;
-  const DexFile& dex_file = *dex_cache->GetDexFile();
-
-  resolved = is_static ? mirror::Class::FindStaticField(self, klass, dex_cache, field_idx)
-                       : klass->FindInstanceField(dex_cache, field_idx);
-
-  if (resolved == nullptr) {
-    const dex::FieldId& field_id = dex_file.GetFieldId(field_idx);
-    const char* name = dex_file.GetFieldName(field_id);
-    const char* type = dex_file.GetFieldTypeDescriptor(field_id);
-    resolved = is_static ? mirror::Class::FindStaticField(self, klass, name, type)
-                         : klass->FindInstanceField(name, type);
-  }
-
+  ArtField* resolved = is_static ? klass->FindStaticField(dex_cache, field_idx)
+                                 : klass->FindInstanceField(dex_cache, field_idx);
   if (resolved != nullptr &&
       hiddenapi::ShouldDenyAccessToMember(resolved,
                                           hiddenapi::AccessContext(class_loader, dex_cache),
@@ -9348,14 +9257,7 @@ ArtField* ClassLinker::FindResolvedFieldJLS(ObjPtr<mirror::Class> klass,
                                             ObjPtr<mirror::DexCache> dex_cache,
                                             ObjPtr<mirror::ClassLoader> class_loader,
                                             uint32_t field_idx) {
-  ArtField* resolved = nullptr;
-  Thread* self = Thread::Current();
-  const DexFile& dex_file = *dex_cache->GetDexFile();
-  const dex::FieldId& field_id = dex_file.GetFieldId(field_idx);
-
-  const char* name = dex_file.GetFieldName(field_id);
-  const char* type = dex_file.GetFieldTypeDescriptor(field_id);
-  resolved = mirror::Class::FindField(self, klass, name, type);
+  ArtField* resolved = klass->FindField(dex_cache, field_idx);
 
   if (resolved != nullptr &&
       hiddenapi::ShouldDenyAccessToMember(resolved,
@@ -9428,7 +9330,9 @@ ObjPtr<mirror::MethodType> ClassLinker::ResolveMethodType(
 
   Handle<mirror::MethodType> type = hs.NewHandle(
       mirror::MethodType::Create(self, return_type, method_params));
-  dex_cache->SetResolvedMethodType(proto_idx, type.Get());
+  if (type != nullptr) {
+    dex_cache->SetResolvedMethodType(proto_idx, type.Get());
+  }
 
   return type.Get();
 }
@@ -10038,10 +9942,7 @@ ObjPtr<mirror::ClassLoader> ClassLinker::CreateWellKnownClassLoader(
   // Make a pretend boot-classpath.
   // TODO: Should we scan the image?
   ArtField* const parent_field =
-      mirror::Class::FindField(self,
-                               h_class_loader->GetClass(),
-                               "parent",
-                               "Ljava/lang/ClassLoader;");
+      jni::DecodeArtField(WellKnownClasses::java_lang_ClassLoader_parent);
   DCHECK(parent_field != nullptr);
   if (parent_loader.Get() == nullptr) {
     ScopedObjectAccessUnchecked soa(self);

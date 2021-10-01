@@ -85,7 +85,7 @@ class Object;
 // more memory and additional memory accesses on add/get, but is moving-GC safe. It will catch
 // additional problems, e.g.: create iref1 for obj, delete iref1, create iref2 for same obj,
 // lookup iref1. A pattern based on object bits will miss this.
-typedef void* IndirectRef;
+using IndirectRef = void*;
 
 // Indirect reference kind, used as the two low bits of IndirectRef.
 //
@@ -295,6 +295,12 @@ class IndirectReferenceTable {
     return segment_state_.top_index;
   }
 
+  // Return the number of non-null entries in the table. Only reliable for a
+  // single segment table.
+  int32_t NEntriesForGlobal() {
+    return segment_state_.top_index - current_num_holes_;
+  }
+
   // Ensure that at least free_capacity elements are available, or return false.
   bool EnsureFreeCapacity(size_t free_capacity, std::string* error_msg)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -418,7 +424,7 @@ class IndirectReferenceTable {
   // Some values to retain old behavior with holes. Description of the algorithm is in the .cc
   // file.
   // TODO: Consider other data structures for compact tables, e.g., free lists.
-  size_t current_num_holes_;
+  size_t current_num_holes_;  // Number of holes in the current / top segment.
   IRTSegmentState last_known_previous_state_;
 
   // Whether the table's capacity may be resized. As there are no locks used, it is the caller's

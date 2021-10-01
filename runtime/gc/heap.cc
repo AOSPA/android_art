@@ -203,6 +203,12 @@ uint8_t* const Heap::kPreferredAllocSpaceBegin = reinterpret_cast<uint8_t*>(0x40
 #endif
 #endif
 
+// Log GC on regular (but fairly large) intervals during GC stress mode.
+// It is expected that the other runtime options will be used to reduce the usual logging.
+// This allows us to make the logging much less verbose while still reporting some
+// progress (biased towards expensive GCs), and while still reporting pathological cases.
+static constexpr int64_t kGcStressModeGcLogSampleFrequencyNs = MsToNs(10000);
+
 static inline bool CareAboutPauseTimes() {
   return Runtime::Current()->InJankPerceptibleProcessState();
 }
@@ -256,7 +262,11 @@ Heap::Heap(size_t initial_size,
            size_t non_moving_space_capacity,
            const std::vector<std::string>& boot_class_path,
            const std::vector<std::string>& boot_class_path_locations,
-           const std::string& image_file_name,
+           const std::vector<int>& boot_class_path_fds,
+           const std::vector<int>& boot_class_path_image_fds,
+           const std::vector<int>& boot_class_path_vdex_fds,
+           const std::vector<int>& boot_class_path_oat_fds,
+           const std::vector<std::string>& image_file_names,
            const InstructionSet image_instruction_set,
            CollectorType foreground_collector_type,
            CollectorType background_collector_type,
@@ -456,7 +466,11 @@ Heap::Heap(size_t initial_size,
   MemMap heap_reservation;
   if (space::ImageSpace::LoadBootImage(boot_class_path,
                                        boot_class_path_locations,
-                                       image_file_name,
+                                       boot_class_path_fds,
+                                       boot_class_path_image_fds,
+                                       boot_class_path_vdex_fds,
+                                       boot_class_path_oat_fds,
+                                       image_file_names,
                                        image_instruction_set,
                                        runtime->ShouldRelocate(),
                                        /*executable=*/ !runtime->IsAotCompiler(),
@@ -2681,7 +2695,6 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
       }
       CHECK(temp_space_->IsEmpty());
     }
-    gc_type = collector::kGcTypeFull;  // TODO: Not hard code this in.
   } else if (current_allocator_ == kAllocatorTypeRosAlloc ||
       current_allocator_ == kAllocatorTypeDlMalloc) {
     collector = FindCollectorByGcType(gc_type);
@@ -2732,6 +2745,16 @@ void Heap::LogGC(GcCause gc_cause, collector::GarbageCollector* collector) {
       log_gc = log_gc || pause >= long_pause_log_threshold_;
     }
   }
+  bool is_sampled = false;
+  if (UNLIKELY(gc_stress_mode_)) {
+    static std::atomic_int64_t accumulated_duration_ns = 0;
+    accumulated_duration_ns += duration;
+    if (accumulated_duration_ns >= kGcStressModeGcLogSampleFrequencyNs) {
+      accumulated_duration_ns -= kGcStressModeGcLogSampleFrequencyNs;
+      log_gc = true;
+      is_sampled = true;
+    }
+  }
   if (log_gc) {
     const size_t percent_free = GetPercentFree();
     const size_t current_heap_size = GetBytesAllocated();
@@ -2742,6 +2765,7 @@ void Heap::LogGC(GcCause gc_cause, collector::GarbageCollector* collector) {
                    << ((i != pause_times.size() - 1) ? "," : "");
     }
     LOG(INFO) << gc_cause << " " << collector->GetName()
+              << (is_sampled ? " (sampled)" : "")
               << " GC freed "  << current_gc_iteration_.GetFreedObjects() << "("
               << PrettySize(current_gc_iteration_.GetFreedBytes()) << ") AllocSpace objects, "
               << current_gc_iteration_.GetFreedLargeObjects() << "("
@@ -3987,16 +4011,26 @@ inline void Heap::CheckGCForNative(Thread* self) {
     if (is_gc_concurrent) {
       bool requested =
           RequestConcurrentGC(self, kGcCauseForNativeAlloc, /*force_full=*/true, starting_gc_num);
-      if (gc_urgency > kStopForNativeFactor
+      if (requested && gc_urgency > kStopForNativeFactor
           && current_native_bytes > stop_for_native_allocs_) {
         // We're in danger of running out of memory due to rampant native allocation.
         if (VLOG_IS_ON(heap) || VLOG_IS_ON(startup)) {
           LOG(INFO) << "Stopping for native allocation, urgency: " << gc_urgency;
         }
-        if (WaitForGcToComplete(kGcCauseForNativeAlloc, self) == collector::kGcTypeNone) {
-          DCHECK(!requested
-                 || GCNumberLt(starting_gc_num, max_gc_requested_.load(std::memory_order_relaxed)));
-          // TODO: Eventually sleep here again.
+        // Count how many times we do this, so we can warn if this becomes excessive.
+        // Stop after a while, out of excessive caution.
+        static constexpr int kGcWaitIters = 20;
+        for (int i = 1; i <= kGcWaitIters; ++i) {
+          if (!GCNumberLt(GetCurrentGcNum(), max_gc_requested_.load(std::memory_order_relaxed))
+              || WaitForGcToComplete(kGcCauseForNativeAlloc, self) != collector::kGcTypeNone) {
+            break;
+          }
+          CHECK(GCNumberLt(starting_gc_num, max_gc_requested_.load(std::memory_order_relaxed)));
+          if (i % 10 == 0) {
+            LOG(WARNING) << "Slept " << i << " times in native allocation, waiting for GC";
+          }
+          static constexpr int kGcWaitSleepMicros = 2000;
+          usleep(kGcWaitSleepMicros);  // Encourage our requested GC to start.
         }
       }
     } else {
@@ -4479,6 +4513,8 @@ void Heap::VisitReflectiveTargets(ReflectiveValueVisitor *visit) {
       down_cast<mirror::Field*>(ref)->VisitTarget(visit);
     } else if (art::GetClassRoot<art::mirror::MethodHandle>()->IsAssignableFrom(klass)) {
       down_cast<mirror::MethodHandle*>(ref)->VisitTarget(visit);
+    } else if (art::GetClassRoot<art::mirror::StaticFieldVarHandle>()->IsAssignableFrom(klass)) {
+      down_cast<mirror::StaticFieldVarHandle*>(ref)->VisitTarget(visit);
     } else if (art::GetClassRoot<art::mirror::FieldVarHandle>()->IsAssignableFrom(klass)) {
       down_cast<mirror::FieldVarHandle*>(ref)->VisitTarget(visit);
     } else if (art::GetClassRoot<art::mirror::DexCache>()->IsAssignableFrom(klass)) {

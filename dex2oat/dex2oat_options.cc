@@ -71,6 +71,11 @@ static void AddInputMappings(Builder& builder) {
                     "Eg: --dex-file=/home/build/out/system/framework/core.jar\n"
                     "    --dex-location=/system/framework/core.jar")
           .IntoKey(M::DexLocations)
+      .Define("--dex-fd=_")
+          .WithType<std::vector<int>>().AppendValues()
+          .WithHelp("Specifies a file descriptor of a dex file. It can be specified for multiple\n"
+                    "times, but the number must match the number of --dex-file. Eg: --dex-fd=5")
+          .IntoKey(M::DexFds)
       .Define("--zip-fd=_")
           .WithType<int>()
           .WithHelp("specifies a file descriptor of a zip file containing a classes.dex file to\n"
@@ -188,6 +193,11 @@ static void AddImageMappings(Builder& builder) {
           .WithHelp("list of known dirty objects in the image. The image writer will group them"
                     " together")
           .IntoKey(M::DirtyImageObjects)
+      .Define("--dirty-image-objects-fd=_")
+          .WithType<int>()
+          .WithHelp("Specify a file descriptor for reading the list of known dirty objects in\n"
+                    "the image. The image writer will group them together")
+          .IntoKey(M::DirtyImageObjectsFd)
       .Define("--updatable-bcp-packages-file=_")
           .WithType<std::string>()
           .WithHelp("file with a list of updatable boot class path packages. Classes in these\n"
@@ -196,6 +206,14 @@ static void AddImageMappings(Builder& builder) {
                     "components."
           )
           .IntoKey(M::UpdatableBcpPackagesFile)
+      .Define("--updatable-bcp-packages-fd=_")
+          .WithType<int>()
+          .WithHelp("File descriptor to read a list of updatable boot class path packages.\n"
+                    "Classes in these packages and sub-packages shall not be resolved during app\n"
+                    "compilation to avoid AOT assumptions being invalidated after applying\n"
+                    "updates to these components."
+          )
+          .IntoKey(M::UpdatableBcpPackagesFd)
       .Define("--image-format=_")
           .WithType<ImageHeader::StorageMode>()
           .WithValueMap({{"lz4", ImageHeader::kStorageModeLZ4},
@@ -293,7 +311,7 @@ Parser CreateDex2oatArgumentParser() {
                     "of detected hardware threads available on the host system.")
           .IntoKey(M::Threads)
       .Define("--cpu-set=_")
-          .WithType<std::vector<int32_t>>()
+          .WithType<ParseIntList<','>>()
           .WithHelp("sets the cpu affinitiy to the given <set>. The <set> is a comma separated\n"
                     "list of cpus. Eg: --cpu-set=0,1,2,3")
           .WithMetavar("<set>")
