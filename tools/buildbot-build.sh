@@ -39,7 +39,7 @@ fi
 java_libraries_dir=${out_dir}/target/common/obj/JAVA_LIBRARIES
 common_targets="vogar core-tests apache-harmony-jdwp-tests-hostdex jsr166-tests libartpalette-system mockito-target"
 # These build targets have different names on device and host.
-specific_targets="libjavacoretests libjdwp libwrapagentproperties libwrapagentpropertiesd"
+specific_targets="libjavacoretests libwrapagentproperties libwrapagentpropertiesd"
 build_host="no"
 build_target="no"
 installclean="no"
@@ -97,7 +97,7 @@ apexes=(
 make_command="build/soong/soong_ui.bash --make-mode $j_arg $extra_args $showcommands $common_targets"
 if [[ $build_host == "yes" ]]; then
   make_command+=" build-art-host-tests"
-  make_command+=" dx-tests junit-host"
+  make_command+=" dx-tests junit-host libjdwp-host"
   for LIB in ${specific_targets} ; do
     make_command+=" $LIB-host"
   done
@@ -109,7 +109,7 @@ if [[ $build_target == "yes" ]]; then
   fi
   make_command+=" build-art-target-tests"
   make_command+=" libnetd_client-target toybox sh libtombstoned_client"
-  make_command+=" debuggerd su gdbserver"
+  make_command+=" debuggerd su"
   # vogar requires the class files for conscrypt and ICU.
   make_command+=" conscrypt core-icu4j"
   make_command+=" ${ANDROID_PRODUCT_OUT#"${ANDROID_BUILD_TOP}/"}/system/etc/public.libraries.txt"

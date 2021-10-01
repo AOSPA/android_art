@@ -207,6 +207,12 @@ known_failing_tests = [
   "2005-pause-all-redefine-multithreaded",
   "2008-redefine-then-old-reflect-field",
   "2011-stack-walk-concurrent-instrument",
+  # 2040-huge-native-alloc: Fails with:
+  #
+  #   Test command execution failed with status FAILED: CommandResult: exit code=1, out=, err=Exception in thread "main" java.lang.ArrayIndexOutOfBoundsException: length=0; index=0
+  #           at Main.main(Main.java:56)
+  #
+  "2040-huge-native-alloc",
   "203-multi-checkpoint",
   "2031-zygote-compiled-frame-deopt",
   "2033-shutdown-mechanics",
@@ -471,6 +477,8 @@ art_gtest_user_module_names = [
     "art_standalone_dexlist_tests",
     "art_standalone_libartbase_tests",
     "art_standalone_libartpalette_tests",
+    "art_standalone_libartservice_tests",
+    "art_standalone_libarttools_tests",
     "art_standalone_libdexfile_support_tests",
     "art_standalone_libdexfile_tests",
     "art_standalone_libprofile_tests",
@@ -647,6 +655,7 @@ class Generator:
     other_presubmit_tests = [
         "CtsJdwpTestCases",
         "BootImageProfileTest",
+        "ArtServiceTests",
     ]
     presubmit_run_tests = run_test_module_names[0:num_presubmit_run_tests]
     presubmit_tests = other_presubmit_tests + presubmit_run_tests + art_gtest_module_names

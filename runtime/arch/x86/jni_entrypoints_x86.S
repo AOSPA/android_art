@@ -108,8 +108,8 @@ DEFINE_FUNCTION art_jni_dlsym_lookup_critical_stub
     movl %edx, FRAME_SIZE_SAVE_REFS_AND_ARGS - __SIZEOF_POINTER__(%eax)
 
     // Replace the target method with the SaveRefsAndArgs runtime method.
-    LOAD_RUNTIME_INSTANCE ecx, ebx
-    movl RUNTIME_SAVE_REFS_AND_ARGS_METHOD_OFFSET(%ecx), %ebx
+    LOAD_RUNTIME_INSTANCE ebx
+    movl RUNTIME_SAVE_REFS_AND_ARGS_METHOD_OFFSET(%ebx), %ebx
 
     movl %eax, %ecx               // Prepare untagged managed SP for the runtime method.
 
@@ -194,7 +194,7 @@ DEFINE_FUNCTION art_jni_dlsym_lookup_critical_stub
 
     // Do the tail call.
     jmp *%eax
-    CFI_RESTORE_STATE_AND_DEF_CFA(%esp, FRAME_SIZE_SAVE_REFS_AND_ARGS)
+    CFI_RESTORE_STATE_AND_DEF_CFA %esp, FRAME_SIZE_SAVE_REFS_AND_ARGS
 
 .Lcritical_deliver_exception:
     DELIVER_PENDING_EXCEPTION_FRAME_READY
