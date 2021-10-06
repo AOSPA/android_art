@@ -1834,7 +1834,9 @@ static void GenUnsafeGet(HInvoke* invoke,
 static void CreateIntIntIntToIntLocations(ArenaAllocator* allocator, HInvoke* invoke) {
   bool can_call = kEmitCompilerReadBarrier &&
       (invoke->GetIntrinsic() == Intrinsics::kUnsafeGetObject ||
-       invoke->GetIntrinsic() == Intrinsics::kUnsafeGetObjectVolatile);
+       invoke->GetIntrinsic() == Intrinsics::kUnsafeGetObjectVolatile ||
+       invoke->GetIntrinsic() == Intrinsics::kJdkUnsafeGetObject ||
+       invoke->GetIntrinsic() == Intrinsics::kJdkUnsafeGetObjectVolatile);
   LocationSummary* locations =
       new (allocator) LocationSummary(invoke,
                                       can_call
@@ -1852,42 +1854,86 @@ static void CreateIntIntIntToIntLocations(ArenaAllocator* allocator, HInvoke* in
 }
 
 void IntrinsicLocationsBuilderX86_64::VisitUnsafeGet(HInvoke* invoke) {
-  CreateIntIntIntToIntLocations(allocator_, invoke);
+  VisitJdkUnsafeGet(invoke);
 }
 void IntrinsicLocationsBuilderX86_64::VisitUnsafeGetVolatile(HInvoke* invoke) {
-  CreateIntIntIntToIntLocations(allocator_, invoke);
+  VisitJdkUnsafeGetVolatile(invoke);
 }
 void IntrinsicLocationsBuilderX86_64::VisitUnsafeGetLong(HInvoke* invoke) {
-  CreateIntIntIntToIntLocations(allocator_, invoke);
+  VisitJdkUnsafeGetLong(invoke);
 }
 void IntrinsicLocationsBuilderX86_64::VisitUnsafeGetLongVolatile(HInvoke* invoke) {
-  CreateIntIntIntToIntLocations(allocator_, invoke);
+  VisitJdkUnsafeGetLongVolatile(invoke);
 }
 void IntrinsicLocationsBuilderX86_64::VisitUnsafeGetObject(HInvoke* invoke) {
-  CreateIntIntIntToIntLocations(allocator_, invoke);
+  VisitJdkUnsafeGetObject(invoke);
 }
 void IntrinsicLocationsBuilderX86_64::VisitUnsafeGetObjectVolatile(HInvoke* invoke) {
+  VisitJdkUnsafeGetObjectVolatile(invoke);
+}
+
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafeGet(HInvoke* invoke) {
+  CreateIntIntIntToIntLocations(allocator_, invoke);
+}
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafeGetVolatile(HInvoke* invoke) {
+  CreateIntIntIntToIntLocations(allocator_, invoke);
+}
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafeGetAcquire(HInvoke* invoke) {
+  CreateIntIntIntToIntLocations(allocator_, invoke);
+}
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafeGetLong(HInvoke* invoke) {
+  CreateIntIntIntToIntLocations(allocator_, invoke);
+}
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafeGetLongVolatile(HInvoke* invoke) {
+  CreateIntIntIntToIntLocations(allocator_, invoke);
+}
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafeGetObject(HInvoke* invoke) {
+  CreateIntIntIntToIntLocations(allocator_, invoke);
+}
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafeGetObjectVolatile(HInvoke* invoke) {
   CreateIntIntIntToIntLocations(allocator_, invoke);
 }
 
 
 void IntrinsicCodeGeneratorX86_64::VisitUnsafeGet(HInvoke* invoke) {
-  GenUnsafeGet(invoke, DataType::Type::kInt32, /* is_volatile= */ false, codegen_);
+  VisitJdkUnsafeGet(invoke);
 }
 void IntrinsicCodeGeneratorX86_64::VisitUnsafeGetVolatile(HInvoke* invoke) {
-  GenUnsafeGet(invoke, DataType::Type::kInt32, /* is_volatile= */ true, codegen_);
+  VisitJdkUnsafeGetVolatile(invoke);
 }
 void IntrinsicCodeGeneratorX86_64::VisitUnsafeGetLong(HInvoke* invoke) {
-  GenUnsafeGet(invoke, DataType::Type::kInt64, /* is_volatile= */ false, codegen_);
+  VisitJdkUnsafeGetLong(invoke);
 }
 void IntrinsicCodeGeneratorX86_64::VisitUnsafeGetLongVolatile(HInvoke* invoke) {
-  GenUnsafeGet(invoke, DataType::Type::kInt64, /* is_volatile= */ true, codegen_);
+  VisitJdkUnsafeGetLongVolatile(invoke);
 }
 void IntrinsicCodeGeneratorX86_64::VisitUnsafeGetObject(HInvoke* invoke) {
-  GenUnsafeGet(invoke, DataType::Type::kReference, /* is_volatile= */ false, codegen_);
+  VisitJdkUnsafeGetObject(invoke);
 }
 void IntrinsicCodeGeneratorX86_64::VisitUnsafeGetObjectVolatile(HInvoke* invoke) {
-  GenUnsafeGet(invoke, DataType::Type::kReference, /* is_volatile= */ true, codegen_);
+  VisitJdkUnsafeGetObjectVolatile(invoke);
+}
+
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafeGet(HInvoke* invoke) {
+  GenUnsafeGet(invoke, DataType::Type::kInt32, /*is_volatile=*/ false, codegen_);
+}
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafeGetVolatile(HInvoke* invoke) {
+  GenUnsafeGet(invoke, DataType::Type::kInt32, /*is_volatile=*/ true, codegen_);
+}
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafeGetAcquire(HInvoke* invoke) {
+  GenUnsafeGet(invoke, DataType::Type::kInt32, /*is_volatile=*/ true, codegen_);
+}
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafeGetLong(HInvoke* invoke) {
+  GenUnsafeGet(invoke, DataType::Type::kInt64, /*is_volatile=*/ false, codegen_);
+}
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafeGetLongVolatile(HInvoke* invoke) {
+  GenUnsafeGet(invoke, DataType::Type::kInt64, /*is_volatile=*/ true, codegen_);
+}
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafeGetObject(HInvoke* invoke) {
+  GenUnsafeGet(invoke, DataType::Type::kReference, /*is_volatile=*/ false, codegen_);
+}
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafeGetObjectVolatile(HInvoke* invoke) {
+  GenUnsafeGet(invoke, DataType::Type::kReference, /*is_volatile=*/ true, codegen_);
 }
 
 
@@ -1908,30 +1954,61 @@ static void CreateIntIntIntIntToVoidPlusTempsLocations(ArenaAllocator* allocator
 }
 
 void IntrinsicLocationsBuilderX86_64::VisitUnsafePut(HInvoke* invoke) {
-  CreateIntIntIntIntToVoidPlusTempsLocations(allocator_, DataType::Type::kInt32, invoke);
+  VisitJdkUnsafePut(invoke);
 }
 void IntrinsicLocationsBuilderX86_64::VisitUnsafePutOrdered(HInvoke* invoke) {
-  CreateIntIntIntIntToVoidPlusTempsLocations(allocator_, DataType::Type::kInt32, invoke);
+  VisitJdkUnsafePutOrdered(invoke);
 }
 void IntrinsicLocationsBuilderX86_64::VisitUnsafePutVolatile(HInvoke* invoke) {
-  CreateIntIntIntIntToVoidPlusTempsLocations(allocator_, DataType::Type::kInt32, invoke);
+  VisitJdkUnsafePutVolatile(invoke);
 }
 void IntrinsicLocationsBuilderX86_64::VisitUnsafePutObject(HInvoke* invoke) {
-  CreateIntIntIntIntToVoidPlusTempsLocations(allocator_, DataType::Type::kReference, invoke);
+  VisitJdkUnsafePutObject(invoke);
 }
 void IntrinsicLocationsBuilderX86_64::VisitUnsafePutObjectOrdered(HInvoke* invoke) {
-  CreateIntIntIntIntToVoidPlusTempsLocations(allocator_, DataType::Type::kReference, invoke);
+  VisitJdkUnsafePutObjectOrdered(invoke);
 }
 void IntrinsicLocationsBuilderX86_64::VisitUnsafePutObjectVolatile(HInvoke* invoke) {
-  CreateIntIntIntIntToVoidPlusTempsLocations(allocator_, DataType::Type::kReference, invoke);
+  VisitJdkUnsafePutObjectVolatile(invoke);
 }
 void IntrinsicLocationsBuilderX86_64::VisitUnsafePutLong(HInvoke* invoke) {
-  CreateIntIntIntIntToVoidPlusTempsLocations(allocator_, DataType::Type::kInt64, invoke);
+  VisitJdkUnsafePutLong(invoke);
 }
 void IntrinsicLocationsBuilderX86_64::VisitUnsafePutLongOrdered(HInvoke* invoke) {
-  CreateIntIntIntIntToVoidPlusTempsLocations(allocator_, DataType::Type::kInt64, invoke);
+  VisitJdkUnsafePutLongOrdered(invoke);
 }
 void IntrinsicLocationsBuilderX86_64::VisitUnsafePutLongVolatile(HInvoke* invoke) {
+  VisitJdkUnsafePutLongVolatile(invoke);
+}
+
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafePut(HInvoke* invoke) {
+  CreateIntIntIntIntToVoidPlusTempsLocations(allocator_, DataType::Type::kInt32, invoke);
+}
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafePutOrdered(HInvoke* invoke) {
+  CreateIntIntIntIntToVoidPlusTempsLocations(allocator_, DataType::Type::kInt32, invoke);
+}
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafePutVolatile(HInvoke* invoke) {
+  CreateIntIntIntIntToVoidPlusTempsLocations(allocator_, DataType::Type::kInt32, invoke);
+}
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafePutRelease(HInvoke* invoke) {
+  CreateIntIntIntIntToVoidPlusTempsLocations(allocator_, DataType::Type::kInt32, invoke);
+}
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafePutObject(HInvoke* invoke) {
+  CreateIntIntIntIntToVoidPlusTempsLocations(allocator_, DataType::Type::kReference, invoke);
+}
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafePutObjectOrdered(HInvoke* invoke) {
+  CreateIntIntIntIntToVoidPlusTempsLocations(allocator_, DataType::Type::kReference, invoke);
+}
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafePutObjectVolatile(HInvoke* invoke) {
+  CreateIntIntIntIntToVoidPlusTempsLocations(allocator_, DataType::Type::kReference, invoke);
+}
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafePutLong(HInvoke* invoke) {
+  CreateIntIntIntIntToVoidPlusTempsLocations(allocator_, DataType::Type::kInt64, invoke);
+}
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafePutLongOrdered(HInvoke* invoke) {
+  CreateIntIntIntIntToVoidPlusTempsLocations(allocator_, DataType::Type::kInt64, invoke);
+}
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafePutLongVolatile(HInvoke* invoke) {
   CreateIntIntIntIntToVoidPlusTempsLocations(allocator_, DataType::Type::kInt64, invoke);
 }
 
@@ -1970,34 +2047,65 @@ static void GenUnsafePut(LocationSummary* locations, DataType::Type type, bool i
 }
 
 void IntrinsicCodeGeneratorX86_64::VisitUnsafePut(HInvoke* invoke) {
-  GenUnsafePut(invoke->GetLocations(), DataType::Type::kInt32, /* is_volatile= */ false, codegen_);
+  VisitJdkUnsafePut(invoke);
 }
 void IntrinsicCodeGeneratorX86_64::VisitUnsafePutOrdered(HInvoke* invoke) {
-  GenUnsafePut(invoke->GetLocations(), DataType::Type::kInt32, /* is_volatile= */ false, codegen_);
+  VisitJdkUnsafePutOrdered(invoke);
 }
 void IntrinsicCodeGeneratorX86_64::VisitUnsafePutVolatile(HInvoke* invoke) {
-  GenUnsafePut(invoke->GetLocations(), DataType::Type::kInt32, /* is_volatile= */ true, codegen_);
+  VisitJdkUnsafePutVolatile(invoke);
 }
 void IntrinsicCodeGeneratorX86_64::VisitUnsafePutObject(HInvoke* invoke) {
-  GenUnsafePut(
-      invoke->GetLocations(), DataType::Type::kReference, /* is_volatile= */ false, codegen_);
+  VisitJdkUnsafePutObject(invoke);
 }
 void IntrinsicCodeGeneratorX86_64::VisitUnsafePutObjectOrdered(HInvoke* invoke) {
-  GenUnsafePut(
-      invoke->GetLocations(), DataType::Type::kReference, /* is_volatile= */ false, codegen_);
+  VisitJdkUnsafePutObjectOrdered(invoke);
 }
 void IntrinsicCodeGeneratorX86_64::VisitUnsafePutObjectVolatile(HInvoke* invoke) {
-  GenUnsafePut(
-      invoke->GetLocations(), DataType::Type::kReference, /* is_volatile= */ true, codegen_);
+  VisitJdkUnsafePutObjectVolatile(invoke);
 }
 void IntrinsicCodeGeneratorX86_64::VisitUnsafePutLong(HInvoke* invoke) {
-  GenUnsafePut(invoke->GetLocations(), DataType::Type::kInt64, /* is_volatile= */ false, codegen_);
+  VisitJdkUnsafePutLong(invoke);
 }
 void IntrinsicCodeGeneratorX86_64::VisitUnsafePutLongOrdered(HInvoke* invoke) {
-  GenUnsafePut(invoke->GetLocations(), DataType::Type::kInt64, /* is_volatile= */ false, codegen_);
+  VisitJdkUnsafePutLongOrdered(invoke);
 }
 void IntrinsicCodeGeneratorX86_64::VisitUnsafePutLongVolatile(HInvoke* invoke) {
-  GenUnsafePut(invoke->GetLocations(), DataType::Type::kInt64, /* is_volatile= */ true, codegen_);
+  VisitJdkUnsafePutLongVolatile(invoke);
+}
+
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafePut(HInvoke* invoke) {
+  GenUnsafePut(invoke->GetLocations(), DataType::Type::kInt32, /*is_volatile=*/ false, codegen_);
+}
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafePutOrdered(HInvoke* invoke) {
+  GenUnsafePut(invoke->GetLocations(), DataType::Type::kInt32, /*is_volatile=*/ false, codegen_);
+}
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafePutVolatile(HInvoke* invoke) {
+  GenUnsafePut(invoke->GetLocations(), DataType::Type::kInt32, /*is_volatile=*/ true, codegen_);
+}
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafePutRelease(HInvoke* invoke) {
+  GenUnsafePut(invoke->GetLocations(), DataType::Type::kInt32, /* is_volatile= */ true, codegen_);
+}
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafePutObject(HInvoke* invoke) {
+  GenUnsafePut(
+      invoke->GetLocations(), DataType::Type::kReference, /*is_volatile=*/ false, codegen_);
+}
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafePutObjectOrdered(HInvoke* invoke) {
+  GenUnsafePut(
+      invoke->GetLocations(), DataType::Type::kReference, /*is_volatile=*/ false, codegen_);
+}
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafePutObjectVolatile(HInvoke* invoke) {
+  GenUnsafePut(
+      invoke->GetLocations(), DataType::Type::kReference, /*is_volatile=*/ true, codegen_);
+}
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafePutLong(HInvoke* invoke) {
+  GenUnsafePut(invoke->GetLocations(), DataType::Type::kInt64, /*is_volatile=*/ false, codegen_);
+}
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafePutLongOrdered(HInvoke* invoke) {
+  GenUnsafePut(invoke->GetLocations(), DataType::Type::kInt64, /*is_volatile=*/ false, codegen_);
+}
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafePutLongVolatile(HInvoke* invoke) {
+  GenUnsafePut(invoke->GetLocations(), DataType::Type::kInt64, /*is_volatile=*/ true, codegen_);
 }
 
 static void CreateUnsafeCASLocations(ArenaAllocator* allocator,
@@ -2005,7 +2113,8 @@ static void CreateUnsafeCASLocations(ArenaAllocator* allocator,
                                      HInvoke* invoke) {
   bool can_call = kEmitCompilerReadBarrier &&
       kUseBakerReadBarrier &&
-      (invoke->GetIntrinsic() == Intrinsics::kUnsafeCASObject);
+      (invoke->GetIntrinsic() == Intrinsics::kUnsafeCASObject ||
+       invoke->GetIntrinsic() == Intrinsics::kJdkUnsafeCASObject);
   LocationSummary* locations =
       new (allocator) LocationSummary(invoke,
                                       can_call
@@ -2035,14 +2144,26 @@ static void CreateUnsafeCASLocations(ArenaAllocator* allocator,
 }
 
 void IntrinsicLocationsBuilderX86_64::VisitUnsafeCASInt(HInvoke* invoke) {
-  CreateUnsafeCASLocations(allocator_, DataType::Type::kInt32, invoke);
+  VisitJdkUnsafeCASInt(invoke);
 }
 
 void IntrinsicLocationsBuilderX86_64::VisitUnsafeCASLong(HInvoke* invoke) {
-  CreateUnsafeCASLocations(allocator_, DataType::Type::kInt64, invoke);
+  VisitJdkUnsafeCASLong(invoke);
 }
 
 void IntrinsicLocationsBuilderX86_64::VisitUnsafeCASObject(HInvoke* invoke) {
+  VisitJdkUnsafeCASObject(invoke);
+}
+
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafeCASInt(HInvoke* invoke) {
+  CreateUnsafeCASLocations(allocator_, DataType::Type::kInt32, invoke);
+}
+
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafeCASLong(HInvoke* invoke) {
+  CreateUnsafeCASLocations(allocator_, DataType::Type::kInt64, invoke);
+}
+
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafeCASObject(HInvoke* invoke) {
   // The only read barrier implementation supporting the
   // UnsafeCASObject intrinsic is the Baker-style read barriers.
   if (kEmitCompilerReadBarrier && !kUseBakerReadBarrier) {
@@ -2050,6 +2171,10 @@ void IntrinsicLocationsBuilderX86_64::VisitUnsafeCASObject(HInvoke* invoke) {
   }
 
   CreateUnsafeCASLocations(allocator_, DataType::Type::kReference, invoke);
+}
+
+void IntrinsicLocationsBuilderX86_64::VisitJdkUnsafeCompareAndSetInt(HInvoke* invoke) {
+  CreateUnsafeCASLocations(allocator_, DataType::Type::kInt32, invoke);
 }
 
 // Convert ZF into the Boolean result.
@@ -2301,19 +2426,35 @@ static void GenCAS(DataType::Type type, HInvoke* invoke, CodeGeneratorX86_64* co
 }
 
 void IntrinsicCodeGeneratorX86_64::VisitUnsafeCASInt(HInvoke* invoke) {
-  GenCAS(DataType::Type::kInt32, invoke, codegen_);
+  VisitJdkUnsafeCASInt(invoke);
 }
 
 void IntrinsicCodeGeneratorX86_64::VisitUnsafeCASLong(HInvoke* invoke) {
-  GenCAS(DataType::Type::kInt64, invoke, codegen_);
+  VisitJdkUnsafeCASLong(invoke);
 }
 
 void IntrinsicCodeGeneratorX86_64::VisitUnsafeCASObject(HInvoke* invoke) {
+  VisitJdkUnsafeCASObject(invoke);
+}
+
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafeCASInt(HInvoke* invoke) {
+  GenCAS(DataType::Type::kInt32, invoke, codegen_);
+}
+
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafeCASLong(HInvoke* invoke) {
+  GenCAS(DataType::Type::kInt64, invoke, codegen_);
+}
+
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafeCASObject(HInvoke* invoke) {
   // The only read barrier implementation supporting the
   // UnsafeCASObject intrinsic is the Baker-style read barriers.
   DCHECK(!kEmitCompilerReadBarrier || kUseBakerReadBarrier);
 
   GenCAS(DataType::Type::kReference, invoke, codegen_);
+}
+
+void IntrinsicCodeGeneratorX86_64::VisitJdkUnsafeCompareAndSetInt(HInvoke* invoke) {
+  GenCAS(DataType::Type::kInt32, invoke, codegen_);
 }
 
 void IntrinsicLocationsBuilderX86_64::VisitIntegerReverse(HInvoke* invoke) {
@@ -3129,6 +3270,7 @@ static void GenerateVarHandleStaticFieldCheck(HInvoke* invoke,
 static void GenerateVarHandleInstanceFieldChecks(HInvoke* invoke,
                                                  CodeGeneratorX86_64* codegen,
                                                  SlowPathCode* slow_path) {
+  VarHandleOptimizations optimizations(invoke);
   X86_64Assembler* assembler = codegen->GetAssembler();
 
   LocationSummary* locations = invoke->GetLocations();
@@ -3140,8 +3282,10 @@ static void GenerateVarHandleInstanceFieldChecks(HInvoke* invoke,
   const MemberOffset coordinate_type1_offset = mirror::VarHandle::CoordinateType1Offset();
 
   // Null-check the object.
-  __ testl(object, object);
-  __ j(kZero, slow_path->GetEntryLabel());
+  if (!optimizations.GetSkipObjectNullCheck()) {
+    __ testl(object, object);
+    __ j(kZero, slow_path->GetEntryLabel());
+  }
 
   // Check that the VarHandle references an instance field by checking that
   // coordinateType1 == null. coordinateType0 should be not null, but this is handled by the
@@ -3242,72 +3386,17 @@ static bool HasVarHandleIntrinsicImplementation(HInvoke* invoke) {
     return false;
   }
 
+  VarHandleOptimizations optimizations(invoke);
+  if (optimizations.GetDoNotIntrinsify()) {
+    return false;
+  }
+
   size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
+  DCHECK_LE(expected_coordinates_count, 2u);  // Filtered by the `DoNotIntrinsify` flag above.
   if (expected_coordinates_count > 1u) {
     // Only static and instance fields VarHandle are supported now.
     // TODO: add support for arrays and views.
     return false;
-  }
-  if (expected_coordinates_count != 0u &&
-      invoke->InputAt(1)->GetType() != DataType::Type::kReference) {
-    // Except for static fields (no coordinates), the first coordinate must be a reference.
-    return false;
-  }
-
-  uint32_t number_of_arguments = invoke->GetNumberOfArguments();
-  DataType::Type return_type = invoke->GetType();
-  mirror::VarHandle::AccessModeTemplate access_mode_template =
-      mirror::VarHandle::GetAccessModeTemplateByIntrinsic(invoke->GetIntrinsic());
-  switch (access_mode_template) {
-    case mirror::VarHandle::AccessModeTemplate::kGet:
-      // The return type should be the same as varType, so it shouldn't be void.
-      if (return_type == DataType::Type::kVoid) {
-        return false;
-      }
-      break;
-    case mirror::VarHandle::AccessModeTemplate::kSet:
-      if (return_type != DataType::Type::kVoid) {
-        return false;
-      }
-      break;
-    case mirror::VarHandle::AccessModeTemplate::kCompareAndSet: {
-      if (return_type != DataType::Type::kBool) {
-        return false;
-      }
-      DataType::Type expected_type = GetDataTypeFromShorty(invoke, number_of_arguments - 2);
-      DataType::Type new_value_type = GetDataTypeFromShorty(invoke, number_of_arguments - 1);
-      if (expected_type != new_value_type) {
-        return false;
-      }
-      break;
-    }
-    case mirror::VarHandle::AccessModeTemplate::kCompareAndExchange: {
-      DataType::Type expected_type = GetDataTypeFromShorty(invoke, number_of_arguments - 2);
-      DataType::Type new_value_type = GetDataTypeFromShorty(invoke, number_of_arguments - 1);
-      if (expected_type != new_value_type || return_type != expected_type) {
-        return false;
-      }
-      break;
-    }
-    case mirror::VarHandle::AccessModeTemplate::kGetAndUpdate: {
-      DataType::Type value_type = GetDataTypeFromShorty(invoke, number_of_arguments - 1);
-      if (IsVarHandleGetAndAdd(invoke) &&
-          (value_type == DataType::Type::kReference || value_type == DataType::Type::kBool)) {
-        // We should only add numerical types.
-        return false;
-      } else if (IsVarHandleGetAndBitwiseOp(invoke) && !DataType::IsIntegralType(value_type)) {
-        // We can only apply operators to bitwise integral types.
-        // Note that bitwise VarHandle operations accept a non-integral boolean type and
-        // perform the appropriate logical operation. However, the result is the same as
-        // using the bitwise operation on our boolean representation and this fits well
-        // with DataType::IsIntegralType() treating the compiler type kBool as integral.
-        return false;
-      }
-      if (return_type != value_type) {
-        return false;
-      }
-      break;
-    }
   }
 
   return true;
@@ -4277,6 +4366,9 @@ UNIMPLEMENTED_INTRINSIC(X86_64, FP16Greater)
 UNIMPLEMENTED_INTRINSIC(X86_64, FP16GreaterEquals)
 UNIMPLEMENTED_INTRINSIC(X86_64, FP16Less)
 UNIMPLEMENTED_INTRINSIC(X86_64, FP16LessEquals)
+UNIMPLEMENTED_INTRINSIC(X86_64, FP16Compare)
+UNIMPLEMENTED_INTRINSIC(X86_64, FP16Min)
+UNIMPLEMENTED_INTRINSIC(X86_64, FP16Max)
 
 UNIMPLEMENTED_INTRINSIC(X86_64, StringStringIndexOf);
 UNIMPLEMENTED_INTRINSIC(X86_64, StringStringIndexOfAfter);
@@ -4305,6 +4397,13 @@ UNIMPLEMENTED_INTRINSIC(X86_64, UnsafeGetAndSetObject)
 
 UNIMPLEMENTED_INTRINSIC(X86_64, MethodHandleInvokeExact)
 UNIMPLEMENTED_INTRINSIC(X86_64, MethodHandleInvoke)
+
+// OpenJDK 11
+UNIMPLEMENTED_INTRINSIC(X86_64, JdkUnsafeGetAndAddInt)
+UNIMPLEMENTED_INTRINSIC(X86_64, JdkUnsafeGetAndAddLong)
+UNIMPLEMENTED_INTRINSIC(X86_64, JdkUnsafeGetAndSetInt)
+UNIMPLEMENTED_INTRINSIC(X86_64, JdkUnsafeGetAndSetLong)
+UNIMPLEMENTED_INTRINSIC(X86_64, JdkUnsafeGetAndSetObject)
 
 UNREACHABLE_INTRINSICS(X86_64)
 

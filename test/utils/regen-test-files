@@ -218,6 +218,7 @@ known_failing_tests = [
   "2033-shutdown-mechanics",
   "2036-jni-filechannel",
   "2037-thread-name-inherit",
+  "2235-JdkUnsafeTest",
   "305-other-fault-handler",
   "449-checker-bce",
   "454-get-vreg",
@@ -279,6 +280,10 @@ known_failing_tests = [
   #           at Main.main(Main.java:20)
   #
   "821-many-args",
+  # 826-infinite-loop: The test expects an argument passed to `Main.main` (the test library,
+  # usually `arttestd` or `arttest)`, but the ART run-test TradeFed test runner
+  # (`com.android.tradefed.testtype.ArtRunTest`) does not implement this yet.
+  "826-infinite-loop",
   "900-hello-plugin",
   "901-hello-ti-agent",
   "902-hello-transformation",
@@ -644,8 +649,12 @@ class Generator:
     run_test_module_names = [ART_RUN_TEST_MODULE_NAME_PREFIX + t for t in art_run_tests]
 
     # Mainline presubmits.
+    mainline_other_presubmit_tests = [
+        "ComposHostTestCases",
+    ]
     mainline_presubmit_run_tests = run_test_module_names[0:num_mainline_presubmit_run_tests]
-    mainline_presubmit_tests = mainline_presubmit_run_tests + art_gtest_module_names
+    mainline_presubmit_tests = (mainline_other_presubmit_tests + mainline_presubmit_run_tests +
+                                art_gtest_module_names)
     mainline_presubmit_tests_with_apex = [t + "[com.google.android.art.apex]"
                                           for t
                                           in mainline_presubmit_tests]
@@ -656,6 +665,7 @@ class Generator:
         "CtsJdwpTestCases",
         "BootImageProfileTest",
         "ArtServiceTests",
+        "ComposHostTestCases",
     ]
     presubmit_run_tests = run_test_module_names[0:num_presubmit_run_tests]
     presubmit_tests = other_presubmit_tests + presubmit_run_tests + art_gtest_module_names

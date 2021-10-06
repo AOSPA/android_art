@@ -89,6 +89,7 @@ Arm64FeaturesUniquePtr Arm64InstructionSetFeatures::FromVariant(
       "cortex-a75",
       "cortex-a76",
       "kryo385",
+      "kryo785",
   };
 
   static const char* arm64_variants_with_fp16[] = {
@@ -96,6 +97,7 @@ Arm64FeaturesUniquePtr Arm64InstructionSetFeatures::FromVariant(
       "cortex-a75",
       "cortex-a76",
       "kryo385",
+      "kryo785",
   };
 
   static const char* arm64_variants_with_dotprod[] = {

@@ -22,6 +22,9 @@
 #include <malloc.h>  // For mallinfo()
 #endif
 #include <memory>
+#include <random>
+#include <unistd.h>
+#include <sys/types.h>
 #include <vector>
 
 #include "android-base/stringprintf.h"
@@ -326,6 +329,7 @@ Heap::Heap(size_t initial_size,
       next_gc_type_(collector::kGcTypePartial),
       capacity_(capacity),
       growth_limit_(growth_limit),
+      initial_heap_size_(initial_size),
       target_footprint_(initial_size),
       // Using kPostMonitorLock as a lock at kDefaultMutexLevel is acquired after
       // this one.
@@ -339,6 +343,7 @@ Heap::Heap(size_t initial_size,
       old_native_bytes_allocated_(0),
       native_objects_notified_(0),
       num_bytes_freed_revoke_(0),
+      num_bytes_alive_after_gc_(0),
       verify_missing_card_marks_(false),
       verify_system_weaks_(false),
       verify_pre_gc_heap_(verify_pre_gc_heap),
@@ -406,7 +411,8 @@ Heap::Heap(size_t initial_size,
       dump_region_info_after_gc_(dump_region_info_after_gc),
       boot_image_spaces_(),
       boot_images_start_address_(0u),
-      boot_images_size_(0u) {
+      boot_images_size_(0u),
+      pre_oome_gc_count_(0u) {
   if (VLOG_IS_ON(heap) || VLOG_IS_ON(startup)) {
     LOG(INFO) << "Heap() entering";
   }
@@ -1240,7 +1246,7 @@ void Heap::DumpGcPerformanceInfo(std::ostream& os) {
   os << "Total GC time: " << PrettyDuration(GetGcTime()) << "\n";
   os << "Total blocking GC count: " << GetBlockingGcCount() << "\n";
   os << "Total blocking GC time: " << PrettyDuration(GetBlockingGcTime()) << "\n";
-
+  os << "Total pre-OOME GC count: " << GetPreOomeGcCount() << "\n";
   {
     MutexLock mu(Thread::Current(), *gc_complete_lock_);
     if (gc_count_rate_histogram_.SampleSize() > 0U) {
@@ -1287,6 +1293,7 @@ void Heap::ResetGcPerformanceInfo() {
   total_wait_time_ = 0;
   blocking_gc_count_ = 0;
   blocking_gc_time_ = 0;
+  pre_oome_gc_count_.store(0, std::memory_order_relaxed);
   gc_count_last_window_ = 0;
   blocking_gc_count_last_window_ = 0;
   last_update_time_gc_count_rate_histograms_ =  // Round down by the window duration.
@@ -1334,6 +1341,10 @@ void Heap::DumpBlockingGcCountRateHistogram(std::ostream& os) const {
   if (blocking_gc_count_rate_histogram_.SampleSize() > 0U) {
     blocking_gc_count_rate_histogram_.DumpBins(os);
   }
+}
+
+uint64_t Heap::GetPreOomeGcCount() const {
+  return pre_oome_gc_count_.load(std::memory_order_relaxed);
 }
 
 ALWAYS_INLINE
@@ -1902,6 +1913,7 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
   // TODO: Should check whether another thread already just ran a GC with soft
   // references.
   DCHECK(!gc_plan_.empty());
+  pre_oome_gc_count_.fetch_add(1, std::memory_order_relaxed);
   PERFORM_SUSPENDING_OPERATION(
       CollectGarbageInternal(gc_plan_.back(), kGcCauseForAlloc, true, GC_NUM_ANY));
   if ((was_default_allocator && allocator != GetCurrentAllocator()) ||
@@ -2142,6 +2154,27 @@ HomogeneousSpaceCompactResult Heap::PerformHomogeneousSpaceCompact() {
   return HomogeneousSpaceCompactResult::kSuccess;
 }
 
+void Heap::SetDefaultConcurrentStartBytes() {
+  MutexLock mu(Thread::Current(), *gc_complete_lock_);
+  if (collector_type_running_ != kCollectorTypeNone) {
+    // If a collector is already running, just let it set concurrent_start_bytes_ .
+    return;
+  }
+  SetDefaultConcurrentStartBytesLocked();
+}
+
+void Heap::SetDefaultConcurrentStartBytesLocked() {
+  if (IsGcConcurrent()) {
+    size_t target_footprint = target_footprint_.load(std::memory_order_relaxed);
+    size_t reserve_bytes = target_footprint / 4;
+    reserve_bytes = std::min(reserve_bytes, kMaxConcurrentRemainingBytes);
+    reserve_bytes = std::max(reserve_bytes, kMinConcurrentRemainingBytes);
+    concurrent_start_bytes_ = UnsignedDifference(target_footprint, reserve_bytes);
+  } else {
+    concurrent_start_bytes_ = std::numeric_limits<size_t>::max();
+  }
+}
+
 void Heap::ChangeCollector(CollectorType collector_type) {
   // TODO: Only do this with all mutators suspended to avoid races.
   if (collector_type != collector_type_) {
@@ -2188,13 +2221,7 @@ void Heap::ChangeCollector(CollectorType collector_type) {
         UNREACHABLE();
       }
     }
-    if (IsGcConcurrent()) {
-      concurrent_start_bytes_ =
-          UnsignedDifference(target_footprint_.load(std::memory_order_relaxed),
-                             kMinConcurrentRemainingBytes);
-    } else {
-      concurrent_start_bytes_ = std::numeric_limits<size_t>::max();
-    }
+    SetDefaultConcurrentStartBytesLocked();
   }
 }
 
@@ -2322,6 +2349,8 @@ void Heap::IncrementFreedEver() {
 #  pragma clang diagnostic ignored "-Wframe-larger-than="
 #endif
 // This has a large frame, but shouldn't be run anywhere near the stack limit.
+// FIXME: BUT it did exceed... http://b/197647048
+#  pragma clang diagnostic ignored "-Wframe-larger-than="
 void Heap::PreZygoteFork() {
   if (!HasZygoteSpace()) {
     // We still want to GC in case there is some unreachable non moving objects that could cause a
@@ -2713,6 +2742,7 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
   // Grow the heap so that we know when to perform the next GC.
   GrowForUtilization(collector, bytes_allocated_before_gc);
   old_native_bytes_allocated_.store(GetNativeBytes());
+  num_bytes_alive_after_gc_ = bytes_allocated_before_gc - current_gc_iteration_.GetFreedBytes();
   LogGC(gc_cause, collector);
   FinishGC(self, gc_type);
   // Actually enqueue all cleared references. Do this after the GC has officially finished since
@@ -3568,6 +3598,11 @@ double Heap::HeapGrowthMultiplier() const {
 
 void Heap::GrowForUtilization(collector::GarbageCollector* collector_ran,
                               size_t bytes_allocated_before_gc) {
+  // We're running in the thread that set collector_type_running_ to something other than none,
+  // thus ensuring that there is only one of us running. Thus
+  // collector_type_running_ != kCollectorTypeNone, but that's a little tricky to turn into a
+  // DCHECK.
+
   // We know what our utilization is at this moment.
   // This doesn't actually resize any memory. It just lets the heap grow more when necessary.
   const size_t bytes_allocated = GetBytesAllocated();
@@ -3693,8 +3728,7 @@ void Heap::ClearGrowthLimit() {
   if (target_footprint_.load(std::memory_order_relaxed) == growth_limit_
       && growth_limit_ < capacity_) {
     target_footprint_.store(capacity_, std::memory_order_relaxed);
-    concurrent_start_bytes_ =
-        UnsignedDifference(capacity_, kMinConcurrentRemainingBytes);
+    SetDefaultConcurrentStartBytes();
   }
   growth_limit_ = capacity_;
   ScopedObjectAccess soa(Thread::Current());
@@ -3841,6 +3875,16 @@ void Heap::RequestCollectorTransition(CollectorType desired_collector_type, uint
     // For CC, we invoke a full compaction when going to the background, but the collector type
     // doesn't change.
     DCHECK_EQ(desired_collector_type_, kCollectorTypeCCBackground);
+    // App's allocations (since last GC) more than the threshold then do TransitionGC
+    // when the app was in background. If not then don't do TransitionGC.
+    size_t num_bytes_allocated_since_gc = GetBytesAllocated() - num_bytes_alive_after_gc_;
+    if (num_bytes_allocated_since_gc <
+        (UnsignedDifference(target_footprint_.load(std::memory_order_relaxed),
+                            num_bytes_alive_after_gc_)/4)
+        && !kStressCollectorTransition
+        && !IsLowMemoryMode()) {
+      return;
+    }
   }
   DCHECK_NE(collector_type_, kCollectorTypeCCBackground);
   CollectorTransitionTask* added_task = nullptr;
@@ -4471,32 +4515,97 @@ void Heap::VlogHeapGrowth(size_t old_footprint, size_t new_footprint, size_t all
              << PrettySize(new_footprint) << " for a " << PrettySize(alloc_size) << " allocation";
 }
 
+// Run a gc if we haven't run one since initial_gc_num. This forces processes to
+// reclaim memory allocated during startup, even if they don't do much
+// allocation post startup. If the process is actively allocating and triggering
+// GCs, or has moved to the background and hence forced a GC, this does nothing.
 class Heap::TriggerPostForkCCGcTask : public HeapTask {
  public:
-  explicit TriggerPostForkCCGcTask(uint64_t target_time) : HeapTask(target_time) {}
+  explicit TriggerPostForkCCGcTask(uint64_t target_time, uint32_t initial_gc_num) :
+      HeapTask(target_time), initial_gc_num_(initial_gc_num) {}
   void Run(Thread* self) override {
     gc::Heap* heap = Runtime::Current()->GetHeap();
-    // Trigger a GC, if not already done. The first GC after fork, whenever it
-    // takes place, will adjust the thresholds to normal levels.
-    if (heap->target_footprint_.load(std::memory_order_relaxed) == heap->growth_limit_) {
-      heap->RequestConcurrentGC(self, kGcCauseBackground, false, heap->GetCurrentGcNum());
+    if (heap->GetCurrentGcNum() == initial_gc_num_) {
+      if (kLogAllGCs) {
+        LOG(INFO) << "Forcing GC for allocation-inactive process";
+      }
+      heap->RequestConcurrentGC(self, kGcCauseBackground, false, initial_gc_num_);
     }
   }
+ private:
+  uint32_t initial_gc_num_;
 };
 
+// Reduce target footprint, if no GC has occurred since initial_gc_num.
+// If a GC already occurred, it will have done this for us.
+class Heap::ReduceTargetFootprintTask : public HeapTask {
+ public:
+  explicit ReduceTargetFootprintTask(uint64_t target_time, size_t new_target_sz,
+                                     uint32_t initial_gc_num) :
+      HeapTask(target_time), new_target_sz_(new_target_sz), initial_gc_num_(initial_gc_num) {}
+  void Run(Thread* self) override {
+    gc::Heap* heap = Runtime::Current()->GetHeap();
+    MutexLock mu(self, *(heap->gc_complete_lock_));
+    if (heap->GetCurrentGcNum() == initial_gc_num_
+        && heap->collector_type_running_ == kCollectorTypeNone) {
+      size_t target_footprint = heap->target_footprint_.load(std::memory_order_relaxed);
+      if (target_footprint > new_target_sz_) {
+        if (heap->target_footprint_.CompareAndSetStrongRelaxed(target_footprint, new_target_sz_)) {
+          heap->SetDefaultConcurrentStartBytesLocked();
+        }
+      }
+    }
+  }
+ private:
+  size_t new_target_sz_;
+  uint32_t initial_gc_num_;
+};
+
+// Return a pseudo-random integer between 0 and 19999, using the uid as a seed.  We want this to
+// be deterministic for a given process, but to vary randomly across processes. Empirically, the
+// uids for processes for which this matters are distinct.
+static uint32_t GetPseudoRandomFromUid() {
+  std::default_random_engine rng(getuid());
+  std::uniform_int_distribution<int> dist(0, 19999);
+  return dist(rng);
+}
+
 void Heap::PostForkChildAction(Thread* self) {
+  uint32_t starting_gc_num = GetCurrentGcNum();
+  uint64_t last_adj_time = NanoTime();
+  next_gc_type_ = NonStickyGcType();  // Always start with a full gc.
+
   // Temporarily increase target_footprint_ and concurrent_start_bytes_ to
   // max values to avoid GC during app launch.
-  if (collector_type_ == kCollectorTypeCC && !IsLowMemoryMode()) {
+  if (!IsLowMemoryMode()) {
     // Set target_footprint_ to the largest allowed value.
     SetIdealFootprint(growth_limit_);
-    // Set concurrent_start_bytes_ to half of the heap size.
-    size_t target_footprint = target_footprint_.load(std::memory_order_relaxed);
-    concurrent_start_bytes_ = std::max(target_footprint / 2, GetBytesAllocated());
+    SetDefaultConcurrentStartBytes();
 
-    GetTaskProcessor()->AddTask(
-        self, new TriggerPostForkCCGcTask(NanoTime() + MsToNs(kPostForkMaxHeapDurationMS)));
+    // Shrink heap after kPostForkMaxHeapDurationMS, to force a memory hog process to GC.
+    // This remains high enough that many processes will continue without a GC.
+    if (initial_heap_size_ < growth_limit_) {
+      size_t first_shrink_size = std::max(growth_limit_ / 4, initial_heap_size_);
+      last_adj_time += MsToNs(kPostForkMaxHeapDurationMS);
+      GetTaskProcessor()->AddTask(
+          self, new ReduceTargetFootprintTask(last_adj_time, first_shrink_size, starting_gc_num));
+      // Shrink to a small value after a substantial time period. This will typically force a
+      // GC if none has occurred yet. Has no effect if there was a GC before this anyway, which
+      // is commonly the case, e.g. because of a process transition.
+      if (initial_heap_size_ < first_shrink_size) {
+        last_adj_time += MsToNs(4 * kPostForkMaxHeapDurationMS);
+        GetTaskProcessor()->AddTask(
+            self,
+            new ReduceTargetFootprintTask(last_adj_time, initial_heap_size_, starting_gc_num));
+      }
+    }
   }
+  // Schedule a GC after a substantial period of time. This will become a no-op if another GC is
+  // scheduled in the interim. If not, we want to avoid holding onto start-up garbage.
+  uint64_t post_fork_gc_time = last_adj_time
+      + MsToNs(4 * kPostForkMaxHeapDurationMS + GetPseudoRandomFromUid());
+  GetTaskProcessor()->AddTask(self,
+                              new TriggerPostForkCCGcTask(post_fork_gc_time, starting_gc_num));
 }
 
 void Heap::VisitReflectiveTargets(ReflectiveValueVisitor *visit) {

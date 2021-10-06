@@ -39,10 +39,16 @@ art_module_cc_defaults {
         darwin: {
             enabled: false,
         },
+        // This has to be duplicated for android and host to make sure it
+        // comes after the -Wframe-larger-than warnings inserted by art.go
+        // target-specific properties
+        android: {
+            cflags: ["-Wno-frame-larger-than="],
+        },
+        host: {
+            cflags: ["-Wno-frame-larger-than="],
+        },
     },
-    cflags: [
-        "-Wno-frame-larger-than=",
-    ],
 }
 
 art_module_cc_defaults {
@@ -133,6 +139,7 @@ art_cc_defaults {
     // eventually.
     host_supported: false,
     test_config_template: ":art-gtests-target-standalone-template",
+    min_sdk_version: "S",
 }
 
 // Properties common to `art_gtest_defaults` and `art_standalone_gtest_defaults`.
@@ -454,9 +461,9 @@ java_defaults {
     system_modules: "core-all-system-modules",
 
     // Some ART run-tests contain constructs which break ErrorProne checks;
-    // disable them on `errorprone` builds.
+    // disable `errorprone` builds.
     errorprone: {
-        javacflags: ["-XepDisableAllChecks"],
+        enabled: false,
     },
     test_suites: [
         "general-tests",
@@ -465,6 +472,7 @@ java_defaults {
     host_required: [
         "art-run-test-checker",
     ],
+    min_sdk_version: "S",
 }
 
 art_cc_test_library {
@@ -905,6 +913,7 @@ cc_defaults {
         "2036-jni-filechannel/jni_filechannel.cc",
         "2037-thread-name-inherit/thread_name_inherit.cc",
         "2040-huge-native-alloc/huge_native_buf.cc",
+        "2235-JdkUnsafeTest/unsafe_test.cc",
         "common/runtime_state.cc",
         "common/stack_inspect.cc",
     ],
@@ -1081,6 +1090,11 @@ java_library {
         "2007-virtual-structural-finalizable/src-art/art/Test2007.java",
     ],
     sdk_version: "core_platform",
+    // Some ART run-tests contain constructs which break ErrorProne checks;
+    // disable `errorprone` builds.
+    errorprone: {
+        enabled: false,
+    },
 }
 
 // CTS test runner in cts/hostsidetests/jvmti looks for an expected test
@@ -1296,6 +1310,30 @@ art_cc_test {
         "com.android.art",
         "com.android.art.debug",
     ],
+}
+
+// Install run-test data in the output directory.
+prebuilt_etc_host {
+    name: "art-run-test-host-data",
+    src: ":art-run-test-host-data-merged",
+    sub_dir: "art",
+    filename: "art-run-test-host-data.zip",
+}
+
+// Install run-test data in the output directory.
+prebuilt_etc_host {
+    name: "art-run-test-jvm-data",
+    src: ":art-run-test-jvm-data-merged",
+    sub_dir: "art",
+    filename: "art-run-test-jvm-data.zip",
+}
+
+// Install run-test data in the output directory.
+prebuilt_etc_host {
+    name: "art-run-test-target-data",
+    src: ":art-run-test-target-data-merged",
+    sub_dir: "art",
+    filename: "art-run-test-target-data.zip",
 }
 
 filegroup {
@@ -1773,3 +1811,25 @@ genrule {
     srcs: ["Dex2oatVdexPublicSdkDex/*.smali"],
     out: ["art-gtest-jars-Dex2oatVdexPublicSdkDex.dex"],
 }
+
+genrule_defaults {
+    name: "art-run-test-data-defaults",
+    tool_files: [
+        "run-test-build.py",
+        "knownfailures.json",
+        "etc/default-build",
+        "etc/default-run",
+        "etc/default-check",
+        ":art-run-test-bootclasspath",
+    ],
+    tools: [
+        "d8",
+        "hiddenapi",
+        "jasmin",
+        "smali",
+    ],
+}
+
+build = [
+    "Android.run-test.bp",
+]
