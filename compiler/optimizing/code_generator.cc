@@ -982,6 +982,9 @@ void CodeGenerator::AllocateLocations(HInstruction* instruction) {
     if (locations != nullptr) {
       if (locations->CanCall()) {
         MarkNotLeaf();
+        if (locations->NeedsSuspendCheckEntry()) {
+          MarkNeedsSuspendCheckEntry();
+        }
       } else if (locations->Intrinsified() &&
                  instruction->IsInvokeStaticOrDirect() &&
                  !instruction->AsInvokeStaticOrDirect()->HasCurrentMethodInput()) {
@@ -1061,6 +1064,7 @@ CodeGenerator::CodeGenerator(HGraph* graph,
       current_slow_path_(nullptr),
       current_block_index_(0),
       is_leaf_(true),
+      needs_suspend_check_entry_(false),
       requires_current_method_(false),
       code_generation_data_() {
   if (GetGraph()->IsCompilingOsr()) {
@@ -1240,7 +1244,6 @@ void CodeGenerator::RecordPcInfo(HInstruction* instruction,
   }
 
   uint32_t outer_dex_pc = dex_pc;
-  uint32_t outer_environment_size = 0u;
   uint32_t inlining_depth = 0;
   HEnvironment* const environment = instruction->GetEnvironment();
   if (environment != nullptr) {
@@ -1250,7 +1253,6 @@ void CodeGenerator::RecordPcInfo(HInstruction* instruction,
       ++inlining_depth;
     }
     outer_dex_pc = outer_environment->GetDexPc();
-    outer_environment_size = outer_environment->Size();
   }
 
   HLoopInformation* info = instruction->GetBlock()->GetLoopInformation();

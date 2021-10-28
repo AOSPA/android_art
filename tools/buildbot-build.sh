@@ -110,7 +110,8 @@ if [[ $build_target == "yes" ]]; then
   make_command+=" build-art-target-tests"
   make_command+=" libnetd_client-target toybox sh libtombstoned_client"
   make_command+=" debuggerd su"
-  # vogar requires the class files for conscrypt and ICU.
+  # testrunner in chroot requires the class files for conscrypt and ICU (cf.
+  # https://r.android.com/1828052).
   make_command+=" conscrypt core-icu4j"
   make_command+=" ${ANDROID_PRODUCT_OUT#"${ANDROID_BUILD_TOP}/"}/system/etc/public.libraries.txt"
   # Targets required to generate a linker configuration for device within the
@@ -149,9 +150,15 @@ if [[ $build_target == "yes" ]]; then
   debugfs=$ANDROID_HOST_OUT/bin/debugfs_static
   for apex in ${apexes[@]}; do
     dir="$ANDROID_PRODUCT_OUT/system/apex/${apex}"
-    file="$ANDROID_PRODUCT_OUT/system/apex/${apex}.apex"
-    if [ -f "${file}" ]; then
-      echo "Extracting APEX file: ${apex}"
+    apexbase="$ANDROID_PRODUCT_OUT/system/apex/${apex}"
+    unset file
+    if [ -f "${apexbase}.apex" ]; then
+      file="${apexbase}.apex"
+    elif [ -f "${apexbase}.capex" ]; then
+      file="${apexbase}.capex"
+    fi
+    if [ -n "${file}" ]; then
+      echo "Extracting APEX file: ${file}"
       rm -rf $dir
       mkdir -p $dir
       $ANDROID_HOST_OUT/bin/deapexer --debugfs_path $debugfs extract $file $dir

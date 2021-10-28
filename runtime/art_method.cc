@@ -559,7 +559,8 @@ const OatQuickMethodHeader* ArtMethod::GetOatQuickMethodHeader(uintptr_t pc) {
   if (!class_linker->IsQuickGenericJniStub(existing_entry_point) &&
       !class_linker->IsQuickResolutionStub(existing_entry_point) &&
       !class_linker->IsQuickToInterpreterBridge(existing_entry_point) &&
-      existing_entry_point != GetQuickInstrumentationEntryPoint()) {
+      existing_entry_point != GetQuickInstrumentationEntryPoint() &&
+      existing_entry_point != GetInvokeObsoleteMethodStub()) {
     OatQuickMethodHeader* method_header =
         OatQuickMethodHeader::FromEntryPoint(existing_entry_point);
 
@@ -696,7 +697,7 @@ void ArtMethod::SetIntrinsic(uint32_t intrinsic) {
     DCHECK_EQ(is_compilable, IsCompilable());
     DCHECK_EQ(must_count_locks, MustCountLocks());
     // Only DCHECK that we have preserved the hidden API access flags if the
-    // original method was not on the whitelist. This is because the core image
+    // original method was not in the SDK list. This is because the core image
     // does not have the access flags set (b/77733081).
     if ((hiddenapi_flags & kAccHiddenapiBits) != kAccPublicApi) {
       DCHECK_EQ(hiddenapi_flags, hiddenapi::GetRuntimeFlags(this)) << PrettyMethod();

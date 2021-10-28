@@ -224,6 +224,14 @@ class SystemArrayCopyOptimizations : public IntrinsicOptimizations {
   DISALLOW_COPY_AND_ASSIGN(SystemArrayCopyOptimizations);
 };
 
+class VarHandleOptimizations : public IntrinsicOptimizations {
+ public:
+  explicit VarHandleOptimizations(HInvoke* invoke) : IntrinsicOptimizations(invoke) {}
+
+  INTRINSIC_OPTIMIZATION(DoNotIntrinsify, 0);  // One of the checks is statically known to fail.
+  INTRINSIC_OPTIMIZATION(SkipObjectNullCheck, 1);  // Not applicable for static fields.
+};
+
 #undef INTRISIC_OPTIMIZATION
 
 //
@@ -287,6 +295,9 @@ UNREACHABLE_INTRINSIC(Arch, StringLength)                       \
 UNREACHABLE_INTRINSIC(Arch, UnsafeLoadFence)                    \
 UNREACHABLE_INTRINSIC(Arch, UnsafeStoreFence)                   \
 UNREACHABLE_INTRINSIC(Arch, UnsafeFullFence)                    \
+UNREACHABLE_INTRINSIC(Arch, JdkUnsafeLoadFence)                 \
+UNREACHABLE_INTRINSIC(Arch, JdkUnsafeStoreFence)                \
+UNREACHABLE_INTRINSIC(Arch, JdkUnsafeFullFence)                 \
 UNREACHABLE_INTRINSIC(Arch, VarHandleFullFence)                 \
 UNREACHABLE_INTRINSIC(Arch, VarHandleAcquireFence)              \
 UNREACHABLE_INTRINSIC(Arch, VarHandleReleaseFence)              \

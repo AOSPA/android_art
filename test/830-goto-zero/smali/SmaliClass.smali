@@ -1,12 +1,10 @@
-#!/bin/bash
-#
-# Copyright (C) 2014 The Android Open Source Project
+# Copyright (C) 2021 The Android Open Source Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#      http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,13 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Inputs:
-# $1: Test's expected standard output
-# $2: Test's actual standard output
-# $3: Test's expected standard error
-# $4: Test's actual standard error
+.class public LSmaliClass;
+.super Ljava/lang/Object;
 
-# Check that a build failure happened (the test is not expected to run).
-EXPECTED_ERROR="Cannot fit requested classes in a single dex"
-diff --strip-trailing-cr -q "$1" "$2" >/dev/null \
-  && grep -q "$EXPECTED_ERROR" "$4"
+.method public constructor <init>()V
+  .registers 1
+  invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+  return-void
+.end method
+
+.method public static gotoZero()V
+  .registers 0
+  :Linfinite_loop
+  goto/32 :Linfinite_loop
+  return-void
+.end method

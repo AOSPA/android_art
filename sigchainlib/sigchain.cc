@@ -114,6 +114,8 @@ static void lookup_libc_symbol(T* output, T wrapper, const char* name) {
 #error unsupported glibc version
 #endif
   constexpr const char* libc_name = "libc.so.6";
+#elif defined(ANDROID_HOST_MUSL)
+  constexpr const char* libc_name = "libc_musl.so";
 #else
 #error unsupported libc: not bionic or glibc?
 #endif
@@ -405,7 +407,7 @@ void SignalChain::Handler(int signo, siginfo_t* siginfo, void* ucontext_raw) {
     if (handler == SIG_IGN) {
       return;
     } else if (handler == SIG_DFL) {
-      fatal("exiting due to SIG_DFL handler for signal %d", signo);
+      fatal("exiting due to SIG_DFL handler for signal %d, ucontext %p", signo, ucontext);
     } else {
       handler(signo);
     }

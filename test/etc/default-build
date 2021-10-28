@@ -227,10 +227,16 @@ D8_FLAGS="${D8_FLAGS} --min-api $API_LEVEL"
 # Optionally, zipalign results to some alignment.
 function zip() {
   local zip_target="$1"
-  local entry_src="$2"
-  shift 2
+  local zip_args="-o $1 "
+  shift
+  if [[ $ZIP_COMPRESSION_METHOD = "store" ]]; then
+    zip_args+="-L 0 "
+  fi
+  for arg in "$@"; do
+    zip_args+="-f $arg "
+  done
 
-  command zip --compression-method "$ZIP_COMPRESSION_METHOD" "$zip_target" "$entry_src" "$@"
+  ${SOONG_ZIP} $zip_args
 
   if "$WITH_ZIP_ALIGN"; then
     # zipalign does not operate in-place, so write results to a temp file.
@@ -272,15 +278,19 @@ function javac_with_bootclasspath {
 # packaged in a jar file.
 function make_dex() {
   local name="$1"
-  local d8_inputs=$(find $name -name '*.class' -type f)
+  local d8_inputs=$(find $name -name '*.class' -type f | sort)
   local d8_output=${name}.jar
   local dex_output=${name}.dex
   local d8_local_flags=""
   if [[ "$USE_DESUGAR" = "true" ]]; then
-    local boot_class_path_list=$($ANDROID_BUILD_TOP/art/tools/bootjars.sh --$BUILD_MODE --core --path)
-    for boot_class_path_element in $boot_class_path_list; do
-      d8_local_flags="$d8_local_flags --lib $boot_class_path_element"
-    done
+    if [[ ! -z ${ART_TEST_RUN_TEST_BOOTCLASSPATH} ]]; then
+      d8_local_flags="$d8_local_flags --lib ${ART_TEST_RUN_TEST_BOOTCLASSPATH}"
+    else
+      local boot_class_path_list=$($ANDROID_BUILD_TOP/art/tools/bootjars.sh --$BUILD_MODE --core --path)
+      for boot_class_path_element in $boot_class_path_list; do
+        d8_local_flags="$d8_local_flags --lib $boot_class_path_element"
+      done
+    fi
   else
     d8_local_flags="$d8_local_flags --no-desugaring"
   fi
@@ -314,23 +324,17 @@ function make_dexmerge() {
     shift
   done
 
-  # Skip merge if we are not merging anything. IE: input = output.
-  if [[ "${#dex_files_to_merge[@]}" -eq "1" ]]; then
-    local single_input=${dex_files_to_merge[0]}
-    if [[ "$dst_file" != "$single_input" ]]; then
-     mv "$single_input" "$dst_file";
-     return
-    fi
-  fi
+  # NB: We merge even if there is just single input.
+  # It is useful to normalize non-deterministic smali output.
 
-  # We assume the dexer did all the API level checks and just merge away.
   mkdir d8_merge_out
-  ${DEXMERGER} --min-api 1000 --output ./d8_merge_out "${dex_files_to_merge[@]}"
+  ${D8} --min-api $API_LEVEL --output ./d8_merge_out "${dex_files_to_merge[@]}"
 
   if [[ -e "./d8_merge_out/classes2.dex" ]]; then
     fail "Cannot merge all dex files into a single dex"
   fi
 
+  rm "${dex_files_to_merge[@]}"
   mv ./d8_merge_out/classes.dex "$dst_file";
   rmdir d8_merge_out
 }

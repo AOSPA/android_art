@@ -33,8 +33,12 @@ art_runtime_base_binaries_both_on_device_first_on_host = [
 //  (likely 64-bit) and on host).
 art_runtime_base_binaries_first_on_device_first_on_host = [
     "dexoptanalyzer",
-    "odrefresh",
     "profman",
+]
+// - Base requirements (binaries for which the "first" version is preferred on device
+//  (likely 64-bit).
+art_runtime_base_binaries_first_on_device = [
+    "odrefresh",
 ]
 
 // - Base requirements (libraries).
@@ -172,6 +176,19 @@ libcore_java_libs = [
     "apache-xml",
 ]
 
+// Create combined library which is used for compiling run-tests.
+// This is much easier than trying to make the test depend on them directly,
+// or than trying to make the test compilation depend on the apex module.
+// Some of the components are only visible here (but not in test Android.bp).
+java_library {
+    name: "art-run-test-bootclasspath",
+    sdk_version: "core_platform",
+    static_libs: libcore_java_libs + [
+        "core-icu4j-host",
+        "framework-annotations-lib",
+    ],
+}
+
 // Native libraries that support the core Java libraries.
 //
 // Note: ART on-device chroot-based testing and benchmarking is not yet using
@@ -259,6 +276,7 @@ apex_defaults {
         },
         first: {
             binaries: art_runtime_base_binaries_first_on_device_first_on_host +
+                art_runtime_base_binaries_first_on_device +
                 art_tools_common_binaries +
                 art_tools_device_only_binaries,
         },

@@ -71,28 +71,6 @@ my_files :=
 include $(CLEAR_VARS)
 ###################################################################################################
 
-# Create a phony module that contains data needed for ART chroot-based testing.
-include $(CLEAR_VARS)
-LOCAL_MODULE := art_chroot
-LOCAL_LICENSE_KINDS := SPDX-license-identifier-Apache-2.0
-LOCAL_LICENSE_CONDITIONS := notice
-LOCAL_NOTICE_FILE := $(LOCAL_PATH)/../NOTICE
-LOCAL_MODULE_TAGS := tests
-LOCAL_MODULE_CLASS := NATIVE_TESTS
-LOCAL_MODULE_SUFFIX := .txt
-LOCAL_COMPATIBILITY_SUITE := general-tests
-LOCAL_COMPATIBILITY_SUPPORT_FILES := \
-	$(foreach apex,$(TESTING_ART_APEX) $(RUNTIME_APEX) $(CONSCRYPT_APEX) $(I18N_APEX),\
-		$(PRODUCT_OUT)/system/apex/$(apex).apex:system/apex/$(apex).apex)
-include $(BUILD_SYSTEM)/base_rules.mk
-
-$(LOCAL_BUILT_MODULE):
-	@mkdir -p $(dir $@)
-	echo "This directory contains common data and tools needed for ART target tests" > $@
-
-include $(CLEAR_VARS)
-###################################################################################################
-
 # The path for which all the dex files are relative, not actually the current directory.
 LOCAL_PATH := art/test
 
@@ -121,7 +99,7 @@ ART_GTEST_transaction_test_TARGET_DEPS := $(TARGET_CORE_IMAGE_DEFAULT_64) $(TARG
 # The path for which all the source files are relative, not actually the current directory.
 LOCAL_PATH := art
 
-ART_TEST_MODULES := \
+ART_TEST_MODULES_COMMON := \
     art_cmdline_tests \
     art_compiler_host_tests \
     art_compiler_tests \
@@ -144,23 +122,25 @@ ART_TEST_MODULES := \
     art_libdexfile_tests \
     art_libprofile_tests \
     art_oatdump_tests \
-    art_odrefresh_tests \
     art_profman_tests \
     art_runtime_compiler_tests \
     art_runtime_tests \
     art_sigchain_tests \
 
-ART_TARGET_GTEST_NAMES := $(foreach tm,$(ART_TEST_MODULES),\
+ART_TEST_MODULES_TARGET := $(ART_TEST_MODULES_COMMON) art_odrefresh_tests
+ART_TEST_MODULES_HOST := $(ART_TEST_MODULES_COMMON)
+
+ART_TARGET_GTEST_NAMES := $(foreach tm,$(ART_TEST_MODULES_TARGET),\
   $(foreach path,$(ART_TEST_LIST_device_$(TARGET_ARCH)_$(tm)),\
     $(notdir $(path))\
    )\
 )
 
-ART_HOST_GTEST_FILES := $(foreach m,$(ART_TEST_MODULES),\
+ART_HOST_GTEST_FILES := $(foreach m,$(ART_TEST_MODULES_HOST),\
     $(ART_TEST_LIST_host_$(ART_HOST_ARCH)_$(m)))
 
 ifneq ($(HOST_PREFER_32_BIT),true)
-2ND_ART_HOST_GTEST_FILES += $(foreach m,$(ART_TEST_MODULES),\
+2ND_ART_HOST_GTEST_FILES += $(foreach m,$(ART_TEST_MODULES_HOST),\
     $(ART_TEST_LIST_host_$(2ND_ART_HOST_ARCH)_$(m)))
 endif
 

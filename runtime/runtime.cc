@@ -144,6 +144,7 @@
 #include "native/org_apache_harmony_dalvik_ddmc_DdmServer.h"
 #include "native/org_apache_harmony_dalvik_ddmc_DdmVmInternal.h"
 #include "native/sun_misc_Unsafe.h"
+#include "native/jdk_internal_misc_Unsafe.h"
 #include "native_bridge_art_interface.h"
 #include "native_stack_dump.h"
 #include "nativehelper/scoped_local_ref.h"
@@ -409,7 +410,7 @@ Runtime::~Runtime() {
     while (threads_being_born_ > 0) {
       shutdown_cond_->Wait(self);
     }
-    shutting_down_ = true;
+    SetShuttingDown();
   }
   // Shutdown and wait for the daemons.
   CHECK(self != nullptr);
@@ -640,7 +641,7 @@ void Runtime::Abort(const char* msg) {
   // May be coming from an unattached thread.
   if (Thread::Current() == nullptr) {
     Runtime* current = Runtime::Current();
-    if (current != nullptr && current->IsStarted() && !current->IsShuttingDown(nullptr)) {
+    if (current != nullptr && current->IsStarted() && !current->IsShuttingDownUnsafe()) {
       // We do not flag this to the unexpected-signal handler so that that may dump the stack.
       abort();
       UNREACHABLE();
@@ -1390,9 +1391,9 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   QuasiAtomic::Startup();
 
-  oat_file_manager_ = new OatFileManager;
+  oat_file_manager_ = new OatFileManager();
 
-  jni_id_manager_.reset(new jni::JniIdManager);
+  jni_id_manager_.reset(new jni::JniIdManager());
 
   Thread::SetSensitiveThreadHook(runtime_options.GetOrDefault(Opt::HookIsSensitiveThread));
   Monitor::Init(runtime_options.GetOrDefault(Opt::LockProfThreshold),
@@ -1437,6 +1438,10 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   is_explicit_gc_disabled_ = runtime_options.Exists(Opt::DisableExplicitGC);
   image_dex2oat_enabled_ = runtime_options.GetOrDefault(Opt::ImageDex2Oat);
   dump_native_stack_on_sig_quit_ = runtime_options.GetOrDefault(Opt::DumpNativeStackOnSigQuit);
+
+  if (is_zygote_ || runtime_options.Exists(Opt::OnlyUseTrustedOatFiles)) {
+    oat_file_manager_->SetOnlyUseTrustedOatFiles();
+  }
 
   vfprintf_ = runtime_options.GetOrDefault(Opt::HookVfprintf);
   exit_ = runtime_options.GetOrDefault(Opt::HookExit);
@@ -1981,11 +1986,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   VLOG(startup) << "Runtime::Init exiting";
 
-  // Set OnlyUseTrustedOatFiles only after the boot classpath has been set up.
-  if (runtime_options.Exists(Opt::OnlyUseTrustedOatFiles)) {
-    oat_file_manager_->SetOnlyUseTrustedOatFiles();
-  }
-
   return true;
 }
 
@@ -2185,6 +2185,7 @@ void Runtime::RegisterRuntimeNativeMethods(JNIEnv* env) {
   register_java_lang_Throwable(env);
   register_java_lang_VMClassLoader(env);
   register_java_util_concurrent_atomic_AtomicLong(env);
+  register_jdk_internal_misc_Unsafe(env);
   register_libcore_util_CharsetUtils(env);
   register_org_apache_harmony_dalvik_ddmc_DdmServer(env);
   register_org_apache_harmony_dalvik_ddmc_DdmVmInternal(env);

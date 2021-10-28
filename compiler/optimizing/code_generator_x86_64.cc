@@ -605,6 +605,7 @@ class ReadBarrierMarkAndUpdateFieldSlowPathX86_64 : public SlowPathCode {
         mirror::VarHandle::AccessModeTemplate::kCompareAndExchange;
     static constexpr auto kVarHandleGAU = mirror::VarHandle::AccessModeTemplate::kGetAndUpdate;
     DCHECK(intrinsic == Intrinsics::kUnsafeCASObject ||
+           intrinsic == Intrinsics::kJdkUnsafeCASObject ||
            mirror::VarHandle::GetAccessModeTemplateByIntrinsic(intrinsic) == kVarHandleCAS ||
            mirror::VarHandle::GetAccessModeTemplateByIntrinsic(intrinsic) == kVarHandleCAX ||
            mirror::VarHandle::GetAccessModeTemplateByIntrinsic(intrinsic) == kVarHandleGAU);
@@ -843,7 +844,9 @@ class ReadBarrierForHeapReferenceSlowPathX86_64 : public SlowPathCode {
         DCHECK(instruction_->IsInvoke()) << instruction_->DebugName();
         DCHECK(instruction_->GetLocations()->Intrinsified());
         DCHECK((instruction_->AsInvoke()->GetIntrinsic() == Intrinsics::kUnsafeGetObject) ||
-               (instruction_->AsInvoke()->GetIntrinsic() == Intrinsics::kUnsafeGetObjectVolatile))
+               (instruction_->AsInvoke()->GetIntrinsic() == Intrinsics::kUnsafeGetObjectVolatile) ||
+               (instruction_->AsInvoke()->GetIntrinsic() == Intrinsics::kJdkUnsafeGetObject) ||
+               (instruction_->AsInvoke()->GetIntrinsic() == Intrinsics::kJdkUnsafeGetObjectVolatile))
             << instruction_->AsInvoke()->GetIntrinsic();
         DCHECK_EQ(offset_, 0U);
         DCHECK(index_.IsRegister());
@@ -1085,6 +1088,7 @@ void CodeGeneratorX86_64::GenerateStaticOrDirectCall(
 
   switch (invoke->GetCodePtrLocation()) {
     case CodePtrLocation::kCallSelf:
+      DCHECK(!GetGraph()->HasShouldDeoptimizeFlag());
       __ call(&frame_entry_label_);
       RecordPcInfo(invoke, invoke->GetDexPc(), slow_path);
       break;

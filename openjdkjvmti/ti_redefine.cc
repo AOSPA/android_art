@@ -759,6 +759,7 @@ art::mirror::DexCache* Redefiner::ClassRedefinition::CreateNewDexCache(
   }
   art::WriterMutexLock mu(driver_->self_, *art::Locks::dex_lock_);
   cache->SetLocation(location.Get());
+  cache->SetClassLoader(loader.Get());
   cache->InitializeNativeFields(dex_file_.get(),
                                 loader.IsNull() ? driver_->runtime_->GetLinearAlloc()
                                                 : loader->GetAllocator());
@@ -1622,7 +1623,6 @@ bool Redefiner::ClassRedefinition::CheckVerification(const RedefinitionDataIter&
                                                 hs.NewHandle(GetClassLoader()),
                                                 /*class_def=*/ dex_file_->GetClassDef(0),
                                                 /*callbacks=*/ nullptr,
-                                                /*allow_soft_failures=*/ true,
                                                 /*log_level=*/
                                                 art::verifier::HardFailLogMode::kLogWarning,
                                                 art::Runtime::Current()->GetTargetSdkVersion(),

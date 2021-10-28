@@ -16,6 +16,7 @@
 <configuration description="ART gtests for target (using chroot)">
     <option name="test-suite-tag" value="art-target-gtest-chroot" />
 
+    <target_preparer class="com.android.tradefed.targetprep.RebootTargetPreparer" />
     <target_preparer class="com.android.tradefed.targetprep.RootTargetPreparer" />
     <target_preparer class="com.android.tradefed.targetprep.DisableSELinuxTargetPreparer" />
     <target_preparer class="com.android.tradefed.targetprep.ArtChrootPreparer" />
@@ -35,4 +36,7 @@
         <!-- ART Mainline Module (external (AOSP) version). -->
         <option name="mainline-module-package-name" value="com.android.art" />
     </object>
+
+    <!--- Only run tests if the device under test is SDK version 31 (Android 12) or above. -->
+    <object type="module_controller" class="com.android.tradefed.testtype.suite.module.Sdk31ModuleController" />
 </configuration>

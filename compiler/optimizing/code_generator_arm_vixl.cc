@@ -840,6 +840,8 @@ class ReadBarrierForHeapReferenceSlowPathARMVIXL : public SlowPathCodeARMVIXL {
         Intrinsics intrinsic = instruction_->AsInvoke()->GetIntrinsic();
         DCHECK(intrinsic == Intrinsics::kUnsafeGetObject ||
                intrinsic == Intrinsics::kUnsafeGetObjectVolatile ||
+               intrinsic == Intrinsics::kJdkUnsafeGetObject ||
+               intrinsic == Intrinsics::kJdkUnsafeGetObjectVolatile ||
                mirror::VarHandle::GetAccessModeTemplateByIntrinsic(intrinsic) ==
                    mirror::VarHandle::AccessModeTemplate::kGet ||
                mirror::VarHandle::GetAccessModeTemplateByIntrinsic(intrinsic) ==
@@ -9253,6 +9255,7 @@ void CodeGeneratorARMVIXL::GenerateStaticOrDirectCall(
   switch (invoke->GetCodePtrLocation()) {
     case CodePtrLocation::kCallSelf:
       {
+        DCHECK(!GetGraph()->HasShouldDeoptimizeFlag());
         // Use a scope to help guarantee that `RecordPcInfo()` records the correct pc.
         ExactAssemblyScope aas(GetVIXLAssembler(),
                                vixl32::k32BitT32InstructionSizeInBytes,
