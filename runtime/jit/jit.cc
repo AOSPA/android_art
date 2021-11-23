@@ -913,12 +913,14 @@ class ZygoteVerificationTask final : public Task {
           LOG(WARNING) << "Could not find " << descriptor;
           continue;
         }
-        ++number_of_classes;
         if (linker->VerifyClass(self, /* verifier_deps= */ nullptr, klass) ==
                 verifier::FailureKind::kHardFailure) {
-          DCHECK(self->IsExceptionPending());
-          LOG(FATAL) << "Methods in the boot classpath failed to verify: "
-                     << self->GetException()->Dump();
+          CHECK(self->IsExceptionPending());
+          LOG(WARNING) << "Methods in the boot classpath failed to verify: "
+                       << self->GetException()->Dump();
+          self->ClearException();
+        } else {
+          ++number_of_classes;
         }
         CHECK(!self->IsExceptionPending());
       }
@@ -1414,7 +1416,7 @@ uint32_t Jit::CompileMethodsFromProfile(
     return 0u;
   }
 
-  ProfileCompilationInfo profile_info;
+  ProfileCompilationInfo profile_info(/* for_boot_image= */ class_loader.IsNull());
   if (!profile_info.Load(profile.Fd())) {
     LOG(ERROR) << "Could not load profile file";
     return 0u;
