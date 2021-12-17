@@ -2742,6 +2742,15 @@ public class Main {
     return (byte) ((value & and_constant) >> 16);
   }
 
+  /// CHECK-START: byte Main.$noinline$redundantAndRegressionNotConstant(int, int) instruction_simplifier (before)
+  /// CHECK-DAG:                       And
+
+  /// CHECK-START: byte Main.$noinline$redundantAndRegressionNotConstant(int, int) instruction_simplifier (after)
+  /// CHECK-DAG:                       And
+  public static byte $noinline$redundantAndRegressionNotConstant(int value, int mask) {
+    return (byte) ((value & mask) >> 8);
+  }
+
   public static void main(String[] args) throws Exception {
     Class smaliTests2 = Class.forName("SmaliTests2");
     Method $noinline$XorAllOnes = smaliTests2.getMethod("$noinline$XorAllOnes", int.class);
@@ -3048,6 +3057,7 @@ public class Main {
     assertIntEquals(-1, $noinline$redundantAndIntToByteShift31(0xffffff45));
     assertIntEquals(-1, $noinline$redundantAndIntToByteShortAndConstant(0x7fffff45));
     assertIntEquals(-1, $noinline$redundantAndIntToByteShortAndConstant(0xffffff45));
+    assertIntEquals(111, $noinline$redundantAndRegressionNotConstant(-1, 0x6f45));
   }
 
   private static boolean $inline$true() { return true; }
