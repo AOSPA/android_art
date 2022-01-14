@@ -74,15 +74,13 @@ static void DefaultInitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qp
 
   // JNI
   qpoints->pJniMethodStart = JniMethodStart;
-  qpoints->pJniMethodFastStart = JniMethodFastStart;
   qpoints->pJniMethodStartSynchronized = JniMethodStartSynchronized;
   qpoints->pJniMethodEnd = JniMethodEnd;
   qpoints->pJniMethodEndSynchronized = JniMethodEndSynchronized;
   qpoints->pJniMethodEndWithReference = JniMethodEndWithReference;
-  qpoints->pJniMethodFastEndWithReference = JniMethodFastEndWithReference;
   qpoints->pJniMethodEndWithReferenceSynchronized = JniMethodEndWithReferenceSynchronized;
-  qpoints->pJniMethodFastEnd = JniMethodFastEnd;
   qpoints->pQuickGenericJniTrampoline = art_quick_generic_jni_trampoline;
+  qpoints->pJniDecodeReferenceResult = JniDecodeReferenceResult;
 
   // Locks
   if (UNLIKELY(VLOG_IS_ON(systrace_lock_logging))) {
@@ -130,6 +128,10 @@ static void DefaultInitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qp
   // Tiered JIT support
   qpoints->pUpdateInlineCache = art_quick_update_inline_cache;
   qpoints->pCompileOptimized = art_quick_compile_optimized;
+
+  // Tracing hooks
+  qpoints->pMethodEntryHook = art_quick_method_entry_hook;
+  qpoints->pMethodExitHook = art_quick_method_exit_hook;
 
   bool should_report = false;
   PaletteShouldReportJniInvocations(&should_report);

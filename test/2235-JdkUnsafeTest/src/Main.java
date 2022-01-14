@@ -53,6 +53,11 @@ public class Main {
     }
   }
 
+  private static void expectThrow(Class<?> exceptionClass, String msg) {
+    System.out.println(msg + " : expected " + exceptionClass.getName());
+    System.exit(1);
+  }
+
   private static Unsafe getUnsafe() throws NoSuchFieldException, IllegalAccessException {
     Class<?> unsafeClass = Unsafe.class;
     Field f = unsafeClass.getDeclaredField("theUnsafe");
@@ -70,7 +75,7 @@ public class Main {
     testCompareAndSet(unsafe);
     testGetAndPutVolatile(unsafe);
     testGetAcquireAndPutRelease(unsafe);
-    testCopyMemoryPrimitiveArrays(unsafe);
+    testCopyMemory(unsafe);
   }
 
   private static void testArrayBaseOffset(Unsafe unsafe) {
@@ -380,36 +385,99 @@ public class Main {
           "Unsafe.getObjectAcquire(Object, long)");
   }
 
-  // Regression test for "copyMemory" operations hitting a DCHECK() for float/double arrays.
-  private static void testCopyMemoryPrimitiveArrays(Unsafe unsafe) {
-    int size = 4 * 1024;
-    long memory = jdkUnsafeTestMalloc(size);
+  private static void testCopyMemory(Unsafe unsafe) {
+    final int size = 4 * 1024;
 
-    int floatSize = 4;
+    final int intSize = 4;
+    int[] inputInts = new int[size / intSize];
+    for (int i = 0; i != inputInts.length; ++i) {
+      inputInts[i] = ((int)i) + 1;
+    }
+    int[] outputInts = new int[size / intSize];
+    unsafe.copyMemory(inputInts, Unsafe.ARRAY_INT_BASE_OFFSET,
+                      outputInts, Unsafe.ARRAY_INT_BASE_OFFSET,
+                      size);
+    for (int i = 0; i != inputInts.length; ++i) {
+      check(inputInts[i], outputInts[i], "unsafe.copyMemory/int");
+    }
+
+    final int longSize = 8;
+    long[] inputLongs = new long[size / longSize];
+    for (int i = 0; i != inputLongs.length; ++i) {
+      inputLongs[i] = ((long)i) + 1L;
+    }
+    long[] outputLongs = new long[size / longSize];
+    unsafe.copyMemory(inputLongs, 0, outputLongs, 0, size);
+    unsafe.copyMemory(inputLongs, Unsafe.ARRAY_LONG_BASE_OFFSET,
+                      outputLongs, Unsafe.ARRAY_LONG_BASE_OFFSET,
+                      size);
+    for (int i = 0; i != inputLongs.length; ++i) {
+      check(inputLongs[i], outputLongs[i], "unsafe.copyMemory/long");
+    }
+
+    final int floatSize = 4;
     float[] inputFloats = new float[size / floatSize];
     for (int i = 0; i != inputFloats.length; ++i) {
       inputFloats[i] = ((float)i) + 0.5f;
     }
     float[] outputFloats = new float[size / floatSize];
-    unsafe.copyMemoryFromPrimitiveArray(inputFloats, 0, memory, size);
-    unsafe.copyMemoryToPrimitiveArray(memory, outputFloats, 0, size);
+    unsafe.copyMemory(inputFloats, 0, outputFloats, 0, size);
+    unsafe.copyMemory(inputFloats, Unsafe.ARRAY_FLOAT_BASE_OFFSET,
+                      outputFloats, Unsafe.ARRAY_FLOAT_BASE_OFFSET,
+                      size);
     for (int i = 0; i != inputFloats.length; ++i) {
       check(inputFloats[i], outputFloats[i], "unsafe.copyMemory/float");
     }
 
-    int doubleSize = 8;
+    final int doubleSize = 8;
     double[] inputDoubles = new double[size / doubleSize];
     for (int i = 0; i != inputDoubles.length; ++i) {
       inputDoubles[i] = ((double)i) + 0.5;
     }
     double[] outputDoubles = new double[size / doubleSize];
-    unsafe.copyMemoryFromPrimitiveArray(inputDoubles, 0, memory, size);
-    unsafe.copyMemoryToPrimitiveArray(memory, outputDoubles, 0, size);
+    unsafe.copyMemory(inputDoubles, Unsafe.ARRAY_DOUBLE_BASE_OFFSET,
+                      outputDoubles, Unsafe.ARRAY_DOUBLE_BASE_OFFSET,
+                      size);
     for (int i = 0; i != inputDoubles.length; ++i) {
       check(inputDoubles[i], outputDoubles[i], "unsafe.copyMemory/double");
     }
 
-    jdkUnsafeTestFree(memory);
+    // check the version that works with memory pointers
+    try (TestMemoryPtr srcPtr = new TestMemoryPtr(size);
+         TestMemoryPtr dstPtr = new TestMemoryPtr(size)) {
+        // use the integer array to fill the source
+        unsafe.copyMemory(inputInts, Unsafe.ARRAY_INT_BASE_OFFSET,
+                          null, srcPtr.get(),
+                          size);
+
+        unsafe.copyMemory(srcPtr.get(), dstPtr.get(), size);
+        for (int i = 0; i != size; ++i) {
+          check(unsafe.getByte(srcPtr.get() + i),
+                unsafe.getByte(dstPtr.get() + i),
+                "unsafe.copyMemory/memoryAddress");
+        }
+    }
+
+    try {
+        TestClass srcObj = new TestClass();
+        srcObj.intVar = 12345678;
+        int[] dstArray = new int[1];
+        unsafe.copyMemory(srcObj, unsafe.objectFieldOffset(TestClass.class, "intVar"),
+                          dstArray, Unsafe.ARRAY_INT_BASE_OFFSET,
+                          4);
+        expectThrow(RuntimeException.class, "unsafe.copyMemory/non-array-src");
+    } catch (RuntimeException expected) {
+    }
+
+    try {
+        int[] srcArray = { 12345678 };
+        TestClass dstObj = new TestClass();
+        unsafe.copyMemory(srcArray, Unsafe.ARRAY_INT_BASE_OFFSET,
+                          dstObj, unsafe.objectFieldOffset(TestClass.class, "intVar"),
+                          4);
+        expectThrow(RuntimeException.class, "unsafe.copyMemory/non-array-dst");
+    } catch (RuntimeException expected) {
+    }
   }
 
   private static class TestClass {
@@ -422,6 +490,26 @@ public class Main {
     public volatile int volatileIntVar = 0;
     public volatile long volatileLongVar = 0;
     public volatile Object volatileObjectVar = null;
+  }
+
+  private static class TestMemoryPtr implements AutoCloseable {
+      private long ptr = 0;
+
+      public TestMemoryPtr(int size) {
+          ptr = jdkUnsafeTestMalloc(size);
+      }
+
+      public long get() {
+          return ptr;
+      }
+
+      @Override
+      public void close() {
+          if (ptr != 0) {
+              jdkUnsafeTestFree(ptr);
+              ptr = 0;
+          }
+      }
   }
 
   private static native int vmJdkArrayBaseOffset(Class<?> clazz);

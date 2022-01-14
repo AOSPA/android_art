@@ -529,7 +529,8 @@ class LoadClassSlowPathARMVIXL : public SlowPathCodeARMVIXL {
 
     InvokeRuntimeCallingConventionARMVIXL calling_convention;
     if (must_resolve_type) {
-      DCHECK(IsSameDexFile(cls_->GetDexFile(), arm_codegen->GetGraph()->GetDexFile()));
+      DCHECK(IsSameDexFile(cls_->GetDexFile(), arm_codegen->GetGraph()->GetDexFile()) ||
+             arm_codegen->GetCompilerOptions().WithinOatFile(&cls_->GetDexFile()));
       dex::TypeIndex type_index = cls_->GetTypeIndex();
       __ Mov(calling_convention.GetRegisterAt(0), type_index.index_);
       if (cls_->NeedsAccessCheck()) {
@@ -969,6 +970,31 @@ class ReadBarrierForRootSlowPathARMVIXL : public SlowPathCodeARMVIXL {
   const Location root_;
 
   DISALLOW_COPY_AND_ASSIGN(ReadBarrierForRootSlowPathARMVIXL);
+};
+
+class MethodEntryExitHooksSlowPathARMVIXL : public SlowPathCodeARMVIXL {
+ public:
+  explicit MethodEntryExitHooksSlowPathARMVIXL(HInstruction* instruction)
+      : SlowPathCodeARMVIXL(instruction) {}
+
+  void EmitNativeCode(CodeGenerator* codegen) override {
+    LocationSummary* locations = instruction_->GetLocations();
+    CodeGeneratorARMVIXL* arm_codegen = down_cast<CodeGeneratorARMVIXL*>(codegen);
+    QuickEntrypointEnum entry_point =
+        (instruction_->IsMethodEntryHook()) ? kQuickMethodEntryHook : kQuickMethodExitHook;
+    __ Bind(GetEntryLabel());
+    SaveLiveRegisters(codegen, locations);
+    arm_codegen->InvokeRuntime(entry_point, instruction_, instruction_->GetDexPc(), this);
+    RestoreLiveRegisters(codegen, locations);
+    __ B(GetExitLabel());
+  }
+
+  const char* GetDescription() const override {
+    return "MethodEntryExitHooksSlowPath";
+  }
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(MethodEntryExitHooksSlowPathARMVIXL);
 };
 
 inline vixl32::Condition ARMCondition(IfCondition cond) {
@@ -2111,6 +2137,44 @@ void CodeGeneratorARMVIXL::ComputeSpillMask() {
   }
 }
 
+void LocationsBuilderARMVIXL::VisitMethodExitHook(HMethodExitHook* method_hook) {
+  LocationSummary* locations = new (GetGraph()->GetAllocator())
+      LocationSummary(method_hook, LocationSummary::kCallOnSlowPath);
+  locations->SetInAt(0, parameter_visitor_.GetReturnLocation(method_hook->InputAt(0)->GetType()));
+}
+
+void InstructionCodeGeneratorARMVIXL::GenerateMethodEntryExitHook(HInstruction* instruction) {
+  UseScratchRegisterScope temps(GetVIXLAssembler());
+  vixl32::Register temp = temps.Acquire();
+
+  SlowPathCodeARMVIXL* slow_path =
+      new (codegen_->GetScopedAllocator()) MethodEntryExitHooksSlowPathARMVIXL(instruction);
+  codegen_->AddSlowPath(slow_path);
+
+  int offset = instrumentation::Instrumentation::NeedsEntryExitHooksOffset().Int32Value();
+  uint32_t address = reinterpret_cast32<uint32_t>(Runtime::Current()->GetInstrumentation());
+  __ Mov(temp, address + offset);
+  __ Ldrb(temp, MemOperand(temp, 0));
+  __ CompareAndBranchIfNonZero(temp, slow_path->GetEntryLabel());
+  __ Bind(slow_path->GetExitLabel());
+}
+
+void InstructionCodeGeneratorARMVIXL::VisitMethodExitHook(HMethodExitHook* instruction) {
+  DCHECK(codegen_->GetCompilerOptions().IsJitCompiler() && GetGraph()->IsDebuggable());
+  DCHECK(codegen_->RequiresCurrentMethod());
+  GenerateMethodEntryExitHook(instruction);
+}
+
+void LocationsBuilderARMVIXL::VisitMethodEntryHook(HMethodEntryHook* method_hook) {
+  new (GetGraph()->GetAllocator()) LocationSummary(method_hook, LocationSummary::kCallOnSlowPath);
+}
+
+void InstructionCodeGeneratorARMVIXL::VisitMethodEntryHook(HMethodEntryHook* instruction) {
+  DCHECK(codegen_->GetCompilerOptions().IsJitCompiler() && GetGraph()->IsDebuggable());
+  DCHECK(codegen_->RequiresCurrentMethod());
+  GenerateMethodEntryExitHook(instruction);
+}
+
 void CodeGeneratorARMVIXL::MaybeIncrementHotness(bool is_frame_entry) {
   if (GetCompilerOptions().CountHotnessInCompiledCode()) {
     UseScratchRegisterScope temps(GetVIXLAssembler());
@@ -2123,10 +2187,12 @@ void CodeGeneratorARMVIXL::MaybeIncrementHotness(bool is_frame_entry) {
     }
     // Load with zero extend to clear the high bits for integer overflow check.
     __ Ldrh(temp, MemOperand(kMethodRegister, ArtMethod::HotnessCountOffset().Int32Value()));
-    __ Add(temp, temp, 1);
-    // Subtract one if the counter would overflow.
-    __ Sub(temp, temp, Operand(temp, ShiftType::LSR, 16));
+    vixl::aarch32::Label done;
+    DCHECK_EQ(0u, interpreter::kNterpHotnessValue);
+    __ CompareAndBranchIfZero(temp, &done, /* is_far_target= */ false);
+    __ Add(temp, temp, -1);
     __ Strh(temp, MemOperand(kMethodRegister, ArtMethod::HotnessCountOffset().Int32Value()));
+    __ Bind(&done);
     if (!is_frame_entry) {
       __ Pop(vixl32::Register(kMethodRegister));
       GetAssembler()->cfi().AdjustCFAOffset(-static_cast<int>(kArmWordSize));

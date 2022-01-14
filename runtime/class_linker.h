@@ -28,10 +28,10 @@
 
 #include "base/enums.h"
 #include "base/hash_map.h"
-#include "base/mutex.h"
 #include "base/intrusive_forward_list.h"
 #include "base/locks.h"
 #include "base/macros.h"
+#include "base/mutex.h"
 #include "dex/class_accessor.h"
 #include "dex/dex_file_types.h"
 #include "gc_root.h"
@@ -39,6 +39,7 @@
 #include "jni.h"
 #include "mirror/class.h"
 #include "mirror/object.h"
+#include "oat_file.h"
 #include "verifier/verifier_enums.h"
 
 namespace art {
@@ -501,6 +502,8 @@ class ClassLinker {
   ObjPtr<mirror::DexCache> FindDexCache(Thread* self, const DexFile& dex_file)
       REQUIRES(!Locks::dex_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
+  ObjPtr<mirror::DexCache> FindDexCache(Thread* self, const OatDexFile* const oat_dex_file)
+      REQUIRES(!Locks::dex_lock_) REQUIRES_SHARED(Locks::mutator_lock_);
   ClassTable* FindClassTable(Thread* self, ObjPtr<mirror::DexCache> dex_cache)
       REQUIRES(!Locks::dex_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -867,7 +870,7 @@ class ClassLinker {
 
  private:
   class LinkFieldsHelper;
-  class LinkInterfaceMethodsHelper;
+  class LinkMethodsHelper;
   class MethodTranslation;
   class VisiblyInitializedCallback;
 
@@ -1119,8 +1122,9 @@ class ClassLinker {
       REQUIRES(Locks::dex_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
   const DexCacheData* FindDexCacheDataLocked(const DexFile& dex_file)
-      REQUIRES_SHARED(Locks::dex_lock_)
-      REQUIRES_SHARED(Locks::mutator_lock_);
+      REQUIRES_SHARED(Locks::dex_lock_);
+  const DexCacheData* FindDexCacheDataLocked(const OatDexFile* const oat_dex_file)
+      REQUIRES_SHARED(Locks::dex_lock_);
   static ObjPtr<mirror::DexCache> DecodeDexCacheLocked(Thread* self, const DexCacheData* data)
       REQUIRES_SHARED(Locks::dex_lock_, Locks::mutator_lock_);
   bool IsSameClassLoader(ObjPtr<mirror::DexCache> dex_cache,
@@ -1174,28 +1178,6 @@ class ClassLinker {
       const dex::MethodHandleItem& method_handle,
       ArtMethod* referrer) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Links the virtual methods for the given class and records any default methods that will need to
-  // be updated later.
-  //
-  // Arguments:
-  // * self - The current thread.
-  // * klass - class, whose vtable will be filled in.
-  // * default_translations - Vtable index to new method map.
-  //                          Any vtable entries that need to be updated with new default methods
-  //                          are stored into the default_translations map. The default_translations
-  //                          map is keyed on the vtable index that needs to be updated. We use this
-  //                          map because if we override a default method with another default
-  //                          method we need to update the vtable to point to the new method.
-  //                          Unfortunately since we copy the ArtMethod* we cannot just do a simple
-  //                          scan, we therefore store the vtable index's that might need to be
-  //                          updated with the method they will turn into.
-  // TODO This whole default_translations thing is very dirty. There should be a better way.
-  bool LinkVirtualMethods(
-        Thread* self,
-        Handle<mirror::Class> klass,
-        /*out*/HashMap<size_t, MethodTranslation>* default_translations)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
   // Sets up the interface lookup table (IFTable) in the correct order to allow searching for
   // default methods.
   bool SetupInterfaceLookupTable(Thread* self,
@@ -1233,16 +1215,6 @@ class ClassLinker {
       ArtMethod* target_method,
       Handle<mirror::Class> klass,
       /*out*/ArtMethod** out_default_method) const
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Sets the imt entries and fixes up the vtable for the given class by linking all the interface
-  // methods. See LinkVirtualMethods for an explanation of what default_translations is.
-  bool LinkInterfaceMethods(
-      Thread* self,
-      Handle<mirror::Class> klass,
-      const HashMap<size_t, MethodTranslation>& default_translations,
-      bool* out_new_conflict,
-      ArtMethod** out_imt)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool LinkStaticFields(Thread* self, Handle<mirror::Class> klass, size_t* class_size)

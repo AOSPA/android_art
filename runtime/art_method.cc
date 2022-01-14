@@ -569,8 +569,7 @@ const OatQuickMethodHeader* ArtMethod::GetOatQuickMethodHeader(uintptr_t pc) {
     }
   }
 
-  if (OatQuickMethodHeader::NterpMethodHeader != nullptr &&
-      OatQuickMethodHeader::NterpMethodHeader->Contains(pc)) {
+  if (OatQuickMethodHeader::IsNterpPc(pc)) {
     return OatQuickMethodHeader::NterpMethodHeader;
   }
 
@@ -753,7 +752,9 @@ void ArtMethod::CopyFrom(ArtMethod* src, PointerSize image_pointer_size) {
     SetDataPtrSize(nullptr, image_pointer_size);
   }
   // Clear hotness to let the JIT properly decide when to compile this method.
-  hotness_count_ = 0;
+  if (!IsAbstract()) {
+    ResetCounter();
+  }
 }
 
 bool ArtMethod::IsImagePointerSize(PointerSize pointer_size) {

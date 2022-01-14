@@ -89,7 +89,9 @@ class X86_64JNIMacroAssembler final : public JNIMacroAssemblerFwd<X86_64Assemble
   void LoadRawPtrFromThread(ManagedRegister dest, ThreadOffset64 offs) override;
 
   // Copying routines
-  void MoveArguments(ArrayRef<ArgumentLocation> dests, ArrayRef<ArgumentLocation> srcs) override;
+  void MoveArguments(ArrayRef<ArgumentLocation> dests,
+                     ArrayRef<ArgumentLocation> srcs,
+                     ArrayRef<FrameOffset> refs) override;
 
   void Move(ManagedRegister dest, ManagedRegister src, size_t size) override;
 
@@ -178,6 +180,9 @@ class X86_64JNIMacroAssembler final : public JNIMacroAssemblerFwd<X86_64Assemble
   void Call(FrameOffset base, Offset offset) override;
   void CallFromThread(ThreadOffset64 offset) override;
 
+  // Generate suspend check and branch to `label` if there is a pending suspend request.
+  void SuspendCheck(JNIMacroLabel* label) override;
+
   // Generate code to check if Thread::Current()->exception_ is non-null
   // and branch to the `label` if it is.
   void ExceptionPoll(JNIMacroLabel* label) override;
@@ -190,6 +195,8 @@ class X86_64JNIMacroAssembler final : public JNIMacroAssemblerFwd<X86_64Assemble
   void Jump(JNIMacroLabel* label) override;
   // Emit a conditional jump to the label by applying a unary condition test to the GC marking flag.
   void TestGcMarking(JNIMacroLabel* label, JNIMacroUnaryCondition cond) override;
+  // Emit a conditional jump to the label by applying a unary condition test to object's mark bit.
+  void TestMarkBit(ManagedRegister ref, JNIMacroLabel* label, JNIMacroUnaryCondition cond) override;
   // Code at this offset will serve as the target for the Jump call.
   void Bind(JNIMacroLabel* label) override;
 
