@@ -4217,7 +4217,7 @@ static void GenerateVarHandleArrayChecks(HInvoke* invoke,
       codegen->GetCompilerOptions().IsBootImage() ||
       !Runtime::Current()->GetHeap()->GetBootImageSpaces().empty();
   DCHECK(boot_image_available || codegen->GetCompilerOptions().IsJitCompiler());
-  size_t can_be_view =
+  bool can_be_view =
       ((value_type != DataType::Type::kReference) && (DataType::Size(value_type) != 1u)) &&
       boot_image_available;
   vixl32::Label* slow_path_label =
@@ -4913,14 +4913,16 @@ static void GenerateVarHandleCompareAndSetOrExchange(HInvoke* invoke,
         seq_cst_barrier ? MemBarrierKind::kAnyAny : MemBarrierKind::kLoadAny);
   }
 
+  if (byte_swap && value_type == DataType::Type::kInt64) {
+    // Undo byte swapping in `expected` and `new_value`. We do not have the
+    // information whether the value in these registers shall be needed later.
+    GenerateReverseBytesInPlaceForEachWord(assembler, expected);
+    GenerateReverseBytesInPlaceForEachWord(assembler, new_value);
+  }
   if (!return_success) {
     if (byte_swap) {
       if (value_type == DataType::Type::kInt64) {
         GenerateReverseBytesInPlaceForEachWord(assembler, old_value);
-        // Undo byte swapping in `expected` and `new_value`. We do not have the
-        // information whether the value in these registers shall be needed later.
-        GenerateReverseBytesInPlaceForEachWord(assembler, expected);
-        GenerateReverseBytesInPlaceForEachWord(assembler, new_value);
       } else {
         GenerateReverseBytes(assembler, value_type, old_value, out);
       }
@@ -5524,6 +5526,9 @@ UNIMPLEMENTED_INTRINSIC(ARMVIXL, StringBuilderLength);
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, StringBuilderToString);
 
 // 1.8.
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, MathFmaDouble)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, MathFmaFloat)
+
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndAddInt)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndAddLong)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndSetInt)

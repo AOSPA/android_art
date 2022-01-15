@@ -301,11 +301,13 @@ END \name
 2:
     ldr x0, [sp]
     ldrh w2, [x0, #ART_METHOD_HOTNESS_COUNT_OFFSET]
-    add x2, x2, #1
-    and w2, w2, #NTERP_HOTNESS_MASK
-    strh w2, [x0, #ART_METHOD_HOTNESS_COUNT_OFFSET]
-    // If the counter overflows, handle this in the runtime.
+#if (NTERP_HOTNESS_VALUE != 0)
+#error Expected 0 for hotness value
+#endif
+    // If the counter is at zero, handle this in the runtime.
     cbz w2, NterpHandleHotnessOverflow
+    add x2, x2, #-1
+    strh w2, [x0, #ART_METHOD_HOTNESS_COUNT_OFFSET]
     // Otherwise, do a suspend check.
     ldr x0, [xSELF, #THREAD_FLAGS_OFFSET]
     ands x0, x0, #THREAD_SUSPEND_OR_CHECKPOINT_REQUEST
@@ -368,6 +370,10 @@ END \name
 5:
 .endm
 
+.macro TEST_IF_MARKING label
+    cbnz wMR, \label
+.endm
+
 // Setup the stack to start executing the method. Expects:
 // - x0 to contain the ArtMethod
 //
@@ -422,11 +428,13 @@ END \name
 .macro START_EXECUTING_INSTRUCTIONS
     ldr x0, [sp]
     ldrh w2, [x0, #ART_METHOD_HOTNESS_COUNT_OFFSET]
-    add x2, x2, #1
-    and w2, w2, #NTERP_HOTNESS_MASK
-    strh w2, [x0, #ART_METHOD_HOTNESS_COUNT_OFFSET]
-    // If the counter overflows, handle this in the runtime.
+#if (NTERP_HOTNESS_VALUE != 0)
+#error Expected 0 for hotness value
+#endif
+    // If the counter is at zero, handle this in the runtime.
     cbz w2, 2f
+    add x2, x2, #-1
+    strh w2, [x0, #ART_METHOD_HOTNESS_COUNT_OFFSET]
     ldr x0, [xSELF, #THREAD_FLAGS_OFFSET]
     tst x0, #THREAD_SUSPEND_OR_CHECKPOINT_REQUEST
     b.ne 3f
@@ -1752,7 +1760,7 @@ NterpNewArray:
    EXPORT_PC
    // Fast-path which gets the class from thread-local cache.
    FETCH_FROM_THREAD_CACHE x0, 2f
-   cbnz wMR, 3f
+   TEST_IF_MARKING 3f
 1:
    lsr     w1, wINST, #12              // w1<- B
    GET_VREG w1, w1                     // w1<- vB (array length)

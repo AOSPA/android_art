@@ -288,7 +288,8 @@ class LoadClassSlowPathX86 : public SlowPathCode {
 
     InvokeRuntimeCallingConvention calling_convention;
     if (must_resolve_type) {
-      DCHECK(IsSameDexFile(cls_->GetDexFile(), x86_codegen->GetGraph()->GetDexFile()));
+      DCHECK(IsSameDexFile(cls_->GetDexFile(), x86_codegen->GetGraph()->GetDexFile()) ||
+             x86_codegen->GetCompilerOptions().WithinOatFile(&cls_->GetDexFile()));
       dex::TypeIndex type_index = cls_->GetTypeIndex();
       __ movl(calling_convention.GetRegisterAt(0), Immediate(type_index.index_));
       if (cls_->NeedsAccessCheck()) {
@@ -942,6 +943,30 @@ class ReadBarrierForRootSlowPathX86 : public SlowPathCode {
   DISALLOW_COPY_AND_ASSIGN(ReadBarrierForRootSlowPathX86);
 };
 
+class MethodEntryExitHooksSlowPathX86 : public SlowPathCode {
+ public:
+  explicit MethodEntryExitHooksSlowPathX86(HInstruction* instruction) : SlowPathCode(instruction) {}
+
+  void EmitNativeCode(CodeGenerator* codegen) override {
+    CodeGeneratorX86* x86_codegen = down_cast<CodeGeneratorX86*>(codegen);
+    LocationSummary* locations = instruction_->GetLocations();
+    QuickEntrypointEnum entry_point =
+        (instruction_->IsMethodEntryHook()) ? kQuickMethodEntryHook : kQuickMethodExitHook;
+    __ Bind(GetEntryLabel());
+    SaveLiveRegisters(codegen, locations);
+    x86_codegen->InvokeRuntime(entry_point, instruction_, instruction_->GetDexPc(), this);
+    RestoreLiveRegisters(codegen, locations);
+    __ jmp(GetExitLabel());
+  }
+
+  const char* GetDescription() const override {
+    return "MethodEntryExitHooksSlowPath";
+  }
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(MethodEntryExitHooksSlowPathX86);
+};
+
 #undef __
 // NOLINT on __ macro to suppress wrong warning/fix (misc-macro-parentheses) from clang-tidy.
 #define __ down_cast<X86Assembler*>(GetAssembler())->  // NOLINT
@@ -1062,7 +1087,8 @@ CodeGeneratorX86::CodeGeneratorX86(HGraph* graph,
       location_builder_(graph, this),
       instruction_visitor_(graph, this),
       move_resolver_(graph->GetAllocator(), this),
-      assembler_(graph->GetAllocator()),
+      assembler_(graph->GetAllocator(),
+                 compiler_options.GetInstructionSetFeatures()->AsX86InstructionSetFeatures()),
       boot_image_method_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       method_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       boot_image_type_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
@@ -1097,6 +1123,70 @@ static dwarf::Reg DWARFReg(Register reg) {
   return dwarf::Reg::X86Core(static_cast<int>(reg));
 }
 
+void SetInForReturnValue(HInstruction* ret, LocationSummary* locations) {
+  switch (ret->InputAt(0)->GetType()) {
+    case DataType::Type::kReference:
+    case DataType::Type::kBool:
+    case DataType::Type::kUint8:
+    case DataType::Type::kInt8:
+    case DataType::Type::kUint16:
+    case DataType::Type::kInt16:
+    case DataType::Type::kInt32:
+      locations->SetInAt(0, Location::RegisterLocation(EAX));
+      break;
+
+    case DataType::Type::kInt64:
+      locations->SetInAt(0, Location::RegisterPairLocation(EAX, EDX));
+      break;
+
+    case DataType::Type::kFloat32:
+    case DataType::Type::kFloat64:
+      locations->SetInAt(0, Location::FpuRegisterLocation(XMM0));
+      break;
+
+    case DataType::Type::kVoid:
+      locations->SetInAt(0, Location::NoLocation());
+      break;
+
+    default:
+      LOG(FATAL) << "Unknown return type " << ret->InputAt(0)->GetType();
+  }
+}
+
+void LocationsBuilderX86::VisitMethodExitHook(HMethodExitHook* method_hook) {
+  LocationSummary* locations = new (GetGraph()->GetAllocator())
+      LocationSummary(method_hook, LocationSummary::kCallOnSlowPath);
+  SetInForReturnValue(method_hook, locations);
+}
+
+void InstructionCodeGeneratorX86::GenerateMethodEntryExitHook(HInstruction* instruction) {
+  SlowPathCode* slow_path =
+      new (codegen_->GetScopedAllocator()) MethodEntryExitHooksSlowPathX86(instruction);
+  codegen_->AddSlowPath(slow_path);
+
+  uint64_t address = reinterpret_cast64<uint64_t>(Runtime::Current()->GetInstrumentation());
+  int offset = instrumentation::Instrumentation::NeedsEntryExitHooksOffset().Int32Value();
+  __ cmpb(Address::Absolute(address + offset), Immediate(0));
+  __ j(kNotEqual, slow_path->GetEntryLabel());
+  __ Bind(slow_path->GetExitLabel());
+}
+
+void InstructionCodeGeneratorX86::VisitMethodExitHook(HMethodExitHook* instruction) {
+  DCHECK(codegen_->GetCompilerOptions().IsJitCompiler() && GetGraph()->IsDebuggable());
+  DCHECK(codegen_->RequiresCurrentMethod());
+  GenerateMethodEntryExitHook(instruction);
+}
+
+void LocationsBuilderX86::VisitMethodEntryHook(HMethodEntryHook* method_hook) {
+  new (GetGraph()->GetAllocator()) LocationSummary(method_hook, LocationSummary::kCallOnSlowPath);
+}
+
+void InstructionCodeGeneratorX86::VisitMethodEntryHook(HMethodEntryHook* instruction) {
+  DCHECK(codegen_->GetCompilerOptions().IsJitCompiler() && GetGraph()->IsDebuggable());
+  DCHECK(codegen_->RequiresCurrentMethod());
+  GenerateMethodEntryExitHook(instruction);
+}
+
 void CodeGeneratorX86::MaybeIncrementHotness(bool is_frame_entry) {
   if (GetCompilerOptions().CountHotnessInCompiledCode()) {
     Register reg = EAX;
@@ -1109,10 +1199,9 @@ void CodeGeneratorX86::MaybeIncrementHotness(bool is_frame_entry) {
     }
     NearLabel overflow;
     __ cmpw(Address(reg, ArtMethod::HotnessCountOffset().Int32Value()),
-            Immediate(ArtMethod::MaxCounter()));
+            Immediate(interpreter::kNterpHotnessValue));
     __ j(kEqual, &overflow);
-    __ addw(Address(reg, ArtMethod::HotnessCountOffset().Int32Value()),
-            Immediate(1));
+    __ addw(Address(reg, ArtMethod::HotnessCountOffset().Int32Value()), Immediate(-1));
     __ Bind(&overflow);
     if (!is_frame_entry) {
       __ popl(EAX);
@@ -2408,31 +2497,7 @@ void InstructionCodeGeneratorX86::VisitReturnVoid(HReturnVoid* ret ATTRIBUTE_UNU
 void LocationsBuilderX86::VisitReturn(HReturn* ret) {
   LocationSummary* locations =
       new (GetGraph()->GetAllocator()) LocationSummary(ret, LocationSummary::kNoCall);
-  switch (ret->InputAt(0)->GetType()) {
-    case DataType::Type::kReference:
-    case DataType::Type::kBool:
-    case DataType::Type::kUint8:
-    case DataType::Type::kInt8:
-    case DataType::Type::kUint16:
-    case DataType::Type::kInt16:
-    case DataType::Type::kInt32:
-      locations->SetInAt(0, Location::RegisterLocation(EAX));
-      break;
-
-    case DataType::Type::kInt64:
-      locations->SetInAt(
-          0, Location::RegisterPairLocation(EAX, EDX));
-      break;
-
-    case DataType::Type::kFloat32:
-    case DataType::Type::kFloat64:
-      locations->SetInAt(
-          0, Location::FpuRegisterLocation(XMM0));
-      break;
-
-    default:
-      LOG(FATAL) << "Unknown return type " << ret->InputAt(0)->GetType();
-  }
+  SetInForReturnValue(ret, locations);
 }
 
 void InstructionCodeGeneratorX86::VisitReturn(HReturn* ret) {
@@ -5434,7 +5499,8 @@ void CodeGeneratorX86::RecordMethodBssEntryPatch(HInvoke* invoke) {
   size_t index = invoke->IsInvokeInterface()
       ? invoke->AsInvokeInterface()->GetSpecialInputIndex()
       : invoke->AsInvokeStaticOrDirect()->GetSpecialInputIndex();
-  DCHECK(IsSameDexFile(GetGraph()->GetDexFile(), *invoke->GetMethodReference().dex_file));
+  DCHECK(IsSameDexFile(GetGraph()->GetDexFile(), *invoke->GetMethodReference().dex_file) ||
+         GetCompilerOptions().WithinOatFile(invoke->GetMethodReference().dex_file));
   HX86ComputeBaseMethodAddress* method_address =
       invoke->InputAt(index)->AsX86ComputeBaseMethodAddress();
   // Add the patch entry and bind its label at the end of the instruction.

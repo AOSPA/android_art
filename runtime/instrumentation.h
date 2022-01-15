@@ -17,12 +17,13 @@
 #ifndef ART_RUNTIME_INSTRUMENTATION_H_
 #define ART_RUNTIME_INSTRUMENTATION_H_
 
-#include <functional>
 #include <stdint.h>
+
+#include <functional>
 #include <list>
 #include <memory>
-#include <unordered_set>
 #include <optional>
+#include <unordered_set>
 
 #include "arch/instruction_set.h"
 #include "base/enums.h"
@@ -30,6 +31,7 @@
 #include "base/macros.h"
 #include "base/safe_map.h"
 #include "gc_root.h"
+#include "offsets.h"
 
 namespace art {
 namespace mirror {
@@ -41,6 +43,7 @@ class ArtField;
 class ArtMethod;
 template <typename T> class Handle;
 template <typename T> class MutableHandle;
+struct NthCallerVisitor;
 union JValue;
 class SHARED_LOCKABLE ReaderWriterMutex;
 class ShadowFrame;
@@ -79,9 +82,7 @@ struct InstrumentationListener {
       REQUIRES_SHARED(Locks::mutator_lock_) = 0;
 
   virtual void MethodExited(Thread* thread,
-                            Handle<mirror::Object> this_object,
                             ArtMethod* method,
-                            uint32_t dex_pc,
                             OptionalFrame frame,
                             MutableHandle<mirror::Object>& return_value)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -90,9 +91,7 @@ struct InstrumentationListener {
   // value (if appropriate) or use the alternate MethodExited callback instead if they need to
   // go through a suspend point.
   virtual void MethodExited(Thread* thread,
-                            Handle<mirror::Object> this_object,
                             ArtMethod* method,
-                            uint32_t dex_pc,
                             OptionalFrame frame,
                             JValue& return_value)
       REQUIRES_SHARED(Locks::mutator_lock_) = 0;
@@ -207,6 +206,15 @@ class Instrumentation {
 
   Instrumentation();
 
+  static constexpr MemberOffset NeedsEntryExitHooksOffset() {
+    // Assert that instrumentation_stubs_installed_ is 8bits wide. If the size changes
+    // update the compare instructions in the code generator when generating checks for
+    // MethodEntryExitHooks.
+    static_assert(sizeof(instrumentation_stubs_installed_) == 1,
+                  "instrumentation_stubs_installed_ isn't expected size");
+    return MemberOffset(OFFSETOF_MEMBER(Instrumentation, instrumentation_stubs_installed_));
+  }
+
   // Add a listener to be notified of the masked together sent of instrumentation events. This
   // suspend the runtime to install stubs. You are expected to hold the mutator lock as a proxy
   // for saying you should have suspended all threads (installing stubs while threads are running
@@ -228,7 +236,7 @@ class Instrumentation {
       REQUIRES(!GetDeoptimizedMethodsLock());
 
   bool AreAllMethodsDeoptimized() const {
-    return interpreter_stubs_installed_;
+    return InterpreterStubsInstalled();
   }
   bool ShouldNotifyMethodEnterExitEvents() const REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -324,13 +332,21 @@ class Instrumentation {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void ForceInterpretOnly() {
-    interpret_only_ = true;
     forced_interpret_only_ = true;
+  }
+
+  bool EntryExitStubsInstalled() const {
+    return instrumentation_level_ == InstrumentationLevel::kInstrumentWithInstrumentationStubs ||
+           instrumentation_level_ == InstrumentationLevel::kInstrumentWithInterpreter;
+  }
+
+  bool InterpreterStubsInstalled() const {
+    return instrumentation_level_ == InstrumentationLevel::kInstrumentWithInterpreter;
   }
 
   // Called by ArtMethod::Invoke to determine dispatch mechanism.
   bool InterpretOnly() const {
-    return interpret_only_;
+    return forced_interpret_only_ || InterpreterStubsInstalled();
   }
 
   bool IsForcedInterpretOnly() const {
@@ -406,14 +422,12 @@ class Instrumentation {
   // Inform listeners that a method has been exited.
   template<typename T>
   void MethodExitEvent(Thread* thread,
-                       ObjPtr<mirror::Object> this_object,
                        ArtMethod* method,
-                       uint32_t dex_pc,
                        OptionalFrame frame,
                        T& return_value) const
       REQUIRES_SHARED(Locks::mutator_lock_) {
     if (UNLIKELY(HasMethodExitListeners())) {
-      MethodExitEventImpl(thread, this_object, method, dex_pc, frame, return_value);
+      MethodExitEventImpl(thread, method, frame, return_value);
     }
   }
 
@@ -485,6 +499,14 @@ class Instrumentation {
   void ExceptionHandledEvent(Thread* thread, ObjPtr<mirror::Throwable> exception_object) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  JValue GetReturnValue(Thread* self,
+                        ArtMethod* method,
+                        bool* is_ref,
+                        uint64_t* gpr_result,
+                        uint64_t* fpr_result) REQUIRES_SHARED(Locks::mutator_lock_);
+  bool ShouldDeoptimizeMethod(Thread* self, const NthCallerVisitor& visitor)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   // Called when an instrumented method is entered. The intended link register (lr) is saved so
   // that returning causes a branch to the method exit stub. Generates method enter events.
   void PushInstrumentationStackFrame(Thread* self,
@@ -530,10 +552,13 @@ class Instrumentation {
                !GetDeoptimizedMethodsLock());
 
   // Install instrumentation exit stub on every method of the stack of the given thread.
-  // This is used by the debugger to cause a deoptimization of the thread's stack after updating
-  // local variable(s).
-  void InstrumentThreadStack(Thread* thread)
-      REQUIRES(Locks::mutator_lock_);
+  // This is used by:
+  //  - the debugger to cause a deoptimization of the all frames in thread's stack (for
+  //    example, after updating local variables)
+  //  - to call method entry / exit hooks for tracing. For this we instrument
+  //    the stack frame to run entry / exit hooks but we don't need to deoptimize.
+  // deopt_all_frames indicates whether the frames need to deoptimize or not.
+  void InstrumentThreadStack(Thread* thread, bool deopt_all_frames) REQUIRES(Locks::mutator_lock_);
 
   // Force all currently running frames to be deoptimized back to interpreter. This should only be
   // used in cases where basically all compiled code has been invalidated.
@@ -556,6 +581,13 @@ class Instrumentation {
   // Returns true if moving to the given instrumentation level requires the installation of stubs.
   // False otherwise.
   bool RequiresInstrumentationInstallation(InstrumentationLevel new_level) const;
+
+  // Returns true if we need entry exit stub to call entry hooks. JITed code
+  // directly call entry / exit hooks and don't need the stub.
+  bool CodeNeedsEntryExitStub(const void* code, ArtMethod* method);
+
+  // Update the current instrumentation_level_.
+  void UpdateInstrumentationLevel(InstrumentationLevel level);
 
   // Does the job of installing or removing instrumentation code within methods.
   // In order to support multiple clients using instrumentation at the same time,
@@ -596,9 +628,7 @@ class Instrumentation {
       REQUIRES_SHARED(Locks::mutator_lock_);
   template <typename T>
   void MethodExitEventImpl(Thread* thread,
-                           ObjPtr<mirror::Object> this_object,
                            ArtMethod* method,
-                           uint32_t dex_pc,
                            OptionalFrame frame,
                            T& return_value) const
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -651,14 +681,11 @@ class Instrumentation {
   // Have we hijacked ArtMethod::code_ so that it calls instrumentation/interpreter code?
   bool instrumentation_stubs_installed_;
 
-  // Have we hijacked ArtMethod::code_ to reference the enter/exit stubs?
-  bool entry_exit_stubs_installed_;
-
-  // Have we hijacked ArtMethod::code_ to reference the enter interpreter stub?
-  bool interpreter_stubs_installed_;
-
-  // Do we need the fidelity of events that we only get from running within the interpreter?
-  bool interpret_only_;
+  // The required level of instrumentation. This could be one of the following values:
+  // kInstrumentNothing: no instrumentation support is needed
+  // kInstrumentWithInstrumentationStubs: needs support to call method entry/exit stubs.
+  // kInstrumentWithInterpreter: only execute with interpreter
+  Instrumentation::InstrumentationLevel instrumentation_level_;
 
   // Did the runtime request we only run in the interpreter? ie -Xint mode.
   bool forced_interpret_only_;
@@ -751,7 +778,7 @@ class Instrumentation {
 
   friend class InstrumentationTest;  // For GetCurrentInstrumentationLevel and ConfigureStubs.
   friend class InstrumentationStackPopper;  // For popping instrumentation frames.
-  friend void InstrumentationInstallStack(Thread*, void*);
+  friend void InstrumentationInstallStack(Thread*, void*, bool);
 
   DISALLOW_COPY_AND_ASSIGN(Instrumentation);
 };
