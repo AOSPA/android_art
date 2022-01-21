@@ -35,7 +35,7 @@
 
 namespace {
 
-using ::art::InstructionSet;
+using ::art::odrefresh::CompilationOptions;
 using ::art::odrefresh::Concatenate;
 using ::art::odrefresh::ExitCode;
 using ::art::odrefresh::OdrCompilationLog;
@@ -95,6 +95,14 @@ std::string GetEnvironmentVariableOrDie(const char* name) {
   return value;
 }
 
+std::string GetEnvironmentVariableOrDefault(const char* name, std::string default_value) {
+  const char* value = getenv(name);
+  if (value == nullptr) {
+    return default_value;
+  }
+  return value;
+}
+
 bool ArgumentMatches(std::string_view argument, std::string_view prefix, std::string* value) {
   if (android::base::StartsWith(argument, prefix)) {
     *value = std::string(argument.substr(prefix.size()));
@@ -108,9 +116,16 @@ bool ArgumentEquals(std::string_view argument, std::string_view expected) {
 }
 
 bool InitializeCommonConfig(std::string_view argument, OdrConfig* config) {
-  static constexpr std::string_view kDryRunArgument{"--dry-run"};
-  if (ArgumentEquals(argument, kDryRunArgument)) {
+  if (ArgumentEquals(argument, "--dry-run")) {
     config->SetDryRun();
+    return true;
+  }
+  if (ArgumentEquals(argument, "--partial-compilation")) {
+    config->SetPartialCompilation(true);
+    return true;
+  }
+  if (ArgumentEquals(argument, "--no-refresh")) {
+    config->SetRefresh(false);
     return true;
   }
   return false;
@@ -118,6 +133,8 @@ bool InitializeCommonConfig(std::string_view argument, OdrConfig* config) {
 
 void CommonOptionsHelp() {
   UsageError("--dry-run");
+  UsageError("--partial-compilation  Only generate artifacts that are out-of-date or missing.");
+  UsageError("--no-refresh           Do not refresh existing artifacts.");
 }
 
 int InitializeHostConfig(int argc, char** argv, OdrConfig* config) {
@@ -153,6 +170,10 @@ int InitializeHostConfig(int argc, char** argv, OdrConfig* config) {
       config->SetIsa(art::GetInstructionSetFromString(value.c_str()));
     } else if (ArgumentMatches(arg, "--system-server-classpath=", &value)) {
       config->SetSystemServerClasspath(arg);
+    } else if (ArgumentMatches(arg, "--bootclasspath=", &value)) {
+      config->SetBootClasspath(arg);
+    } else if (ArgumentMatches(arg, "--standalone-system-server-jars=", &value)) {
+      config->SetStandaloneSystemServerJars(arg);
     } else if (ArgumentMatches(arg, "--zygote-arch=", &value)) {
       ZygoteKind zygote_kind;
       if (!ParseZygoteKind(value.c_str(), &zygote_kind)) {
@@ -175,6 +196,8 @@ void HostOptionsHelp() {
   UsageError("--isa-root");
   UsageError("--system-server-classpath");
   UsageError("--zygote-arch");
+  UsageError("--bootclasspath");
+  UsageError("--standalone-system-server-jars");
 }
 
 int InitializeTargetConfig(int argc, char** argv, OdrConfig* config) {
@@ -183,15 +206,11 @@ int InitializeTargetConfig(int argc, char** argv, OdrConfig* config) {
   config->SetBootClasspath(GetEnvironmentVariableOrDie("BOOTCLASSPATH"));
   config->SetDex2oatBootclasspath(GetEnvironmentVariableOrDie("DEX2OATBOOTCLASSPATH"));
   config->SetSystemServerClasspath(GetEnvironmentVariableOrDie("SYSTEMSERVERCLASSPATH"));
+  config->SetStandaloneSystemServerJars(
+      GetEnvironmentVariableOrDefault("STANDALONE_SYSTEMSERVER_JARS", /*default_value=*/""));
   config->SetIsa(art::kRuntimeISA);
 
-  const std::string zygote = android::base::GetProperty("ro.zygote", {});
-  ZygoteKind zygote_kind;
-  if (!ParseZygoteKind(zygote.c_str(), &zygote_kind)) {
-    LOG(FATAL) << "Unknown zygote: " << QuotePath(zygote);
-  }
-  config->SetZygoteKind(zygote_kind);
-
+  std::string zygote;
   int n = 1;
   for (; n < argc - 1; ++n) {
     const char* arg = argv[n];
@@ -205,7 +224,7 @@ int InitializeTargetConfig(int argc, char** argv, OdrConfig* config) {
     } else if (ArgumentMatches(arg, "--dalvik-cache=", &value)) {
       art::OverrideDalvikCacheSubDirectory(value);
       config->SetArtifactDirectory(Concatenate(
-          {android::base::Dirname(art::odrefresh::kOdrefreshArtifactDirectory), "/", value}));
+          {GetApexDataDalvikCacheDirectory(art::InstructionSet::kNone), "/", value}));
     } else if (ArgumentMatches(arg, "--max-execution-seconds=", &value)) {
       int seconds;
       if (!android::base::ParseInt(value, &seconds)) {
@@ -218,10 +237,25 @@ int InitializeTargetConfig(int argc, char** argv, OdrConfig* config) {
         ArgumentError("Failed to parse integer: %s", value.c_str());
       }
       config->SetMaxChildProcessSeconds(seconds);
+    } else if (ArgumentMatches(arg, "--zygote-arch=", &value)) {
+      zygote = value;
+    } else if (ArgumentMatches(arg, "--staging-dir=", &value)) {
+      config->SetStagingDir(value);
     } else if (!InitializeCommonConfig(arg, config)) {
       UsageError("Unrecognized argument: '%s'", arg);
     }
   }
+
+  if (zygote.empty()) {
+    // Use ro.zygote by default, if not overridden by --zygote-arch flag.
+    zygote = android::base::GetProperty("ro.zygote", {});
+  }
+  ZygoteKind zygote_kind;
+  if (!ParseZygoteKind(zygote.c_str(), &zygote_kind)) {
+    LOG(FATAL) << "Unknown zygote: " << QuotePath(zygote);
+  }
+  config->SetZygoteKind(zygote_kind);
+
   return n;
 }
 
@@ -232,6 +266,7 @@ void TargetOptionsHelp() {
       "--dalvik-cache=<DIR>             Write artifacts to .../<DIR> rather than .../dalvik-cache");
   UsageError("--max-execution-seconds=<N>      Maximum timeout of all compilation combined");
   UsageError("--max-child-process-seconds=<N>  Maximum timeout of each compilation task");
+  UsageError("--zygote-arch=<STRING>           Zygote kind that overrides ro.zygote");
 }
 
 int InitializeConfig(int argc, char** argv, OdrConfig* config) {
@@ -292,26 +327,21 @@ int main(int argc, char** argv) {
   OnDeviceRefresh odr(config);
   for (int i = 0; i < argc; ++i) {
     std::string_view action(argv[i]);
-    std::vector<InstructionSet> compile_boot_extensions;
-    bool compile_system_server;
+    CompilationOptions compilation_options;
     if (action == "--check") {
       // Fast determination of whether artifacts are up to date.
-      return odr.CheckArtifactsAreUpToDate(
-          metrics, &compile_boot_extensions, &compile_system_server);
+      return odr.CheckArtifactsAreUpToDate(metrics, &compilation_options);
     } else if (action == "--compile") {
-      const ExitCode exit_code =
-          odr.CheckArtifactsAreUpToDate(metrics, &compile_boot_extensions, &compile_system_server);
+      const ExitCode exit_code = odr.CheckArtifactsAreUpToDate(metrics, &compilation_options);
       if (exit_code != ExitCode::kCompilationRequired) {
         return exit_code;
       }
       OdrCompilationLog compilation_log;
-      if (!compilation_log.ShouldAttemptCompile(metrics.GetArtApexVersion(),
-                                                metrics.GetArtApexLastUpdateMillis(),
-                                                metrics.GetTrigger())) {
+      if (!compilation_log.ShouldAttemptCompile(metrics.GetTrigger())) {
+        LOG(INFO) << "Compilation skipped because it was attempted recently";
         return ExitCode::kOkay;
       }
-      ExitCode compile_result =
-          odr.Compile(metrics, compile_boot_extensions, compile_system_server);
+      ExitCode compile_result = odr.Compile(metrics, compilation_options);
       compilation_log.Log(metrics.GetArtApexVersion(),
                           metrics.GetArtApexLastUpdateMillis(),
                           metrics.GetTrigger(),
@@ -324,8 +354,10 @@ int main(int argc, char** argv) {
         return ExitCode::kCleanupFailed;
       }
       return odr.Compile(metrics,
-                         /*compile_boot_extensions=*/config.GetBootExtensionIsas(),
-                         /*compile_system_server=*/true);
+                         CompilationOptions{
+                             .compile_boot_extensions_for_isas = config.GetBootExtensionIsas(),
+                             .system_server_jars_to_compile = odr.AllSystemServerJars(),
+                         });
     } else if (action == "--help") {
       UsageHelp(argv[0]);
     } else {

@@ -47,8 +47,12 @@ cc_defaults {
         "libbase",
         "liblog",
     ],
-    static_libs: ["libtinyxml2"],
+    static_libs: [
+        "libc++fs",
+        "libtinyxml2",
+    ],
     tidy: true,
+    tidy_disabled_srcs: [":art-apex-cache-info"],
     tidy_flags: [
         "-format-style=file",
         "-header-filter=(art/odrefresh/|system/apex/)",
@@ -112,6 +116,17 @@ art_cc_binary {
         "com.android.art",
         "com.android.art.debug",
     ],
+}
+
+// A no-op version of the odrefresh binary.
+art_cc_binary {
+    name: "odrefresh_broken",
+    defaults: ["art_defaults"],
+    stem: "odrefresh",
+    local_include_dirs: ["include"],
+    header_libs: ["libbase_headers"],
+    srcs: ["odrefresh_broken.cc"],
+    apex_available: ["test_jitzygote_com.android.art"],
 }
 
 art_cc_binary {

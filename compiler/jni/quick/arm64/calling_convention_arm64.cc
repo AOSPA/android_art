@@ -58,8 +58,8 @@ static constexpr ManagedRegister kCalleeSaveRegisters[] = {
 
     // Thread register(X19) is saved on stack.
     Arm64ManagedRegister::FromXRegister(X19),
-    Arm64ManagedRegister::FromXRegister(X20),
-    Arm64ManagedRegister::FromXRegister(X21),
+    Arm64ManagedRegister::FromXRegister(X20),  // Note: Marking register.
+    Arm64ManagedRegister::FromXRegister(X21),  // Note: Suspend check register.
     Arm64ManagedRegister::FromXRegister(X22),
     Arm64ManagedRegister::FromXRegister(X23),
     Arm64ManagedRegister::FromXRegister(X24),
@@ -236,11 +236,11 @@ uint32_t Arm64JniCallingConvention::FpSpillMask() const {
 
 ArrayRef<const ManagedRegister> Arm64JniCallingConvention::CalleeSaveScratchRegisters() const {
   DCHECK(!IsCriticalNative());
-  // Use X21-X29 from native callee saves.
-  constexpr size_t kStart = 2u;
-  constexpr size_t kLength = 9u;
+  // Use X22-X29 from native callee saves.
+  constexpr size_t kStart = 3u;
+  constexpr size_t kLength = 8u;
   static_assert(kAapcs64CalleeSaveRegisters[kStart].Equals(
-                    Arm64ManagedRegister::FromXRegister(X21)));
+                    Arm64ManagedRegister::FromXRegister(X22)));
   static_assert(kAapcs64CalleeSaveRegisters[kStart + kLength - 1u].Equals(
                     Arm64ManagedRegister::FromXRegister(X29)));
   static_assert((kAapcs64CoreCalleeSpillMask & ~kCoreCalleeSpillMask) == 0u);
@@ -363,9 +363,9 @@ FrameOffset Arm64JniCallingConvention::CurrentParamStackOffset() {
   return FrameOffset(offset);
 }
 
-ManagedRegister Arm64JniCallingConvention::HiddenArgumentRegister() const {
-  CHECK(IsCriticalNative());
-  // X15 is neither managed callee-save, nor argument register, nor scratch register.
+// X15 is neither managed callee-save, nor argument register. It is suitable for use as the
+// locking argument for synchronized methods and hidden argument for @CriticalNative methods.
+static void AssertX15IsNeitherCalleeSaveNorArgumentRegister() {
   // TODO: Change to static_assert; std::none_of should be constexpr since C++20.
   DCHECK(std::none_of(kCalleeSaveRegisters,
                       kCalleeSaveRegisters + std::size(kCalleeSaveRegisters),
@@ -374,7 +374,20 @@ ManagedRegister Arm64JniCallingConvention::HiddenArgumentRegister() const {
                       }));
   DCHECK(std::none_of(kXArgumentRegisters,
                       kXArgumentRegisters + std::size(kXArgumentRegisters),
-                      [](XRegister reg) { return reg == X15; }));
+                      [](XRegister arg) { return arg == X15; }));
+}
+
+ManagedRegister Arm64JniCallingConvention::LockingArgumentRegister() const {
+  DCHECK(!IsFastNative());
+  DCHECK(!IsCriticalNative());
+  DCHECK(IsSynchronized());
+  AssertX15IsNeitherCalleeSaveNorArgumentRegister();
+  return Arm64ManagedRegister::FromWRegister(W15);
+}
+
+ManagedRegister Arm64JniCallingConvention::HiddenArgumentRegister() const {
+  DCHECK(IsCriticalNative());
+  AssertX15IsNeitherCalleeSaveNorArgumentRegister();
   return Arm64ManagedRegister::FromXRegister(X15);
 }
 

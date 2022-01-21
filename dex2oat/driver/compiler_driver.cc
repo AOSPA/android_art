@@ -1426,7 +1426,7 @@ class ParallelCompilationManager {
 
     // Ensure we're suspended while we're blocked waiting for the other threads to finish (worker
     // thread destructor's called below perform join).
-    CHECK_NE(self->GetState(), kRunnable);
+    CHECK_NE(self->GetState(), ThreadState::kRunnable);
 
     // Wait for all the worker threads to finish.
     thread_pool_->Wait(self, true, false);
@@ -1911,8 +1911,11 @@ class VerifyClassVisitor : public CompilationVisitor {
         } else if (klass->IsVerifiedNeedsAccessChecks()) {
           DCHECK_EQ(failure_kind, verifier::FailureKind::kAccessChecksFailure);
         } else if (klass->ShouldVerifyAtRuntime()) {
-          DCHECK(failure_kind == verifier::FailureKind::kSoftFailure ||
-                 failure_kind == verifier::FailureKind::kTypeChecksFailure);
+          DCHECK_NE(failure_kind, verifier::FailureKind::kHardFailure);
+          // This could either be due to:
+          // - kTypeChecksFailure, or
+          // - kSoftFailure, or
+          // - the superclass or interfaces not being verified.
         } else {
           DCHECK_EQ(failure_kind, verifier::FailureKind::kHardFailure);
         }
@@ -2537,7 +2540,7 @@ static void CompileDexFile(CompilerDriver* driver,
     }
 
     // Go to native so that we don't block GC during compilation.
-    ScopedThreadSuspension sts(soa.Self(), kNative);
+    ScopedThreadSuspension sts(soa.Self(), ThreadState::kNative);
 
     // Compile direct and virtual methods.
     int64_t previous_method_idx = -1;

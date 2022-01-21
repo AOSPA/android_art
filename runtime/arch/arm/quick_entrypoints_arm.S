@@ -494,51 +494,25 @@ END art_quick_do_long_jump
 TWO_ARG_REF_DOWNCALL art_quick_handle_fill_data, artHandleFillArrayDataFromCode, RETURN_IF_RESULT_IS_ZERO_OR_DELIVER
 
     /*
-     * Entry from managed code that calls artLockObjectFromCode, may block for GC. r0 holds the
-     * possibly null object to lock.
+     * Entry from managed code that tries to lock the object in a fast path and
+     * calls `artLockObjectFromCode()` for the difficult cases, may block for GC.
+     * r0 holds the possibly null object to lock.
      */
-    .extern artLockObjectFromCode
 ENTRY art_quick_lock_object
-    ldr    r1, [rSELF, #THREAD_ID_OFFSET]
-    cbz    r0, .Lslow_lock
-.Lretry_lock:
-    ldrex  r2, [r0, #MIRROR_OBJECT_LOCK_WORD_OFFSET]
-    eor    r3, r2, r1                 @ Prepare the value to store if unlocked
-                                      @   (thread id, count of 0 and preserved read barrier bits),
-                                      @ or prepare to compare thread id for recursive lock check
-                                      @   (lock_word.ThreadId() ^ self->ThreadId()).
-    ands   ip, r2, #LOCK_WORD_GC_STATE_MASK_SHIFTED_TOGGLED  @ Test the non-gc bits.
-    bne    .Lnot_unlocked             @ Check if unlocked.
-    @ unlocked case - store r3: original lock word plus thread id, preserved read barrier bits.
-    strex  r2, r3, [r0, #MIRROR_OBJECT_LOCK_WORD_OFFSET]
-    cbnz   r2, .Llock_strex_fail      @ If store failed, retry.
-    dmb    ish                        @ Full (LoadLoad|LoadStore) memory barrier.
-    bx lr
-.Lnot_unlocked:  @ r2: original lock word, r1: thread_id, r3: r2 ^ r1
-#if LOCK_WORD_THIN_LOCK_COUNT_SHIFT + LOCK_WORD_THIN_LOCK_COUNT_SIZE != LOCK_WORD_GC_STATE_SHIFT
-#error "Expecting thin lock count and gc state in consecutive bits."
-#endif
-                                      @ Check lock word state and thread id together,
-    bfc    r3, #LOCK_WORD_THIN_LOCK_COUNT_SHIFT, #(LOCK_WORD_THIN_LOCK_COUNT_SIZE + LOCK_WORD_GC_STATE_SIZE)
-    cbnz   r3, .Lslow_lock            @ if either of the top two bits are set, or the lock word's
-                                      @ thread id did not match, go slow path.
-    add    r3, r2, #LOCK_WORD_THIN_LOCK_COUNT_ONE  @ Increment the recursive lock count.
-                                      @ Extract the new thin lock count for overflow check.
-    ubfx   r2, r3, #LOCK_WORD_THIN_LOCK_COUNT_SHIFT, #LOCK_WORD_THIN_LOCK_COUNT_SIZE
-    cbz    r2, .Lslow_lock            @ Zero as the new count indicates overflow, go slow path.
-    strex  r2, r3, [r0, #MIRROR_OBJECT_LOCK_WORD_OFFSET]  @ strex necessary for read barrier bits.
-    cbnz   r2, .Llock_strex_fail      @ If strex failed, retry.
-    bx lr
-.Llock_strex_fail:
-    b      .Lretry_lock               @ retry
-// Note: the slow path is actually the art_quick_lock_object_no_inline (tail call).
+    // Note: the slow path is actually the art_quick_lock_object_no_inline (tail call).
+    LOCK_OBJECT_FAST_PATH r0, r1, r2, r3, .Llock_object_slow, /*can_be_null*/ 1
 END art_quick_lock_object
 
+    /*
+     * Entry from managed code that calls `artLockObjectFromCode()`, may block for GC.
+     * r0 holds the possibly null object to lock.
+     */
+    .extern artLockObjectFromCode
 ENTRY art_quick_lock_object_no_inline
-    // This is also the slow path for art_quick_lock_object. Note that we
-    // need a local label, the assembler complains about target being out of
-    // range if we try to jump to `art_quick_lock_object_no_inline`.
-.Lslow_lock:
+    // This is also the slow path for art_quick_lock_object.
+    // Note that we need a local label as the assembler emits bad instructions
+    // for CBZ/CBNZ if we try to jump to `art_quick_lock_object_no_inline`.
+.Llock_object_slow:
     SETUP_SAVE_REFS_ONLY_FRAME r1     @ save callee saves in case we block
     mov    r1, rSELF                  @ pass Thread::Current
     bl     artLockObjectFromCode      @ (Object* obj, Thread*)
@@ -549,61 +523,26 @@ ENTRY art_quick_lock_object_no_inline
 END art_quick_lock_object_no_inline
 
     /*
-     * Entry from managed code that calls artUnlockObjectFromCode and delivers exception on failure.
-     * r0 holds the possibly null object to lock.
+     * Entry from managed code that tries to unlock the object in a fast path and calls
+     * `artUnlockObjectFromCode()` for the difficult cases and delivers exception on failure.
+     * r0 holds the possibly null object to unlock.
      */
-    .extern artUnlockObjectFromCode
 ENTRY art_quick_unlock_object
-    ldr    r1, [rSELF, #THREAD_ID_OFFSET]
-    cbz    r0, .Lslow_unlock
-.Lretry_unlock:
-#ifndef USE_READ_BARRIER
-    ldr    r2, [r0, #MIRROR_OBJECT_LOCK_WORD_OFFSET]
-#else
-                                      @ Need to use atomic instructions for read barrier.
-    ldrex  r2, [r0, #MIRROR_OBJECT_LOCK_WORD_OFFSET]
-#endif
-    eor    r3, r2, r1                 @ Prepare the value to store if simply locked
-                                      @   (mostly 0s, and preserved read barrier bits),
-                                      @ or prepare to compare thread id for recursive lock check
-                                      @   (lock_word.ThreadId() ^ self->ThreadId()).
-    ands   ip, r3, #LOCK_WORD_GC_STATE_MASK_SHIFTED_TOGGLED  @ Test the non-gc bits.
-    bne    .Lnot_simply_locked        @ Locked recursively or by other thread?
-    @ Transition to unlocked.
-    dmb    ish                        @ Full (LoadStore|StoreStore) memory barrier.
-#ifndef USE_READ_BARRIER
-    str    r3, [r0, #MIRROR_OBJECT_LOCK_WORD_OFFSET]
-#else
-    strex  r2, r3, [r0, #MIRROR_OBJECT_LOCK_WORD_OFFSET]  @ strex necessary for read barrier bits
-    cbnz   r2, .Lunlock_strex_fail    @ If the store failed, retry.
-#endif
-    bx     lr
-.Lnot_simply_locked:  @ r2: original lock word, r1: thread_id, r3: r2 ^ r1
-#if LOCK_WORD_THIN_LOCK_COUNT_SHIFT + LOCK_WORD_THIN_LOCK_COUNT_SIZE != LOCK_WORD_GC_STATE_SHIFT
-#error "Expecting thin lock count and gc state in consecutive bits."
-#endif
-                                      @ Check lock word state and thread id together,
-    bfc    r3, #LOCK_WORD_THIN_LOCK_COUNT_SHIFT, #(LOCK_WORD_THIN_LOCK_COUNT_SIZE + LOCK_WORD_GC_STATE_SIZE)
-    cbnz   r3, .Lslow_unlock          @ if either of the top two bits are set, or the lock word's
-                                      @ thread id did not match, go slow path.
-    sub    r3, r2, #LOCK_WORD_THIN_LOCK_COUNT_ONE  @ Decrement recursive lock count.
-#ifndef USE_READ_BARRIER
-    str    r3, [r0, #MIRROR_OBJECT_LOCK_WORD_OFFSET]
-#else
-    strex  r2, r3, [r0, #MIRROR_OBJECT_LOCK_WORD_OFFSET]  @ strex necessary for read barrier bits.
-    cbnz   r2, .Lunlock_strex_fail    @ If the store failed, retry.
-#endif
-    bx     lr
-.Lunlock_strex_fail:
-    b      .Lretry_unlock             @ retry
-// Note: the slow path is actually the art_quick_unlock_object_no_inline (tail call).
+    // Note: the slow path is actually the art_quick_unlock_object_no_inline (tail call).
+    UNLOCK_OBJECT_FAST_PATH r0, r1, r2, r3, .Lunlock_object_slow, /*can_be_null*/ 1
 END art_quick_unlock_object
 
+    /*
+     * Entry from managed code that calls `artUnlockObjectFromCode()`
+     * and delivers exception on failure.
+     * r0 holds the possibly null object to unlock.
+     */
+    .extern artUnlockObjectFromCode
 ENTRY art_quick_unlock_object_no_inline
-    // This is also the slow path for art_quick_unlock_object. Note that we
-    // need a local label, the assembler complains about target being out of
-    // range if we try to jump to `art_quick_unlock_object_no_inline`.
-.Lslow_unlock:
+    // This is also the slow path for art_quick_unlock_object.
+    // Note that we need a local label as the assembler emits bad instructions
+    // for CBZ/CBNZ if we try to jump to `art_quick_unlock_object_no_inline`.
+.Lunlock_object_slow:
     @ save callee saves in case exception allocation triggers GC
     SETUP_SAVE_REFS_ONLY_FRAME r1
     mov    r1, rSELF                  @ pass Thread::Current
