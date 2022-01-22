@@ -223,7 +223,7 @@ static void UpdateClassAfterVerification(Handle<mirror::Class> klass,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   Runtime* runtime = Runtime::Current();
   ClassLinker* class_linker = runtime->GetClassLinker();
-  if (failure_kind == verifier::FailureKind::kNoFailure) {
+  if (klass->IsVerified() && (failure_kind == verifier::FailureKind::kNoFailure)) {
     klass->SetSkipAccessChecksFlagOnAllMethods(pointer_size);
   }
 
@@ -1949,6 +1949,7 @@ bool ClassLinker::AddImageSpace(
   if (!runtime->IsAotCompiler()) {
     ScopedTrace trace("AppImage:UpdateCodeItemAndNterp");
     bool can_use_nterp = interpreter::CanRuntimeUseNterp();
+    uint16_t hotness_threshold = runtime->GetJITOptions()->GetWarmupThreshold();
     header.VisitPackedArtMethods([&](ArtMethod& method) REQUIRES_SHARED(Locks::mutator_lock_) {
       // In the image, the `data` pointer field of the ArtMethod contains the code
       // item offset. Change this to the actual pointer to the code item.
@@ -1958,7 +1959,7 @@ bool ClassLinker::AddImageSpace(
         method.SetCodeItem(code_item);
         // The hotness counter may have changed since we compiled the image, so
         // reset it with the runtime value.
-        method.ResetCounter();
+        method.ResetCounter(hotness_threshold);
       }
       // Set image methods' entry point that point to the interpreter bridge to the
       // nterp entry point.
@@ -2549,7 +2550,7 @@ ObjPtr<mirror::Class> ClassLinker::EnsureResolved(Thread* self,
     }
     {
       // Handle wrapper deals with klass moving.
-      ScopedThreadSuspension sts(self, kSuspended);
+      ScopedThreadSuspension sts(self, ThreadState::kSuspended);
       if (index < kNumYieldIterations) {
         sched_yield();
       } else {
@@ -2934,7 +2935,7 @@ ObjPtr<mirror::Class> ClassLinker::FindClass(Thread* self,
             soa.Env(), soa.AddLocalReference<jobject>(class_loader.Get()));
         ScopedLocalRef<jobject> result(soa.Env(), nullptr);
         {
-          ScopedThreadStateChange tsc(self, kNative);
+          ScopedThreadStateChange tsc(self, ThreadState::kNative);
           ScopedLocalRef<jobject> class_name_object(
               soa.Env(), soa.Env()->NewStringUTF(class_name_string.c_str()));
           if (class_name_object.get() == nullptr) {
@@ -3227,7 +3228,7 @@ ObjPtr<mirror::Class> ClassLinker::DefineClass(Thread* self,
     // We must be in the kRunnable state to prevent instrumentation from
     // suspending all threads to update entrypoints while we are doing it
     // for this class.
-    DCHECK_EQ(self->GetState(), kRunnable);
+    DCHECK_EQ(self->GetState(), ThreadState::kRunnable);
     Runtime::Current()->GetInstrumentation()->InstallStubsForClass(h_new_class.Get());
   }
 
@@ -3687,6 +3688,7 @@ void ClassLinker::LoadClass(Thread* self,
     uint32_t last_dex_method_index = dex::kDexNoIndex;
     size_t last_class_def_method_index = 0;
 
+    uint16_t hotness_threshold = runtime->GetJITOptions()->GetWarmupThreshold();
     // Use the visitor since the ranged based loops are bit slower from seeking. Seeking to the
     // methods needs to decode all of the fields.
     accessor.VisitFieldsAndMethods([&](
@@ -3720,11 +3722,13 @@ void ClassLinker::LoadClass(Thread* self,
             last_dex_method_index = it_method_index;
             last_class_def_method_index = class_def_method_index;
           }
+          art_method->ResetCounter(hotness_threshold);
           ++class_def_method_index;
         }, [&](const ClassAccessor::Method& method) REQUIRES_SHARED(Locks::mutator_lock_) {
           ArtMethod* art_method = klass->GetVirtualMethodUnchecked(
               class_def_method_index - accessor.NumDirectMethods(),
               image_pointer_size_);
+          art_method->ResetCounter(hotness_threshold);
           LoadMethod(dex_file, method, klass, art_method);
           LinkCode(this, art_method, oat_class_ptr, class_def_method_index);
           ++class_def_method_index;
@@ -4117,8 +4121,7 @@ ObjPtr<mirror::DexCache> ClassLinker::FindDexCache(Thread* self, const DexFile& 
   UNREACHABLE();
 }
 
-ObjPtr<mirror::DexCache> ClassLinker::FindDexCache(Thread* self,
-                                                   const OatDexFile* const oat_dex_file) {
+ObjPtr<mirror::DexCache> ClassLinker::FindDexCache(Thread* self, const OatDexFile& oat_dex_file) {
   ReaderMutexLock mu(self, *Locks::dex_lock_);
   const DexCacheData* dex_cache_data = FindDexCacheDataLocked(oat_dex_file);
   ObjPtr<mirror::DexCache> dex_cache = DecodeDexCacheLocked(self, dex_cache_data);
@@ -4132,7 +4135,7 @@ ObjPtr<mirror::DexCache> ClassLinker::FindDexCache(Thread* self,
       LOG(FATAL_WITHOUT_ABORT) << "Registered dex file " << entry.first->GetLocation();
     }
   }
-  LOG(FATAL) << "Failed to find DexCache for OatDexFile " << oat_dex_file->GetDexFileLocation()
+  LOG(FATAL) << "Failed to find DexCache for OatDexFile " << oat_dex_file.GetDexFileLocation()
              << " " << &oat_dex_file;
   UNREACHABLE();
 }
@@ -4154,12 +4157,9 @@ ClassTable* ClassLinker::FindClassTable(Thread* self, ObjPtr<mirror::DexCache> d
 }
 
 const ClassLinker::DexCacheData* ClassLinker::FindDexCacheDataLocked(
-    const OatDexFile* const oat_dex_file) {
-  // DexFiles are not guaranteed to have an non-null OatDexFile*. If we pass a nullptr as parameter,
-  // we might not get back the DexCacheData we are expecting.
-  DCHECK_NE(oat_dex_file, nullptr);
-  auto it = std::find_if(dex_caches_.begin(), dex_caches_.end(), [oat_dex_file](const auto& entry) {
-    return entry.first->GetOatDexFile() == oat_dex_file;
+    const OatDexFile& oat_dex_file) {
+  auto it = std::find_if(dex_caches_.begin(), dex_caches_.end(), [&](const auto& entry) {
+    return entry.first->GetOatDexFile() == &oat_dex_file;
   });
   return it != dex_caches_.end() ? &it->second : nullptr;
 }
@@ -4720,7 +4720,6 @@ verifier::FailureKind ClassLinker::VerifyClass(Thread* self,
       // Regardless of our own verification result, we need to verify the class
       // at runtime if the super class is not verified. This is required in case
       // we generate an app/boot image.
-      verifier_failure = verifier::FailureKind::kSoftFailure;
       mirror::Class::SetStatus(klass, ClassStatus::kRetryVerificationAtRuntime, self);
     } else if (verifier_failure == verifier::FailureKind::kNoFailure) {
       mirror::Class::SetStatus(klass, ClassStatus::kVerified, self);
@@ -7439,7 +7438,7 @@ class ClassLinker::LinkMethodsHelper {
       if (methods != old_methods && old_methods != nullptr) {
         // Need to make sure the GC is not running since it could be scanning the methods we are
         // about to overwrite.
-        ScopedThreadStateChange tsc(self_, kSuspended);
+        ScopedThreadStateChange tsc(self_, ThreadState::kSuspended);
         gc::ScopedGCCriticalSection gcs(self_,
                                         gc::kGcCauseClassLinker,
                                         gc::kCollectorTypeClassLinker);

@@ -176,7 +176,7 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .IntoKey(M::ProfileClock)
       .Define("-Xjitthreshold:_")
           .WithType<unsigned int>()
-          .IntoKey(M::JITCompileThreshold)
+          .IntoKey(M::JITOptimizeThreshold)
       .SetCategory("ART")
       .Define("-Ximage:_")
           .WithType<ParseStringList<':'>>()
@@ -272,9 +272,6 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Xjitwarmupthreshold:_")
           .WithType<unsigned int>()
           .IntoKey(M::JITWarmupThreshold)
-      .Define("-Xjitosrthreshold:_")
-          .WithType<unsigned int>()
-          .IntoKey(M::JITOsrThreshold)
       .Define("-Xjitprithreadweight:_")
           .WithType<unsigned int>()
           .IntoKey(M::JITPriorityThreadWeight)
@@ -475,7 +472,7 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           "-Xverifyopt:_", "-Xcheckdexsum", "-Xincludeselectedop", "-Xjitop:_",
           "-Xincludeselectedmethod",
           "-Xjitblocking", "-Xjitmethod:_", "-Xjitclass:_", "-Xjitoffset:_",
-          "-Xjitconfig:_", "-Xjitcheckcg", "-Xjitverbose", "-Xjitprofile",
+          "-Xjitosrthreshold:_", "-Xjitconfig:_", "-Xjitcheckcg", "-Xjitverbose", "-Xjitprofile",
           "-Xjitdisableopt", "-Xjitsuspendpoll", "-XX:mainThreadStackSize=_"})
       .IgnoreUnrecognized(ignore_unrecognized)
       .OrderCategories({"standard", "extended", "Dalvik", "ART"});

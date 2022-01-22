@@ -74,19 +74,21 @@ static void DefaultInitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qp
 
   // JNI
   qpoints->pJniMethodStart = JniMethodStart;
-  qpoints->pJniMethodStartSynchronized = JniMethodStartSynchronized;
   qpoints->pJniMethodEnd = JniMethodEnd;
-  qpoints->pJniMethodEndSynchronized = JniMethodEndSynchronized;
   qpoints->pJniMethodEndWithReference = JniMethodEndWithReference;
-  qpoints->pJniMethodEndWithReferenceSynchronized = JniMethodEndWithReferenceSynchronized;
   qpoints->pQuickGenericJniTrampoline = art_quick_generic_jni_trampoline;
   qpoints->pJniDecodeReferenceResult = JniDecodeReferenceResult;
+  qpoints->pJniReadBarrier = art_jni_read_barrier;
 
   // Locks
   if (UNLIKELY(VLOG_IS_ON(systrace_lock_logging))) {
+    qpoints->pJniLockObject = art_jni_lock_object_no_inline;
+    qpoints->pJniUnlockObject = art_jni_unlock_object_no_inline;
     qpoints->pLockObject = art_quick_lock_object_no_inline;
     qpoints->pUnlockObject = art_quick_unlock_object_no_inline;
   } else {
+    qpoints->pJniLockObject = art_jni_lock_object;
+    qpoints->pJniUnlockObject = art_jni_unlock_object;
     qpoints->pLockObject = art_quick_lock_object;
     qpoints->pUnlockObject = art_quick_unlock_object;
   }
@@ -137,12 +139,8 @@ static void DefaultInitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qp
   PaletteShouldReportJniInvocations(&should_report);
   if (should_report) {
     qpoints->pJniMethodStart = JniMonitoredMethodStart;
-    qpoints->pJniMethodStartSynchronized = JniMonitoredMethodStartSynchronized;
     qpoints->pJniMethodEnd = JniMonitoredMethodEnd;
-    qpoints->pJniMethodEndSynchronized = JniMonitoredMethodEndSynchronized;
     qpoints->pJniMethodEndWithReference = JniMonitoredMethodEndWithReference;
-    qpoints->pJniMethodEndWithReferenceSynchronized =
-        JniMonitoredMethodEndWithReferenceSynchronized;
   }
 }
 

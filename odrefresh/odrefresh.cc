@@ -30,8 +30,11 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <iosfwd>
 #include <iostream>
@@ -39,20 +42,28 @@
 #include <memory>
 #include <optional>
 #include <ostream>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "aidl/com/android/art/CompilerFilter.h"
+#include "aidl/com/android/art/DexoptBcpExtArgs.h"
+#include "aidl/com/android/art/DexoptSystemServerArgs.h"
+#include "aidl/com/android/art/Isa.h"
 #include "android-base/file.h"
 #include "android-base/logging.h"
 #include "android-base/macros.h"
 #include "android-base/parseint.h"
 #include "android-base/properties.h"
 #include "android-base/result.h"
+#include "android-base/scopeguard.h"
 #include "android-base/stringprintf.h"
 #include "android-base/strings.h"
 #include "android/log.h"
@@ -61,6 +72,7 @@
 #include "base/globals.h"
 #include "base/macros.h"
 #include "base/os.h"
+#include "base/stl_util.h"
 #include "base/string_view_cpp20.h"
 #include "base/unix_file/fd_file.h"
 #include "com_android_apex.h"
@@ -81,11 +93,6 @@
 #include "palette/palette.h"
 #include "palette/palette_types.h"
 
-#include "aidl/com/android/art/CompilerFilter.h"
-#include "aidl/com/android/art/DexoptBcpExtArgs.h"
-#include "aidl/com/android/art/DexoptSystemServerArgs.h"
-#include "aidl/com/android/art/Isa.h"
-
 namespace art {
 namespace odrefresh {
 
@@ -102,6 +109,8 @@ namespace {
 
 // Name of cache info file in the ART Apex artifact cache.
 constexpr const char* kCacheInfoFile = "cache-info.xml";
+
+constexpr mode_t kFileMode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
 
 void EraseFiles(const std::vector<std::unique_ptr<File>>& files) {
   for (auto& file : files) {
@@ -132,7 +141,6 @@ bool MoveOrEraseFiles(const std::vector<std::unique_ptr<File>>& files,
       return false;
     }
 
-    static constexpr mode_t kFileMode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
     if (fchmod(output_files.back()->Fd(), kFileMode) != 0) {
       PLOG(ERROR) << "Could not set file mode on " << QuotePath(output_file_path);
       EraseFiles(output_files);
@@ -197,60 +205,95 @@ std::vector<art_apex::ModuleInfo> GenerateModuleInfoList(
   return module_info_list;
 }
 
-bool CheckComponents(const std::vector<art_apex::Component>& expected_components,
-                     const std::vector<art_apex::Component>& actual_components,
-                     std::string* error_msg) {
+// Returns a rewritten path based on ANDROID_ROOT if the path starts with "/system/".
+std::string AndroidRootRewrite(const std::string &path) {
+  if (StartsWith(path, "/system/")) {
+    return Concatenate({GetAndroidRoot(), path.substr(7)});
+  } else {
+    return path;
+  }
+}
+
+template <typename T>
+Result<void> CheckComponents(
+    const std::vector<T>& expected_components,
+    const std::vector<T>& actual_components,
+    const std::function<Result<void>(const T& expected, const T& actual)>& custom_checker =
+        [](const T&, const T&) -> Result<void> { return {}; }) {
   if (expected_components.size() != actual_components.size()) {
-    return false;
+    return Errorf(
+        "Component count differs ({} != {})", expected_components.size(), actual_components.size());
   }
 
   for (size_t i = 0; i < expected_components.size(); ++i) {
-    const art_apex::Component& expected = expected_components[i];
-    const art_apex::Component& actual = actual_components[i];
+    const T& expected = expected_components[i];
+    const T& actual = actual_components[i];
 
     if (expected.getFile() != actual.getFile()) {
-      *error_msg = android::base::StringPrintf("Component %zu file differs ('%s' != '%s')",
-                                               i,
-                                               expected.getFile().c_str(),
-                                               actual.getFile().c_str());
-      return false;
+      return Errorf(
+          "Component {} file differs ('{}' != '{}')", i, expected.getFile(), actual.getFile());
     }
+
     if (expected.getSize() != actual.getSize()) {
-      *error_msg =
-          android::base::StringPrintf("Component %zu size differs (%" PRIu64 " != %" PRIu64 ")",
-                                      i,
-                                      expected.getSize(),
-                                      actual.getSize());
-      return false;
+      return Errorf(
+          "Component {} size differs ({} != {})", i, expected.getSize(), actual.getSize());
     }
+
     if (expected.getChecksums() != actual.getChecksums()) {
-      *error_msg = android::base::StringPrintf("Component %zu checksums differ ('%s' != '%s')",
-                                               i,
-                                               expected.getChecksums().c_str(),
-                                               actual.getChecksums().c_str());
-      return false;
+      return Errorf("Component {} checksums differ ('{}' != '{}')",
+                    i,
+                    expected.getChecksums(),
+                    actual.getChecksums());
+    }
+
+    Result<void> result = custom_checker(expected, actual);
+    if (!result.ok()) {
+      return Errorf("Component {} {}", i, result.error().message());
     }
   }
 
-  return true;
+  return {};
 }
 
-std::vector<art_apex::Component> GenerateComponents(const std::vector<std::string>& jars) {
-  std::vector<art_apex::Component> components;
+Result<void> CheckSystemServerComponents(
+    const std::vector<art_apex::SystemServerComponent>& expected_components,
+    const std::vector<art_apex::SystemServerComponent>& actual_components) {
+  return CheckComponents<art_apex::SystemServerComponent>(
+      expected_components,
+      actual_components,
+      [](const art_apex::SystemServerComponent& expected,
+         const art_apex::SystemServerComponent& actual) -> Result<void> {
+        if (expected.getIsInClasspath() != actual.getIsInClasspath()) {
+          return Errorf("isInClasspath differs ({} != {})",
+                        expected.getIsInClasspath(),
+                        actual.getIsInClasspath());
+        }
+
+        return {};
+      });
+}
+
+template <typename T>
+std::vector<T> GenerateComponents(
+    const std::vector<std::string>& jars,
+    const std::function<T(const std::string& path, uint64_t size, const std::string& checksum)>&
+        custom_generator) {
+  std::vector<T> components;
 
   ArtDexFileLoader loader;
   for (const std::string& path : jars) {
+    std::string actual_path = AndroidRootRewrite(path);
     struct stat sb;
-    if (stat(path.c_str(), &sb) == -1) {
-      PLOG(ERROR) << "Failed to get component: " << QuotePath(path);
+    if (stat(actual_path.c_str(), &sb) == -1) {
+      PLOG(ERROR) << "Failed to stat component: " << QuotePath(actual_path);
       return {};
     }
 
     std::vector<uint32_t> checksums;
     std::vector<std::string> dex_locations;
     std::string error_msg;
-    if (!loader.GetMultiDexChecksums(path.c_str(), &checksums, &dex_locations, &error_msg)) {
-      LOG(ERROR) << "Failed to get components: " << error_msg;
+    if (!loader.GetMultiDexChecksums(actual_path.c_str(), &checksums, &dex_locations, &error_msg)) {
+      LOG(ERROR) << "Failed to get multi-dex checksums: " << error_msg;
       return {};
     }
 
@@ -263,16 +306,31 @@ std::vector<art_apex::Component> GenerateComponents(const std::vector<std::strin
     }
     const std::string checksum = oss.str();
 
-    components.emplace_back(art_apex::Component{path, static_cast<uint64_t>(sb.st_size), checksum});
+    Result<T> component = custom_generator(path, static_cast<uint64_t>(sb.st_size), checksum);
+    if (!component.ok()) {
+      LOG(ERROR) << "Failed to generate component: " << component.error();
+      return {};
+    }
+
+    components.push_back(*std::move(component));
   }
 
   return components;
 }
 
+std::vector<art_apex::Component> GenerateComponents(const std::vector<std::string>& jars) {
+  return GenerateComponents<art_apex::Component>(
+      jars, [](const std::string& path, uint64_t size, const std::string& checksum) {
+        return art_apex::Component{path, size, checksum};
+      });
+}
+
 // Checks whether a group of artifacts exists. Returns true if all are present, false otherwise.
+// If `checked_artifacts` is present, adds checked artifacts to `checked_artifacts`.
 bool ArtifactsExist(const OdrArtifacts& artifacts,
                     bool check_art_file,
-                    /*out*/ std::string* error_msg) {
+                    /*out*/ std::string* error_msg,
+                    /*out*/ std::vector<std::string>* checked_artifacts = nullptr) {
   std::vector<const char*> paths{artifacts.OatPath().c_str(), artifacts.VdexPath().c_str()};
   if (check_art_file) {
     paths.push_back(artifacts.ImagePath().c_str());
@@ -286,6 +344,13 @@ bool ArtifactsExist(const OdrArtifacts& artifacts,
       return false;
     }
   }
+  // This should be done after checking all artifacts because either all of them are valid or none
+  // of them is valid.
+  if (checked_artifacts != nullptr) {
+    for (const char* path : paths) {
+      checked_artifacts->emplace_back(path);
+    }
+  }
   return true;
 }
 
@@ -293,8 +358,8 @@ bool PrepareDex2OatConcurrencyArguments(/*out*/ int* threads, /*out*/ std::vecto
   DCHECK(threads);
   DCHECK(cpu_set && cpu_set->empty());
   *threads = android::base::GetIntProperty("dalvik.vm.boot-dex2oat-threads",
-                                           /*default_value=*/ 0,
-                                           /*min=*/ 1);
+                                           /*default_value=*/0,
+                                           /*min=*/1);
 
   std::string cpu_set_spec = android::base::GetProperty("dalvik.vm.boot-dex2oat-cpu-set", "");
   if (cpu_set_spec.empty()) {
@@ -334,9 +399,10 @@ bool PrepareBootClasspathFds(/*inout*/ std::vector<int>& boot_classpath_fds,
     if (StartsWith(jar, "/apex/")) {
       boot_classpath_fds.emplace_back(-1);
     } else {
-      std::unique_ptr<File> jar_file(OS::OpenFileForReading(jar.c_str()));
+      std::string actual_path = AndroidRootRewrite(jar);
+      std::unique_ptr<File> jar_file(OS::OpenFileForReading(actual_path.c_str()));
       if (!jar_file || !jar_file->IsValid()) {
-        LOG(ERROR) << "Failed to open a BCP jar " << jar;
+        LOG(ERROR) << "Failed to open a BCP jar " << actual_path;
         return false;
       }
       boot_classpath_fds.emplace_back(jar_file->Fd());
@@ -409,10 +475,10 @@ WARN_UNUSED bool CheckCompilationSpace() {
   // the users data partition.
   //
   // We do not have a good way of pre-computing the required space for a compilation step, but
-  // typically observe 16MB as the largest size of an AOT artifact. Since there are three
-  // AOT artifacts per compilation step - an image file, executable file, and a verification
-  // data file - the threshold is three times 16MB.
-  static constexpr uint64_t kMinimumSpaceForCompilation = 3 * 16 * 1024 * 1024;
+  // typically observe no more than 48MiB as the largest total size of AOT artifacts for a single
+  // dex2oat invocation, which includes an image file, an executable file, and a verification data
+  // file.
+  static constexpr uint64_t kMinimumSpaceForCompilation = 48 * 1024 * 1024;
 
   uint64_t bytes_available;
   const std::string& art_apex_data_path = GetArtApexData();
@@ -464,7 +530,7 @@ OnDeviceRefresh::OnDeviceRefresh(const OdrConfig& config)
     : OnDeviceRefresh(config,
                       Concatenate({config.GetArtifactDirectory(), "/", kCacheInfoFile}),
                       std::make_unique<ExecUtils>(),
-                      std::move(OdrDexopt::Create(config, std::make_unique<ExecUtils>()))) {}
+                      OdrDexopt::Create(config, std::make_unique<ExecUtils>())) {}
 
 OnDeviceRefresh::OnDeviceRefresh(const OdrConfig& config,
                                  const std::string& cache_info_filename,
@@ -484,8 +550,17 @@ OnDeviceRefresh::OnDeviceRefresh(const OdrConfig& config,
     }
   }
 
-  systemserver_compilable_jars_ = android::base::Split(config_.GetSystemServerClasspath(), ":");
+  all_systemserver_jars_ = android::base::Split(config_.GetSystemServerClasspath(), ":");
+  systemserver_classpath_jars_ = {all_systemserver_jars_.begin(), all_systemserver_jars_.end()};
   boot_classpath_jars_ = android::base::Split(config_.GetBootClasspath(), ":");
+  std::string standalone_system_server_jars_str = config_.GetStandaloneSystemServerJars();
+  if (!standalone_system_server_jars_str.empty()) {
+    std::vector<std::string> standalone_systemserver_jars =
+        android::base::Split(standalone_system_server_jars_str, ":");
+    std::move(standalone_systemserver_jars.begin(),
+              standalone_systemserver_jars.end(),
+              std::back_inserter(all_systemserver_jars_));
+  }
 }
 
 time_t OnDeviceRefresh::GetExecutionTimeUsed() const {
@@ -493,7 +568,8 @@ time_t OnDeviceRefresh::GetExecutionTimeUsed() const {
 }
 
 time_t OnDeviceRefresh::GetExecutionTimeRemaining() const {
-  return std::max(static_cast<time_t>(0), config_.GetMaxExecutionSeconds() - GetExecutionTimeUsed());
+  return std::max(static_cast<time_t>(0),
+                  config_.GetMaxExecutionSeconds() - GetExecutionTimeUsed());
 }
 
 time_t OnDeviceRefresh::GetSubprocessTimeout() const {
@@ -562,7 +638,7 @@ void OnDeviceRefresh::WriteCacheInfo() const {
     return;
   }
 
-  std::optional<std::vector<art_apex::Component>> system_server_components =
+  std::optional<std::vector<art_apex::SystemServerComponent>> system_server_components =
       GenerateSystemServerComponents();
   if (!system_server_components.has_value()) {
     LOG(ERROR) << "No system_server extension components.";
@@ -574,16 +650,15 @@ void OnDeviceRefresh::WriteCacheInfo() const {
                            {art_apex::ModuleInfoList(module_info_list)},
                            {art_apex::Classpath(bcp_components.value())},
                            {art_apex::Classpath(bcp_compilable_components.value())},
-                           {art_apex::Classpath(system_server_components.value())});
+                           {art_apex::SystemServerComponents(system_server_components.value())});
 
   art_apex::write(out, info);
 }
 
-void OnDeviceRefresh::ReportNextBootAnimationProgress(uint32_t current_compilation) const {
-  uint32_t number_of_compilations =
-      config_.GetBootExtensionIsas().size() + systemserver_compilable_jars_.size();
-  // We arbitrarily show progress until 90%, expecting that our compilations
-  // take a large chunk of boot time.
+static void ReportNextBootAnimationProgress(uint32_t current_compilation,
+                                            uint32_t number_of_compilations) {
+  // We arbitrarily show progress until 90%, expecting that our compilations take a large chunk of
+  // boot time.
   uint32_t value = (90 * current_compilation) / number_of_compilations;
   android::base::SetProperty("service.bootanim.progress", std::to_string(value));
 }
@@ -597,8 +672,14 @@ std::vector<art_apex::Component> OnDeviceRefresh::GenerateBootExtensionCompilabl
   return GenerateComponents(boot_extension_compilable_jars_);
 }
 
-std::vector<art_apex::Component> OnDeviceRefresh::GenerateSystemServerComponents() const {
-  return GenerateComponents(systemserver_compilable_jars_);
+std::vector<art_apex::SystemServerComponent> OnDeviceRefresh::GenerateSystemServerComponents()
+    const {
+  return GenerateComponents<art_apex::SystemServerComponent>(
+      all_systemserver_jars_,
+      [&](const std::string& path, uint64_t size, const std::string& checksum) {
+        bool isInClasspath = ContainsElement(systemserver_classpath_jars_, path);
+        return art_apex::SystemServerComponent{path, size, checksum, isInClasspath};
+      });
 }
 
 std::string OnDeviceRefresh::GetBootImageExtensionImage(bool on_system) const {
@@ -632,51 +713,6 @@ std::string OnDeviceRefresh::GetSystemServerImagePath(bool on_system,
   }
 }
 
-WARN_UNUSED bool OnDeviceRefresh::RemoveBootExtensionArtifactsFromData(InstructionSet isa) const {
-  if (config_.GetDryRun()) {
-    LOG(INFO) << "Removal of bcp extension artifacts on /data skipped (dry-run).";
-    return true;
-  }
-
-  const std::string apexdata_image_location =
-      GetBootImageExtensionImagePath(/*on_system=*/false, isa);
-  LOG(INFO) << "Removing boot class path artifacts on /data for "
-            << QuotePath(apexdata_image_location);
-  return RemoveArtifacts(OdrArtifacts::ForBootImageExtension(apexdata_image_location));
-}
-
-WARN_UNUSED bool OnDeviceRefresh::RemoveSystemServerArtifactsFromData() const {
-  if (config_.GetDryRun()) {
-    LOG(INFO) << "Removal of system_server artifacts on /data skipped (dry-run).";
-    return true;
-  }
-
-  bool success = true;
-  for (const std::string& jar_path : systemserver_compilable_jars_) {
-    const std::string image_location = GetSystemServerImagePath(/*on_system=*/false, jar_path);
-    const OdrArtifacts artifacts = OdrArtifacts::ForSystemServer(image_location);
-    LOG(INFO) << "Removing system_server artifacts on /data for " << QuotePath(jar_path);
-    success &= RemoveArtifacts(artifacts);
-  }
-  return success;
-}
-
-WARN_UNUSED bool OnDeviceRefresh::RemoveArtifacts(const OdrArtifacts& artifacts) const {
-  bool success = true;
-  for (const auto& location : {artifacts.ImagePath(), artifacts.OatPath(), artifacts.VdexPath()}) {
-    if (config_.GetDryRun()) {
-      LOG(INFO) << "Removing " << QuotePath(location) << " (dry-run).";
-      continue;
-    }
-
-    if (OS::FileExists(location.c_str()) && unlink(location.c_str()) != 0) {
-      PLOG(ERROR) << "Failed to remove: " << QuotePath(location);
-      success = false;
-    }
-  }
-  return success;
-}
-
 WARN_UNUSED bool OnDeviceRefresh::RemoveArtifactsDirectory() const {
   if (config_.GetDryRun()) {
     LOG(INFO) << "Directory " << QuotePath(config_.GetArtifactDirectory())
@@ -689,24 +725,30 @@ WARN_UNUSED bool OnDeviceRefresh::RemoveArtifactsDirectory() const {
 WARN_UNUSED bool OnDeviceRefresh::BootExtensionArtifactsExist(
     bool on_system,
     const InstructionSet isa,
-    /*out*/ std::string* error_msg) const {
+    /*out*/ std::string* error_msg,
+    /*out*/ std::vector<std::string>* checked_artifacts) const {
   const std::string apexdata_image_location = GetBootImageExtensionImagePath(on_system, isa);
   const OdrArtifacts artifacts = OdrArtifacts::ForBootImageExtension(apexdata_image_location);
-  return ArtifactsExist(artifacts, /*check_art_file=*/true, error_msg);
+  return ArtifactsExist(artifacts, /*check_art_file=*/true, error_msg, checked_artifacts);
 }
 
-WARN_UNUSED bool OnDeviceRefresh::SystemServerArtifactsExist(bool on_system,
-                                                             /*out*/ std::string* error_msg) const {
-  for (const std::string& jar_path : systemserver_compilable_jars_) {
+WARN_UNUSED bool OnDeviceRefresh::SystemServerArtifactsExist(
+    bool on_system,
+    /*out*/ std::string* error_msg,
+    /*out*/ std::set<std::string>* jars_missing_artifacts,
+    /*out*/ std::vector<std::string>* checked_artifacts) const {
+  for (const std::string& jar_path : all_systemserver_jars_) {
     const std::string image_location = GetSystemServerImagePath(on_system, jar_path);
     const OdrArtifacts artifacts = OdrArtifacts::ForSystemServer(image_location);
     // .art files are optional and are not generated for all jars by the build system.
     const bool check_art_file = !on_system;
-    if (!ArtifactsExist(artifacts, check_art_file, error_msg)) {
-      return false;
+    std::string error_msg_tmp;
+    if (!ArtifactsExist(artifacts, check_art_file, &error_msg_tmp, checked_artifacts)) {
+      jars_missing_artifacts->insert(jar_path);
+      *error_msg = error_msg->empty() ? error_msg_tmp : *error_msg + "\n" + error_msg_tmp;
     }
   }
-  return true;
+  return jars_missing_artifacts->empty();
 }
 
 WARN_UNUSED bool OnDeviceRefresh::CheckBootExtensionArtifactsAreUpToDate(
@@ -714,16 +756,13 @@ WARN_UNUSED bool OnDeviceRefresh::CheckBootExtensionArtifactsAreUpToDate(
     const InstructionSet isa,
     const apex::ApexInfo& art_apex_info,
     const std::optional<art_apex::CacheInfo>& cache_info,
-    /*out*/ bool* cleanup_required) const {
-  std::string error_msg;
-
+    /*out*/ std::vector<std::string>* checked_artifacts) const {
   if (art_apex_info.getIsFactory()) {
     LOG(INFO) << "Factory ART APEX mounted.";
 
     // ART is not updated, so we can use the artifacts on /system. Check if they exist.
+    std::string error_msg;
     if (BootExtensionArtifactsExist(/*on_system=*/true, isa, &error_msg)) {
-      // We don't need the artifacts on /data since we can use those on /system.
-      *cleanup_required = true;
       return true;
     }
 
@@ -736,7 +775,6 @@ WARN_UNUSED bool OnDeviceRefresh::CheckBootExtensionArtifactsAreUpToDate(
     // before.
     PLOG(INFO) << "No prior cache-info file: " << QuotePath(cache_info_filename_);
     metrics.SetTrigger(OdrMetrics::Trigger::kMissingArtifacts);
-    *cleanup_required = true;
     return false;
   }
 
@@ -746,7 +784,6 @@ WARN_UNUSED bool OnDeviceRefresh::CheckBootExtensionArtifactsAreUpToDate(
   if (cached_art_info == nullptr) {
     LOG(INFO) << "Missing ART APEX info from cache-info.";
     metrics.SetTrigger(OdrMetrics::Trigger::kApexVersionMismatch);
-    *cleanup_required = true;
     return false;
   }
 
@@ -754,7 +791,6 @@ WARN_UNUSED bool OnDeviceRefresh::CheckBootExtensionArtifactsAreUpToDate(
     LOG(INFO) << "ART APEX version code mismatch (" << cached_art_info->getVersionCode()
               << " != " << art_apex_info.getVersionCode() << ").";
     metrics.SetTrigger(OdrMetrics::Trigger::kApexVersionMismatch);
-    *cleanup_required = true;
     return false;
   }
 
@@ -762,7 +798,6 @@ WARN_UNUSED bool OnDeviceRefresh::CheckBootExtensionArtifactsAreUpToDate(
     LOG(INFO) << "ART APEX version name mismatch (" << cached_art_info->getVersionName()
               << " != " << art_apex_info.getVersionName() << ").";
     metrics.SetTrigger(OdrMetrics::Trigger::kApexVersionMismatch);
-    *cleanup_required = true;
     return false;
   }
 
@@ -775,7 +810,6 @@ WARN_UNUSED bool OnDeviceRefresh::CheckBootExtensionArtifactsAreUpToDate(
     LOG(INFO) << "ART APEX last update time mismatch (" << cached_art_last_update_millis
               << " != " << art_apex_info.getLastUpdateMillis() << ").";
     metrics.SetTrigger(OdrMetrics::Trigger::kApexVersionMismatch);
-    *cleanup_required = true;
     return false;
   }
 
@@ -794,37 +828,43 @@ WARN_UNUSED bool OnDeviceRefresh::CheckBootExtensionArtifactsAreUpToDate(
        !cache_info->getFirstDex2oatBootClasspath()->hasComponent())) {
     LOG(INFO) << "Missing Dex2oatBootClasspath components.";
     metrics.SetTrigger(OdrMetrics::Trigger::kDexFilesChanged);
-    *cleanup_required = true;
     return false;
   }
 
   const std::vector<art_apex::Component>& bcp_compilable_components =
       cache_info->getFirstDex2oatBootClasspath()->getComponent();
-  if (!CheckComponents(expected_bcp_compilable_components, bcp_compilable_components, &error_msg)) {
-    LOG(INFO) << "Dex2OatClasspath components mismatch: " << error_msg;
+  Result<void> result =
+      CheckComponents(expected_bcp_compilable_components, bcp_compilable_components);
+  if (!result.ok()) {
+    LOG(INFO) << "Dex2OatClasspath components mismatch: " << result.error();
     metrics.SetTrigger(OdrMetrics::Trigger::kDexFilesChanged);
-    *cleanup_required = true;
     return false;
   }
 
   // Cache info looks good, check all compilation artifacts exist.
-  if (!BootExtensionArtifactsExist(/*on_system=*/false, isa, &error_msg)) {
+  std::string error_msg;
+  if (!BootExtensionArtifactsExist(/*on_system=*/false, isa, &error_msg, checked_artifacts)) {
     LOG(INFO) << "Incomplete boot extension artifacts. " << error_msg;
     metrics.SetTrigger(OdrMetrics::Trigger::kMissingArtifacts);
-    *cleanup_required = true;
     return false;
   }
 
-  *cleanup_required = false;
   return true;
 }
 
-WARN_UNUSED bool OnDeviceRefresh::CheckSystemServerArtifactsAreUpToDate(
+bool OnDeviceRefresh::CheckSystemServerArtifactsAreUpToDate(
     OdrMetrics& metrics,
     const std::vector<apex::ApexInfo>& apex_info_list,
     const std::optional<art_apex::CacheInfo>& cache_info,
-    /*out*/ bool* cleanup_required) const {
-  std::string error_msg;
+    /*out*/ std::set<std::string>* jars_to_compile,
+    /*out*/ std::vector<std::string>* checked_artifacts) const {
+  auto compile_all = [&, this]() {
+    *jars_to_compile = AllSystemServerJars();
+    return false;
+  };
+
+  std::set<std::string> jars_missing_artifacts_on_system;
+  bool artifacts_on_system_up_to_date = false;
 
   if (std::all_of(apex_info_list.begin(),
                   apex_info_list.end(),
@@ -832,14 +872,15 @@ WARN_UNUSED bool OnDeviceRefresh::CheckSystemServerArtifactsAreUpToDate(
     LOG(INFO) << "Factory APEXes mounted.";
 
     // APEXes are not updated, so we can use the artifacts on /system. Check if they exist.
-    if (SystemServerArtifactsExist(/*on_system=*/true, &error_msg)) {
-      // We don't need the artifacts on /data since we can use those on /system.
-      *cleanup_required = true;
+    std::string error_msg;
+    if (SystemServerArtifactsExist(
+            /*on_system=*/true, &error_msg, &jars_missing_artifacts_on_system)) {
       return true;
     }
 
     LOG(INFO) << "Incomplete system server artifacts on /system. " << error_msg;
     LOG(INFO) << "Checking cache.";
+    artifacts_on_system_up_to_date = true;
   }
 
   if (!cache_info.has_value()) {
@@ -847,8 +888,11 @@ WARN_UNUSED bool OnDeviceRefresh::CheckSystemServerArtifactsAreUpToDate(
     // before.
     PLOG(INFO) << "No prior cache-info file: " << QuotePath(cache_info_filename_);
     metrics.SetTrigger(OdrMetrics::Trigger::kMissingArtifacts);
-    *cleanup_required = true;
-    return false;
+    if (artifacts_on_system_up_to_date) {
+      *jars_to_compile = jars_missing_artifacts_on_system;
+      return false;
+    }
+    return compile_all();
   }
 
   // Check whether the current cached module info differs from the current module info.
@@ -857,17 +901,15 @@ WARN_UNUSED bool OnDeviceRefresh::CheckSystemServerArtifactsAreUpToDate(
   if (cached_module_info_list == nullptr) {
     LOG(INFO) << "Missing APEX info list from cache-info.";
     metrics.SetTrigger(OdrMetrics::Trigger::kApexVersionMismatch);
-    *cleanup_required = true;
-    return false;
+    return compile_all();
   }
 
   std::unordered_map<std::string, const art_apex::ModuleInfo*> cached_module_info_map;
   for (const art_apex::ModuleInfo& module_info : cached_module_info_list->getModuleInfo()) {
     if (!module_info.hasName()) {
       LOG(INFO) << "Unexpected module info from cache-info. Missing module name.";
-      metrics.SetTrigger(OdrMetrics::Trigger::kUnknown);
-      *cleanup_required = true;
-      return false;
+      metrics.SetTrigger(OdrMetrics::Trigger::kApexVersionMismatch);
+      return compile_all();
     }
     cached_module_info_map[module_info.getName()] = &module_info;
   }
@@ -878,8 +920,7 @@ WARN_UNUSED bool OnDeviceRefresh::CheckSystemServerArtifactsAreUpToDate(
       LOG(INFO) << "Missing APEX info from cache-info (" << current_apex_info.getModuleName()
                 << ").";
       metrics.SetTrigger(OdrMetrics::Trigger::kApexVersionMismatch);
-      *cleanup_required = true;
-      return false;
+      return compile_all();
     }
 
     const art_apex::ModuleInfo* cached_module_info = it->second;
@@ -889,8 +930,7 @@ WARN_UNUSED bool OnDeviceRefresh::CheckSystemServerArtifactsAreUpToDate(
                 << cached_module_info->getVersionCode()
                 << " != " << current_apex_info.getVersionCode() << ").";
       metrics.SetTrigger(OdrMetrics::Trigger::kApexVersionMismatch);
-      *cleanup_required = true;
-      return false;
+      return compile_all();
     }
 
     if (cached_module_info->getVersionName() != current_apex_info.getVersionName()) {
@@ -898,8 +938,7 @@ WARN_UNUSED bool OnDeviceRefresh::CheckSystemServerArtifactsAreUpToDate(
                 << cached_module_info->getVersionName()
                 << " != " << current_apex_info.getVersionName() << ").";
       metrics.SetTrigger(OdrMetrics::Trigger::kApexVersionMismatch);
-      *cleanup_required = true;
-      return false;
+      return compile_all();
     }
 
     if (!cached_module_info->hasLastUpdateMillis() ||
@@ -908,8 +947,7 @@ WARN_UNUSED bool OnDeviceRefresh::CheckSystemServerArtifactsAreUpToDate(
                 << cached_module_info->getLastUpdateMillis()
                 << " != " << current_apex_info.getLastUpdateMillis() << ").";
       metrics.SetTrigger(OdrMetrics::Trigger::kApexVersionMismatch);
-      *cleanup_required = true;
-      return false;
+      return compile_all();
     }
   }
 
@@ -922,24 +960,24 @@ WARN_UNUSED bool OnDeviceRefresh::CheckSystemServerArtifactsAreUpToDate(
   //
   // The system_server components may change unexpectedly, for example an OTA could update
   // services.jar.
-  const std::vector<art_apex::Component> expected_system_server_components =
+  const std::vector<art_apex::SystemServerComponent> expected_system_server_components =
       GenerateSystemServerComponents();
   if (expected_system_server_components.size() != 0 &&
-      (!cache_info->hasSystemServerClasspath() ||
-       !cache_info->getFirstSystemServerClasspath()->hasComponent())) {
-    LOG(INFO) << "Missing SystemServerClasspath components.";
+      (!cache_info->hasSystemServerComponents() ||
+       !cache_info->getFirstSystemServerComponents()->hasComponent())) {
+    LOG(INFO) << "Missing SystemServerComponents.";
     metrics.SetTrigger(OdrMetrics::Trigger::kDexFilesChanged);
-    *cleanup_required = true;
-    return false;
+    return compile_all();
   }
 
-  const std::vector<art_apex::Component>& system_server_components =
-      cache_info->getFirstSystemServerClasspath()->getComponent();
-  if (!CheckComponents(expected_system_server_components, system_server_components, &error_msg)) {
-    LOG(INFO) << "SystemServerClasspath components mismatch: " << error_msg;
+  const std::vector<art_apex::SystemServerComponent>& system_server_components =
+      cache_info->getFirstSystemServerComponents()->getComponent();
+  Result<void> result =
+      CheckSystemServerComponents(expected_system_server_components, system_server_components);
+  if (!result.ok()) {
+    LOG(INFO) << "SystemServerComponents mismatch: " << result.error();
     metrics.SetTrigger(OdrMetrics::Trigger::kDexFilesChanged);
-    *cleanup_required = true;
-    return false;
+    return compile_all();
   }
 
   const std::vector<art_apex::Component> expected_bcp_components =
@@ -948,46 +986,146 @@ WARN_UNUSED bool OnDeviceRefresh::CheckSystemServerArtifactsAreUpToDate(
       (!cache_info->hasBootClasspath() || !cache_info->getFirstBootClasspath()->hasComponent())) {
     LOG(INFO) << "Missing BootClasspath components.";
     metrics.SetTrigger(OdrMetrics::Trigger::kDexFilesChanged);
-    *cleanup_required = true;
     return false;
   }
 
   const std::vector<art_apex::Component>& bcp_components =
       cache_info->getFirstBootClasspath()->getComponent();
-  if (!CheckComponents(expected_bcp_components, bcp_components, &error_msg)) {
-    LOG(INFO) << "BootClasspath components mismatch: " << error_msg;
+  result = CheckComponents(expected_bcp_components, bcp_components);
+  if (!result.ok()) {
+    LOG(INFO) << "BootClasspath components mismatch: " << result.error();
     metrics.SetTrigger(OdrMetrics::Trigger::kDexFilesChanged);
     // Boot classpath components can be dependencies of system_server components, so system_server
     // components need to be recompiled if boot classpath components are changed.
-    *cleanup_required = true;
-    return false;
+    return compile_all();
   }
 
-  if (!SystemServerArtifactsExist(/*on_system=*/false, &error_msg)) {
+  std::string error_msg;
+  std::set<std::string> jars_missing_artifacts_on_data;
+  if (!SystemServerArtifactsExist(
+          /*on_system=*/false, &error_msg, &jars_missing_artifacts_on_data, checked_artifacts)) {
+    if (artifacts_on_system_up_to_date) {
+      // Check if the remaining system_server artifacts are on /data.
+      std::set_intersection(jars_missing_artifacts_on_system.begin(),
+                            jars_missing_artifacts_on_system.end(),
+                            jars_missing_artifacts_on_data.begin(),
+                            jars_missing_artifacts_on_data.end(),
+                            std::inserter(*jars_to_compile, jars_to_compile->end()));
+      if (!jars_to_compile->empty()) {
+        LOG(INFO) << "Incomplete system_server artifacts on /data. " << error_msg;
+        metrics.SetTrigger(OdrMetrics::Trigger::kMissingArtifacts);
+        return false;
+      }
+
+      LOG(INFO) << "Found the remaining system_server artifacts on /data.";
+      return true;
+    }
+
     LOG(INFO) << "Incomplete system_server artifacts. " << error_msg;
-    // No clean-up is required here: we have boot extension artifacts. The method
-    // `SystemServerArtifactsExistOnData()` checks in compilation order so it is possible some of
-    // the artifacts are here. We likely ran out of space compiling the system_server artifacts.
-    // Any artifacts present are usable.
     metrics.SetTrigger(OdrMetrics::Trigger::kMissingArtifacts);
-    *cleanup_required = false;
+    *jars_to_compile = jars_missing_artifacts_on_data;
     return false;
   }
 
-  *cleanup_required = false;
   return true;
 }
 
-WARN_UNUSED ExitCode OnDeviceRefresh::CheckArtifactsAreUpToDate(
-    OdrMetrics& metrics,
-    /*out*/ std::vector<InstructionSet>* compile_boot_extensions,
-    /*out*/ bool* compile_system_server) const {
+Result<void> OnDeviceRefresh::CleanupArtifactDirectory(
+    const std::vector<std::string>& artifacts_to_keep) const {
+  const std::string& artifact_dir = config_.GetArtifactDirectory();
+  std::unordered_set<std::string> artifact_set{artifacts_to_keep.begin(), artifacts_to_keep.end()};
+
+  // When anything unexpected happens, remove all artifacts.
+  auto remove_artifact_dir = android::base::make_scope_guard([&]() {
+    if (!RemoveDirectory(artifact_dir)) {
+      LOG(ERROR) << "Failed to remove the artifact directory";
+    }
+  });
+
+  std::vector<std::filesystem::directory_entry> entries;
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::recursive_directory_iterator(artifact_dir, ec)) {
+    // Save the entries and use them later because modifications during the iteration will result in
+    // undefined behavior;
+    entries.push_back(entry);
+  }
+  if (ec) {
+    return Errorf("Failed to iterate over entries in the artifact directory: {}", ec.message());
+  }
+
+  for (const std::filesystem::directory_entry& entry : entries) {
+    std::string path = entry.path().string();
+    if (entry.is_regular_file()) {
+      if (!ContainsElement(artifact_set, path)) {
+        LOG(INFO) << "Removing " << path;
+        if (unlink(path.c_str()) != 0) {
+          return ErrnoErrorf("Failed to remove file {}", QuotePath(path));
+        }
+      }
+    } else if (!entry.is_directory()) {
+      // Neither a regular file nor a directory. Unexpected file type.
+      LOG(INFO) << "Removing " << path;
+      if (unlink(path.c_str()) != 0) {
+        return ErrnoErrorf("Failed to remove file {}", QuotePath(path));
+      }
+    }
+  }
+
+  remove_artifact_dir.Disable();
+  return {};
+}
+
+Result<void> OnDeviceRefresh::RefreshExistingArtifacts() const {
+  const std::string& artifact_dir = config_.GetArtifactDirectory();
+  if (!OS::DirectoryExists(artifact_dir.c_str())) {
+    return {};
+  }
+
+  std::vector<std::filesystem::directory_entry> entries;
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::recursive_directory_iterator(artifact_dir, ec)) {
+    // Save the entries and use them later because modifications during the iteration will result in
+    // undefined behavior;
+    entries.push_back(entry);
+  }
+  if (ec) {
+    return Errorf("Failed to iterate over entries in the artifact directory: {}", ec.message());
+  }
+
+  for (const std::filesystem::directory_entry& entry : entries) {
+    std::string path = entry.path().string();
+    if (entry.is_regular_file()) {
+      // Unexpected files are already removed by `CleanupArtifactDirectory`. We can safely assume
+      // that all the remaining files are good.
+      LOG(INFO) << "Refreshing " << path;
+      std::string content;
+      if (!android::base::ReadFileToString(path, &content)) {
+        return Errorf("Failed to read file {}", QuotePath(path));
+      }
+      if (unlink(path.c_str()) != 0) {
+        return ErrnoErrorf("Failed to remove file {}", QuotePath(path));
+      }
+      if (!android::base::WriteStringToFile(content, path)) {
+        return Errorf("Failed to write file {}", QuotePath(path));
+      }
+      if (chmod(path.c_str(), kFileMode) != 0) {
+        return ErrnoErrorf("Failed to chmod file {}", QuotePath(path));
+      }
+    }
+  }
+
+  return {};
+}
+
+WARN_UNUSED ExitCode
+OnDeviceRefresh::CheckArtifactsAreUpToDate(OdrMetrics& metrics,
+                                           /*out*/ CompilationOptions* compilation_options) const {
   metrics.SetStage(OdrMetrics::Stage::kCheck);
 
   // Clean-up helper used to simplify clean-ups and handling failures there.
   auto cleanup_and_compile_all = [&, this]() {
-    *compile_boot_extensions = config_.GetBootExtensionIsas();
-    *compile_system_server = true;
+    compilation_options->compile_boot_extensions_for_isas = config_.GetBootExtensionIsas();
+    compilation_options->system_server_jars_to_compile = AllSystemServerJars();
     return RemoveArtifactsDirectory() ? ExitCode::kCompilationRequired : ExitCode::kCleanupFailed;
   };
 
@@ -1022,55 +1160,56 @@ WARN_UNUSED ExitCode OnDeviceRefresh::CheckArtifactsAreUpToDate(
     // compatible with an old cache-info file. Further up-to-date checks are not possible if it
     // does.
     PLOG(ERROR) << "Failed to parse cache-info file: " << QuotePath(cache_info_filename_);
-    metrics.SetTrigger(OdrMetrics::Trigger::kUnknown);
+    metrics.SetTrigger(OdrMetrics::Trigger::kApexVersionMismatch);
     return cleanup_and_compile_all();
   }
 
   InstructionSet system_server_isa = config_.GetSystemServerIsa();
-  bool cleanup_required;
+  std::vector<std::string> checked_artifacts;
+  checked_artifacts.push_back(cache_info_filename_);
 
   for (const InstructionSet isa : config_.GetBootExtensionIsas()) {
-    cleanup_required = false;
     if (!CheckBootExtensionArtifactsAreUpToDate(
-            metrics, isa, art_apex_info.value(), cache_info, &cleanup_required)) {
-      compile_boot_extensions->push_back(isa);
+            metrics, isa, art_apex_info.value(), cache_info, &checked_artifacts)) {
+      compilation_options->compile_boot_extensions_for_isas.push_back(isa);
       // system_server artifacts are invalid without valid boot extension artifacts.
       if (isa == system_server_isa) {
-        *compile_system_server = true;
-        if (!RemoveSystemServerArtifactsFromData()) {
-          return ExitCode::kCleanupFailed;
-        }
-      }
-    }
-    if (cleanup_required) {
-      if (!RemoveBootExtensionArtifactsFromData(isa)) {
-        return ExitCode::kCleanupFailed;
+        compilation_options->system_server_jars_to_compile = AllSystemServerJars();
       }
     }
   }
 
-  cleanup_required = false;
-  if (!*compile_system_server &&
-      !CheckSystemServerArtifactsAreUpToDate(
-          metrics, apex_info_list.value(), cache_info, &cleanup_required)) {
-    *compile_system_server = true;
+  if (compilation_options->system_server_jars_to_compile.empty()) {
+    CheckSystemServerArtifactsAreUpToDate(metrics,
+                                          apex_info_list.value(),
+                                          cache_info,
+                                          &compilation_options->system_server_jars_to_compile,
+                                          &checked_artifacts);
   }
-  if (cleanup_required) {
-    if (!RemoveSystemServerArtifactsFromData()) {
+
+  bool compilation_required = (!compilation_options->compile_boot_extensions_for_isas.empty() ||
+                               !compilation_options->system_server_jars_to_compile.empty());
+
+  if (compilation_required) {
+    if (!config_.GetPartialCompilation()) {
+      return cleanup_and_compile_all();
+    }
+    Result<void> result = CleanupArtifactDirectory(checked_artifacts);
+    if (!result.ok()) {
+      LOG(ERROR) << result.error();
       return ExitCode::kCleanupFailed;
     }
   }
 
-  return (!compile_boot_extensions->empty() || *compile_system_server) ?
-             ExitCode::kCompilationRequired :
-             ExitCode::kOkay;
+  return compilation_required ? ExitCode::kCompilationRequired : ExitCode::kOkay;
 }
 
-WARN_UNUSED bool OnDeviceRefresh::CompileBootExtensionArtifacts(const InstructionSet isa,
-                                                                const std::string& staging_dir,
-                                                                OdrMetrics& metrics,
-                                                                uint32_t* dex2oat_invocation_count,
-                                                                std::string* error_msg) const {
+WARN_UNUSED bool OnDeviceRefresh::CompileBootExtensionArtifacts(
+    const InstructionSet isa,
+    const std::string& staging_dir,
+    OdrMetrics& metrics,
+    const std::function<void()>& on_dex2oat_success,
+    std::string* error_msg) const {
   ScopedOdrCompilationTimer compilation_timer(metrics);
 
   DexoptBcpExtArgs dexopt_args;
@@ -1078,8 +1217,8 @@ WARN_UNUSED bool OnDeviceRefresh::CompileBootExtensionArtifacts(const Instructio
 
   std::vector<std::unique_ptr<File>> readonly_files_raii;
   const std::string boot_profile_file(GetAndroidRoot() + "/etc/boot-image.prof");
-  if (!PrepareDex2OatProfileIfExists(&dexopt_args.profileFd, &readonly_files_raii,
-                                     boot_profile_file)) {
+  if (!PrepareDex2OatProfileIfExists(
+          &dexopt_args.profileFd, &readonly_files_raii, boot_profile_file)) {
     LOG(ERROR) << "Missing expected profile for boot extension: " << boot_profile_file;
     return false;
   }
@@ -1095,7 +1234,8 @@ WARN_UNUSED bool OnDeviceRefresh::CompileBootExtensionArtifacts(const Instructio
 
   // Add boot extensions to compile.
   for (const std::string& component : boot_extension_compilable_jars_) {
-    std::unique_ptr<File> file(OS::OpenFileForReading(component.c_str()));
+    std::string actual_path = AndroidRootRewrite(component);
+    std::unique_ptr<File> file(OS::OpenFileForReading(actual_path.c_str()));
     dexopt_args.dexPaths.emplace_back(component);
     dexopt_args.dexFds.emplace_back(file->Fd());
     readonly_files_raii.push_back(std::move(file));
@@ -1103,9 +1243,7 @@ WARN_UNUSED bool OnDeviceRefresh::CompileBootExtensionArtifacts(const Instructio
 
   auto bcp_jars = android::base::Split(config_.GetDex2oatBootClasspath(), ":");
   dexopt_args.bootClasspaths = bcp_jars;
-  if (!PrepareBootClasspathFds(dexopt_args.bootClasspathFds,
-                               readonly_files_raii,
-                               bcp_jars)) {
+  if (!PrepareBootClasspathFds(dexopt_args.bootClasspathFds, readonly_files_raii, bcp_jars)) {
     return false;
   }
 
@@ -1161,8 +1299,8 @@ WARN_UNUSED bool OnDeviceRefresh::CompileBootExtensionArtifacts(const Instructio
   }
 
   bool timed_out = false;
-  int dex2oat_exit_code = odr_dexopt_->DexoptBcpExtension(
-      dexopt_args, timeout, &timed_out, error_msg);
+  int dex2oat_exit_code =
+      odr_dexopt_->DexoptBcpExtension(dexopt_args, timeout, &timed_out, error_msg);
 
   if (dex2oat_exit_code != 0) {
     if (timed_out) {
@@ -1179,27 +1317,38 @@ WARN_UNUSED bool OnDeviceRefresh::CompileBootExtensionArtifacts(const Instructio
     return false;
   }
 
-  *dex2oat_invocation_count = *dex2oat_invocation_count + 1;
-  ReportNextBootAnimationProgress(*dex2oat_invocation_count);
-
+  on_dex2oat_success();
   return true;
 }
 
-WARN_UNUSED bool OnDeviceRefresh::CompileSystemServerArtifacts(const std::string& staging_dir,
-                                                               OdrMetrics& metrics,
-                                                               uint32_t* dex2oat_invocation_count,
-                                                               std::string* error_msg) const {
+WARN_UNUSED bool OnDeviceRefresh::CompileSystemServerArtifacts(
+    const std::string& staging_dir,
+    OdrMetrics& metrics,
+    const std::set<std::string>& system_server_jars_to_compile,
+    const std::function<void()>& on_dex2oat_success,
+    std::string* error_msg) const {
   ScopedOdrCompilationTimer compilation_timer(metrics);
   std::vector<std::string> classloader_context;
 
   const std::string dex2oat = config_.GetDex2Oat();
   const InstructionSet isa = config_.GetSystemServerIsa();
-  for (const std::string& jar : systemserver_compilable_jars_) {
+  for (const std::string& jar : all_systemserver_jars_) {
+    auto scope_guard = android::base::make_scope_guard([&]() {
+      if (ContainsElement(systemserver_classpath_jars_, jar)) {
+        classloader_context.emplace_back(jar);
+      }
+    });
+
+    if (!ContainsElement(system_server_jars_to_compile, jar)) {
+      continue;
+    }
+
     std::vector<std::unique_ptr<File>> readonly_files_raii;
     DexoptSystemServerArgs dexopt_args;
     dexopt_args.isa = InstructionSetToAidlIsa(isa);
 
-    std::unique_ptr<File> dex_file(OS::OpenFileForReading(jar.c_str()));
+    std::string actual_jar_path = AndroidRootRewrite(jar);
+    std::unique_ptr<File> dex_file(OS::OpenFileForReading(actual_jar_path.c_str()));
 
     dexopt_args.dexPath = jar;
     dexopt_args.dexFd = dex_file->Fd();
@@ -1223,12 +1372,9 @@ WARN_UNUSED bool OnDeviceRefresh::CompileSystemServerArtifacts(const std::string
 
     const std::string image_location = GetSystemServerImagePath(/*on_system=*/false, jar);
     const std::string install_location = android::base::Dirname(image_location);
-    if (classloader_context.empty()) {
-      // All images are in the same directory, we only need to check on the first iteration.
-      if (!EnsureDirectoryExists(install_location)) {
-        metrics.SetStatus(OdrMetrics::Status::kIoError);
-        return false;
-      }
+    if (!EnsureDirectoryExists(install_location)) {
+      metrics.SetStatus(OdrMetrics::Status::kIoError);
+      return false;
     }
 
     OdrArtifacts artifacts = OdrArtifacts::ForSystemServer(image_location);
@@ -1257,9 +1403,7 @@ WARN_UNUSED bool OnDeviceRefresh::CompileSystemServerArtifacts(const std::string
 
     auto bcp_jars = android::base::Split(config_.GetBootClasspath(), ":");
     dexopt_args.bootClasspaths = bcp_jars;
-    if (!PrepareBootClasspathFds(dexopt_args.bootClasspathFds,
-                                 readonly_files_raii,
-                                 bcp_jars)) {
+    if (!PrepareBootClasspathFds(dexopt_args.bootClasspathFds, readonly_files_raii, bcp_jars)) {
       return false;
     }
     std::string unused_error_msg;
@@ -1275,9 +1419,10 @@ WARN_UNUSED bool OnDeviceRefresh::CompileSystemServerArtifacts(const std::string
     if (!classloader_context.empty()) {
       std::vector<int> fds;
       for (const std::string& path : classloader_context) {
-        std::unique_ptr<File> file(OS::OpenFileForReading(path.c_str()));
+        std::string actual_path = AndroidRootRewrite(path);
+        std::unique_ptr<File> file(OS::OpenFileForReading(actual_path.c_str()));
         if (!file->IsValid()) {
-          PLOG(ERROR) << "Failed to open classloader context " << path;
+          PLOG(ERROR) << "Failed to open classloader context " << actual_path;
           metrics.SetStatus(OdrMetrics::Status::kIoError);
           return false;
         }
@@ -1285,6 +1430,9 @@ WARN_UNUSED bool OnDeviceRefresh::CompileSystemServerArtifacts(const std::string
         readonly_files_raii.emplace_back(std::move(file));
       }
       dexopt_args.classloaderFds = fds;
+    }
+    if (!art::ContainsElement(systemserver_classpath_jars_, jar)) {
+      dexopt_args.classloaderContextAsParent = true;
     }
 
     if (!PrepareDex2OatConcurrencyArguments(&dexopt_args.threads, &dexopt_args.cpuSet)) {
@@ -1300,8 +1448,8 @@ WARN_UNUSED bool OnDeviceRefresh::CompileSystemServerArtifacts(const std::string
     }
 
     bool timed_out = false;
-    int dex2oat_exit_code = odr_dexopt_->DexoptSystemServer(
-        dexopt_args, timeout, &timed_out, error_msg);
+    int dex2oat_exit_code =
+        odr_dexopt_->DexoptSystemServer(dexopt_args, timeout, &timed_out, error_msg);
 
     if (dex2oat_exit_code != 0) {
       if (timed_out) {
@@ -1318,20 +1466,24 @@ WARN_UNUSED bool OnDeviceRefresh::CompileSystemServerArtifacts(const std::string
       return false;
     }
 
-    *dex2oat_invocation_count = *dex2oat_invocation_count + 1;
-    ReportNextBootAnimationProgress(*dex2oat_invocation_count);
-    classloader_context.emplace_back(jar);
+    on_dex2oat_success();
   }
 
   return true;
 }
 
-WARN_UNUSED ExitCode
-OnDeviceRefresh::Compile(OdrMetrics& metrics,
-                         const std::vector<InstructionSet>& compile_boot_extensions,
-                         bool compile_system_server) const {
+WARN_UNUSED ExitCode OnDeviceRefresh::Compile(OdrMetrics& metrics,
+                                              const CompilationOptions& compilation_options) const {
   const char* staging_dir = nullptr;
   metrics.SetStage(OdrMetrics::Stage::kPreparation);
+
+  if (config_.GetRefresh()) {
+    Result<void> result = RefreshExistingArtifacts();
+    if (!result.ok()) {
+      LOG(ERROR) << "Failed to refresh existing artifacts: " << result.error();
+      return ExitCode::kCleanupFailed;
+    }
+  }
 
   if (!config_.GetStagingDir().empty()) {
     staging_dir = config_.GetStagingDir().c_str();
@@ -1349,22 +1501,29 @@ OnDeviceRefresh::Compile(OdrMetrics& metrics,
   std::string error_msg;
 
   uint32_t dex2oat_invocation_count = 0;
-  ReportNextBootAnimationProgress(dex2oat_invocation_count);
+  uint32_t total_dex2oat_invocation_count =
+      compilation_options.compile_boot_extensions_for_isas.size() +
+      compilation_options.system_server_jars_to_compile.size();
+  ReportNextBootAnimationProgress(dex2oat_invocation_count, total_dex2oat_invocation_count);
+  auto advance_animation_progress = [&]() {
+    ReportNextBootAnimationProgress(++dex2oat_invocation_count, total_dex2oat_invocation_count);
+  };
 
   const auto& bcp_instruction_sets = config_.GetBootExtensionIsas();
   DCHECK(!bcp_instruction_sets.empty() && bcp_instruction_sets.size() <= 2);
-  for (const InstructionSet isa : compile_boot_extensions) {
+  for (const InstructionSet isa : compilation_options.compile_boot_extensions_for_isas) {
     auto stage = (isa == bcp_instruction_sets.front()) ? OdrMetrics::Stage::kPrimaryBootClasspath :
                                                          OdrMetrics::Stage::kSecondaryBootClasspath;
     metrics.SetStage(stage);
     if (!CheckCompilationSpace()) {
       metrics.SetStatus(OdrMetrics::Status::kNoSpace);
-      // Return kOkay so odsign will keep and sign whatever we have been able to compile.
-      return ExitCode::kOkay;
+      // Return kCompilationFailed so odsign will keep and sign whatever we have been able to
+      // compile.
+      return ExitCode::kCompilationFailed;
     }
 
     if (!CompileBootExtensionArtifacts(
-            isa, staging_dir, metrics, &dex2oat_invocation_count, &error_msg)) {
+            isa, staging_dir, metrics, advance_animation_progress, &error_msg)) {
       LOG(ERROR) << "Compilation of BCP failed: " << error_msg;
       if (!config_.GetDryRun() && !RemoveDirectory(staging_dir)) {
         return ExitCode::kCleanupFailed;
@@ -1373,17 +1532,21 @@ OnDeviceRefresh::Compile(OdrMetrics& metrics,
     }
   }
 
-  if (compile_system_server) {
+  if (!compilation_options.system_server_jars_to_compile.empty()) {
     metrics.SetStage(OdrMetrics::Stage::kSystemServerClasspath);
 
     if (!CheckCompilationSpace()) {
       metrics.SetStatus(OdrMetrics::Status::kNoSpace);
-      // Return kOkay so odsign will keep and sign whatever we have been able to compile.
-      return ExitCode::kOkay;
+      // Return kCompilationFailed so odsign will keep and sign whatever we have been able to
+      // compile.
+      return ExitCode::kCompilationFailed;
     }
 
-    if (!CompileSystemServerArtifacts(
-            staging_dir, metrics, &dex2oat_invocation_count, &error_msg)) {
+    if (!CompileSystemServerArtifacts(staging_dir,
+                                      metrics,
+                                      compilation_options.system_server_jars_to_compile,
+                                      advance_animation_progress,
+                                      &error_msg)) {
       LOG(ERROR) << "Compilation of system_server failed: " << error_msg;
       if (!config_.GetDryRun() && !RemoveDirectory(staging_dir)) {
         return ExitCode::kCleanupFailed;

@@ -21,10 +21,6 @@
 
 ASM_DEFINE(THREAD_CARD_TABLE_OFFSET,
            art::Thread::CardTableOffset<art::kRuntimePointerSize>().Int32Value())
-ASM_DEFINE(THREAD_CHECKPOINT_REQUEST,
-           art::kCheckpointRequest)
-ASM_DEFINE(THREAD_EMPTY_CHECKPOINT_REQUEST,
-           art::kEmptyCheckpointRequest)
 ASM_DEFINE(THREAD_EXCEPTION_OFFSET,
            art::Thread::ExceptionOffset<art::kRuntimePointerSize>().Int32Value())
 ASM_DEFINE(THREAD_FLAGS_OFFSET,
@@ -56,11 +52,13 @@ ASM_DEFINE(THREAD_ROSALLOC_RUNS_OFFSET,
 ASM_DEFINE(THREAD_SELF_OFFSET,
            art::Thread::SelfOffset<art::kRuntimePointerSize>().Int32Value())
 ASM_DEFINE(THREAD_SUSPEND_OR_CHECKPOINT_REQUEST,
-           art::kSuspendRequest | art::kCheckpointRequest | art::kEmptyCheckpointRequest)
+           art::Thread::SuspendOrCheckpointRequestFlags())
 ASM_DEFINE(THREAD_SUSPEND_REQUEST,
-           art::kSuspendRequest)
+           static_cast<uint32_t>(art::ThreadFlag::kSuspendRequest))
 ASM_DEFINE(THREAD_TOP_QUICK_FRAME_OFFSET,
            art::Thread::TopOfManagedStackOffset<art::kRuntimePointerSize>().Int32Value())
+ASM_DEFINE(THREAD_SUSPEND_TRIGGER_OFFSET,
+           art::Thread::ThreadSuspendTriggerOffset<art::kRuntimePointerSize>().Int32Value())
 ASM_DEFINE(THREAD_ALLOC_OBJECT_ENTRYPOINT_OFFSET,
            art::GetThreadOffset<art::kRuntimePointerSize>(art::kQuickAllocObjectInitialized)
                .Int32Value())

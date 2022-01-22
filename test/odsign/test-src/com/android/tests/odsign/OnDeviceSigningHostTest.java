@@ -28,9 +28,11 @@ import com.android.tradefed.testtype.junit4.DeviceTestRunOptions;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 import java.util.stream.Collectors;
 
 /**
@@ -38,10 +40,6 @@ import java.util.stream.Collectors;
  */
 @RunWith(DeviceJUnit4ClassRunner.class)
 public class OnDeviceSigningHostTest extends BaseHostJUnit4Test {
-    private static final List<String> APP_ARTIFACT_EXTENSIONS = List.of(".art", ".odex", ".vdex");
-
-    private static final List<String> BCP_ARTIFACT_EXTENSIONS = List.of(".art", ".oat", ".vdex");
-
     private static final String TEST_APP_PACKAGE_NAME = "com.android.tests.odsign";
     private static final String TEST_APP_APK = "odsign_e2e_test_app.apk";
 
@@ -99,10 +97,22 @@ public class OnDeviceSigningHostTest extends BaseHostJUnit4Test {
         verifyGeneratedArtifactsLoaded();
     }
 
-    private String[] getSystemServerClasspath() throws Exception {
-        String systemServerClasspath =
-                getDevice().executeShellCommand("echo $SYSTEMSERVERCLASSPATH");
-        return systemServerClasspath.trim().split(":");
+    @Test
+    public void verifyGeneratedArtifactsLoadedAfterPartialCompilation() throws Exception {
+        Set<String> mappedArtifacts = sTestUtils.getSystemServerLoadedArtifacts();
+        // Delete an arbitrary artifact.
+        getDevice().deleteFile(mappedArtifacts.iterator().next());
+        sTestUtils.removeCompilationLogToAvoidBackoff();
+        sTestUtils.reboot();
+        verifyGeneratedArtifactsLoaded();
+    }
+
+    private String[] getListFromEnvironmentVariable(String name) throws Exception {
+        String systemServerClasspath = getDevice().executeShellCommand("echo $" + name).trim();
+        if (!systemServerClasspath.isEmpty()) {
+            return systemServerClasspath.split(":");
+        }
+        return new String[0];
     }
 
     private String getSystemServerIsa(String mappedArtifact) {
@@ -115,8 +125,12 @@ public class OnDeviceSigningHostTest extends BaseHostJUnit4Test {
     }
 
     private void verifySystemServerLoadedArtifacts() throws Exception {
-        String[] classpathElements = getSystemServerClasspath();
+        String[] classpathElements = getListFromEnvironmentVariable("SYSTEMSERVERCLASSPATH");
         assertTrue("SYSTEMSERVERCLASSPATH is empty", classpathElements.length > 0);
+        String[] standaloneJars = getListFromEnvironmentVariable("STANDALONE_SYSTEMSERVER_JARS");
+        String[] allSystemServerJars = Stream
+                .concat(Arrays.stream(classpathElements), Arrays.stream(standaloneJars))
+                .toArray(String[]::new);
 
         final Set<String> mappedArtifacts = sTestUtils.getSystemServerLoadedArtifacts();
         assertTrue(
@@ -127,11 +141,11 @@ public class OnDeviceSigningHostTest extends BaseHostJUnit4Test {
                 String.format("%s/%s", OdsignTestUtils.ART_APEX_DALVIK_CACHE_DIRNAME, isa);
 
         // Check components in the system_server classpath have mapped artifacts.
-        for (String element : classpathElements) {
+        for (String element : allSystemServerJars) {
           String escapedPath = element.substring(1).replace('/', '@');
-          for (String extension : APP_ARTIFACT_EXTENSIONS) {
+          for (String extension : OdsignTestUtils.APP_ARTIFACT_EXTENSIONS) {
             final String fullArtifactPath =
-                String.format("%s/%s@classes%s", isaCacheDirectory, escapedPath, extension);
+                    String.format("%s/%s@classes%s", isaCacheDirectory, escapedPath, extension);
             assertTrue("Missing " + fullArtifactPath, mappedArtifacts.contains(fullArtifactPath));
           }
         }
@@ -139,7 +153,8 @@ public class OnDeviceSigningHostTest extends BaseHostJUnit4Test {
         for (String mappedArtifact : mappedArtifacts) {
           // Check the mapped artifact has a .art, .odex or .vdex extension.
           final boolean knownArtifactKind =
-              APP_ARTIFACT_EXTENSIONS.stream().anyMatch(e -> mappedArtifact.endsWith(e));
+                    OdsignTestUtils.APP_ARTIFACT_EXTENSIONS.stream().anyMatch(
+                            e -> mappedArtifact.endsWith(e));
           assertTrue("Unknown artifact kind: " + mappedArtifact, knownArtifactKind);
         }
     }
@@ -151,7 +166,7 @@ public class OnDeviceSigningHostTest extends BaseHostJUnit4Test {
         assertTrue("Expect 3 boot-framework artifacts", mappedArtifacts.size() == 3);
 
         String allArtifacts = mappedArtifacts.stream().collect(Collectors.joining(","));
-        for (String extension : BCP_ARTIFACT_EXTENSIONS) {
+        for (String extension : OdsignTestUtils.BCP_ARTIFACT_EXTENSIONS) {
             final String artifact = bootExtensionName + extension;
             final boolean found = mappedArtifacts.stream().anyMatch(a -> a.endsWith(artifact));
             assertTrue(zygoteName + " " + artifact + " not found: '" + allArtifacts + "'", found);

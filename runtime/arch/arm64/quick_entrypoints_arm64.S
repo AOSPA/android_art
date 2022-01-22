@@ -361,10 +361,11 @@ INVOKE_TRAMPOLINE art_quick_invoke_virtual_trampoline_with_access_check, artInvo
 
 
 .macro INVOKE_STUB_CREATE_FRAME
-SAVE_SIZE=6*8   // x4, x5, x19, x20, FP, LR saved.
+SAVE_SIZE=8*8   // x4, x5, <padding>, x19, x20, x21, FP, LR saved.
     SAVE_TWO_REGS_INCREASE_FRAME x4, x5, SAVE_SIZE
-    SAVE_TWO_REGS x19, x20, 16
-    SAVE_TWO_REGS xFP, xLR, 32
+    SAVE_REG      x19,      24
+    SAVE_TWO_REGS x20, x21, 32
+    SAVE_TWO_REGS xFP, xLR, 48
 
     mov xFP, sp                            // Use xFP for frame pointer, as it's callee-saved.
     .cfi_def_cfa_register xFP
@@ -401,6 +402,7 @@ SAVE_SIZE=6*8   // x4, x5, x19, x20, FP, LR saved.
 .macro INVOKE_STUB_CALL_AND_RETURN
 
     REFRESH_MARKING_REGISTER
+    REFRESH_SUSPEND_CHECK_REGISTER
 
     // load method-> METHOD_QUICK_CODE_OFFSET
     ldr x9, [x0, #ART_METHOD_QUICK_CODE_OFFSET_64]
@@ -412,8 +414,9 @@ SAVE_SIZE=6*8   // x4, x5, x19, x20, FP, LR saved.
     .cfi_def_cfa_register sp
 
     // Restore saved registers including value address and shorty address.
-    RESTORE_TWO_REGS x19, x20, 16
-    RESTORE_TWO_REGS xFP, xLR, 32
+    RESTORE_REG      x19,      24
+    RESTORE_TWO_REGS x20, x21, 32
+    RESTORE_TWO_REGS xFP, xLR, 48
     RESTORE_TWO_REGS_DECREASE_FRAME x4, x5, SAVE_SIZE
 
     // Store result (w0/x0/s0/d0) appropriately, depending on resultType.
@@ -765,6 +768,7 @@ ENTRY art_quick_osr_stub
 
     mov xSELF, x5                         // Move thread pointer into SELF register.
     REFRESH_MARKING_REGISTER
+    REFRESH_SUSPEND_CHECK_REGISTER
 
     INCREASE_FRAME 16
     str xzr, [sp]                         // Store null for ArtMethod* slot
@@ -877,46 +881,25 @@ ENTRY art_quick_do_long_jump
     mov sp, xIP0
 
     REFRESH_MARKING_REGISTER
+    REFRESH_SUSPEND_CHECK_REGISTER
 
     br  xIP1
 END art_quick_do_long_jump
 
     /*
-     * Entry from managed code that calls artLockObjectFromCode, may block for GC. x0 holds the
-     * possibly null object to lock.
-     *
-     * Derived from arm32 code.
+     * Entry from managed code that tries to lock the object in a fast path and
+     * calls `artLockObjectFromCode()` for the difficult cases, may block for GC.
+     * x0 holds the possibly null object to lock.
      */
-    .extern artLockObjectFromCode
 ENTRY art_quick_lock_object
-    ldr    w1, [xSELF, #THREAD_ID_OFFSET]
-    cbz    w0, art_quick_lock_object_no_inline
-                                      // Exclusive load/store has no immediate anymore.
-    add    x4, x0, #MIRROR_OBJECT_LOCK_WORD_OFFSET
-.Lretry_lock:
-    ldaxr  w2, [x4]                   // Acquire needed only in most common case.
-    eor    w3, w2, w1                 // Prepare the value to store if unlocked
-                                      //   (thread id, count of 0 and preserved read barrier bits),
-                                      // or prepare to compare thread id for recursive lock check
-                                      //   (lock_word.ThreadId() ^ self->ThreadId()).
-    tst    w2, #LOCK_WORD_GC_STATE_MASK_SHIFTED_TOGGLED  // Test the non-gc bits.
-    b.ne   .Lnot_unlocked             // Check if unlocked.
-    // unlocked case - store w3: original lock word plus thread id, preserved read barrier bits.
-    stxr   w2, w3, [x4]
-    cbnz   w2, .Lretry_lock           // If the store failed, retry.
-    ret
-.Lnot_unlocked:  // w2: original lock word, w1: thread id, w3: w2 ^ w1
-                                      // Check lock word state and thread id together,
-    tst    w3, #(LOCK_WORD_STATE_MASK_SHIFTED | LOCK_WORD_THIN_LOCK_OWNER_MASK_SHIFTED)
-    b.ne   art_quick_lock_object_no_inline
-    add    w3, w2, #LOCK_WORD_THIN_LOCK_COUNT_ONE  // Increment the recursive lock count.
-    tst    w3, #LOCK_WORD_THIN_LOCK_COUNT_MASK_SHIFTED  // Test the new thin lock count.
-    b.eq   art_quick_lock_object_no_inline  // Zero as the new count indicates overflow, go slow path.
-    stxr   w2, w3, [x4]
-    cbnz   w2, .Lretry_lock           // If the store failed, retry.
-    ret
+    LOCK_OBJECT_FAST_PATH x0, art_quick_lock_object_no_inline, /*can_be_null*/ 1
 END art_quick_lock_object
 
+    /*
+     * Entry from managed code that calls `artLockObjectFromCode()`, may block for GC.
+     * x0 holds the possibly null object to lock.
+     */
+    .extern artLockObjectFromCode
 ENTRY art_quick_lock_object_no_inline
     // This is also the slow path for art_quick_lock_object.
     SETUP_SAVE_REFS_ONLY_FRAME        // save callee saves in case we block
@@ -928,51 +911,20 @@ ENTRY art_quick_lock_object_no_inline
 END art_quick_lock_object_no_inline
 
     /*
-     * Entry from managed code that calls artUnlockObjectFromCode and delivers exception on failure.
-     * x0 holds the possibly null object to lock.
-     *
-     * Derived from arm32 code.
+     * Entry from managed code that tries to unlock the object in a fast path and calls
+     * `artUnlockObjectFromCode()` for the difficult cases and delivers exception on failure.
+     * x0 holds the possibly null object to unlock.
      */
-    .extern artUnlockObjectFromCode
 ENTRY art_quick_unlock_object
-    ldr    w1, [xSELF, #THREAD_ID_OFFSET]
-    cbz    x0, art_quick_unlock_object_no_inline
-                                      // Exclusive load/store has no immediate anymore.
-    add    x4, x0, #MIRROR_OBJECT_LOCK_WORD_OFFSET
-.Lretry_unlock:
-#ifndef USE_READ_BARRIER
-    ldr    w2, [x4]
-#else
-    ldxr   w2, [x4]                   // Need to use atomic instructions for read barrier.
-#endif
-    eor    w3, w2, w1                 // Prepare the value to store if simply locked
-                                      //   (mostly 0s, and preserved read barrier bits),
-                                      // or prepare to compare thread id for recursive lock check
-                                      //   (lock_word.ThreadId() ^ self->ThreadId()).
-    tst    w3, #LOCK_WORD_GC_STATE_MASK_SHIFTED_TOGGLED  // Test the non-gc bits.
-    b.ne   .Lnot_simply_locked        // Locked recursively or by other thread?
-    // Transition to unlocked.
-#ifndef USE_READ_BARRIER
-    stlr   w3, [x4]
-#else
-    stlxr  w2, w3, [x4]               // Need to use atomic instructions for read barrier.
-    cbnz   w2, .Lretry_unlock         // If the store failed, retry.
-#endif
-    ret
-.Lnot_simply_locked:
-                                      // Check lock word state and thread id together,
-    tst    w3, #(LOCK_WORD_STATE_MASK_SHIFTED | LOCK_WORD_THIN_LOCK_OWNER_MASK_SHIFTED)
-    b.ne   art_quick_unlock_object_no_inline
-    sub    w3, w2, #LOCK_WORD_THIN_LOCK_COUNT_ONE  // decrement count
-#ifndef USE_READ_BARRIER
-    str    w3, [x4]
-#else
-    stxr   w2, w3, [x4]               // Need to use atomic instructions for read barrier.
-    cbnz   w2, .Lretry_unlock         // If the store failed, retry.
-#endif
-    ret
+    UNLOCK_OBJECT_FAST_PATH x0, art_quick_unlock_object_no_inline, /*can_be_null*/ 1
 END art_quick_unlock_object
 
+    /*
+     * Entry from managed code that calls `artUnlockObjectFromCode()`
+     * and delivers exception on failure.
+     * x0 holds the possibly null object to unlock.
+     */
+    .extern artUnlockObjectFromCode
 ENTRY art_quick_unlock_object_no_inline
     // This is also the slow path for art_quick_unlock_object.
     SETUP_SAVE_REFS_ONLY_FRAME        // save callee saves in case exception allocation triggers GC
@@ -1659,21 +1611,29 @@ GENERATE_ALLOC_ARRAY_TLAB art_quick_alloc_array_resolved64_tlab, artAllocArrayFr
      */
     .extern artTestSuspendFromCode
 ENTRY art_quick_test_suspend
-    SETUP_SAVE_EVERYTHING_FRAME RUNTIME_SAVE_EVERYTHING_FOR_SUSPEND_CHECK_METHOD_OFFSET  // save callee saves for stack crawl
+                                        // Save callee saves for stack crawl.
+    SETUP_SAVE_EVERYTHING_FRAME RUNTIME_SAVE_EVERYTHING_FOR_SUSPEND_CHECK_METHOD_OFFSET
     mov    x0, xSELF
-    bl     artTestSuspendFromCode             // (Thread*)
+    bl     artTestSuspendFromCode       // (Thread*)
     RESTORE_SAVE_EVERYTHING_FRAME
     REFRESH_MARKING_REGISTER
+    REFRESH_SUSPEND_CHECK_REGISTER
     ret
 END art_quick_test_suspend
 
+    /*
+     * Redirection point from implicit suspend check fault handler.
+     */
+    .extern artTestSuspendFromCode
 ENTRY art_quick_implicit_suspend
+                                        // Save callee saves for stack crawl.
+    SETUP_SAVE_EVERYTHING_FRAME RUNTIME_SAVE_EVERYTHING_FOR_SUSPEND_CHECK_METHOD_OFFSET
     mov    x0, xSELF
-    SETUP_SAVE_REFS_ONLY_FRAME                // save callee saves for stack crawl
-    bl     artTestSuspendFromCode             // (Thread*)
-    RESTORE_SAVE_REFS_ONLY_FRAME
+    bl     artTestSuspendFromCode       // (Thread*)
+    RESTORE_SAVE_EVERYTHING_FRAME
     REFRESH_MARKING_REGISTER
-    ret
+    REFRESH_SUSPEND_CHECK_REGISTER
+    br     lr  // Do not use RET as we do not enter the entrypoint with "BL".
 END art_quick_implicit_suspend
 
      /*
