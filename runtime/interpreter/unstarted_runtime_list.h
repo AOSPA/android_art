@@ -27,6 +27,7 @@
   V(ClassClassForName, "Ljava/lang/Class;", "classForName", "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;") \
   V(ClassNewInstance, "Ljava/lang/Class;", "newInstance", "()Ljava/lang/Object;") \
   V(ClassGetDeclaredField, "Ljava/lang/Class;", "getDeclaredField", "(Ljava/lang/String;)Ljava/lang/reflect/Field;") \
+  V(ClassGetDeclaredFields, "Ljava/lang/Class;", "getDeclaredFields", "()[Ljava/lang/reflect/Field;") \
   V(ClassGetDeclaredMethod, "Ljava/lang/Class;", "getDeclaredMethodInternal", "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;") \
   V(ClassGetDeclaredConstructor, "Ljava/lang/Class;", "getDeclaredConstructorInternal", "([Ljava/lang/Class;)Ljava/lang/reflect/Constructor;") \
   V(ClassGetDeclaringClass, "Ljava/lang/Class;", "getDeclaringClass", "()Ljava/lang/Class;") \
@@ -109,6 +110,7 @@
   V(UnsafePutObject, "Lsun/misc/Unsafe;", "putObject", "(Ljava/lang/Object;JLjava/lang/Object;)V") \
   V(UnsafeGetArrayBaseOffsetForComponentType, "Lsun/misc/Unsafe;", "getArrayBaseOffsetForComponentType", "(Ljava/lang/Class;)I") \
   V(UnsafeGetArrayIndexScaleForComponentType, "Lsun/misc/Unsafe;", "getArrayIndexScaleForComponentType", "(Ljava/lang/Class;)I") \
+  V(JdkUnsafeAddressSize, "Ljdk/internal/misc/Unsafe;", "addressSize", "()I") \
   V(JdkUnsafeCompareAndSwapInt, "Ljdk/internal/misc/Unsafe;", "compareAndSwapInt", "(Ljava/lang/Object;JII)Z") \
   V(JdkUnsafeGetIntVolatile, "Ljdk/internal/misc/Unsafe;", "getIntVolatile", "(Ljava/lang/Object;J)I") \
   V(JdkUnsafePutObject, "Ljdk/internal/misc/Unsafe;", "putObject", "(Ljava/lang/Object;JLjava/lang/Object;)V") \

@@ -2784,15 +2784,25 @@ static void GenerateIntrinsicGet(HInvoke* invoke,
   }
 }
 
+static bool UnsafeGetIntrinsicOnCallList(Intrinsics intrinsic) {
+  switch (intrinsic) {
+    case Intrinsics::kUnsafeGetObject:
+    case Intrinsics::kUnsafeGetObjectVolatile:
+    case Intrinsics::kJdkUnsafeGetObject:
+    case Intrinsics::kJdkUnsafeGetObjectVolatile:
+    case Intrinsics::kJdkUnsafeGetObjectAcquire:
+      return true;
+    default:
+      break;
+  }
+  return false;
+}
+
 static void CreateUnsafeGetLocations(HInvoke* invoke,
                                      CodeGeneratorARMVIXL* codegen,
                                      DataType::Type type,
                                      bool atomic) {
-  bool can_call = kEmitCompilerReadBarrier &&
-      (invoke->GetIntrinsic() == Intrinsics::kUnsafeGetObject ||
-       invoke->GetIntrinsic() == Intrinsics::kUnsafeGetObjectVolatile ||
-       invoke->GetIntrinsic() == Intrinsics::kJdkUnsafeGetObject ||
-       invoke->GetIntrinsic() == Intrinsics::kJdkUnsafeGetObjectVolatile);
+  bool can_call = kEmitCompilerReadBarrier && UnsafeGetIntrinsicOnCallList(invoke->GetIntrinsic());
   ArenaAllocator* allocator = invoke->GetBlock()->GetGraph()->GetAllocator();
   LocationSummary* locations =
       new (allocator) LocationSummary(invoke,
@@ -2937,6 +2947,15 @@ void IntrinsicCodeGeneratorARMVIXL::VisitJdkUnsafeGetLongVolatile(HInvoke* invok
       invoke, codegen_, DataType::Type::kInt64, std::memory_order_seq_cst, /*atomic=*/ true);
 }
 
+void IntrinsicLocationsBuilderARMVIXL::VisitJdkUnsafeGetLongAcquire(HInvoke* invoke) {
+  CreateUnsafeGetLocations(invoke, codegen_, DataType::Type::kInt64, /*atomic=*/ true);
+}
+
+void IntrinsicCodeGeneratorARMVIXL::VisitJdkUnsafeGetLongAcquire(HInvoke* invoke) {
+  GenUnsafeGet(
+      invoke, codegen_, DataType::Type::kInt64, std::memory_order_acquire, /*atomic=*/ true);
+}
+
 void IntrinsicLocationsBuilderARMVIXL::VisitJdkUnsafeGetObject(HInvoke* invoke) {
   CreateUnsafeGetLocations(invoke, codegen_, DataType::Type::kReference, /*atomic=*/ false);
 }
@@ -2953,6 +2972,15 @@ void IntrinsicLocationsBuilderARMVIXL::VisitJdkUnsafeGetObjectVolatile(HInvoke* 
 void IntrinsicCodeGeneratorARMVIXL::VisitJdkUnsafeGetObjectVolatile(HInvoke* invoke) {
   GenUnsafeGet(
       invoke, codegen_, DataType::Type::kReference, std::memory_order_seq_cst, /*atomic=*/ true);
+}
+
+void IntrinsicLocationsBuilderARMVIXL::VisitJdkUnsafeGetObjectAcquire(HInvoke* invoke) {
+  CreateUnsafeGetLocations(invoke, codegen_, DataType::Type::kReference, /*atomic=*/ true);
+}
+
+void IntrinsicCodeGeneratorARMVIXL::VisitJdkUnsafeGetObjectAcquire(HInvoke* invoke) {
+  GenUnsafeGet(
+      invoke, codegen_, DataType::Type::kReference, std::memory_order_acquire, /*atomic=*/ true);
 }
 
 static void GenerateIntrinsicSet(CodeGeneratorARMVIXL* codegen,
@@ -3259,6 +3287,18 @@ void IntrinsicCodeGeneratorARMVIXL::VisitJdkUnsafePutObjectVolatile(HInvoke* inv
                codegen_);
 }
 
+void IntrinsicLocationsBuilderARMVIXL::VisitJdkUnsafePutObjectRelease(HInvoke* invoke) {
+  CreateUnsafePutLocations(invoke, codegen_, DataType::Type::kReference, /*atomic=*/ true);
+}
+
+void IntrinsicCodeGeneratorARMVIXL::VisitJdkUnsafePutObjectRelease(HInvoke* invoke) {
+  GenUnsafePut(invoke,
+               DataType::Type::kReference,
+               std::memory_order_release,
+               /*atomic=*/ true,
+               codegen_);
+}
+
 void IntrinsicLocationsBuilderARMVIXL::VisitJdkUnsafePutLong(HInvoke* invoke) {
   CreateUnsafePutLocations(invoke, codegen_, DataType::Type::kInt64, /*atomic=*/ false);
 }
@@ -3291,6 +3331,18 @@ void IntrinsicCodeGeneratorARMVIXL::VisitJdkUnsafePutLongVolatile(HInvoke* invok
   GenUnsafePut(invoke,
                DataType::Type::kInt64,
                std::memory_order_seq_cst,
+               /*atomic=*/ true,
+               codegen_);
+}
+
+void IntrinsicLocationsBuilderARMVIXL::VisitJdkUnsafePutLongRelease(HInvoke* invoke) {
+  CreateUnsafePutLocations(invoke, codegen_, DataType::Type::kInt64, /*atomic=*/ true);
+}
+
+void IntrinsicCodeGeneratorARMVIXL::VisitJdkUnsafePutLongRelease(HInvoke* invoke) {
+  GenUnsafePut(invoke,
+               DataType::Type::kInt64,
+               std::memory_order_release,
                /*atomic=*/ true,
                codegen_);
 }
@@ -4092,18 +4144,6 @@ static void GenerateVarHandleInstanceFieldChecks(HInvoke* invoke,
       codegen, slow_path, object, temp, /*object_can_be_null=*/ false);
 }
 
-static DataType::Type GetVarHandleExpectedValueType(HInvoke* invoke,
-                                                    size_t expected_coordinates_count) {
-  DCHECK_EQ(expected_coordinates_count, GetExpectedVarHandleCoordinatesCount(invoke));
-  uint32_t number_of_arguments = invoke->GetNumberOfArguments();
-  DCHECK_GE(number_of_arguments, /* VarHandle object */ 1u + expected_coordinates_count);
-  if (number_of_arguments == /* VarHandle object */ 1u + expected_coordinates_count) {
-    return invoke->GetType();
-  } else {
-    return GetDataTypeFromShorty(invoke, number_of_arguments - 1u);
-  }
-}
-
 static void GenerateVarHandleArrayChecks(HInvoke* invoke,
                                          CodeGeneratorARMVIXL* codegen,
                                          VarHandleSlowPathARMVIXL* slow_path) {
@@ -4177,7 +4217,7 @@ static void GenerateVarHandleArrayChecks(HInvoke* invoke,
       codegen->GetCompilerOptions().IsBootImage() ||
       !Runtime::Current()->GetHeap()->GetBootImageSpaces().empty();
   DCHECK(boot_image_available || codegen->GetCompilerOptions().IsJitCompiler());
-  size_t can_be_view =
+  bool can_be_view =
       ((value_type != DataType::Type::kReference) && (DataType::Size(value_type) != 1u)) &&
       boot_image_available;
   vixl32::Label* slow_path_label =
@@ -4873,14 +4913,16 @@ static void GenerateVarHandleCompareAndSetOrExchange(HInvoke* invoke,
         seq_cst_barrier ? MemBarrierKind::kAnyAny : MemBarrierKind::kLoadAny);
   }
 
+  if (byte_swap && value_type == DataType::Type::kInt64) {
+    // Undo byte swapping in `expected` and `new_value`. We do not have the
+    // information whether the value in these registers shall be needed later.
+    GenerateReverseBytesInPlaceForEachWord(assembler, expected);
+    GenerateReverseBytesInPlaceForEachWord(assembler, new_value);
+  }
   if (!return_success) {
     if (byte_swap) {
       if (value_type == DataType::Type::kInt64) {
         GenerateReverseBytesInPlaceForEachWord(assembler, old_value);
-        // Undo byte swapping in `expected` and `new_value`. We do not have the
-        // information whether the value in these registers shall be needed later.
-        GenerateReverseBytesInPlaceForEachWord(assembler, expected);
-        GenerateReverseBytesInPlaceForEachWord(assembler, new_value);
       } else {
         GenerateReverseBytes(assembler, value_type, old_value, out);
       }
@@ -5376,6 +5418,7 @@ void VarHandleSlowPathARMVIXL::EmitByteArrayViewCode(CodeGenerator* codegen_in) 
     // the class of the actual coordinate argument but it does not match the value type.
     // Check if the `varhandle` references a ByteArrayViewVarHandle instance.
     __ Ldr(temp, MemOperand(varhandle, class_offset.Int32Value()));
+    codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp);
     codegen->LoadClassRootForIntrinsic(temp2, ClassRoot::kJavaLangInvokeByteArrayViewVarHandle);
     __ Cmp(temp, temp2);
     __ B(ne, GetEntryLabel());
@@ -5483,6 +5526,9 @@ UNIMPLEMENTED_INTRINSIC(ARMVIXL, StringBuilderLength);
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, StringBuilderToString);
 
 // 1.8.
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, MathFmaDouble)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, MathFmaFloat)
+
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndAddInt)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndAddLong)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndSetInt)
@@ -5499,6 +5545,8 @@ UNIMPLEMENTED_INTRINSIC(ARMVIXL, JdkUnsafeGetAndAddLong)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, JdkUnsafeGetAndSetInt)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, JdkUnsafeGetAndSetLong)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, JdkUnsafeGetAndSetObject)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, JdkUnsafeCompareAndSetLong)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, JdkUnsafeCompareAndSetObject)
 
 UNREACHABLE_INTRINSICS(ARMVIXL)
 

@@ -89,6 +89,7 @@
 #include "handle_scope-inl.h"
 #include "hidden_api.h"
 #include "image-inl.h"
+#include "indirect_reference_table.h"
 #include "instrumentation.h"
 #include "intern_table-inl.h"
 #include "interpreter/interpreter.h"
@@ -497,6 +498,8 @@ Runtime::~Runtime() {
   monitor_pool_ = nullptr;
   delete class_linker_;
   class_linker_ = nullptr;
+  delete small_irt_allocator_;
+  small_irt_allocator_ = nullptr;
   delete heap_;
   heap_ = nullptr;
   delete intern_table_;
@@ -1291,40 +1294,47 @@ void Runtime::InitializeApexVersions() {
       bcp_apexes.push_back(apex);
     }
   }
-  std::string result;
   static const char* kApexFileName = "/apex/apex-info-list.xml";
-  // When running on host or chroot, we just encode empty markers.
+  // Start with empty markers.
+  apex_versions_ = std::string(bcp_apexes.size(), '/');
+  // When running on host or chroot, we just use empty markers.
   if (!kIsTargetBuild || !OS::FileExists(kApexFileName)) {
-    for (uint32_t i = 0; i < bcp_apexes.size(); ++i) {
-      result += '/';
-    }
-  } else {
+    return;
+  }
 #ifdef ART_TARGET_ANDROID
-    auto info_list = apex::readApexInfoList(kApexFileName);
-    CHECK(info_list.has_value());
-    std::map<std::string_view, const apex::ApexInfo*> apex_infos;
-    for (const apex::ApexInfo& info : info_list->getApexInfo()) {
-      if (info.getIsActive()) {
-        apex_infos.emplace(info.getModuleName(), &info);
-      }
+  if (access(kApexFileName, R_OK) != 0) {
+    PLOG(WARNING) << "Failed to read " << kApexFileName;
+    return;
+  }
+  auto info_list = apex::readApexInfoList(kApexFileName);
+  if (!info_list.has_value()) {
+    LOG(WARNING) << "Failed to parse " << kApexFileName;
+    return;
+  }
+
+  std::string result;
+  std::map<std::string_view, const apex::ApexInfo*> apex_infos;
+  for (const apex::ApexInfo& info : info_list->getApexInfo()) {
+    if (info.getIsActive()) {
+      apex_infos.emplace(info.getModuleName(), &info);
     }
-    for (const std::string_view& str : bcp_apexes) {
-      auto info = apex_infos.find(str);
-      if (info == apex_infos.end() || info->second->getIsFactory()) {
-        result += '/';
-      } else {
-        // In case lastUpdateMillis field is populated in apex-info-list.xml, we
-        // prefer to use it as version scheme. If the field is missing we
-        // fallback to the version code of the APEX.
-        uint64_t version = info->second->hasLastUpdateMillis()
-            ? info->second->getLastUpdateMillis()
-            : info->second->getVersionCode();
-        android::base::StringAppendF(&result, "/%" PRIu64, version);
-      }
+  }
+  for (const std::string_view& str : bcp_apexes) {
+    auto info = apex_infos.find(str);
+    if (info == apex_infos.end() || info->second->getIsFactory()) {
+      result += '/';
+    } else {
+      // In case lastUpdateMillis field is populated in apex-info-list.xml, we
+      // prefer to use it as version scheme. If the field is missing we
+      // fallback to the version code of the APEX.
+      uint64_t version = info->second->hasLastUpdateMillis()
+          ? info->second->getLastUpdateMillis()
+          : info->second->getVersionCode();
+      android::base::StringAppendF(&result, "/%" PRIu64, version);
     }
-#endif
   }
   apex_versions_ = result;
+#endif
 }
 
 void Runtime::ReloadAllFlags(const std::string& caller) {
@@ -1650,6 +1660,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     low_4gb_arena_pool_.reset(new MemMapArenaPool(/* low_4gb= */ true));
   }
   linear_alloc_.reset(CreateLinearAlloc());
+
+  small_irt_allocator_ = new SmallIrtAllocator();
 
   BlockSignals();
   InitPlatformSignalHandlers();

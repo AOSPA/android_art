@@ -358,11 +358,30 @@ std::string GetDefaultBootImageLocation(std::string* error_msg) {
   return GetDefaultBootImageLocation(android_root, /*deny_art_apex_data_files=*/false);
 }
 
+std::string GetBootImagePath(bool on_system, const std::string& jar_path) {
+  if (on_system) {
+    const std::string jar_name = android::base::Basename(jar_path);
+    const std::string image_name = ReplaceFileExtension(jar_name, "art");
+    // Typically "/system/framework/boot-framework.art".
+    return StringPrintf("%s/framework/boot-%s", GetAndroidRoot().c_str(), image_name.c_str());
+  } else {
+    // Typically "/data/misc/apexdata/com.android.art/dalvik-cache/boot-framework.art".
+    return GetApexDataBootImage(jar_path);
+  }
+}
+
+static /*constinit*/ std::string_view dalvik_cache_sub_dir = "dalvik-cache";
+
+void OverrideDalvikCacheSubDirectory(std::string sub_dir) {
+    static std::string overridden_dalvik_cache_sub_dir;
+    overridden_dalvik_cache_sub_dir = std::move(sub_dir);
+    dalvik_cache_sub_dir = overridden_dalvik_cache_sub_dir;
+}
+
 static std::string GetDalvikCacheDirectory(std::string_view root_directory,
                                            std::string_view sub_directory = {}) {
-  static constexpr std::string_view kDalvikCache = "dalvik-cache";
   std::stringstream oss;
-  oss << root_directory << '/' << kDalvikCache;
+  oss << root_directory << '/' << dalvik_cache_sub_dir;
   if (!sub_directory.empty()) {
     oss << '/' << sub_directory;
   }
@@ -498,6 +517,10 @@ std::string GetApexDataDalvikCacheFilename(std::string_view dex_location,
 
 std::string GetVdexFilename(const std::string& oat_location) {
   return ReplaceFileExtension(oat_location, "vdex");
+}
+
+std::string GetDmFilename(const std::string& dex_location) {
+  return ReplaceFileExtension(dex_location, "dm");
 }
 
 std::string GetSystemOdexFilenameForApex(std::string_view location, InstructionSet isa) {

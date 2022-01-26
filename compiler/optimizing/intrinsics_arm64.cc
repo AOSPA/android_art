@@ -739,12 +739,22 @@ static void GenUnsafeGet(HInvoke* invoke,
   }
 }
 
+static bool UnsafeGetIntrinsicOnCallList(Intrinsics intrinsic) {
+  switch (intrinsic) {
+    case Intrinsics::kUnsafeGetObject:
+    case Intrinsics::kUnsafeGetObjectVolatile:
+    case Intrinsics::kJdkUnsafeGetObject:
+    case Intrinsics::kJdkUnsafeGetObjectVolatile:
+    case Intrinsics::kJdkUnsafeGetObjectAcquire:
+      return true;
+    default:
+      break;
+  }
+  return false;
+}
+
 static void CreateIntIntIntToIntLocations(ArenaAllocator* allocator, HInvoke* invoke) {
-  bool can_call = kEmitCompilerReadBarrier &&
-      (invoke->GetIntrinsic() == Intrinsics::kUnsafeGetObject ||
-       invoke->GetIntrinsic() == Intrinsics::kUnsafeGetObjectVolatile ||
-       invoke->GetIntrinsic() == Intrinsics::kJdkUnsafeGetObject ||
-       invoke->GetIntrinsic() == Intrinsics::kJdkUnsafeGetObjectVolatile);
+  bool can_call = kEmitCompilerReadBarrier && UnsafeGetIntrinsicOnCallList(invoke->GetIntrinsic());
   LocationSummary* locations =
       new (allocator) LocationSummary(invoke,
                                       can_call
@@ -798,10 +808,16 @@ void IntrinsicLocationsBuilderARM64::VisitJdkUnsafeGetLong(HInvoke* invoke) {
 void IntrinsicLocationsBuilderARM64::VisitJdkUnsafeGetLongVolatile(HInvoke* invoke) {
   CreateIntIntIntToIntLocations(allocator_, invoke);
 }
+void IntrinsicLocationsBuilderARM64::VisitJdkUnsafeGetLongAcquire(HInvoke* invoke) {
+  CreateIntIntIntToIntLocations(allocator_, invoke);
+}
 void IntrinsicLocationsBuilderARM64::VisitJdkUnsafeGetObject(HInvoke* invoke) {
   CreateIntIntIntToIntLocations(allocator_, invoke);
 }
 void IntrinsicLocationsBuilderARM64::VisitJdkUnsafeGetObjectVolatile(HInvoke* invoke) {
+  CreateIntIntIntToIntLocations(allocator_, invoke);
+}
+void IntrinsicLocationsBuilderARM64::VisitJdkUnsafeGetObjectAcquire(HInvoke* invoke) {
   CreateIntIntIntToIntLocations(allocator_, invoke);
 }
 
@@ -839,10 +855,16 @@ void IntrinsicCodeGeneratorARM64::VisitJdkUnsafeGetLong(HInvoke* invoke) {
 void IntrinsicCodeGeneratorARM64::VisitJdkUnsafeGetLongVolatile(HInvoke* invoke) {
   GenUnsafeGet(invoke, DataType::Type::kInt64, /*is_volatile=*/ true, codegen_);
 }
+void IntrinsicCodeGeneratorARM64::VisitJdkUnsafeGetLongAcquire(HInvoke* invoke) {
+  GenUnsafeGet(invoke, DataType::Type::kInt64, /*is_volatile=*/ true, codegen_);
+}
 void IntrinsicCodeGeneratorARM64::VisitJdkUnsafeGetObject(HInvoke* invoke) {
   GenUnsafeGet(invoke, DataType::Type::kReference, /*is_volatile=*/ false, codegen_);
 }
 void IntrinsicCodeGeneratorARM64::VisitJdkUnsafeGetObjectVolatile(HInvoke* invoke) {
+  GenUnsafeGet(invoke, DataType::Type::kReference, /*is_volatile=*/ true, codegen_);
+}
+void IntrinsicCodeGeneratorARM64::VisitJdkUnsafeGetObjectAcquire(HInvoke* invoke) {
   GenUnsafeGet(invoke, DataType::Type::kReference, /*is_volatile=*/ true, codegen_);
 }
 
@@ -904,6 +926,9 @@ void IntrinsicLocationsBuilderARM64::VisitJdkUnsafePutObjectOrdered(HInvoke* inv
 void IntrinsicLocationsBuilderARM64::VisitJdkUnsafePutObjectVolatile(HInvoke* invoke) {
   CreateIntIntIntIntToVoid(allocator_, invoke);
 }
+void IntrinsicLocationsBuilderARM64::VisitJdkUnsafePutObjectRelease(HInvoke* invoke) {
+  CreateIntIntIntIntToVoid(allocator_, invoke);
+}
 void IntrinsicLocationsBuilderARM64::VisitJdkUnsafePutLong(HInvoke* invoke) {
   CreateIntIntIntIntToVoid(allocator_, invoke);
 }
@@ -911,6 +936,9 @@ void IntrinsicLocationsBuilderARM64::VisitJdkUnsafePutLongOrdered(HInvoke* invok
   CreateIntIntIntIntToVoid(allocator_, invoke);
 }
 void IntrinsicLocationsBuilderARM64::VisitJdkUnsafePutLongVolatile(HInvoke* invoke) {
+  CreateIntIntIntIntToVoid(allocator_, invoke);
+}
+void IntrinsicLocationsBuilderARM64::VisitJdkUnsafePutLongRelease(HInvoke* invoke) {
   CreateIntIntIntIntToVoid(allocator_, invoke);
 }
 
@@ -1031,6 +1059,13 @@ void IntrinsicCodeGeneratorARM64::VisitJdkUnsafePutObjectVolatile(HInvoke* invok
                /*is_ordered=*/ false,
                codegen_);
 }
+void IntrinsicCodeGeneratorARM64::VisitJdkUnsafePutObjectRelease(HInvoke* invoke) {
+  GenUnsafePut(invoke,
+               DataType::Type::kReference,
+               /*is_volatile=*/ true,
+               /*is_ordered=*/ false,
+               codegen_);
+}
 void IntrinsicCodeGeneratorARM64::VisitJdkUnsafePutLong(HInvoke* invoke) {
   GenUnsafePut(invoke,
                DataType::Type::kInt64,
@@ -1046,6 +1081,13 @@ void IntrinsicCodeGeneratorARM64::VisitJdkUnsafePutLongOrdered(HInvoke* invoke) 
                codegen_);
 }
 void IntrinsicCodeGeneratorARM64::VisitJdkUnsafePutLongVolatile(HInvoke* invoke) {
+  GenUnsafePut(invoke,
+               DataType::Type::kInt64,
+               /*is_volatile=*/ true,
+               /*is_ordered=*/ false,
+               codegen_);
+}
+void IntrinsicCodeGeneratorARM64::VisitJdkUnsafePutLongRelease(HInvoke* invoke) {
   GenUnsafePut(invoke,
                DataType::Type::kInt64,
                /*is_volatile=*/ true,
@@ -1497,6 +1539,9 @@ void IntrinsicLocationsBuilderARM64::VisitJdkUnsafeCASObject(HInvoke* invoke) {
 void IntrinsicLocationsBuilderARM64::VisitJdkUnsafeCompareAndSetInt(HInvoke* invoke) {
   CreateUnsafeCASLocations(allocator_, invoke);
 }
+void IntrinsicLocationsBuilderARM64::VisitJdkUnsafeCompareAndSetLong(HInvoke* invoke) {
+  CreateUnsafeCASLocations(allocator_, invoke);
+}
 
 void IntrinsicCodeGeneratorARM64::VisitUnsafeCASInt(HInvoke* invoke) {
   VisitJdkUnsafeCASInt(invoke);
@@ -1519,6 +1564,9 @@ void IntrinsicCodeGeneratorARM64::VisitJdkUnsafeCASObject(HInvoke* invoke) {
 }
 void IntrinsicCodeGeneratorARM64::VisitJdkUnsafeCompareAndSetInt(HInvoke* invoke) {
   GenUnsafeCas(invoke, DataType::Type::kInt32, codegen_);
+}
+void IntrinsicCodeGeneratorARM64::VisitJdkUnsafeCompareAndSetLong(HInvoke* invoke) {
+  GenUnsafeCas(invoke, DataType::Type::kInt64, codegen_);
 }
 
 enum class GetAndUpdateOp {
@@ -2209,6 +2257,22 @@ static void CreateFPFPToFPCallLocations(ArenaAllocator* allocator, HInvoke* invo
   locations->SetInAt(0, LocationFrom(calling_convention.GetFpuRegisterAt(0)));
   locations->SetInAt(1, LocationFrom(calling_convention.GetFpuRegisterAt(1)));
   locations->SetOut(calling_convention.GetReturnLocation(invoke->GetType()));
+}
+
+static void CreateFPFPFPToFPCallLocations(ArenaAllocator* allocator, HInvoke* invoke) {
+  DCHECK_EQ(invoke->GetNumberOfArguments(), 3U);
+  DCHECK(DataType::IsFloatingPointType(invoke->InputAt(0)->GetType()));
+  DCHECK(DataType::IsFloatingPointType(invoke->InputAt(1)->GetType()));
+  DCHECK(DataType::IsFloatingPointType(invoke->InputAt(2)->GetType()));
+  DCHECK(DataType::IsFloatingPointType(invoke->GetType()));
+
+  LocationSummary* const locations =
+      new (allocator) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
+
+  locations->SetInAt(0, Location::RequiresFpuRegister());
+  locations->SetInAt(1, Location::RequiresFpuRegister());
+  locations->SetInAt(2, Location::RequiresFpuRegister());
+  locations->SetOut(Location::RequiresFpuRegister(), Location::kNoOutputOverlap);
 }
 
 static void GenFPToFPCall(HInvoke* invoke,
@@ -4131,6 +4195,33 @@ void IntrinsicCodeGeneratorARM64::VisitMathMultiplyHigh(HInvoke* invoke) {
   __ Smulh(out, x, y);
 }
 
+static void GenerateMathFma(HInvoke* invoke, CodeGeneratorARM64* codegen) {
+  MacroAssembler* masm = codegen->GetVIXLAssembler();
+
+  VRegister n = helpers::InputFPRegisterAt(invoke, 0);
+  VRegister m = helpers::InputFPRegisterAt(invoke, 1);
+  VRegister a = helpers::InputFPRegisterAt(invoke, 2);
+  VRegister out = helpers::OutputFPRegister(invoke);
+
+  __ Fmadd(out, n, m, a);
+}
+
+void IntrinsicLocationsBuilderARM64::VisitMathFmaDouble(HInvoke* invoke) {
+  CreateFPFPFPToFPCallLocations(allocator_, invoke);
+}
+
+void IntrinsicCodeGeneratorARM64::VisitMathFmaDouble(HInvoke* invoke) {
+  GenerateMathFma(invoke, codegen_);
+}
+
+void IntrinsicLocationsBuilderARM64::VisitMathFmaFloat(HInvoke* invoke) {
+  CreateFPFPFPToFPCallLocations(allocator_, invoke);
+}
+
+void IntrinsicCodeGeneratorARM64::VisitMathFmaFloat(HInvoke* invoke) {
+  GenerateMathFma(invoke, codegen_);
+}
+
 class VarHandleSlowPathARM64 : public IntrinsicSlowPathARM64 {
  public:
   VarHandleSlowPathARM64(HInvoke* invoke, std::memory_order order)
@@ -4336,18 +4427,6 @@ static void GenerateVarHandleInstanceFieldChecks(HInvoke* invoke,
       codegen, slow_path, object, temp, /*object_can_be_null=*/ false);
 }
 
-static DataType::Type GetVarHandleExpectedValueType(HInvoke* invoke,
-                                                    size_t expected_coordinates_count) {
-  DCHECK_EQ(expected_coordinates_count, GetExpectedVarHandleCoordinatesCount(invoke));
-  uint32_t number_of_arguments = invoke->GetNumberOfArguments();
-  DCHECK_GE(number_of_arguments, /* VarHandle object */ 1u + expected_coordinates_count);
-  if (number_of_arguments == /* VarHandle object */ 1u + expected_coordinates_count) {
-    return invoke->GetType();
-  } else {
-    return GetDataTypeFromShorty(invoke, number_of_arguments - 1u);
-  }
-}
-
 static void GenerateVarHandleArrayChecks(HInvoke* invoke,
                                          CodeGeneratorARM64* codegen,
                                          VarHandleSlowPathARM64* slow_path) {
@@ -4421,7 +4500,7 @@ static void GenerateVarHandleArrayChecks(HInvoke* invoke,
         codegen->GetCompilerOptions().IsBootImage() ||
         !Runtime::Current()->GetHeap()->GetBootImageSpaces().empty();
     DCHECK(boot_image_available || codegen->GetCompilerOptions().IsJitCompiler());
-    size_t can_be_view = (DataType::Size(value_type) != 1u) && boot_image_available;
+    bool can_be_view = (DataType::Size(value_type) != 1u) && boot_image_available;
     vixl::aarch64::Label* slow_path_label =
         can_be_view ? slow_path->GetByteArrayViewCheckLabel() : slow_path->GetEntryLabel();
     __ Cmp(temp2, static_cast<uint16_t>(primitive_type));
@@ -5487,6 +5566,7 @@ void VarHandleSlowPathARM64::EmitByteArrayViewCode(CodeGenerator* codegen_in) {
     // the class of the actual coordinate argument but it does not match the value type.
     // Check if the `varhandle` references a ByteArrayViewVarHandle instance.
     __ Ldr(temp, HeapOperand(varhandle, class_offset.Int32Value()));
+    codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp);
     codegen->LoadClassRootForIntrinsic(temp2, ClassRoot::kJavaLangInvokeByteArrayViewVarHandle);
     __ Cmp(temp, temp2);
     __ B(GetEntryLabel(), ne);
@@ -5575,6 +5655,7 @@ UNIMPLEMENTED_INTRINSIC(ARM64, JdkUnsafeGetAndAddLong)
 UNIMPLEMENTED_INTRINSIC(ARM64, JdkUnsafeGetAndSetInt)
 UNIMPLEMENTED_INTRINSIC(ARM64, JdkUnsafeGetAndSetLong)
 UNIMPLEMENTED_INTRINSIC(ARM64, JdkUnsafeGetAndSetObject)
+UNIMPLEMENTED_INTRINSIC(ARM64, JdkUnsafeCompareAndSetObject)
 
 UNREACHABLE_INTRINSICS(ARM64)
 

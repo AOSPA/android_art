@@ -17,7 +17,6 @@ soong_config_module_type_import {
     module_types: [
         "art_module_apex_defaults",
         "art_module_cc_defaults",
-        "art_module_genrule_defaults",
     ],
 }
 
@@ -184,7 +183,6 @@ java_library {
     name: "art-run-test-bootclasspath",
     sdk_version: "core_platform",
     static_libs: libcore_java_libs + [
-        "core-icu4j-host",
         "framework-annotations-lib",
     ],
 }
@@ -298,7 +296,7 @@ apex_defaults {
             enabled: false,
         },
     },
-    min_sdk_version: "S",
+    min_sdk_version: "31",
     // Indicates that pre-installed version of this apex can be compressed.
     // Whether it actually will be compressed is controlled on per-device basis.
     compressible: true,
@@ -372,11 +370,15 @@ art_gtests = [
     "art_libdexfile_support_tests",
     "art_libprofile_tests",
     "art_oatdump_tests",
-    "art_odrefresh_tests",
     "art_profman_tests",
     "art_runtime_compiler_tests",
     "art_runtime_tests",
     "art_sigchain_tests",
+]
+art_gtests_first_only = [
+    // We only ship "first" for odrefresh, so don't bother test the "second". This also avoids a
+    // problem where some dependencies may only build "first" and doesn't have "second".
+    "art_odrefresh_tests",
 ]
 
 // "Testing" version of the ART APEX module (containing both release
@@ -387,7 +389,14 @@ art_apex_test {
     defaults: ["com.android.art-devel-defaults"],
     file_contexts: ":com.android.art.debug-file_contexts",
     certificate: ":com.android.art.certificate",
-    tests: art_gtests,
+    multilib: {
+        both: {
+            tests: art_gtests,
+        },
+        first: {
+            tests: art_gtests_first_only,
+        },
+    },
     binaries: ["signal_dumper"], // Need signal_dumper for run-tests.
     updatable: false,
 }
@@ -468,17 +477,9 @@ art_check_apex_gen_stem = "$(location art-apex-tester)" +
 
 // The non-flattened APEXes are always checked, as they are always generated
 // (even when APEX flattening is enabled).
-art_module_genrule_defaults {
+genrule_defaults {
     name: "art-check-apex-gen-defaults",
-
-    // Enable if SOONG_CONFIG_art_module_source_build is true.
-    enabled: false,
-    soong_config_variables: {
-        source_build: {
-            enabled: true,
-        },
-    },
-
+    defaults: ["art_module_source_build_genrule_defaults"],
     tools: [
         "art-apex-tester",
         "deapexer",

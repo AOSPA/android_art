@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 The Android Open Source Project
+ * Copyright (C) 2021 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,9 +14,13 @@
  * limitations under the License.
  */
 
-import android.icu.util.TimeZone;
+package com.android.art;
 
-public abstract class MyTimeZone extends TimeZone {
-  // Reference to MyTimeZone.getDefaultTimeZoneType() shall resolve
-  // to TimeZone.getDefaultTimeZoneType() which should be easily inlined.
+@Backing(type="int")
+enum CompilerFilter {
+    UNSUPPORTED = 0,
+    VERIFY,
+    SPEED,
+    SPEED_PROFILE,
 }
+

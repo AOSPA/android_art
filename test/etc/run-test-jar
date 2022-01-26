@@ -101,7 +101,8 @@ VDEX_ARGS=""
 EXTERNAL_LOG_TAGS="n" # if y respect externally set ANDROID_LOG_TAGS.
 DRY_RUN="n" # if y prepare to run the test but don't run it.
 TEST_VDEX="n"
-TEST_DM="n"
+TEST_DEX2OAT_DM="n"
+TEST_RUNTIME_DM="n"
 TEST_IS_NDEBUG="n"
 APP_IMAGE="y"
 SECONDARY_APP_IMAGE="y"
@@ -424,6 +425,9 @@ while true; do
         shift
         CHROOT="$1"
         shift
+    elif [ "x$1" = "x--simpleperf" ]; then
+        SIMPLEPERF="yes"
+        shift
     elif [ "x$1" = "x--android-root" ]; then
         shift
         ANDROID_ROOT="$1"
@@ -479,8 +483,11 @@ while true; do
     elif [ "x$1" = "x--vdex" ]; then
         TEST_VDEX="y"
         shift
-    elif [ "x$1" = "x--dm" ]; then
-        TEST_DM="y"
+    elif [ "x$1" = "x--dex2oat-dm" ]; then
+        TEST_DEX2OAT_DM="y"
+        shift
+    elif [ "x$1" = "x--runtime-dm" ]; then
+        TEST_RUNTIME_DM="y"
         shift
     elif [ "x$1" = "x--vdex-filter" ]; then
         shift
@@ -640,6 +647,12 @@ if [ "$USE_JVMTI" = "y" ]; then
     # We used to add flags here that made the runtime debuggable but that is not
     # needed anymore since the plugin can do it for us now.
     FLAGS="${FLAGS} -Xplugin:${plugin}"
+
+    # For jvmti tests, set the threshold of compilation to 0, so we jit on the first
+    # use to provide better test coverage for jvmti + jit. This means we won't run
+    # the default --jit configuration but it is not too important test scenario for
+    # jvmti tests. This is art specific flag, so don't use it with jvm.
+    FLAGS="${FLAGS} -Xjitthreshold:0"
   fi
 fi
 
@@ -1020,7 +1033,17 @@ function write_dex2oat_cmdlines {
   # If the name ends in -ex then this is a secondary dex file
   if [ "${name:${#name}-3}" = "-ex" ]; then
     # Lazily realize the default value in case DEX_LOCATION/TEST_NAME change
-    [ -z "$SECONDARY_CLASS_LOADER_CONTEXT" ] && SECONDARY_CLASS_LOADER_CONTEXT="PCL[];PCL[$DEX_LOCATION/$TEST_NAME.jar]"
+    if [ "x$SECONDARY_CLASS_LOADER_CONTEXT" = "x" ]; then
+      if [ "x$SECONDARY_DEX" = "x" ]; then
+        # Tests without `--secondary` load the "-ex" jar in a separate PathClassLoader
+        # that is a child of the main PathClassLoader. If the class loader is constructed
+        # in any other way, the test needs to specify the secondary CLC explicitly.
+        SECONDARY_CLASS_LOADER_CONTEXT="PCL[];PCL[$DEX_LOCATION/$TEST_NAME.jar]"
+      else
+        # Tests with `--secondary` load the `-ex` jar a part of the main PathClassLoader.
+        SECONDARY_CLASS_LOADER_CONTEXT="PCL[$DEX_LOCATION/$TEST_NAME.jar]"
+      fi
+    fi
     class_loader_context="'--class-loader-context=$SECONDARY_CLASS_LOADER_CONTEXT'"
     $enable_app_image && [ "$SECONDARY_APP_IMAGE" = "y" ] || enable_app_image=false
   fi
@@ -1075,10 +1098,13 @@ function write_dex2oat_cmdlines {
     else
       vdex_cmdline="${dex2oat_cmdline} ${VDEX_ARGS} --input-vdex=$DEX_LOCATION/oat/$ISA/$name.vdex"
     fi
-  elif [ "$TEST_DM" = "y" ]; then
+  elif [ "$TEST_DEX2OAT_DM" = "y" ]; then
+    vdex_cmdline="${dex2oat_cmdline} ${VDEX_ARGS} --dump-timings --dm-file=$DEX_LOCATION/oat/$ISA/$name.dm"
     dex2oat_cmdline="${dex2oat_cmdline} --copy-dex-files=false --output-vdex=$DEX_LOCATION/oat/$ISA/primary.vdex"
     dm_cmdline="zip -qj $DEX_LOCATION/oat/$ISA/$name.dm $DEX_LOCATION/oat/$ISA/primary.vdex"
-    vdex_cmdline="${dex2oat_cmdline} ${VDEX_ARGS} --dump-timings --dm-file=$DEX_LOCATION/oat/$ISA/$name.dm"
+  elif [ "$TEST_RUNTIME_DM" = "y" ]; then
+    dex2oat_cmdline="${dex2oat_cmdline} --copy-dex-files=false --output-vdex=$DEX_LOCATION/oat/$ISA/primary.vdex"
+    dm_cmdline="zip -qj $DEX_LOCATION/$name.dm $DEX_LOCATION/oat/$ISA/primary.vdex"
   fi
 }
 
@@ -1142,6 +1168,7 @@ fi
 # We set DumpNativeStackOnSigQuit to false to avoid stressing libunwind.
 # b/27185632
 # b/24664297
+
 dalvikvm_cmdline="$INVOKE_WITH $GDB $ANDROID_ART_BIN_DIR/$DALVIKVM \
                   $GDB_ARGS \
                   $FLAGS \
@@ -1157,6 +1184,10 @@ dalvikvm_cmdline="$INVOKE_WITH $GDB $ANDROID_ART_BIN_DIR/$DALVIKVM \
                   $TMP_DIR_OPTION \
                   -XX:DumpNativeStackOnSigQuit:false \
                   -cp $DEX_LOCATION/$TEST_NAME.jar$SECONDARY_DEX $MAIN $ARGS"
+
+if [ "x$SIMPLEPERF" == xyes ]; then
+  dalvikvm_cmdline="simpleperf record ${dalvikvm_cmdline} && simpleperf report"
+fi
 
 sanitize_dex2oat_cmdline() {
   local args=()

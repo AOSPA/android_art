@@ -61,8 +61,8 @@ func globalFlags(ctx android.LoadHookContext) ([]string, []string) {
 	}
 
 	if !ctx.Config().IsEnvFalse("ART_USE_READ_BARRIER") && ctx.Config().ArtUseReadBarrier() {
-		// Used to change the read barrier type. Valid values are BAKER, BROOKS,
-		// TABLELOOKUP. The default is BAKER.
+		// Used to change the read barrier type. Valid values are BAKER, TABLELOOKUP.
+		// The default is BAKER.
 		barrierType := ctx.Config().GetenvWithDefault("ART_READ_BARRIER_TYPE", "BAKER")
 		cflags = append(cflags,
 			"-DART_USE_READ_BARRIER=1",
@@ -370,15 +370,15 @@ func init() {
 }
 
 func artApexBundleFactory() android.Module {
-	return apex.ApexBundleFactory(false /*testApex*/, true /*artApex*/)
+	return apex.ApexBundleFactory(false)
 }
 
 func artTestApexBundleFactory() android.Module {
-	return apex.ApexBundleFactory(true /*testApex*/, true /*artApex*/)
+	return apex.ApexBundleFactory(true)
 }
 
 func artHostTestApexBundleFactory() android.Module {
-	module := apex.ApexBundleFactory(true /*testApex*/, true /*artApex*/)
+	module := apex.ApexBundleFactory(true)
 	android.AddLoadHook(module, func(ctx android.LoadHookContext) {
 		if ctx.Config().IsEnvTrue("HOST_PREFER_32_BIT") {
 			type props struct {

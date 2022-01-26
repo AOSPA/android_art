@@ -390,8 +390,8 @@ class WatchDog {
       if (rc == EINTR) {
         continue;
       } else if (rc == ETIMEDOUT) {
-        Fatal(StringPrintf("dex2oat did not finish after %" PRId64 " seconds",
-                           timeout_in_milliseconds_/1000));
+        Fatal(StringPrintf("dex2oat did not finish after %" PRId64 " milliseconds",
+                           timeout_in_milliseconds_));
       } else if (rc != 0) {
         std::string message(StringPrintf("pthread_cond_timedwait failed: %s", strerror(rc)));
         Fatal(message);
@@ -529,8 +529,6 @@ class Dex2Oat final {
       passes_to_run_filename_(nullptr),
       dirty_image_objects_filename_(nullptr),
       dirty_image_objects_fd_(-1),
-      updatable_bcp_packages_filename_(nullptr),
-      updatable_bcp_packages_fd_(-1),
       is_host_(false),
       elf_writers_(),
       oat_writers_(),
@@ -559,7 +557,11 @@ class Dex2Oat final {
     if (!kIsDebugBuild && !(kRunningOnMemoryTool && kMemoryToolDetectsLeaks)) {
       // We want to just exit on non-debug builds, not bringing the runtime down
       // in an orderly fashion. So release the following fields.
-      driver_.release();                // NOLINT
+      if (!compiler_options_->GetDumpStats()) {
+        // The --dump-stats get logged when the optimizing compiler gets destroyed, so we can't
+        // release the driver_.
+        driver_.release();              // NOLINT
+      }
       image_writer_.release();          // NOLINT
       for (std::unique_ptr<const DexFile>& dex_file : opened_dex_files_) {
         dex_file.release();             // NOLINT
@@ -822,15 +824,6 @@ class Dex2Oat final {
       Usage("--dirty-image-objects and --dirty-image-objects-fd should not be both specified");
     }
 
-    if ((IsBootImage() || IsBootImageExtension()) && (updatable_bcp_packages_filename_ != nullptr ||
-                                                      updatable_bcp_packages_fd_ != -1)) {
-      Usage("Do not specify --updatable-bcp-packages-file[-fd] for boot image compilation.");
-    }
-    if (updatable_bcp_packages_filename_ != nullptr && updatable_bcp_packages_fd_ != -1) {
-      Usage("--updatable-bcp-packages-file and --updatable-bcp-packages-fd should not be "
-            "both specified");
-    }
-
     if (!cpu_set_.empty()) {
       SetCpuAffinity(cpu_set_);
     }
@@ -1088,8 +1081,6 @@ class Dex2Oat final {
     AssignIfExists(args, M::ClasspathDir, &classpath_dir_);
     AssignIfExists(args, M::DirtyImageObjects, &dirty_image_objects_filename_);
     AssignIfExists(args, M::DirtyImageObjectsFd, &dirty_image_objects_fd_);
-    AssignIfExists(args, M::UpdatableBcpPackagesFile, &updatable_bcp_packages_filename_);
-    AssignIfExists(args, M::UpdatableBcpPackagesFd, &updatable_bcp_packages_fd_);
     AssignIfExists(args, M::ImageFormat, &image_storage_mode_);
     AssignIfExists(args, M::CompilationReason, &compilation_reason_);
     AssignTrueIfExists(args, M::CheckLinkageConditions, &check_linkage_conditions_);
@@ -1175,6 +1166,15 @@ class Dex2Oat final {
     } else if (args.Exists(M::StoredClassLoaderContext)) {
       Usage("Option --stored-class-loader-context should only be used if "
             "--class-loader-context is also specified");
+    }
+
+    if (args.Exists(M::UpdatableBcpPackagesFile)) {
+      LOG(WARNING)
+          << "Option --updatable-bcp-packages-file is deprecated and no longer takes effect";
+    }
+
+    if (args.Exists(M::UpdatableBcpPackagesFd)) {
+      LOG(WARNING) << "Option --updatable-bcp-packages-fd is deprecated and no longer takes effect";
     }
 
     // If we have a profile, change the default compiler filter to speed-profile
@@ -1343,38 +1343,9 @@ class Dex2Oat final {
 
     if (dm_file_ != nullptr) {
       DCHECK(input_vdex_file_ == nullptr);
-      std::string error_msg;
-      static const char* kDexMetadata = "DexMetadata";
-      std::unique_ptr<ZipEntry> zip_entry(dm_file_->Find(VdexFile::kVdexNameInDmFile, &error_msg));
-      if (zip_entry == nullptr) {
-        LOG(INFO) << "No " << VdexFile::kVdexNameInDmFile << " file in DexMetadata archive. "
-                  << "Not doing fast verification.";
-      } else {
-        MemMap input_file = zip_entry->MapDirectlyOrExtract(
-            VdexFile::kVdexNameInDmFile,
-            kDexMetadata,
-            &error_msg,
-            alignof(VdexFile));
-        if (!input_file.IsValid()) {
-          LOG(WARNING) << "Could not open vdex file in DexMetadata archive: " << error_msg;
-        } else {
-          input_vdex_file_ = std::make_unique<VdexFile>(std::move(input_file));
-          if (!input_vdex_file_->IsValid()) {
-            // Ideally we would do this validation at the framework level but the framework
-            // has not knowledge of the .vdex format and adding new APIs just for it is
-            // overkill.
-            // TODO(calin): include this in dex2oat metrics.
-            LOG(WARNING) << "The dex metadata .vdex is not valid. Ignoring it.";
-            input_vdex_file_ = nullptr;
-          } else {
-            if (input_vdex_file_->HasDexSection()) {
-              LOG(ERROR) << "The dex metadata is not allowed to contain dex files";
-              android_errorWriteLog(0x534e4554, "178055795");  // Report to SafetyNet.
-              return false;
-            }
-            VLOG(verifier) << "Doing fast verification with vdex from DexMetadata archive";
-          }
-        }
+      input_vdex_file_ = VdexFile::OpenFromDm(dm_file_location_, *dm_file_);
+      if (input_vdex_file_ != nullptr) {
+        VLOG(verifier) << "Doing fast verification with vdex from DexMetadata archive";
       }
     }
 
@@ -1438,8 +1409,6 @@ class Dex2Oat final {
       return dex2oat::ReturnCode::kOther;
     }
 
-    // Verification results are null since we don't know if we will need them yet as the compiler
-    // filter may change.
     callbacks_.reset(new QuickCompilerCallbacks(
         // For class verification purposes, boot image extension is the same as boot image.
         (IsBootImage() || IsBootImageExtension())
@@ -1667,11 +1636,6 @@ class Dex2Oat final {
           class_loader_context_->EncodeContextForOatFile(classpath_dir_,
                                                          stored_class_loader_context_.get());
       key_value_store_->Put(OatHeader::kClassPathKey, class_path_key);
-
-      // Prepare exclusion list for updatable boot class path packages.
-      if (!PrepareUpdatableBcpPackages()) {
-        return dex2oat::ReturnCode::kOther;
-      }
     }
 
     // Now that we have finalized key_value_store_, start writing the .rodata section.
@@ -2536,62 +2500,6 @@ class Dex2Oat final {
     return true;
   }
 
-  bool PrepareUpdatableBcpPackages() {
-    DCHECK(!IsBootImage() && !IsBootImageExtension());
-    AotClassLinker* aot_class_linker = down_cast<AotClassLinker*>(runtime_->GetClassLinker());
-    std::unique_ptr<std::vector<std::string>> updatable_bcp_packages;
-    if (updatable_bcp_packages_fd_ != -1) {
-      updatable_bcp_packages = ReadCommentedInputFromFd<std::vector<std::string>>(
-          updatable_bcp_packages_fd_,
-          nullptr);  // No post-processing.
-      // Close since we won't need it again.
-      close(updatable_bcp_packages_fd_);
-      updatable_bcp_packages_fd_ = -1;
-      if (updatable_bcp_packages == nullptr) {
-        LOG(ERROR) << "Failed to load updatable boot class path packages from fd "
-            << updatable_bcp_packages_fd_;
-        return false;
-      }
-    } else if (updatable_bcp_packages_filename_ != nullptr) {
-      updatable_bcp_packages = ReadCommentedInputFromFile<std::vector<std::string>>(
-          updatable_bcp_packages_filename_,
-          nullptr);  // No post-processing.
-      if (updatable_bcp_packages == nullptr) {
-        LOG(ERROR) << "Failed to load updatable boot class path packages from '"
-            << updatable_bcp_packages_filename_ << "'";
-        return false;
-      }
-    } else {
-      // Use the default list based on updatable packages for Android 11.
-      return aot_class_linker->SetUpdatableBootClassPackages({
-          // Reserved conscrypt packages (includes sub-packages under these paths).
-          // "android.net.ssl",  // Covered by android.net below.
-          "com.android.org.conscrypt",
-          // Reserved updatable-media package (includes sub-packages under this path).
-          "android.media",
-          // Reserved framework-mediaprovider package (includes sub-packages under this path).
-          "android.provider",
-          // Reserved framework-statsd packages (includes sub-packages under these paths).
-          "android.app",
-          "android.os",
-          "android.util",
-          "com.android.internal.statsd",
-          // Reserved framework-permission packages (includes sub-packages under this path).
-          "android.permission",
-          // "android.app.role",  // Covered by android.app above.
-          // Reserved framework-sdkextensions package (includes sub-packages under this path).
-          // "android.os.ext",  // Covered by android.os above.
-          // Reserved framework-wifi packages (includes sub-packages under these paths).
-          "android.hardware.wifi",
-          // "android.net.wifi",  // Covered by android.net below.
-          "com.android.wifi.x",
-          // Reserved framework-tethering package (includes sub-packages under this path).
-          "android.net",
-      });
-    }
-    return aot_class_linker->SetUpdatableBootClassPackages(*updatable_bcp_packages);
-  }
-
   void PruneNonExistentDexFiles() {
     DCHECK_EQ(dex_filenames_.size(), dex_locations_.size());
     size_t kept = 0u;
@@ -2957,8 +2865,6 @@ class Dex2Oat final {
   const char* dirty_image_objects_filename_;
   int dirty_image_objects_fd_;
   std::unique_ptr<HashSet<std::string>> dirty_image_objects_;
-  const char* updatable_bcp_packages_filename_;
-  int updatable_bcp_packages_fd_;
   std::unique_ptr<std::vector<std::string>> passes_to_run_;
   bool is_host_;
   std::string android_root_;

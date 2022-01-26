@@ -29,6 +29,7 @@ cc_defaults {
         "odrefresh.cc",
         "odr_common.cc",
         "odr_compilation_log.cc",
+        "odr_dexopt.cc",
         "odr_fs_utils.cc",
         "odr_metrics.cc",
         "odr_metrics_record.cc",
@@ -41,6 +42,7 @@ cc_defaults {
         "art-odrefresh-operator-srcs",
     ],
     shared_libs: [
+        "artd-private-aidl-ndk",
         "libartpalette",
         "libbase",
         "liblog",
@@ -72,11 +74,11 @@ cc_defaults {
 
 cc_library_headers {
     name: "odrefresh_headers",
+    defaults: ["art_defaults"],
     export_include_dirs: ["include"],
     host_supported: true,
     stl: "none",
     system_shared_libs: [],
-    min_sdk_version: "29", // As part of mainline modules(APEX), it should support at least 29(Q).
     sdk_version: "minimum", // The minimum sdk version required by users of this module.
     apex_available: [
         "//apex_available:platform", // For odsign.
@@ -104,6 +106,7 @@ art_cc_binary {
     shared_libs: [
         "libart",
         "libartbase",
+        "libdexopt",
     ],
     apex_available: [
         "com.android.art",
@@ -124,6 +127,7 @@ art_cc_binary {
     shared_libs: [
         "libartd",
         "libartbased",
+        "libdexoptd",
     ],
     apex_available: [
         "com.android.art.debug",
@@ -189,8 +193,9 @@ art_cc_test {
     host_supported: false,
     shared_libs: [
         "libdexfiled",
+        "libdexoptd",
     ],
-    test_config_template: "art_odrefresh_tests.xml",
+    test_config_template: "//art/test:art-gtests-target-standalone-root-template",
 }
 
 // Standalone version of ART gtest `art_odrefresh_tests`, not bundled with the ART APEX on target.
@@ -202,8 +207,9 @@ art_cc_test {
     ],
     shared_libs: [
         "libdexfile",
+        "libdexopt",
     ],
-    test_config_template: "art_odrefresh_tests.xml",
+    test_config_template: "//art/test:art-gtests-target-standalone-root-template",
 }
 
 genrule {

@@ -58,6 +58,10 @@ class VerifierDepsCompilerCallbacks : public CompilerCallbacks {
 
 class VerifierDepsTest : public CommonCompilerDriverTest {
  public:
+  VerifierDepsTest() {
+    this->use_boot_image_ = true;  // Make the Runtime creation cheaper.
+  }
+
   void SetUpRuntimeOptions(RuntimeOptions* options) override {
     CommonCompilerTest::SetUpRuntimeOptions(options);
     callbacks_.reset(new VerifierDepsCompilerCallbacks());
@@ -326,6 +330,7 @@ class VerifierDepsTest : public CommonCompilerDriverTest {
 
     return decoded_deps.ValidateDependencies(soa.Self(),
                                              new_class_loader,
+                                             second_dex_files,
                                              error_msg);
   }
 

@@ -1556,6 +1556,7 @@ void Heap::TrimIndirectReferenceTables(Thread* self) {
   // Trim globals indirect reference table.
   vm->TrimGlobals();
   // Trim locals indirect reference tables.
+  // TODO: May also want to look for entirely empty pages maintained by SmallIrtAllocator.
   Barrier barrier(0);
   TrimIndirectReferenceTableClosure closure(&barrier);
   ScopedThreadStateChange tsc(self, kWaitingForCheckPointsToRun);
@@ -2742,7 +2743,6 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
   // Grow the heap so that we know when to perform the next GC.
   GrowForUtilization(collector, bytes_allocated_before_gc);
   old_native_bytes_allocated_.store(GetNativeBytes());
-  num_bytes_alive_after_gc_ = bytes_allocated_before_gc - current_gc_iteration_.GetFreedBytes();
   LogGC(gc_cause, collector);
   FinishGC(self, gc_type);
   // Actually enqueue all cleared references. Do this after the GC has officially finished since
@@ -3676,6 +3676,9 @@ void Heap::GrowForUtilization(collector::GarbageCollector* collector_ran,
       const uint64_t freed_bytes = current_gc_iteration_.GetFreedBytes() +
           current_gc_iteration_.GetFreedLargeObjectBytes() +
           current_gc_iteration_.GetFreedRevokeBytes();
+      // Records the number of bytes allocated at the time of GC finish,excluding the number of
+      // bytes allocated during GC.
+      num_bytes_alive_after_gc_ = UnsignedDifference(bytes_allocated_before_gc, freed_bytes);
       // Bytes allocated will shrink by freed_bytes after the GC runs, so if we want to figure out
       // how many bytes were allocated during the GC we need to add freed_bytes back on.
       // Almost always bytes_allocated + freed_bytes >= bytes_allocated_before_gc.

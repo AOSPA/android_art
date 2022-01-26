@@ -77,6 +77,13 @@ std::string GetDefaultBootImageLocation(std::string* error_msg);
 std::string GetDefaultBootImageLocation(const std::string& android_root,
                                         bool deny_art_apex_data_files);
 
+// Returns the boot image path of the provided jar, on /system or /data.
+std::string GetBootImagePath(bool on_system, const std::string& jar_path);
+
+// Allows the name to be used for the dalvik cache directory (normally "dalvik-cache") to be
+// overridden with a new value.
+void OverrideDalvikCacheSubDirectory(std::string sub_dir);
+
 // Return true if we found the dalvik cache and stored it in the dalvik_cache argument.
 // `have_android_data` will be set to true if we have an ANDROID_DATA that exists,
 // `dalvik_cache_exists` will be true if there is a dalvik-cache directory that is present.
@@ -118,6 +125,9 @@ std::string GetSystemImageFilename(const char* location, InstructionSet isa);
 
 // Returns the vdex filename for the given oat filename.
 std::string GetVdexFilename(const std::string& oat_filename);
+
+// Returns the dm filename for the given dex location.
+std::string GetDmFilename(const std::string& dex_location);
 
 // Returns the odex location on /system for a DEX file on /apex. The caller must make sure that
 // `location` is on /apex.

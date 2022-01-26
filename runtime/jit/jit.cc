@@ -913,12 +913,14 @@ class ZygoteVerificationTask final : public Task {
           LOG(WARNING) << "Could not find " << descriptor;
           continue;
         }
-        ++number_of_classes;
         if (linker->VerifyClass(self, /* verifier_deps= */ nullptr, klass) ==
                 verifier::FailureKind::kHardFailure) {
-          DCHECK(self->IsExceptionPending());
-          LOG(FATAL) << "Methods in the boot classpath failed to verify: "
-                     << self->GetException()->Dump();
+          CHECK(self->IsExceptionPending());
+          LOG(WARNING) << "Methods in the boot classpath failed to verify: "
+                       << self->GetException()->Dump();
+          self->ClearException();
+        } else {
+          ++number_of_classes;
         }
         CHECK(!self->IsExceptionPending());
       }
@@ -1414,7 +1416,7 @@ uint32_t Jit::CompileMethodsFromProfile(
     return 0u;
   }
 
-  ProfileCompilationInfo profile_info;
+  ProfileCompilationInfo profile_info(/* for_boot_image= */ class_loader.IsNull());
   if (!profile_info.Load(profile.Fd())) {
     LOG(ERROR) << "Could not load profile file";
     return 0u;
@@ -1470,7 +1472,7 @@ uint32_t Jit::CompileMethodsFromProfile(
 }
 
 bool Jit::IgnoreSamplesForMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_) {
-  if (method->IsClassInitializer() || !method->IsCompilable() || method->IsPreCompiled()) {
+  if (method->IsClassInitializer() || !method->IsCompilable()) {
     // We do not want to compile such methods.
     return true;
   }
@@ -1488,64 +1490,6 @@ bool Jit::IgnoreSamplesForMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutat
     }
   }
   return false;
-}
-
-bool Jit::MaybeCompileMethod(Thread* self,
-                             ArtMethod* method,
-                             uint32_t old_count,
-                             uint32_t new_count,
-                             bool with_backedges) {
-  if (thread_pool_ == nullptr) {
-    return false;
-  }
-  if (UNLIKELY(method->IsPreCompiled()) && !with_backedges /* don't check for OSR */) {
-    if (!NeedsClinitCheckBeforeCall(method) ||
-        method->GetDeclaringClass()->IsVisiblyInitialized()) {
-      const void* entry_point = code_cache_->GetSavedEntryPointOfPreCompiledMethod(method);
-      if (entry_point != nullptr) {
-        Runtime::Current()->GetInstrumentation()->UpdateMethodsCode(method, entry_point);
-        return true;
-      }
-    }
-  }
-
-  if (IgnoreSamplesForMethod(method)) {
-    return false;
-  }
-  if (HotMethodThreshold() == 0) {
-    // Tests might request JIT on first use (compiled synchronously in the interpreter).
-    return false;
-  }
-  DCHECK_GT(WarmMethodThreshold(), 0);
-  DCHECK_GT(HotMethodThreshold(), WarmMethodThreshold());
-  DCHECK_GT(OSRMethodThreshold(), HotMethodThreshold());
-  DCHECK_GE(PriorityThreadWeight(), 1);
-  DCHECK_LE(PriorityThreadWeight(), HotMethodThreshold());
-
-  if (UseJitCompilation()) {
-    if (old_count < HotMethodThreshold() && new_count >= HotMethodThreshold()) {
-      if (!code_cache_->ContainsPc(method->GetEntryPointFromQuickCompiledCode())) {
-        DCHECK(thread_pool_ != nullptr);
-        thread_pool_->AddTask(
-            self,
-            new JitCompileTask(
-                method, JitCompileTask::TaskKind::kCompile, CompilationKind::kBaseline));
-      }
-    }
-    if (old_count < OSRMethodThreshold() && new_count >= OSRMethodThreshold()) {
-      if (!with_backedges) {
-        return false;
-      }
-      DCHECK(!method->IsNative());  // No back edges reported for native methods.
-      if (!code_cache_->IsOsrCompiled(method)) {
-        DCHECK(thread_pool_ != nullptr);
-        thread_pool_->AddTask(
-            self,
-            new JitCompileTask(method, JitCompileTask::TaskKind::kCompile, CompilationKind::kOsr));
-      }
-    }
-  }
-  return true;
 }
 
 void Jit::EnqueueOptimizedCompilation(ArtMethod* method, Thread* self) {
@@ -1596,7 +1540,7 @@ void Jit::MethodEntered(Thread* thread, ArtMethod* method) {
     return;
   }
 
-  AddSamples(thread, method, 1, /* with_backedges= */false);
+  AddSamples(thread, method);
 }
 
 void Jit::WaitForCompilationToFinish(Thread* self) {
@@ -1790,19 +1734,48 @@ bool Jit::CanAssumeInitialized(ObjPtr<mirror::Class> cls, bool is_for_shared_reg
   }
 }
 
-void Jit::EnqueueCompilationFromNterp(ArtMethod* method, Thread* self) {
+void Jit::EnqueueCompilation(ArtMethod* method, Thread* self) {
   if (thread_pool_ == nullptr) {
     return;
   }
-  if (GetCodeCache()->ContainsPc(method->GetEntryPointFromQuickCompiledCode())) {
-    // If we already have compiled code for it, nterp may be stuck in a loop.
-    // Compile OSR.
-    thread_pool_->AddTask(
-        self,
-        new JitCompileTask(method, JitCompileTask::TaskKind::kCompile, CompilationKind::kOsr));
+
+  if (JitAtFirstUse()) {
+    // Tests might request JIT on first use (compiled synchronously in the interpreter).
     return;
   }
-  if (GetCodeCache()->CanAllocateProfilingInfo()) {
+
+  if (!UseJitCompilation()) {
+    return;
+  }
+
+  if (GetCodeCache()->ContainsPc(method->GetEntryPointFromQuickCompiledCode())) {
+    if (!method->IsNative() && !code_cache_->IsOsrCompiled(method)) {
+      // If we already have compiled code for it, nterp may be stuck in a loop.
+      // Compile OSR.
+      thread_pool_->AddTask(
+          self,
+          new JitCompileTask(method, JitCompileTask::TaskKind::kCompile, CompilationKind::kOsr));
+    }
+    return;
+  }
+
+  // Check if we have precompiled this method.
+  if (UNLIKELY(method->IsPreCompiled())) {
+    if (!NeedsClinitCheckBeforeCall(method) ||
+        method->GetDeclaringClass()->IsVisiblyInitialized()) {
+      const void* entry_point = code_cache_->GetSavedEntryPointOfPreCompiledMethod(method);
+      if (entry_point != nullptr) {
+        Runtime::Current()->GetInstrumentation()->UpdateMethodsCode(method, entry_point);
+      }
+    }
+    return;
+  }
+
+  if (IgnoreSamplesForMethod(method)) {
+    return;
+  }
+
+  if (!method->IsNative() && GetCodeCache()->CanAllocateProfilingInfo()) {
     thread_pool_->AddTask(
         self,
         new JitCompileTask(method, JitCompileTask::TaskKind::kCompile, CompilationKind::kBaseline));

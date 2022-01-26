@@ -48,6 +48,7 @@ class X86_64JniCallingConvention final : public JniCallingConvention {
  public:
   X86_64JniCallingConvention(bool is_static,
                              bool is_synchronized,
+                             bool is_fast_native,
                              bool is_critical_native,
                              const char* shorty);
   ~X86_64JniCallingConvention() override {}
@@ -58,8 +59,7 @@ class X86_64JniCallingConvention final : public JniCallingConvention {
   size_t FrameSize() const override;
   size_t OutFrameSize() const override;
   ArrayRef<const ManagedRegister> CalleeSaveRegisters() const override;
-  ManagedRegister SavedLocalReferenceCookieRegister() const override;
-  ManagedRegister ReturnScratchRegister() const override;
+  ArrayRef<const ManagedRegister> CalleeSaveScratchRegisters() const override;
   uint32_t CoreSpillMask() const override;
   uint32_t FpSpillMask() const override;
   bool IsCurrentParamInRegister() override;

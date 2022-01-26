@@ -28,6 +28,7 @@
 #include "exec_utils.h"
 #include "odr_artifacts.h"
 #include "odr_config.h"
+#include "odr_dexopt.h"
 #include "odr_metrics.h"
 #include "odrefresh/odrefresh.h"
 
@@ -41,7 +42,8 @@ class OnDeviceRefresh final {
   // Constructor with injections. For testing and internal use only.
   OnDeviceRefresh(const OdrConfig& config,
                   const std::string& cache_info_filename,
-                  std::unique_ptr<ExecUtils> exec_utils);
+                  std::unique_ptr<ExecUtils> exec_utils,
+                  std::unique_ptr<OdrDexopt> odr_dexopt);
 
   // Returns the exit code, a list of ISAs that boot extensions should be compiled for, and a
   // boolean indicating whether the system server should be compiled.
@@ -53,16 +55,6 @@ class OnDeviceRefresh final {
   WARN_UNUSED ExitCode Compile(OdrMetrics& metrics,
                                const std::vector<InstructionSet>& compile_boot_extensions,
                                bool compile_system_server) const;
-
-  // Verify all artifacts are up-to-date.
-  //
-  // This method checks artifacts can be loaded by the runtime.
-  //
-  // Returns ExitCode::kOkay if artifacts are up-to-date, ExitCode::kCompilationRequired
-  // otherwise.
-  //
-  // NB This is the main function used by the --verify command-line option.
-  WARN_UNUSED ExitCode VerifyArtifactsAreUpToDate() const;
 
   WARN_UNUSED bool RemoveArtifactsDirectory() const;
 
@@ -127,26 +119,6 @@ class OnDeviceRefresh final {
       const std::optional<com::android::art::CacheInfo>& cache_info,
       /*out*/ bool* cleanup_required) const;
 
-  // Check the validity of boot class path extension artifacts.
-  //
-  // Returns true if artifacts exist and are valid according to dexoptanalyzer.
-  WARN_UNUSED bool VerifyBootExtensionArtifactsAreUpToDate(const InstructionSet isa,
-                                                           bool on_system) const;
-
-  // Verify whether boot extension artifacts for `isa` are valid on system partition or in
-  // apexdata. This method has the side-effect of removing boot classpath extension artifacts on
-  // /data, if there are valid artifacts on /system, or if the artifacts on /data are not valid.
-  // Returns true if valid boot externsion artifacts are valid.
-  WARN_UNUSED bool VerifyBootExtensionArtifactsAreUpToDate(InstructionSet isa) const;
-
-  WARN_UNUSED bool VerifySystemServerArtifactsAreUpToDate(bool on_system) const;
-
-  // Verify the validity of system server artifacts on both /system and /data.
-  // This method has the side-effect of removing system server artifacts on /data, if there are
-  // valid artifacts on /system, or if the artifacts on /data are not valid.
-  // Returns true if valid artifacts are found.
-  WARN_UNUSED bool VerifySystemServerArtifactsAreUpToDate() const;
-
   WARN_UNUSED bool CompileBootExtensionArtifacts(const InstructionSet isa,
                                                  const std::string& staging_dir,
                                                  OdrMetrics& metrics,
@@ -176,9 +148,9 @@ class OnDeviceRefresh final {
 
   const time_t start_time_;
 
-  time_t max_child_process_seconds_;
-
   std::unique_ptr<ExecUtils> exec_utils_;
+
+  std::unique_ptr<OdrDexopt> odr_dexopt_;
 
   DISALLOW_COPY_AND_ASSIGN(OnDeviceRefresh);
 };

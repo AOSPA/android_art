@@ -70,7 +70,7 @@ class EntrypointsOrderTest : public CommonRuntimeTest {
     EXPECT_OFFSET_DIFFP(Thread, tls32_, daemon, throwing_OutOfMemoryError, 4);
     EXPECT_OFFSET_DIFFP(Thread, tls32_, throwing_OutOfMemoryError, no_thread_suspension, 4);
     EXPECT_OFFSET_DIFFP(Thread, tls32_, no_thread_suspension, thread_exit_check_count, 4);
-    EXPECT_OFFSET_DIFFP(Thread, tls32_, thread_exit_check_count, handling_signal_, 4);
+    EXPECT_OFFSET_DIFFP(Thread, tls32_, thread_exit_check_count, is_transitioning_to_runnable, 4);
 
     // TODO: Better connection. Take alignment into account.
     EXPECT_OFFSET_DIFF_GT3(Thread, tls32_.thread_exit_check_count, tls64_.trace_clock_base, 4,
@@ -216,21 +216,18 @@ class EntrypointsOrderTest : public CommonRuntimeTest {
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pGetObjInstance, pGetObjStatic, sizeof(void*));
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pGetObjStatic, pAputObject, sizeof(void*));
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pAputObject, pJniMethodStart, sizeof(void*));
-    EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pJniMethodStart, pJniMethodFastStart,
-                         sizeof(void*));
-    EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pJniMethodFastStart, pJniMethodStartSynchronized,
+    EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pJniMethodStart, pJniMethodStartSynchronized,
                          sizeof(void*));
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pJniMethodStartSynchronized, pJniMethodEnd,
                          sizeof(void*));
-    EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pJniMethodEnd, pJniMethodFastEnd, sizeof(void*));
-    EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pJniMethodFastEnd, pJniMethodEndSynchronized, sizeof(void*));
+    EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pJniMethodEnd, pJniMethodEndSynchronized, sizeof(void*));
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pJniMethodEndSynchronized, pJniMethodEndWithReference,
                          sizeof(void*));
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pJniMethodEndWithReference,
-                         pJniMethodFastEndWithReference, sizeof(void*));
-    EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pJniMethodFastEndWithReference,
                          pJniMethodEndWithReferenceSynchronized, sizeof(void*));
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pJniMethodEndWithReferenceSynchronized,
+                         pJniDecodeReferenceResult, sizeof(void*));
+    EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pJniDecodeReferenceResult,
                          pQuickGenericJniTrampoline, sizeof(void*));
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pQuickGenericJniTrampoline, pLockObject, sizeof(void*));
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pLockObject, pUnlockObject, sizeof(void*));
@@ -405,9 +402,13 @@ class EntrypointsOrderTest : public CommonRuntimeTest {
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pReadBarrierMarkReg29, pReadBarrierSlow, sizeof(void*));
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pReadBarrierSlow, pReadBarrierForRootSlow,
                          sizeof(void*));
+    EXPECT_OFFSET_DIFFNP(
+        QuickEntryPoints, pReadBarrierForRootSlow, pMethodEntryHook, sizeof(void*));
+    EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pMethodEntryHook, pMethodExitHook, sizeof(void*));
 
-    CHECKED(OFFSETOF_MEMBER(QuickEntryPoints, pReadBarrierForRootSlow)
-            + sizeof(void*) == sizeof(QuickEntryPoints), QuickEntryPoints_all);
+    CHECKED(OFFSETOF_MEMBER(QuickEntryPoints, pMethodExitHook) + sizeof(void*) ==
+                sizeof(QuickEntryPoints),
+            QuickEntryPoints_all);
   }
 };
 

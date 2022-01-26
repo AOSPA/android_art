@@ -6,6 +6,12 @@
         "bug": "http://b/33389022"
     },
     {
+        "tests": "304-method-tracing",
+        "description": ["Disable 304-method-tracing temporarily until a fix",
+                        "arrives."],
+        "bug": "http://b/203253172"
+    },
+    {
         "tests": "132-daemon-locks-shutdown",
         "description": ["This test seems to fail occasionally on redefine-stress for unknown reasons without stack-traces"],
         "variant": "redefine-stress",
@@ -372,7 +378,8 @@
                   "530-checker-lse2",
                   "030-bad-finalizer",
                   "080-oom-throw",
-                  "1336-short-finalizer-timeout"],
+                  "1336-short-finalizer-timeout",
+                  "2041-bad-cleaner"],
         "bug": "http://b/36377828",
         "variant": "interp-ac"
     },
@@ -1083,6 +1090,7 @@
           "1945-proxy-method-arguments",
           "1946-list-descriptors",
           "1947-breakpoint-redefine-deopt",
+          "2041-bad-cleaner",
           "2230-profile-save-hotness"
         ],
         "variant": "jvm",
@@ -1159,6 +1167,7 @@
                   "830-goto-zero",
                   "831-unverified-bcp",
                   "831-unresolved-field",
+                  "833-background-verification",
                   "999-redefine-hiddenapi",
                   "1000-non-moving-space-stress",
                   "1001-app-image-regions",
@@ -1442,5 +1451,24 @@
         "variant": "jvm",
         "bug": "b/195387473",
         "description": ["Depends on using language level 11."]
+    },
+    {
+        "tests": ["727-checker-unresolved-class"],
+        "description": ["The test used to use --updatable-bcp-packages-file to",
+                        "make classes unresolved, but the flag is deprecated",
+                        "and no longer takes effect"],
+        "bug": "b/203171409",
+        "variant": "target | host"
+    },
+    {
+        "tests": ["004-ReferenceMap"],
+        "variant": "redefine-stress & jit",
+        "description": ["Test expects specific dex pcs which breaks with redefine-stress"]
+    },
+    {
+        "tests": ["597-deopt-invoke-stub"],
+        "variant": "redefine-stress & jit | jvmti-stress & jit",
+        "description": ["Test expects few methods to be interpreted but jvmti enables",
+		        "jit-on-first-use which breaks this expectation"]
     }
 ]

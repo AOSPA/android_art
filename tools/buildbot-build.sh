@@ -16,10 +16,12 @@
 
 set -e
 
+. "$(dirname $0)/buildbot-utils.sh"
+
 shopt -s failglob
 
 if [ ! -d art ]; then
-  echo "Script needs to be run at the root of the android tree"
+  msgerror "Script needs to be run at the root of the Android tree"
   exit 1
 fi
 
@@ -43,6 +45,7 @@ specific_targets="libjavacoretests libwrapagentproperties libwrapagentproperties
 build_host="no"
 build_target="no"
 installclean="no"
+skip_run_tests_build="no"
 j_arg="-j$(nproc)"
 showcommands=
 make_command=
@@ -57,6 +60,9 @@ while true; do
   elif [[ "$1" == "--installclean" ]]; then
     installclean="yes"
     shift
+  elif [[ "$1" == "--skip-run-tests-build" ]]; then
+    skip_run_tests_build="yes"
+    shift
   elif [[ "$1" == -j* ]]; then
     j_arg=$1
     shift
@@ -66,7 +72,7 @@ while true; do
   elif [[ "$1" == "" ]]; then
     break
   else
-    echo "Unknown options $@"
+    msgerror "Unknown options: $@"
     exit 1
   fi
 done
@@ -96,7 +102,8 @@ apexes=(
 
 make_command="build/soong/soong_ui.bash --make-mode $j_arg $extra_args $showcommands $common_targets"
 if [[ $build_host == "yes" ]]; then
-  make_command+=" build-art-host-tests"
+  make_command+=" build-art-host-gtests"
+  test $skip_run_tests_build == "yes" || make_command+=" build-art-host-run-tests"
   make_command+=" dx-tests junit-host libjdwp-host"
   for LIB in ${specific_targets} ; do
     make_command+=" $LIB-host"
@@ -104,20 +111,26 @@ if [[ $build_host == "yes" ]]; then
 fi
 if [[ $build_target == "yes" ]]; then
   if [[ -z "${ANDROID_PRODUCT_OUT}" ]]; then
-    echo 'ANDROID_PRODUCT_OUT environment variable is empty; did you forget to run `lunch`?'
+    msgerror 'ANDROID_PRODUCT_OUT environment variable is empty; did you forget to run `lunch`?'
     exit 1
   fi
-  make_command+=" build-art-target-tests"
-  make_command+=" libnetd_client-target toybox sh libtombstoned_client"
-  make_command+=" debuggerd su"
-  # testrunner in chroot requires the class files for conscrypt and ICU (cf.
-  # https://r.android.com/1828052).
+  make_command+=" build-art-target-gtests"
+  test $skip_run_tests_build == "yes" || make_command+=" build-art-target-run-tests"
+  make_command+=" debuggerd sh su toybox"
+  # Indirect dependencies in the platform, e.g. through heapprofd_client_api.
+  # These are built to go into system/lib(64) to be part of the system linker
+  # namespace.
+  make_command+=" libbacktrace libnetd_client-target libprocinfo libtombstoned_client libunwindstack"
+  # Extract jars from other APEX SDKs for use by vogar. Note these go into
+  # out/target/common/obj/JAVA_LIBRARIES which isn't removed by "m installclean".
   make_command+=" conscrypt core-icu4j"
   make_command+=" ${ANDROID_PRODUCT_OUT#"${ANDROID_BUILD_TOP}/"}/system/etc/public.libraries.txt"
   # Targets required to generate a linker configuration for device within the
   # chroot environment. The *.libraries.txt targets are required by
   # the source linkerconfig but not included in the prebuilt one.
   make_command+=" linkerconfig conv_linker_config sanitizer.libraries.txt vndkcorevariant.libraries.txt"
+  # Additional dependency in /system
+  make_command+=" libbinder_ndk"
   # Additional targets needed for the chroot environment.
   make_command+=" event-log-tags"
   # Needed to extract prebuilt APEXes.
@@ -128,21 +141,24 @@ if [[ $build_target == "yes" ]]; then
 fi
 
 if [[ $installclean == "yes" ]]; then
-  echo "Perform installclean"
+  msginfo "Perform installclean"
   ANDROID_QUIET_BUILD=true build/soong/soong_ui.bash --make-mode $extra_args installclean
+  # The common java library directory is not cleaned up by installclean. Do that
+  # explicitly to not overcache them in incremental builds.
+  rm -rf $java_libraries_dir
 else
-  echo "WARNING: Missing --installclean argument to buildbot-build.sh"
-  echo "WARNING: This is usually ok, but may cause rare odd failures."
+  msgwarning "Missing --installclean argument to buildbot-build.sh"
+  msgwarning "This is usually ok, but may cause rare odd failures."
   echo ""
 fi
 
-echo "Executing $make_command"
+msginfo "Executing" "$make_command"
 # Disable path restrictions to enable luci builds using vpython.
 eval "$make_command"
 
 if [[ $build_target == "yes" ]]; then
   if [[ -z "${ANDROID_HOST_OUT}" ]]; then
-    echo "ANDROID_HOST_OUT environment variable is empty; using $out_dir/host/linux-x86"
+    msgwarning "ANDROID_HOST_OUT environment variable is empty; using $out_dir/host/linux-x86"
     ANDROID_HOST_OUT=$out_dir/host/linux-x86
   fi
 
@@ -158,7 +174,7 @@ if [[ $build_target == "yes" ]]; then
       file="${apexbase}.capex"
     fi
     if [ -n "${file}" ]; then
-      echo "Extracting APEX file: ${file}"
+      msginfo "Extracting APEX file:" "${file}"
       rm -rf $dir
       mkdir -p $dir
       $ANDROID_HOST_OUT/bin/deapexer --debugfs_path $debugfs extract $file $dir
@@ -185,12 +201,12 @@ if [[ $build_target == "yes" ]]; then
     for so in ${implementation_libs[@]}; do
       if [ -d "$ANDROID_PRODUCT_OUT/system/lib" ]; then
         cmd="cp -p prebuilts/runtime/mainline/platform/impl/$arch32/$so $ANDROID_PRODUCT_OUT/system/lib/$so"
-        echo "Executing $cmd"
+        msginfo "Executing" "$cmd"
         eval "$cmd"
       fi
       if [ -d "$ANDROID_PRODUCT_OUT/system/lib64" ]; then
         cmd="cp -p prebuilts/runtime/mainline/platform/impl/$arch64/$so $ANDROID_PRODUCT_OUT/system/lib64/$so"
-        echo "Executing $cmd"
+        msginfo "Executing" "$cmd"
         eval "$cmd"
       fi
    done
@@ -211,18 +227,18 @@ if [[ $build_target == "yes" ]]; then
   target_out_unstripped="$ANDROID_PRODUCT_OUT/symbols"
   link_name="$target_out_unstripped/apex/com.android.art"
   link_command="mkdir -p $(dirname "$link_name") && ln -sf com.android.art.testing \"$link_name\""
-  echo "Executing $link_command"
+  msginfo "Executing" "$link_command"
   eval "$link_command"
 
   # Temporary fix for libjavacrypto.so dependencies in libcore and jvmti tests (b/147124225).
   conscrypt_dir="$ANDROID_PRODUCT_OUT/system/apex/com.android.conscrypt"
   conscrypt_libs="libjavacrypto.so libcrypto.so libssl.so"
   if [ ! -d "${conscrypt_dir}" ]; then
-    echo -e "Missing conscrypt APEX in build output: ${conscrypt_dir}"
+    msgerror "Missing conscrypt APEX in build output: ${conscrypt_dir}"
     exit 1
   fi
   if [ ! -f "${conscrypt_dir}/javalib/conscrypt.jar" ]; then
-    echo -e "Missing conscrypt jar in build output: ${conscrypt_dir}"
+    msgerror "Missing conscrypt jar in build output: ${conscrypt_dir}"
     exit 1
   fi
   for l in lib lib64; do
@@ -234,7 +250,7 @@ if [[ $build_target == "yes" ]]; then
       dst="$ANDROID_PRODUCT_OUT/system/${l}/${so}"
       if [ "${src}" -nt "${dst}" ]; then
         cmd="cp -p \"${src}\" \"${dst}\""
-        echo "Executing $cmd"
+        msginfo "Executing" "$cmd"
         eval "$cmd"
       fi
     done
@@ -252,7 +268,7 @@ if [[ $build_target == "yes" ]]; then
   # installSymlinkToRuntimeApex in soong/cc/binary.go, but we have to replicate
   # it here since we don't run the install rules for the Runtime APEX.
   for b in linker{,_asan}{,64}; do
-    echo "Symlinking /apex/com.android.runtime/bin/$b to /system/bin"
+    msginfo "Symlinking" "/apex/com.android.runtime/bin/$b to /system/bin"
     ln -sf /apex/com.android.runtime/bin/$b $ANDROID_PRODUCT_OUT/system/bin/$b
   done
   for d in $ANDROID_PRODUCT_OUT/system/apex/com.android.runtime/lib{,64}/bionic; do
@@ -262,7 +278,7 @@ if [[ $build_target == "yes" ]]; then
         lib_file=$(basename $p)
         src=/apex/com.android.runtime/${lib_dir}/bionic/${lib_file}
         dst=$ANDROID_PRODUCT_OUT/system/${lib_dir}/${lib_file}
-        echo "Symlinking $src into /system/${lib_dir}"
+        msginfo "Symlinking" "$src into /system/${lib_dir}"
         mkdir -p $(dirname $dst)
         ln -sf $src $dst
       done
@@ -291,14 +307,14 @@ if [[ $build_target == "yes" ]]; then
     else
       dst="$linkerconfig_root/apex/${apex}"
     fi
-    echo "Copying APEX directory from $src to $dst"
+    msginfo "Copying APEX directory" "from $src to $dst"
     rm -rf $dst
     cp -r $src $dst
   done
 
   # Linkerconfig also looks at /apex/apex-info-list.xml to check for system APEXes.
   apex_xml_file=$linkerconfig_root/apex/apex-info-list.xml
-  echo "Creating $apex_xml_file"
+  msginfo "Creating" "$apex_xml_file"
   cat <<EOF > $apex_xml_file
 <?xml version="1.0" encoding="utf-8"?>
 <apex-info-list>
@@ -359,7 +375,7 @@ EOF
     libz.so
   )
 
-  echo "Encoding linker.config.json to $system_linker_config_pb"
+  msginfo "Encoding linker.config.json" "to $system_linker_config_pb"
   $ANDROID_HOST_OUT/bin/conv_linker_config proto -s $ANDROID_BUILD_TOP/system/core/rootdir/etc/linker.config.json -o $system_linker_config_pb
   $ANDROID_HOST_OUT/bin/conv_linker_config append -s $system_linker_config_pb -o $system_linker_config_pb --key "provideLibs" --value "${system_provide_libs[*]}"
 
@@ -369,8 +385,9 @@ EOF
 
   platform_version=$(build/soong/soong_ui.bash --dumpvar-mode PLATFORM_VERSION)
   linkerconfig_out=$ANDROID_PRODUCT_OUT/linkerconfig
-  echo "Generating linkerconfig in $linkerconfig_out"
+  msginfo "Generating linkerconfig" "in $linkerconfig_out"
   rm -rf $linkerconfig_out
   mkdir -p $linkerconfig_out
   $ANDROID_HOST_OUT/bin/linkerconfig --target $linkerconfig_out --root $linkerconfig_root --vndk $platform_version
+  msgnote "Don't be scared by \"Unable to access VNDK APEX\" message, it's not fatal"
 fi
