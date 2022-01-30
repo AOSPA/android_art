@@ -159,7 +159,7 @@ std::vector<const OatFile*> OatFileManager::RegisterImageOatFiles(
   oat_files.reserve(spaces.size());
   for (gc::space::ImageSpace* space : spaces) {
     // The oat file was generated in memory if the image space has a profile.
-    bool in_memory = !space->GetProfileFile().empty();
+    bool in_memory = !space->GetProfileFiles().empty();
     oat_files.push_back(RegisterOatFile(space->ReleaseOatFile(), in_memory));
   }
   return oat_files;
@@ -847,6 +847,17 @@ void OatFileManager::DumpForSigQuit(std::ostream& os) {
     }
     os << oat_file->GetLocation() << ": " << oat_file->GetCompilerFilter() << "\n";
   }
+}
+
+bool OatFileManager::ContainsPc(const void* code) {
+  ReaderMutexLock mu(Thread::Current(), *Locks::oat_file_manager_lock_);
+  std::vector<const OatFile*> boot_oat_files = GetBootOatFiles();
+  for (const std::unique_ptr<const OatFile>& oat_file : oat_files_) {
+    if (oat_file->Contains(code)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace art

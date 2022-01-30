@@ -182,6 +182,7 @@ int InitializeHostConfig(int argc, char** argv, OdrConfig* config) {
       config->SetZygoteKind(zygote_kind);
     } else if (!InitializeCommonConfig(arg, config)) {
       UsageError("Unrecognized argument: '%s'", arg);
+      exit(EX_USAGE);
     }
   }
   return n;
@@ -223,8 +224,7 @@ int InitializeTargetConfig(int argc, char** argv, OdrConfig* config) {
       config->SetCompilationOsAddress(cid);
     } else if (ArgumentMatches(arg, "--dalvik-cache=", &value)) {
       art::OverrideDalvikCacheSubDirectory(value);
-      config->SetArtifactDirectory(Concatenate(
-          {GetApexDataDalvikCacheDirectory(art::InstructionSet::kNone), "/", value}));
+      config->SetArtifactDirectory(GetApexDataDalvikCacheDirectory(art::InstructionSet::kNone));
     } else if (ArgumentMatches(arg, "--max-execution-seconds=", &value)) {
       int seconds;
       if (!android::base::ParseInt(value, &seconds)) {
@@ -262,10 +262,12 @@ int InitializeTargetConfig(int argc, char** argv, OdrConfig* config) {
 void TargetOptionsHelp() {
   UsageError("--use-compilation-os=<CID>       Run compilation in the VM with the given CID.");
   UsageError("                                 (0 = do not use VM, -1 = use composd's VM)");
-  UsageError(
-      "--dalvik-cache=<DIR>             Write artifacts to .../<DIR> rather than .../dalvik-cache");
+  UsageError("--dalvik-cache=<DIR>             Write artifacts to .../<DIR> rather than");
+  UsageError("                                 .../dalvik-cache");
   UsageError("--max-execution-seconds=<N>      Maximum timeout of all compilation combined");
   UsageError("--max-child-process-seconds=<N>  Maximum timeout of each compilation task");
+  UsageError("--staging-dir=<DIR>              Write temporary artifacts to <DIR> rather than");
+  UsageError("                                 .../staging");
   UsageError("--zygote-arch=<STRING>           Zygote kind that overrides ro.zygote");
 }
 
@@ -321,48 +323,48 @@ int main(int argc, char** argv) {
   argc -= n;
   if (argc != 1) {
     UsageError("Expected 1 argument, but have %d.", argc);
+    exit(EX_USAGE);
   }
 
   OdrMetrics metrics(config.GetArtifactDirectory());
   OnDeviceRefresh odr(config);
-  for (int i = 0; i < argc; ++i) {
-    std::string_view action(argv[i]);
-    CompilationOptions compilation_options;
-    if (action == "--check") {
-      // Fast determination of whether artifacts are up to date.
-      return odr.CheckArtifactsAreUpToDate(metrics, &compilation_options);
-    } else if (action == "--compile") {
-      const ExitCode exit_code = odr.CheckArtifactsAreUpToDate(metrics, &compilation_options);
-      if (exit_code != ExitCode::kCompilationRequired) {
-        return exit_code;
-      }
-      OdrCompilationLog compilation_log;
-      if (!compilation_log.ShouldAttemptCompile(metrics.GetTrigger())) {
-        LOG(INFO) << "Compilation skipped because it was attempted recently";
-        return ExitCode::kOkay;
-      }
-      ExitCode compile_result = odr.Compile(metrics, compilation_options);
-      compilation_log.Log(metrics.GetArtApexVersion(),
-                          metrics.GetArtApexLastUpdateMillis(),
-                          metrics.GetTrigger(),
-                          compile_result);
-      return compile_result;
-    } else if (action == "--force-compile") {
-      // Clean-up existing files.
-      if (!odr.RemoveArtifactsDirectory()) {
-        metrics.SetStatus(OdrMetrics::Status::kIoError);
-        return ExitCode::kCleanupFailed;
-      }
-      return odr.Compile(metrics,
-                         CompilationOptions{
-                             .compile_boot_extensions_for_isas = config.GetBootExtensionIsas(),
-                             .system_server_jars_to_compile = odr.AllSystemServerJars(),
-                         });
-    } else if (action == "--help") {
-      UsageHelp(argv[0]);
-    } else {
-      UsageError("Unknown argument: ", argv[i]);
+
+  std::string_view action(argv[0]);
+  CompilationOptions compilation_options;
+  if (action == "--check") {
+    // Fast determination of whether artifacts are up to date.
+    return odr.CheckArtifactsAreUpToDate(metrics, &compilation_options);
+  } else if (action == "--compile") {
+    const ExitCode exit_code = odr.CheckArtifactsAreUpToDate(metrics, &compilation_options);
+    if (exit_code != ExitCode::kCompilationRequired) {
+      return exit_code;
     }
+    OdrCompilationLog compilation_log;
+    if (!compilation_log.ShouldAttemptCompile(metrics.GetTrigger())) {
+      LOG(INFO) << "Compilation skipped because it was attempted recently";
+      return ExitCode::kOkay;
+    }
+    ExitCode compile_result = odr.Compile(metrics, compilation_options);
+    compilation_log.Log(metrics.GetArtApexVersion(),
+                        metrics.GetArtApexLastUpdateMillis(),
+                        metrics.GetTrigger(),
+                        compile_result);
+    return compile_result;
+  } else if (action == "--force-compile") {
+    // Clean-up existing files.
+    if (!odr.RemoveArtifactsDirectory()) {
+      metrics.SetStatus(OdrMetrics::Status::kIoError);
+      return ExitCode::kCleanupFailed;
+    }
+    return odr.Compile(metrics,
+                       CompilationOptions{
+                         .compile_boot_extensions_for_isas = config.GetBootExtensionIsas(),
+                         .system_server_jars_to_compile = odr.AllSystemServerJars(),
+                       });
+  } else if (action == "--help") {
+    UsageHelp(argv[0]);
+  } else {
+    UsageError("Unknown argument: ", action);
+    exit(EX_USAGE);
   }
-  return ExitCode::kOkay;
 }

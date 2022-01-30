@@ -589,10 +589,6 @@ class ClassLinker {
                                          jobjectArray throws)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Get the oat code for a method when its class isn't yet initialized.
-  const void* GetQuickOatCodeFor(ArtMethod* method)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
   pid_t GetClassesLockOwner();  // For SignalCatcher.
   pid_t GetDexLockOwner();  // For SignalCatcher.
 
@@ -720,9 +716,6 @@ class ClassLinker {
   void InsertDexFileInToClassLoader(ObjPtr<mirror::Object> dex_file,
                                     ObjPtr<mirror::ClassLoader> class_loader)
       REQUIRES(!Locks::classlinker_classes_lock_)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  static bool ShouldUseInterpreterEntrypoint(ArtMethod* method, const void* quick_code)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   static bool IsBootClassLoader(ScopedObjectAccessAlreadyRunnable& soa,
@@ -870,6 +863,7 @@ class ClassLinker {
 
  private:
   class LinkFieldsHelper;
+  template <PointerSize kPointerSize>
   class LinkMethodsHelper;
   class MethodTranslation;
   class VisiblyInitializedCallback;
