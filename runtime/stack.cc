@@ -682,6 +682,7 @@ static void AssertPcIsWithinQuickCode(ArtMethod* method, uintptr_t pc)
   uintptr_t code_start = reinterpret_cast<uintptr_t>(code);
   CHECK(code_start <= pc && pc <= (code_start + code_size))
       << method->PrettyMethod()
+      << " " << Runtime::Current()->GetInstrumentation()->EntryPointString(code)
       << " pc=" << std::hex << pc
       << " code_start=" << code_start
       << " code_size=" << code_size;
@@ -787,8 +788,7 @@ QuickMethodFrameInfo StackVisitor::GetCurrentQuickFrameInfo() const {
   DCHECK(method->IsNative());
   if (kIsDebugBuild && !method->IsCriticalNative()) {
     ClassLinker* class_linker = runtime->GetClassLinker();
-    const void* entry_point = runtime->GetInstrumentation()->GetQuickCodeFor(method,
-                                                                             kRuntimePointerSize);
+    const void* entry_point = runtime->GetInstrumentation()->GetCodeForInvoke(method);
     CHECK(class_linker->IsQuickGenericJniStub(entry_point) ||
           // The current entrypoint (after filtering out trampolines) may have changed
           // from GenericJNI to JIT-compiled stub since we have entered this frame.

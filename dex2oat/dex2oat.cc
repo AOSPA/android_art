@@ -15,16 +15,15 @@
  */
 
 #include <inttypes.h>
+#include <log/log.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
-#include "base/memory_tool.h"
 
 #include <forward_list>
 #include <fstream>
 #include <iostream>
 #include <limits>
-#include <log/log.h>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -51,8 +50,10 @@
 #include "base/dumpable.h"
 #include "base/fast_exit.h"
 #include "base/file_utils.h"
+#include "base/globals.h"
 #include "base/leb128.h"
 #include "base/macros.h"
+#include "base/memory_tool.h"
 #include "base/mutex.h"
 #include "base/os.h"
 #include "base/scoped_flock.h"
@@ -705,11 +706,6 @@ class Dex2Oat final {
       Usage("--oat-fd should not be used with --image");
     }
 
-    if ((input_vdex_fd_ != -1 || !input_vdex_.empty()) &&
-        (dm_fd_ != -1 || !dm_file_location_.empty())) {
-      Usage("An input vdex should not be passed with a .dm file");
-    }
-
     if (!parser_options->oat_symbols.empty() &&
         parser_options->oat_symbols.size() != oat_filenames_.size()) {
       Usage("--oat-file arguments do not match --oat-symbols arguments");
@@ -775,8 +771,11 @@ class Dex2Oat final {
       // Use the default, i.e. multi-image for boot image and boot image extension.
       multi_image_ = IsBootImage() || IsBootImageExtension();  // Shall pass checks below.
     }
-    if (IsBootImage() && !multi_image_) {
-      Usage("--single-image specified for primary boot image");
+    // On target we support generating a single image for the primary boot image.
+    if (!kIsTargetBuild) {
+      if (IsBootImage() && !multi_image_) {
+        Usage("--single-image specified for primary boot image on host");
+      }
     }
     if (IsAppImage() && multi_image_) {
       Usage("--multi-image specified for app image");
@@ -834,7 +833,8 @@ class Dex2Oat final {
     // Set the compilation target's implicit checks options.
     switch (compiler_options_->GetInstructionSet()) {
       case InstructionSet::kArm64:
-        compiler_options_->implicit_suspend_checks_ = true;
+        // TODO: Investigate implicit suspend check regressions. Bug: 209235730, 213121241.
+        compiler_options_->implicit_suspend_checks_ = false;
         FALLTHROUGH_INTENDED;
       case InstructionSet::kArm:
       case InstructionSet::kThumb2:
@@ -878,25 +878,23 @@ class Dex2Oat final {
       }
     }
 
-    // Trim the boot image location to not include any specified profile. Note
-    // that the logic below will include the first boot image extension, but not
-    // the ones that could be listed after the profile of that extension. This
-    // works for our current top use case:
-    // boot.art:/system/framework/boot-framework.art
-    // But this would need to be adjusted if we had to support different use
-    // cases.
-    size_t profile_separator_pos = boot_image_filename_.find(ImageSpace::kProfileSeparator);
-    if (profile_separator_pos != std::string::npos) {
-      DCHECK(!IsBootImage());  // For primary boot image the boot_image_filename_ is empty.
-      if (IsBootImageExtension()) {
-        Usage("Unsupported profile specification in boot image location (%s) for extension.",
-              boot_image_filename_.c_str());
+    // Prune profile specifications of the boot image location.
+    std::vector<std::string> boot_images =
+        android::base::Split(boot_image_filename_, {ImageSpace::kComponentSeparator});
+    bool boot_image_filename_pruned = false;
+    for (std::string& boot_image : boot_images) {
+      size_t profile_separator_pos = boot_image.find(ImageSpace::kProfileSeparator);
+      if (profile_separator_pos != std::string::npos) {
+        boot_image.resize(profile_separator_pos);
+        boot_image_filename_pruned = true;
       }
-      VLOG(compiler)
-          << "Truncating boot image location " << boot_image_filename_
-          << " because it contains profile specification. Truncated: "
-          << boot_image_filename_.substr(/*pos*/ 0u, /*length*/ profile_separator_pos);
-      boot_image_filename_.resize(profile_separator_pos);
+    }
+    if (boot_image_filename_pruned) {
+      std::string new_boot_image_filename =
+          android::base::Join(boot_images, ImageSpace::kComponentSeparator);
+      VLOG(compiler) << "Pruning profile specifications of the boot image location. Before: "
+                     << boot_image_filename_ << ", After: " << new_boot_image_filename;
+      boot_image_filename_ = std::move(new_boot_image_filename);
     }
 
     compiler_options_->passes_to_run_ = passes_to_run_.get();
@@ -1177,6 +1175,13 @@ class Dex2Oat final {
       LOG(WARNING) << "Option --updatable-bcp-packages-fd is deprecated and no longer takes effect";
     }
 
+    if (args.Exists(M::ForceJitZygote)) {
+      if (!parser_options->boot_image_filename.empty()) {
+        Usage("Option --boot-image and --force-jit-zygote cannot be specified together");
+      }
+      parser_options->boot_image_filename = "boot.art:/nonx/boot-framework.art";
+    }
+
     // If we have a profile, change the default compiler filter to speed-profile
     // before reading compiler options.
     static_assert(CompilerFilter::kDefaultCompilerFilter == CompilerFilter::kSpeed);
@@ -1348,11 +1353,16 @@ class Dex2Oat final {
       }
     }
 
+    // If we have a dm file and a vdex file, we (arbitrarily) pick the vdex file.
+    // In theory the files should be the same.
     if (dm_file_ != nullptr) {
-      DCHECK(input_vdex_file_ == nullptr);
-      input_vdex_file_ = VdexFile::OpenFromDm(dm_file_location_, *dm_file_);
-      if (input_vdex_file_ != nullptr) {
-        VLOG(verifier) << "Doing fast verification with vdex from DexMetadata archive";
+      if (input_vdex_file_ == nullptr) {
+        input_vdex_file_ = VdexFile::OpenFromDm(dm_file_location_, *dm_file_);
+        if (input_vdex_file_ != nullptr) {
+          VLOG(verifier) << "Doing fast verification with vdex from DexMetadata archive";
+        }
+      } else {
+        LOG(INFO) << "Ignoring vdex file in dex metadata due to vdex file already being passed";
       }
     }
 
@@ -1552,12 +1562,6 @@ class Dex2Oat final {
       };
       if (std::any_of(bcp_dex_files.begin(), bcp_dex_files.end() - dex_files.size(), lacks_image)) {
         LOG(ERROR) << "Missing required boot image(s) for boot image extension.";
-        return dex2oat::ReturnCode::kOther;
-      }
-    } else {
-      // Check that we loaded at least the primary boot image for app compilation.
-      if (runtime_->GetHeap()->GetBootImageSpaces().empty()) {
-        LOG(ERROR) << "Missing primary boot image for app compilation.";
         return dex2oat::ReturnCode::kOther;
       }
     }

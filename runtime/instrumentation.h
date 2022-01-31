@@ -226,10 +226,6 @@ class Instrumentation {
   void RemoveListener(InstrumentationListener* listener, uint32_t events)
       REQUIRES(Locks::mutator_lock_, !Locks::thread_list_lock_, !Locks::classlinker_classes_lock_);
 
-  // Deoptimization.
-  void EnableDeoptimization()
-      REQUIRES(Locks::mutator_lock_)
-      REQUIRES(!GetDeoptimizedMethodsLock());
   // Calls UndeoptimizeEverything which may visit class linker classes through ConfigureStubs.
   void DisableDeoptimization(const char* key)
       REQUIRES(Locks::mutator_lock_, Roles::uninterruptible_)
@@ -239,10 +235,6 @@ class Instrumentation {
     return InterpreterStubsInstalled();
   }
   bool ShouldNotifyMethodEnterExitEvents() const REQUIRES_SHARED(Locks::mutator_lock_);
-
-  bool CanDeoptimize() {
-    return deoptimization_enabled_;
-  }
 
   // Executes everything with interpreter.
   void DeoptimizeEverything(const char* key)
@@ -305,12 +297,19 @@ class Instrumentation {
                !Locks::runtime_shutdown_lock_);
   void ResetQuickAllocEntryPoints() REQUIRES(Locks::runtime_shutdown_lock_);
 
+  // Returns a string representation of the given entry point.
+  static std::string EntryPointString(const void* code);
+
+  // Initialize the entrypoint of the method .`aot_code` is the AOT code.
+  void InitializeMethodsCode(ArtMethod* method, const void* aot_code)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   // Update the code of a method respecting any installed stubs.
-  void UpdateMethodsCode(ArtMethod* method, const void* quick_code)
+  void UpdateMethodsCode(ArtMethod* method, const void* new_code)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!GetDeoptimizedMethodsLock());
 
   // Update the code of a native method to a JITed stub.
-  void UpdateNativeMethodsCodeToJitCode(ArtMethod* method, const void* quick_code)
+  void UpdateNativeMethodsCodeToJitCode(ArtMethod* method, const void* new_code)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!GetDeoptimizedMethodsLock());
 
   // Update the code of a method to the interpreter respecting any installed stubs from debugger.
@@ -318,18 +317,11 @@ class Instrumentation {
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!GetDeoptimizedMethodsLock());
 
   // Update the code of a method respecting any installed stubs from debugger.
-  void UpdateMethodsCodeForJavaDebuggable(ArtMethod* method, const void* quick_code)
+  void UpdateMethodsCodeForJavaDebuggable(ArtMethod* method, const void* new_code)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!GetDeoptimizedMethodsLock());
 
   // Return the code that we can execute for an invoke including from the JIT.
-  const void* GetCodeForInvoke(ArtMethod* method) const
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Get the quick code for the given method. More efficient than asking the class linker as it
-  // will short-cut to GetCode if instrumentation and static method resolution stubs aren't
-  // installed.
-  const void* GetQuickCodeFor(ArtMethod* method, PointerSize pointer_size) const
-      REQUIRES_SHARED(Locks::mutator_lock_);
+  const void* GetCodeForInvoke(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
 
   void ForceInterpretOnly() {
     forced_interpret_only_ = true;
@@ -348,15 +340,11 @@ class Instrumentation {
   bool InterpretOnly() const {
     return forced_interpret_only_ || InterpreterStubsInstalled();
   }
+  bool InterpretOnly(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool IsForcedInterpretOnly() const {
     return forced_interpret_only_;
   }
-
-  // Code is in boot image oat file which isn't compiled as debuggable.
-  // Need debug version (interpreter or jitted) if that's the case.
-  bool NeedDebugVersionFor(ArtMethod* method) const
-      REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool AreExitStubsInstalled() const {
     return instrumentation_stubs_installed_;
@@ -661,7 +649,7 @@ class Instrumentation {
       REQUIRES_SHARED(Locks::mutator_lock_, GetDeoptimizedMethodsLock());
   bool IsDeoptimizedMethodsEmpty() const
       REQUIRES_SHARED(Locks::mutator_lock_, GetDeoptimizedMethodsLock());
-  void UpdateMethodsCodeImpl(ArtMethod* method, const void* quick_code)
+  void UpdateMethodsCodeImpl(ArtMethod* method, const void* new_code)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!GetDeoptimizedMethodsLock());
 
   ReaderWriterMutex* GetDeoptimizedMethodsLock() const {
@@ -752,7 +740,6 @@ class Instrumentation {
   // only.
   mutable std::unique_ptr<ReaderWriterMutex> deoptimized_methods_lock_ BOTTOM_MUTEX_ACQUIRED_AFTER;
   std::unordered_set<ArtMethod*> deoptimized_methods_ GUARDED_BY(GetDeoptimizedMethodsLock());
-  bool deoptimization_enabled_;
 
   // Current interpreter handler table. This is updated each time the thread state flags are
   // modified.
