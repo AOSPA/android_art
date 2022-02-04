@@ -16,6 +16,8 @@
 
 package com.android.tests.odsign;
 
+import static com.google.common.truth.Truth.assertThat;
+
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -43,8 +45,9 @@ import java.util.regex.Matcher;
 public class OdrefreshHostTest extends BaseHostJUnit4Test {
     private static final String CACHE_INFO_FILE =
             OdsignTestUtils.ART_APEX_DALVIK_CACHE_DIRNAME + "/cache-info.xml";
+    private static final String ODREFRESH_BIN = "odrefresh";
     private static final String ODREFRESH_COMMAND =
-            "odrefresh --partial-compilation --no-refresh --compile";
+            ODREFRESH_BIN + " --partial-compilation --no-refresh --compile";
 
     private static OdsignTestUtils sTestUtils;
 
@@ -55,6 +58,7 @@ public class OdrefreshHostTest extends BaseHostJUnit4Test {
     public static void beforeClassWithDevice(TestInformation testInfo) throws Exception {
         sTestUtils = new OdsignTestUtils(testInfo);
         sTestUtils.installTestApex();
+        sTestUtils.enableAdbRootOrSkipTest();
 
         sZygoteArtifacts = new HashSet<>();
         for (String zygoteName : sTestUtils.ZYGOTE_NAMES) {
@@ -67,6 +71,7 @@ public class OdrefreshHostTest extends BaseHostJUnit4Test {
     @AfterClassWithInfo
     public static void afterClassWithDevice(TestInformation testInfo) throws Exception {
         sTestUtils.uninstallTestApex();
+        sTestUtils.restoreAdbRoot();
     }
 
     @Test
@@ -142,6 +147,52 @@ public class OdrefreshHostTest extends BaseHostJUnit4Test {
         getDevice().executeShellV2Command(ODREFRESH_COMMAND);
 
         assertFalse(getDevice().doesFileExist(unexpected));
+    }
+
+    @Test
+    public void verifyCacheInfoOmitsIrrelevantApexes() throws Exception {
+        String cacheInfo = getDevice().pullFileContents(CACHE_INFO_FILE);
+
+        // cacheInfo should list all APEXes that have compilable JARs and
+        // none that do not.
+
+        // This should always contain classpath JARs, that's the reason it exists.
+        assertThat(cacheInfo).contains("name=\"com.android.sdkext\"");
+
+        // This should never contain classpath JARs, it's the native runtime.
+        assertThat(cacheInfo).doesNotContain("name=\"com.android.runtime\"");
+    }
+
+    @Test
+    public void verifyCompilationOsMode() throws Exception {
+        sTestUtils.removeCompilationLogToAvoidBackoff();
+        long timeMs = getCurrentTimeMs();
+        getDevice().executeShellV2Command(ODREFRESH_BIN + " --compilation-os-mode --compile");
+
+        // odrefresh should unconditionally compile everything in Compilation OS.
+        assertArtifactsModifiedAfter(sZygoteArtifacts, timeMs);
+        assertArtifactsModifiedAfter(sSystemServerArtifacts, timeMs);
+
+        String cacheInfo = getDevice().pullFileContents(CACHE_INFO_FILE);
+        assertThat(cacheInfo).contains("compilationOsMode=\"true\"");
+        assertThat(cacheInfo).doesNotContain("lastUpdateMillis=");
+
+        // Compilation OS does not write the compilation log to the host.
+        sTestUtils.removeCompilationLogToAvoidBackoff();
+
+        // Simulate the odrefresh invocation on the next boot.
+        timeMs = getCurrentTimeMs();
+        getDevice().executeShellV2Command(ODREFRESH_COMMAND);
+
+        // odrefresh should not re-compile anything regardless of the missing `lastUpdateMillis`
+        // field.
+        assertArtifactsNotModifiedAfter(sZygoteArtifacts, timeMs);
+        assertArtifactsNotModifiedAfter(sSystemServerArtifacts, timeMs);
+
+        // The cache info should be updated.
+        cacheInfo = getDevice().pullFileContents(CACHE_INFO_FILE);
+        assertThat(cacheInfo).doesNotContain("compilationOsMode=\"true\"");
+        assertThat(cacheInfo).contains("lastUpdateMillis=");
     }
 
     /**

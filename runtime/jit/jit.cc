@@ -281,7 +281,7 @@ bool Jit::CompileMethod(ArtMethod* method,
 
   RuntimeCallbacks* cb = Runtime::Current()->GetRuntimeCallbacks();
   // Don't compile the method if it has breakpoints.
-  if (cb->IsMethodBeingInspected(method) && !cb->IsMethodSafeToJit(method)) {
+  if (cb->IsMethodBeingInspected(method)) {
     VLOG(jit) << "JIT not compiling " << method->PrettyMethod()
               << " due to not being safe to jit according to runtime-callbacks. For example, there"
               << " could be breakpoints in this method.";
@@ -1313,6 +1313,8 @@ bool Jit::CompileMethodFromProfile(Thread* self,
       // We explicitly check for the stub. The trampoline is for methods backed by
       // a .oat file that has a compiled version of the method.
       (entry_point == GetQuickResolutionStub())) {
+    VLOG(jit) << "JIT Zygote processing method " << ArtMethod::PrettyMethod(method)
+              << " from profile";
     method->SetPreCompiled();
     if (!add_to_queue) {
       CompileMethod(method, self, CompilationKind::kOptimized, /* prejit= */ true);
@@ -1408,11 +1410,6 @@ uint32_t Jit::CompileMethodsFromProfile(
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   uint32_t added_to_queue = 0u;
   for (const DexFile* dex_file : dex_files) {
-    if (LocationIsOnArtModule(dex_file->GetLocation().c_str())) {
-      // The ART module jars are already preopted.
-      continue;
-    }
-
     std::set<dex::TypeIndex> class_types;
     std::set<uint16_t> all_methods;
     if (!profile_info.GetClassesAndMethods(*dex_file,
