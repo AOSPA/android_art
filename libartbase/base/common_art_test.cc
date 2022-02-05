@@ -50,7 +50,6 @@
 #include "dex/primitive.h"
 #include "gtest/gtest.h"
 #include "nativehelper/scoped_local_ref.h"
-#include "procinfo/process.h"
 
 namespace art {
 
@@ -560,15 +559,12 @@ std::unique_ptr<const DexFile> CommonArtTestImpl::OpenTestDexFile(const char* na
 }
 
 std::string CommonArtTestImpl::GetImageDirectory() {
-  std::string path;
   if (IsHost()) {
     const char* host_dir = getenv("ANDROID_HOST_OUT");
     CHECK(host_dir != nullptr);
-    path = std::string(host_dir) + "/apex/art_boot_images";
-  } else {
-    path = std::string(kAndroidArtApexDefaultPath);
+    return std::string(host_dir) + "/apex/art_boot_images/javalib";
   }
-  return path + "/javalib";
+  return GetPrebuiltPrimaryBootImageDir();
 }
 
 std::string CommonArtTestImpl::GetCoreFileLocation(const char* suffix) {
@@ -680,12 +676,16 @@ CommonArtTestImpl::ForkAndExecResult CommonArtTestImpl::ForkAndExec(
 std::vector<pid_t> GetPidByName(const std::string& process_name) {
   std::vector<pid_t> results;
   for (pid_t pid : android::base::AllPids{}) {
-    android::procinfo::ProcessInfo process_info;
-    std::string error;
-    if (!android::procinfo::GetProcessInfo(pid, &process_info, &error)) {
+    std::string cmdline;
+    if (!android::base::ReadFileToString(StringPrintf("/proc/%d/cmdline", pid), &cmdline)) {
       continue;
     }
-    if (process_info.name == process_name) {
+    // Take the first argument.
+    size_t pos = cmdline.find('\0');
+    if (pos != std::string::npos) {
+      cmdline.resize(pos);
+    }
+    if (cmdline == process_name) {
       results.push_back(pid);
     }
   }

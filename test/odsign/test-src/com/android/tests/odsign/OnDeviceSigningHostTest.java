@@ -48,12 +48,13 @@ public class OnDeviceSigningHostTest extends BaseHostJUnit4Test {
     @BeforeClassWithInfo
     public static void beforeClassWithDevice(TestInformation testInfo) throws Exception {
         sTestUtils = new OdsignTestUtils(testInfo);
-        sTestUtils.installTestApex();;
+        sTestUtils.installTestApex();
     }
 
     @AfterClassWithInfo
     public static void afterClassWithDevice(TestInformation testInfo) throws Exception {
         sTestUtils.uninstallTestApex();
+        sTestUtils.restoreAdbRoot();
     }
 
     @Test
@@ -77,8 +78,7 @@ public class OnDeviceSigningHostTest extends BaseHostJUnit4Test {
     @Test
     public void verifyGeneratedArtifactsLoaded() throws Exception {
         // Checking zygote and system_server need the device have adb root to walk process maps.
-        final boolean adbEnabled = getDevice().enableAdbRoot();
-        assertTrue("ADB root failed and required to get process maps", adbEnabled);
+        sTestUtils.enableAdbRootOrSkipTest();
 
         // Check there is a compilation log, we expect compilation to have occurred.
         assertTrue("Compilation log not found", sTestUtils.haveCompilationLog());
@@ -93,12 +93,16 @@ public class OnDeviceSigningHostTest extends BaseHostJUnit4Test {
 
     @Test
     public void verifyGeneratedArtifactsLoadedAfterReboot() throws Exception {
+        sTestUtils.enableAdbRootOrSkipTest();
+
         sTestUtils.reboot();
         verifyGeneratedArtifactsLoaded();
     }
 
     @Test
     public void verifyGeneratedArtifactsLoadedAfterPartialCompilation() throws Exception {
+        sTestUtils.enableAdbRootOrSkipTest();
+
         Set<String> mappedArtifacts = sTestUtils.getSystemServerLoadedArtifacts();
         // Delete an arbitrary artifact.
         getDevice().deleteFile(mappedArtifacts.iterator().next());
@@ -118,8 +122,6 @@ public class OnDeviceSigningHostTest extends BaseHostJUnit4Test {
     private String getSystemServerIsa(String mappedArtifact) {
         // Artifact path for system server artifacts has the form:
         //    ART_APEX_DALVIK_CACHE_DIRNAME + "/<arch>/system@framework@some.jar@classes.odex"
-        // `mappedArtifacts` may include other artifacts, such as boot-framework.oat that are not
-        // prefixed by the architecture.
         String[] pathComponents = mappedArtifact.split("/");
         return pathComponents[pathComponents.length - 2];
     }
@@ -161,13 +163,13 @@ public class OnDeviceSigningHostTest extends BaseHostJUnit4Test {
 
     private void verifyZygoteLoadedArtifacts(String zygoteName, Set<String> mappedArtifacts)
             throws Exception {
-        final String bootExtensionName = "boot-framework";
+        final String bootImageStem = "boot";
 
-        assertTrue("Expect 3 boot-framework artifacts", mappedArtifacts.size() == 3);
+        assertTrue("Expect 3 bootclasspath artifacts", mappedArtifacts.size() == 3);
 
         String allArtifacts = mappedArtifacts.stream().collect(Collectors.joining(","));
         for (String extension : OdsignTestUtils.BCP_ARTIFACT_EXTENSIONS) {
-            final String artifact = bootExtensionName + extension;
+            final String artifact = bootImageStem + extension;
             final boolean found = mappedArtifacts.stream().anyMatch(a -> a.endsWith(artifact));
             assertTrue(zygoteName + " " + artifact + " not found: '" + allArtifacts + "'", found);
         }

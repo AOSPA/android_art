@@ -686,6 +686,7 @@ class ReadBarrierForHeapReferenceSlowPathARM64 : public SlowPathCodeARM64 {
                intrinsic == Intrinsics::kJdkUnsafeGetObjectVolatile ||
                intrinsic == Intrinsics::kJdkUnsafeGetObjectAcquire ||
                intrinsic == Intrinsics::kJdkUnsafeCASObject ||
+               intrinsic == Intrinsics::kJdkUnsafeCompareAndSetObject ||
                mirror::VarHandle::GetAccessModeTemplateByIntrinsic(intrinsic) ==
                    mirror::VarHandle::AccessModeTemplate::kGet ||
                mirror::VarHandle::GetAccessModeTemplateByIntrinsic(intrinsic) ==
@@ -1987,6 +1988,9 @@ void InstructionCodeGeneratorARM64::GenerateSuspendCheck(HSuspendCheck* instruct
   if (codegen_->CanUseImplicitSuspendCheck()) {
     __ Ldr(kImplicitSuspendCheckRegister, MemOperand(kImplicitSuspendCheckRegister));
     codegen_->RecordPcInfo(instruction, instruction->GetDexPc());
+    if (successor != nullptr) {
+      __ B(codegen_->GetLabelOf(successor));
+    }
     return;
   }
 
@@ -2530,9 +2534,9 @@ void InstructionCodeGeneratorARM64::VisitMultiplyAccumulate(HMultiplyAccumulate*
   if (instr->GetType() == DataType::Type::kInt64 &&
       codegen_->GetInstructionSetFeatures().NeedFixCortexA53_835769()) {
     MacroAssembler* masm = down_cast<CodeGeneratorARM64*>(codegen_)->GetVIXLAssembler();
-    vixl::aarch64::Instruction* prev =
-        masm->GetCursorAddress<vixl::aarch64::Instruction*>() - kInstructionSize;
-    if (prev->IsLoadOrStore()) {
+    ptrdiff_t off = masm->GetCursorOffset();
+    if (off >= static_cast<ptrdiff_t>(kInstructionSize) &&
+        masm->GetInstructionAt(off - static_cast<ptrdiff_t>(kInstructionSize))->IsLoadOrStore()) {
       // Make sure we emit only exactly one nop.
       ExactAssemblyScope scope(masm, kInstructionSize, CodeBufferCheckScope::kExactSize);
       __ nop();
@@ -3583,9 +3587,7 @@ void InstructionCodeGeneratorARM64::HandleGoto(HInstruction* got, HBasicBlock* s
   if (info != nullptr && info->IsBackEdge(*block) && info->HasSuspendCheck()) {
     codegen_->MaybeIncrementHotness(/* is_frame_entry= */ false);
     GenerateSuspendCheck(info->GetSuspendCheck(), successor);
-    if (!codegen_->CanUseImplicitSuspendCheck()) {
-      return;  // `GenerateSuspendCheck()` emitted the jump.
-    }
+    return;  // `GenerateSuspendCheck()` emitted the jump.
   }
   if (block->IsEntryBlock() && (previous != nullptr) && previous->IsSuspendCheck()) {
     GenerateSuspendCheck(previous->AsSuspendCheck(), nullptr);
