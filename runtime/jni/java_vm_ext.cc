@@ -285,7 +285,7 @@ class Libraries {
     const char* shorty = m->GetShorty();
     {
       // Go to suspended since dlsym may block for a long time if other threads are using dlopen.
-      ScopedThreadSuspension sts(self, kNative);
+      ScopedThreadSuspension sts(self, ThreadState::kNative);
       void* native_code = FindNativeMethodInternal(self,
                                                    declaring_class_loader_allocator,
                                                    shorty,
@@ -353,7 +353,7 @@ class Libraries {
         }
       }
     }
-    ScopedThreadSuspension sts(self, kNative);
+    ScopedThreadSuspension sts(self, ThreadState::kNative);
     // Do this without holding the jni libraries lock to prevent possible deadlocks.
     UnloadLibraries(self->GetJniEnv()->GetVm(), unload_libraries);
     for (auto library : unload_libraries) {
@@ -509,6 +509,7 @@ JavaVMExt::JavaVMExt(Runtime* runtime,
       weak_globals_add_condition_("weak globals add condition",
                                   (CHECK(Locks::jni_weak_globals_lock_ != nullptr),
                                    *Locks::jni_weak_globals_lock_)),
+      env_hooks_lock_("environment hooks lock", art::kGenericBottomLock),
       env_hooks_(),
       enable_allocation_tracking_delta_(
           runtime_options.GetOrDefault(RuntimeArgumentMap::GlobalRefAllocStackTraceLimit)),
@@ -536,7 +537,12 @@ std::unique_ptr<JavaVMExt> JavaVMExt::Create(Runtime* runtime,
 }
 
 jint JavaVMExt::HandleGetEnv(/*out*/void** env, jint version) {
-  for (GetEnvHook hook : env_hooks_) {
+  std::vector<GetEnvHook> env_hooks;
+  {
+    ReaderMutexLock rmu(Thread::Current(), env_hooks_lock_);
+    env_hooks.assign(env_hooks_.begin(), env_hooks_.end());
+  }
+  for (GetEnvHook hook : env_hooks) {
     jint res = hook(this, env, version);
     if (res == JNI_OK) {
       return JNI_OK;
@@ -552,6 +558,7 @@ jint JavaVMExt::HandleGetEnv(/*out*/void** env, jint version) {
 // Add a hook to handle getting environments from the GetEnv call.
 void JavaVMExt::AddEnvironmentHook(GetEnvHook hook) {
   CHECK(hook != nullptr) << "environment hooks shouldn't be null!";
+  WriterMutexLock wmu(Thread::Current(), env_hooks_lock_);
   env_hooks_.push_back(hook);
 }
 
@@ -575,7 +582,7 @@ void JavaVMExt::JniAbort(const char* jni_function_name, const char* msg) {
     check_jni_abort_hook_(check_jni_abort_hook_data_, os.str());
   } else {
     // Ensure that we get a native stack trace for this thread.
-    ScopedThreadSuspension sts(self, kNative);
+    ScopedThreadSuspension sts(self, ThreadState::kNative);
     LOG(FATAL) << os.str();
     UNREACHABLE();
   }
@@ -1228,6 +1235,13 @@ extern "C" jint JNI_CreateJavaVM(JavaVM** p_vm, JNIEnv** p_env, void* vm_args) {
   if (!Runtime::Create(options, ignore_unrecognized)) {
     return JNI_ERR;
   }
+
+  // When `ART_CRASH_RUNTIME_DELIBERATELY` is defined (which happens only in the
+  // case of a test APEX), we crash the runtime here on purpose, to test the
+  // behavior of rollbacks following a failed ART Mainline Module update.
+#ifdef ART_CRASH_RUNTIME_DELIBERATELY
+  LOG(FATAL) << "Runtime crashing deliberately for testing purposes.";
+#endif
 
   // Initialize native loader. This step makes sure we have
   // everything set up before we start using JNI.

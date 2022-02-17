@@ -644,7 +644,7 @@ static void HandleDeoptimization(JValue* result,
                                               deopt_frame,
                                               result,
                                               from_code,
-                                              DeoptimizationMethodType::kDefault);
+                                              method_type);
 }
 
 extern "C" uint64_t artQuickToInterpreterBridge(ArtMethod* method, Thread* self, ArtMethod** sp)
@@ -1036,24 +1036,21 @@ extern "C" const void* artInstrumentationMethodEntryFromCode(ArtMethod* method,
       << "Proxy method " << method->PrettyMethod()
       << " (declaring class: " << method->GetDeclaringClass()->PrettyClass() << ")"
       << " should not hit instrumentation entrypoint.";
-  if (instrumentation->IsDeoptimized(method)) {
-    result = GetQuickToInterpreterBridge();
-  } else {
-    // This will get the entry point either from the oat file, the JIT or the appropriate bridge
-    // method if none of those can be found.
-    result = instrumentation->GetCodeForInvoke(method);
-    jit::Jit* jit = Runtime::Current()->GetJit();
-    DCHECK_NE(result, GetQuickInstrumentationEntryPoint()) << method->PrettyMethod();
-    DCHECK(jit == nullptr ||
-           // Native methods come through here in Interpreter entrypoints. We might not have
-           // disabled jit-gc but that is fine since we won't return jit-code for native methods.
-           method->IsNative() ||
-           !jit->GetCodeCache()->GetGarbageCollectCode());
-    DCHECK(!method->IsNative() ||
-           jit == nullptr ||
-           !jit->GetCodeCache()->ContainsPc(result))
-        << method->PrettyMethod() << " code will jump to possibly cleaned up jit code!";
-  }
+  DCHECK(!instrumentation->IsDeoptimized(method));
+  // This will get the entry point either from the oat file, the JIT or the appropriate bridge
+  // method if none of those can be found.
+  result = instrumentation->GetCodeForInvoke(method);
+  jit::Jit* jit = Runtime::Current()->GetJit();
+  DCHECK_NE(result, GetQuickInstrumentationEntryPoint()) << method->PrettyMethod();
+  DCHECK(jit == nullptr ||
+         // Native methods come through here in Interpreter entrypoints. We might not have
+         // disabled jit-gc but that is fine since we won't return jit-code for native methods.
+         method->IsNative() ||
+         !jit->GetCodeCache()->GetGarbageCollectCode());
+  DCHECK(!method->IsNative() ||
+         jit == nullptr ||
+         !jit->GetCodeCache()->ContainsPc(result))
+      << method->PrettyMethod() << " code will jump to possibly cleaned up jit code!";
 
   bool interpreter_entry = (result == GetQuickToInterpreterBridge());
   bool is_static = method->IsStatic();
@@ -1065,8 +1062,21 @@ extern "C" const void* artInstrumentationMethodEntryFromCode(ArtMethod* method,
   RememberForGcArgumentVisitor visitor(sp, is_static, shorty, shorty_len, &soa);
   visitor.VisitArguments();
 
+  StackHandleScope<2> hs(self);
+  Handle<mirror::Object> h_object(hs.NewHandle(is_static ? nullptr : this_object));
+  Handle<mirror::Class> h_class(hs.NewHandle(method->GetDeclaringClass()));
+
+  // Ensure that the called method's class is initialized.
+  if (NeedsClinitCheckBeforeCall(method) && !h_class->IsVisiblyInitialized()) {
+    if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(self, h_class, true, true)) {
+      visitor.FixupReferences();
+      DCHECK(self->IsExceptionPending());
+      return nullptr;
+    }
+  }
+
   instrumentation->PushInstrumentationStackFrame(self,
-                                                 is_static ? nullptr : this_object,
+                                                 is_static ? nullptr : h_object.Get(),
                                                  method,
                                                  reinterpret_cast<uintptr_t>(
                                                      QuickArgumentVisitor::GetCallingPcAddr(sp)),
@@ -1378,15 +1388,8 @@ extern "C" const void* artQuickResolutionTrampoline(
       success = linker->EnsureInitialized(soa.Self(), h_called_class, true, true);
     }
     if (success) {
-      code = called->GetEntryPointFromQuickCompiledCode();
-      if (linker->IsQuickResolutionStub(code)) {
-        DCHECK_EQ(invoke_type, kStatic);
-        // Go to JIT or oat and grab code.
-        code = linker->GetQuickOatCodeFor(called);
-      }
-      if (linker->ShouldUseInterpreterEntrypoint(called, code)) {
-        code = GetQuickToInterpreterBridge();
-      }
+      instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
+      code = instrumentation->GetCodeForInvoke(called);
     } else {
       DCHECK(called_class->IsErroneous());
       DCHECK(self->IsExceptionPending());
@@ -1948,7 +1951,7 @@ class BuildGenericJniFrameVisitor final : public QuickArgumentVisitor {
         auto* declaring_class = reinterpret_cast<mirror::CompressedReference<mirror::Class>*>(
             method->GetDeclaringClassAddressWithoutBarrier());
         if (kUseReadBarrier) {
-          artReadBarrierJni(method);
+          artJniReadBarrier(method);
         }
         sm_.AdvancePointer(declaring_class);
       }  // else "this" reference is already handled by QuickArgumentVisitor.
@@ -2062,11 +2065,14 @@ void BuildGenericJniFrameVisitor::Visit() {
  * needed and return to the stub.
  *
  * The return value is the pointer to the native code, null on failure.
+ *
+ * NO_THREAD_SAFETY_ANALYSIS: Depending on the use case, the trampoline may
+ * or may not lock a synchronization object and transition out of Runnable.
  */
 extern "C" const void* artQuickGenericJniTrampoline(Thread* self,
                                                     ArtMethod** managed_sp,
                                                     uintptr_t* reserved_area)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
+    REQUIRES_SHARED(Locks::mutator_lock_) NO_THREAD_SAFETY_ANALYSIS {
   // Note: We cannot walk the stack properly until fixed up below.
   ArtMethod* called = *managed_sp;
   DCHECK(called->IsNative()) << called->PrettyMethod(true);
@@ -2117,17 +2123,21 @@ extern "C" const void* artQuickGenericJniTrampoline(Thread* self,
     }
   }
 
-  // Skip calling JniMethodStart for @CriticalNative and @FastNative.
+  // Skip calling `artJniMethodStart()` for @CriticalNative and @FastNative.
   if (LIKELY(normal_native)) {
     // Start JNI.
     if (called->IsSynchronized()) {
-      jobject lock = GetGenericJniSynchronizationObject(self, called);
-      JniMethodStartSynchronized(lock, self);
+      ObjPtr<mirror::Object> lock = GetGenericJniSynchronizationObject(self, called);
+      DCHECK(lock != nullptr);
+      lock->MonitorEnter(self);
       if (self->IsExceptionPending()) {
         return nullptr;  // Report error.
       }
+    }
+    if (UNLIKELY(self->ReadFlag(ThreadFlag::kMonitorJniEntryExit))) {
+      artJniMonitoredMethodStart(self);
     } else {
-      JniMethodStart(self);
+      artJniMethodStart(self);
     }
   } else {
     DCHECK(!called->IsSynchronized())
@@ -2626,16 +2636,21 @@ extern "C" int artMethodExitHook(Thread* self,
       res.Assign(return_value.GetL());
     }
     DCHECK(!method->IsRuntimeMethod());
-    instr->MethodExitEvent(self,
-                           method,
-                           /* frame= */ {},
-                           return_value);
 
     // Deoptimize if the caller needs to continue execution in the interpreter. Do nothing if we get
     // back to an upcall.
-    NthCallerVisitor visitor(self, 1, true);
+    NthCallerVisitor visitor(self, 1, /*include_runtime_and_upcalls=*/false);
     visitor.WalkStack(true);
     deoptimize = instr->ShouldDeoptimizeMethod(self, visitor);
+
+    // If we need a deoptimization MethodExitEvent will be called by the interpreter when it
+    // re-executes the return instruction.
+    if (!deoptimize) {
+      instr->MethodExitEvent(self,
+                             method,
+                             /* frame= */ {},
+                             return_value);
+    }
 
     if (is_ref) {
       // Restore the return value if it's a reference since it might have moved.

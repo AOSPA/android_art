@@ -158,7 +158,9 @@ static void UnimplementedEntryPoint() {
   UNIMPLEMENTED(FATAL);
 }
 
-void InitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints);
+void InitEntryPoints(JniEntryPoints* jpoints,
+                     QuickEntryPoints* qpoints,
+                     bool monitor_jni_entry_exit);
 void UpdateReadBarrierEntrypoints(QuickEntryPoints* qpoints, bool is_active);
 
 void Thread::SetIsGcMarkingAndUpdateEntrypoints(bool is_marking) {
@@ -176,7 +178,12 @@ void Thread::InitTlsEntryPoints() {
   for (uintptr_t* it = begin; it != end; ++it) {
     *it = reinterpret_cast<uintptr_t>(UnimplementedEntryPoint);
   }
-  InitEntryPoints(&tlsPtr_.jni_entrypoints, &tlsPtr_.quick_entrypoints);
+  bool monitor_jni_entry_exit = false;
+  PaletteShouldReportJniInvocations(&monitor_jni_entry_exit);
+  if (monitor_jni_entry_exit) {
+    AtomicSetFlag(ThreadFlag::kMonitorJniEntryExit);
+  }
+  InitEntryPoints(&tlsPtr_.jni_entrypoints, &tlsPtr_.quick_entrypoints, monitor_jni_entry_exit);
 }
 
 void Thread::ResetQuickAllocEntryPointsForThread() {
@@ -1003,8 +1010,8 @@ Thread* Thread::Attach(const char* thread_name, bool as_daemon, PeerAction peer_
 
   self->InitStringEntryPoints();
 
-  CHECK_NE(self->GetState(), kRunnable);
-  self->SetState(kNative);
+  CHECK_NE(self->GetState(), ThreadState::kRunnable);
+  self->SetState(ThreadState::kNative);
 
   // Run the action that is acting on the peer.
   if (!peer_action(self)) {
@@ -1444,7 +1451,7 @@ bool Thread::ModifySuspendCountInternal(Thread* self,
     return false;
   }
 
-  uint16_t flags = kSuspendRequest;
+  uint32_t flags = enum_cast<uint32_t>(ThreadFlag::kSuspendRequest);
   if (delta > 0 && suspend_barrier != nullptr) {
     uint32_t available_barrier = kMaxSuspendBarriers;
     for (uint32_t i = 0; i < kMaxSuspendBarriers; ++i) {
@@ -1458,7 +1465,7 @@ bool Thread::ModifySuspendCountInternal(Thread* self,
       return false;
     }
     tlsPtr_.active_suspend_barriers[available_barrier] = suspend_barrier;
-    flags |= kActiveSuspendBarrier;
+    flags |= enum_cast<uint32_t>(ThreadFlag::kActiveSuspendBarrier);
   }
 
   tls32_.suspend_count += delta;
@@ -1471,10 +1478,10 @@ bool Thread::ModifySuspendCountInternal(Thread* self,
   }
 
   if (tls32_.suspend_count == 0) {
-    AtomicClearFlag(kSuspendRequest);
+    AtomicClearFlag(ThreadFlag::kSuspendRequest);
   } else {
     // Two bits might be set simultaneously.
-    tls32_.state_and_flags.as_atomic_int.fetch_or(flags, std::memory_order_seq_cst);
+    tls32_.state_and_flags.fetch_or(flags, std::memory_order_seq_cst);
     TriggerSuspend();
   }
   return true;
@@ -1488,7 +1495,7 @@ bool Thread::PassActiveSuspendBarriers(Thread* self) {
   AtomicInteger* pass_barriers[kMaxSuspendBarriers];
   {
     MutexLock mu(self, *Locks::thread_suspend_count_lock_);
-    if (!ReadFlag(kActiveSuspendBarrier)) {
+    if (!ReadFlag(ThreadFlag::kActiveSuspendBarrier)) {
       // quick exit test: the barriers have already been claimed - this is
       // possible as there may be a race to claim and it doesn't matter
       // who wins.
@@ -1503,7 +1510,7 @@ bool Thread::PassActiveSuspendBarriers(Thread* self) {
       pass_barriers[i] = tlsPtr_.active_suspend_barriers[i];
       tlsPtr_.active_suspend_barriers[i] = nullptr;
     }
-    AtomicClearFlag(kActiveSuspendBarrier);
+    AtomicClearFlag(ThreadFlag::kActiveSuspendBarrier);
   }
 
   uint32_t barrier_count = 0;
@@ -1530,7 +1537,7 @@ bool Thread::PassActiveSuspendBarriers(Thread* self) {
 }
 
 void Thread::ClearSuspendBarrier(AtomicInteger* target) {
-  CHECK(ReadFlag(kActiveSuspendBarrier));
+  CHECK(ReadFlag(ThreadFlag::kActiveSuspendBarrier));
   bool clear_flag = true;
   for (uint32_t i = 0; i < kMaxSuspendBarriers; ++i) {
     AtomicInteger* ptr = tlsPtr_.active_suspend_barriers[i];
@@ -1541,11 +1548,30 @@ void Thread::ClearSuspendBarrier(AtomicInteger* target) {
     }
   }
   if (LIKELY(clear_flag)) {
-    AtomicClearFlag(kActiveSuspendBarrier);
+    AtomicClearFlag(ThreadFlag::kActiveSuspendBarrier);
   }
 }
 
 void Thread::RunCheckpointFunction() {
+  // If this thread is suspended and another thread is running the checkpoint on its behalf,
+  // we may have a pending flip function that we need to run for the sake of those checkpoints
+  // that need to walk the stack. We should not see the flip function flags when the thread
+  // is running the checkpoint on its own.
+  StateAndFlags state_and_flags = GetStateAndFlags(std::memory_order_relaxed);
+  if (UNLIKELY(state_and_flags.IsAnyOfFlagsSet(FlipFunctionFlags()))) {
+    DCHECK(IsSuspended());
+    Thread* self = Thread::Current();
+    DCHECK(self != this);
+    if (state_and_flags.IsFlagSet(ThreadFlag::kPendingFlipFunction)) {
+      EnsureFlipFunctionStarted(self);
+      state_and_flags = GetStateAndFlags(std::memory_order_relaxed);
+      DCHECK(!state_and_flags.IsFlagSet(ThreadFlag::kPendingFlipFunction));
+    }
+    if (state_and_flags.IsFlagSet(ThreadFlag::kRunningFlipFunction)) {
+      WaitForFlipFunction(self);
+    }
+  }
+
   // Grab the suspend_count lock, get the next checkpoint and update all the checkpoint fields. If
   // there are no more checkpoints we will also clear the kCheckpointRequest flag.
   Closure* checkpoint;
@@ -1559,7 +1585,7 @@ void Thread::RunCheckpointFunction() {
     } else {
       // No overflow checkpoints. Clear the kCheckpointRequest flag
       tlsPtr_.checkpoint_function = nullptr;
-      AtomicClearFlag(kCheckpointRequest);
+      AtomicClearFlag(ThreadFlag::kCheckpointRequest);
     }
   }
   // Outside the lock, run the checkpoint function.
@@ -1569,25 +1595,25 @@ void Thread::RunCheckpointFunction() {
 }
 
 void Thread::RunEmptyCheckpoint() {
+  // Note: Empty checkpoint does not access the thread's stack,
+  // so we do not need to check for the flip function.
   DCHECK_EQ(Thread::Current(), this);
-  AtomicClearFlag(kEmptyCheckpointRequest);
+  AtomicClearFlag(ThreadFlag::kEmptyCheckpointRequest);
   Runtime::Current()->GetThreadList()->EmptyCheckpointBarrier()->Pass(this);
 }
 
 bool Thread::RequestCheckpoint(Closure* function) {
-  union StateAndFlags old_state_and_flags;
-  old_state_and_flags.as_int = tls32_.state_and_flags.as_int;
-  if (old_state_and_flags.as_struct.state != kRunnable) {
+  StateAndFlags old_state_and_flags = GetStateAndFlags(std::memory_order_relaxed);
+  if (old_state_and_flags.GetState() != ThreadState::kRunnable) {
     return false;  // Fail, thread is suspended and so can't run a checkpoint.
   }
 
   // We must be runnable to request a checkpoint.
-  DCHECK_EQ(old_state_and_flags.as_struct.state, kRunnable);
-  union StateAndFlags new_state_and_flags;
-  new_state_and_flags.as_int = old_state_and_flags.as_int;
-  new_state_and_flags.as_struct.flags |= kCheckpointRequest;
-  bool success = tls32_.state_and_flags.as_atomic_int.CompareAndSetStrongSequentiallyConsistent(
-      old_state_and_flags.as_int, new_state_and_flags.as_int);
+  DCHECK_EQ(old_state_and_flags.GetState(), ThreadState::kRunnable);
+  StateAndFlags new_state_and_flags = old_state_and_flags;
+  new_state_and_flags.SetFlag(ThreadFlag::kCheckpointRequest);
+  bool success = tls32_.state_and_flags.CompareAndSetStrongSequentiallyConsistent(
+      old_state_and_flags.GetValue(), new_state_and_flags.GetValue());
   if (success) {
     // Succeeded setting checkpoint flag, now insert the actual checkpoint.
     if (tlsPtr_.checkpoint_function == nullptr) {
@@ -1595,28 +1621,26 @@ bool Thread::RequestCheckpoint(Closure* function) {
     } else {
       checkpoint_overflow_.push_back(function);
     }
-    CHECK_EQ(ReadFlag(kCheckpointRequest), true);
+    CHECK(ReadFlag(ThreadFlag::kCheckpointRequest));
     TriggerSuspend();
   }
   return success;
 }
 
 bool Thread::RequestEmptyCheckpoint() {
-  union StateAndFlags old_state_and_flags;
-  old_state_and_flags.as_int = tls32_.state_and_flags.as_int;
-  if (old_state_and_flags.as_struct.state != kRunnable) {
+  StateAndFlags old_state_and_flags = GetStateAndFlags(std::memory_order_relaxed);
+  if (old_state_and_flags.GetState() != ThreadState::kRunnable) {
     // If it's not runnable, we don't need to do anything because it won't be in the middle of a
     // heap access (eg. the read barrier).
     return false;
   }
 
   // We must be runnable to request a checkpoint.
-  DCHECK_EQ(old_state_and_flags.as_struct.state, kRunnable);
-  union StateAndFlags new_state_and_flags;
-  new_state_and_flags.as_int = old_state_and_flags.as_int;
-  new_state_and_flags.as_struct.flags |= kEmptyCheckpointRequest;
-  bool success = tls32_.state_and_flags.as_atomic_int.CompareAndSetStrongSequentiallyConsistent(
-      old_state_and_flags.as_int, new_state_and_flags.as_int);
+  DCHECK_EQ(old_state_and_flags.GetState(), ThreadState::kRunnable);
+  StateAndFlags new_state_and_flags = old_state_and_flags;
+  new_state_and_flags.SetFlag(ThreadFlag::kEmptyCheckpointRequest);
+  bool success = tls32_.state_and_flags.CompareAndSetStrongSequentiallyConsistent(
+      old_state_and_flags.GetValue(), new_state_and_flags.GetValue());
   if (success) {
     TriggerSuspend();
   }
@@ -1752,31 +1776,102 @@ bool Thread::RequestSynchronousCheckpoint(Closure* function, ThreadState suspend
   }
 }
 
-Closure* Thread::GetFlipFunction() {
-  Atomic<Closure*>* atomic_func = reinterpret_cast<Atomic<Closure*>*>(&tlsPtr_.flip_function);
-  Closure* func;
-  do {
-    func = atomic_func->load(std::memory_order_relaxed);
-    if (func == nullptr) {
-      return nullptr;
-    }
-  } while (!atomic_func->CompareAndSetWeakSequentiallyConsistent(func, nullptr));
-  DCHECK(func != nullptr);
-  return func;
-}
-
 void Thread::SetFlipFunction(Closure* function) {
-  CHECK(function != nullptr);
-  Atomic<Closure*>* atomic_func = reinterpret_cast<Atomic<Closure*>*>(&tlsPtr_.flip_function);
-  atomic_func->store(function, std::memory_order_seq_cst);
+  // This is called with all threads suspended, except for the calling thread.
+  DCHECK(IsSuspended() || Thread::Current() == this);
+  DCHECK(function != nullptr);
+  DCHECK(tlsPtr_.flip_function == nullptr);
+  tlsPtr_.flip_function = function;
+  DCHECK(!GetStateAndFlags(std::memory_order_relaxed).IsAnyOfFlagsSet(FlipFunctionFlags()));
+  AtomicSetFlag(ThreadFlag::kPendingFlipFunction, std::memory_order_release);
 }
 
-void Thread::FullSuspendCheck() {
+void Thread::EnsureFlipFunctionStarted(Thread* self) {
+  while (true) {
+    StateAndFlags old_state_and_flags = GetStateAndFlags(std::memory_order_relaxed);
+    if (!old_state_and_flags.IsFlagSet(ThreadFlag::kPendingFlipFunction)) {
+      return;
+    }
+    DCHECK(!old_state_and_flags.IsFlagSet(ThreadFlag::kRunningFlipFunction));
+    StateAndFlags new_state_and_flags =
+        old_state_and_flags.WithFlag(ThreadFlag::kRunningFlipFunction)
+                           .WithoutFlag(ThreadFlag::kPendingFlipFunction);
+    if (tls32_.state_and_flags.CompareAndSetWeakAcquire(old_state_and_flags.GetValue(),
+                                                        new_state_and_flags.GetValue())) {
+      RunFlipFunction(self, /*notify=*/ true);
+      DCHECK(!GetStateAndFlags(std::memory_order_relaxed).IsAnyOfFlagsSet(FlipFunctionFlags()));
+      return;
+    }
+  }
+}
+
+void Thread::RunFlipFunction(Thread* self, bool notify) {
+  // This function is called for suspended threads and by the thread running
+  // `ThreadList::FlipThreadRoots()` after we've successfully set the flag
+  // `ThreadFlag::kRunningFlipFunction`. This flag is not set if the thread is
+  // running the flip function right after transitioning to Runnable as
+  // no other thread may run checkpoints on a thread that's actually Runnable.
+  DCHECK_EQ(notify, ReadFlag(ThreadFlag::kRunningFlipFunction));
+
+  Closure* flip_function = tlsPtr_.flip_function;
+  tlsPtr_.flip_function = nullptr;
+  DCHECK(flip_function != nullptr);
+  flip_function->Run(this);
+
+  if (notify) {
+    // Clear the `ThreadFlag::kRunningFlipFunction` and `ThreadFlag::kWaitingForFlipFunction`.
+    // Check if the latter was actually set, indicating that there is at least one waiting thread.
+    constexpr uint32_t kFlagsToClear = enum_cast<uint32_t>(ThreadFlag::kRunningFlipFunction) |
+                                       enum_cast<uint32_t>(ThreadFlag::kWaitingForFlipFunction);
+    StateAndFlags old_state_and_flags(
+        tls32_.state_and_flags.fetch_and(~kFlagsToClear, std::memory_order_release));
+    if (old_state_and_flags.IsFlagSet(ThreadFlag::kWaitingForFlipFunction)) {
+      // Notify all threads that are waiting for completion (at least one).
+      // TODO: Should we create a separate mutex and condition variable instead
+      // of piggy-backing on the `thread_suspend_count_lock_` and `resume_cond_`?
+      MutexLock mu(self, *Locks::thread_suspend_count_lock_);
+      resume_cond_->Broadcast(self);
+    }
+  }
+}
+
+void Thread::WaitForFlipFunction(Thread* self) {
+  // Another thread is running the flip function. Wait for it to complete.
+  // Check the flag while holding the mutex so that we do not miss the broadcast.
+  // Repeat the check after waiting to guard against spurious wakeups (and because
+  // we share the `thread_suspend_count_lock_` and `resume_cond_` with other code).
+  MutexLock mu(self, *Locks::thread_suspend_count_lock_);
+  while (true) {
+    StateAndFlags old_state_and_flags = GetStateAndFlags(std::memory_order_acquire);
+    DCHECK(!old_state_and_flags.IsFlagSet(ThreadFlag::kPendingFlipFunction));
+    if (!old_state_and_flags.IsFlagSet(ThreadFlag::kRunningFlipFunction)) {
+      DCHECK(!old_state_and_flags.IsAnyOfFlagsSet(FlipFunctionFlags()));
+      break;
+    }
+    if (!old_state_and_flags.IsFlagSet(ThreadFlag::kWaitingForFlipFunction)) {
+      // Mark that there is a waiting thread.
+      StateAndFlags new_state_and_flags =
+          old_state_and_flags.WithFlag(ThreadFlag::kWaitingForFlipFunction);
+      if (!tls32_.state_and_flags.CompareAndSetWeakRelaxed(old_state_and_flags.GetValue(),
+                                                           new_state_and_flags.GetValue())) {
+        continue;  // Retry.
+      }
+    }
+    resume_cond_->Wait(self);
+  }
+}
+
+void Thread::FullSuspendCheck(bool implicit) {
   ScopedTrace trace(__FUNCTION__);
   VLOG(threads) << this << " self-suspending";
   // Make thread appear suspended to other threads, release mutator_lock_.
   // Transition to suspended and back to runnable, re-acquire share on mutator_lock_.
-  ScopedThreadSuspension(this, kSuspended);  // NOLINT
+  ScopedThreadSuspension(this, ThreadState::kSuspended);  // NOLINT
+  if (implicit) {
+    // For implicit suspend check we want to `madvise()` away
+    // the alternate signal stack to avoid wasting memory.
+    MadviseAwayAlternateSignalStack();
+  }
   VLOG(threads) << this << " self-reviving";
 }
 
@@ -1806,26 +1901,11 @@ static std::string GetSchedulerGroupName(pid_t tid) {
   return "";
 }
 
-
 void Thread::DumpState(std::ostream& os, const Thread* thread, pid_t tid) {
   std::string group_name;
   int priority;
   bool is_daemon = false;
   Thread* self = Thread::Current();
-
-  // If flip_function is not null, it means we have run a checkpoint
-  // before the thread wakes up to execute the flip function and the
-  // thread roots haven't been forwarded.  So the following access to
-  // the roots (opeer or methods in the frames) would be bad. Run it
-  // here. TODO: clean up.
-  if (thread != nullptr) {
-    ScopedObjectAccessUnchecked soa(self);
-    Thread* this_thread = const_cast<Thread*>(thread);
-    Closure* flip_func = this_thread->GetFlipFunction();
-    if (flip_func != nullptr) {
-      flip_func->Run(this_thread);
-    }
-  }
 
   // Don't do this if we are aborting since the GC may have all the threads suspended. This will
   // cause ScopedObjectAccessUnchecked to deadlock.
@@ -1879,10 +1959,14 @@ void Thread::DumpState(std::ostream& os, const Thread* thread, pid_t tid) {
 
   if (thread != nullptr) {
     auto suspend_log_fn = [&]() REQUIRES(Locks::thread_suspend_count_lock_) {
+      StateAndFlags state_and_flags = thread->GetStateAndFlags(std::memory_order_relaxed);
+      static_assert(
+          static_cast<std::underlying_type_t<ThreadState>>(ThreadState::kRunnable) == 0u);
+      state_and_flags.SetState(ThreadState::kRunnable);  // Clear state bits.
       os << "  | group=\"" << group_name << "\""
          << " sCount=" << thread->tls32_.suspend_count
          << " ucsCount=" << thread->tls32_.user_code_suspend_count
-         << " flags=" << thread->tls32_.state_and_flags.as_struct.flags
+         << " flags=" << state_and_flags.GetValue()
          << " obj=" << reinterpret_cast<void*>(thread->tlsPtr_.opeer)
          << " self=" << reinterpret_cast<const void*>(thread) << "\n";
     };
@@ -2058,11 +2142,11 @@ struct StackDumpVisitor : public MonitorObjectsStackVisitor {
       REQUIRES_SHARED(Locks::mutator_lock_) {
     const char* msg;
     switch (state) {
-      case kBlocked:
+      case ThreadState::kBlocked:
         msg = "  - waiting to lock ";
         break;
 
-      case kWaitingForLockInflation:
+      case ThreadState::kWaitingForLockInflation:
         msg = "  - waiting for lock inflation of ";
         break;
 
@@ -2116,12 +2200,14 @@ static bool ShouldShowNativeStack(const Thread* thread)
   ThreadState state = thread->GetState();
 
   // In native code somewhere in the VM (one of the kWaitingFor* states)? That's interesting.
-  if (state > kWaiting && state < kStarting) {
+  if (state > ThreadState::kWaiting && state < ThreadState::kStarting) {
     return true;
   }
 
   // In an Object.wait variant or Thread.sleep? That's not interesting.
-  if (state == kTimedWaiting || state == kSleeping || state == kWaiting) {
+  if (state == ThreadState::kTimedWaiting ||
+      state == ThreadState::kSleeping ||
+      state == ThreadState::kWaiting) {
     return false;
   }
 
@@ -2139,19 +2225,6 @@ static bool ShouldShowNativeStack(const Thread* thread)
 }
 
 void Thread::DumpJavaStack(std::ostream& os, bool check_suspended, bool dump_locks) const {
-  // If flip_function is not null, it means we have run a checkpoint
-  // before the thread wakes up to execute the flip function and the
-  // thread roots haven't been forwarded.  So the following access to
-  // the roots (locks or methods in the frames) would be bad. Run it
-  // here. TODO: clean up.
-  {
-    Thread* this_thread = const_cast<Thread*>(this);
-    Closure* flip_func = this_thread->GetFlipFunction();
-    if (flip_func != nullptr) {
-      flip_func->Run(this_thread);
-    }
-  }
-
   // Dumping the Java stack involves the verifier for locks. The verifier operates under the
   // assumption that there is no exception pending on entry. Thus, stash any pending exception.
   // Thread::Current() instead of this in case a thread is dumping the stack of another suspended
@@ -2297,14 +2370,17 @@ Thread::Thread(bool daemon)
       is_runtime_thread_(false) {
   wait_mutex_ = new Mutex("a thread wait mutex", LockLevel::kThreadWaitLock);
   wait_cond_ = new ConditionVariable("a thread wait condition variable", *wait_mutex_);
+  tlsPtr_.mutator_lock = Locks::mutator_lock_;
+  DCHECK(tlsPtr_.mutator_lock != nullptr);
   tlsPtr_.instrumentation_stack =
       new std::map<uintptr_t, instrumentation::InstrumentationStackFrame>;
   tlsPtr_.name = new std::string(kThreadNameDuringStartup);
 
   static_assert((sizeof(Thread) % 4) == 0U,
                 "art::Thread has a size which is not a multiple of 4.");
-  tls32_.state_and_flags.as_struct.flags = 0;
-  tls32_.state_and_flags.as_struct.state = kNative;
+  DCHECK_EQ(GetStateAndFlags(std::memory_order_relaxed).GetValue(), 0u);
+  StateAndFlags state_and_flags = StateAndFlags(0u).WithState(ThreadState::kNative);
+  tls32_.state_and_flags.store(state_and_flags.GetValue(), std::memory_order_relaxed);
   tls32_.interrupted.store(false, std::memory_order_relaxed);
   // Initialize with no permit; if the java Thread was unparked before being
   // started, it will unpark itself before calling into java code.
@@ -2460,9 +2536,9 @@ Thread::~Thread() {
     delete tlsPtr_.jni_env;
     tlsPtr_.jni_env = nullptr;
   }
-  CHECK_NE(GetState(), kRunnable);
-  CHECK(!ReadFlag(kCheckpointRequest));
-  CHECK(!ReadFlag(kEmptyCheckpointRequest));
+  CHECK_NE(GetState(), ThreadState::kRunnable);
+  CHECK(!ReadFlag(ThreadFlag::kCheckpointRequest));
+  CHECK(!ReadFlag(ThreadFlag::kEmptyCheckpointRequest));
   CHECK(tlsPtr_.checkpoint_function == nullptr);
   CHECK_EQ(checkpoint_overflow_.size(), 0u);
   CHECK(tlsPtr_.flip_function == nullptr);
@@ -2474,7 +2550,7 @@ Thread::~Thread() {
       "Not all deoptimized frames have been consumed by the debugger.";
 
   // We may be deleting a still born thread.
-  SetStateUnsafe(kTerminated);
+  SetStateUnsafe(ThreadState::kTerminated);
 
   delete wait_cond_;
   delete wait_mutex_;
@@ -2501,7 +2577,7 @@ void Thread::HandleUncaughtExceptions(ScopedObjectAccessAlreadyRunnable& soa) {
     return;
   }
   ScopedLocalRef<jobject> peer(tlsPtr_.jni_env, soa.AddLocalReference<jobject>(tlsPtr_.opeer));
-  ScopedThreadStateChange tsc(this, kNative);
+  ScopedThreadStateChange tsc(this, ThreadState::kNative);
 
   // Get and clear the exception.
   ScopedLocalRef<jthrowable> exception(tlsPtr_.jni_env, tlsPtr_.jni_env->ExceptionOccurred());
@@ -2524,7 +2600,7 @@ void Thread::RemoveFromThreadGroup(ScopedObjectAccessAlreadyRunnable& soa) {
   if (ogroup != nullptr) {
     ScopedLocalRef<jobject> group(soa.Env(), soa.AddLocalReference<jobject>(ogroup));
     ScopedLocalRef<jobject> peer(soa.Env(), soa.AddLocalReference<jobject>(tlsPtr_.opeer));
-    ScopedThreadStateChange tsc(soa.Self(), kNative);
+    ScopedThreadStateChange tsc(soa.Self(), ThreadState::kNative);
     tlsPtr_.jni_env->CallVoidMethod(group.get(),
                                     WellKnownClasses::java_lang_ThreadGroup_removeThread,
                                     peer.get());
@@ -3031,20 +3107,6 @@ jobjectArray Thread::CreateAnnotatedStackTrace(const ScopedObjectAccessAlreadyRu
     return nullptr;
   }
 
-  // If flip_function is not null, it means we have run a checkpoint
-  // before the thread wakes up to execute the flip function and the
-  // thread roots haven't been forwarded.  So the following access to
-  // the roots (locks or methods in the frames) would be bad. Run it
-  // here. TODO: clean up.
-  // Note: copied from DumpJavaStack.
-  {
-    Thread* this_thread = const_cast<Thread*>(this);
-    Closure* flip_func = this_thread->GetFlipFunction();
-    if (flip_func != nullptr) {
-      flip_func->Run(this_thread);
-    }
-  }
-
   class CollectFramesAndLocksStackVisitor : public MonitorObjectsStackVisitor {
    public:
     CollectFramesAndLocksStackVisitor(const ScopedObjectAccessAlreadyRunnable& soaa_in,
@@ -3473,12 +3535,10 @@ void Thread::DumpThreadOffset(std::ostream& os, uint32_t offset) {
   QUICK_ENTRY_POINT_INFO(pGetObjStatic)
   QUICK_ENTRY_POINT_INFO(pAputObject)
   QUICK_ENTRY_POINT_INFO(pJniMethodStart)
-  QUICK_ENTRY_POINT_INFO(pJniMethodStartSynchronized)
   QUICK_ENTRY_POINT_INFO(pJniMethodEnd)
-  QUICK_ENTRY_POINT_INFO(pJniMethodEndSynchronized)
-  QUICK_ENTRY_POINT_INFO(pJniMethodEndWithReference)
-  QUICK_ENTRY_POINT_INFO(pJniMethodEndWithReferenceSynchronized)
   QUICK_ENTRY_POINT_INFO(pJniDecodeReferenceResult)
+  QUICK_ENTRY_POINT_INFO(pJniLockObject)
+  QUICK_ENTRY_POINT_INFO(pJniUnlockObject)
   QUICK_ENTRY_POINT_INFO(pQuickGenericJniTrampoline)
   QUICK_ENTRY_POINT_INFO(pLockObject)
   QUICK_ENTRY_POINT_INFO(pUnlockObject)
@@ -3555,7 +3615,7 @@ void Thread::DumpThreadOffset(std::ostream& os, uint32_t offset) {
   QUICK_ENTRY_POINT_INFO(pNewStringFromString)
   QUICK_ENTRY_POINT_INFO(pNewStringFromStringBuffer)
   QUICK_ENTRY_POINT_INFO(pNewStringFromStringBuilder)
-  QUICK_ENTRY_POINT_INFO(pReadBarrierJni)
+  QUICK_ENTRY_POINT_INFO(pJniReadBarrier)
   QUICK_ENTRY_POINT_INFO(pReadBarrierMarkReg00)
   QUICK_ENTRY_POINT_INFO(pReadBarrierMarkReg01)
   QUICK_ENTRY_POINT_INFO(pReadBarrierMarkReg02)
@@ -4469,7 +4529,7 @@ bool Thread::IsSystemDaemon() const {
 
 std::string Thread::StateAndFlagsAsHexString() const {
   std::stringstream result_stream;
-  result_stream << std::hex << tls32_.state_and_flags.as_atomic_int.load();
+  result_stream << std::hex << GetStateAndFlags(std::memory_order_relaxed).GetValue();
   return result_stream.str();
 }
 

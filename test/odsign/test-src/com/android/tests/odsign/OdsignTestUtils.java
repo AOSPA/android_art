@@ -40,6 +40,9 @@ public class OdsignTestUtils {
 
     public static final List<String> ZYGOTE_NAMES = List.of("zygote", "zygote64");
 
+    public static final List<String> APP_ARTIFACT_EXTENSIONS = List.of(".art", ".odex", ".vdex");
+    public static final List<String> BCP_ARTIFACT_EXTENSIONS = List.of(".art", ".oat", ".vdex");
+
     private static final String APEX_FILENAME = "test_com.android.art.apex";
 
     private static final String ODREFRESH_COMPILATION_LOG =
@@ -49,6 +52,9 @@ public class OdsignTestUtils {
 
     private final InstallUtilsHost mInstallUtils;
     private final TestInformation mTestInfo;
+
+    private boolean mWasAdbRoot = false;
+    private boolean mAdbRootEnabled = false;
 
     public OdsignTestUtils(TestInformation testInfo) throws Exception {
         assertNotNull(testInfo.getDevice());
@@ -103,7 +109,7 @@ public class OdsignTestUtils {
         final String zygotePid = result.getStdout().trim().split("\\s+")[0];
         assertTrue(!zygotePid.isEmpty());
 
-        final String grepPattern = ART_APEX_DALVIK_CACHE_DIRNAME + ".*boot-framework";
+        final String grepPattern = ART_APEX_DALVIK_CACHE_DIRNAME + ".*boot";
         return Optional.of(getMappedArtifacts(zygotePid, grepPattern));
     }
 
@@ -139,5 +145,23 @@ public class OdsignTestUtils {
         boolean success =
                 mTestInfo.getDevice().waitForBootComplete(BOOT_COMPLETE_TIMEOUT.toMillis());
         assertWithMessage("Device didn't boot in %s", BOOT_COMPLETE_TIMEOUT).that(success).isTrue();
+    }
+
+    /**
+     * Enables adb root or skips the test if adb root is not supported.
+     */
+    public void enableAdbRootOrSkipTest() throws Exception {
+        mWasAdbRoot = mTestInfo.getDevice().isAdbRoot();
+        mAdbRootEnabled = mTestInfo.getDevice().enableAdbRoot();
+        assumeTrue("ADB root failed and required to get process maps", mAdbRootEnabled);
+    }
+
+    /**
+     * Restores the device to the state before {@link enableAdbRootOrSkipTest} was called.
+     */
+    public void restoreAdbRoot() throws Exception {
+        if (mAdbRootEnabled && !mWasAdbRoot) {
+            mTestInfo.getDevice().disableAdbRoot();
+        }
     }
 }

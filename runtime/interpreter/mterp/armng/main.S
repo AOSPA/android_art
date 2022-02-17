@@ -301,12 +301,12 @@ END \name
 .endm
 
 .macro BRANCH
+    add rPC, rPC, rINST, lsl #1
     // Update method counter and do a suspend check if the branch is negative or zero.
     cmp rINST, #0
     ble 2f
 1:
-    add r2, rINST, rINST                // r2<- byte offset
-    FETCH_ADVANCE_INST_RB r2            // update xPC, load rINST
+    FETCH_INST                          // load rINST
     GET_INST_OPCODE ip                  // extract opcode from rINST
     GOTO_OPCODE ip                      // jump to next instruction
 2:
@@ -318,7 +318,7 @@ END \name
     strh r2, [r0, #ART_METHOD_HOTNESS_COUNT_OFFSET]
     // Otherwise, do a suspend check.
     ldr r0, [rSELF, #THREAD_FLAGS_OFFSET]
-    ands r0, r0, #THREAD_SUSPEND_OR_CHECKPOINT_REQUEST
+    tst r0, #THREAD_SUSPEND_OR_CHECKPOINT_REQUEST
     beq 1b
     EXPORT_PC
     bl    art_quick_test_suspend
@@ -1799,13 +1799,12 @@ NterpNewArray:
 
 
 NterpHandleHotnessOverflow:
-    add r1, rPC, rINST, lsl #1
+    mov r1, rPC
     mov r2, rFP
     bl nterp_hot_method
     cmp r0, #0
     bne 1f
-    add r2, rINST, rINST                // w2<- byte offset
-    FETCH_ADVANCE_INST_RB r2            // update rPC, load rINST
+    FETCH_INST                          // load rINST
     GET_INST_OPCODE ip                  // extract opcode from rINST
     GOTO_OPCODE ip                      // jump to next instruction
 1:

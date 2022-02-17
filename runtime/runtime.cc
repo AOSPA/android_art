@@ -654,7 +654,7 @@ void Runtime::Abort(const char* msg) {
   {
     // Ensure that we don't have multiple threads trying to abort at once,
     // which would result in significantly worse diagnostics.
-    ScopedThreadStateChange tsc(Thread::Current(), kNativeForAbort);
+    ScopedThreadStateChange tsc(Thread::Current(), ThreadState::kNativeForAbort);
     Locks::abort_lock_->ExclusiveLock(Thread::Current());
   }
 
@@ -709,7 +709,9 @@ void Runtime::PostZygoteFork() {
     // Ensure that the threads in the JIT pool have been created with the right
     // priority.
     if (kIsDebugBuild && jit->GetThreadPool() != nullptr) {
-      jit->GetThreadPool()->CheckPthreadPriority(jit->GetThreadPoolPthreadPriority());
+      jit->GetThreadPool()->CheckPthreadPriority(
+          IsZygote() ? jit->GetZygoteThreadPoolPthreadPriority()
+                     : jit->GetThreadPoolPthreadPriority());
     }
   }
   // Reset all stats.
@@ -718,7 +720,7 @@ void Runtime::PostZygoteFork() {
 
 void Runtime::CallExitHook(jint status) {
   if (exit_ != nullptr) {
-    ScopedThreadStateChange tsc(Thread::Current(), kNative);
+    ScopedThreadStateChange tsc(Thread::Current(), ThreadState::kNative);
     exit_(status);
     LOG(WARNING) << "Exit hook returned instead of exiting!";
   }
@@ -883,7 +885,7 @@ bool Runtime::Start() {
   // Restore main thread state to kNative as expected by native code.
   Thread* self = Thread::Current();
 
-  self->TransitionFromRunnableToSuspended(kNative);
+  self->TransitionFromRunnableToSuspended(ThreadState::kNative);
 
   started_ = true;
 
@@ -990,7 +992,7 @@ bool Runtime::Start() {
   finished_starting_ = true;
 
   if (trace_config_.get() != nullptr && trace_config_->trace_file != "") {
-    ScopedThreadStateChange tsc(self, kWaitingForMethodTracingStart);
+    ScopedThreadStateChange tsc(self, ThreadState::kWaitingForMethodTracingStart);
     Trace::Start(trace_config_->trace_file.c_str(),
                  static_cast<int>(trace_config_->trace_file_size),
                  0,
@@ -1195,7 +1197,7 @@ void Runtime::StartDaemonThreads() {
   Thread* self = Thread::Current();
 
   // Must be in the kNative state for calling native methods.
-  CHECK_EQ(self->GetState(), kNative);
+  CHECK_EQ(self->GetState(), ThreadState::kNative);
 
   JNIEnv* env = self->GetJniEnv();
   env->CallStaticVoidMethod(WellKnownClasses::java_lang_Daemons,
@@ -1281,16 +1283,8 @@ static inline void CreatePreAllocatedException(Thread* self,
 void Runtime::InitializeApexVersions() {
   std::vector<std::string_view> bcp_apexes;
   for (std::string_view jar : Runtime::Current()->GetBootClassPathLocations()) {
-    if (LocationIsOnApex(jar)) {
-      size_t start = jar.find('/', 1);
-      if (start == std::string::npos) {
-        continue;
-      }
-      size_t end = jar.find('/', start + 1);
-      if (end == std::string::npos) {
-        continue;
-      }
-      std::string_view apex = jar.substr(start + 1, end - start - 1);
+    std::string_view apex = ApexNameFromLocation(jar);
+    if (!apex.empty()) {
       bcp_apexes.push_back(apex);
     }
   }
@@ -1668,10 +1662,12 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   // Change the implicit checks flags based on runtime architecture.
   switch (kRuntimeISA) {
+    case InstructionSet::kArm64:
+      implicit_suspend_checks_ = true;
+      FALLTHROUGH_INTENDED;
     case InstructionSet::kArm:
     case InstructionSet::kThumb2:
     case InstructionSet::kX86:
-    case InstructionSet::kArm64:
     case InstructionSet::kX86_64:
       implicit_null_checks_ = true;
       // Historical note: Installing stack protection was not playing well with Valgrind.
@@ -2086,7 +2082,7 @@ void Runtime::InitNativeMethods() {
   JNIEnv* env = self->GetJniEnv();
 
   // Must be in the kNative state for calling native methods (JNI_OnLoad code).
-  CHECK_EQ(self->GetState(), kNative);
+  CHECK_EQ(self->GetState(), ThreadState::kNative);
 
   // Set up the native methods provided by the runtime itself.
   RegisterRuntimeNativeMethods(env);

@@ -176,11 +176,13 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .IntoKey(M::ProfileClock)
       .Define("-Xjitthreshold:_")
           .WithType<unsigned int>()
-          .IntoKey(M::JITCompileThreshold)
+          .IntoKey(M::JITOptimizeThreshold)
       .SetCategory("ART")
       .Define("-Ximage:_")
           .WithType<ParseStringList<':'>>()
           .IntoKey(M::Image)
+      .Define("-Xforcejitzygote")
+          .IntoKey(M::ForceJitZygote)
       .Define("-Xprimaryzygote")
           .IntoKey(M::PrimaryZygote)
       .Define("-Xbootclasspath-locations:_")
@@ -272,9 +274,6 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Xjitwarmupthreshold:_")
           .WithType<unsigned int>()
           .IntoKey(M::JITWarmupThreshold)
-      .Define("-Xjitosrthreshold:_")
-          .WithType<unsigned int>()
-          .IntoKey(M::JITOsrThreshold)
       .Define("-Xjitprithreadweight:_")
           .WithType<unsigned int>()
           .IntoKey(M::JITPriorityThreadWeight)
@@ -475,7 +474,7 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           "-Xverifyopt:_", "-Xcheckdexsum", "-Xincludeselectedop", "-Xjitop:_",
           "-Xincludeselectedmethod",
           "-Xjitblocking", "-Xjitmethod:_", "-Xjitclass:_", "-Xjitoffset:_",
-          "-Xjitconfig:_", "-Xjitcheckcg", "-Xjitverbose", "-Xjitprofile",
+          "-Xjitosrthreshold:_", "-Xjitconfig:_", "-Xjitcheckcg", "-Xjitverbose", "-Xjitprofile",
           "-Xjitdisableopt", "-Xjitsuspendpoll", "-XX:mainThreadStackSize=_"})
       .IgnoreUnrecognized(ignore_unrecognized)
       .OrderCategories({"standard", "extended", "Dalvik", "ART"});
@@ -725,6 +724,17 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
           boot_class_path_locations->Join().c_str());
       return false;
     }
+  }
+
+  if (args.Exists(M::ForceJitZygote)) {
+    if (args.Exists(M::Image)) {
+      Usage("-Ximage and -Xforcejitzygote cannot be specified together\n");
+      Exit(0);
+    }
+    // If `boot.art` exists in the ART APEX, it will be used. Otherwise, Everything will be JITed.
+    args.Set(M::Image,
+             ParseStringList<':'>{{"boot.art!/apex/com.android.art/etc/boot-image.prof",
+                                   "/nonx/boot-framework.art!/system/etc/boot-image.prof"}});
   }
 
   if (!args.Exists(M::CompilerCallbacksPtr) && !args.Exists(M::Image)) {

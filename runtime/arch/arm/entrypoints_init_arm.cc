@@ -125,8 +125,10 @@ void UpdateReadBarrierEntrypoints(QuickEntryPoints* qpoints, bool is_active) {
   }
 }
 
-void InitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints) {
-  DefaultInitEntryPoints(jpoints, qpoints);
+void InitEntryPoints(JniEntryPoints* jpoints,
+                     QuickEntryPoints* qpoints,
+                     bool monitor_jni_entry_exit) {
+  DefaultInitEntryPoints(jpoints, qpoints, monitor_jni_entry_exit);
 
   // Cast
   qpoints->pInstanceofNonTrivial = artInstanceOfFromCode;
@@ -173,7 +175,6 @@ void InitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints) {
   qpoints->pMemcpy = memcpy;
 
   // Read barrier.
-  qpoints->pReadBarrierJni = art_read_barrier_jni;
   UpdateReadBarrierEntrypoints(qpoints, /*is_active=*/ false);
   qpoints->pReadBarrierMarkReg12 = nullptr;  // Cannot use register 12 (IP) to pass arguments.
   qpoints->pReadBarrierMarkReg13 = nullptr;  // Cannot use register 13 (SP) to pass arguments.

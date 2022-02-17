@@ -17,13 +17,16 @@
 #ifndef ART_ODREFRESH_ODR_CONFIG_H_
 #define ART_ODREFRESH_ODR_CONFIG_H_
 
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "android-base/file.h"
 #include "arch/instruction_set.h"
+#include "base/file_utils.h"
 #include "base/globals.h"
 #include "log/log.h"
+#include "odr_common.h"
 #include "odrefresh/odrefresh.h"
 
 namespace art {
@@ -56,15 +59,19 @@ class OdrConfig final {
   std::string dex2oat_;
   std::string dex2oat_boot_classpath_;
   bool dry_run_;
+  std::optional<bool> refresh_;
+  std::optional<bool> partial_compilation_;
   InstructionSet isa_;
   std::string program_name_;
   std::string system_server_classpath_;
+  std::string system_server_compiler_filter_;
   ZygoteKind zygote_kind_;
-  int compilation_os_address_ = 0;
   std::string boot_classpath_;
   std::string artifact_dir_;
-  time_t max_execution_seconds_ = kMaxChildProcessSeconds;
-  time_t max_child_process_seconds_ = kMaximumExecutionSeconds;
+  time_t max_execution_seconds_ = kMaximumExecutionSeconds;
+  time_t max_child_process_seconds_ = kMaxChildProcessSeconds;
+  std::string standalone_system_server_jars_;
+  bool compilation_os_mode_ = false;
 
   // Staging directory for artifacts. The directory must exist and will be automatically removed
   // after compilation. If empty, use the default directory.
@@ -75,12 +82,12 @@ class OdrConfig final {
     : dry_run_(false),
       isa_(InstructionSet::kNone),
       program_name_(android::base::Basename(program_name)),
-      artifact_dir_(kOdrefreshArtifactDirectory) {
+      artifact_dir_(GetApexDataDalvikCacheDirectory(InstructionSet::kNone)) {
   }
 
   const std::string& GetApexInfoListFile() const { return apex_info_list_file_; }
 
-  std::vector<InstructionSet> GetBootExtensionIsas() const {
+  std::vector<InstructionSet> GetBootClasspathIsas() const {
     const auto [isa32, isa64] = GetPotentialInstructionSets();
     switch (zygote_kind_) {
       case ZygoteKind::kZygote32:
@@ -128,16 +135,24 @@ class OdrConfig final {
   }
 
   bool GetDryRun() const { return dry_run_; }
+  bool GetPartialCompilation() const {
+    return partial_compilation_.value_or(true);
+  }
+  bool GetRefresh() const {
+    return refresh_.value_or(true);
+  }
   const std::string& GetSystemServerClasspath() const {
     return system_server_classpath_;
   }
-  bool UseCompilationOs() const { return compilation_os_address_ != 0; }
-  int GetCompilationOsAddress() const { return compilation_os_address_; }
+  const std::string& GetSystemServerCompilerFilter() const {
+    return system_server_compiler_filter_;
+  }
   const std::string& GetStagingDir() const {
     return staging_dir_;
   }
   time_t GetMaxExecutionSeconds() const { return max_execution_seconds_; }
   time_t GetMaxChildProcessSeconds() const { return max_child_process_seconds_; }
+  bool GetCompilationOsMode() const { return compilation_os_mode_; }
 
   void SetApexInfoListFile(const std::string& file_path) { apex_info_list_file_ = file_path; }
   void SetArtBinDir(const std::string& art_bin_dir) { art_bin_dir_ = art_bin_dir; }
@@ -151,13 +166,22 @@ class OdrConfig final {
   }
 
   void SetDryRun() { dry_run_ = true; }
+  void SetPartialCompilation(bool value) {
+    partial_compilation_ = value;
+  }
+  void SetRefresh(bool value) {
+    refresh_ = value;
+  }
   void SetIsa(const InstructionSet isa) { isa_ = isa; }
-  void SetCompilationOsAddress(int address) { compilation_os_address_ = address; }
   void SetMaxExecutionSeconds(int seconds) { max_execution_seconds_ = seconds; }
   void SetMaxChildProcessSeconds(int seconds) { max_child_process_seconds_ = seconds; }
 
   void SetSystemServerClasspath(const std::string& classpath) {
     system_server_classpath_ = classpath;
+  }
+
+  void SetSystemServerCompilerFilter(const std::string& filter) {
+    system_server_compiler_filter_ = filter;
   }
 
   void SetZygoteKind(ZygoteKind zygote_kind) { zygote_kind_ = zygote_kind; }
@@ -169,6 +193,16 @@ class OdrConfig final {
   void SetStagingDir(const std::string& staging_dir) {
     staging_dir_ = staging_dir;
   }
+
+  const std::string& GetStandaloneSystemServerJars() const {
+    return standalone_system_server_jars_;
+  }
+
+  void SetStandaloneSystemServerJars(const std::string& jars) {
+    standalone_system_server_jars_ = jars;
+  }
+
+  void SetCompilationOsMode(bool value) { compilation_os_mode_ = value; }
 
  private:
   // Returns a pair for the possible instruction sets for the configured instruction set

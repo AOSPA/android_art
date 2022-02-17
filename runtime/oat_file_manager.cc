@@ -159,7 +159,7 @@ std::vector<const OatFile*> OatFileManager::RegisterImageOatFiles(
   oat_files.reserve(spaces.size());
   for (gc::space::ImageSpace* space : spaces) {
     // The oat file was generated in memory if the image space has a profile.
-    bool in_memory = !space->GetProfileFile().empty();
+    bool in_memory = !space->GetProfileFiles().empty();
     oat_files.push_back(RegisterOatFile(space->ReleaseOatFile(), in_memory));
   }
   return oat_files;
@@ -263,7 +263,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
             // Add image space has a race condition since other threads could be reading from the
             // spaces array.
             {
-              ScopedThreadSuspension sts(self, kSuspended);
+              ScopedThreadSuspension sts(self, ThreadState::kSuspended);
               gc::ScopedGCCriticalSection gcs(self,
                                               gc::kGcCauseAddRemoveAppImageSpace,
                                               gc::kCollectorTypeAddRemoveAppImageSpace);
@@ -290,7 +290,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
               LOG(INFO) << "Failed to add image file " << temp_error_msg;
               dex_files.clear();
               {
-                ScopedThreadSuspension sts(self, kSuspended);
+                ScopedThreadSuspension sts(self, ThreadState::kSuspended);
                 gc::ScopedGCCriticalSection gcs(self,
                                                 gc::kGcCauseAddRemoveAppImageSpace,
                                                 gc::kCollectorTypeAddRemoveAppImageSpace);
@@ -344,6 +344,18 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
       }
 
       if (oat_file != nullptr) {
+        VdexFile* vdex_file = oat_file->GetVdexFile();
+        if (vdex_file != nullptr) {
+          // Opened vdex file from an oat file, madvise it to its loaded state.
+          // TODO(b/196052575): Unify dex and vdex madvise knobs and behavior.
+          const size_t madvise_size_limit = Runtime::Current()->GetMadviseWillNeedSizeVdex();
+          Runtime::MadviseFileForRange(madvise_size_limit,
+                                       vdex_file->Size(),
+                                       vdex_file->Begin(),
+                                       vdex_file->End(),
+                                       vdex_file->GetName());
+        }
+
         VLOG(class_linker) << "Registering " << oat_file->GetLocation();
         *out_oat_file = RegisterOatFile(std::move(oat_file));
       }
@@ -485,7 +497,6 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat_
     vdex_file = VdexFile::Open(vdex_path,
                                /* writable= */ false,
                                /* low_4gb= */ false,
-                               /* unquicken= */ false,
                                &error_msg);
     if (vdex_file == nullptr) {
       LOG(WARNING) << "Failed to open vdex " << vdex_path << ": " << error_msg;
@@ -835,6 +846,17 @@ void OatFileManager::DumpForSigQuit(std::ostream& os) {
     }
     os << oat_file->GetLocation() << ": " << oat_file->GetCompilerFilter() << "\n";
   }
+}
+
+bool OatFileManager::ContainsPc(const void* code) {
+  ReaderMutexLock mu(Thread::Current(), *Locks::oat_file_manager_lock_);
+  std::vector<const OatFile*> boot_oat_files = GetBootOatFiles();
+  for (const std::unique_ptr<const OatFile>& oat_file : oat_files_) {
+    if (oat_file->Contains(code)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace art

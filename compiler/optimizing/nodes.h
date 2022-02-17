@@ -54,6 +54,7 @@
 namespace art {
 
 class ArenaStack;
+class CodeGenerator;
 class GraphChecker;
 class HBasicBlock;
 class HConstructorFence;
@@ -75,6 +76,7 @@ class HTryBoundary;
 class FieldInfo;
 class LiveInterval;
 class LocationSummary;
+class ProfilingInfo;
 class SlowPathCode;
 class SsaBuilder;
 
@@ -426,6 +428,7 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   }
 
   std::ostream& Dump(std::ostream& os,
+                     CodeGenerator* codegen,
                      std::optional<std::reference_wrapper<const BlockNamer>> namer = std::nullopt);
 
   ArenaAllocator* GetAllocator() const { return allocator_; }
@@ -704,6 +707,9 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   ArtMethod* GetArtMethod() const { return art_method_; }
   void SetArtMethod(ArtMethod* method) { art_method_ = method; }
 
+  void SetProfilingInfo(ProfilingInfo* info) { profiling_info_ = info; }
+  ProfilingInfo* GetProfilingInfo() const { return profiling_info_; }
+
   // Returns an instruction with the opposite Boolean value from 'cond'.
   // The instruction has been inserted into the graph, either as a constant, or
   // before cursor.
@@ -870,6 +876,9 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   // (such as when the superclass could not be found).
   ArtMethod* art_method_;
 
+  // The `ProfilingInfo` associated with the method being compiled.
+  ProfilingInfo* profiling_info_;
+
   // How we are compiling the graph: either optimized, osr, or baseline.
   // For osr, we will make all loops seen as irreducible and emit special
   // stack maps to mark compiled code entries which the interpreter can
@@ -885,10 +894,6 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   ART_FRIEND_TEST(GraphTest, IfSuccessorSimpleJoinBlock1);
   DISALLOW_COPY_AND_ASSIGN(HGraph);
 };
-
-inline std::ostream& operator<<(std::ostream& os, HGraph& graph) {
-  return graph.Dump(os);
-}
 
 class HLoopInformation : public ArenaObject<kArenaAllocLoopInfo> {
  public:
@@ -3005,6 +3010,8 @@ class HMethodEntryHook : public HExpression<0> {
     return true;
   }
 
+  bool CanThrow() const override { return true; }
+
   DECLARE_INSTRUCTION(MethodEntryHook);
 
  protected:
@@ -3021,6 +3028,8 @@ class HMethodExitHook : public HExpression<1> {
   bool NeedsEnvironment() const override {
     return true;
   }
+
+  bool CanThrow() const override { return true; }
 
   DECLARE_INSTRUCTION(MethodExitHook);
 

@@ -178,6 +178,14 @@ TEST_F(FileUtilsTest, ReplaceFileExtension) {
   EXPECT_EQ("/.directory/file.vdex", ReplaceFileExtension("/.directory/file", "vdex"));
 }
 
+TEST_F(FileUtilsTest, ArtApexDataPath) {
+  ScopedUnsetEnvironmentVariable no_env("ART_APEX_DATA");
+  EXPECT_EQ(kArtApexDataDefaultPath, GetArtApexData());
+
+  setenv("ART_APEX_DATA", "/path/from/env", /* overwrite */ 1);
+  EXPECT_EQ("/path/from/env", GetArtApexData());
+}
+
 TEST_F(FileUtilsTest, GetApexDataOatFilename) {
   ScopedUnsetEnvironmentVariable android_root("ANDROID_ROOT");
   ScopedUnsetEnvironmentVariable i18n_root("ANDROID_I18N_ROOT");
@@ -320,6 +328,17 @@ TEST_F(FileUtilsTest, GetSystemOdexFilenameForApex) {
   EXPECT_EQ(
       GetAndroidRoot() + "/framework/oat/arm/apex@com.android.art@javalib@some.jar@classes.odex",
       GetSystemOdexFilenameForApex(apex_jar.c_str(), InstructionSet::kArm));
+}
+
+TEST_F(FileUtilsTest, ApexNameFromLocation) {
+  EXPECT_EQ("", ApexNameFromLocation(""));
+  EXPECT_EQ("", ApexNameFromLocation("/apex/com.android.foo"));
+  EXPECT_EQ("", ApexNameFromLocation("/apex//something"));
+  EXPECT_EQ("com.android.foo", ApexNameFromLocation("/apex/com.android.foo/"));
+  EXPECT_EQ("", ApexNameFromLocation("apex/com.android.foo/"));
+  EXPECT_EQ("foo", ApexNameFromLocation("/apex/foo/something.jar"));
+  EXPECT_EQ("", ApexNameFromLocation("/bar/foo/baz"));
+  EXPECT_EQ("", ApexNameFromLocation("/apexx/foo/baz"));
 }
 
 }  // namespace art

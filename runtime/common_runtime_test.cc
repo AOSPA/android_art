@@ -99,7 +99,13 @@ void CommonRuntimeTestImpl::SetUp() {
   options.push_back(std::make_pair(boot_class_path_string, nullptr));
   options.push_back(std::make_pair(boot_class_path_locations_string, nullptr));
   if (use_boot_image_) {
-    options.emplace_back("-Ximage:" + GetImageLocation(), nullptr);
+    std::string image_location = GetImageLocation();
+    if (!IsHost()) {
+      // On target, the boot image can be outdated due to an ART update. In such case, the profile
+      // will be used for generating a boot image in memory.
+      image_location += "!/apex/com.android.art/etc/boot-image.prof";
+    }
+    options.emplace_back("-Ximage:" + image_location, nullptr);
   }
   options.push_back(std::make_pair("-Xcheck:jni", nullptr));
   options.push_back(std::make_pair(min_heap_string, nullptr));
@@ -130,7 +136,7 @@ void CommonRuntimeTestImpl::SetUp() {
 
   // Runtime::Create acquired the mutator_lock_ that is normally given away when we
   // Runtime::Start, give it away now and then switch to a more managable ScopedObjectAccess.
-  Thread::Current()->TransitionFromRunnableToSuspended(kNative);
+  Thread::Current()->TransitionFromRunnableToSuspended(ThreadState::kNative);
 
   // Get the boot class path from the runtime so it can be used in tests.
   boot_class_path_ = class_linker_->GetBootClassPath();

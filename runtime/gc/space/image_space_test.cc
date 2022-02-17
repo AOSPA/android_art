@@ -19,11 +19,11 @@
 #include "android-base/logging.h"
 #include "android-base/stringprintf.h"
 #include "android-base/strings.h"
-
+#include "base/globals.h"
 #include "base/stl_util.h"
 #include "class_linker.h"
-#include "dexopt_test.h"
 #include "dex/utf.h"
+#include "dexopt_test.h"
 #include "intern_table-inl.h"
 #include "noop_compiler_callbacks.h"
 #include "oat_file.h"
@@ -371,7 +371,7 @@ TEST_F(DexoptTest, Checksums) {
   }
 }
 
-template <bool kImage, bool kRelocate>
+template <bool kImage, bool kRelocate, bool kProfile>
 class ImageSpaceLoadingTest : public CommonRuntimeTest {
  protected:
   void SetUpRuntimeOptions(RuntimeOptions* options) override {
@@ -379,6 +379,21 @@ class ImageSpaceLoadingTest : public CommonRuntimeTest {
     if (!kImage) {
       missing_image_base_ = std::make_unique<ScratchFile>();
       image_location = missing_image_base_->GetFilename() + ".art";
+    }
+    // Compiling the primary boot image into a single image is not allowed on host.
+    if (kProfile && kIsTargetBuild) {
+      std::vector<std::string> dex_files(GetLibCoreDexFileNames());
+      profile1_ = std::make_unique<ScratchFile>();
+      GenerateBootProfile(ArrayRef<const std::string>(dex_files),
+                          profile1_->GetFile(),
+                          /*method_frequency=*/6,
+                          /*type_frequency=*/6);
+      profile2_ = std::make_unique<ScratchFile>();
+      GenerateBootProfile(ArrayRef<const std::string>(dex_files),
+                          profile2_->GetFile(),
+                          /*method_frequency=*/8,
+                          /*type_frequency=*/8);
+      image_location += "!" + profile1_->GetFilename() + "!" + profile2_->GetFilename();
     }
     options->emplace_back(android::base::StringPrintf("-Ximage:%s", image_location.c_str()),
                           nullptr);
@@ -410,62 +425,45 @@ class ImageSpaceLoadingTest : public CommonRuntimeTest {
 
  private:
   std::unique_ptr<ScratchFile> missing_image_base_;
+  std::unique_ptr<ScratchFile> profile1_;
+  std::unique_ptr<ScratchFile> profile2_;
   UniqueCPtr<const char[]> old_dex2oat_bcp_;
 };
 
-using ImageSpaceNoDex2oatTest = ImageSpaceLoadingTest<true, true>;
+using ImageSpaceNoDex2oatTest =
+    ImageSpaceLoadingTest</*kImage=*/true, /*kRelocate=*/true, /*kProfile=*/false>;
 TEST_F(ImageSpaceNoDex2oatTest, Test) {
   EXPECT_FALSE(Runtime::Current()->GetHeap()->GetBootImageSpaces().empty());
 }
 
-using ImageSpaceNoRelocateNoDex2oatTest = ImageSpaceLoadingTest<true, false>;
+using ImageSpaceNoRelocateNoDex2oatTest =
+    ImageSpaceLoadingTest</*kImage=*/true, /*kRelocate=*/false, /*kProfile=*/false>;
 TEST_F(ImageSpaceNoRelocateNoDex2oatTest, Test) {
   EXPECT_FALSE(Runtime::Current()->GetHeap()->GetBootImageSpaces().empty());
 }
 
-class NoAccessAndroidDataTest : public ImageSpaceLoadingTest<false, true> {
- protected:
-  NoAccessAndroidDataTest() : quiet_(LogSeverity::FATAL) {}
-
-  void SetUpRuntimeOptions(RuntimeOptions* options) override {
-    const char* android_data = getenv("ANDROID_DATA");
-    CHECK(android_data != nullptr);
-    old_android_data_ = android_data;
-    bad_android_data_ = old_android_data_ + "/no-android-data";
-    int result = setenv("ANDROID_DATA", bad_android_data_.c_str(), /* replace */ 1);
-    CHECK_EQ(result, 0) << strerror(errno);
-    result = mkdir(bad_android_data_.c_str(), /* mode */ 0700);
-    CHECK_EQ(result, 0) << strerror(errno);
-    // Create a regular file "dalvik_cache". GetDalvikCache() shall get EEXIST
-    // when trying to create a directory with the same name and creating a
-    // subdirectory for a particular architecture shall fail.
-    bad_dalvik_cache_ = bad_android_data_ + "/dalvik-cache";
-    int fd = creat(bad_dalvik_cache_.c_str(), /* mode */ 0);
-    CHECK_NE(fd, -1) << strerror(errno);
-    result = close(fd);
-    CHECK_EQ(result, 0) << strerror(errno);
-    ImageSpaceLoadingTest<false, true>::SetUpRuntimeOptions(options);
-  }
-
-  void TearDown() override {
-    ImageSpaceLoadingTest<false, true>::TearDown();
-    int result = unlink(bad_dalvik_cache_.c_str());
-    CHECK_EQ(result, 0) << strerror(errno);
-    result = rmdir(bad_android_data_.c_str());
-    CHECK_EQ(result, 0) << strerror(errno);
-    result = setenv("ANDROID_DATA", old_android_data_.c_str(), /* replace */ 1);
-    CHECK_EQ(result, 0) << strerror(errno);
-  }
-
- private:
-  ScopedLogSeverity quiet_;
-  std::string old_android_data_;
-  std::string bad_android_data_;
-  std::string bad_dalvik_cache_;
-};
-
-TEST_F(NoAccessAndroidDataTest, Test) {
+using ImageSpaceNoImageNoProfileTest =
+    ImageSpaceLoadingTest</*kImage=*/false, /*kRelocate=*/true, /*kProfile=*/false>;
+TEST_F(ImageSpaceNoImageNoProfileTest, Test) {
+  // Imageless mode.
   EXPECT_TRUE(Runtime::Current()->GetHeap()->GetBootImageSpaces().empty());
+}
+
+using ImageSpaceNoImageTest =
+    ImageSpaceLoadingTest</*kImage=*/false, /*kRelocate=*/true, /*kProfile=*/true>;
+TEST_F(ImageSpaceNoImageTest, Test) {
+  // Compiling the primary boot image into a single image is not allowed on host.
+  TEST_DISABLED_FOR_HOST();
+
+  const std::vector<ImageSpace*>& image_spaces =
+      Runtime::Current()->GetHeap()->GetBootImageSpaces();
+  ASSERT_FALSE(image_spaces.empty());
+
+  const OatFile* oat_file = image_spaces[0]->GetOatFile();
+  ASSERT_TRUE(oat_file != nullptr);
+
+  // Compiled by JIT Zygote.
+  EXPECT_EQ(oat_file->GetCompilerFilter(), CompilerFilter::Filter::kVerify);
 }
 
 }  // namespace space

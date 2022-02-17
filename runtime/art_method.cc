@@ -319,7 +319,7 @@ void ArtMethod::Invoke(Thread* self, uint32_t* args, uint32_t args_size, JValue*
 
   if (kIsDebugBuild) {
     self->AssertThreadSuspensionIsAllowable();
-    CHECK_EQ(kRunnable, self->GetState());
+    CHECK_EQ(ThreadState::kRunnable, self->GetState());
     CHECK_STREQ(GetInterfaceMethodIfProxy(kRuntimePointerSize)->GetShorty(), shorty);
   }
 
@@ -752,9 +752,7 @@ void ArtMethod::CopyFrom(ArtMethod* src, PointerSize image_pointer_size) {
     SetDataPtrSize(nullptr, image_pointer_size);
   }
   // Clear hotness to let the JIT properly decide when to compile this method.
-  if (!IsAbstract()) {
-    ResetCounter();
-  }
+  ResetCounter(runtime->GetJITOptions()->GetWarmupThreshold());
 }
 
 bool ArtMethod::IsImagePointerSize(PointerSize pointer_size) {
@@ -845,12 +843,12 @@ const char* ArtMethod::GetRuntimeMethodName() {
   }
 }
 
-void ArtMethod::SetCodeItem(const dex::CodeItem* code_item) {
+void ArtMethod::SetCodeItem(const dex::CodeItem* code_item, bool is_compact_dex_code_item) {
   DCHECK(HasCodeItem());
   // We mark the lowest bit for the interpreter to know whether it's executing a
   // method in a compact or standard dex file.
   uintptr_t data =
-      reinterpret_cast<uintptr_t>(code_item) | (GetDexFile()->IsCompactDexFile() ? 1 : 0);
+      reinterpret_cast<uintptr_t>(code_item) | (is_compact_dex_code_item ? 1 : 0);
   SetDataPtrSize(reinterpret_cast<void*>(data), kRuntimePointerSize);
 }
 

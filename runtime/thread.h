@@ -26,6 +26,8 @@
 #include <string>
 
 #include "base/atomic.h"
+#include "base/bit_field.h"
+#include "base/bit_utils.h"
 #include "base/enums.h"
 #include "base/locks.h"
 #include "base/macros.h"
@@ -118,12 +120,43 @@ enum ThreadPriority {
   kMaxThreadPriority = 10,
 };
 
-enum ThreadFlag {
-  kSuspendRequest   = 1,  // If set implies that suspend_count_ > 0 and the Thread should enter the
-                          // safepoint handler.
-  kCheckpointRequest = 2,  // Request that the thread do some checkpoint work and then continue.
-  kEmptyCheckpointRequest = 4,  // Request that the thread do empty checkpoint and then continue.
-  kActiveSuspendBarrier = 8,  // Register that at least 1 suspend barrier needs to be passed.
+enum class ThreadFlag : uint32_t {
+  // If set, implies that suspend_count_ > 0 and the Thread should enter the safepoint handler.
+  kSuspendRequest = 1u << 0,
+
+  // Request that the thread do some checkpoint work and then continue.
+  kCheckpointRequest = 1u << 1,
+
+  // Request that the thread do empty checkpoint and then continue.
+  kEmptyCheckpointRequest = 1u << 2,
+
+  // Register that at least 1 suspend barrier needs to be passed.
+  kActiveSuspendBarrier = 1u << 3,
+
+  // Marks that a "flip function" needs to be executed on this thread.
+  kPendingFlipFunction = 1u << 4,
+
+  // Marks that the "flip function" is being executed by another thread.
+  //
+  // This is used to guards against multiple threads trying to run the
+  // "flip function" for the same thread while the thread is suspended.
+  //
+  // This is not needed when the thread is running the flip function
+  // on its own after transitioning to Runnable.
+  kRunningFlipFunction = 1u << 5,
+
+  // Marks that a thread is wating for "flip function" to complete.
+  //
+  // This is used to check if we need to broadcast the completion of the
+  // "flip function" to other threads. See also `kRunningFlipFunction`.
+  kWaitingForFlipFunction = 1u << 6,
+
+  // Request that compiled JNI stubs do not transition to Native or Runnable with
+  // inlined code, but take a slow path for monitoring method entry and exit events.
+  kMonitorJniEntryExit = 1u << 7,
+
+  // Indicates the last flag. Used for checking that the flags do not overlap thread state.
+  kLastFlag = kMonitorJniEntryExit
 };
 
 enum class StackedShadowFrameType {
@@ -197,7 +230,7 @@ class Thread {
   void AllowThreadSuspension() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Process pending thread suspension request and handle if pending.
-  void CheckSuspend() REQUIRES_SHARED(Locks::mutator_lock_);
+  void CheckSuspend(bool implicit = false) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Process a pending empty checkpoint if pending.
   void CheckEmptyCheckpointFromWeakRefAccess(BaseMutex* cond_var_mutex);
@@ -236,9 +269,7 @@ class Thread {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   ThreadState GetState() const {
-    DCHECK_GE(tls32_.state_and_flags.as_struct.state, kTerminated);
-    DCHECK_LE(tls32_.state_and_flags.as_struct.state, kSuspended);
-    return static_cast<ThreadState>(tls32_.state_and_flags.as_struct.state);
+    return GetStateAndFlags(std::memory_order_relaxed).GetState();
   }
 
   ThreadState SetState(ThreadState new_state);
@@ -253,10 +284,9 @@ class Thread {
   }
 
   bool IsSuspended() const {
-    union StateAndFlags state_and_flags;
-    state_and_flags.as_int = tls32_.state_and_flags.as_atomic_int.load(std::memory_order_relaxed);
-    return state_and_flags.as_struct.state != kRunnable &&
-        (state_and_flags.as_struct.flags & kSuspendRequest) != 0;
+    StateAndFlags state_and_flags = GetStateAndFlags(std::memory_order_relaxed);
+    return state_and_flags.GetState() != ThreadState::kRunnable &&
+           state_and_flags.IsFlagSet(ThreadFlag::kSuspendRequest);
   }
 
   void DecrDefineClassCount() {
@@ -313,8 +343,18 @@ class Thread {
   bool RequestEmptyCheckpoint()
       REQUIRES(Locks::thread_suspend_count_lock_);
 
+  // Set the flip function. This is done with all threads suspended, except for the calling thread.
   void SetFlipFunction(Closure* function);
-  Closure* GetFlipFunction();
+
+  // Ensure that thread flip function started running. If no other thread is executing
+  // it, the calling thread shall run the flip function and then notify other threads
+  // that have tried to do that concurrently. After this function returns, the
+  // `ThreadFlag::kPendingFlipFunction` is cleared but another thread may still
+  // run the flip function as indicated by the `ThreadFlag::kRunningFlipFunction`.
+  void EnsureFlipFunctionStarted(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Wait for the flip function to complete if still running on another thread.
+  void WaitForFlipFunction(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_);
 
   gc::accounting::AtomicStack<mirror::Object>* GetThreadLocalMarkStack() {
     CHECK(kUseReadBarrier);
@@ -327,7 +367,7 @@ class Thread {
 
   // Called when thread detected that the thread_suspend_count_ was non-zero. Gives up share of
   // mutator_lock_ and waits until it is resumed and thread_suspend_count_ is zero.
-  void FullSuspendCheck()
+  void FullSuspendCheck(bool implicit = false)
       REQUIRES(!Locks::thread_suspend_count_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -917,6 +957,19 @@ class Thread {
                                                                 top_handle_scope));
   }
 
+  template<PointerSize pointer_size>
+  static constexpr ThreadOffset<pointer_size> MutatorLockOffset() {
+    return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values,
+                                                                mutator_lock));
+  }
+
+  template<PointerSize pointer_size>
+  static constexpr ThreadOffset<pointer_size> HeldMutexOffset(LockLevel level) {
+    DCHECK_LT(enum_cast<size_t>(level), arraysize(tlsPtr_.held_mutexes));
+    return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values,
+                                                                held_mutexes[level]));
+  }
+
   BaseReflectiveHandleScope* GetTopReflectiveHandleScope() {
     return tlsPtr_.top_reflective_handle_scope;
   }
@@ -1097,19 +1150,15 @@ class Thread {
       REQUIRES(Locks::thread_suspend_count_lock_);
 
   bool ReadFlag(ThreadFlag flag) const {
-    return (tls32_.state_and_flags.as_struct.flags & flag) != 0;
+    return GetStateAndFlags(std::memory_order_relaxed).IsFlagSet(flag);
   }
 
-  bool TestAllFlags() const {
-    return (tls32_.state_and_flags.as_struct.flags != 0);
+  void AtomicSetFlag(ThreadFlag flag, std::memory_order order = std::memory_order_seq_cst) {
+    tls32_.state_and_flags.fetch_or(enum_cast<uint32_t>(flag), order);
   }
 
-  void AtomicSetFlag(ThreadFlag flag) {
-    tls32_.state_and_flags.as_atomic_int.fetch_or(flag, std::memory_order_seq_cst);
-  }
-
-  void AtomicClearFlag(ThreadFlag flag) {
-    tls32_.state_and_flags.as_atomic_int.fetch_and(-1 ^ flag, std::memory_order_seq_cst);
+  void AtomicClearFlag(ThreadFlag flag, std::memory_order order = std::memory_order_seq_cst) {
+    tls32_.state_and_flags.fetch_and(~enum_cast<uint32_t>(flag), order);
   }
 
   void ResetQuickAllocEntryPointsForThread();
@@ -1303,6 +1352,27 @@ class Thread {
     return WhichPowerOf2(InterpreterCache::kSize);
   }
 
+  static constexpr uint32_t AllThreadFlags() {
+    return enum_cast<uint32_t>(ThreadFlag::kLastFlag) |
+           (enum_cast<uint32_t>(ThreadFlag::kLastFlag) - 1u);
+  }
+
+  static constexpr uint32_t SuspendOrCheckpointRequestFlags() {
+    return enum_cast<uint32_t>(ThreadFlag::kSuspendRequest) |
+           enum_cast<uint32_t>(ThreadFlag::kCheckpointRequest) |
+           enum_cast<uint32_t>(ThreadFlag::kEmptyCheckpointRequest);
+  }
+
+  static constexpr uint32_t FlipFunctionFlags() {
+    return enum_cast<uint32_t>(ThreadFlag::kPendingFlipFunction) |
+           enum_cast<uint32_t>(ThreadFlag::kRunningFlipFunction) |
+           enum_cast<uint32_t>(ThreadFlag::kWaitingForFlipFunction);
+  }
+
+  static constexpr uint32_t StoredThreadStateValue(ThreadState state) {
+    return StateAndFlags::EncodeState(state);
+  }
+
  private:
   explicit Thread(bool daemon);
   ~Thread() REQUIRES(!Locks::mutator_lock_, !Locks::thread_suspend_count_lock_);
@@ -1330,10 +1400,17 @@ class Thread {
                        jint thread_priority)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Avoid use, callers should use SetState. Used only by SignalCatcher::HandleSigQuit and, ~Thread
-  ThreadState SetStateUnsafe(ThreadState new_state) {
-    ThreadState old_state = GetState();
-    if (old_state == kRunnable && new_state != kRunnable) {
+  // Avoid use, callers should use SetState.
+  // Used only by `Thread` destructor and stack trace collection in semi-space GC (currently
+  // disabled by `kStoreStackTraces = false`).
+  // NO_THREAD_SAFETY_ANALYSIS: This function is "Unsafe" and can be called in
+  // different states, so clang cannot perform the thread safety analysis.
+  ThreadState SetStateUnsafe(ThreadState new_state) NO_THREAD_SAFETY_ANALYSIS {
+    StateAndFlags old_state_and_flags = GetStateAndFlags(std::memory_order_relaxed);
+    ThreadState old_state = old_state_and_flags.GetState();
+    if (old_state == new_state) {
+      // Nothing to do.
+    } else if (old_state == ThreadState::kRunnable) {
       // Need to run pending checkpoint and suspend barriers. Run checkpoints in runnable state in
       // case they need to use a ScopedObjectAccess. If we are holding the mutator lock and a SOA
       // attempts to TransitionFromSuspendedToRunnable, it results in a deadlock.
@@ -1341,9 +1418,25 @@ class Thread {
       // Since we transitioned to a suspended state, check the pass barrier requests.
       PassActiveSuspendBarriers();
     } else {
-      tls32_.state_and_flags.as_struct.state = new_state;
+      while (true) {
+        StateAndFlags new_state_and_flags = old_state_and_flags;
+        new_state_and_flags.SetState(new_state);
+        if (LIKELY(tls32_.state_and_flags.CompareAndSetWeakAcquire(
+                                              old_state_and_flags.GetValue(),
+                                              new_state_and_flags.GetValue()))) {
+          break;
+        }
+        // Reload state and flags.
+        old_state_and_flags = GetStateAndFlags(std::memory_order_relaxed);
+        DCHECK_EQ(old_state, old_state_and_flags.GetState());
+      }
     }
     return old_state;
+  }
+
+  MutatorMutex* GetMutatorLock() RETURN_CAPABILITY(Locks::mutator_lock_) {
+    DCHECK_EQ(tlsPtr_.mutator_lock, Locks::mutator_lock_);
+    return tlsPtr_.mutator_lock;
   }
 
   void VerifyStackImpl() REQUIRES_SHARED(Locks::mutator_lock_);
@@ -1386,9 +1479,11 @@ class Thread {
 
   void SetUpAlternateSignalStack();
   void TearDownAlternateSignalStack();
+  void MadviseAwayAlternateSignalStack();
 
   ALWAYS_INLINE void TransitionToSuspendedAndRunCheckpoints(ThreadState new_state)
-      REQUIRES(!Locks::thread_suspend_count_lock_, !Roles::uninterruptible_);
+      REQUIRES(!Locks::thread_suspend_count_lock_, !Roles::uninterruptible_)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   ALWAYS_INLINE void PassActiveSuspendBarriers()
       REQUIRES(!Locks::thread_suspend_count_lock_, !Roles::uninterruptible_);
@@ -1417,7 +1512,9 @@ class Thread {
   // Runs a single checkpoint function. If there are no more pending checkpoint functions it will
   // clear the kCheckpointRequest flag. The caller is responsible for calling this in a loop until
   // the kCheckpointRequest flag is cleared.
-  void RunCheckpointFunction() REQUIRES(!Locks::thread_suspend_count_lock_);
+  void RunCheckpointFunction()
+      REQUIRES(!Locks::thread_suspend_count_lock_)
+      REQUIRES_SHARED(Locks::mutator_lock_);
   void RunEmptyCheckpoint();
 
   bool PassActiveSuspendBarriers(Thread* self)
@@ -1435,32 +1532,100 @@ class Thread {
 
   void ReleaseLongJumpContextInternal();
 
-  // 32 bits of atomically changed state and flags. Keeping as 32 bits allows and atomic CAS to
-  // change from being Suspended to Runnable without a suspend request occurring.
-  union PACKED(4) StateAndFlags {
-    StateAndFlags() {}
-    struct PACKED(4) {
-      // Bitfield of flag values. Must be changed atomically so that flag values aren't lost. See
-      // ThreadFlag for bit field meanings.
-      volatile uint16_t flags;
-      // Holds the ThreadState. May be changed non-atomically between Suspended (ie not Runnable)
-      // transitions. Changing to Runnable requires that the suspend_request be part of the atomic
-      // operation. If a thread is suspended and a suspend_request is present, a thread may not
-      // change to Runnable as a GC or other operation is in progress.
-      volatile uint16_t state;
-    } as_struct;
-    AtomicInteger as_atomic_int;
-    volatile int32_t as_int;
+  // Helper class for manipulating the 32 bits of atomically changed state and flags.
+  class StateAndFlags {
+   public:
+    explicit StateAndFlags(uint32_t value) :value_(value) {}
+
+    uint32_t GetValue() const {
+      return value_;
+    }
+
+    void SetValue(uint32_t value) {
+      value_ = value;
+    }
+
+    bool IsAnyOfFlagsSet(uint32_t flags) const {
+      DCHECK_EQ(flags & ~AllThreadFlags(), 0u);
+      return (value_ & flags) != 0u;
+    }
+
+    bool IsFlagSet(ThreadFlag flag) const {
+      return (value_ & enum_cast<uint32_t>(flag)) != 0u;
+    }
+
+    void SetFlag(ThreadFlag flag) {
+      value_ |= enum_cast<uint32_t>(flag);
+    }
+
+    StateAndFlags WithFlag(ThreadFlag flag) const {
+      StateAndFlags result = *this;
+      result.SetFlag(flag);
+      return result;
+    }
+
+    StateAndFlags WithoutFlag(ThreadFlag flag) const {
+      StateAndFlags result = *this;
+      result.ClearFlag(flag);
+      return result;
+    }
+
+    void ClearFlag(ThreadFlag flag) {
+      value_ &= ~enum_cast<uint32_t>(flag);
+    }
+
+    ThreadState GetState() const {
+      ThreadState state = ThreadStateField::Decode(value_);
+      ValidateThreadState(state);
+      return state;
+    }
+
+    void SetState(ThreadState state) {
+      ValidateThreadState(state);
+      value_ = ThreadStateField::Update(state, value_);
+    }
+
+    StateAndFlags WithState(ThreadState state) const {
+      StateAndFlags result = *this;
+      result.SetState(state);
+      return result;
+    }
+
+    static constexpr uint32_t EncodeState(ThreadState state) {
+      ValidateThreadState(state);
+      return ThreadStateField::Encode(state);
+    }
 
    private:
-    // gcc does not handle struct with volatile member assignments correctly.
-    // See http://gcc.gnu.org/bugzilla/show_bug.cgi?id=47409
-    DISALLOW_COPY_AND_ASSIGN(StateAndFlags);
+    static constexpr void ValidateThreadState(ThreadState state) {
+      if (kIsDebugBuild && state != ThreadState::kRunnable) {
+        CHECK_GE(state, ThreadState::kTerminated);
+        CHECK_LE(state, ThreadState::kSuspended);
+        CHECK_NE(state, ThreadState::kObsoleteRunnable);
+      }
+    }
+
+    // The value holds thread flags and thread state.
+    uint32_t value_;
+
+    static constexpr size_t kThreadStateBitSize = BitSizeOf<std::underlying_type_t<ThreadState>>();
+    static constexpr size_t kThreadStatePosition = BitSizeOf<uint32_t>() - kThreadStateBitSize;
+    using ThreadStateField = BitField<ThreadState, kThreadStatePosition, kThreadStateBitSize>;
+    static_assert(
+        WhichPowerOf2(enum_cast<uint32_t>(ThreadFlag::kLastFlag)) < kThreadStatePosition);
   };
-  static_assert(sizeof(StateAndFlags) == sizeof(int32_t), "Weird state_and_flags size");
+  static_assert(sizeof(StateAndFlags) == sizeof(uint32_t), "Unexpected StateAndFlags size");
+
+  StateAndFlags GetStateAndFlags(std::memory_order order) const {
+    return StateAndFlags(tls32_.state_and_flags.load(order));
+  }
 
   // Format state and flags as a hex string. For diagnostic output.
   std::string StateAndFlagsAsHexString() const;
+
+  // Run the flip function and, if requested, notify other threads that may have tried
+  // to do that concurrently.
+  void RunFlipFunction(Thread* self, bool notify) REQUIRES_SHARED(Locks::mutator_lock_);
 
   static void ThreadExitCallback(void* arg);
 
@@ -1497,7 +1662,8 @@ class Thread {
     using bool32_t = uint32_t;
 
     explicit tls_32bit_sized_values(bool is_daemon)
-        : suspend_count(0),
+        : state_and_flags(0u),
+          suspend_count(0),
           thin_lock_thread_id(0),
           tid(0),
           daemon(is_daemon),
@@ -1513,9 +1679,13 @@ class Thread {
           make_visibly_initialized_counter(0),
           define_class_counter(0) {}
 
-    union StateAndFlags state_and_flags;
-    static_assert(sizeof(union StateAndFlags) == sizeof(int32_t),
-                  "Size of state_and_flags and int32 are different");
+    // The state and flags field must be changed atomically so that flag values aren't lost.
+    // See `StateAndFlags` for bit assignments of `ThreadFlag` and `ThreadState` values.
+    // Keeping the state and flags together allows an atomic CAS to change from being
+    // Suspended to Runnable without a suspend request occurring.
+    Atomic<uint32_t> state_and_flags;
+    static_assert(sizeof(state_and_flags) == sizeof(uint32_t),
+                  "Size of state_and_flags and uint32 are different");
 
     // A non-zero value is used to tell the current thread to enter a safe point
     // at the next poll.
@@ -1639,6 +1809,7 @@ class Thread {
                                thread_local_objects(0),
                                thread_local_alloc_stack_top(nullptr),
                                thread_local_alloc_stack_end(nullptr),
+                               mutator_lock(nullptr),
                                flip_function(nullptr),
                                method_verifier(nullptr),
                                thread_local_mark_stack(nullptr),
@@ -1781,6 +1952,10 @@ class Thread {
     // Thread-local allocation stack data/routines.
     StackReference<mirror::Object>* thread_local_alloc_stack_top;
     StackReference<mirror::Object>* thread_local_alloc_stack_end;
+
+    // Pointer to the mutator lock.
+    // This is the same as `Locks::mutator_lock_` but cached for faster state transitions.
+    MutatorMutex* mutator_lock;
 
     // Support for Mutex lock hierarchy bug detection.
     BaseMutex* held_mutexes[kLockLevelCount];

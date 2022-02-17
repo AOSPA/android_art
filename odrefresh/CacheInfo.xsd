@@ -24,12 +24,14 @@
     `/data/misc/apexdata/com.android.art/dalvik-cache` -->
   <xs:element name="cacheInfo">
     <xs:complexType>
+    <!-- True if the cache info is generated in the Compilation OS. -->
+    <xs:attribute name="compilationOsMode" type="xs:boolean" />
     <xs:sequence>
       <xs:element name="artModuleInfo" minOccurs="1" maxOccurs="1" type="t:moduleInfo" />
       <xs:element name="moduleInfoList" minOccurs="1" maxOccurs="1" type="t:moduleInfoList" />
       <xs:element name="bootClasspath" minOccurs="1" maxOccurs="1" type="t:classpath" />
       <xs:element name="dex2oatBootClasspath" minOccurs="1" maxOccurs="1" type="t:classpath" />
-      <xs:element name="systemServerClasspath" minOccurs="1" maxOccurs="1" type="t:classpath" />
+      <xs:element name="systemServerComponents" minOccurs="1" maxOccurs="1" type="t:systemServerComponents" />
     </xs:sequence>
     </xs:complexType>
   </xs:element>
@@ -49,8 +51,9 @@
     <xs:attribute name="versionCode" type="xs:long" use="required" />
     <!-- Module versionName for the active APEX from `/apex/apex-info-list.xml`. -->
     <xs:attribute name="versionName" type="xs:string" use="required" />
-    <!-- Module lastUpdateMillis for the active APEX from `/apex/apex-info-list.xml`. -->
-    <xs:attribute name="lastUpdateMillis" type="xs:long" use="required" />
+    <!-- Module lastUpdateMillis for the active APEX from `/apex/apex-info-list.xml`. This field is
+      not set if the cache info is generated in Compilation OS. -->
+    <xs:attribute name="lastUpdateMillis" type="xs:long" />
   </xs:complexType>
 
   <!-- Components of a classpath. -->
@@ -67,6 +70,22 @@
     <xs:attribute name="size" type="xs:unsignedLong" use="required" />
     <!-- DEX file checksums within the component. Multidex files have multiple checksums. -->
     <xs:attribute name="checksums" type="xs:string" use="required" />
+  </xs:complexType>
+
+  <xs:complexType name="systemServerComponents">
+    <xs:sequence>
+      <xs:element name="component" type="t:systemServerComponent" />
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="systemServerComponent">
+    <xs:complexContent>
+      <xs:extension base="component">
+        <!-- True if the component is in SYSTEMSERVERCLASSPATH. Otherwise, the component is a
+          standalone one. -->
+        <xs:attribute name="isInClasspath" type="xs:boolean" use="required" />
+      </xs:extension>
+    </xs:complexContent>
   </xs:complexType>
 
 </xs:schema>

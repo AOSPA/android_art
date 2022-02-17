@@ -65,24 +65,17 @@ static constexpr int kJitPoolThreadPthreadDefaultPriority = 9;
 // 19 is the lowest background priority on device.
 // See android/os/Process.java.
 static constexpr int kJitZygotePoolThreadPthreadDefaultPriority = 19;
-// We check whether to jit-compile the method every Nth invoke.
-// The tests often use threshold of 1000 (and thus 500 to start profiling).
-static constexpr uint32_t kJitSamplesBatchSize = 512;  // Must be power of 2.
 
 class JitOptions {
  public:
   static JitOptions* CreateFromRuntimeArguments(const RuntimeArgumentMap& options);
 
-  uint16_t GetCompileThreshold() const {
-    return compile_threshold_;
+  uint16_t GetOptimizeThreshold() const {
+    return optimize_threshold_;
   }
 
   uint16_t GetWarmupThreshold() const {
     return warmup_threshold_;
-  }
-
-  uint16_t GetOsrThreshold() const {
-    return osr_threshold_;
   }
 
   uint16_t GetPriorityThreadWeight() const {
@@ -143,7 +136,7 @@ class JitOptions {
 
   void SetJitAtFirstUse() {
     use_jit_compilation_ = true;
-    compile_threshold_ = 0;
+    optimize_threshold_ = 0;
   }
 
   void SetUseBaselineCompiler() {
@@ -164,9 +157,8 @@ class JitOptions {
   bool use_baseline_compiler_;
   size_t code_cache_initial_capacity_;
   size_t code_cache_max_capacity_;
-  uint32_t compile_threshold_;
+  uint32_t optimize_threshold_;
   uint32_t warmup_threshold_;
-  uint32_t osr_threshold_;
   uint16_t priority_thread_weight_;
   uint16_t invoke_transition_weight_;
   bool dump_info_on_shutdown_;
@@ -180,9 +172,8 @@ class JitOptions {
         use_baseline_compiler_(false),
         code_cache_initial_capacity_(0),
         code_cache_max_capacity_(0),
-        compile_threshold_(0),
+        optimize_threshold_(0),
         warmup_threshold_(0),
-        osr_threshold_(0),
         priority_thread_weight_(0),
         invoke_transition_weight_(0),
         dump_info_on_shutdown_(false),
@@ -203,6 +194,7 @@ class JitCompilerInterface {
       REQUIRES_SHARED(Locks::mutator_lock_) = 0;
   virtual bool GenerateDebugInfo() = 0;
   virtual void ParseCompilerOptions() = 0;
+  virtual bool IsBaselineCompiler() const;
 
   virtual std::vector<uint8_t> PackElfFileForJIT(ArrayRef<const JITCodeEntry*> elf_files,
                                                  ArrayRef<const void*> removed_symbols,
@@ -281,12 +273,12 @@ class Jit {
     return options_->GetThreadPoolPthreadPriority();
   }
 
-  uint16_t OSRMethodThreshold() const {
-    return options_->GetOsrThreshold();
+  int GetZygoteThreadPoolPthreadPriority() const {
+    return options_->GetZygoteThreadPoolPthreadPriority();
   }
 
   uint16_t HotMethodThreshold() const {
-    return options_->GetCompileThreshold();
+    return options_->GetOptimizeThreshold();
   }
 
   uint16_t WarmMethodThreshold() const {

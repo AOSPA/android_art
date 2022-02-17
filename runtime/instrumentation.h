@@ -52,13 +52,6 @@ enum class DeoptimizationMethodType;
 
 namespace instrumentation {
 
-// Interpreter handler tables.
-enum InterpreterHandlerTable {
-  kMainHandlerTable = 0,          // Main handler table: no suspend check, no instrumentation.
-  kAlternativeHandlerTable = 1,   // Alternative handler table: suspend check and/or instrumentation
-                                  // enabled.
-  kNumHandlerTables
-};
 
 // Do we want to deoptimize for method entry and exit listeners or just try to intercept
 // invocations? Deoptimization forces all code to run in the interpreter and considerably hurts the
@@ -226,10 +219,6 @@ class Instrumentation {
   void RemoveListener(InstrumentationListener* listener, uint32_t events)
       REQUIRES(Locks::mutator_lock_, !Locks::thread_list_lock_, !Locks::classlinker_classes_lock_);
 
-  // Deoptimization.
-  void EnableDeoptimization()
-      REQUIRES(Locks::mutator_lock_)
-      REQUIRES(!GetDeoptimizedMethodsLock());
   // Calls UndeoptimizeEverything which may visit class linker classes through ConfigureStubs.
   void DisableDeoptimization(const char* key)
       REQUIRES(Locks::mutator_lock_, Roles::uninterruptible_)
@@ -239,10 +228,6 @@ class Instrumentation {
     return InterpreterStubsInstalled();
   }
   bool ShouldNotifyMethodEnterExitEvents() const REQUIRES_SHARED(Locks::mutator_lock_);
-
-  bool CanDeoptimize() {
-    return deoptimization_enabled_;
-  }
 
   // Executes everything with interpreter.
   void DeoptimizeEverything(const char* key)
@@ -290,10 +275,6 @@ class Instrumentation {
                !Locks::classlinker_classes_lock_,
                !GetDeoptimizedMethodsLock());
 
-  InterpreterHandlerTable GetInterpreterHandlerTable() const
-      REQUIRES_SHARED(Locks::mutator_lock_) {
-    return interpreter_handler_table_;
-  }
 
   void InstrumentQuickAllocEntryPoints() REQUIRES(!Locks::instrument_entrypoints_lock_);
   void UninstrumentQuickAllocEntryPoints() REQUIRES(!Locks::instrument_entrypoints_lock_);
@@ -305,12 +286,19 @@ class Instrumentation {
                !Locks::runtime_shutdown_lock_);
   void ResetQuickAllocEntryPoints() REQUIRES(Locks::runtime_shutdown_lock_);
 
+  // Returns a string representation of the given entry point.
+  static std::string EntryPointString(const void* code);
+
+  // Initialize the entrypoint of the method .`aot_code` is the AOT code.
+  void InitializeMethodsCode(ArtMethod* method, const void* aot_code)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   // Update the code of a method respecting any installed stubs.
-  void UpdateMethodsCode(ArtMethod* method, const void* quick_code)
+  void UpdateMethodsCode(ArtMethod* method, const void* new_code)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!GetDeoptimizedMethodsLock());
 
   // Update the code of a native method to a JITed stub.
-  void UpdateNativeMethodsCodeToJitCode(ArtMethod* method, const void* quick_code)
+  void UpdateNativeMethodsCodeToJitCode(ArtMethod* method, const void* new_code)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!GetDeoptimizedMethodsLock());
 
   // Update the code of a method to the interpreter respecting any installed stubs from debugger.
@@ -318,18 +306,11 @@ class Instrumentation {
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!GetDeoptimizedMethodsLock());
 
   // Update the code of a method respecting any installed stubs from debugger.
-  void UpdateMethodsCodeForJavaDebuggable(ArtMethod* method, const void* quick_code)
+  void UpdateMethodsCodeForJavaDebuggable(ArtMethod* method, const void* new_code)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!GetDeoptimizedMethodsLock());
 
   // Return the code that we can execute for an invoke including from the JIT.
-  const void* GetCodeForInvoke(ArtMethod* method) const
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Get the quick code for the given method. More efficient than asking the class linker as it
-  // will short-cut to GetCode if instrumentation and static method resolution stubs aren't
-  // installed.
-  const void* GetQuickCodeFor(ArtMethod* method, PointerSize pointer_size) const
-      REQUIRES_SHARED(Locks::mutator_lock_);
+  const void* GetCodeForInvoke(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
 
   void ForceInterpretOnly() {
     forced_interpret_only_ = true;
@@ -348,15 +329,11 @@ class Instrumentation {
   bool InterpretOnly() const {
     return forced_interpret_only_ || InterpreterStubsInstalled();
   }
+  bool InterpretOnly(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool IsForcedInterpretOnly() const {
     return forced_interpret_only_;
   }
-
-  // Code is in boot image oat file which isn't compiled as debuggable.
-  // Need debug version (interpreter or jitted) if that's the case.
-  bool NeedDebugVersionFor(ArtMethod* method) const
-      REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool AreExitStubsInstalled() const {
     return instrumentation_stubs_installed_;
@@ -545,7 +522,7 @@ class Instrumentation {
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!GetDeoptimizedMethodsLock());
 
   // Sets up instrumentation to allow single thread deoptimization using ForceInterpreterCount.
-  void EnableSingleThreadDeopt()
+  void EnableSingleThreadDeopt(const char* key)
       REQUIRES(Locks::mutator_lock_, Roles::uninterruptible_)
       REQUIRES(!Locks::thread_list_lock_,
                !Locks::classlinker_classes_lock_,
@@ -603,22 +580,7 @@ class Instrumentation {
       REQUIRES(!GetDeoptimizedMethodsLock(),
                !Locks::thread_list_lock_,
                !Locks::classlinker_classes_lock_);
-  void UpdateInstrumentationLevels(InstrumentationLevel level)
-      REQUIRES(Locks::mutator_lock_, Roles::uninterruptible_)
-      REQUIRES(!GetDeoptimizedMethodsLock(),
-               !Locks::thread_list_lock_,
-               !Locks::classlinker_classes_lock_);
 
-  void UpdateInterpreterHandlerTable() REQUIRES(Locks::mutator_lock_) {
-    /*
-     * TUNING: Dalvik's mterp stashes the actual current handler table base in a
-     * tls field.  For Arm, this enables all suspend, debug & tracing checks to be
-     * collapsed into a single conditionally-executed ldw instruction.
-     * Move to Dalvik-style handler-table management for both the goto interpreter and
-     * mterp.
-     */
-    interpreter_handler_table_ = IsActive() ? kAlternativeHandlerTable : kMainHandlerTable;
-  }
 
   // No thread safety analysis to get around SetQuickAllocEntryPointsInstrumented requiring
   // exclusive access to mutator lock which you can't get if the runtime isn't started.
@@ -666,7 +628,7 @@ class Instrumentation {
       REQUIRES_SHARED(Locks::mutator_lock_, GetDeoptimizedMethodsLock());
   bool IsDeoptimizedMethodsEmpty() const
       REQUIRES_SHARED(Locks::mutator_lock_, GetDeoptimizedMethodsLock());
-  void UpdateMethodsCodeImpl(ArtMethod* method, const void* quick_code)
+  void UpdateMethodsCodeImpl(ArtMethod* method, const void* new_code)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!GetDeoptimizedMethodsLock());
 
   ReaderWriterMutex* GetDeoptimizedMethodsLock() const {
@@ -757,11 +719,9 @@ class Instrumentation {
   // only.
   mutable std::unique_ptr<ReaderWriterMutex> deoptimized_methods_lock_ BOTTOM_MUTEX_ACQUIRED_AFTER;
   std::unordered_set<ArtMethod*> deoptimized_methods_ GUARDED_BY(GetDeoptimizedMethodsLock());
-  bool deoptimization_enabled_;
 
   // Current interpreter handler table. This is updated each time the thread state flags are
   // modified.
-  InterpreterHandlerTable interpreter_handler_table_ GUARDED_BY(Locks::mutator_lock_);
 
   // Greater than 0 if quick alloc entry points instrumented.
   size_t quick_alloc_entry_points_instrumentation_counter_;
@@ -770,11 +730,6 @@ class Instrumentation {
   // to prevent races with the GC where the GC relies on thread suspension only see
   // alloc_entrypoints_instrumented_ change during suspend points.
   bool alloc_entrypoints_instrumented_;
-
-  // If we can use instrumentation trampolines. After the first time we instrument something with
-  // the interpreter we can no longer use trampolines because it can lead to stack corruption.
-  // TODO Figure out a way to remove the need for this.
-  bool can_use_instrumentation_trampolines_;
 
   friend class InstrumentationTest;  // For GetCurrentInstrumentationLevel and ConfigureStubs.
   friend class InstrumentationStackPopper;  // For popping instrumentation frames.

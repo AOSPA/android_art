@@ -242,11 +242,15 @@ static void AddCompilerMappings(Builder& builder) {
           .WithType<std::string>()
           .IntoKey(M::Passes)
       .Define("--profile-file=_")
-          .WithType<std::string>()
-          .WithHelp("Specify profiler output file to use for compilation using a filename.")
+          .WithType<std::vector<std::string>>().AppendValues()
+          .WithHelp("Specify profiler output file to use for compilation using a filename.\n"
+                    "When multiple profiles are used, the order matters: If multiple profiles \n"
+                    "contain classes and methods of the same dex file with different checksums, \n"
+                    "only the classes and methods from the first profile will be used for that \n"
+                    "particular dex file.")
           .IntoKey(M::Profile)
       .Define("--profile-file-fd=_")
-          .WithType<int>()
+          .WithType<std::vector<int>>().AppendValues()
           .WithHelp("Specify profiler output file to use for compilation using a file-descriptor.")
           .IntoKey(M::ProfileFd)
       .Define("--no-inline-from=_")
@@ -430,7 +434,10 @@ Parser CreateDex2oatArgumentParser() {
       .Define("--apex-versions=_")
           .WithType<std::string>()
           .WithHelp("Versions of apexes in the boot classpath, separated by '/'")
-          .IntoKey(M::ApexVersions);
+          .IntoKey(M::ApexVersions)
+      .Define("--force-jit-zygote")
+          .WithHelp("Optimizes the app to be executed in an environment that uses JIT Zygote.")
+          .IntoKey(M::ForceJitZygote);
 
   AddCompilerOptionsArgumentParserOptions<Dex2oatArgumentMap>(*parser_builder);
 

@@ -64,21 +64,19 @@ static constexpr bool kEnableOnStackReplacement = true;
 // Maximum permitted threshold value.
 static constexpr uint32_t kJitMaxThreshold = std::numeric_limits<uint16_t>::max();
 
-// Different compilation threshold constants. These can be overridden on the command line.
+static constexpr uint32_t kJitDefaultOptimizeThreshold = 0xffff;
+// Different optimization threshold constants. These default to the equivalent optimization
+// thresholds divided by 2, but can be overridden at the command-line.
+static constexpr uint32_t kJitStressDefaultOptimizeThreshold = kJitDefaultOptimizeThreshold / 2;
+static constexpr uint32_t kJitSlowStressDefaultOptimizeThreshold =
+    kJitStressDefaultOptimizeThreshold / 2;
 
-// Non-debug default
-static constexpr uint32_t kJitDefaultCompileThreshold = 20 * kJitSamplesBatchSize;
-// Fast-debug build.
-static constexpr uint32_t kJitStressDefaultCompileThreshold = 2 * kJitSamplesBatchSize;
-// Slow-debug build.
-static constexpr uint32_t kJitSlowStressDefaultCompileThreshold = 2;
-
-// Different warm-up threshold constants. These default to the equivalent compile thresholds divided
+static constexpr uint32_t kJitDefaultWarmupThreshold = 0xffff;
+// Different warm-up threshold constants. These default to the equivalent warmup thresholds divided
 // by 2, but can be overridden at the command-line.
-static constexpr uint32_t kJitDefaultWarmUpThreshold = kJitDefaultCompileThreshold / 2;
-static constexpr uint32_t kJitStressDefaultWarmUpThreshold = kJitStressDefaultCompileThreshold / 2;
-static constexpr uint32_t kJitSlowStressDefaultWarmUpThreshold =
-    kJitSlowStressDefaultCompileThreshold / 2;
+static constexpr uint32_t kJitStressDefaultWarmupThreshold = kJitDefaultWarmupThreshold / 2;
+static constexpr uint32_t kJitSlowStressDefaultWarmupThreshold =
+    kJitStressDefaultWarmupThreshold / 2;
 
 DEFINE_RUNTIME_DEBUG_FLAG(Jit, kSlowMode);
 
@@ -106,66 +104,30 @@ JitOptions* JitOptions::CreateFromRuntimeArguments(const RuntimeArgumentMap& opt
   jit_options->zygote_thread_pool_pthread_priority_ =
       options.GetOrDefault(RuntimeArgumentMap::JITZygotePoolThreadPthreadPriority);
 
-  // Set default compile threshold to aid with checking defaults.
-  jit_options->compile_threshold_ =
+  // Set default optimize threshold to aid with checking defaults.
+  jit_options->optimize_threshold_ =
       kIsDebugBuild
       ? (Jit::kSlowMode
-         ? kJitSlowStressDefaultCompileThreshold
-         : kJitStressDefaultCompileThreshold)
-      : kJitDefaultCompileThreshold;
-
-  // When not running in slow-mode, thresholds are quantized to kJitSamplesbatchsize.
-  const uint32_t kJitThresholdStep = Jit::kSlowMode ? 1u : kJitSamplesBatchSize;
+         ? kJitSlowStressDefaultOptimizeThreshold
+         : kJitStressDefaultOptimizeThreshold)
+      : kJitDefaultOptimizeThreshold;
 
   // Set default warm-up threshold to aid with checking defaults.
   jit_options->warmup_threshold_ =
       kIsDebugBuild ? (Jit::kSlowMode
-                       ? kJitSlowStressDefaultWarmUpThreshold
-                       : kJitStressDefaultWarmUpThreshold)
-      : kJitDefaultWarmUpThreshold;
+                       ? kJitSlowStressDefaultWarmupThreshold
+                       : kJitStressDefaultWarmupThreshold)
+      : kJitDefaultWarmupThreshold;
 
-  // Warmup threshold should be less than compile threshold (so long as compile threshold is not
-  // zero == JIT-on-first-use).
-  DCHECK_LT(jit_options->warmup_threshold_, jit_options->compile_threshold_);
-  DCHECK_EQ(RoundUp(jit_options->warmup_threshold_, kJitThresholdStep),
-            jit_options->warmup_threshold_);
-
-  if (options.Exists(RuntimeArgumentMap::JITCompileThreshold)) {
-    jit_options->compile_threshold_ = *options.Get(RuntimeArgumentMap::JITCompileThreshold);
+  if (options.Exists(RuntimeArgumentMap::JITOptimizeThreshold)) {
+    jit_options->optimize_threshold_ = *options.Get(RuntimeArgumentMap::JITOptimizeThreshold);
   }
-  jit_options->compile_threshold_ = RoundUp(jit_options->compile_threshold_, kJitThresholdStep);
+  DCHECK_LE(jit_options->optimize_threshold_, kJitMaxThreshold);
 
   if (options.Exists(RuntimeArgumentMap::JITWarmupThreshold)) {
     jit_options->warmup_threshold_ = *options.Get(RuntimeArgumentMap::JITWarmupThreshold);
   }
-  jit_options->warmup_threshold_ = RoundUp(jit_options->warmup_threshold_, kJitThresholdStep);
-
-  if (options.Exists(RuntimeArgumentMap::JITOsrThreshold)) {
-    jit_options->osr_threshold_ = *options.Get(RuntimeArgumentMap::JITOsrThreshold);
-  } else {
-    jit_options->osr_threshold_ = jit_options->compile_threshold_ * 2;
-    if (jit_options->osr_threshold_ > kJitMaxThreshold) {
-      jit_options->osr_threshold_ =
-          RoundDown(kJitMaxThreshold, kJitThresholdStep);
-    }
-  }
-  jit_options->osr_threshold_ = RoundUp(jit_options->osr_threshold_, kJitThresholdStep);
-
-  // Enforce ordering constraints between thresholds if not jit-on-first-use (when the compile
-  // threshold is 0).
-  if (jit_options->compile_threshold_ != 0) {
-    // Clamp thresholds such that OSR > compile > warm-up (see Jit::MaybeCompileMethod).
-    jit_options->osr_threshold_ = std::clamp(jit_options->osr_threshold_,
-                                             2u * kJitThresholdStep,
-                                             RoundDown(kJitMaxThreshold, kJitThresholdStep));
-    jit_options->compile_threshold_ = std::clamp(jit_options->compile_threshold_,
-                                                 kJitThresholdStep,
-                                                 jit_options->osr_threshold_ - kJitThresholdStep);
-    jit_options->warmup_threshold_ =
-        std::clamp(jit_options->warmup_threshold_,
-                   0u,
-                   jit_options->compile_threshold_ - kJitThresholdStep);
-  }
+  DCHECK_LE(jit_options->warmup_threshold_, kJitMaxThreshold);
 
   if (options.Exists(RuntimeArgumentMap::JITPriorityThreadWeight)) {
     jit_options->priority_thread_weight_ =
@@ -241,15 +203,20 @@ Jit* Jit::Create(JitCodeCache* code_cache, JitOptions* options) {
   // With 'perf', we want a 1-1 mapping between an address and a method.
   // We aren't able to keep method pointers live during the instrumentation method entry trampoline
   // so we will just disable jit-gc if we are doing that.
+  // JitAtFirstUse compiles the methods synchronously on mutator threads. While this should work
+  // in theory it is causing deadlocks in some jvmti tests related to Jit GC. Hence, disabling
+  // Jit GC for now (b/147208992).
   if (code_cache->GetGarbageCollectCode()) {
     code_cache->SetGarbageCollectCode(!jit_compiler_->GenerateDebugInfo() &&
-        !Runtime::Current()->GetInstrumentation()->AreExitStubsInstalled());
+        !Runtime::Current()->GetInstrumentation()->AreExitStubsInstalled() &&
+        !jit->JitAtFirstUse());
   }
 
   VLOG(jit) << "JIT created with initial_capacity="
       << PrettySize(options->GetCodeCacheInitialCapacity())
       << ", max_capacity=" << PrettySize(options->GetCodeCacheMaxCapacity())
-      << ", compile_threshold=" << options->GetCompileThreshold()
+      << ", warmup_threshold=" << options->GetWarmupThreshold()
+      << ", optimize_threshold=" << options->GetOptimizeThreshold()
       << ", profile_saver_options=" << options->GetProfileSaverOptions();
 
   // We want to know whether the compiler is compiling baseline, as this
@@ -299,9 +266,22 @@ bool Jit::CompileMethod(ArtMethod* method,
   DCHECK(Runtime::Current()->UseJitCompilation());
   DCHECK(!method->IsRuntimeMethod());
 
+  // If the baseline flag was explicitly passed in the compiler options, change the compilation kind
+  // from optimized to baseline.
+  if (jit_compiler_->IsBaselineCompiler() && compilation_kind == CompilationKind::kOptimized) {
+    compilation_kind = CompilationKind::kBaseline;
+  }
+
+  // If we're asked to compile baseline, but we cannot allocate profiling infos,
+  // change the compilation kind to optimized.
+  if ((compilation_kind == CompilationKind::kBaseline) &&
+      !GetCodeCache()->CanAllocateProfilingInfo()) {
+    compilation_kind = CompilationKind::kOptimized;
+  }
+
   RuntimeCallbacks* cb = Runtime::Current()->GetRuntimeCallbacks();
   // Don't compile the method if it has breakpoints.
-  if (cb->IsMethodBeingInspected(method) && !cb->IsMethodSafeToJit(method)) {
+  if (cb->IsMethodBeingInspected(method)) {
     VLOG(jit) << "JIT not compiling " << method->PrettyMethod()
               << " due to not being safe to jit according to runtime-callbacks. For example, there"
               << " could be breakpoints in this method.";
@@ -940,26 +920,27 @@ class ZygoteTask final : public Task {
     Runtime* runtime = Runtime::Current();
     uint32_t added_to_queue = 0;
     for (gc::space::ImageSpace* space : Runtime::Current()->GetHeap()->GetBootImageSpaces()) {
-      const std::string& profile_file = space->GetProfileFile();
-      if (profile_file.empty()) {
-        continue;
-      }
-      LOG(INFO) << "JIT Zygote looking at profile " << profile_file;
-
       const std::vector<const DexFile*>& boot_class_path =
           runtime->GetClassLinker()->GetBootClassPath();
       ScopedNullHandle<mirror::ClassLoader> null_handle;
-      // We add to the queue for zygote so that we can fork processes in-between
-      // compilations.
+      // We avoid doing compilation at boot for the secondary zygote, as apps forked from it are not
+      // critical for boot.
       if (Runtime::Current()->IsPrimaryZygote()) {
-        std::string boot_profile = GetBootProfileFile(profile_file);
-        // We avoid doing compilation at boot for the secondary zygote, as apps
-        // forked from it are not critical for boot.
-        added_to_queue += runtime->GetJit()->CompileMethodsFromBootProfile(
-            self, boot_class_path, boot_profile, null_handle, /* add_to_queue= */ true);
+        for (const std::string& profile_file : space->GetProfileFiles()) {
+          std::string boot_profile = GetBootProfileFile(profile_file);
+          LOG(INFO) << "JIT Zygote looking at boot profile " << boot_profile;
+
+          // We add to the queue for zygote so that we can fork processes in-between compilations.
+          added_to_queue += runtime->GetJit()->CompileMethodsFromBootProfile(
+              self, boot_class_path, boot_profile, null_handle, /* add_to_queue= */ true);
+        }
       }
-      added_to_queue += runtime->GetJit()->CompileMethodsFromProfile(
-          self, boot_class_path, profile_file, null_handle, /* add_to_queue= */ true);
+      for (const std::string& profile_file : space->GetProfileFiles()) {
+        LOG(INFO) << "JIT Zygote looking at profile " << profile_file;
+
+        added_to_queue += runtime->GetJit()->CompileMethodsFromProfile(
+            self, boot_class_path, profile_file, null_handle, /* add_to_queue= */ true);
+      }
     }
 
     JitCodeCache* code_cache = runtime->GetJit()->GetCodeCache();
@@ -1169,7 +1150,7 @@ void Jit::MapBootImageMethods() {
 // methods in that profile for performance.
 static bool HasImageWithProfile() {
   for (gc::space::ImageSpace* space : Runtime::Current()->GetHeap()->GetBootImageSpaces()) {
-    if (!space->GetProfileFile().empty()) {
+    if (!space->GetProfileFiles().empty()) {
       return true;
     }
   }
@@ -1332,6 +1313,8 @@ bool Jit::CompileMethodFromProfile(Thread* self,
       // We explicitly check for the stub. The trampoline is for methods backed by
       // a .oat file that has a compiled version of the method.
       (entry_point == GetQuickResolutionStub())) {
+    VLOG(jit) << "JIT Zygote processing method " << ArtMethod::PrettyMethod(method)
+              << " from profile";
     method->SetPreCompiled();
     if (!add_to_queue) {
       CompileMethod(method, self, CompilationKind::kOptimized, /* prejit= */ true);
@@ -1427,11 +1410,6 @@ uint32_t Jit::CompileMethodsFromProfile(
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   uint32_t added_to_queue = 0u;
   for (const DexFile* dex_file : dex_files) {
-    if (LocationIsOnArtModule(dex_file->GetLocation().c_str())) {
-      // The ART module jars are already preopted.
-      continue;
-    }
-
     std::set<dex::TypeIndex> class_types;
     std::set<uint16_t> all_methods;
     if (!profile_info.GetClassesAndMethods(*dex_file,
@@ -1493,6 +1471,10 @@ bool Jit::IgnoreSamplesForMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutat
 }
 
 void Jit::EnqueueOptimizedCompilation(ArtMethod* method, Thread* self) {
+  // Reset the hotness counter so the baseline compiled code doesn't call this
+  // method repeatedly.
+  GetCodeCache()->ResetHotnessCounter(method, self);
+
   if (thread_pool_ == nullptr) {
     return;
   }
@@ -1640,8 +1622,12 @@ void Jit::PostForkChildAction(bool is_system_server, bool is_zygote) {
   jit_compiler_->ParseCompilerOptions();
 
   // Adjust the status of code cache collection: the status from zygote was to not collect.
+  // JitAtFirstUse compiles the methods synchronously on mutator threads. While this should work
+  // in theory it is causing deadlocks in some jvmti tests related to Jit GC. Hence, disabling
+  // Jit GC for now (b/147208992).
   code_cache_->SetGarbageCollectCode(!jit_compiler_->GenerateDebugInfo() &&
-      !Runtime::Current()->GetInstrumentation()->AreExitStubsInstalled());
+      !Runtime::Current()->GetInstrumentation()->AreExitStubsInstalled() &&
+      !JitAtFirstUse());
 
   if (is_system_server && HasImageWithProfile()) {
     // Disable garbage collection: we don't want it to delete methods we're compiling

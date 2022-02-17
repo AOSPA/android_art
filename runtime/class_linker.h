@@ -502,7 +502,7 @@ class ClassLinker {
   ObjPtr<mirror::DexCache> FindDexCache(Thread* self, const DexFile& dex_file)
       REQUIRES(!Locks::dex_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  ObjPtr<mirror::DexCache> FindDexCache(Thread* self, const OatDexFile* const oat_dex_file)
+  ObjPtr<mirror::DexCache> FindDexCache(Thread* self, const OatDexFile& oat_dex_file)
       REQUIRES(!Locks::dex_lock_) REQUIRES_SHARED(Locks::mutator_lock_);
   ClassTable* FindClassTable(Thread* self, ObjPtr<mirror::DexCache> dex_cache)
       REQUIRES(!Locks::dex_lock_)
@@ -552,10 +552,6 @@ class ClassLinker {
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Roles::uninterruptible_);
 
-  ObjPtr<mirror::IfTable> AllocIfTable(Thread* self, size_t ifcount)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!Roles::uninterruptible_);
-
   ObjPtr<mirror::ObjectArray<mirror::StackTraceElement>> AllocStackTraceElementArray(Thread* self,
                                                                                      size_t length)
       REQUIRES_SHARED(Locks::mutator_lock_)
@@ -587,10 +583,6 @@ class ClassLinker {
                                          jobject loader,
                                          jobjectArray methods,
                                          jobjectArray throws)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Get the oat code for a method when its class isn't yet initialized.
-  const void* GetQuickOatCodeFor(ArtMethod* method)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   pid_t GetClassesLockOwner();  // For SignalCatcher.
@@ -720,9 +712,6 @@ class ClassLinker {
   void InsertDexFileInToClassLoader(ObjPtr<mirror::Object> dex_file,
                                     ObjPtr<mirror::ClassLoader> class_loader)
       REQUIRES(!Locks::classlinker_classes_lock_)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  static bool ShouldUseInterpreterEntrypoint(ArtMethod* method, const void* quick_code)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   static bool IsBootClassLoader(ScopedObjectAccessAlreadyRunnable& soa,
@@ -870,6 +859,7 @@ class ClassLinker {
 
  private:
   class LinkFieldsHelper;
+  template <PointerSize kPointerSize>
   class LinkMethodsHelper;
   class MethodTranslation;
   class VisiblyInitializedCallback;
@@ -1123,7 +1113,7 @@ class ClassLinker {
       REQUIRES_SHARED(Locks::mutator_lock_);
   const DexCacheData* FindDexCacheDataLocked(const DexFile& dex_file)
       REQUIRES_SHARED(Locks::dex_lock_);
-  const DexCacheData* FindDexCacheDataLocked(const OatDexFile* const oat_dex_file)
+  const DexCacheData* FindDexCacheDataLocked(const OatDexFile& oat_dex_file)
       REQUIRES_SHARED(Locks::dex_lock_);
   static ObjPtr<mirror::DexCache> DecodeDexCacheLocked(Thread* self, const DexCacheData* data)
       REQUIRES_SHARED(Locks::dex_lock_, Locks::mutator_lock_);
@@ -1177,14 +1167,6 @@ class ClassLinker {
       Thread* self,
       const dex::MethodHandleItem& method_handle,
       ArtMethod* referrer) REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Sets up the interface lookup table (IFTable) in the correct order to allow searching for
-  // default methods.
-  bool SetupInterfaceLookupTable(Thread* self,
-                                 Handle<mirror::Class> klass,
-                                 Handle<mirror::ObjectArray<mirror::Class>> interfaces)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
 
   enum class DefaultMethodSearchResult {
     kDefaultFound,

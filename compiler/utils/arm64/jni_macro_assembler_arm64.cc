@@ -382,30 +382,6 @@ void Arm64JNIMacroAssembler::MoveArguments(ArrayRef<ArgumentLocation> dests,
   DCHECK_EQ(arg_count, srcs.size());
   DCHECK_EQ(arg_count, refs.size());
 
-  // Spill reference registers. Spill two references together with STP where possible.
-  for (size_t i = 0; i != arg_count; ++i) {
-    if (refs[i] != kInvalidReferenceOffset) {
-      DCHECK_EQ(srcs[i].GetSize(), kObjectReferenceSize);
-      if (srcs[i].IsRegister()) {
-        // Use STP if we're storing 2 consecutive references within the available STP range.
-        if (i + 1u != arg_count &&
-            refs[i + 1u].SizeValue() == refs[i].SizeValue() + kObjectReferenceSize &&
-            srcs[i + 1u].IsRegister() &&
-            refs[i].SizeValue() < kStpWOffsetCutoff) {
-          DCHECK_EQ(srcs[i + 1u].GetSize(), kObjectReferenceSize);
-          ___ Stp(reg_w(srcs[i].GetRegister().AsArm64().AsWRegister()),
-                  reg_w(srcs[i + 1u].GetRegister().AsArm64().AsWRegister()),
-                  MEM_OP(sp, refs[i].SizeValue()));
-          ++i;
-        } else {
-          Store(refs[i], srcs[i].GetRegister(), kObjectReferenceSize);
-        }
-      } else {
-        DCHECK_EQ(srcs[i].GetFrameOffset(), refs[i]);
-      }
-    }
-  }
-
   auto get_mask = [](ManagedRegister reg) -> uint64_t {
     Arm64ManagedRegister arm64_reg = reg.AsArm64();
     if (arm64_reg.IsXRegister()) {
@@ -429,12 +405,12 @@ void Arm64JNIMacroAssembler::MoveArguments(ArrayRef<ArgumentLocation> dests,
   };
 
   // More than 8 core or FP reg args are very rare, so we do not optimize for
-  // that case by using LDP/STP, except for situations that arise for normal
-  // native even with low number of arguments. We use STP for the non-reference
-  // spilling which also covers the initial spill for native reference register
-  // args as they are spilled as raw 32-bit values. We also optimize loading
-  // args to registers with LDP, whether references or not, except for the
-  // initial non-null reference which we do not need to load at all.
+  // that case by using LDP/STP, except for situations that arise even with low
+  // number of arguments. We use STP for the non-reference spilling which also
+  // covers the initial spill for native reference register args as they are
+  // spilled as raw 32-bit values. We also optimize loading args to registers
+  // with LDP, whether references or not, except for the initial non-null
+  // reference which we do not need to load at all.
 
   // Collect registers to move while storing/copying args to stack slots.
   // Convert processed references to `jobject`.
@@ -913,11 +889,76 @@ void Arm64JNIMacroAssembler::CreateJObject(FrameOffset out_off,
   ___ Str(scratch, MEM_OP(reg_x(SP), out_off.Int32Value()));
 }
 
+void Arm64JNIMacroAssembler::TryToTransitionFromRunnableToNative(
+    JNIMacroLabel* label, ArrayRef<const ManagedRegister> scratch_regs ATTRIBUTE_UNUSED) {
+  constexpr uint32_t kNativeStateValue = Thread::StoredThreadStateValue(ThreadState::kNative);
+  constexpr uint32_t kRunnableStateValue = Thread::StoredThreadStateValue(ThreadState::kRunnable);
+  constexpr ThreadOffset64 thread_flags_offset = Thread::ThreadFlagsOffset<kArm64PointerSize>();
+  constexpr ThreadOffset64 thread_held_mutex_mutator_lock_offset =
+      Thread::HeldMutexOffset<kArm64PointerSize>(kMutatorLock);
+
+  UseScratchRegisterScope temps(asm_.GetVIXLAssembler());
+  Register scratch = temps.AcquireW();
+  Register scratch2 = temps.AcquireW();
+
+  // CAS release, old_value = kRunnableStateValue, new_value = kNativeStateValue, no flags.
+  vixl::aarch64::Label retry;
+  ___ Bind(&retry);
+  static_assert(thread_flags_offset.Int32Value() == 0);  // LDXR/STLXR require exact address.
+  ___ Ldxr(scratch, MEM_OP(reg_x(TR)));
+  ___ Mov(scratch2, kNativeStateValue);
+  // If any flags are set, go to the slow path.
+  static_assert(kRunnableStateValue == 0u);
+  ___ Cbnz(scratch, Arm64JNIMacroLabel::Cast(label)->AsArm64());
+  ___ Stlxr(scratch, scratch2, MEM_OP(reg_x(TR)));
+  ___ Cbnz(scratch, &retry);
+
+  // Clear `self->tlsPtr_.held_mutexes[kMutatorLock]`.
+  ___ Str(xzr, MEM_OP(reg_x(TR), thread_held_mutex_mutator_lock_offset.Int32Value()));
+}
+
+void Arm64JNIMacroAssembler::TryToTransitionFromNativeToRunnable(
+    JNIMacroLabel* label,
+    ArrayRef<const ManagedRegister> scratch_regs ATTRIBUTE_UNUSED,
+    ManagedRegister return_reg ATTRIBUTE_UNUSED) {
+  constexpr uint32_t kNativeStateValue = Thread::StoredThreadStateValue(ThreadState::kNative);
+  constexpr uint32_t kRunnableStateValue = Thread::StoredThreadStateValue(ThreadState::kRunnable);
+  constexpr ThreadOffset64 thread_flags_offset = Thread::ThreadFlagsOffset<kArm64PointerSize>();
+  constexpr ThreadOffset64 thread_held_mutex_mutator_lock_offset =
+      Thread::HeldMutexOffset<kArm64PointerSize>(kMutatorLock);
+  constexpr ThreadOffset64 thread_mutator_lock_offset =
+      Thread::MutatorLockOffset<kArm64PointerSize>();
+
+  UseScratchRegisterScope temps(asm_.GetVIXLAssembler());
+  Register scratch = temps.AcquireW();
+  Register scratch2 = temps.AcquireW();
+
+  // CAS acquire, old_value = kNativeStateValue, new_value = kRunnableStateValue, no flags.
+  vixl::aarch64::Label retry;
+  ___ Bind(&retry);
+  static_assert(thread_flags_offset.Int32Value() == 0);  // LDAXR/STXR require exact address.
+  ___ Ldaxr(scratch, MEM_OP(reg_x(TR)));
+  ___ Mov(scratch2, kNativeStateValue);
+  // If any flags are set, or the state is not Native, go to the slow path.
+  // (While the thread can theoretically transition between different Suspended states,
+  // it would be very unexpected to see a state other than Native at this point.)
+  ___ Cmp(scratch, scratch2);
+  ___ B(ne, Arm64JNIMacroLabel::Cast(label)->AsArm64());
+  static_assert(kRunnableStateValue == 0u);
+  ___ Stxr(scratch, wzr, MEM_OP(reg_x(TR)));
+  ___ Cbnz(scratch, &retry);
+
+  // Set `self->tlsPtr_.held_mutexes[kMutatorLock]` to the mutator lock.
+  ___ Ldr(scratch.X(), MEM_OP(reg_x(TR), thread_mutator_lock_offset.Int32Value()));
+  ___ Str(scratch.X(), MEM_OP(reg_x(TR), thread_held_mutex_mutator_lock_offset.Int32Value()));
+}
+
 void Arm64JNIMacroAssembler::SuspendCheck(JNIMacroLabel* label) {
   UseScratchRegisterScope temps(asm_.GetVIXLAssembler());
   Register scratch = temps.AcquireW();
-  ___ Ldrh(scratch, MEM_OP(reg_x(TR), Thread::ThreadFlagsOffset<kArm64PointerSize>().Int32Value()));
-  ___ Cbnz(scratch, Arm64JNIMacroLabel::Cast(label)->AsArm64());
+  ___ Ldr(scratch, MEM_OP(reg_x(TR), Thread::ThreadFlagsOffset<kArm64PointerSize>().Int32Value()));
+  ___ Tst(scratch, Thread::SuspendOrCheckpointRequestFlags());
+  ___ B(ne, Arm64JNIMacroLabel::Cast(label)->AsArm64());
 }
 
 void Arm64JNIMacroAssembler::ExceptionPoll(JNIMacroLabel* label) {
