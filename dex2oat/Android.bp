@@ -483,6 +483,12 @@ art_cc_defaults {
         ":art-gtest-jars-VerifierDepsMulti",
         ":art-gtest-jars-VerifySoftFailDuringClinit",
     ],
+    tidy_timeout_srcs: [
+        "dex2oat_test.cc",
+        "verifier_deps_test.cc",
+        "linker/arm/relative_patcher_thumb2_test.cc",
+        "linker/arm64/relative_patcher_arm64_test.cc",
+    ],
     srcs: [
         "dex2oat_test.cc",
         "dex2oat_vdex_test.cc",
@@ -564,6 +570,7 @@ art_cc_test {
         "art_standalone_gtest_defaults",
         "art_dex2oat_tests_defaults",
     ],
+    data: [":generate-boot-image"],
     shared_libs: [
         "libartbase",
         "libart-compiler",
@@ -589,6 +596,7 @@ art_cc_test {
         ":art-gtest-jars-MultiDex",
         ":art-gtest-jars-MultiDexModifiedSecondary",
         ":art-gtest-jars-Nested",
+        ":generate-boot-image",
     ],
     test_config: "art_standalone_dex2oat_cts_tests.xml",
     test_suites: ["cts"],

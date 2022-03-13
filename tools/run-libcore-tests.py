@@ -65,7 +65,7 @@ LIBCORE_TEST_NAMES = [
   "libcore.highmemorytest.java.time.format.DateTimeFormatterTest",
   "libcore.highmemorytest.java.util.CalendarTest",
   "libcore.highmemorytest.java.util.CurrencyTest",
-  "libcore.highmemorytest.libcore.icu.LocaleDataTest",
+  "libcore.highmemorytest.libcore.icu.SimpleDateFormatDataTest",
   # All other tests in alphabetical order.
   "libcore.android.system",
   "libcore.build",
@@ -154,7 +154,7 @@ def get_test_names():
 def get_vogar_command(test_name):
   cmd = ["vogar"]
   if args.mode == "device":
-    cmd.append("--mode=device --vm-arg -Ximage:/apex/com.android.art/javalib/boot.art")
+    cmd.append("--mode=device --vm-arg -Ximage:/system/framework/art_boot_images/boot.art")
     cmd.append("--vm-arg -Xbootclasspath:" + ":".join(BOOT_CLASSPATH))
   if args.mode == "host":
     # We explicitly give a wrong path for the image, to ensure vogar
