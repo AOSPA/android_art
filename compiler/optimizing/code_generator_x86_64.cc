@@ -274,7 +274,9 @@ class LoadClassSlowPathX86_64 : public SlowPathCode {
     // Custom calling convention: RAX serves as both input and output.
     if (must_resolve_type) {
       DCHECK(IsSameDexFile(cls_->GetDexFile(), x86_64_codegen->GetGraph()->GetDexFile()) ||
-             x86_64_codegen->GetCompilerOptions().WithinOatFile(&cls_->GetDexFile()));
+             x86_64_codegen->GetCompilerOptions().WithinOatFile(&cls_->GetDexFile()) ||
+             ContainsElement(Runtime::Current()->GetClassLinker()->GetBootClassPath(),
+                             &cls_->GetDexFile()));
       dex::TypeIndex type_index = cls_->GetTypeIndex();
       __ movl(CpuRegister(RAX), Immediate(type_index.index_));
       if (cls_->NeedsAccessCheck()) {
@@ -1241,7 +1243,9 @@ void CodeGeneratorX86_64::RecordBootImageMethodPatch(HInvoke* invoke) {
 
 void CodeGeneratorX86_64::RecordMethodBssEntryPatch(HInvoke* invoke) {
   DCHECK(IsSameDexFile(GetGraph()->GetDexFile(), *invoke->GetMethodReference().dex_file) ||
-         GetCompilerOptions().WithinOatFile(invoke->GetMethodReference().dex_file));
+         GetCompilerOptions().WithinOatFile(invoke->GetMethodReference().dex_file) ||
+         ContainsElement(Runtime::Current()->GetClassLinker()->GetBootClassPath(),
+                         invoke->GetMethodReference().dex_file));
   method_bss_entry_patches_.emplace_back(invoke->GetMethodReference().dex_file,
                                          invoke->GetMethodReference().index);
   __ Bind(&method_bss_entry_patches_.back().label);
@@ -5195,8 +5199,7 @@ void InstructionCodeGeneratorX86_64::HandleFieldSet(HInstruction* instruction,
         if (byte_swap) {
           v = BSWAP(v);
         }
-        // `field_type == DataType::Type::kReference` implies `v == 0`.
-        DCHECK((field_type != DataType::Type::kReference) || (v == 0));
+        DCHECK_IMPLIES(field_type == DataType::Type::kReference, v == 0);
         // Note: if heap poisoning is enabled, no need to poison
         // (negate) `v` if it is a reference, as it would be null.
         __ movl(field_addr, Immediate(v));
