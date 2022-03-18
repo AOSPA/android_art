@@ -1339,7 +1339,7 @@ static void CheckPosition(ArmVIXLAssembler* assembler,
 void IntrinsicCodeGeneratorARMVIXL::VisitSystemArrayCopy(HInvoke* invoke) {
   // The only read barrier implementation supporting the
   // SystemArrayCopy intrinsic is the Baker-style read barriers.
-  DCHECK(!kEmitCompilerReadBarrier || kUseBakerReadBarrier);
+  DCHECK_IMPLIES(kEmitCompilerReadBarrier, kUseBakerReadBarrier);
 
   ArmVIXLAssembler* assembler = GetAssembler();
   LocationSummary* locations = invoke->GetLocations();
@@ -3485,6 +3485,7 @@ static void GenerateCompareAndSet(CodeGeneratorARMVIXL* codegen,
     __ cmp(eq, HighRegisterFrom(old_value), HighRegisterFrom(expected));
   } else if (expected.IsRegisterPair()) {
     DCHECK_EQ(type, DataType::Type::kReference);
+    DCHECK(!expected.Contains(old_value));
     // Check if the loaded value matches any of the two registers in `expected`.
     __ Cmp(RegisterFrom(old_value), LowRegisterFrom(expected));
     ExactAssemblyScope aas(assembler->GetVIXLAssembler(), 2 * k16BitT32InstructionSizeInBytes);
@@ -3797,7 +3798,7 @@ void IntrinsicCodeGeneratorARMVIXL::VisitJdkUnsafeCompareAndSetInt(HInvoke* invo
 }
 void IntrinsicCodeGeneratorARMVIXL::VisitJdkUnsafeCompareAndSetObject(HInvoke* invoke) {
   // The only supported read barrier implementation is the Baker-style read barriers (b/173104084).
-  DCHECK(!kEmitCompilerReadBarrier || kUseBakerReadBarrier);
+  DCHECK_IMPLIES(kEmitCompilerReadBarrier, kUseBakerReadBarrier);
 
   GenUnsafeCas(invoke, DataType::Type::kReference, codegen_);
 }
@@ -4234,7 +4235,6 @@ static void GenerateVarHandleArrayChecks(HInvoke* invoke,
   bool boot_image_available =
       codegen->GetCompilerOptions().IsBootImage() ||
       !Runtime::Current()->GetHeap()->GetBootImageSpaces().empty();
-  DCHECK(boot_image_available || codegen->GetCompilerOptions().IsJitCompiler());
   bool can_be_view =
       ((value_type != DataType::Type::kReference) && (DataType::Size(value_type) != 1u)) &&
       boot_image_available;
@@ -4623,7 +4623,8 @@ static void GenerateVarHandleSet(HInvoke* invoke,
       size_t temp_start = 0u;
       if (Use64BitExclusiveLoadStore(atomic, codegen)) {
         // Clear `maybe_temp3` which was initialized above for Float64.
-        DCHECK(value_type != DataType::Type::kFloat64 || maybe_temp3.Equals(locations->GetTemp(2)));
+        DCHECK_IMPLIES(value_type == DataType::Type::kFloat64,
+                       maybe_temp3.Equals(locations->GetTemp(2)));
         maybe_temp3 = Location::NoLocation();
         temp_start = 2u;
       }
@@ -4893,10 +4894,10 @@ static void GenerateVarHandleCompareAndSetOrExchange(HInvoke* invoke,
 
   if (kEmitCompilerReadBarrier && value_type == DataType::Type::kReference) {
     // The `old_value_temp` is used first for the marked `old_value` and then for the unmarked
-    // reloaded old value for subsequent CAS in the slow path.
-    vixl32::Register old_value_temp = store_result;
+    // reloaded old value for subsequent CAS in the slow path. This must not clobber `old_value`.
+    vixl32::Register old_value_temp = return_success ? RegisterFrom(out) : store_result;
     // The slow path store result must not clobber `old_value`.
-    vixl32::Register slow_path_store_result = return_success ? RegisterFrom(out) : store_result;
+    vixl32::Register slow_path_store_result = old_value_temp;
     ReadBarrierCasSlowPathARMVIXL* rb_slow_path =
         new (codegen->GetScopedAllocator()) ReadBarrierCasSlowPathARMVIXL(
             invoke,
