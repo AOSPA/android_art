@@ -59,6 +59,7 @@
 #include "obj_ptr.h"
 #include "stack.h"
 #include "thread.h"
+#include "thread-inl.h"
 #include "unstarted_runtime.h"
 #include "verifier/method_verifier.h"
 #include "well_known_classes.h"
@@ -705,8 +706,8 @@ static inline int32_t DoSparseSwitch(const Instruction* inst, const ShadowFrame&
 // TODO We might wish to reconsider how we cause some events to be ignored.
 bool MoveToExceptionHandler(Thread* self,
                             ShadowFrame& shadow_frame,
-                            const instrumentation::Instrumentation* instrumentation)
-    REQUIRES_SHARED(Locks::mutator_lock_);
+                            bool skip_listeners,
+                            bool skip_throw_listener) REQUIRES_SHARED(Locks::mutator_lock_);
 
 NO_RETURN void UnexpectedOpcode(const Instruction* inst, const ShadowFrame& shadow_frame)
   __attribute__((cold))
