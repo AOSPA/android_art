@@ -823,6 +823,10 @@ class Dex2Oat final {
       Usage("--dirty-image-objects and --dirty-image-objects-fd should not be both specified");
     }
 
+    if (!preloaded_classes_files_.empty() && !preloaded_classes_fds_.empty()) {
+      Usage("--preloaded-classes and --preloaded-classes-fds should not be both specified");
+    }
+
     if (!cpu_set_.empty()) {
       SetCpuAffinity(cpu_set_);
     }
@@ -954,7 +958,6 @@ class Dex2Oat final {
     key_value_store_->Put(OatHeader::kCompilerFilter,
                           CompilerFilter::NameOfFilter(compiler_options_->GetCompilerFilter()));
     key_value_store_->Put(OatHeader::kConcurrentCopying, kUseReadBarrier);
-    key_value_store_->Put(OatHeader::kRequiresImage, compiler_options_->IsGeneratingImage());
     if (invocation_file_.get() != -1) {
       std::ostringstream oss;
       for (int i = 0; i < argc; ++i) {
@@ -1071,6 +1074,7 @@ class Dex2Oat final {
     AssignIfExists(args, M::Profile, &profile_files_);
     AssignIfExists(args, M::ProfileFd, &profile_file_fds_);
     AssignIfExists(args, M::PreloadedClasses, &preloaded_classes_files_);
+    AssignIfExists(args, M::PreloadedClassesFds, &preloaded_classes_fds_);
     AssignIfExists(args, M::RuntimeOptions, &runtime_args_);
     AssignIfExists(args, M::SwapFile, &swap_file_name_);
     AssignIfExists(args, M::SwapFileFd, &swap_fd_);
@@ -1520,10 +1524,10 @@ class Dex2Oat final {
     }
     if (runtime_->GetHeap()->GetBootImageSpaces().empty() &&
         (IsBootImageExtension() || IsAppImage())) {
-      LOG(ERROR) << "Cannot create "
-                 << (IsBootImageExtension() ? "boot image extension" : "app image")
-                 << " without a primary boot image.";
-      return dex2oat::ReturnCode::kOther;
+      LOG(WARNING) << "Cannot create "
+                   << (IsBootImageExtension() ? "boot image extension" : "app image")
+                   << " without a primary boot image.";
+      compiler_options_->image_type_ = CompilerOptions::ImageType::kNone;
     }
     ArrayRef<const DexFile* const> bcp_dex_files(runtime_->GetClassLinker()->GetBootClassPath());
     if (IsBootImage() || IsBootImageExtension()) {
@@ -1661,6 +1665,10 @@ class Dex2Oat final {
           apex_versions_argument_.empty() ? runtime->GetApexVersions() : apex_versions_argument_;
       key_value_store_->Put(OatHeader::kApexVersionsKey, versions);
     }
+
+    // Now that we have adjusted whether we generate an image, encode it in the
+    // key/value store.
+    key_value_store_->Put(OatHeader::kRequiresImage, compiler_options_->IsGeneratingImage());
 
     // Now that we have finalized key_value_store_, start writing the .rodata section.
     // Among other things, this creates type lookup tables that speed up the compilation.
@@ -2319,7 +2327,11 @@ class Dex2Oat final {
   }
 
   bool DoDexLayoutOptimizations() const {
-    return DoProfileGuidedOptimizations() || DoGenerateCompactDex();
+    // Only run dexlayout when being asked to generate compact dex. We do this
+    // to avoid having multiple arguments being passed to dex2oat and the main
+    // user of dex2oat (installd) will have the same reasons for
+    // disabling/enabling compact dex and dex layout.
+    return DoGenerateCompactDex();
   }
 
   bool DoOatLayoutOptimizations() const {
@@ -2526,11 +2538,19 @@ class Dex2Oat final {
   }
 
   bool PreparePreloadedClasses() {
-    preloaded_classes_.reset(new HashSet<std::string>());
-    for (const std::string& file : preloaded_classes_files_) {
-      ReadCommentedInputFromFile<HashSet<std::string>>(file.c_str(),
-                                                       nullptr,
-                                                       preloaded_classes_.get());
+    preloaded_classes_ = std::make_unique<HashSet<std::string>>();
+    if (!preloaded_classes_fds_.empty()) {
+      for (int fd : preloaded_classes_fds_) {
+        if (!ReadCommentedInputFromFd(fd, nullptr, preloaded_classes_.get())) {
+          return false;
+        }
+      }
+    } else {
+      for (const std::string& file : preloaded_classes_files_) {
+        if (!ReadCommentedInputFromFile(file.c_str(), nullptr, preloaded_classes_.get())) {
+          return false;
+        }
+      }
     }
     return true;
   }
@@ -2764,14 +2784,27 @@ class Dex2Oat final {
   }
 
   template <typename T>
-  static void ReadCommentedInputFromFile(
+  static bool ReadCommentedInputFromFile(
       const char* input_filename, std::function<std::string(const char*)>* process, T* output) {
     auto input_file = std::unique_ptr<FILE, decltype(&fclose)>{fopen(input_filename, "r"), fclose};
     if (!input_file) {
       LOG(ERROR) << "Failed to open input file " << input_filename;
-      return;
+      return false;
     }
     ReadCommentedInputStream<T>(input_file.get(), process, output);
+    return true;
+  }
+
+  template <typename T>
+  static bool ReadCommentedInputFromFd(
+      int input_fd, std::function<std::string(const char*)>* process, T* output) {
+    auto input_file = std::unique_ptr<FILE, decltype(&fclose)>{fdopen(input_fd, "r"), fclose};
+    if (!input_file) {
+      LOG(ERROR) << "Failed to re-open input fd from /prof/self/fd/" << input_fd;
+      return false;
+    }
+    ReadCommentedInputStream<T>(input_file.get(), process, output);
+    return true;
   }
 
   // Read lines from the given file, dropping comments and empty lines. Post-process each line with
@@ -2779,13 +2812,8 @@ class Dex2Oat final {
   template <typename T>
   static std::unique_ptr<T> ReadCommentedInputFromFile(
       const char* input_filename, std::function<std::string(const char*)>* process) {
-    auto input_file = std::unique_ptr<FILE, decltype(&fclose)>{fopen(input_filename, "r"), fclose};
-    if (!input_file) {
-      LOG(ERROR) << "Failed to open input file " << input_filename;
-      return nullptr;
-    }
     std::unique_ptr<T> output(new T());
-    ReadCommentedInputStream<T>(input_file.get(), process, output.get());
+    ReadCommentedInputFromFile(input_filename, process, output.get());
     return output;
   }
 
@@ -2794,13 +2822,8 @@ class Dex2Oat final {
   template <typename T>
   static std::unique_ptr<T> ReadCommentedInputFromFd(
       int input_fd, std::function<std::string(const char*)>* process) {
-    auto input_file = std::unique_ptr<FILE, decltype(&fclose)>{fdopen(input_fd, "r"), fclose};
-    if (!input_file) {
-      LOG(ERROR) << "Failed to re-open input fd from /prof/self/fd/" << input_fd;
-      return nullptr;
-    }
     std::unique_ptr<T> output(new T());
-    ReadCommentedInputStream<T>(input_file.get(), process, output.get());
+    ReadCommentedInputFromFd(input_fd, process, output.get());
     return output;
   }
 
@@ -2950,6 +2973,7 @@ class Dex2Oat final {
   std::vector<std::string> profile_files_;
   std::vector<int> profile_file_fds_;
   std::vector<std::string> preloaded_classes_files_;
+  std::vector<int> preloaded_classes_fds_;
   std::unique_ptr<ProfileCompilationInfo> profile_compilation_info_;
   TimingLogger* timings_;
   std::vector<std::vector<const DexFile*>> dex_files_per_oat_file_;
