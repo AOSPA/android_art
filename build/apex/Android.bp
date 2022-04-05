@@ -233,7 +233,7 @@ apex_key {
 art_module_apex_defaults {
     name: "com.android.art-defaults",
 
-    // Enable if SOONG_CONFIG_art_module_source_build is true.
+    // Enable if ART_MODULE_BUILD_FROM_SOURCE is true
     enabled: false,
     soong_config_variables: {
         source_build: {
@@ -254,7 +254,10 @@ art_module_apex_defaults {
 // Default values shared by device ART APEXes.
 apex_defaults {
     name: "com.android.art-device-defaults-minus-odrefresh",
-    defaults: ["com.android.art-defaults"],
+    defaults: [
+        "com.android.art-defaults",
+        "s-launched-apex-module",
+    ],
     compile_multilib: "both",
     manifest: "manifest-art.json",
     bootclasspath_fragments: ["art-bootclasspath-fragment"],
@@ -295,7 +298,6 @@ apex_defaults {
             enabled: false,
         },
     },
-    min_sdk_version: "31",
     // Indicates that pre-installed version of this apex can be compressed.
     // Whether it actually will be compressed is controlled on per-device basis.
     compressible: true,
@@ -332,20 +334,16 @@ apex_defaults {
     },
 }
 
-apex_test {
-    name: "test_com.android.art",
-    defaults: ["com.android.art-devel-defaults"],
-    manifest: "test_apex_manifest.json",
-    file_contexts: ":com.android.art.debug-file_contexts",
-    certificate: ":com.android.art.certificate",
-    installable: false,
-}
-
 // "Broken" test APEX, only used for testing, including module
 // `libart-broken` instead of `libart`.
 apex_test {
     name: "test_broken_com.android.art",
-    defaults: ["com.android.art-defaults"],
+    // Use of "s-launched-apex-module" does not imply that this is a released
+    // module.
+    defaults: [
+        "com.android.art-defaults",
+        "s-launched-apex-module",
+    ],
 
     // Only include native libraries in this test APEX. Don't include
     // binaries (and maybe other artifacts) for now, as they pull
@@ -360,7 +358,6 @@ apex_test {
     file_contexts: ":com.android.art-file_contexts",
     certificate: ":com.android.art.certificate",
     installable: false,
-    min_sdk_version: "31",
 }
 
 apex_test {
@@ -376,13 +373,12 @@ apex_test {
     file_contexts: ":com.android.art-file_contexts",
     certificate: ":com.android.art.certificate",
     installable: false,
-    min_sdk_version: "31",
 }
 
 // Release version of the ART APEX module (not containing debug
 // variants nor tools), included in user builds. Also used for
 // storage-constrained devices in userdebug and eng builds.
-art_apex {
+apex {
     name: "com.android.art",
     defaults: ["com.android.art-device-defaults"],
     certificate: ":com.android.art.certificate",
@@ -391,7 +387,7 @@ art_apex {
 // "Debug" version of the ART APEX module (containing both release and
 // debug variants, as well as additional tools), included in userdebug and
 // eng build.
-art_apex {
+apex {
     name: "com.android.art.debug",
     defaults: ["com.android.art-devel-defaults"],
     certificate: ":com.android.art.certificate",
@@ -427,7 +423,7 @@ art_gtests = [
 // "Testing" version of the ART APEX module (containing both release
 // and debug variants, additional tools, and ART gtests), for testing
 // purposes only.
-art_apex_test {
+apex_test {
     name: "com.android.art.testing",
     defaults: ["com.android.art-devel-defaults"],
     file_contexts: ":com.android.art.debug-file_contexts",
@@ -528,7 +524,7 @@ art_module_cc_defaults {
     host_supported: true,
     device_supported: false,
 
-    // Enable if SOONG_CONFIG_art_module_source_build is true.
+    // Enable if ART_MODULE_BUILD_FROM_SOURCE is true
     enabled: false,
     soong_config_variables: {
         source_build: {

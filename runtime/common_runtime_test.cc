@@ -60,6 +60,7 @@
 #include "noop_compiler_callbacks.h"
 #include "profile/profile_compilation_info.h"
 #include "runtime-inl.h"
+#include "runtime_intrinsics.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread.h"
 #include "well_known_classes.h"
@@ -99,13 +100,7 @@ void CommonRuntimeTestImpl::SetUp() {
   options.push_back(std::make_pair(boot_class_path_string, nullptr));
   options.push_back(std::make_pair(boot_class_path_locations_string, nullptr));
   if (use_boot_image_) {
-    std::string image_location = GetImageLocation();
-    if (!IsHost()) {
-      // On target, the boot image can be outdated due to an ART update. In such case, the profile
-      // will be used for generating a boot image in memory.
-      image_location += "!/apex/com.android.art/etc/boot-image.prof";
-    }
-    options.emplace_back("-Ximage:" + image_location, nullptr);
+    options.emplace_back("-Ximage:" + GetImageLocation(), nullptr);
   }
   options.push_back(std::make_pair("-Xcheck:jni", nullptr));
   options.push_back(std::make_pair(min_heap_string, nullptr));
@@ -166,8 +161,10 @@ void CommonRuntimeTestImpl::FinalizeSetup() {
     runtime_->RunRootClinits(soa.Self());
   }
 
-  // We're back in native, take the opportunity to initialize well known classes.
+  // We're back in native, take the opportunity to initialize well known classes and ensure
+  // intrinsics are initialized.
   WellKnownClasses::Init(Thread::Current()->GetJniEnv());
+  InitializeIntrinsics();
 
   // Create the heap thread pool so that the GC runs in parallel for tests. Normally, the thread
   // pool is created by the runtime.

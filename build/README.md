@@ -58,13 +58,13 @@ the module. It is also mutually exclusive with the other ones.
 3.  Build the module:
 
     ```
-    m
+    m apps_only dist
     ```
 
 4.  Install the module and reboot:
 
     ```
-    adb install out/target/product/module_<arch>/system/apex/com.android.art.apex
+    adb install out/dist/com.android.art.apex
     adb reboot
     ```
 
@@ -82,7 +82,7 @@ module build on `master-art` above (b/172480617).
 2.  Ensure the ART Module is built from source:
 
     ```
-    export SOONG_CONFIG_art_module_source_build=true
+    export ART_MODULE_BUILD_FROM_SOURCE=true
     ```
 
     If this isn't set then the build may use prebuilts of the ART Module that

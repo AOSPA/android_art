@@ -41,6 +41,8 @@ using ::art::odrefresh::OdrConfig;
 using ::art::odrefresh::OdrMetrics;
 using ::art::odrefresh::OnDeviceRefresh;
 using ::art::odrefresh::QuotePath;
+using ::art::odrefresh::ShouldDisablePartialCompilation;
+using ::art::odrefresh::ShouldDisableRefresh;
 using ::art::odrefresh::ZygoteKind;
 
 void UsageMsgV(const char* fmt, va_list ap) {
@@ -145,6 +147,8 @@ int InitializeConfig(int argc, char** argv, OdrConfig* config) {
       config->SetPartialCompilation(true);
     } else if (ArgumentEquals(arg, "--no-refresh")) {
       config->SetRefresh(false);
+    } else if (ArgumentEquals(arg, "--minimal")) {
+      config->SetMinimal(true);
     } else {
       ArgumentError("Unrecognized argument: '%s'", arg);
     }
@@ -164,6 +168,17 @@ int InitializeConfig(int argc, char** argv, OdrConfig* config) {
     std::string filter =
         android::base::GetProperty("dalvik.vm.systemservercompilerfilter", "speed");
     config->SetSystemServerCompilerFilter(filter);
+  }
+
+  if (!config->HasPartialCompilation() &&
+      ShouldDisablePartialCompilation(
+          android::base::GetProperty("ro.build.version.security_patch", /*default_value=*/""))) {
+    config->SetPartialCompilation(false);
+  }
+
+  if (ShouldDisableRefresh(
+          android::base::GetProperty("ro.build.version.sdk", /*default_value=*/""))) {
+    config->SetRefresh(false);
   }
 
   return n;
@@ -198,6 +213,7 @@ NO_RETURN void UsageHelp(const char* argv0) {
   UsageMsg("--system-server-compiler-filter=<STRING>");
   UsageMsg("                                 Compiler filter that overrides");
   UsageMsg("                                 dalvik.vm.systemservercompilerfilter");
+  UsageMsg("--minimal                        Generate a minimal boot image only.");
 
   exit(EX_USAGE);
 }

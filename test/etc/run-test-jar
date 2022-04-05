@@ -741,9 +741,14 @@ fi
 readonly b_path=$(get_apex_bootclasspath ${HOST})
 readonly b_path_locations=$(get_apex_bootclasspath_locations ${HOST})
 
+BCPEX=
+if [ -f "$TEST_NAME-bcpex.jar" ] ; then
+  BCPEX=":$DEX_LOCATION/$TEST_NAME-bcpex.jar"
+fi
+
 # Pass down the bootclasspath
-FLAGS="${FLAGS} -Xbootclasspath:${b_path}"
-FLAGS="${FLAGS} -Xbootclasspath-locations:${b_path_locations}"
+FLAGS="${FLAGS} -Xbootclasspath:${b_path}${BCPEX}"
+FLAGS="${FLAGS} -Xbootclasspath-locations:${b_path_locations}${BCPEX}"
 COMPILE_FLAGS="${COMPILE_FLAGS} --runtime-arg -Xbootclasspath:${b_path}"
 COMPILE_FLAGS="${COMPILE_FLAGS} --runtime-arg -Xbootclasspath-locations:${b_path_locations}"
 
@@ -754,14 +759,13 @@ if [ "$HAVE_IMAGE" = "n" ]; then
     # We'll abuse a second flag here to test different behavior. If --relocate, use the
     # existing image - relocation will fail as patching is disallowed. If --no-relocate,
     # pass a non-existent image - compilation will fail as dex2oat is disallowed.
-    if [ "${RELOCATE}" = "y" ] ; then
-      DALVIKVM_BOOT_OPT="-Ximage:${BOOT_IMAGE}"
-    else
-      DALVIKVM_BOOT_OPT="-Ximage:/system/non-existent/boot.art"
+    if [ "${RELOCATE}" = "n" ] ; then
+      BOOT_IMAGE="/system/non-existent/boot.art"
     fi
-else
-    DALVIKVM_BOOT_OPT="-Ximage:${BOOT_IMAGE}"
+    # App images cannot be generated without a boot image.
+    APP_IMAGE="n"
 fi
+DALVIKVM_BOOT_OPT="-Ximage:${BOOT_IMAGE}"
 
 if [ "$USE_GDB_DEX2OAT" = "y" ]; then
   if [ "$HOST" = "n" ]; then
@@ -1139,6 +1143,12 @@ else
   QUOTED_DALVIKVM_BOOT_OPT="$DALVIKVM_BOOT_OPT"
 fi
 
+DALVIKVM_CLASSPATH=$DEX_LOCATION/$TEST_NAME.jar
+if [ -f "$TEST_NAME-aotex.jar" ] ; then
+  DALVIKVM_CLASSPATH=$DALVIKVM_CLASSPATH:$DEX_LOCATION/$TEST_NAME-aotex.jar
+fi
+DALVIKVM_CLASSPATH=$DALVIKVM_CLASSPATH$SECONDARY_DEX
+
 # We set DumpNativeStackOnSigQuit to false to avoid stressing libunwind.
 # b/27185632
 # b/24664297
@@ -1157,7 +1167,7 @@ dalvikvm_cmdline="$INVOKE_WITH $GDB $ANDROID_ART_BIN_DIR/$DALVIKVM \
                   ${QUOTED_DALVIKVM_BOOT_OPT} \
                   $TMP_DIR_OPTION \
                   -XX:DumpNativeStackOnSigQuit:false \
-                  -cp $DEX_LOCATION/$TEST_NAME.jar$SECONDARY_DEX $MAIN $ARGS"
+                  -cp $DALVIKVM_CLASSPATH $MAIN $ARGS"
 
 if [ "x$SIMPLEPERF" == xyes ]; then
   dalvikvm_cmdline="simpleperf record ${dalvikvm_cmdline} && simpleperf report"
@@ -1214,6 +1224,8 @@ if [ "$HOST" = "n" ]; then
       adb shell mkdir -p $CHROOT_DEX_LOCATION
       adb push $TEST_NAME.jar $CHROOT_DEX_LOCATION
       adb push $TEST_NAME-ex.jar $CHROOT_DEX_LOCATION
+      adb push $TEST_NAME-aotex.jar $CHROOT_DEX_LOCATION
+      adb push $TEST_NAME-bcpex.jar $CHROOT_DEX_LOCATION
       if [ "$PROFILE" = "y" ] || [ "$RANDOM_PROFILE" = "y" ]; then
         adb push profile $CHROOT_DEX_LOCATION
       fi
@@ -1226,6 +1238,8 @@ if [ "$HOST" = "n" ]; then
       adb shell mkdir -p $CHROOT_DEX_LOCATION >/dev/null 2>&1
       adb push $TEST_NAME.jar $CHROOT_DEX_LOCATION >/dev/null 2>&1
       adb push $TEST_NAME-ex.jar $CHROOT_DEX_LOCATION >/dev/null 2>&1
+      adb push $TEST_NAME-aotex.jar $CHROOT_DEX_LOCATION >/dev/null 2>&1
+      adb push $TEST_NAME-bcpex.jar $CHROOT_DEX_LOCATION >/dev/null 2>&1
       if [ "$PROFILE" = "y" ] || [ "$RANDOM_PROFILE" = "y" ]; then
         adb push profile $CHROOT_DEX_LOCATION >/dev/null 2>&1
       fi

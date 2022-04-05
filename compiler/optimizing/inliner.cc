@@ -64,6 +64,11 @@ static constexpr size_t kMaximumNumberOfCumulatedDexRegisters = 32;
 // much inlining compared to code locality.
 static constexpr size_t kMaximumNumberOfRecursiveCalls = 4;
 
+// Limit recursive polymorphic call inlining to prevent code bloat, since it can quickly get out of
+// hand in the presence of multiple Wrapper classes. We set this to 0 to disallow polymorphic
+// recursive calls at all.
+static constexpr size_t kMaximumNumberOfPolymorphicRecursiveCalls = 0;
+
 // Controls the use of inline caches in AOT mode.
 static constexpr bool kUseAOTInlineCaches = true;
 
@@ -952,8 +957,26 @@ bool HInliner::TryInlinePolymorphicCall(
 
     dex::TypeIndex class_index = FindClassIndexIn(handle.Get(), caller_compilation_unit_);
     HInstruction* return_replacement = nullptr;
-    LOG_NOTE() << "Try inline polymorphic call to " << method->PrettyMethod();
-    if (!class_index.IsValid() ||
+
+    // In monomorphic cases when UseOnlyPolymorphicInliningWithNoDeopt() is true, we call
+    // `TryInlinePolymorphicCall` even though we are monomorphic.
+    const bool actually_monomorphic = number_of_types == 1;
+    DCHECK_IMPLIES(actually_monomorphic, UseOnlyPolymorphicInliningWithNoDeopt());
+
+    // We only want to limit recursive polymorphic cases, not monomorphic ones.
+    const bool too_many_polymorphic_recursive_calls =
+        !actually_monomorphic &&
+        CountRecursiveCallsOf(method) > kMaximumNumberOfPolymorphicRecursiveCalls;
+    if (too_many_polymorphic_recursive_calls) {
+      LOG_FAIL(stats_, MethodCompilationStat::kNotInlinedPolymorphicRecursiveBudget)
+          << "Method " << method->PrettyMethod()
+          << " is not inlined because it has reached its polymorphic recursive call budget.";
+    } else if (class_index.IsValid()) {
+      LOG_NOTE() << "Try inline polymorphic call to " << method->PrettyMethod();
+    }
+
+    if (too_many_polymorphic_recursive_calls ||
+        !class_index.IsValid() ||
         !TryBuildAndInline(invoke_instruction,
                            method,
                            ReferenceTypeInfo::Create(handle, /* is_exact= */ true),
@@ -1528,14 +1551,19 @@ bool HInliner::TryPatternSubstitution(HInvoke* invoke_instruction,
       *return_replacement = GetInvokeInputForArgVRegIndex(invoke_instruction,
                                                           inline_method.d.return_data.arg);
       break;
-    case kInlineOpNonWideConst:
-      if (method->GetShorty()[0] == 'L') {
+    case kInlineOpNonWideConst: {
+      char shorty0 = method->GetShorty()[0];
+      if (shorty0 == 'L') {
         DCHECK_EQ(inline_method.d.data, 0u);
         *return_replacement = graph_->GetNullConstant();
+      } else if (shorty0 == 'F') {
+        *return_replacement = graph_->GetFloatConstant(
+            bit_cast<float, int32_t>(static_cast<int32_t>(inline_method.d.data)));
       } else {
         *return_replacement = graph_->GetIntConstant(static_cast<int32_t>(inline_method.d.data));
       }
       break;
+    }
     case kInlineOpIGet: {
       const InlineIGetIPutData& data = inline_method.d.ifield_data;
       if (data.method_is_static || data.object_arg != 0u) {
@@ -1717,11 +1745,12 @@ static bool CanEncodeInlinedMethodInStackMap(const DexFile& outer_dex_file,
   // Inline across dexfiles if the callee's DexFile is:
   // 1) in the bootclasspath, or
   if (callee->GetDeclaringClass()->GetClassLoader() == nullptr) {
-    // There are cases in which the BCP DexFiles are within the OatFile as far as the compiler
-    // options are concerned, but they have their own OatWriter (and therefore not in the same
-    // OatFile). Then, we request the BSS check for all BCP DexFiles.
-    // TODO(solanes): Add .bss support for BCP.
-    *out_needs_bss_check = true;
+    // In multi-image, each BCP DexFile has their own OatWriter. Since they don't cooperate with
+    // each other, we request the BSS check for them.
+    // TODO(solanes): Add .bss support for BCP multi-image.
+    const bool is_multi_image = codegen->GetCompilerOptions().IsBootImage() ||
+                                codegen->GetCompilerOptions().IsBootImageExtension();
+    *out_needs_bss_check = is_multi_image;
     return true;
   }
 

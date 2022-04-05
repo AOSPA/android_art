@@ -573,6 +573,7 @@
             "691-hiddenapi-proxy",
             "692-vdex-inmem-loader",
             "693-vdex-inmem-loader-evict",
+            "817-hiddenapi",
             "944-transform-classloaders",
             "999-redefine-hiddenapi",
             "2038-hiddenapi-jvmti-ext"
@@ -1167,6 +1168,7 @@
                   "831-unverified-bcp",
                   "831-unresolved-field",
                   "833-background-verification",
+                  "836-32768classes",
                   "999-redefine-hiddenapi",
                   "1000-non-moving-space-stress",
                   "1001-app-image-regions",
@@ -1216,7 +1218,8 @@
                   "2035-structural-native-method",
                   "2036-structural-subclass-shadow",
                   "2038-hiddenapi-jvmti-ext",
-                  "2040-huge-native-alloc"],
+                  "2040-huge-native-alloc",
+                  "2238-checker-polymorphic-recursive-inlining"],
         "variant": "jvm",
         "description": ["Doesn't run on RI."]
     },
@@ -1446,18 +1449,17 @@
     },
     {
         "tests": ["2235-JdkUnsafeTest",
-                  "2236-JdkUnsafeGetLong-regression"],
+                  "2236-JdkUnsafeGetLong-regression",
+                  "2239-varhandle-perf"],
         "variant": "jvm",
         "bug": "b/195387473",
         "description": ["Depends on using language level 11."]
     },
     {
         "tests": ["727-checker-unresolved-class"],
-        "description": ["The test used to use --updatable-bcp-packages-file to",
-                        "make classes unresolved, but the flag is deprecated",
-                        "and no longer takes effect"],
+        "description": ["The run-test-jar script does not support *-bcpex.jar for RI."],
         "bug": "b/203171409",
-        "variant": "target | host"
+        "variant": "jvm"
     },
     {
         "tests": ["004-ReferenceMap"],
@@ -1468,11 +1470,33 @@
         "tests": ["597-deopt-invoke-stub"],
         "variant": "redefine-stress & jit | jvmti-stress & jit",
         "description": ["Test expects few methods to be interpreted but jvmti enables",
-		        "jit-on-first-use which breaks this expectation"]
+                        "jit-on-first-use which breaks this expectation"]
     },
     {
         "tests": ["667-jit-jni-stub"],
         "variant": "jit-on-first-use | redefine-stress",
         "description": ["jit-on-first-use disables jit GC but this test requires jit GC"]
+    },
+    {
+        "tests": ["835-b216762268"],
+        "variant": "jit | optimizing | jit-on-first-use",
+        "bug": "b/216762268",
+        "description": ["bug in the loop optimization"]
+    },
+    {
+        "tests": ["445-checker-licm",
+                  "449-checker-bce",
+                  "455-checker-gvn",
+                  "530-checker-lse",
+                  "530-checker-peel-unroll",
+                  "552-checker-sharpening",
+                  "577-checker-fp2int",
+                  "580-checker-string-fact-intrinsics",
+                  "603-checker-instanceof",
+                  "623-checker-loop-regressions",
+                  "639-checker-code-sinking",
+                  "640-checker-integer-valueof"],
+        "variant": "optimizing & no-image",
+        "description": ["Expected failures when compiling without a boot image"]
     }
 ]

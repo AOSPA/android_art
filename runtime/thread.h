@@ -413,7 +413,7 @@ class Thread {
   // End region where no thread suspension is expected.
   void EndAssertNoThreadSuspension(const char* old_cause) RELEASE(Roles::uninterruptible_) {
     if (kIsDebugBuild) {
-      CHECK(old_cause != nullptr || tls32_.no_thread_suspension == 1);
+      CHECK_IMPLIES(old_cause == nullptr, tls32_.no_thread_suspension == 1);
       CHECK_GT(tls32_.no_thread_suspension, 0U);
       tls32_.no_thread_suspension--;
       tlsPtr_.last_no_thread_suspension_cause = old_cause;
@@ -1541,7 +1541,8 @@ class Thread {
   template <bool kPrecise>
   void VisitRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void SweepInterpreterCache(IsMarkedVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
+  static void SweepInterpreterCaches(IsMarkedVisitor* visitor)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   static bool IsAotCompiler();
 

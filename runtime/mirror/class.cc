@@ -149,7 +149,7 @@ ObjPtr<ClassExt> Class::EnsureExtDataPresent(Handle<Class> h_this, Thread* self)
                                           std::memory_order_seq_cst);
     }
     ObjPtr<ClassExt> ret(set ? new_ext.Get() : h_this->GetExtData());
-    DCHECK(!set || h_this->GetExtData() == new_ext.Get());
+    DCHECK_IMPLIES(set, h_this->GetExtData() == new_ext.Get());
     CHECK(!ret.IsNull());
     // Restore the exception if there was one.
     if (throwable != nullptr) {
@@ -1546,7 +1546,7 @@ ObjPtr<Class> Class::ResolveDirectInterface(Thread* self, Handle<Class> klass, u
     DCHECK(!klass->IsProxyClass());
     dex::TypeIndex type_idx = klass->GetDirectInterfaceTypeIdx(idx);
     interface = Runtime::Current()->GetClassLinker()->ResolveType(type_idx, klass.Get());
-    CHECK(interface != nullptr || self->IsExceptionPending());
+    CHECK_IMPLIES(interface == nullptr, self->IsExceptionPending());
   }
   return interface;
 }
@@ -1755,7 +1755,7 @@ static bool IsMethodPreferredOver(ArtMethod* orig_method,
   // We iterate over virtual methods first and then over direct ones,
   // so we can never be in situation where `orig_method` is direct and
   // `new_method` is virtual.
-  DCHECK(!orig_method->IsDirect() || new_method->IsDirect());
+  DCHECK_IMPLIES(orig_method->IsDirect(), new_method->IsDirect());
 
   // Original method is synthetic, the new one is not?
   if (orig_method->IsSynthetic() && !new_method->IsSynthetic()) {
@@ -2120,7 +2120,13 @@ ArtMethod* Class::FindAccessibleInterfaceMethod(ArtMethod* implementation_method
         ArtMethod* interface_method = &iface->GetVirtualMethodsSlice(pointer_size)[j];
         // If the interface method is part of the public SDK, return it.
         if ((hiddenapi::GetRuntimeFlags(interface_method) & kAccPublicApi) != 0) {
-          return interface_method;
+          hiddenapi::ApiList api_list(hiddenapi::detail::GetDexFlags(interface_method));
+          // The kAccPublicApi flag is also used as an optimization to avoid
+          // other hiddenapi checks to always go on the slow path. Therefore, we
+          // need to check here if the method is in the SDK list.
+          if (api_list.IsSdkApi()) {
+            return interface_method;
+          }
         }
       }
     }

@@ -531,7 +531,9 @@ class LoadClassSlowPathARMVIXL : public SlowPathCodeARMVIXL {
     InvokeRuntimeCallingConventionARMVIXL calling_convention;
     if (must_resolve_type) {
       DCHECK(IsSameDexFile(cls_->GetDexFile(), arm_codegen->GetGraph()->GetDexFile()) ||
-             arm_codegen->GetCompilerOptions().WithinOatFile(&cls_->GetDexFile()));
+             arm_codegen->GetCompilerOptions().WithinOatFile(&cls_->GetDexFile()) ||
+             ContainsElement(Runtime::Current()->GetClassLinker()->GetBootClassPath(),
+                             &cls_->GetDexFile()));
       dex::TypeIndex type_index = cls_->GetTypeIndex();
       __ Mov(calling_convention.GetRegisterAt(0), type_index.index_);
       if (cls_->NeedsAccessCheck()) {
@@ -1886,7 +1888,7 @@ static bool CanGenerateConditionalMove(const Location& out, const Location& src)
 vixl32::Label* CodeGeneratorARMVIXL::GetFinalLabel(HInstruction* instruction,
                                                    vixl32::Label* final_label) {
   DCHECK(!instruction->IsControlFlow() && !instruction->IsSuspendCheck());
-  DCHECK(!instruction->IsInvoke() || !instruction->GetLocations()->CanCall());
+  DCHECK_IMPLIES(instruction->IsInvoke(), !instruction->GetLocations()->CanCall());
 
   const HBasicBlock* const block = instruction->GetBlock();
   const HLoopInformation* const info = block->GetLoopInformation();
@@ -2949,7 +2951,7 @@ void InstructionCodeGeneratorARMVIXL::VisitSelect(HSelect* select) {
       !out.Equals(second) &&
       (condition->GetLocations()->InAt(0).Equals(out) ||
        condition->GetLocations()->InAt(1).Equals(out));
-  DCHECK(!output_overlaps_with_condition_inputs || condition->IsCondition());
+  DCHECK_IMPLIES(output_overlaps_with_condition_inputs, condition->IsCondition());
   Location src;
 
   if (condition->IsIntConstant()) {
@@ -10124,7 +10126,7 @@ void CodeGeneratorARMVIXL::CompileBakerReadBarrierThunk(ArmVIXLAssembler& assemb
 
   // For JIT, the slow path is considered part of the compiled method,
   // so JIT should pass null as `debug_name`.
-  DCHECK(!GetCompilerOptions().IsJitCompiler() || debug_name == nullptr);
+  DCHECK_IMPLIES(GetCompilerOptions().IsJitCompiler(), debug_name == nullptr);
   if (debug_name != nullptr && GetCompilerOptions().GenerateAnyDebugInfo()) {
     std::ostringstream oss;
     oss << "BakerReadBarrierThunk";

@@ -100,7 +100,7 @@ endif # HOST_OS != darwin
 
 ########################################################################
 # Everything below is only available in ART source builds
-# (SOONG_CONFIG_art_module_source_build=true).
+# (ART_MODULE_BUILD_FROM_SOURCE=true).
 ########################################################################
 
 # TODO(b/172480617): Clean up the platform dependencies on everything above and
@@ -394,10 +394,10 @@ LOCAL_NOTICE_FILE := $(LOCAL_PATH)/NOTICE
 
 # Reference the libraries and binaries in the appropriate APEX module, because
 # they don't have platform variants. However if
-# SOONG_CONFIG_art_module_source_build isn't true then the APEX modules are
-# disabled, so Soong won't apply the APEX mutators to them, and then they are
-# available with their plain names.
-ifeq (true,$(SOONG_CONFIG_art_module_source_build))
+# ART_MODULE_BUILD_FROM_SOURCE isn't true then the APEX
+# modules are disabled, so Soong won't apply the APEX mutators to them, and
+# then they are available with their plain names.
+ifeq (true,$(ART_MODULE_BUILD_FROM_SOURCE))
   art_module_lib = $(1).com.android.art
   art_module_debug_lib = $(1).com.android.art.debug
 else
@@ -711,6 +711,7 @@ build-art-target-golem: $(RELEASE_ART_APEX) com.android.runtime $(CONSCRYPT_APEX
                         $(TARGET_OUT_EXECUTABLES)/dex2oat_wrapper \
                         $(ART_TARGET_PLATFORM_DEPENDENCIES) \
                         $(ART_TARGET_SHARED_LIBRARY_BENCHMARK) \
+                        $(PRODUCT_OUT)/apex/art_boot_images/javalib/$(TARGET_ARCH)/boot.art \
                         standalone-apex-files
 	# remove debug libraries from public.libraries.txt because golem builds
 	# won't have it.

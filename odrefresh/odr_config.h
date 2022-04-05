@@ -64,6 +64,7 @@ class OdrConfig final {
   std::string artifact_dir_;
   std::string standalone_system_server_jars_;
   bool compilation_os_mode_ = false;
+  bool minimal_ = false;
 
   // Staging directory for artifacts. The directory must exist and will be automatically removed
   // after compilation. If empty, use the default directory.
@@ -127,6 +128,9 @@ class OdrConfig final {
   }
 
   bool GetDryRun() const { return dry_run_; }
+  bool HasPartialCompilation() const {
+    return partial_compilation_.has_value();
+  }
   bool GetPartialCompilation() const {
     return partial_compilation_.value_or(true);
   }
@@ -143,6 +147,7 @@ class OdrConfig final {
     return staging_dir_;
   }
   bool GetCompilationOsMode() const { return compilation_os_mode_; }
+  bool GetMinimal() const { return minimal_; }
 
   void SetApexInfoListFile(const std::string& file_path) { apex_info_list_file_ = file_path; }
   void SetArtBinDir(const std::string& art_bin_dir) { art_bin_dir_ = art_bin_dir; }
@@ -191,6 +196,8 @@ class OdrConfig final {
   }
 
   void SetCompilationOsMode(bool value) { compilation_os_mode_ = value; }
+
+  void SetMinimal(bool value) { minimal_ = value; }
 
  private:
   // Returns a pair for the possible instruction sets for the configured instruction set
