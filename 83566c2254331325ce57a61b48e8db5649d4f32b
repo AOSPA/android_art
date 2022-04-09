@@ -33,6 +33,23 @@
       "message": "haven\u0027t benchmarked, but builds and runs fine",
       "revId": "83566c2254331325ce57a61b48e8db5649d4f32b",
       "serverId": "3162e3d8-d894-470e-abd9-724f7b0effad"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "614249cf_deb59b17",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 1
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 1000012
+      },
+      "writtenOn": "2022-04-09T17:13:40Z",
+      "side": 1,
+      "message": "for what it\u0027s worth, this is from Motorola on 8992 and likely has not been tested for performance since. that being said, it sounds like it could be an improvement.",
+      "revId": "83566c2254331325ce57a61b48e8db5649d4f32b",
+      "serverId": "3162e3d8-d894-470e-abd9-724f7b0effad"
     }
   ]
 }
