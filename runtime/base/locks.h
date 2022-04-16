@@ -95,6 +95,7 @@ enum LockLevel : uint8_t {
   kOatFileManagerLock,
   kTracingUniqueMethodsLock,
   kTracingStreamingLock,
+  kJniLoadLibraryLock,
   kClassLoaderClassesLock,
   kDefaultMutexLevel,
   kDexCacheLock,
@@ -105,7 +106,6 @@ enum LockLevel : uint8_t {
   kAllocatedThreadIdsLock,
   kMonitorPoolLock,
   kClassLinkerClassesLock,  // TODO rename.
-  kDexToDexCompilerLock,
   kSubtypeCheckLock,
   kBreakpointLock,
   // This is a generic lock level for a lock meant to be gained after having a
@@ -113,7 +113,6 @@ enum LockLevel : uint8_t {
   kPostMonitorLock,
   kMonitorLock,
   kMonitorListLock,
-  kJniLoadLibraryLock,
   kThreadListLock,
   kAllocTrackerLock,
   kDeoptimizationLock,
