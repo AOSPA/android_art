@@ -13,7 +13,7 @@
     See the License for the specific language governing permissions and
     limitations under the License.
 -->
-<configuration description="Config for on-device signing ART e2e test cases">
+<configuration description="Config for a subset of on-device signing ART e2e test cases that run in CTS">
     <option name="test-suite-tag" value="odsign_e2e_tests" />
     <option name="test-suite-tag" value="apct" />
     <option name="test-suite-tag" value="cts" />
@@ -25,6 +25,7 @@
 
     <test class="com.android.tradefed.testtype.HostTest" >
         <option name="jar" value="odsign_e2e_tests.jar" />
+        <option name="include-annotation" value="com.android.tests.odsign.annotation.CtsTestCase" />
     </test>
 
     <!-- Only run tests if the device under test is SDK version 31 (Android 12) or above. -->

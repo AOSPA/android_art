@@ -353,9 +353,14 @@ void ImageWriter::CopyMetadata() {
 
 // NO_THREAD_SAFETY_ANALYSIS: Avoid locking the `Locks::intern_table_lock_` while single-threaded.
 bool ImageWriter::IsStronglyInternedString(ObjPtr<mirror::String> str) NO_THREAD_SAFETY_ANALYSIS {
+  uint32_t hash = static_cast<uint32_t>(str->GetStoredHashCode());
+  if (hash == 0u && str->ComputeHashCode() != 0) {
+    // A string with uninitialized hash code cannot be interned.
+    return false;
+  }
   InternTable* intern_table = Runtime::Current()->GetInternTable();
   for (InternTable::Table::InternalTable& table : intern_table->strong_interns_.tables_) {
-    auto it = table.set_.find(GcRoot<mirror::String>(str));
+    auto it = table.set_.FindWithHash(GcRoot<mirror::String>(str), hash);
     if (it != table.set_.end()) {
       return it->Read<kWithoutReadBarrier>() == str;
     }
@@ -1103,12 +1108,20 @@ class ImageWriter::PruneClassesVisitor : public ClassVisitor {
   size_t Prune() REQUIRES_SHARED(Locks::mutator_lock_) {
     ClassTable* class_table =
         Runtime::Current()->GetClassLinker()->ClassTableForClassLoader(class_loader_);
+    WriterMutexLock mu(Thread::Current(), class_table->lock_);
     for (mirror::Class* klass : classes_to_prune_) {
-      std::string storage;
-      const char* descriptor = klass->GetDescriptor(&storage);
-      bool result = class_table->Remove(descriptor);
-      DCHECK(result);
-      DCHECK(!class_table->Remove(descriptor)) << descriptor;
+      uint32_t hash = ClassTable::TableSlot::HashDescriptor(klass);
+      DCHECK(!class_table->classes_.empty());
+      ClassTable::ClassSet& last_class_set = class_table->classes_.back();
+      auto it = last_class_set.FindWithHash(ClassTable::TableSlot(klass, hash), hash);
+      DCHECK(it != last_class_set.end());
+      last_class_set.erase(it);
+      DCHECK(std::none_of(class_table->classes_.begin(),
+                          class_table->classes_.end(),
+                          [klass, hash](ClassTable::ClassSet& class_set) {
+                            ClassTable::TableSlot slot(klass, hash);
+                            return class_set.FindWithHash(slot, hash) != class_set.end();
+                          }));
     }
     return defined_class_count_;
   }
@@ -1227,8 +1240,10 @@ void ImageWriter::PromoteWeakInternsToStrong(Thread* self) {
   MutexLock mu(self, *Locks::intern_table_lock_);
   DCHECK_EQ(intern_table->weak_interns_.tables_.size(), 1u);
   for (GcRoot<mirror::String>& entry : intern_table->weak_interns_.tables_.front().set_) {
-    DCHECK(!IsStronglyInternedString(entry.Read<kWithoutReadBarrier>()));
-    intern_table->InsertStrong(entry.Read<kWithoutReadBarrier>());
+    ObjPtr<mirror::String> s = entry.Read<kWithoutReadBarrier>();
+    DCHECK(!IsStronglyInternedString(s));
+    uint32_t hash = static_cast<uint32_t>(s->GetStoredHashCode());
+    intern_table->InsertStrong(s, hash);
   }
   intern_table->weak_interns_.tables_.front().set_.clear();
 }
@@ -2019,8 +2034,9 @@ void ImageWriter::LayoutHelper::ProcessInterns(Thread* self) {
       uint32_t utf16_length;
       const char* utf8_data = dex_file->StringDataAndUtf16LengthByIdx(dex::StringIndex(i),
                                                                       &utf16_length);
-      int32_t hash = InternTable::Utf8String::Hash(utf16_length, utf8_data);
-      auto intern_it = intern_set.find(InternTable::Utf8String(utf16_length, utf8_data, hash));
+      uint32_t hash = InternTable::Utf8String::Hash(utf16_length, utf8_data);
+      auto intern_it =
+          intern_set.FindWithHash(InternTable::Utf8String(utf16_length, utf8_data), hash);
       if (intern_it != intern_set.end()) {
         mirror::String* string = intern_it->Read<kWithoutReadBarrier>();
         DCHECK(string != nullptr);
@@ -3221,7 +3237,10 @@ void ImageWriter::FixupObject(Object* orig, Object* copy) {
   } else {
     ObjPtr<mirror::ObjectArray<mirror::Class>> class_roots =
         Runtime::Current()->GetClassLinker()->GetClassRoots<kWithoutReadBarrier>();
-    if (klass == GetClassRoot<mirror::Method, kWithoutReadBarrier>(class_roots) ||
+    if (klass == GetClassRoot<mirror::String, kWithoutReadBarrier>(class_roots)) {
+      // Make sure all image strings have the hash code calculated, even if they are not interned.
+      down_cast<mirror::String*>(copy)->GetHashCode();
+    } else if (klass == GetClassRoot<mirror::Method, kWithoutReadBarrier>(class_roots) ||
         klass == GetClassRoot<mirror::Constructor, kWithoutReadBarrier>(class_roots)) {
       // Need to update the ArtMethod.
       auto* dest = down_cast<mirror::Executable*>(copy);
