@@ -96,6 +96,9 @@ class ClassTable {
     static uint32_t Encode(ObjPtr<mirror::Class> klass, uint32_t hash_bits)
         REQUIRES_SHARED(Locks::mutator_lock_);
 
+    static uint32_t UpdateHashForProxyClass(uint32_t hash, ObjPtr<mirror::Class> proxy_class)
+        REQUIRES_SHARED(Locks::mutator_lock_);
+
     // Data contains the class pointer GcRoot as well as the low bits of the descriptor hash.
     mutable Atomic<uint32_t> data_;
     static constexpr uint32_t kHashMask = kObjectAlignment - 1;
@@ -214,11 +217,6 @@ class ClassTable {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void InsertWithHash(ObjPtr<mirror::Class> klass, size_t hash)
-      REQUIRES(!lock_)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Returns true if the class was found and removed, false otherwise.
-  bool Remove(const char* descriptor)
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
