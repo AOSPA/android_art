@@ -49,6 +49,7 @@ ART_TEST_CHROOT = os.environ.get("ART_TEST_CHROOT")
 ANDROID_PRODUCT_OUT = os.environ.get("ANDROID_PRODUCT_OUT")
 
 LIBCORE_TEST_NAMES = [
+  ### luni tests. ###
   # Naive critical path optimization: Run the longest tests first.
   "org.apache.harmony.tests.java.util",  # 90min under gcstress
   "libcore.java.lang",                   # 90min under gcstress
@@ -66,7 +67,7 @@ LIBCORE_TEST_NAMES = [
   "libcore.highmemorytest.java.util.CalendarTest",
   "libcore.highmemorytest.java.util.CurrencyTest",
   "libcore.highmemorytest.libcore.icu.SimpleDateFormatDataTest",
-  # All other tests in alphabetical order.
+  # All other luni tests in alphabetical order.
   "libcore.android.system",
   "libcore.build",
   "libcore.dalvik.system",
@@ -98,6 +99,131 @@ LIBCORE_TEST_NAMES = [
   "org.apache.harmony.tests.java.math",
   "org.apache.harmony.tests.javax.security",
   "tests.java.lang.String",
+  ### OpenJDK upstream tests (ojluni). ###
+  # "test.java.awt",
+  "test.java.awt",
+  # test.java.io
+  "test.java.io.ByteArrayInputStream",
+  "test.java.io.ByteArrayOutputStream",
+  "test.java.io.FileReader",
+  "test.java.io.FileWriter",
+  "test.java.io.InputStream",
+  "test.java.io.OutputStream",
+  "test.java.io.PrintStream",
+  "test.java.io.PrintWriter",
+  "test.java.io.Reader",
+  "test.java.io.Writer",
+  # test.java.lang
+  "test.java.lang.Boolean",
+  "test.java.lang.ClassLoader",
+  "test.java.lang.Double",
+  "test.java.lang.Float",
+  "test.java.lang.Integer",
+  "test.java.lang.Long",
+  # Sharded test.java.lang.StrictMath
+  "test.java.lang.StrictMath.CubeRootTests",
+  "test.java.lang.StrictMath.ExactArithTests",
+  "test.java.lang.StrictMath.Expm1Tests",
+  "test.java.lang.StrictMath.ExpTests",
+  "test.java.lang.StrictMath.HyperbolicTests",
+  "test.java.lang.StrictMath.HypotTests#testAgainstTranslit_shard1",
+  "test.java.lang.StrictMath.HypotTests#testAgainstTranslit_shard2",
+  "test.java.lang.StrictMath.HypotTests#testAgainstTranslit_shard3",
+  "test.java.lang.StrictMath.HypotTests#testAgainstTranslit_shard4",
+  "test.java.lang.StrictMath.HypotTests#testHypot",
+  "test.java.lang.StrictMath.Log1pTests",
+  "test.java.lang.StrictMath.Log10Tests",
+  "test.java.lang.StrictMath.MultiplicationTests",
+  "test.java.lang.StrictMath.PowTests",
+  "test.java.lang.String",
+  "test.java.lang.Thread",
+  # test.java.lang.invoke
+  "test.java.lang.invoke",
+  # test.java.lang.ref
+  "test.java.lang.ref.SoftReference",
+  "test.java.lang.ref.BasicTest",
+  "test.java.lang.ref.EnqueueNullRefTest",
+  "test.java.lang.ref.EnqueuePollRaceTest",
+  "test.java.lang.ref.ReferenceCloneTest",
+  "test.java.lang.ref.ReferenceEnqueuePendingTest",
+  # test.java.math
+  "test.java.math.BigDecimal",
+  # Sharded test.java.math.BigInteger
+  "test.java.math.BigInteger#testArithmetic",
+  "test.java.math.BigInteger#testBitCount",
+  "test.java.math.BigInteger#testBitLength",
+  "test.java.math.BigInteger#testbitOps",
+  "test.java.math.BigInteger#testBitwise",
+  "test.java.math.BigInteger#testByteArrayConv",
+  "test.java.math.BigInteger#testConstructor",
+  "test.java.math.BigInteger#testDivideAndReminder",
+  "test.java.math.BigInteger#testDivideLarge",
+  "test.java.math.BigInteger#testModExp",
+  "test.java.math.BigInteger#testModInv",
+  "test.java.math.BigInteger#testMultiplyLarge",
+  "test.java.math.BigInteger#testNextProbablePrime",
+  "test.java.math.BigInteger#testPow",
+  "test.java.math.BigInteger#testPrime",
+  "test.java.math.BigInteger#testSerialize",
+  "test.java.math.BigInteger#testShift",
+  "test.java.math.BigInteger#testSquare",
+  "test.java.math.BigInteger#testSquareLarge",
+  "test.java.math.BigInteger#testSquareRoot",
+  "test.java.math.BigInteger#testSquareRootAndReminder",
+  "test.java.math.BigInteger#testStringConv_generic",
+  "test.java.math.BigInteger#testStringConv_schoenhage_threshold_pow0",
+  "test.java.math.BigInteger#testStringConv_schoenhage_threshold_pow1",
+  "test.java.math.BigInteger#testStringConv_schoenhage_threshold_pow2",
+  "test.java.math.RoundingMode",
+  # test.java.net
+  "test.java.net.DatagramSocket",
+  "test.java.net.Socket",
+  "test.java.net.SocketOptions",
+  "test.java.net.URLDecoder",
+  "test.java.net.URLEncoder",
+  # test.java.nio
+  "test.java.nio.channels.Channels",
+  "test.java.nio.channels.SelectionKey",
+  "test.java.nio.channels.Selector",
+  "test.java.nio.file",
+  # test.java.security
+  "test.java.security.cert",
+  # Sharded test.java.security.KeyAgreement
+  "test.java.security.KeyAgreement.KeyAgreementTest",
+  "test.java.security.KeyAgreement.KeySizeTest#testDHKeySize",
+  "test.java.security.KeyAgreement.KeySizeTest#testECDHKeySize",
+  "test.java.security.KeyAgreement.KeySpecTest",
+  "test.java.security.KeyAgreement.MultiThreadTest",
+  "test.java.security.KeyAgreement.NegativeTest",
+  "test.java.security.KeyStore",
+  "test.java.security.Provider",
+  # test.java.time
+  "test.java.time",
+  # test.java.util
+  "test.java.util.Arrays",
+  "test.java.util.Collection",
+  "test.java.util.Collections",
+  "test.java.util.Date",
+  "test.java.util.EnumMap",
+  "test.java.util.EnumSet",
+  "test.java.util.GregorianCalendar",
+  "test.java.util.LinkedHashMap",
+  "test.java.util.LinkedHashSet",
+  "test.java.util.List",
+  "test.java.util.Map",
+  "test.java.util.Optional",
+  "test.java.util.TestFormatter",
+  "test.java.util.TimeZone",
+  # test.java.util.concurrent
+  "test.java.util.concurrent",
+  # test.java.util.function
+  "test.java.util.function",
+  # test.java.util.stream
+  "test.java.util.stream",
+  # test.java.util.zip
+  "test.java.util.zip.ZipFile",
+  # tck.java.time
+  "tck.java.time",
 ]
 # "org.apache.harmony.security",  # We don't have rights to revert changes in case of failures.
 
