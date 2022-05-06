@@ -1382,7 +1382,10 @@ class CountInternedStringReferencesVisitor {
         space_.HasAddress(referred_obj.Ptr()) &&
         referred_obj->IsString()) {
       ObjPtr<mirror::String> referred_str = referred_obj->AsString();
-      auto it = image_interns_.find(GcRoot<mirror::String>(referred_str));
+      uint32_t hash = static_cast<uint32_t>(referred_str->GetStoredHashCode());
+      // All image strings have the hash code calculated, even if they are not interned.
+      DCHECK_EQ(hash, static_cast<uint32_t>(referred_str->ComputeHashCode()));
+      auto it = image_interns_.FindWithHash(GcRoot<mirror::String>(referred_str), hash);
       if (it != image_interns_.end() && it->Read() == referred_str) {
         ++count_;
       }
@@ -3701,7 +3704,23 @@ void ClassLinker::LoadMethod(const DexFile& dex_file,
       }
     }
   }
-  size_t slow_args_search_start = 1u;  // First arg.
+
+  // Check for nterp invoke fast-path based on shorty.
+  bool all_parameters_are_reference = true;
+  bool all_parameters_are_reference_or_int = true;
+  for (size_t i = 1; i < shorty.length(); ++i) {
+    if (shorty[i] != 'L') {
+      all_parameters_are_reference = false;
+      if (shorty[i] == 'F' || shorty[i] == 'D' || shorty[i] == 'J') {
+        all_parameters_are_reference_or_int = false;
+        break;
+      }
+    }
+  }
+  if (all_parameters_are_reference_or_int && shorty[0] != 'F' && shorty[0] != 'D') {
+    access_flags |= kAccNterpInvokeFastPathFlag;
+  }
+
   if (UNLIKELY((access_flags & kAccNative) != 0u)) {
     // Check if the native method is annotated with @FastNative or @CriticalNative.
     const dex::ClassDef& class_def = dex_file.GetClassDef(klass->GetDexClassDefIndex());
@@ -3723,6 +3742,10 @@ void ClassLinker::LoadMethod(const DexFile& dex_file,
     DCHECK_EQ(method.GetCodeItemOffset(), 0u);
     dst->SetDataPtrSize(nullptr, image_pointer_size_);  // Single implementation not set yet.
   } else {
+    // Check for nterp entry fast-path based on shorty.
+    if (all_parameters_are_reference) {
+      access_flags |= kAccNterpEntryPointFastPathFlag;
+    }
     const dex::ClassDef& class_def = dex_file.GetClassDef(klass->GetDexClassDefIndex());
     if (annotations::MethodIsNeverCompile(dex_file, class_def, dex_method_idx)) {
       access_flags |= kAccCompileDontBother;
@@ -3737,19 +3760,6 @@ void ClassLinker::LoadMethod(const DexFile& dex_file,
     } else {
       dst->SetCodeItem(dex_file.GetCodeItem(code_item_offset), dex_file.IsCompactDexFile());
     }
-    // Check for nterp entry fast-path based on shorty.
-    slow_args_search_start = shorty.find_first_not_of('L', 1u);
-    if (slow_args_search_start == std::string_view::npos) {
-      dst->SetNterpEntryPointFastPathFlag();
-    }
-  }
-
-  // Check for nterp invoke fast-path based on shorty.
-  auto is_slow_arg = [](char c) { return c == 'F' || c == 'D' || c == 'J'; };
-  if ((shorty[0] != 'F' && shorty[0] != 'D') &&  // Returns reference or integral type.
-      (slow_args_search_start == std::string_view::npos ||
-       std::none_of(shorty.begin() + slow_args_search_start, shorty.end(), is_slow_arg))) {
-    dst->SetNterpInvokeFastPathFlag();
   }
 
   if (Runtime::Current()->IsZygote()) {
@@ -7533,6 +7543,13 @@ class ClassLinker::LinkMethodsHelper {
   ArenaStack stack_;
   ScopedArenaAllocator allocator_;
 
+  // If there are multiple methods with the same signature in the superclass vtable
+  // (which can happen with a new virtual method having the same signature as an
+  // inaccessible package-private method from another package in the superclass),
+  // we keep singly-linked lists in this single array that maps vtable index to the
+  // next vtable index in the list, `dex::kDexNoIndex` denotes the end of a list.
+  ArrayRef<uint32_t> same_signature_vtable_lists_;
+
   // Avoid large allocation for a few copied method records.
   // Keep the initial buffer on the stack to avoid arena allocations
   // if there are no special cases (the first arena allocation is costly).
@@ -7971,6 +7988,7 @@ size_t ClassLinker::LinkMethodsHelper<kPointerSize>::AssignVTableIndexes(
           same_signature_vtable_lists = ArrayRef<uint32_t>(
               allocator_.AllocArray<uint32_t>(super_vtable_length), super_vtable_length);
           std::fill_n(same_signature_vtable_lists.data(), super_vtable_length, dex::kDexNoIndex);
+          same_signature_vtable_lists_ = same_signature_vtable_lists;
         }
         DCHECK_LT(*it, i);
         same_signature_vtable_lists[i] = *it;
@@ -8008,9 +8026,18 @@ size_t ClassLinker::LinkMethodsHelper<kPointerSize>::AssignVTableIndexes(
       // superclass method would have been incorrectly overridden.
       bool overrides = klass->CanAccessMember(super_method->GetDeclaringClass(),
                                               super_method->GetAccessFlags());
+      if (overrides && super_method->IsFinal()) {
+        sants.reset();
+        ThrowLinkageError(klass, "Method %s overrides final method in class %s",
+                          virtual_method->PrettyMethod().c_str(),
+                          super_method->GetDeclaringClassDescriptor());
+        return 0u;
+      }
       if (UNLIKELY(!same_signature_vtable_lists.empty())) {
-        // We override only the first accessible virtual method from superclass.
-        // TODO: Override all methods that need to be overridden according to JLS. b/211854716
+        // We may override more than one method according to JLS, see b/211854716 .
+        // We record the highest overridden vtable index here so that we can walk
+        // the list to find other overridden methods when constructing the vtable.
+        // However, we walk all the methods to check for final method overriding.
         size_t current_index = super_index;
         while (same_signature_vtable_lists[current_index] != dex::kDexNoIndex) {
           DCHECK_LT(same_signature_vtable_lists[current_index], current_index);
@@ -8018,20 +8045,22 @@ size_t ClassLinker::LinkMethodsHelper<kPointerSize>::AssignVTableIndexes(
           ArtMethod* current_method = super_vtable_accessor.GetVTableEntry(current_index);
           if (klass->CanAccessMember(current_method->GetDeclaringClass(),
                                      current_method->GetAccessFlags())) {
-            overrides = true;
-            super_index = current_index;
-            super_method = current_method;
+            if (current_method->IsFinal()) {
+              sants.reset();
+              ThrowLinkageError(klass, "Method %s overrides final method in class %s",
+                                virtual_method->PrettyMethod().c_str(),
+                                current_method->GetDeclaringClassDescriptor());
+              return 0u;
+            }
+            if (!overrides) {
+              overrides = true;
+              super_index = current_index;
+              super_method = current_method;
+            }
           }
         }
       }
       if (overrides) {
-        if (super_method->IsFinal()) {
-          sants.reset();
-          ThrowLinkageError(klass, "Method %s overrides final method in class %s",
-                            virtual_method->PrettyMethod().c_str(),
-                            super_method->GetDeclaringClassDescriptor());
-          return 0u;
-        }
         virtual_method->SetMethodIndex(super_index);
         continue;
       }
@@ -8067,10 +8096,22 @@ size_t ClassLinker::LinkMethodsHelper<kPointerSize>::AssignVTableIndexes(
       } else {
         auto it2 = super_vtable_signatures.FindWithHash(interface_method, hash);
         if (it2 != super_vtable_signatures.end()) {
-          // FIXME: If there are multiple vtable methods with the same signature, the one
-          // with the highest vtable index is not nessarily the one in most-derived class.
-          // However, we're preserving old behavior for now. b/211854716
+          // If there are multiple vtable methods with the same signature, the one with
+          // the highest vtable index is not nessarily the one in most-derived class.
+          // Find the most-derived method. See b/211854716 .
           vtable_method = super_vtable_accessor.GetVTableEntry(*it2);
+          if (UNLIKELY(!same_signature_vtable_lists.empty())) {
+            size_t current_index = *it2;
+            while (same_signature_vtable_lists[current_index] != dex::kDexNoIndex) {
+              DCHECK_LT(same_signature_vtable_lists[current_index], current_index);
+              current_index = same_signature_vtable_lists[current_index];
+              ArtMethod* current_method = super_vtable_accessor.GetVTableEntry(current_index);
+              ObjPtr<mirror::Class> current_class = current_method->GetDeclaringClass();
+              if (current_class->IsSubClass(vtable_method->GetDeclaringClass())) {
+                vtable_method = current_method;
+              }
+            }
+          }
           found = true;
         }
       }
@@ -8078,6 +8119,7 @@ size_t ClassLinker::LinkMethodsHelper<kPointerSize>::AssignVTableIndexes(
       if (found) {
         DCHECK(vtable_method != nullptr);
         if (!vtable_method->IsAbstract() && !vtable_method->IsPublic()) {
+          // FIXME: Delay the exception until we actually try to call the method. b/211854716
           sants.reset();
           ThrowIllegalAccessErrorForImplementingMethod(klass, vtable_method, interface_method);
           return 0u;
@@ -8426,9 +8468,25 @@ bool ClassLinker::LinkMethodsHelper<kPointerSize>::LinkMethods(
     }
 
     // Store new virtual methods in the new vtable.
+    ArrayRef<uint32_t> same_signature_vtable_lists = same_signature_vtable_lists_;
     for (ArtMethod& virtual_method : klass->GetVirtualMethodsSliceUnchecked(kPointerSize)) {
-      int32_t vtable_index = virtual_method.GetMethodIndexDuringLinking();
+      uint32_t vtable_index = virtual_method.GetMethodIndexDuringLinking();
       vtable->SetElementPtrSize(vtable_index, &virtual_method, kPointerSize);
+      if (UNLIKELY(vtable_index < same_signature_vtable_lists.size())) {
+        // We may override more than one method according to JLS, see b/211854716 .
+        // If we do, arbitrarily update the method index to the lowest overridden vtable index.
+        while (same_signature_vtable_lists[vtable_index] != dex::kDexNoIndex) {
+          DCHECK_LT(same_signature_vtable_lists[vtable_index], vtable_index);
+          vtable_index = same_signature_vtable_lists[vtable_index];
+          ArtMethod* current_method = super_class->GetVTableEntry(vtable_index, kPointerSize);
+          if (klass->CanAccessMember(current_method->GetDeclaringClass(),
+                                     current_method->GetAccessFlags())) {
+            DCHECK(!current_method->IsFinal());
+            vtable->SetElementPtrSize(vtable_index, &virtual_method, kPointerSize);
+            virtual_method.SetMethodIndex(vtable_index);
+          }
+        }
+      }
     }
 
     // For non-overridden vtable slots, copy a method from `super_class`.

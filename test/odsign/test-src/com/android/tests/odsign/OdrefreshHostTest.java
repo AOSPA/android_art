@@ -62,7 +62,6 @@ public class OdrefreshHostTest extends BaseHostJUnit4Test {
         OdsignTestUtils testUtils = new OdsignTestUtils(testInfo);
         testUtils.installTestApex();
         testUtils.reboot();
-        testUtils.enableAdbRootOrSkipTest();
 
         HashSet<String> zygoteArtifacts = new HashSet<>();
         for (String zygoteName : testUtils.ZYGOTE_NAMES) {
@@ -81,7 +80,6 @@ public class OdrefreshHostTest extends BaseHostJUnit4Test {
         OdsignTestUtils testUtils = new OdsignTestUtils(testInfo);
         testUtils.uninstallTestApex();
         testUtils.reboot();
-        testUtils.restoreAdbRoot();
     }
 
     @Before

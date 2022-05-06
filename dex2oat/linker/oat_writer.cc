@@ -1507,11 +1507,25 @@ class OatWriter::LayoutReserveOffsetCodeMethodVisitor : public OrderedMethodVisi
   const bool generate_debug_info_;
 };
 
+template <bool kDeduplicate>
 class OatWriter::InitMapMethodVisitor : public OatDexMethodVisitor {
  public:
   InitMapMethodVisitor(OatWriter* writer, size_t offset)
       : OatDexMethodVisitor(writer, offset),
         dedupe_bit_table_(&writer_->code_info_data_) {
+    if (kDeduplicate) {
+      // Reserve large buffers for `CodeInfo` and bit table deduplication except for
+      // multi-image compilation as we do not want to reserve multiple large buffers.
+      // User devices should not do any multi-image compilation.
+      const CompilerOptions& compiler_options = writer->GetCompilerOptions();
+      DCHECK(compiler_options.IsAnyCompilationEnabled());
+      if (compiler_options.DeduplicateCode() && !compiler_options.IsMultiImage()) {
+        size_t unique_code_infos =
+            writer->compiler_driver_->GetCompiledMethodStorage()->UniqueVMapTableEntries();
+        dedupe_code_info_.reserve(unique_code_infos);
+        dedupe_bit_table_.ReserveDedupeBuffer(unique_code_infos);
+      }
+    }
   }
 
   bool VisitMethod(size_t class_def_method_index,
@@ -1526,10 +1540,19 @@ class OatWriter::InitMapMethodVisitor : public OatDexMethodVisitor {
 
       ArrayRef<const uint8_t> map = compiled_method->GetVmapTable();
       if (map.size() != 0u) {
-        size_t offset = dedupe_code_info_.GetOrCreate(map.data(), [=]() {
-          // Deduplicate the inner BitTable<>s within the CodeInfo.
-          return offset_ + dedupe_bit_table_.Dedupe(map.data());
-        });
+        size_t offset = offset_ + writer_->code_info_data_.size();
+        if (kDeduplicate) {
+          auto [it, inserted] = dedupe_code_info_.insert(std::make_pair(map.data(), offset));
+          DCHECK_EQ(inserted, it->second == offset);
+          if (inserted) {
+            size_t dedupe_bit_table_offset = dedupe_bit_table_.Dedupe(map.data());
+            DCHECK_EQ(offset, offset_ + dedupe_bit_table_offset);
+          } else {
+            offset = it->second;
+          }
+        } else {
+          writer_->code_info_data_.insert(writer_->code_info_data_.end(), map.begin(), map.end());
+        }
         // Code offset is not initialized yet, so set file offset for now.
         DCHECK_EQ(oat_class->method_offsets_[method_offsets_index_].code_offset_, 0u);
         oat_class->method_headers_[method_offsets_index_].SetCodeInfoOffset(offset);
@@ -1544,7 +1567,7 @@ class OatWriter::InitMapMethodVisitor : public OatDexMethodVisitor {
   // Deduplicate at CodeInfo level. The value is byte offset within code_info_data_.
   // This deduplicates the whole CodeInfo object without going into the inner tables.
   // The compiler already deduplicated the pointers but it did not dedupe the tables.
-  SafeMap<const uint8_t*, size_t> dedupe_code_info_;
+  HashMap<const uint8_t*, size_t> dedupe_code_info_;
 
   // Deduplicate at BitTable level.
   CodeInfoTableDeduper dedupe_bit_table_;
@@ -2140,13 +2163,17 @@ size_t OatWriter::InitOatMaps(size_t offset) {
   if (!MayHaveCompiledMethods()) {
     return offset;
   }
-  {
-    InitMapMethodVisitor visitor(this, offset);
+  if (GetCompilerOptions().DeduplicateCode()) {
+    InitMapMethodVisitor</*kDeduplicate=*/ true> visitor(this, offset);
     bool success = VisitDexMethods(&visitor);
     DCHECK(success);
-    code_info_data_.shrink_to_fit();
-    offset += code_info_data_.size();
+  } else {
+    InitMapMethodVisitor</*kDeduplicate=*/ false> visitor(this, offset);
+    bool success = VisitDexMethods(&visitor);
+    DCHECK(success);
   }
+  code_info_data_.shrink_to_fit();
+  offset += code_info_data_.size();
   return offset;
 }
 

@@ -16,6 +16,7 @@
 
 package com.android.tests.odsign;
 
+import static com.android.tests.odsign.CompOsTestUtils.PENDING_ARTIFACTS_DIR;
 import static com.android.tradefed.testtype.DeviceJUnit4ClassRunner.TestLogData;
 
 import static com.google.common.truth.Truth.assertThat;
@@ -23,6 +24,7 @@ import static com.google.common.truth.Truth.assertWithMessage;
 
 import static org.junit.Assume.assumeTrue;
 
+import com.android.tests.odsign.annotation.CtsTestCase;
 import com.android.tradefed.device.DeviceNotAvailableException;
 import com.android.tradefed.device.ITestDevice;
 import com.android.tradefed.invoker.TestInformation;
@@ -72,8 +74,7 @@ public class CompOsSigningHostTest extends ActivationTest {
         compOsTestUtils.runCompilationJobEarlyAndWait();
 
         testInfo.properties().put(PENDING_CHECKSUMS_KEY,
-                compOsTestUtils.checksumDirectoryContentPartial(
-                        CompOsTestUtils.PENDING_ARTIFACTS_DIR));
+                compOsTestUtils.checksumDirectoryContentPartial(PENDING_ARTIFACTS_DIR));
 
         testInfo.properties().put(TIMESTAMP_REBOOT_KEY,
                         String.valueOf(testUtils.getCurrentTimeMs()));
@@ -85,7 +86,6 @@ public class CompOsSigningHostTest extends ActivationTest {
         OdsignTestUtils testUtils = new OdsignTestUtils(testInfo);
         testUtils.uninstallTestApex();
         testUtils.reboot();
-        testUtils.restoreAdbRoot();
     }
 
     @Test
@@ -96,7 +96,6 @@ public class CompOsSigningHostTest extends ActivationTest {
 
         // The log files are currently only available through a rooted shell.
         OdsignTestUtils testUtils = new OdsignTestUtils(getTestInformation());
-        testUtils.enableAdbRootOrSkipTest();
 
         testUtils.archiveLogThenDelete(mTestLogs, CompOsTestUtils.APEXDATA_DIR + "/vm.log",
                         "vm.log-CompOsSigningHostTest");
@@ -105,6 +104,7 @@ public class CompOsSigningHostTest extends ActivationTest {
     }
 
     @Test
+    @CtsTestCase
     public void checkFileChecksums() throws Exception {
         CompOsTestUtils compOsTestUtils = new CompOsTestUtils(getDevice());
         String actualChecksums = compOsTestUtils.checksumDirectoryContentPartial(
@@ -119,6 +119,7 @@ public class CompOsSigningHostTest extends ActivationTest {
     }
 
     @Test
+    @CtsTestCase
     public void checkFileCreationTimeAfterVmStartAndBeforeReboot() throws Exception {
         OdsignTestUtils testUtils = new OdsignTestUtils(getTestInformation());
 
