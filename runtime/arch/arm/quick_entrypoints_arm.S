@@ -134,16 +134,50 @@
     .cfi_adjust_cfa_offset -52
 .endm
 
-.macro RETURN_IF_RESULT_IS_ZERO
-    cbnz   r0, 1f              @ result non-zero branch over
-    bx     lr                  @ return
+.macro RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+    ldr r1, [rSELF, # THREAD_EXCEPTION_OFFSET]  // Get exception field.
+    cbnz r1, 1f
+    DEOPT_OR_RETURN r1                          // Check if deopt is required
 1:
+    DELIVER_PENDING_EXCEPTION
 .endm
 
-.macro RETURN_IF_RESULT_IS_NON_ZERO
-    cbz    r0, 1f              @ result zero branch over
-    bx     lr                  @ return
-1:
+.macro DEOPT_OR_RETURN temp, is_ref = 0
+  ldr \temp, [rSELF, #THREAD_DEOPT_CHECK_REQUIRED_OFFSET]
+  cbnz \temp, 2f
+  bx     lr
+2:
+  SETUP_SAVE_EVERYTHING_FRAME \temp
+  mov r2, \is_ref                      // pass if result is a reference
+  mov r1, r0                           // pass the result
+  mov r0, rSELF                        // Thread::Current
+  bl artDeoptimizeIfNeeded
+  .cfi_remember_state
+  RESTORE_SAVE_EVERYTHING_FRAME
+  REFRESH_MARKING_REGISTER
+  bx     lr
+  CFI_RESTORE_STATE_AND_DEF_CFA sp, FRAME_SIZE_SAVE_EVERYTHING
+.endm
+
+.macro DEOPT_OR_RESTORE_SAVE_EVERYTHING_FRAME_AND_RETURN_R0 temp, is_ref
+  ldr \temp, [rSELF, #THREAD_DEOPT_CHECK_REQUIRED_OFFSET]
+  cbnz \temp, 2f
+  .cfi_remember_state
+  RESTORE_SAVE_EVERYTHING_FRAME_KEEP_R0
+  REFRESH_MARKING_REGISTER
+  bx     lr
+  CFI_RESTORE_STATE_AND_DEF_CFA sp, FRAME_SIZE_SAVE_EVERYTHING
+2:
+  str    r0, [sp, SAVE_EVERYTHING_FRAME_R0_OFFSET] // update result in the frame
+  mov r2, \is_ref                                  // pass if result is a reference
+  mov r1, r0                                       // pass the result
+  mov r0, rSELF                                    // Thread::Current
+  bl artDeoptimizeIfNeeded
+  .cfi_remember_state
+  RESTORE_SAVE_EVERYTHING_FRAME
+  REFRESH_MARKING_REGISTER
+  bx     lr
+  CFI_RESTORE_STATE_AND_DEF_CFA sp, FRAME_SIZE_SAVE_EVERYTHING
 .endm
 
 .macro NO_ARG_RUNTIME_EXCEPTION c_name, cxx_name
@@ -183,12 +217,16 @@ END \c_name
 .endm
 
 .macro RETURN_IF_RESULT_IS_ZERO_OR_DELIVER
-    RETURN_IF_RESULT_IS_ZERO
+    cbnz   r0, 1f              @ result non-zero branch over
+    DEOPT_OR_RETURN r1
+1:
     DELIVER_PENDING_EXCEPTION
 .endm
 
-.macro RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
-    RETURN_IF_RESULT_IS_NON_ZERO
+.macro RETURN_IF_RESULT_IS_NON_ZERO_OR_DEOPT_OR_DELIVER
+    cbz    r0, 1f              @ result zero branch over
+    DEOPT_OR_RETURN r1, /*is_ref=*/1
+1:
     DELIVER_PENDING_EXCEPTION
 .endm
 
@@ -517,8 +555,7 @@ ENTRY art_quick_lock_object_no_inline
     bl     artLockObjectFromCode      @ (Object* obj, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME
     REFRESH_MARKING_REGISTER
-    RETURN_IF_RESULT_IS_ZERO
-    DELIVER_PENDING_EXCEPTION
+    RETURN_IF_RESULT_IS_ZERO_OR_DELIVER
 END art_quick_lock_object_no_inline
 
     /*
@@ -548,8 +585,7 @@ ENTRY art_quick_unlock_object_no_inline
     bl     artUnlockObjectFromCode    @ (Object* obj, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME
     REFRESH_MARKING_REGISTER
-    RETURN_IF_RESULT_IS_ZERO
-    DELIVER_PENDING_EXCEPTION
+    RETURN_IF_RESULT_IS_ZERO_OR_DELIVER
 END art_quick_unlock_object_no_inline
 
     /*
@@ -601,13 +637,33 @@ END art_quick_check_instance_of
     .cfi_rel_offset \rReg, \offset
 .endm
 
-    /*
-     * Macro to insert read barrier, only used in art_quick_aput_obj.
-     * rObj and rDest are registers, offset is a defined literal such as MIRROR_OBJECT_CLASS_OFFSET.
-     * TODO: When read barrier has a fast path, add heap unpoisoning support for the fast path.
-     */
-.macro READ_BARRIER rDest, rObj, offset
+    // Helper macros for `art_quick_aput_obj`.
 #ifdef USE_READ_BARRIER
+#ifdef USE_BAKER_READ_BARRIER
+.macro BAKER_RB_CHECK_GRAY_BIT_AND_LOAD rDest, rObj, offset, gray_slow_path_label
+    ldr ip, [\rObj, #MIRROR_OBJECT_LOCK_WORD_OFFSET]
+    tst ip, #LOCK_WORD_READ_BARRIER_STATE_MASK_SHIFTED
+    bne \gray_slow_path_label
+    // False dependency to avoid needing load/load fence.
+    add \rObj, \rObj, ip, lsr #32
+    ldr \rDest, [\rObj, #\offset]
+    UNPOISON_HEAP_REF \rDest
+.endm
+
+.macro BAKER_RB_LOAD_AND_MARK rDest, rObj, offset, mark_function
+    ldr \rDest, [\rObj, #\offset]
+    UNPOISON_HEAP_REF \rDest
+    str lr, [sp, #-8]!             @ Save LR with correct stack alignment.
+    .cfi_rel_offset lr, 0
+    .cfi_adjust_cfa_offset 8
+    bl \mark_function
+    ldr lr, [sp], #8               @ Restore LR.
+    .cfi_restore lr
+    .cfi_adjust_cfa_offset -8
+.endm
+#else  // USE_BAKER_READ_BARRIER
+    .extern artReadBarrierSlow
+.macro READ_BARRIER_SLOW rDest, rObj, offset
     push {r0-r3, ip, lr}            @ 6 words for saved registers (used in art_quick_aput_obj)
     .cfi_adjust_cfa_offset 24
     .cfi_rel_offset r0, 0
@@ -640,30 +696,36 @@ END art_quick_check_instance_of
     pop {lr}                        @ restore lr
     .cfi_adjust_cfa_offset -4
     .cfi_restore lr
-#else
-    ldr \rDest, [\rObj, #\offset]
-    UNPOISON_HEAP_REF \rDest
-#endif  // USE_READ_BARRIER
 .endm
+#endif // USE_BAKER_READ_BARRIER
+#endif  // USE_READ_BARRIER
 
-#ifdef USE_READ_BARRIER
-    .extern artReadBarrierSlow
-#endif
     .hidden art_quick_aput_obj
 ENTRY art_quick_aput_obj
-#ifdef USE_READ_BARRIER
-    @ The offset to .Ldo_aput_null is too large to use cbz due to expansion from READ_BARRIER macro.
+#if defined(USE_READ_BARRIER) && !defined(USE_BAKER_READ_BARRIER)
+    @ The offset to .Ldo_aput_null is too large to use cbz due to expansion from `READ_BARRIER_SLOW`.
     tst r2, r2
-    beq .Ldo_aput_null
-#else
-    cbz r2, .Ldo_aput_null
+    beq .Laput_obj_null
+    READ_BARRIER_SLOW r3, r0, MIRROR_OBJECT_CLASS_OFFSET
+    READ_BARRIER_SLOW r3, r3, MIRROR_CLASS_COMPONENT_TYPE_OFFSET
+    READ_BARRIER_SLOW r4, r2, MIRROR_OBJECT_CLASS_OFFSET
+#else  // !defined(USE_READ_BARRIER) || defined(USE_BAKER_READ_BARRIER)
+    cbz r2, .Laput_obj_null
+#ifdef USE_READ_BARRIER
+    cmp rMR, #0
+    bne .Laput_obj_gc_marking
 #endif  // USE_READ_BARRIER
-    READ_BARRIER r3, r0, MIRROR_OBJECT_CLASS_OFFSET
-    READ_BARRIER ip, r2, MIRROR_OBJECT_CLASS_OFFSET
-    READ_BARRIER r3, r3, MIRROR_CLASS_COMPONENT_TYPE_OFFSET
-    cmp r3, ip  @ value's type == array's component type - trivial assignability
-    bne .Lcheck_assignability
-.Ldo_aput:
+    ldr r3, [r0, #MIRROR_OBJECT_CLASS_OFFSET]
+    UNPOISON_HEAP_REF r3
+    // R4 is a scratch register in managed ARM ABI.
+    ldr r4, [r2, #MIRROR_OBJECT_CLASS_OFFSET]
+    UNPOISON_HEAP_REF r4
+    ldr r3, [r3, #MIRROR_CLASS_COMPONENT_TYPE_OFFSET]
+    UNPOISON_HEAP_REF r3
+#endif  // !defined(USE_READ_BARRIER) || defined(USE_BAKER_READ_BARRIER)
+    cmp r3, r4  @ value's type == array's component type - trivial assignability
+    bne .Laput_obj_check_assignability
+.Laput_obj_store:
     add r3, r0, #MIRROR_OBJECT_ARRAY_DATA_OFFSET
     POISON_HEAP_REF r2
     str r2, [r3, r1, lsl #2]
@@ -671,26 +733,22 @@ ENTRY art_quick_aput_obj
     lsr r0, r0, #CARD_TABLE_CARD_SHIFT
     strb r3, [r3, r0]
     blx lr
-.Ldo_aput_null:
+
+.Laput_obj_null:
     add r3, r0, #MIRROR_OBJECT_ARRAY_DATA_OFFSET
     str r2, [r3, r1, lsl #2]
     blx lr
-.Lcheck_assignability:
+
+.Laput_obj_check_assignability:
     push {r0-r2, lr}             @ save arguments
     .cfi_adjust_cfa_offset 16
-    .cfi_rel_offset r0, 0
-    .cfi_rel_offset r1, 4
-    .cfi_rel_offset r2, 8
     .cfi_rel_offset lr, 12
-    mov r1, ip
+    mov r1, r4
     mov r0, r3
     bl artIsAssignableFromCode
     cbz r0, .Lthrow_array_store_exception
     .cfi_remember_state
     pop {r0-r2, lr}
-    .cfi_restore r0
-    .cfi_restore r1
-    .cfi_restore r2
     .cfi_restore lr
     .cfi_adjust_cfa_offset -16
     add r3, r0, #MIRROR_OBJECT_ARRAY_DATA_OFFSET
@@ -700,19 +758,52 @@ ENTRY art_quick_aput_obj
     lsr r0, r0, #CARD_TABLE_CARD_SHIFT
     strb r3, [r3, r0]
     blx lr
+
 .Lthrow_array_store_exception:
     CFI_RESTORE_STATE_AND_DEF_CFA sp, 16
     pop {r0-r2, lr}
-    .cfi_restore r0
-    .cfi_restore r1
-    .cfi_restore r2
     .cfi_restore lr
     .cfi_adjust_cfa_offset -16
+#if defined(USE_READ_BARRIER) && defined(USE_BAKER_READ_BARRIER)
+    .cfi_remember_state
+#endif  // defined(USE_READ_BARRIER) && defined(USE_BAKER_READ_BARRIER)
     SETUP_SAVE_ALL_CALLEE_SAVES_FRAME r3
     mov r1, r2
-    mov r2, rSELF                  @ pass Thread::Current
+    mov r2, rSELF                  @ Pass Thread::Current.
     bl artThrowArrayStoreException @ (Class*, Class*, Thread*)
-    bkpt                           @ unreached
+    bkpt                           @ Unreachable.
+
+#if defined(USE_READ_BARRIER) && defined(USE_BAKER_READ_BARRIER)
+    CFI_RESTORE_STATE_AND_DEF_CFA sp, 0
+.Laput_obj_gc_marking:
+    BAKER_RB_CHECK_GRAY_BIT_AND_LOAD \
+        r3, r0, MIRROR_OBJECT_CLASS_OFFSET, .Laput_obj_mark_array_class
+.Laput_obj_mark_array_class_continue:
+    BAKER_RB_CHECK_GRAY_BIT_AND_LOAD \
+        r3, r3, MIRROR_CLASS_COMPONENT_TYPE_OFFSET, .Laput_obj_mark_array_element
+.Laput_obj_mark_array_element_continue:
+    BAKER_RB_CHECK_GRAY_BIT_AND_LOAD \
+        r4, r2, MIRROR_OBJECT_CLASS_OFFSET, .Laput_obj_mark_object_class
+.Laput_obj_mark_object_class_continue:
+
+    cmp r3, r4  @ value's type == array's component type - trivial assignability
+    // All registers are set up for correctly `.Laput_obj_check_assignability`.
+    bne .Laput_obj_check_assignability
+    b   .Laput_obj_store
+
+.Laput_obj_mark_array_class:
+    BAKER_RB_LOAD_AND_MARK r3, r0, MIRROR_OBJECT_CLASS_OFFSET, art_quick_read_barrier_mark_reg03
+    b .Laput_obj_mark_array_class_continue
+
+.Laput_obj_mark_array_element:
+    BAKER_RB_LOAD_AND_MARK \
+        r3, r3, MIRROR_CLASS_COMPONENT_TYPE_OFFSET, art_quick_read_barrier_mark_reg03
+    b .Laput_obj_mark_array_element_continue
+
+.Laput_obj_mark_object_class:
+    BAKER_RB_LOAD_AND_MARK r4, r2, MIRROR_OBJECT_CLASS_OFFSET, art_quick_read_barrier_mark_reg04
+    b .Laput_obj_mark_object_class_continue
+#endif  // defined(USE_READ_BARRIER) && defined(USE_BAKER_READ_BARRIER)
 END art_quick_aput_obj
 
 // Macro to facilitate adding new allocation entrypoints.
@@ -782,11 +873,8 @@ ENTRY \name
     mov    r1, rSELF                  @ pass Thread::Current
     bl     \entrypoint                @ (uint32_t index, Thread*)
     cbz    r0, 1f                     @ If result is null, deliver the OOME.
-    .cfi_remember_state
-    RESTORE_SAVE_EVERYTHING_FRAME_KEEP_R0
-    REFRESH_MARKING_REGISTER
-    bx     lr
-    CFI_RESTORE_STATE_AND_DEF_CFA sp, FRAME_SIZE_SAVE_EVERYTHING
+    str    r0, [sp, #136]             @ store result in the frame
+    DEOPT_OR_RESTORE_SAVE_EVERYTHING_FRAME_AND_RETURN_R0 r1, /* is_ref= */ 1
 1:
     DELIVER_PENDING_EXCEPTION_FRAME_READY
 END \name
@@ -809,12 +897,12 @@ ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_string, artResolveStringFromC
     /*
      * Called by managed code to resolve a static field and load a non-wide value.
      */
-ONE_ARG_REF_DOWNCALL art_quick_get_byte_static, artGetByteStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION_R1
-ONE_ARG_REF_DOWNCALL art_quick_get_boolean_static, artGetBooleanStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION_R1
-ONE_ARG_REF_DOWNCALL art_quick_get_short_static, artGetShortStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION_R1
-ONE_ARG_REF_DOWNCALL art_quick_get_char_static, artGetCharStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION_R1
-ONE_ARG_REF_DOWNCALL art_quick_get32_static, artGet32StaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION_R1
-ONE_ARG_REF_DOWNCALL art_quick_get_obj_static, artGetObjStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION_R1
+ONE_ARG_REF_DOWNCALL art_quick_get_byte_static, artGetByteStaticFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+ONE_ARG_REF_DOWNCALL art_quick_get_boolean_static, artGetBooleanStaticFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+ONE_ARG_REF_DOWNCALL art_quick_get_short_static, artGetShortStaticFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+ONE_ARG_REF_DOWNCALL art_quick_get_char_static, artGetCharStaticFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+ONE_ARG_REF_DOWNCALL art_quick_get32_static, artGet32StaticFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+ONE_ARG_REF_DOWNCALL art_quick_get_obj_static, artGetObjStaticFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
     /*
      * Called by managed code to resolve a static field and load a 64-bit primitive value.
      */
@@ -827,7 +915,7 @@ ENTRY art_quick_get64_static
     RESTORE_SAVE_REFS_ONLY_FRAME
     REFRESH_MARKING_REGISTER
     cbnz   r2, 1f                        @ success if no exception pending
-    bx     lr                            @ return on success
+    DEOPT_OR_RETURN r2                   @ check if deopt is required or return
 1:
     DELIVER_PENDING_EXCEPTION
 END art_quick_get64_static
@@ -835,12 +923,12 @@ END art_quick_get64_static
     /*
      * Called by managed code to resolve an instance field and load a non-wide value.
      */
-TWO_ARG_REF_DOWNCALL art_quick_get_byte_instance, artGetByteInstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION_R1
-TWO_ARG_REF_DOWNCALL art_quick_get_boolean_instance, artGetBooleanInstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION_R1
-TWO_ARG_REF_DOWNCALL art_quick_get_short_instance, artGetShortInstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION_R1
-TWO_ARG_REF_DOWNCALL art_quick_get_char_instance, artGetCharInstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION_R1
-TWO_ARG_REF_DOWNCALL art_quick_get32_instance, artGet32InstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION_R1
-TWO_ARG_REF_DOWNCALL art_quick_get_obj_instance, artGetObjInstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION_R1
+TWO_ARG_REF_DOWNCALL art_quick_get_byte_instance, artGetByteInstanceFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get_boolean_instance, artGetBooleanInstanceFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get_short_instance, artGetShortInstanceFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get_char_instance, artGetCharInstanceFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get32_instance, artGet32InstanceFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get_obj_instance, artGetObjInstanceFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
     /*
      * Called by managed code to resolve an instance field and load a 64-bit primitive value.
      */
@@ -853,7 +941,7 @@ ENTRY art_quick_get64_instance
     RESTORE_SAVE_REFS_ONLY_FRAME
     REFRESH_MARKING_REGISTER
     cbnz   r2, 1f                        @ success if no exception pending
-    bx     lr                            @ return on success
+    DEOPT_OR_RETURN r2                   @ check if deopt is required or return
 1:
     DELIVER_PENDING_EXCEPTION
 END art_quick_get64_instance
@@ -888,8 +976,7 @@ ENTRY art_quick_set64_instance
     .cfi_adjust_cfa_offset -16
     RESTORE_SAVE_REFS_ONLY_FRAME         @ TODO: we can clearly save an add here
     REFRESH_MARKING_REGISTER
-    RETURN_IF_RESULT_IS_ZERO
-    DELIVER_PENDING_EXCEPTION
+    RETURN_IF_RESULT_IS_ZERO_OR_DELIVER
 END art_quick_set64_instance
 
     .extern artSet64StaticFromCompiledCode
@@ -903,8 +990,7 @@ ENTRY art_quick_set64_static
     .cfi_adjust_cfa_offset -16
     RESTORE_SAVE_REFS_ONLY_FRAME          @ TODO: we can clearly save an add here
     REFRESH_MARKING_REGISTER
-    RETURN_IF_RESULT_IS_ZERO
-    DELIVER_PENDING_EXCEPTION
+    RETURN_IF_RESULT_IS_ZERO_OR_DELIVER
 END art_quick_set64_static
 
 // Generate the allocation entrypoints for each allocator.
@@ -1037,7 +1123,7 @@ ENTRY \c_name
     bl     \cxx_name                  @ (mirror::Class* cls, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME
     REFRESH_MARKING_REGISTER
-    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+    RETURN_IF_RESULT_IS_NON_ZERO_OR_DEOPT_OR_DELIVER
 END \c_name
 .endm
 
@@ -1122,7 +1208,7 @@ ENTRY \name
     bl     \entrypoint                                        // (mirror::Class* klass, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME
     REFRESH_MARKING_REGISTER
-    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+    RETURN_IF_RESULT_IS_NON_ZERO_OR_DEOPT_OR_DELIVER
 END \name
 .endm
 
@@ -1195,7 +1281,7 @@ ENTRY \name
     bl     \entrypoint
     RESTORE_SAVE_REFS_ONLY_FRAME
     REFRESH_MARKING_REGISTER
-    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+    RETURN_IF_RESULT_IS_NON_ZERO_OR_DEOPT_OR_DELIVER
 END \name
 .endm
 
@@ -1883,7 +1969,7 @@ ENTRY art_quick_string_builder_append
     bl     artStringBuilderAppend       @ (uint32_t, const unit32_t*, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME
     REFRESH_MARKING_REGISTER
-    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+    RETURN_IF_RESULT_IS_NON_ZERO_OR_DEOPT_OR_DELIVER
 END art_quick_string_builder_append
 
     /*
@@ -1895,13 +1981,9 @@ END art_quick_string_builder_append
      *
      * If `reg` is different from `r0`, the generated function follows a
      * non-standard runtime calling convention:
-     * - register `reg` is used to pass the (sole) argument of this
-     *   function (instead of R0);
-     * - register `reg` is used to return the result of this function
-     *   (instead of R0);
-     * - R0 is treated like a normal (non-argument) caller-save register;
-     * - everything else is the same as in the standard runtime calling
-     *   convention (e.g. standard callee-save registers are preserved).
+     * - register `reg` (which may be different from R0) is used to pass the (sole) argument,
+     * - register `reg` (which may be different from R0) is used to return the result,
+     * - all other registers are callee-save (the values they hold are preserved).
      */
 .macro READ_BARRIER_MARK_REG name, reg
 ENTRY \name

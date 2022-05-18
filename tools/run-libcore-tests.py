@@ -159,21 +159,15 @@ LIBCORE_TEST_NAMES = [
   "test.java.math.BigInteger#testDivideAndReminder",
   "test.java.math.BigInteger#testDivideLarge",
   "test.java.math.BigInteger#testModExp",
-  "test.java.math.BigInteger#testModInv",
   "test.java.math.BigInteger#testMultiplyLarge",
   "test.java.math.BigInteger#testNextProbablePrime",
   "test.java.math.BigInteger#testPow",
-  "test.java.math.BigInteger#testPrime",
   "test.java.math.BigInteger#testSerialize",
   "test.java.math.BigInteger#testShift",
   "test.java.math.BigInteger#testSquare",
   "test.java.math.BigInteger#testSquareLarge",
-  "test.java.math.BigInteger#testSquareRoot",
   "test.java.math.BigInteger#testSquareRootAndReminder",
   "test.java.math.BigInteger#testStringConv_generic",
-  "test.java.math.BigInteger#testStringConv_schoenhage_threshold_pow0",
-  "test.java.math.BigInteger#testStringConv_schoenhage_threshold_pow1",
-  "test.java.math.BigInteger#testStringConv_schoenhage_threshold_pow2",
   "test.java.math.RoundingMode",
   # test.java.net
   "test.java.net.DatagramSocket",
@@ -190,7 +184,6 @@ LIBCORE_TEST_NAMES = [
   "test.java.security.cert",
   # Sharded test.java.security.KeyAgreement
   "test.java.security.KeyAgreement.KeyAgreementTest",
-  "test.java.security.KeyAgreement.KeySizeTest#testDHKeySize",
   "test.java.security.KeyAgreement.KeySizeTest#testECDHKeySize",
   "test.java.security.KeyAgreement.KeySpecTest",
   "test.java.security.KeyAgreement.MultiThreadTest",
@@ -242,6 +235,20 @@ BOOT_CLASSPATH = [
 
 CLASSPATH = ["core-tests", "core-ojtests", "jsr166-tests", "mockito-target"]
 
+SLOW_OJLUNI_TESTS = {
+  "test.java.awt",
+  "test.java.lang.String",
+  "test.java.lang.invoke",
+  "test.java.nio.channels.Selector",
+  "test.java.time",
+  "test.java.util.Arrays",
+  "test.java.util.Map",
+  "test.java.util.concurrent",
+  "test.java.util.stream",
+  "test.java.util.zip.ZipFile",
+  "tck.java.time",
+}
+
 def get_jar_filename(classpath):
   base_path = (ANDROID_PRODUCT_OUT + "/../..") if ANDROID_PRODUCT_OUT else "out/target"
   base_path = os.path.normpath(base_path)  # Normalize ".." components for readability.
@@ -275,6 +282,7 @@ def get_test_names():
   # See b/78228743 and b/178351808.
   if args.gcstress or args.debug or args.mode == "jvm":
     test_names = list(t for t in test_names if not t.startswith("libcore.highmemorytest"))
+    test_names = list(filter(lambda x: x not in SLOW_OJLUNI_TESTS, test_names))
   return test_names
 
 def get_vogar_command(test_name):

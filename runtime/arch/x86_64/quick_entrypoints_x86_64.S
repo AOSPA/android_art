@@ -731,12 +731,9 @@ MACRO3(ONE_ARG_SAVE_EVERYTHING_DOWNCALL, c_name, cxx_name, runtime_method_offset
     movl %eax, %edi                               // pass the index of the constant as arg0
     movq %gs:THREAD_SELF_OFFSET, %rsi             // pass Thread::Current()
     call CALLVAR(cxx_name)                        // cxx_name(arg0, Thread*)
-    testl %eax, %eax                              // If result is null, deliver the OOME.
+    testl %eax, %eax                              // If result is null, deliver pending exception.
     jz 1f
-    CFI_REMEMBER_STATE
-    RESTORE_SAVE_EVERYTHING_FRAME_KEEP_RAX        // restore frame up to return address
-    ret
-    CFI_RESTORE_STATE_AND_DEF_CFA rsp, FRAME_SIZE_SAVE_EVERYTHING
+    DEOPT_OR_RESTORE_SAVE_EVERYTHING_FRAME_AND_RETURN_RAX /*is_ref=*/1
 1:
     DELIVER_PENDING_EXCEPTION_FRAME_READY
     END_FUNCTION VAR(c_name)
@@ -746,18 +743,65 @@ MACRO2(ONE_ARG_SAVE_EVERYTHING_DOWNCALL_FOR_CLINIT, c_name, cxx_name)
     ONE_ARG_SAVE_EVERYTHING_DOWNCALL \c_name, \cxx_name, RUNTIME_SAVE_EVERYTHING_FOR_CLINIT_METHOD_OFFSET
 END_MACRO
 
-MACRO0(RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER)
+MACRO0(RETURN_IF_RESULT_IS_NON_ZERO_OR_DEOPT_OR_DELIVER)
     testq %rax, %rax               // rax == 0 ?
     jz  1f                         // if rax == 0 goto 1
-    ret                            // return
+    DEOPT_OR_RETURN /*is_ref=*/1   // Check if deopt is required
 1:                                 // deliver exception on current thread
     DELIVER_PENDING_EXCEPTION
 END_MACRO
 
+
+MACRO0(RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION)
+    movq %gs:THREAD_EXCEPTION_OFFSET, %rcx // get exception field
+    testq %rcx, %rcx               // rcx == 0 ?
+    jnz 1f                         // if rcx != 0 goto 1
+    DEOPT_OR_RETURN                // Check if deopt is required
+1:                                 // deliver exception on current thread
+    DELIVER_PENDING_EXCEPTION
+END_MACRO
+
+MACRO1(DEOPT_OR_RETURN, is_ref = 0)
+  cmpl LITERAL(0), %gs:THREAD_DEOPT_CHECK_REQUIRED_OFFSET
+  jne 2f
+  ret
+2:
+  SETUP_SAVE_EVERYTHING_FRAME
+  movq LITERAL(\is_ref), %rdx          // pass if result is a reference
+  movq %rax, %rsi                      // pass the result
+  movq %gs:THREAD_SELF_OFFSET, %rdi    // pass Thread::Current
+  call SYMBOL(artDeoptimizeIfNeeded)
+  CFI_REMEMBER_STATE
+  RESTORE_SAVE_EVERYTHING_FRAME
+  ret
+  CFI_RESTORE_STATE_AND_DEF_CFA rsp, FRAME_SIZE_SAVE_EVERYTHING
+END_MACRO
+
+MACRO1(DEOPT_OR_RESTORE_SAVE_EVERYTHING_FRAME_AND_RETURN_RAX, is_ref = 0)
+  cmpl LITERAL(0), %gs:THREAD_DEOPT_CHECK_REQUIRED_OFFSET
+  jne 2f
+  CFI_REMEMBER_STATE
+  RESTORE_SAVE_EVERYTHING_FRAME_KEEP_RAX
+  ret
+  CFI_RESTORE_STATE_AND_DEF_CFA rsp, FRAME_SIZE_SAVE_EVERYTHING
+2:
+  movq %rax, SAVE_EVERYTHING_FRAME_RAX_OFFSET(%rsp) // update result in the frame
+  movq LITERAL(\is_ref), %rdx                       // pass if result is a reference
+  movq %rax, %rsi                                   // pass the result
+  movq %gs:THREAD_SELF_OFFSET, %rdi                 // pass Thread::Current
+  call SYMBOL(artDeoptimizeIfNeeded)
+  CFI_REMEMBER_STATE
+  RESTORE_SAVE_EVERYTHING_FRAME
+  ret
+  CFI_RESTORE_STATE_AND_DEF_CFA rsp, FRAME_SIZE_SAVE_EVERYTHING
+END_MACRO
+
+
+
 MACRO0(RETURN_IF_EAX_ZERO)
     testl %eax, %eax               // eax == 0 ?
     jnz  1f                        // if eax != 0 goto 1
-    ret                            // return
+    DEOPT_OR_RETURN                // Check if we need a deopt
 1:                                 // deliver exception on current thread
     DELIVER_PENDING_EXCEPTION
 END_MACRO
@@ -859,7 +903,7 @@ MACRO2(ART_QUICK_ALLOC_OBJECT_ROSALLOC, c_name, cxx_name)
     movq %gs:THREAD_SELF_OFFSET, %rsi                      // pass Thread::Current()
     call CALLVAR(cxx_name)                                 // cxx_name(arg0, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME                           // restore frame up to return address
-    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER                // return or deliver exception
+    RETURN_IF_RESULT_IS_NON_ZERO_OR_DEOPT_OR_DELIVER       // return or deliver exception
     END_FUNCTION VAR(c_name)
 END_MACRO
 
@@ -931,7 +975,7 @@ MACRO1(ALLOC_OBJECT_TLAB_SLOW_PATH, cxx_name)
     movq %gs:THREAD_SELF_OFFSET, %rsi                      // pass Thread::Current()
     call CALLVAR(cxx_name)                                 // cxx_name(arg0, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME                           // restore frame up to return address
-    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER                // return or deliver exception
+    RETURN_IF_RESULT_IS_NON_ZERO_OR_DEOPT_OR_DELIVER       // return or deliver exception
 END_MACRO
 
 // A hand-written override for GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_tlab, TLAB). May be
@@ -1019,7 +1063,7 @@ MACRO3(GENERATE_ALLOC_ARRAY_TLAB, c_entrypoint, cxx_name, size_setup)
     movq %gs:THREAD_SELF_OFFSET, %rdx                          // pass Thread::Current()
     call CALLVAR(cxx_name)                                     // cxx_name(arg0, arg1, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME                               // restore frame up to return address
-    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER                    // return or deliver exception
+    RETURN_IF_RESULT_IS_NON_ZERO_OR_DEOPT_OR_DELIVER           // return or deliver exception
     END_FUNCTION VAR(c_entrypoint)
 END_MACRO
 
@@ -1163,134 +1207,89 @@ MACRO2(POP_REG_NE, reg, exclude_reg)
     .endif
 END_MACRO
 
-    /*
-     * Macro to insert read barrier, used in art_quick_aput_obj.
-     * obj_reg and dest_reg{32|64} are registers, offset is a defined literal such as
-     * MIRROR_OBJECT_CLASS_OFFSET. dest_reg needs two versions to handle the mismatch between
-     * 64b PUSH/POP and 32b argument.
-     * TODO: When read barrier has a fast path, add heap unpoisoning support for the fast path.
-     *
-     * As with art_quick_aput_obj function, the 64b versions are in comments.
-     */
-MACRO4(READ_BARRIER, obj_reg, offset, dest_reg32, dest_reg64)
-#ifdef USE_READ_BARRIER
-    PUSH rax                            // save registers that might be used
-    PUSH rdi
-    PUSH rsi
-    PUSH rdx
-    PUSH rcx
-    SETUP_FP_CALLEE_SAVE_FRAME
-    // Outgoing argument set up
-    // movl REG_VAR(ref_reg32), %edi    // pass ref, no-op for now since parameter ref is unused
-    // // movq REG_VAR(ref_reg64), %rdi
-    movl REG_VAR(obj_reg), %esi         // pass obj_reg
-    // movq REG_VAR(obj_reg), %rsi
-    movl MACRO_LITERAL((RAW_VAR(offset))), %edx // pass offset, double parentheses are necessary
-    // movq MACRO_LITERAL((RAW_VAR(offset))), %rdx
-    call SYMBOL(artReadBarrierSlow)     // artReadBarrierSlow(ref, obj_reg, offset)
-    // No need to unpoison return value in rax, artReadBarrierSlow() would do the unpoisoning.
-    .ifnc RAW_VAR(dest_reg32), eax
-    // .ifnc RAW_VAR(dest_reg64), rax
-      movl %eax, REG_VAR(dest_reg32)    // save loaded ref in dest_reg
-      // movq %rax, REG_VAR(dest_reg64)
-    .endif
-    RESTORE_FP_CALLEE_SAVE_FRAME
-    POP_REG_NE rcx, RAW_VAR(dest_reg64) // Restore registers except dest_reg
-    POP_REG_NE rdx, RAW_VAR(dest_reg64)
-    POP_REG_NE rsi, RAW_VAR(dest_reg64)
-    POP_REG_NE rdi, RAW_VAR(dest_reg64)
-    POP_REG_NE rax, RAW_VAR(dest_reg64)
-#else
-    movl RAW_VAR(offset)(REG_VAR(obj_reg)), REG_VAR(dest_reg32)
-    // movq RAW_VAR(offset)(REG_VAR(obj_reg)), REG_VAR(dest_reg64)
-    UNPOISON_HEAP_REF RAW_VAR(dest_reg32) // UNPOISON_HEAP_REF only takes a 32b register
-#endif  // USE_READ_BARRIER
-END_MACRO
-
 DEFINE_FUNCTION art_quick_aput_obj
-    testl %edx, %edx                // store of null
-//  test %rdx, %rdx
-    jz .Ldo_aput_null
-    READ_BARRIER edi, MIRROR_OBJECT_CLASS_OFFSET, ecx, rcx
-    // READ_BARRIER rdi, MIRROR_OBJECT_CLASS_OFFSET, ecx, rcx
-    READ_BARRIER ecx, MIRROR_CLASS_COMPONENT_TYPE_OFFSET, ecx, rcx
-    // READ_BARRIER rcx, MIRROR_CLASS_COMPONENT_TYPE_OFFSET, ecx, rcx
-#if defined(USE_HEAP_POISONING) || defined(USE_READ_BARRIER)
-    READ_BARRIER edx, MIRROR_OBJECT_CLASS_OFFSET, eax, rax  // rax is free.
-    // READ_BARRIER rdx, MIRROR_OBJECT_CLASS_OFFSET, eax, rax
-    cmpl %eax, %ecx  // value's type == array's component type - trivial assignability
-#else
-    cmpl MIRROR_OBJECT_CLASS_OFFSET(%edx), %ecx // value's type == array's component type - trivial assignability
-//  cmpq MIRROR_CLASS_OFFSET(%rdx), %rcx
-#endif
-    jne .Lcheck_assignability
-.Ldo_aput:
+    test %edx, %edx              // store of null
+    jz .Laput_obj_null
+    movl MIRROR_OBJECT_CLASS_OFFSET(%rdi), %ecx
+    UNPOISON_HEAP_REF ecx
+#ifdef USE_READ_BARRIER
+    cmpl LITERAL(0), %gs:THREAD_IS_GC_MARKING_OFFSET
+    jnz .Laput_obj_gc_marking
+#endif  // USE_READ_BARRIER
+    movl MIRROR_CLASS_COMPONENT_TYPE_OFFSET(%rcx), %ecx
+    cmpl MIRROR_OBJECT_CLASS_OFFSET(%rdx), %ecx  // Both poisoned if heap poisoning is enabled.
+    jne .Laput_obj_check_assignability
+.Laput_obj_store:
     POISON_HEAP_REF edx
-    movl %edx, MIRROR_OBJECT_ARRAY_DATA_OFFSET(%edi, %esi, 4)
-//  movq %rdx, MIRROR_OBJECT_ARRAY_DATA_OFFSET(%rdi, %rsi, 4)
+    movl %edx, MIRROR_OBJECT_ARRAY_DATA_OFFSET(%rdi, %rsi, 4)
     movq %gs:THREAD_CARD_TABLE_OFFSET, %rdx
     shrl LITERAL(CARD_TABLE_CARD_SHIFT), %edi
-//  shrl LITERAL(CARD_TABLE_CARD_SHIFT), %rdi
-    movb %dl, (%rdx, %rdi)                       // Note: this assumes that top 32b of %rdi are zero
+    movb %dl, (%rdx, %rdi)
     ret
-.Ldo_aput_null:
-    movl %edx, MIRROR_OBJECT_ARRAY_DATA_OFFSET(%edi, %esi, 4)
-//  movq %rdx, MIRROR_OBJECT_ARRAY_DATA_OFFSET(%rdi, %rsi, 4)
+
+.Laput_obj_null:
+    movl %edx, MIRROR_OBJECT_ARRAY_DATA_OFFSET(%rdi, %rsi, 4)
     ret
-.Lcheck_assignability:
-    // Save arguments.
-    PUSH rdi
-    PUSH rsi
-    PUSH rdx
+
+.Laput_obj_check_assignability:
+    UNPOISON_HEAP_REF ecx         // Unpoison array component type if poisoning is enabled.
+    PUSH_ARG rdi                  // Save arguments.
+    PUSH_ARG rsi
+    PUSH_ARG rdx
+    movl MIRROR_OBJECT_CLASS_OFFSET(%rdx), %esi  // Pass arg2 = value's class.
+    UNPOISON_HEAP_REF esi
+.Laput_obj_check_assignability_call:
+    movl %ecx, %edi               // Pass arg1 = array's component type.
     SETUP_FP_CALLEE_SAVE_FRAME
-
-#if defined(USE_HEAP_POISONING) || defined(USE_READ_BARRIER)
-    // The load of MIRROR_OBJECT_CLASS_OFFSET(%edx) is redundant, eax still holds the value.
-    movl %eax, %esi               // Pass arg2 = value's class.
-    // movq %rax, %rsi
-#else
-                                     // "Uncompress" = do nothing, as already zero-extended on load.
-    movl MIRROR_OBJECT_CLASS_OFFSET(%edx), %esi  // Pass arg2 = value's class.
-#endif
-    movq %rcx, %rdi               // Pass arg1 = array's component type.
-
     call SYMBOL(artIsAssignableFromCode)  // (Class* a, Class* b)
-
-    // Exception?
-    testq %rax, %rax
-    jz   .Lthrow_array_store_exception
-
-    RESTORE_FP_CALLEE_SAVE_FRAME
-    // Restore arguments.
-    POP  rdx
-    POP  rsi
-    POP  rdi
-
+    RESTORE_FP_CALLEE_SAVE_FRAME  // Resore FP registers.
+    POP_ARG rdx                   // Restore arguments.
+    POP_ARG rsi
+    POP_ARG rdi
+    testq %rax, %rax              // Check for exception.
+    jz   .Laput_obj_throw_array_store_exception
     POISON_HEAP_REF edx
-    movl %edx, MIRROR_OBJECT_ARRAY_DATA_OFFSET(%edi, %esi, 4)
-//  movq %rdx, MIRROR_OBJECT_ARRAY_DATA_OFFSET(%rdi, %rsi, 4)
+    movl %edx, MIRROR_OBJECT_ARRAY_DATA_OFFSET(%rdi, %rsi, 4)
     movq %gs:THREAD_CARD_TABLE_OFFSET, %rdx
     shrl LITERAL(CARD_TABLE_CARD_SHIFT), %edi
-//  shrl LITERAL(CARD_TABLE_CARD_SHIFT), %rdi
-    movb %dl, (%rdx, %rdi)                       // Note: this assumes that top 32b of %rdi are zero
-//  movb %dl, (%rdx, %rdi)
+    movb %dl, (%rdx, %rdi)
     ret
-    CFI_ADJUST_CFA_OFFSET(24 + 4 * 8)  // Reset unwind info so following code unwinds.
-.Lthrow_array_store_exception:
-    RESTORE_FP_CALLEE_SAVE_FRAME
-    // Restore arguments.
-    POP  rdx
-    POP  rsi
-    POP  rdi
 
+.Laput_obj_throw_array_store_exception:
+#ifdef USE_READ_BARRIER
+    CFI_REMEMBER_STATE
+#endif  // USE_READ_BARRIER
     SETUP_SAVE_ALL_CALLEE_SAVES_FRAME  // Save all registers as basis for long jump context.
-
     // Outgoing argument set up.
     movq %rdx, %rsi                         // Pass arg 2 = value.
     movq %gs:THREAD_SELF_OFFSET, %rdx       // Pass arg 3 = Thread::Current().
                                             // Pass arg 1 = array.
     call SYMBOL(artThrowArrayStoreException) // (array, value, Thread*)
     UNREACHABLE
+
+#ifdef USE_READ_BARRIER
+    CFI_RESTORE_STATE_AND_DEF_CFA esp, 4
+.Laput_obj_gc_marking:
+    // We need to align stack for `art_quick_read_barrier_mark_regNN`.
+    INCREASE_FRAME 8                        // Stack alignment.
+    call SYMBOL(art_quick_read_barrier_mark_reg01)  // Mark ECX
+    movl MIRROR_CLASS_COMPONENT_TYPE_OFFSET(%rcx), %ecx
+    UNPOISON_HEAP_REF ecx
+    call SYMBOL(art_quick_read_barrier_mark_reg01)  // Mark ECX
+    movl MIRROR_OBJECT_CLASS_OFFSET(%rdx), %eax
+    UNPOISON_HEAP_REF eax
+    call SYMBOL(art_quick_read_barrier_mark_reg00)  // Mark EAX
+    DECREASE_FRAME 8                        // Remove stack alignment.
+    cmpl %eax, %ecx
+    je .Laput_obj_store
+    // Prepare arguments in line with `.Laput_obj_check_assignability_call` and jump there.
+    PUSH_ARG rdi                  // Save arguments.
+    PUSH_ARG rsi
+    PUSH_ARG rdx
+    movl %eax, %esi               // Pass arg2 - type of the value to be stored.
+    // The arg1 shall be moved at `.Ldo_assignability_check_call`.
+    jmp .Laput_obj_check_assignability_call
+#endif  // USE_READ_BARRIER
 END_FUNCTION art_quick_aput_obj
 
 // TODO: This is quite silly on X86_64 now.
@@ -1324,27 +1323,27 @@ THREE_ARG_REF_DOWNCALL art_quick_set32_instance, artSet32InstanceFromCompiledCod
 THREE_ARG_REF_DOWNCALL art_quick_set64_instance, artSet64InstanceFromCompiledCode, RETURN_IF_EAX_ZERO
 THREE_ARG_REF_DOWNCALL art_quick_set_obj_instance, artSetObjInstanceFromCompiledCode, RETURN_IF_EAX_ZERO
 
-TWO_ARG_REF_DOWNCALL art_quick_get_byte_instance, artGetByteInstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-TWO_ARG_REF_DOWNCALL art_quick_get_boolean_instance, artGetBooleanInstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-TWO_ARG_REF_DOWNCALL art_quick_get_short_instance, artGetShortInstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-TWO_ARG_REF_DOWNCALL art_quick_get_char_instance, artGetCharInstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-TWO_ARG_REF_DOWNCALL art_quick_get32_instance, artGet32InstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-TWO_ARG_REF_DOWNCALL art_quick_get64_instance, artGet64InstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-TWO_ARG_REF_DOWNCALL art_quick_get_obj_instance, artGetObjInstanceFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get_byte_instance, artGetByteInstanceFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get_boolean_instance, artGetBooleanInstanceFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get_short_instance, artGetShortInstanceFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get_char_instance, artGetCharInstanceFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get32_instance, artGet32InstanceFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get64_instance, artGet64InstanceFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_get_obj_instance, artGetObjInstanceFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
 
 TWO_ARG_REF_DOWNCALL art_quick_set8_static, artSet8StaticFromCompiledCode, RETURN_IF_EAX_ZERO
 TWO_ARG_REF_DOWNCALL art_quick_set16_static, artSet16StaticFromCompiledCode, RETURN_IF_EAX_ZERO
 TWO_ARG_REF_DOWNCALL art_quick_set32_static, artSet32StaticFromCompiledCode, RETURN_IF_EAX_ZERO
-TWO_ARG_REF_DOWNCALL art_quick_set64_static, artSet64StaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
+TWO_ARG_REF_DOWNCALL art_quick_set64_static, artSet64StaticFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
 TWO_ARG_REF_DOWNCALL art_quick_set_obj_static, artSetObjStaticFromCompiledCode, RETURN_IF_EAX_ZERO
 
-ONE_ARG_REF_DOWNCALL art_quick_get_byte_static, artGetByteStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-ONE_ARG_REF_DOWNCALL art_quick_get_boolean_static, artGetBooleanStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-ONE_ARG_REF_DOWNCALL art_quick_get_short_static, artGetShortStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-ONE_ARG_REF_DOWNCALL art_quick_get_char_static, artGetCharStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-ONE_ARG_REF_DOWNCALL art_quick_get32_static, artGet32StaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-ONE_ARG_REF_DOWNCALL art_quick_get64_static, artGet64StaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
-ONE_ARG_REF_DOWNCALL art_quick_get_obj_static, artGetObjStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
+ONE_ARG_REF_DOWNCALL art_quick_get_byte_static, artGetByteStaticFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+ONE_ARG_REF_DOWNCALL art_quick_get_boolean_static, artGetBooleanStaticFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+ONE_ARG_REF_DOWNCALL art_quick_get_short_static, artGetShortStaticFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+ONE_ARG_REF_DOWNCALL art_quick_get_char_static, artGetCharStaticFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+ONE_ARG_REF_DOWNCALL art_quick_get32_static, artGet32StaticFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+ONE_ARG_REF_DOWNCALL art_quick_get64_static, artGet64StaticFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
+ONE_ARG_REF_DOWNCALL art_quick_get_obj_static, artGetObjStaticFromCompiledCode, RETURN_OR_DEOPT_OR_DELIVER_PENDING_EXCEPTION
 
 DEFINE_FUNCTION art_quick_proxy_invoke_handler
     SETUP_SAVE_REFS_AND_ARGS_FRAME_WITH_METHOD_IN_RDI
@@ -1846,7 +1845,7 @@ DEFINE_FUNCTION art_quick_string_builder_append
     movq %gs:THREAD_SELF_OFFSET, %rdx         // pass Thread::Current()
     call artStringBuilderAppend               // (uint32_t, const unit32_t*, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME              // restore frame up to return address
-    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER   // return or deliver exception
+    RETURN_IF_RESULT_IS_NON_ZERO_OR_DEOPT_OR_DELIVER  // return or deopt or deliver exception
 END_FUNCTION art_quick_string_builder_append
 
 // Create a function `name` calling the ReadBarrier::Mark routine,
@@ -1855,16 +1854,9 @@ END_FUNCTION art_quick_string_builder_append
 //
 // The generated function follows a non-standard runtime calling
 // convention:
-// - register `reg` (which may be different from RDI) is used to pass
-//   the (sole) argument of this function;
-// - register `reg` (which may be different from RAX) is used to return
-//   the result of this function (instead of RAX);
-// - if `reg` is different from `rdi`, RDI is treated like a normal
-//   (non-argument) caller-save register;
-// - if `reg` is different from `rax`, RAX is treated like a normal
-//   (non-result) caller-save register;
-// - everything else is the same as in the standard runtime calling
-//   convention (e.g. standard callee-save registers are preserved).
+// - register `reg` (which may be different from RDI) is used to pass the (sole) argument,
+// - register `reg` (which may be different from RAX) is used to return the result,
+// - all other registers are callee-save (the values they hold are preserved).
 MACRO2(READ_BARRIER_MARK_REG, name, reg)
     DEFINE_FUNCTION VAR(name)
     // Null check so that we can load the lock word.
