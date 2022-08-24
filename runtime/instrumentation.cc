@@ -107,69 +107,6 @@ class InstallStubsClassVisitor : public ClassVisitor {
   Instrumentation* const instrumentation_;
 };
 
-InstrumentationStackPopper::InstrumentationStackPopper(Thread* self)
-      : self_(self),
-        instrumentation_(Runtime::Current()->GetInstrumentation()),
-        pop_until_(0u) {}
-
-InstrumentationStackPopper::~InstrumentationStackPopper() {
-  std::map<uintptr_t, instrumentation::InstrumentationStackFrame>* stack =
-      self_->GetInstrumentationStack();
-  for (auto i = stack->begin(); i != stack->end() && i->first <= pop_until_;) {
-    i = stack->erase(i);
-  }
-}
-
-bool InstrumentationStackPopper::PopFramesTo(uintptr_t stack_pointer,
-                                             MutableHandle<mirror::Throwable>& exception) {
-  std::map<uintptr_t, instrumentation::InstrumentationStackFrame>* stack =
-      self_->GetInstrumentationStack();
-  DCHECK(!self_->IsExceptionPending());
-  if (!instrumentation_->HasMethodUnwindListeners()) {
-    pop_until_ = stack_pointer;
-    return true;
-  }
-  if (kVerboseInstrumentation) {
-    LOG(INFO) << "Popping frames for exception " << exception->Dump();
-  }
-  // The instrumentation events expect the exception to be set.
-  self_->SetException(exception.Get());
-  bool new_exception_thrown = false;
-  auto i = stack->upper_bound(pop_until_);
-
-  // Now pop all frames until reaching stack_pointer, or a new exception is
-  // thrown. Note that `stack_pointer` doesn't need to be a return PC address
-  // (in fact the exception handling code passes the start of the frame where
-  // the catch handler is).
-  for (; i != stack->end() && i->first <= stack_pointer; i++) {
-    const InstrumentationStackFrame& frame = i->second;
-    ArtMethod* method = frame.method_;
-    // Notify listeners of method unwind.
-    // TODO: improve the dex_pc information here.
-    uint32_t dex_pc = dex::kDexNoIndex;
-    if (kVerboseInstrumentation) {
-      LOG(INFO) << "Popping for unwind " << method->PrettyMethod();
-    }
-    if (!method->IsRuntimeMethod() && !frame.interpreter_entry_) {
-      instrumentation_->MethodUnwindEvent(self_, frame.this_object_, method, dex_pc);
-      new_exception_thrown = self_->GetException() != exception.Get();
-      if (new_exception_thrown) {
-        pop_until_ = i->first;
-        break;
-      }
-    }
-  }
-  if (!new_exception_thrown) {
-    pop_until_ = stack_pointer;
-  }
-  exception.Assign(self_->GetException());
-  self_->ClearException();
-  if (kVerboseInstrumentation && new_exception_thrown) {
-    LOG(INFO) << "Did partial pop of frames due to new exception";
-  }
-  return !new_exception_thrown;
-}
-
 Instrumentation::Instrumentation()
     : current_force_deopt_id_(0),
       instrumentation_stubs_installed_(false),
@@ -190,6 +127,51 @@ Instrumentation::Instrumentation()
       quick_alloc_entry_points_instrumentation_counter_(0),
       alloc_entrypoints_instrumented_(false) {
 }
+
+bool Instrumentation::ProcessMethodUnwindCallbacks(Thread* self,
+                                                   std::queue<ArtMethod*>& methods,
+                                                   MutableHandle<mirror::Throwable>& exception) {
+  DCHECK(!self->IsExceptionPending());
+  if (!HasMethodUnwindListeners()) {
+    return true;
+  }
+  if (kVerboseInstrumentation) {
+    LOG(INFO) << "Popping frames for exception " << exception->Dump();
+  }
+  // The instrumentation events expect the exception to be set.
+  self->SetException(exception.Get());
+  bool new_exception_thrown = false;
+
+  // Process callbacks for all methods that would be unwound until a new exception is thrown.
+  while (!methods.empty()) {
+    ArtMethod* method = methods.front();
+    methods.pop();
+    if (kVerboseInstrumentation) {
+      LOG(INFO) << "Popping for unwind " << method->PrettyMethod();
+    }
+
+    if (method->IsRuntimeMethod()) {
+      continue;
+    }
+
+    // Notify listeners of method unwind.
+    // TODO: improve the dex_pc information here.
+    uint32_t dex_pc = dex::kDexNoIndex;
+    MethodUnwindEvent(self, method, dex_pc);
+    new_exception_thrown = self->GetException() != exception.Get();
+    if (new_exception_thrown) {
+      break;
+    }
+  }
+
+  exception.Assign(self->GetException());
+  self->ClearException();
+  if (kVerboseInstrumentation && new_exception_thrown) {
+    LOG(INFO) << "Did partial pop of frames due to new exception";
+  }
+  return !new_exception_thrown;
+}
+
 
 void Instrumentation::InstallStubsForClass(ObjPtr<mirror::Class> klass) {
   if (!klass->IsResolved()) {
@@ -230,32 +212,9 @@ static bool IsProxyInit(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_)
       method->GetDeclaringClass()->DescriptorEquals("Ljava/lang/reflect/Proxy;");
 }
 
-static void UpdateEntryPoints(ArtMethod* method, const void* quick_code)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  if (kIsDebugBuild) {
-    if (NeedsClinitCheckBeforeCall(method) &&
-        !method->GetDeclaringClass()->IsVisiblyInitialized()) {
-      CHECK(CanHandleInitializationCheck(quick_code));
-    }
-    jit::Jit* jit = Runtime::Current()->GetJit();
-    if (jit != nullptr && jit->GetCodeCache()->ContainsPc(quick_code)) {
-      // Ensure we always have the thumb entrypoint for JIT on arm32.
-      if (kRuntimeISA == InstructionSet::kArm) {
-        CHECK_EQ(reinterpret_cast<uintptr_t>(quick_code) & 1, 1u);
-      }
-    }
-    if (IsProxyInit(method)) {
-      CHECK_NE(quick_code, GetQuickInstrumentationEntryPoint());
-    }
-  }
-  // If the method is from a boot image, don't dirty it if the entrypoint
-  // doesn't change.
-  if (method->GetEntryPointFromQuickCompiledCode() != quick_code) {
-    method->SetEntryPointFromQuickCompiledCode(quick_code);
-  }
-}
-
-bool Instrumentation::CodeNeedsEntryExitStub(const void* code, ArtMethod* method)
+// Returns true if we need entry exit stub to call entry hooks. JITed code
+// directly call entry / exit hooks and don't need the stub.
+static bool CodeNeedsEntryExitStub(const void* code, ArtMethod* method)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   // Proxy.init should never have entry/exit stubs.
   if (IsProxyInit(method)) {
@@ -294,6 +253,36 @@ bool Instrumentation::CodeNeedsEntryExitStub(const void* code, ArtMethod* method
   return true;
 }
 
+static void UpdateEntryPoints(ArtMethod* method, const void* quick_code)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (kIsDebugBuild) {
+    if (NeedsClinitCheckBeforeCall(method) &&
+        !method->GetDeclaringClass()->IsVisiblyInitialized()) {
+      CHECK(CanHandleInitializationCheck(quick_code));
+    }
+    jit::Jit* jit = Runtime::Current()->GetJit();
+    if (jit != nullptr && jit->GetCodeCache()->ContainsPc(quick_code)) {
+      // Ensure we always have the thumb entrypoint for JIT on arm32.
+      if (kRuntimeISA == InstructionSet::kArm) {
+        CHECK_EQ(reinterpret_cast<uintptr_t>(quick_code) & 1, 1u);
+      }
+    }
+    if (IsProxyInit(method)) {
+      CHECK_NE(quick_code, GetQuickInstrumentationEntryPoint());
+    }
+    const Instrumentation* instr = Runtime::Current()->GetInstrumentation();
+    if (instr->EntryExitStubsInstalled()) {
+      DCHECK(quick_code == GetQuickInstrumentationEntryPoint() ||
+             !CodeNeedsEntryExitStub(quick_code, method));
+    }
+  }
+  // If the method is from a boot image, don't dirty it if the entrypoint
+  // doesn't change.
+  if (method->GetEntryPointFromQuickCompiledCode() != quick_code) {
+    method->SetEntryPointFromQuickCompiledCode(quick_code);
+  }
+}
+
 bool Instrumentation::InterpretOnly(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_) {
   if (method->IsNative()) {
     return false;
@@ -303,16 +292,11 @@ bool Instrumentation::InterpretOnly(ArtMethod* method) REQUIRES_SHARED(Locks::mu
          Runtime::Current()->GetRuntimeCallbacks()->IsMethodBeingInspected(method);
 }
 
-static bool CanUseAotCode(ArtMethod* method, const void* quick_code)
+static bool CanUseAotCode(const void* quick_code)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   if (quick_code == nullptr) {
     return false;
   }
-  if (method->IsNative()) {
-    // AOT code for native methods can always be used.
-    return true;
-  }
-
   Runtime* runtime = Runtime::Current();
   // For simplicity, we never use AOT code for debuggable.
   if (runtime->IsJavaDebuggable()) {
@@ -348,7 +332,7 @@ static const void* GetOptimizedCodeFor(ArtMethod* method) REQUIRES_SHARED(Locks:
   // In debuggable mode, we can only use AOT code for native methods.
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   const void* aot_code = method->GetOatMethodQuickCode(class_linker->GetImagePointerSize());
-  if (CanUseAotCode(method, aot_code)) {
+  if (CanUseAotCode(aot_code)) {
     return aot_code;
   }
 
@@ -407,7 +391,7 @@ void Instrumentation::InitializeMethodsCode(ArtMethod* method, const void* aot_c
   }
 
   // Use the provided AOT code if possible.
-  if (CanUseAotCode(method, aot_code)) {
+  if (CanUseAotCode(aot_code)) {
     UpdateEntryPoints(method, aot_code);
     return;
   }
@@ -1204,7 +1188,11 @@ void Instrumentation::Undeoptimize(ArtMethod* method) {
     UpdateEntryPoints(method, GetQuickToInterpreterBridge());
   } else if (NeedsClinitCheckBeforeCall(method) &&
              !method->GetDeclaringClass()->IsVisiblyInitialized()) {
-    UpdateEntryPoints(method, GetQuickResolutionStub());
+    if (EntryExitStubsInstalled()) {
+      UpdateEntryPoints(method, GetQuickInstrumentationEntryPoint());
+    } else {
+      UpdateEntryPoints(method, GetQuickResolutionStub());
+    }
   } else {
     UpdateEntryPoints(method, GetMaybeInstrumentedCodeForInvoke(method));
   }
@@ -1357,16 +1345,12 @@ template<> void Instrumentation::MethodExitEventImpl(Thread* thread,
 }
 
 void Instrumentation::MethodUnwindEvent(Thread* thread,
-                                        ObjPtr<mirror::Object> this_object,
                                         ArtMethod* method,
                                         uint32_t dex_pc) const {
   if (HasMethodUnwindListeners()) {
-    Thread* self = Thread::Current();
-    StackHandleScope<1> hs(self);
-    Handle<mirror::Object> thiz(hs.NewHandle(this_object));
     for (InstrumentationListener* listener : method_unwind_listeners_) {
       if (listener != nullptr) {
-        listener->MethodUnwind(thread, thiz, method, dex_pc);
+        listener->MethodUnwind(thread, method, dex_pc);
       }
     }
   }
@@ -1501,7 +1485,7 @@ void Instrumentation::PushInstrumentationStackFrame(Thread* self,
   if (!interpreter_entry) {
     MethodEnterEvent(self, method);
     if (self->IsExceptionPending()) {
-      MethodUnwindEvent(self, h_this.Get(), method, 0);
+      MethodUnwindEvent(self, method, 0);
       return;
     }
   }
@@ -1776,19 +1760,17 @@ TwoWordReturn Instrumentation::PopInstrumentationStackFrame(Thread* self,
   }
 }
 
-uintptr_t Instrumentation::PopFramesForDeoptimization(Thread* self, uintptr_t pop_until) const {
+uintptr_t Instrumentation::PopInstrumentationStackUntil(Thread* self, uintptr_t pop_until) const {
   std::map<uintptr_t, instrumentation::InstrumentationStackFrame>* stack =
       self->GetInstrumentationStack();
   // Pop all instrumentation frames below `pop_until`.
   uintptr_t return_pc = 0u;
   for (auto i = stack->begin(); i != stack->end() && i->first <= pop_until;) {
-    auto e = i;
-    ++i;
     if (kVerboseInstrumentation) {
-      LOG(INFO) << "Popping for deoptimization " << e->second.method_->PrettyMethod();
+      LOG(INFO) << "Popping for deoptimization " << i->second.method_->PrettyMethod();
     }
-    return_pc = e->second.return_pc_;
-    stack->erase(e);
+    return_pc = i->second.return_pc_;
+    i = stack->erase(i);
   }
   return return_pc;
 }

@@ -270,35 +270,9 @@ static inline JValue Execute(
       CHECK_EQ(shadow_frame.GetDexPC(), 0u);
       self->AssertNoPendingException();
     }
-    instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
     ArtMethod *method = shadow_frame.GetMethod();
 
-    if (UNLIKELY(instrumentation->HasMethodEntryListeners())) {
-      instrumentation->MethodEnterEvent(self, method);
-      if (UNLIKELY(shadow_frame.GetForcePopFrame())) {
-        // The caller will retry this invoke or ignore the result. Just return immediately without
-        // any value.
-        DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
-        JValue ret = JValue();
-        PerformNonStandardReturn<MonitorState::kNoMonitorsLocked>(
-            self, shadow_frame, ret, instrumentation, accessor.InsSize());
-        return ret;
-      }
-      if (UNLIKELY(self->IsExceptionPending())) {
-        instrumentation->MethodUnwindEvent(self,
-                                           shadow_frame.GetThisObject(accessor.InsSize()),
-                                           method,
-                                           0);
-        JValue ret = JValue();
-        if (UNLIKELY(shadow_frame.GetForcePopFrame())) {
-          DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
-          PerformNonStandardReturn<MonitorState::kNoMonitorsLocked>(
-              self, shadow_frame, ret, instrumentation, accessor.InsSize());
-        }
-        return ret;
-      }
-    }
-
+    // If we can continue in JIT and have JITed code available execute JITed code.
     if (!stay_in_interpreter && !self->IsForceInterpreter()) {
       jit::Jit* jit = Runtime::Current()->GetJit();
       if (jit != nullptr) {
@@ -318,6 +292,32 @@ static inline JValue Execute(
 
           return result;
         }
+      }
+    }
+
+    instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
+    if (UNLIKELY(instrumentation->HasMethodEntryListeners())) {
+      instrumentation->MethodEnterEvent(self, method);
+      if (UNLIKELY(shadow_frame.GetForcePopFrame())) {
+        // The caller will retry this invoke or ignore the result. Just return immediately without
+        // any value.
+        DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
+        JValue ret = JValue();
+        PerformNonStandardReturn<MonitorState::kNoMonitorsLocked>(
+            self, shadow_frame, ret, instrumentation, accessor.InsSize());
+        return ret;
+      }
+      if (UNLIKELY(self->IsExceptionPending())) {
+        instrumentation->MethodUnwindEvent(self,
+                                           method,
+                                           0);
+        JValue ret = JValue();
+        if (UNLIKELY(shadow_frame.GetForcePopFrame())) {
+          DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
+          PerformNonStandardReturn<MonitorState::kNoMonitorsLocked>(
+              self, shadow_frame, ret, instrumentation, accessor.InsSize());
+        }
+        return ret;
       }
     }
   }

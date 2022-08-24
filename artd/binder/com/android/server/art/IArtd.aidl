@@ -11,27 +11,13 @@
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
- * limitations under the License
+ * limitations under the License.
  */
 
 package com.android.server.art;
 
-import static org.junit.Assert.assertTrue;
-
-import androidx.test.runner.AndroidJUnit4;
-
-import com.android.server.art.ArtManagerLocal;
-
-import junit.framework.TestCase;
-
-public class ArtManagerLocalTests extends TestCase {
-    private ArtManagerLocal mArtManagerLocal;
-
-    public void setup() {
-        mArtManagerLocal = new ArtManagerLocal();
-    }
-
-    public void testScaffolding() {
-        assertTrue(true);
-    }
+/** {@hide} */
+interface IArtd {
+    // Test to see if the artd service is available.
+    boolean isAlive();
 }
