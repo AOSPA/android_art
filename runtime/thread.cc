@@ -1981,6 +1981,9 @@ void Thread::DumpState(std::ostream& os, const Thread* thread, pid_t tid) {
     if (thread->IsStillStarting()) {
       os << " (still starting up)";
     }
+    if (thread->tls32_.disable_thread_flip_count != 0) {
+      os << " DisableFlipCount = " << thread->tls32_.disable_thread_flip_count;
+    }
     os << "\n";
   } else {
     os << '"' << ::art::GetThreadName(tid) << '"'
@@ -4610,7 +4613,9 @@ void ScopedExceptionStorage::SuppressOldException(const char* message) {
   CHECK(self_->IsExceptionPending()) << *self_;
   ObjPtr<mirror::Throwable> old_suppressed(excp_.Get());
   excp_.Assign(self_->GetException());
-  LOG(WARNING) << message << "Suppressing old exception: " << old_suppressed->Dump();
+  if (old_suppressed != nullptr) {
+    LOG(WARNING) << message << "Suppressing old exception: " << old_suppressed->Dump();
+  }
   self_->ClearException();
 }
 
