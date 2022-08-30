@@ -217,6 +217,8 @@ class Checker:
       return False, 'Could not find %s'
     if fs_object.is_dir:
       return False, '%s is a directory'
+    if fs_object.is_symlink:
+      return False, '%s is a symlink'
     return True, ''
 
   def is_dir(self, path):
@@ -471,7 +473,6 @@ class ReleaseChecker:
     self._checker.check_native_library('libart-disassembler')
     self._checker.check_native_library('libartbase')
     self._checker.check_native_library('libartpalette')
-    self._checker.check_native_library('libartservice')
     self._checker.check_native_library('libarttools')
     self._checker.check_native_library('libdt_fd_forward')
     self._checker.check_native_library('libopenjdkjvm')
@@ -550,6 +551,7 @@ class ReleaseTargetChecker:
     self._checker.check_symlinked_multilib_executable('dex2oat')
 
     # Check internal libraries for ART.
+    self._checker.check_native_library('libartservice')
     self._checker.check_native_library('libperfetto_hprof')
     self._checker.check_prefer64_library('artd-aidl-ndk')
 
@@ -637,6 +639,7 @@ class DebugTargetChecker:
     self._checker.check_symlinked_multilib_executable('dex2oatd')
 
     # Check ART internal libraries.
+    self._checker.check_native_library('libartserviced')
     self._checker.check_native_library('libperfetto_hprofd')
 
     # Check internal native library dependencies.
@@ -673,6 +676,7 @@ class TestingTargetChecker:
     self._checker.check_art_test_executable('art_dexlayout_tests')
     self._checker.check_art_test_executable('art_dexlist_tests')
     self._checker.check_art_test_executable('art_dexoptanalyzer_tests')
+    self._checker.check_art_test_executable('art_disassembler_tests')
     self._checker.check_art_test_executable('art_imgdiag_tests')
     self._checker.check_art_test_executable('art_libartbase_tests')
     self._checker.check_art_test_executable('art_libartpalette_tests')

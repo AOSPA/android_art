@@ -30,11 +30,13 @@ bootstrap_go_package {
 art_clang_tidy_errors = [
     "android-cloexec-open",
     "bugprone-lambda-function-name",
+    "bugprone-macro-parentheses",
     "bugprone-unused-raii", // Protect scoped things like MutexLock.
     "bugprone-virtual-near-miss",
     "modernize-use-bool-literals",
     "performance-implicit-conversion-in-loop",
     "performance-unnecessary-copy-initialization",
+    "performance-unnecessary-value-param",
 ]
 
 art_clang_tidy_allowed = [
@@ -49,7 +51,6 @@ art_clang_tidy_allowed = [
     "performance-faster-string-find",
     "performance-for-range-copy",
     "performance-noexcept-move-constructor",
-    "performance-unnecessary-value-param",
 ]
 
 art_clang_tidy_disabled = [
