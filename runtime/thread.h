@@ -48,7 +48,9 @@
 #include "runtime_stats.h"
 #include "thread_state.h"
 
-class BacktraceMap;
+namespace unwindstack {
+class AndroidLocalUnwinder;
+}  // namespace unwindstack
 
 namespace art {
 
@@ -270,7 +272,11 @@ class Thread {
   // Dumps the detailed thread state and the thread stack (used for SIGQUIT).
   void Dump(std::ostream& os,
             bool dump_native_stack = true,
-            BacktraceMap* backtrace_map = nullptr,
+            bool force_dump_stack = false) const
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  void Dump(std::ostream& os,
+            unwindstack::AndroidLocalUnwinder& unwinder,
+            bool dump_native_stack = true,
             bool force_dump_stack = false) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -546,8 +552,12 @@ class Thread {
   // that needs to be dealt with, false otherwise.
   bool ObserveAsyncException() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Find catch block and perform long jump to appropriate exception handle
-  NO_RETURN void QuickDeliverException() REQUIRES_SHARED(Locks::mutator_lock_);
+  // Find catch block and perform long jump to appropriate exception handle. When
+  // is_method_exit_exception is true, the exception was thrown by the method exit callback and we
+  // should not send method unwind for the method on top of the stack since method exit callback was
+  // already called.
+  NO_RETURN void QuickDeliverException(bool is_method_exit_exception = false)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   Context* GetLongJumpContext();
   void ReleaseLongJumpContext(Context* context) {
@@ -1492,7 +1502,11 @@ class Thread {
   void DumpState(std::ostream& os) const REQUIRES_SHARED(Locks::mutator_lock_);
   void DumpStack(std::ostream& os,
                  bool dump_native_stack = true,
-                 BacktraceMap* backtrace_map = nullptr,
+                 bool force_dump_stack = false) const
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  void DumpStack(std::ostream& os,
+                 unwindstack::AndroidLocalUnwinder& unwinder,
+                 bool dump_native_stack = true,
                  bool force_dump_stack = false) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 

@@ -14,20 +14,29 @@
  * limitations under the License.
  */
 
-package com.android.server.art.wrapper;
+#include <stdlib.h>
 
-import android.annotation.NonNull;
+#include "android-base/logging.h"
+#include "android-base/macros.h"
+#include "android/binder_interface_utils.h"
+#include "android/binder_process.h"
+#include "artd.h"
 
-/** @hide */
-public class PackageDataSnapshot {
-    private final Object mSnapshot;
+int main(int argc ATTRIBUTE_UNUSED, char* argv[]) {
+  android::base::InitLogging(argv);
 
-    PackageDataSnapshot(@NonNull Object snapshot) {
-        mSnapshot = snapshot;
-    }
+  auto artd = ndk::SharedRefBase::make<art::artd::Artd>();
 
-    @NonNull
-    Object getRealInstance() {
-        return mSnapshot;
-    }
+  LOG(INFO) << "Starting artd";
+
+  if (auto ret = artd->Start(); !ret.ok()) {
+    LOG(ERROR) << "Unable to start artd: " << ret.error();
+    exit(1);
+  }
+
+  ABinderProcess_joinThreadPool();
+
+  LOG(INFO) << "artd shutting down";
+
+  return 0;
 }

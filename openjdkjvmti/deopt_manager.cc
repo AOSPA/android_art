@@ -61,16 +61,13 @@
 
 namespace openjdkjvmti {
 
-// TODO We should make this much more selective in the future so we only return true when we
+// We could make this much more selective in the future so we only return true when we
 // actually care about the method at this time (ie active frames had locals changed). For now we
-// just assume that if anything has changed any frame's locals we care about all methods. If nothing
-// has we only care about methods with active breakpoints on them. In the future we should probably
-// rewrite all of this to instead do this at the ShadowFrame or thread granularity.
-bool JvmtiMethodInspectionCallback::IsMethodBeingInspected(art::ArtMethod* method) {
-  // In non-java-debuggable runtimes the breakpoint check would miss if we have breakpoints on
-  // methods that are inlined. Since these features are best effort in non-java-debuggable
-  // runtimes it is OK to be less precise. For debuggable runtimes, inlining is disabled.
-  return manager_->HaveLocalsChanged() || manager_->MethodHasBreakpoints(method);
+// just assume that if anything has changed any frame's locals we care about all methods. This only
+// impacts whether we are able to OSR or not so maybe not really important to maintain frame
+// specific information.
+bool JvmtiMethodInspectionCallback::HaveLocalsChanged() {
+  return manager_->HaveLocalsChanged();
 }
 
 DeoptManager::DeoptManager()
@@ -460,15 +457,7 @@ void DeoptManager::AddDeoptimizationRequester() {
   art::ScopedThreadStateChange stsc(self, art::ThreadState::kSuspended);
   deoptimization_status_lock_.ExclusiveLock(self);
   deopter_count_++;
-  if (deopter_count_ == 1) {
-    ScopedDeoptimizationContext sdc(self, this);
-    art::instrumentation::Instrumentation* instrumentation =
-        art::Runtime::Current()->GetInstrumentation();
-    // Tell instrumentation we will be deopting single threads.
-    instrumentation->EnableSingleThreadDeopt(kInstrumentationKey);
-  } else {
-    deoptimization_status_lock_.ExclusiveUnlock(self);
-  }
+  deoptimization_status_lock_.ExclusiveUnlock(self);
 }
 
 void DeoptManager::DeoptimizeThread(art::Thread* target) {

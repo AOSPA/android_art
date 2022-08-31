@@ -178,6 +178,7 @@
 #include "well_known_classes.h"
 
 #ifdef ART_TARGET_ANDROID
+#include <android/api-level.h>
 #include <android/set_abort_message.h>
 #include "com_android_apex.h"
 namespace apex = com::android::apex;
@@ -543,7 +544,7 @@ struct AbortState {
     os << "Runtime aborting...\n";
     if (Runtime::Current() == nullptr) {
       os << "(Runtime does not yet exist!)\n";
-      DumpNativeStack(os, GetTid(), nullptr, "  native: ", nullptr);
+      DumpNativeStack(os, GetTid(), "  native: ", nullptr);
       return;
     }
     Thread* self = Thread::Current();
@@ -555,7 +556,7 @@ struct AbortState {
 
     if (self == nullptr) {
       os << "(Aborting thread was not attached to runtime!)\n";
-      DumpNativeStack(os, GetTid(), nullptr, "  native: ", nullptr);
+      DumpNativeStack(os, GetTid(), "  native: ", nullptr);
     } else {
       os << "Aborting thread:\n";
       if (Locks::mutator_lock_->IsExclusiveHeld(self) || Locks::mutator_lock_->IsSharedHeld(self)) {
@@ -3372,6 +3373,22 @@ void Runtime::MadviseFileForRange(size_t madvise_size_limit_bytes,
                                   const uint8_t* map_begin,
                                   const uint8_t* map_end,
                                   const std::string& file_name) {
+#ifdef ART_TARGET_ANDROID
+  // Short-circuit the madvise optimization for background processes. This
+  // avoids IO and memory contention with foreground processes, particularly
+  // those involving app startup.
+  // Note: We can only safely short-circuit the madvise on T+, as it requires
+  // the framework to always immediately notify ART of process states.
+  static const int kApiLevel = android_get_device_api_level();
+  const bool accurate_process_state_at_startup = kApiLevel >= __ANDROID_API_T__;
+  if (accurate_process_state_at_startup) {
+    const Runtime* runtime = Runtime::Current();
+    if (runtime != nullptr && !runtime->InJankPerceptibleProcessState()) {
+      return;
+    }
+  }
+#endif  // ART_TARGET_ANDROID
+
   // Ideal blockTransferSize for madvising files (128KiB)
   static constexpr size_t kIdealIoTransferSizeBytes = 128*1024;
 

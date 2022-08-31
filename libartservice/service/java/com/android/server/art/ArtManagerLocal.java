@@ -18,27 +18,28 @@ package com.android.server.art;
 
 import static com.android.server.art.PrimaryDexUtils.DetailedPrimaryDexInfo;
 import static com.android.server.art.PrimaryDexUtils.PrimaryDexInfo;
+import static com.android.server.art.model.ArtFlags.DeleteFlags;
+import static com.android.server.art.model.ArtFlags.GetStatusFlags;
 import static com.android.server.art.model.OptimizationStatus.DexFileOptimizationStatus;
 
 import android.annotation.NonNull;
 import android.annotation.SystemApi;
 import android.os.Binder;
+import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.util.Log;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.server.art.IArtd;
-import com.android.server.art.model.DeleteOptions;
+import com.android.server.art.model.ArtFlags;
 import com.android.server.art.model.DeleteResult;
-import com.android.server.art.model.GetStatusOptions;
 import com.android.server.art.model.OptimizationStatus;
 import com.android.server.art.wrapper.AndroidPackageApi;
-import com.android.server.art.wrapper.PackageDataSnapshot;
 import com.android.server.art.wrapper.PackageManagerLocal;
 import com.android.server.art.wrapper.PackageState;
+import com.android.server.pm.snapshot.PackageDataSnapshot;
 
-import java.io.FileDescriptor;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -84,23 +85,36 @@ public final class ArtManagerLocal {
      * @throws IllegalArgumentException if the arguments are illegal
      * @see ArtShellCommand#onHelp()
      */
-    public int handleShellCommand(@NonNull Binder target, @NonNull FileDescriptor in,
-            @NonNull FileDescriptor out, @NonNull FileDescriptor err, @NonNull String[] args) {
+    public int handleShellCommand(@NonNull Binder target, @NonNull ParcelFileDescriptor in,
+            @NonNull ParcelFileDescriptor out, @NonNull ParcelFileDescriptor err,
+            @NonNull String[] args) {
         return new ArtShellCommand(this, mInjector.getPackageManagerLocal())
-                .exec(target, in, out, err, args);
+                .exec(target, in.getFileDescriptor(), out.getFileDescriptor(),
+                        err.getFileDescriptor(), args);
     }
 
     /**
      * Deletes optimized artifacts of a package.
      *
-     * @throws IllegalArgumentException if the package is not found or the options are illegal
+     * @throws IllegalArgumentException if the package is not found or the flags are illegal
      * @throws IllegalStateException if an internal error occurs
-     *
-     * @hide
      */
+    @NonNull
+    public DeleteResult deleteOptimizedArtifacts(
+            @NonNull PackageDataSnapshot snapshot, @NonNull String packageName) {
+        return deleteOptimizedArtifacts(snapshot, packageName, ArtFlags.defaultDeleteFlags());
+    }
+
+    /**
+     * Same as above, but allows to specify flags.
+     *
+     * @see #deleteOptimizedArtifacts(PackageDataSnapshot, String)
+     */
+    @NonNull
     public DeleteResult deleteOptimizedArtifacts(@NonNull PackageDataSnapshot snapshot,
-            @NonNull String packageName, @NonNull DeleteOptions options) {
-        if (!options.isForPrimaryDex() && !options.isForSecondaryDex()) {
+            @NonNull String packageName, @DeleteFlags int flags) {
+        if ((flags & ArtFlags.FLAG_FOR_PRIMARY_DEX) == 0
+                && (flags & ArtFlags.FLAG_FOR_SECONDARY_DEX) == 0) {
             throw new IllegalArgumentException("Nothing to delete");
         }
 
@@ -110,7 +124,7 @@ public final class ArtManagerLocal {
         try {
             long freedBytes = 0;
 
-            if (options.isForPrimaryDex()) {
+            if ((flags & ArtFlags.FLAG_FOR_PRIMARY_DEX) != 0) {
                 boolean isInDalvikCache = Utils.isInDalvikCache(pkgState);
                 for (PrimaryDexInfo dexInfo : PrimaryDexUtils.getDexInfo(pkg)) {
                     if (!dexInfo.hasCode()) {
@@ -123,7 +137,7 @@ public final class ArtManagerLocal {
                 }
             }
 
-            if (options.isForSecondaryDex()) {
+            if ((flags & ArtFlags.FLAG_FOR_SECONDARY_DEX) != 0) {
                 // TODO(jiakaiz): Implement this.
                 throw new UnsupportedOperationException(
                         "Deleting artifacts of secondary dex'es is not implemented yet");
@@ -138,15 +152,25 @@ public final class ArtManagerLocal {
     /**
      * Returns the optimization status of a package.
      *
-     * @throws IllegalArgumentException if the package is not found or the options are illegal
+     * @throws IllegalArgumentException if the package is not found or the flags are illegal
      * @throws IllegalStateException if an internal error occurs
+     */
+    @NonNull
+    public OptimizationStatus getOptimizationStatus(
+            @NonNull PackageDataSnapshot snapshot, @NonNull String packageName) {
+        return getOptimizationStatus(snapshot, packageName, ArtFlags.defaultGetStatusFlags());
+    }
+
+    /**
+     * Same as above, but allows to specify flags.
      *
-     * @hide
+     * @see #getOptimizationStatus(PackageDataSnapshot, String)
      */
     @NonNull
     public OptimizationStatus getOptimizationStatus(@NonNull PackageDataSnapshot snapshot,
-            @NonNull String packageName, @NonNull GetStatusOptions options) {
-        if (!options.isForPrimaryDex() && !options.isForSecondaryDex()) {
+            @NonNull String packageName, @GetStatusFlags int flags) {
+        if ((flags & ArtFlags.FLAG_FOR_PRIMARY_DEX) == 0
+                && (flags & ArtFlags.FLAG_FOR_SECONDARY_DEX) == 0) {
             throw new IllegalArgumentException("Nothing to check");
         }
 
@@ -156,7 +180,7 @@ public final class ArtManagerLocal {
         try {
             List<DexFileOptimizationStatus> statuses = new ArrayList<>();
 
-            if (options.isForPrimaryDex()) {
+            if ((flags & ArtFlags.FLAG_FOR_PRIMARY_DEX) != 0) {
                 for (DetailedPrimaryDexInfo dexInfo :
                         PrimaryDexUtils.getDetailedDexInfo(pkgState, pkg)) {
                     if (!dexInfo.hasCode()) {
@@ -173,7 +197,7 @@ public final class ArtManagerLocal {
                 }
             }
 
-            if (options.isForSecondaryDex()) {
+            if ((flags & ArtFlags.FLAG_FOR_SECONDARY_DEX) != 0) {
                 // TODO(jiakaiz): Implement this.
                 throw new UnsupportedOperationException(
                         "Getting optimization status of secondary dex'es is not implemented yet");
