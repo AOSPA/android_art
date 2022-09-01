@@ -16,8 +16,16 @@
 
 package com.android.server.art;
 
-/** {@hide} */
+/** @hide */
 interface IArtd {
     // Test to see if the artd service is available.
     boolean isAlive();
+
+    /** Deletes artifacts and returns the released space, in bytes. */
+    long deleteArtifacts(in com.android.server.art.ArtifactsPath artifactsPath);
+
+    /** Returns the optimization status of a dex file. */
+    com.android.server.art.GetOptimizationStatusResult getOptimizationStatus(
+            @utf8InCpp String dexFile, @utf8InCpp String instructionSet,
+            @utf8InCpp String classLoaderContext);
 }

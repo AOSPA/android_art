@@ -46,6 +46,20 @@ cc_library {
     ],
 }
 
+cc_library {
+    name: "libartserviced",
+    defaults: [
+        "libartservice_defaults",
+        "art_debug_defaults",
+    ],
+    apex_available: [
+        "com.android.art",
+        "com.android.art.debug",
+    ],
+    shared_libs: [
+    ],
+}
+
 // Provides the API and implementation of the ART Service class that will be
 // loaded by the System Server.
 java_sdk_library {
@@ -97,6 +111,10 @@ java_sdk_library {
         "modules-utils-shell-command-handler",
     ],
 
+    static_libs: [
+        "artd-aidl-java",
+    ],
+
     plugins: ["java_api_finder"],
     dist_group: "android",
 }
@@ -141,6 +159,7 @@ android_test {
         "androidx.test.ext.junit",
         "androidx.test.ext.truth",
         "androidx.test.runner",
+        "artd-aidl-java",
         "mockito-target-minus-junit4",
         "service-art.impl",
     ],

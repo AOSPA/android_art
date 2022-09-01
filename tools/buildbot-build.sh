@@ -69,6 +69,9 @@ while true; do
   elif [[ "$1" == "--showcommands" ]]; then
     showcommands="showcommands"
     shift
+  elif [[ "$1" == "--dist" ]]; then
+    common_targets="$common_targets dist"
+    shift
   elif [[ "$1" == "" ]]; then
     break
   else
@@ -121,9 +124,11 @@ if [[ $build_target == "yes" ]]; then
   # These are built to go into system/lib(64) to be part of the system linker
   # namespace.
   make_command+=" libbacktrace libnetd_client-target libprocinfo libtombstoned_client libunwindstack"
-  # Extract jars from other APEX SDKs for use by vogar. Note these go into
-  # out/target/common/obj/JAVA_LIBRARIES which isn't removed by "m installclean".
-  make_command+=" conscrypt core-icu4j"
+  # Stubs for other APEX SDKs, for use by vogar. Referenced from DEVICE_JARS in
+  # external/vogar/src/vogar/ModeId.java.
+  # Note these go into out/target/common/obj/JAVA_LIBRARIES which isn't removed
+  # by "m installclean".
+  make_command+=" i18n.module.public.api.stubs conscrypt.module.public.api.stubs"
   make_command+=" ${ANDROID_PRODUCT_OUT#"${ANDROID_BUILD_TOP}/"}/system/etc/public.libraries.txt"
   # Targets required to generate a linker configuration for device within the
   # chroot environment. The *.libraries.txt targets are required by
