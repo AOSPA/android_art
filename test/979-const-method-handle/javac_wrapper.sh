@@ -16,6 +16,8 @@
 
 set -e
 
+export ASM_JAR="${ANDROID_BUILD_TOP}/prebuilts/misc/common/asm/asm-9.2.jar"
+
 # Add annotation src files to our compiler inputs.
 asrcs=util-src/annotations/*.java
 
@@ -32,3 +34,6 @@ for class in intermediate-classes/*.class ; do
   transformed_class=classes/$(basename ${class})
   ${JAVA:-java} ${transformer_args} ${class} ${transformed_class}
 done
+
+# Remove class which we want missing at runtime.
+rm classes/MissingType.class
