@@ -123,13 +123,12 @@ if [[ $build_target == "yes" ]]; then
   # Indirect dependencies in the platform, e.g. through heapprofd_client_api.
   # These are built to go into system/lib(64) to be part of the system linker
   # namespace.
-  make_command+=" libbacktrace libnetd_client-target libprocinfo libtombstoned_client libunwindstack"
+  make_command+=" libnetd_client-target libprocinfo libtombstoned_client libunwindstack"
   # Stubs for other APEX SDKs, for use by vogar. Referenced from DEVICE_JARS in
   # external/vogar/src/vogar/ModeId.java.
   # Note these go into out/target/common/obj/JAVA_LIBRARIES which isn't removed
   # by "m installclean".
   make_command+=" i18n.module.public.api.stubs conscrypt.module.public.api.stubs"
-  make_command+=" ${ANDROID_PRODUCT_OUT#"${ANDROID_BUILD_TOP}/"}/system/etc/public.libraries.txt"
   # Targets required to generate a linker configuration for device within the
   # chroot environment. The *.libraries.txt targets are required by
   # the source linkerconfig but not included in the prebuilt one.
@@ -192,8 +191,15 @@ if [[ $build_target == "yes" ]]; then
   # has it).
   implementation_libs=(
     "heapprofd_client_api.so"
+    "libandroid_runtime_lazy.so"
     "libartpalette-system.so"
+    "libbase.so"
+    "libbinder.so"
+    "libbinder_ndk.so"
+    "libcutils.so"
     "liblog.so"
+    "libutils.so"
+    "libvndksupport.so"
   )
   if [ -d prebuilts/runtime/mainline/platform/impl ]; then
     if [[ $TARGET_ARCH = arm* ]]; then
@@ -301,6 +307,11 @@ if [[ $build_target == "yes" ]]; then
   # Linkerconfig reads files from /system/etc
   mkdir -p $linkerconfig_root/system
   cp -r $ANDROID_PRODUCT_OUT/system/etc $linkerconfig_root/system
+
+  # Use our smaller public.libraries.txt that contains only the public libraries
+  # pushed to the chroot directory.
+  cp $ANDROID_BUILD_TOP/art/tools/public.libraries.buildbot.txt \
+    $linkerconfig_root/system/etc/public.libraries.txt
 
   # For linkerconfig to pick up the APEXes correctly we need to make them
   # available in $linkerconfig_root/apex.

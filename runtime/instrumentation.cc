@@ -122,8 +122,6 @@ Instrumentation::Instrumentation()
       have_watched_frame_pop_listeners_(false),
       have_branch_listeners_(false),
       have_exception_handled_listeners_(false),
-      deoptimized_methods_lock_(new ReaderWriterMutex("deoptimized methods lock",
-                                                      kGenericBottomLock)),
       quick_alloc_entry_points_instrumentation_counter_(0),
       alloc_entrypoints_instrumented_(false) {
 }
@@ -287,9 +285,7 @@ bool Instrumentation::InterpretOnly(ArtMethod* method) REQUIRES_SHARED(Locks::mu
   if (method->IsNative()) {
     return false;
   }
-  return InterpretOnly() ||
-         IsDeoptimized(method) ||
-         Runtime::Current()->GetRuntimeCallbacks()->IsMethodBeingInspected(method);
+  return InterpretOnly() || IsDeoptimized(method);
 }
 
 static bool CanUseAotCode(const void* quick_code)
@@ -359,7 +355,7 @@ void Instrumentation::InitializeMethodsCode(ArtMethod* method, const void* aot_c
     REQUIRES_SHARED(Locks::mutator_lock_) {
   // Use instrumentation entrypoints if instrumentation is installed.
   if (UNLIKELY(EntryExitStubsInstalled()) && !IsProxyInit(method)) {
-    if (!method->IsNative() && InterpretOnly()) {
+    if (!method->IsNative() && InterpretOnly(method)) {
       UpdateEntryPoints(method, GetQuickToInterpreterBridge());
     } else {
       UpdateEntryPoints(method, GetQuickInstrumentationEntryPoint());
@@ -367,7 +363,7 @@ void Instrumentation::InitializeMethodsCode(ArtMethod* method, const void* aot_c
     return;
   }
 
-  if (UNLIKELY(IsForcedInterpretOnly())) {
+  if (UNLIKELY(IsForcedInterpretOnly() || IsDeoptimized(method))) {
     UpdateEntryPoints(
         method, method->IsNative() ? GetQuickGenericJniStub() : GetQuickToInterpreterBridge());
     return;
@@ -623,19 +619,17 @@ static void InstrumentationRestoreStack(Thread* thread, void* arg)
         }
         return true;  // Ignore shadow frames.
       }
-      if (m == nullptr || m->IsRuntimeMethod()) {
+      if (m == nullptr) {
         if (kVerboseInstrumentation) {
-          LOG(INFO) << "  Skipping upcall / runtime method. Frame " << GetFrameId();
+          LOG(INFO) << "  Skipping upcall. Frame " << GetFrameId();
         }
         return true;  // Ignore upcalls and runtime methods.
       }
       const OatQuickMethodHeader* method_header = GetCurrentOatQuickMethodHeader();
-      // For JITed frames, we don't install instrumentation stubs.
       if (method_header != nullptr && method_header->HasShouldDeoptimizeFlag()) {
         if (IsShouldDeoptimizeFlagForDebugSet()) {
           runtime_methods_need_deopt_check_ = true;
         }
-        return true;
       }
       auto it = instrumentation_stack_->find(GetReturnPcAddr());
       if (it != instrumentation_stack_->end()) {
@@ -889,11 +883,6 @@ void Instrumentation::ConfigureStubs(const char* key, InstrumentationLevel desir
   UpdateStubs();
 }
 
-void Instrumentation::EnableSingleThreadDeopt(const char* key) {
-  // Prepare for single thread deopt by installing instrumentation stubs.
-  ConfigureStubs(key, InstrumentationLevel::kInstrumentWithInstrumentationStubs);
-}
-
 void Instrumentation::UpdateInstrumentationLevel(InstrumentationLevel requested_level) {
   instrumentation_level_ = requested_level;
 }
@@ -915,7 +904,9 @@ void Instrumentation::MaybeRestoreInstrumentationStack() {
   Locks::mutator_lock_->AssertExclusiveHeld(self);
   Runtime::Current()->GetThreadList()->ForEach([&](Thread* t) NO_THREAD_SAFETY_ANALYSIS {
     no_remaining_deopts =
-        no_remaining_deopts && !t->IsForceInterpreter() &&
+        no_remaining_deopts &&
+        !t->IsForceInterpreter() &&
+        !t->HasDebuggerShadowFrames() &&
         std::all_of(t->GetInstrumentationStack()->cbegin(),
                     t->GetInstrumentationStack()->cend(),
                     [&](const auto& frame) REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -1051,7 +1042,7 @@ std::string Instrumentation::EntryPointString(const void* code) {
 }
 
 void Instrumentation::UpdateMethodsCodeImpl(ArtMethod* method, const void* new_code) {
-  if (!EntryExitStubsInstalled()) {
+  if (!AreExitStubsInstalled()) {
     // Fast path: no instrumentation.
     DCHECK(!IsDeoptimized(method));
     UpdateEntryPoints(method, new_code);
@@ -1072,7 +1063,7 @@ void Instrumentation::UpdateMethodsCodeImpl(ArtMethod* method, const void* new_c
     return;
   }
 
-  if (CodeNeedsEntryExitStub(new_code, method)) {
+  if (EntryExitStubsInstalled() && CodeNeedsEntryExitStub(new_code, method)) {
     DCHECK(method->GetEntryPointFromQuickCompiledCode() == GetQuickInstrumentationEntryPoint() ||
         class_linker->IsQuickToInterpreterBridge(method->GetEntryPointFromQuickCompiledCode()))
               << EntryPointString(method->GetEntryPointFromQuickCompiledCode())
@@ -1115,14 +1106,6 @@ bool Instrumentation::IsDeoptimizedMethod(ArtMethod* method) {
   return deoptimized_methods_.find(method) != deoptimized_methods_.end();
 }
 
-ArtMethod* Instrumentation::BeginDeoptimizedMethod() {
-  if (deoptimized_methods_.empty()) {
-    // Empty.
-    return nullptr;
-  }
-  return *deoptimized_methods_.begin();
-}
-
 bool Instrumentation::RemoveDeoptimizedMethod(ArtMethod* method) {
   auto it = deoptimized_methods_.find(method);
   if (it == deoptimized_methods_.end()) {
@@ -1132,10 +1115,6 @@ bool Instrumentation::RemoveDeoptimizedMethod(ArtMethod* method) {
   return true;
 }
 
-bool Instrumentation::IsDeoptimizedMethodsEmptyLocked() const {
-  return deoptimized_methods_.empty();
-}
-
 void Instrumentation::Deoptimize(ArtMethod* method) {
   CHECK(!method->IsNative());
   CHECK(!method->IsProxyMethod());
@@ -1143,7 +1122,7 @@ void Instrumentation::Deoptimize(ArtMethod* method) {
 
   Thread* self = Thread::Current();
   {
-    WriterMutexLock mu(self, *GetDeoptimizedMethodsLock());
+    Locks::mutator_lock_->AssertExclusiveHeld(Thread::Current());
     bool has_not_been_deoptimized = AddDeoptimizedMethod(method);
     CHECK(has_not_been_deoptimized) << "Method " << ArtMethod::PrettyMethod(method)
         << " is already deoptimized";
@@ -1169,9 +1148,8 @@ void Instrumentation::Undeoptimize(ArtMethod* method) {
   CHECK(!method->IsProxyMethod());
   CHECK(method->IsInvokable());
 
-  Thread* self = Thread::Current();
   {
-    WriterMutexLock mu(self, *GetDeoptimizedMethodsLock());
+    Locks::mutator_lock_->AssertExclusiveHeld(Thread::Current());
     bool found_and_erased = RemoveDeoptimizedMethod(method);
     CHECK(found_and_erased) << "Method " << ArtMethod::PrettyMethod(method)
         << " is not deoptimized";
@@ -1204,29 +1182,26 @@ void Instrumentation::Undeoptimize(ArtMethod* method) {
 }
 
 bool Instrumentation::IsDeoptimizedMethodsEmpty() const {
-  ReaderMutexLock mu(Thread::Current(), *GetDeoptimizedMethodsLock());
   return deoptimized_methods_.empty();
 }
 
 bool Instrumentation::IsDeoptimized(ArtMethod* method) {
   DCHECK(method != nullptr);
-  ReaderMutexLock mu(Thread::Current(), *GetDeoptimizedMethodsLock());
   return IsDeoptimizedMethod(method);
 }
-
 
 void Instrumentation::DisableDeoptimization(const char* key) {
   // Remove any instrumentation support added for deoptimization.
   ConfigureStubs(key, InstrumentationLevel::kInstrumentNothing);
+  Locks::mutator_lock_->AssertExclusiveHeld(Thread::Current());
   // Undeoptimized selected methods.
   while (true) {
     ArtMethod* method;
     {
-      ReaderMutexLock mu(Thread::Current(), *GetDeoptimizedMethodsLock());
-      if (IsDeoptimizedMethodsEmptyLocked()) {
+      if (deoptimized_methods_.empty()) {
         break;
       }
-      method = BeginDeoptimizedMethod();
+      method = *deoptimized_methods_.begin();
       CHECK(method != nullptr);
     }
     Undeoptimize(method);

@@ -1180,6 +1180,7 @@
                   "831-unresolved-field",
                   "833-background-verification",
                   "836-32768classes",
+                  "837-deopt",
                   "999-redefine-hiddenapi",
                   "1000-non-moving-space-stress",
                   "1001-app-image-regions",
@@ -1273,7 +1274,7 @@
         "tests": ["141-class-unload", "071-dexfile"],
         "variant": "gcstress",
         "bug": "b/111543628",
-        "description" : ["Test seems to timeout when run with gcstress due to slower unwinding by libbacktrace"]
+        "description" : ["Test seems to timeout when run with gcstress due to slower unwinding by libunwindstack"]
     },
     {
         "tests": ["708-jit-cache-churn"],
@@ -1285,7 +1286,7 @@
         "tests": ["712-varhandle-invocations"],
         "variant": "gcstress",
         "bug": "b/111630237",
-        "description": ["Test timing out under gcstress possibly due to slower unwinding by libbacktrace"]
+        "description": ["Test timing out under gcstress possibly due to slower unwinding by libunwindstack"]
     },
     {
         "tests": ["1336-short-finalizer-timeout"],
@@ -1526,5 +1527,10 @@
         "tests": ["2043-reference-pauses"],
         "env_vars": {"ART_TEST_DEBUG_GC": "true"},
         "description": ["Test timing out on debug gc."]
+    },
+    {
+        "tests": ["837-deopt"],
+        "description": ["Tests deoptimization and OSR, which never happens when tracing."],
+        "variant": "trace | stream | jit-on-first-use"
     }
 ]

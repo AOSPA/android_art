@@ -14,11 +14,16 @@
  * limitations under the License.
  */
 
+#include "artd.h"
+
 #include <stdlib.h>
 #include <unistd.h>
 
+#include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -27,6 +32,7 @@
 #include "android-base/logging.h"
 #include "android-base/properties.h"
 #include "android-base/result.h"
+#include "android-base/stringprintf.h"
 #include "android-base/strings.h"
 #include "android/binder_auto_utils.h"
 #include "android/binder_manager.h"
@@ -34,6 +40,7 @@
 #include "base/array_ref.h"
 #include "base/file_utils.h"
 #include "oat_file_assistant.h"
+#include "path_utils.h"
 #include "runtime.h"
 #include "tools/tools.h"
 
@@ -43,13 +50,15 @@ namespace artd {
 namespace {
 
 using ::aidl::com::android::server::art::ArtifactsPath;
-using ::aidl::com::android::server::art::BnArtd;
 using ::aidl::com::android::server::art::GetOptimizationStatusResult;
 using ::android::base::Error;
 using ::android::base::GetBoolProperty;
 using ::android::base::Result;
 using ::android::base::Split;
+using ::android::base::StringPrintf;
 using ::ndk::ScopedAStatus;
+
+constexpr const char* kServiceName = "artd";
 
 constexpr const char* kPhenotypeFlagPrefix = "persist.device_config.runtime_native_boot.";
 constexpr const char* kDalvikVmFlagPrefix = "dalvik.vm.";
@@ -89,130 +98,140 @@ bool DenyArtApexDataFiles() {
   return !GetBoolProperty("odsign.verification.success", /*default_value=*/false);
 }
 
+// Deletes a file. Returns the size of the deleted file, or 0 if the deleted file is empty or an
+// error occurs.
+int64_t GetSizeAndDeleteFile(const std::string& path) {
+  std::error_code ec;
+  int64_t size = std::filesystem::file_size(path, ec);
+  if (ec) {
+    // It is okay if the file does not exist. We don't have to log it.
+    if (ec.value() != ENOENT) {
+      LOG(ERROR) << StringPrintf(
+          "Failed to get the file size of '%s': %s", path.c_str(), ec.message().c_str());
+    }
+    return 0;
+  }
+
+  if (!std::filesystem::remove(path, ec)) {
+    LOG(ERROR) << StringPrintf("Failed to remove '%s': %s", path.c_str(), ec.message().c_str());
+    return 0;
+  }
+
+  return size;
+}
+
 }  // namespace
 
-class Artd : public BnArtd {
-  constexpr static const char* kServiceName = "artd";
+ScopedAStatus Artd::isAlive(bool* _aidl_return) {
+  *_aidl_return = true;
+  return ScopedAStatus::ok();
+}
 
- public:
-  ScopedAStatus isAlive(bool* _aidl_return) override {
-    *_aidl_return = true;
-    return ScopedAStatus::ok();
+ScopedAStatus Artd::deleteArtifacts(const ArtifactsPath& in_artifactsPath, int64_t* _aidl_return) {
+  Result<std::string> oat_path = BuildOatPath(in_artifactsPath);
+  if (!oat_path.ok()) {
+    return ScopedAStatus::fromExceptionCodeWithMessage(EX_ILLEGAL_STATE,
+                                                       oat_path.error().message().c_str());
   }
 
-  ScopedAStatus deleteArtifacts(const ArtifactsPath& in_artifactsPath,
-                                int64_t* _aidl_return) override {
-    (void)in_artifactsPath;
-    (void)_aidl_return;
-    return ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
+  *_aidl_return = 0;
+  *_aidl_return += GetSizeAndDeleteFile(*oat_path);
+  *_aidl_return += GetSizeAndDeleteFile(OatPathToVdexPath(*oat_path));
+  *_aidl_return += GetSizeAndDeleteFile(OatPathToArtPath(*oat_path));
+
+  return ScopedAStatus::ok();
+}
+
+ScopedAStatus Artd::getOptimizationStatus(const std::string& in_dexFile,
+                                          const std::string& in_instructionSet,
+                                          const std::string& in_classLoaderContext,
+                                          GetOptimizationStatusResult* _aidl_return) {
+  Result<OatFileAssistant::RuntimeOptions> runtime_options = GetRuntimeOptions();
+  if (!runtime_options.ok()) {
+    return ScopedAStatus::fromExceptionCodeWithMessage(
+        EX_ILLEGAL_STATE,
+        ("Failed to get runtime options: " + runtime_options.error().message()).c_str());
   }
 
-  ScopedAStatus getOptimizationStatus(const std::string& in_dexFile,
-                                      const std::string& in_instructionSet,
-                                      const std::string& in_classLoaderContext,
-                                      GetOptimizationStatusResult* _aidl_return) override {
-    Result<OatFileAssistant::RuntimeOptions> runtime_options = GetRuntimeOptions();
-    if (!runtime_options.ok()) {
-      return ScopedAStatus::fromExceptionCodeWithMessage(
-          EX_ILLEGAL_STATE,
-          ("Failed to get runtime options: " + runtime_options.error().message()).c_str());
-    }
-
-    std::string error_msg;
-    if (!OatFileAssistant::GetOptimizationStatus(
-            in_dexFile.c_str(),
-            in_instructionSet.c_str(),
-            in_classLoaderContext.c_str(),
-            std::make_unique<OatFileAssistant::RuntimeOptions>(std::move(*runtime_options)),
-            &_aidl_return->compilerFilter,
-            &_aidl_return->compilationReason,
-            &_aidl_return->locationDebugString,
-            &error_msg)) {
-      return ScopedAStatus::fromExceptionCodeWithMessage(
-          EX_ILLEGAL_STATE, ("Failed to get optimization status: " + error_msg).c_str());
-    }
-
-    return ScopedAStatus::ok();
+  std::string error_msg;
+  auto oat_file_assistant = OatFileAssistant::Create(
+      in_dexFile.c_str(),
+      in_instructionSet.c_str(),
+      in_classLoaderContext.c_str(),
+      /*load_executable=*/false,
+      /*only_load_trusted_executable=*/true,
+      std::make_unique<OatFileAssistant::RuntimeOptions>(std::move(*runtime_options)),
+      &error_msg);
+  if (oat_file_assistant == nullptr) {
+    return ScopedAStatus::fromExceptionCodeWithMessage(
+        EX_ILLEGAL_STATE, ("Failed to create OatFileAssistant: " + error_msg).c_str());
   }
 
-  Result<void> Start() {
-    LOG(INFO) << "Starting artd";
+  std::string ignored_odex_status;
+  oat_file_assistant->GetOptimizationStatus(&_aidl_return->compilerFilter,
+                                            &_aidl_return->compilationReason,
+                                            &_aidl_return->locationDebugString,
+                                            &ignored_odex_status);
 
-    ScopedAStatus status = ScopedAStatus::fromStatus(
-        AServiceManager_registerLazyService(this->asBinder().get(), kServiceName));
-    if (!status.isOk()) {
-      return Error() << status.getDescription();
-    }
+  // We ignore odex_status because it is not meaningful. It can only be either "up-to-date",
+  // "apk-more-recent", or "io-error-no-oat", which means it doesn't give us information in addition
+  // to what we can learn from compiler_filter because compiler_filter will be the actual compiler
+  // filter, "run-from-apk-fallback", and "run-from-apk" in those three cases respectively.
+  DCHECK(ignored_odex_status == "up-to-date" || ignored_odex_status == "apk-more-recent" ||
+         ignored_odex_status == "io-error-no-oat");
 
-    ABinderProcess_startThreadPool();
+  return ScopedAStatus::ok();
+}
 
-    return {};
+Result<void> Artd::Start() {
+  ScopedAStatus status = ScopedAStatus::fromStatus(
+      AServiceManager_registerLazyService(this->asBinder().get(), kServiceName));
+  if (!status.isOk()) {
+    return Error() << status.getDescription();
   }
 
- private:
-  Result<OatFileAssistant::RuntimeOptions> GetRuntimeOptions() {
-    // We don't cache this system property because it can change.
-    bool use_jit_zygote = UseJitZygote();
+  ABinderProcess_startThreadPool();
 
-    if (!HasRuntimeOptionsCache()) {
-      OR_RETURN(BuildRuntimeOptionsCache());
-    }
+  return {};
+}
 
-    return OatFileAssistant::RuntimeOptions{
-        .image_locations = cached_boot_image_locations_,
-        .boot_class_path = cached_boot_class_path_,
-        .boot_class_path_locations = cached_boot_class_path_,
-        .use_jit_zygote = use_jit_zygote,
-        .deny_art_apex_data_files = cached_deny_art_apex_data_files_,
-        .apex_versions = cached_apex_versions_,
-    };
+Result<OatFileAssistant::RuntimeOptions> Artd::GetRuntimeOptions() {
+  // We don't cache this system property because it can change.
+  bool use_jit_zygote = UseJitZygote();
+
+  if (!HasRuntimeOptionsCache()) {
+    OR_RETURN(BuildRuntimeOptionsCache());
   }
 
-  Result<void> BuildRuntimeOptionsCache() {
-    // This system property can only be set by odsign on boot, so it won't change.
-    bool deny_art_apex_data_files = DenyArtApexDataFiles();
+  return OatFileAssistant::RuntimeOptions{
+      .image_locations = cached_boot_image_locations_,
+      .boot_class_path = cached_boot_class_path_,
+      .boot_class_path_locations = cached_boot_class_path_,
+      .use_jit_zygote = use_jit_zygote,
+      .deny_art_apex_data_files = cached_deny_art_apex_data_files_,
+      .apex_versions = cached_apex_versions_,
+  };
+}
 
-    std::vector<std::string> image_locations =
-        OR_RETURN(GetBootImageLocations(deny_art_apex_data_files));
-    std::vector<std::string> boot_class_path = OR_RETURN(GetBootClassPath());
-    std::string apex_versions =
-        Runtime::GetApexVersions(ArrayRef<const std::string>(boot_class_path));
+Result<void> Artd::BuildRuntimeOptionsCache() {
+  // This system property can only be set by odsign on boot, so it won't change.
+  bool deny_art_apex_data_files = DenyArtApexDataFiles();
 
-    cached_boot_image_locations_ = std::move(image_locations);
-    cached_boot_class_path_ = std::move(boot_class_path);
-    cached_apex_versions_ = std::move(apex_versions);
-    cached_deny_art_apex_data_files_ = deny_art_apex_data_files;
+  std::vector<std::string> image_locations =
+      OR_RETURN(GetBootImageLocations(deny_art_apex_data_files));
+  std::vector<std::string> boot_class_path = OR_RETURN(GetBootClassPath());
+  std::string apex_versions =
+      Runtime::GetApexVersions(ArrayRef<const std::string>(boot_class_path));
 
-    return {};
-  }
+  cached_boot_image_locations_ = std::move(image_locations);
+  cached_boot_class_path_ = std::move(boot_class_path);
+  cached_apex_versions_ = std::move(apex_versions);
+  cached_deny_art_apex_data_files_ = deny_art_apex_data_files;
 
-  bool HasRuntimeOptionsCache() {
-    return !cached_boot_image_locations_.empty();
-  }
+  return {};
+}
 
-  std::vector<std::string> cached_boot_image_locations_;
-  std::vector<std::string> cached_boot_class_path_;
-  std::string cached_apex_versions_;
-  bool cached_deny_art_apex_data_files_;
-};
+bool Artd::HasRuntimeOptionsCache() const { return !cached_boot_image_locations_.empty(); }
 
 }  // namespace artd
 }  // namespace art
-
-int main(const int argc __attribute__((unused)), char* argv[]) {
-  setenv("ANDROID_LOG_TAGS", "*:v", 1);
-  android::base::InitLogging(argv);
-
-  art::artd::Artd artd;
-
-  if (auto ret = artd.Start(); !ret.ok()) {
-    LOG(ERROR) << "Unable to start artd: " << ret.error();
-    exit(1);
-  }
-
-  ABinderProcess_joinThreadPool();
-
-  LOG(INFO) << "artd shutting down";
-
-  return 0;
-}
