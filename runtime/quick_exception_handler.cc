@@ -399,13 +399,15 @@ class DeoptimizeStackVisitor final : public StackVisitor {
       return true;
     } else if (method->IsNative()) {
       // If we return from JNI with a pending exception and want to deoptimize, we need to skip
-      // the native method.
-      // The top method is a runtime method, the native method comes next.
-      CHECK_EQ(GetFrameDepth(), 1U);
+      // the native method. The top method is a runtime method, the native method comes next.
+      // We also deoptimize due to method instrumentation reasons from method entry / exit
+      // callbacks. In these cases native method is at the top of stack.
+      CHECK((GetFrameDepth() == 1U) || (GetFrameDepth() == 0U));
       callee_method_ = method;
       return true;
     } else if (!single_frame_deopt_ &&
-               !Runtime::Current()->IsAsyncDeoptimizeable(GetCurrentQuickFramePc())) {
+               !Runtime::Current()->IsAsyncDeoptimizeable(GetOuterMethod(),
+                                                          GetCurrentQuickFramePc())) {
       // We hit some code that's not deoptimizeable. However, Single-frame deoptimization triggered
       // from compiled code is always allowed since HDeoptimize always saves the full environment.
       LOG(WARNING) << "Got request to deoptimize un-deoptimizable method "

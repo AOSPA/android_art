@@ -3390,11 +3390,9 @@ void ClassLinker::FixupStaticTrampolines(Thread* self, ObjPtr<mirror::Class> kla
   }
 
   instrumentation::Instrumentation* instrumentation = runtime->GetInstrumentation();
-  // Link the code of methods skipped by LinkCode.
   for (size_t method_index = 0; method_index < num_direct_methods; ++method_index) {
     ArtMethod* method = klass->GetDirectMethod(method_index, pointer_size);
-    if (!method->IsStatic()) {
-      // Only update static methods.
+    if (!NeedsClinitCheckBeforeCall(method)) {
       continue;
     }
     instrumentation->UpdateMethodsCode(method, instrumentation->GetCodeForInvoke(method));
@@ -7860,20 +7858,6 @@ bool ClassLinker::LinkMethodsHelper<kPointerSize>::FinalizeIfTable(
   return true;
 }
 
-NO_INLINE
-static void ThrowIllegalAccessErrorForImplementingMethod(ObjPtr<mirror::Class> klass,
-                                                         ArtMethod* vtable_method,
-                                                         ArtMethod* interface_method)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  DCHECK(!vtable_method->IsAbstract());
-  DCHECK(!vtable_method->IsPublic());
-  ThrowIllegalAccessError(
-      klass,
-      "Method '%s' implementing interface method '%s' is not public",
-      vtable_method->PrettyMethod().c_str(),
-      interface_method->PrettyMethod().c_str());
-}
-
 template <PointerSize kPointerSize>
 ObjPtr<mirror::PointerArray> ClassLinker::LinkMethodsHelper<kPointerSize>::AllocPointerArray(
     Thread* self, size_t length) {
@@ -7962,21 +7946,16 @@ size_t ClassLinker::LinkMethodsHelper<kPointerSize>::AssignVTableIndexes(
   static constexpr double kMinLoadFactor = 0.3;
   static constexpr double kMaxLoadFactor = 0.5;
   static constexpr size_t kMaxStackBuferSize = 256;
-  const size_t super_vtable_buffer_size = super_vtable_length * 3;
   const size_t declared_virtuals_buffer_size = num_virtual_methods * 3;
-  const size_t total_buffer_size = super_vtable_buffer_size + declared_virtuals_buffer_size;
-  uint32_t* super_vtable_buffer_ptr = (total_buffer_size <= kMaxStackBuferSize)
-      ? reinterpret_cast<uint32_t*>(alloca(total_buffer_size * sizeof(uint32_t)))
-      : allocator_.AllocArray<uint32_t>(total_buffer_size);
-  uint32_t* declared_virtuals_buffer_ptr = super_vtable_buffer_ptr + super_vtable_buffer_size;
-  VTableSignatureSet super_vtable_signatures(
-      kMinLoadFactor,
-      kMaxLoadFactor,
-      VTableSignatureHash(super_vtable_accessor),
-      VTableSignatureEqual(super_vtable_accessor),
-      super_vtable_buffer_ptr,
-      super_vtable_buffer_size,
-      allocator_.Adapter());
+  const size_t super_vtable_buffer_size = super_vtable_length * 3;
+  const size_t bit_vector_size = BitVector::BitsToWords(num_virtual_methods);
+  const size_t total_size =
+      declared_virtuals_buffer_size + super_vtable_buffer_size + bit_vector_size;
+
+  uint32_t* declared_virtuals_buffer_ptr = (total_size <= kMaxStackBuferSize)
+      ? reinterpret_cast<uint32_t*>(alloca(total_size * sizeof(uint32_t)))
+      : allocator_.AllocArray<uint32_t>(total_size);
+  uint32_t* bit_vector_buffer_ptr = declared_virtuals_buffer_ptr + declared_virtuals_buffer_size;
 
   DeclaredVirtualSignatureSet declared_virtual_signatures(
       kMinLoadFactor,
@@ -7992,16 +7971,18 @@ size_t ClassLinker::LinkMethodsHelper<kPointerSize>::AssignVTableIndexes(
   size_t vtable_length = super_vtable_length;
 
   // Record which declared methods are overriding a super method.
-  ArenaBitVector initialized_methods(&allocator_, num_virtual_methods, /* expandable= */ false);
+  BitVector initialized_methods(/* expandable= */ false,
+                                Allocator::GetNoopAllocator(),
+                                bit_vector_size,
+                                bit_vector_buffer_ptr);
 
   // Note: our sets hash on the method name, and therefore we pay a high
   // performance price when a class has many overloads.
   //
-  // We populate the declared_virtual_signatures instead of the
-  // super_vtable_signatures (which is only lazy populated in case of interface
-  // overriding, see below). This makes sure that we pay the performance price
-  // only on that class, and not on its subclasses (except in the case of
-  // interface overriding, see below).
+  // We populate a set of declared signatures instead of signatures from the
+  // super vtable (which is only lazy populated in case of interface overriding,
+  // see below). This makes sure that we pay the performance price only on that
+  // class, and not on its subclasses (except in the case of interface overriding, see below).
   for (size_t i = 0; i != num_virtual_methods; ++i) {
     ArtMethod* virtual_method = klass->GetVirtualMethodDuringLinking(i, kPointerSize);
     DCHECK(!virtual_method->IsStatic()) << virtual_method->PrettyMethod();
@@ -8040,9 +8021,9 @@ size_t ClassLinker::LinkMethodsHelper<kPointerSize>::AssignVTableIndexes(
       return 0u;
     }
     if (initialized_methods.IsBitSet(*it)) {
-      // The method is overriding two methods: one public, and one package private.
-      // We record that information to later set the method in the vtable
-      // location that isn't the method index.
+      // The method is overriding more than one method.
+      // We record that information in a linked list to later set the method in the vtable
+      // locations that are not the method index.
       if (same_signature_vtable_lists.empty()) {
         same_signature_vtable_lists = ArrayRef<uint32_t>(
             allocator_.AllocArray<uint32_t>(super_vtable_length), super_vtable_length);
@@ -8053,12 +8034,9 @@ size_t ClassLinker::LinkMethodsHelper<kPointerSize>::AssignVTableIndexes(
     } else {
       initialized_methods.SetBit(*it);
     }
-    // Make sure the vtable index of the method is the vtable index of the overridden
-    // method that is public. We know that index is the largest one, a we can
-    // only start with a package private in the superclass hierarchy, and then have a new
-    // index in a closer superclass.
-    // This makes sure we find the public version when looking for interface
-    // (see code below).
+
+    // We arbitrarily set to the largest index. This is also expected when
+    // iterating over the `same_signature_vtable_lists_`.
     virtual_method->SetMethodIndex(j);
   }
 
@@ -8070,6 +8048,21 @@ size_t ClassLinker::LinkMethodsHelper<kPointerSize>::AssignVTableIndexes(
       vtable_length++;
     }
   }
+
+  // A lazily constructed super vtable set, which we only populate in the less
+  // common sittuation of a superclass implementing a method declared in an
+  // interface this class inherits.
+  // We still try to allocate the set on the stack as using the arena will have
+  // a larger cost.
+  uint32_t* super_vtable_buffer_ptr = bit_vector_buffer_ptr + bit_vector_size;
+  VTableSignatureSet super_vtable_signatures(
+      kMinLoadFactor,
+      kMaxLoadFactor,
+      VTableSignatureHash(super_vtable_accessor),
+      VTableSignatureEqual(super_vtable_accessor),
+      super_vtable_buffer_ptr,
+      super_vtable_buffer_size,
+      allocator_.Adapter());
 
   // Assign vtable indexes for interface methods in new interfaces and store them
   // in implementation method arrays. These shall be replaced by actual method
@@ -8089,11 +8082,13 @@ size_t ClassLinker::LinkMethodsHelper<kPointerSize>::AssignVTableIndexes(
       ArtMethod* interface_method = iface->GetVirtualMethod(j, kPointerSize);
       size_t hash = ComputeMethodHash(interface_method);
       ArtMethod* vtable_method = nullptr;
-      bool found = false;
       auto it1 = declared_virtual_signatures.FindWithHash(interface_method, hash);
       if (it1 != declared_virtual_signatures.end()) {
-        vtable_method = klass->GetVirtualMethodDuringLinking(*it1, kPointerSize);
-        found = true;
+        ArtMethod* found_method = klass->GetVirtualMethodDuringLinking(*it1, kPointerSize);
+        // For interface overriding, we only look at public methods.
+        if (found_method->IsPublic()) {
+          vtable_method = found_method;
+        }
       } else {
         // This situation should be rare (a superclass implements a method
         // declared in an interface this class is inheriting). Only in this case
@@ -8101,40 +8096,25 @@ size_t ClassLinker::LinkMethodsHelper<kPointerSize>::AssignVTableIndexes(
         if (super_vtable_signatures.empty()) {
           for (size_t k = 0; k < super_vtable_length; ++k) {
             ArtMethod* super_method = super_vtable_accessor.GetVTableEntry(k);
-            if (!klass->CanAccessMember(super_method->GetDeclaringClass(),
-                                        super_method->GetAccessFlags())) {
-                continue;
+            if (!super_method->IsPublic()) {
+              // For interface overriding, we only look at public methods.
+              continue;
             }
             size_t super_hash = (k < mirror::Object::kVTableLength)
                 ? class_linker_->object_virtual_method_hashes_[k]
                 : ComputeMethodHash(super_method);
             auto [it, inserted] = super_vtable_signatures.InsertWithHash(k, super_hash);
-            if (UNLIKELY(!inserted)) {
-              // If there is an existing method with the same name and
-              // signature, this means we have a package-private version and a
-              // public version. When setting up vtable indexes, we make sure
-              // the public version has the highest index, and therefore we only
-              // record the public version here. This makes sure we don't get
-              // the package-private version in the lookup below.
-              *it = k;
-            }
+            DCHECK(inserted || super_vtable_accessor.GetVTableEntry(*it) == super_method);
           }
         }
         auto it2 = super_vtable_signatures.FindWithHash(interface_method, hash);
         if (it2 != super_vtable_signatures.end()) {
           vtable_method = super_vtable_accessor.GetVTableEntry(*it2);
-          found = true;
         }
       }
+
       uint32_t vtable_index = vtable_length;
-      if (found) {
-        DCHECK(vtable_method != nullptr);
-        if (!vtable_method->IsAbstract() && !vtable_method->IsPublic()) {
-          // FIXME: Delay the exception until we actually try to call the method. b/211854716
-          sants.reset();
-          ThrowIllegalAccessErrorForImplementingMethod(klass, vtable_method, interface_method);
-          return 0u;
-        }
+      if (vtable_method != nullptr) {
         vtable_index = vtable_method->GetMethodIndexDuringLinking();
         if (!vtable_method->IsOverridableByDefaultMethod()) {
           method_array->SetElementPtrSize(j, vtable_index, kPointerSize);
@@ -8144,7 +8124,7 @@ size_t ClassLinker::LinkMethodsHelper<kPointerSize>::AssignVTableIndexes(
 
       auto [it, inserted] = copied_method_records_.InsertWithHash(
           CopiedMethodRecord(interface_method, vtable_index), hash);
-      if (found) {
+      if (vtable_method != nullptr) {
         DCHECK_EQ(vtable_index, it->GetMethodIndex());
       } else if (inserted) {
         DCHECK_EQ(vtable_index, it->GetMethodIndex());
@@ -8485,22 +8465,15 @@ bool ClassLinker::LinkMethodsHelper<kPointerSize>::LinkMethods(
       vtable->SetElementPtrSize(vtable_index, &virtual_method, kPointerSize);
       if (UNLIKELY(vtable_index < same_signature_vtable_lists.size())) {
         // We may override more than one method according to JLS, see b/211854716.
-        // We really only expect one or two methods overridden, not more: one for
-        // package-private visibility, and one for public visibility.
-        // In AssignVTableIndexes, we make sure the vtable index of a method that
-        // overrides two methods is the same vtable index as the public one.
-        // This makes sure we find the public version when looking for interface
-        // method overriding.
-        // FIXME: Change this while loop into code that only expects two
-        // entries.
         while (same_signature_vtable_lists[vtable_index] != dex::kDexNoIndex) {
           DCHECK_LT(same_signature_vtable_lists[vtable_index], vtable_index);
           vtable_index = same_signature_vtable_lists[vtable_index];
-          ArtMethod* current_method = super_class->GetVTableEntry(vtable_index, kPointerSize);
-          if (klass->CanAccessMember(current_method->GetDeclaringClass(),
-                                     current_method->GetAccessFlags())) {
+          vtable->SetElementPtrSize(vtable_index, &virtual_method, kPointerSize);
+          if (kIsDebugBuild) {
+            ArtMethod* current_method = super_class->GetVTableEntry(vtable_index, kPointerSize);
+            DCHECK(klass->CanAccessMember(current_method->GetDeclaringClass(),
+                                          current_method->GetAccessFlags()));
             DCHECK(!current_method->IsFinal());
-            vtable->SetElementPtrSize(vtable_index, &virtual_method, kPointerSize);
           }
         }
       }
@@ -8612,7 +8585,8 @@ class ClassLinker::LinkFieldsHelper {
 };
 
 // We use the following order of field types for assigning offsets.
-// Some fields can be shuffled forward to fill gaps, see `ClassLinker::LinkFields()`.
+// Some fields can be shuffled forward to fill gaps, see
+// `ClassLinker::LinkFieldsHelper::LinkFields()`.
 enum class ClassLinker::LinkFieldsHelper::FieldTypeOrder : uint16_t {
   kReference = 0u,
   kLong,

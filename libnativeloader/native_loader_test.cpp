@@ -33,7 +33,7 @@ namespace nativeloader {
 using ::testing::Eq;
 using ::testing::NotNull;
 using ::testing::StrEq;
-using internal::ConfigEntry;
+using internal::ConfigEntry;  // NOLINT - ConfigEntry is actually used
 using internal::ParseApexLibrariesConfig;
 using internal::ParseConfig;
 
@@ -68,7 +68,7 @@ class NativeLoaderTest : public ::testing::TestWithParam<bool> {
   void SetExpectations() {
     std::vector<std::string> default_public_libs =
         android::base::Split(preloadable_public_libraries(), ":");
-    for (auto l : default_public_libs) {
+    for (const std::string& l : default_public_libs) {
       EXPECT_CALL(*mock,
                   mock_dlopen_ext(false, StrEq(l.c_str()), RTLD_NOW | RTLD_NODELETE, NotNull()))
           .WillOnce(Return(any_nonnull));

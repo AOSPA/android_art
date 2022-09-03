@@ -3592,6 +3592,7 @@ void Thread::DumpThreadOffset(std::ostream& os, uint32_t offset) {
   QUICK_ENTRY_POINT_INFO(pAputObject)
   QUICK_ENTRY_POINT_INFO(pJniMethodStart)
   QUICK_ENTRY_POINT_INFO(pJniMethodEnd)
+  QUICK_ENTRY_POINT_INFO(pJniMethodEntryHook)
   QUICK_ENTRY_POINT_INFO(pJniDecodeReferenceResult)
   QUICK_ENTRY_POINT_INFO(pJniLockObject)
   QUICK_ENTRY_POINT_INFO(pJniUnlockObject)
@@ -3771,7 +3772,7 @@ void Thread::QuickDeliverException(bool is_method_exit_exception) {
   if (Dbg::IsForcedInterpreterNeededForException(this) || force_deopt || IsForceInterpreter()) {
     NthCallerVisitor visitor(this, 0, false);
     visitor.WalkStack();
-    if (Runtime::Current()->IsAsyncDeoptimizeable(visitor.caller_pc)) {
+    if (Runtime::Current()->IsAsyncDeoptimizeable(visitor.GetOuterMethod(), visitor.caller_pc)) {
       // method_type shouldn't matter due to exception handling.
       const DeoptimizationMethodType method_type = DeoptimizationMethodType::kDefault;
       // Save the exception into the deoptimization context so it can be restored
@@ -3999,7 +4000,7 @@ class ReferenceMapVisitor : public StackVisitor {
         // (PC shall be known thanks to the runtime frame for throwing SIOOBE).
         // Note that JIT does not emit that intrinic implementation.
         const void* pc = reinterpret_cast<const void*>(GetCurrentQuickFramePc());
-        if (pc != 0u && Runtime::Current()->GetHeap()->IsInBootImageOatFile(pc)) {
+        if (pc != nullptr && Runtime::Current()->GetHeap()->IsInBootImageOatFile(pc)) {
           return;
         }
       }
