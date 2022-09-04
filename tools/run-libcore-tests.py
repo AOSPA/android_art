@@ -253,18 +253,19 @@ SLOW_OJLUNI_TESTS = {
 # These tests fail with "java.io.IOException: Stream closed", tracked in
 # http://b/235566533 and http://b/208639267
 DISABLED_GCSTRESS_DEBUG_TESTS = {
-  "test.java.lang.StrictMath.HypotTests_testAgainstTranslit_shard1",
-  "test.java.lang.StrictMath.HypotTests_testAgainstTranslit_shard2",
-  "test.java.lang.StrictMath.HypotTests_testAgainstTranslit_shard3",
-  "test.java.lang.StrictMath.HypotTests_testAgainstTranslit_shard4",
+  "test.java.lang.StrictMath.HypotTests#testAgainstTranslit_shard1",
+  "test.java.lang.StrictMath.HypotTests#testAgainstTranslit_shard2",
+  "test.java.lang.StrictMath.HypotTests#testAgainstTranslit_shard3",
+  "test.java.lang.StrictMath.HypotTests#testAgainstTranslit_shard4",
   "test.java.math.BigDecimal",
-  "test.java.math.BigInteger_testConstructor",
+  "test.java.math.BigInteger#testConstructor",
 }
 
 DISABLED_FUGU_TESTS = {
   "test.java.awt",
   "test.java.io.ByteArrayInputStream",
   "test.java.io.ByteArrayOutputStream",
+  "test.java.io.InputStream",
   "test.java.io.OutputStream",
   "test.java.io.PrintStream",
   "test.java.io.PrintWriter",
@@ -280,11 +281,11 @@ DISABLED_FUGU_TESTS = {
   "test.java.lang.StrictMath.Expm1Tests",
   "test.java.lang.StrictMath.ExpTests",
   "test.java.lang.StrictMath.HyperbolicTests",
-  "test.java.lang.StrictMath.HypotTests_testAgainstTranslit_shard1",
-  "test.java.lang.StrictMath.HypotTests_testAgainstTranslit_shard2",
-  "test.java.lang.StrictMath.HypotTests_testAgainstTranslit_shard3",
-  "test.java.lang.StrictMath.HypotTests_testAgainstTranslit_shard4",
-  "test.java.lang.StrictMath.HypotTests_testHypot",
+  "test.java.lang.StrictMath.HypotTests#testAgainstTranslit_shard1",
+  "test.java.lang.StrictMath.HypotTests#testAgainstTranslit_shard2",
+  "test.java.lang.StrictMath.HypotTests#testAgainstTranslit_shard3",
+  "test.java.lang.StrictMath.HypotTests#testAgainstTranslit_shard4",
+  "test.java.lang.StrictMath.HypotTests#testHypot",
   "test.java.lang.StrictMath.Log1pTests",
   "test.java.lang.StrictMath.Log10Tests",
   "test.java.lang.StrictMath.MultiplicationTests",
@@ -299,25 +300,25 @@ DISABLED_FUGU_TESTS = {
   "test.java.lang.ref.ReferenceCloneTest",
   "test.java.lang.ref.ReferenceEnqueuePendingTest",
   "test.java.math.BigDecimal",
-  "test.java.math.BigInteger_testArithmetic",
-  "test.java.math.BigInteger_testBitCount",
-  "test.java.math.BigInteger_testBitLength",
-  "test.java.math.BigInteger_testbitOps",
-  "test.java.math.BigInteger_testBitwise",
-  "test.java.math.BigInteger_testByteArrayConv",
-  "test.java.math.BigInteger_testConstructor",
-  "test.java.math.BigInteger_testDivideAndReminder",
-  "test.java.math.BigInteger_testDivideLarge",
-  "test.java.math.BigInteger_testModExp",
-  "test.java.math.BigInteger_testMultiplyLarge",
-  "test.java.math.BigInteger_testNextProbablePrime",
-  "test.java.math.BigInteger_testPow",
-  "test.java.math.BigInteger_testSerialize",
-  "test.java.math.BigInteger_testShift",
-  "test.java.math.BigInteger_testSquare",
-  "test.java.math.BigInteger_testSquareLarge",
-  "test.java.math.BigInteger_testSquareRootAndReminder",
-  "test.java.math.BigInteger_testStringConv_generic",
+  "test.java.math.BigInteger#testArithmetic",
+  "test.java.math.BigInteger#testBitCount",
+  "test.java.math.BigInteger#testBitLength",
+  "test.java.math.BigInteger#testbitOps",
+  "test.java.math.BigInteger#testBitwise",
+  "test.java.math.BigInteger#testByteArrayConv",
+  "test.java.math.BigInteger#testConstructor",
+  "test.java.math.BigInteger#testDivideAndReminder",
+  "test.java.math.BigInteger#testDivideLarge",
+  "test.java.math.BigInteger#testModExp",
+  "test.java.math.BigInteger#testMultiplyLarge",
+  "test.java.math.BigInteger#testNextProbablePrime",
+  "test.java.math.BigInteger#testPow",
+  "test.java.math.BigInteger#testSerialize",
+  "test.java.math.BigInteger#testShift",
+  "test.java.math.BigInteger#testSquare",
+  "test.java.math.BigInteger#testSquareLarge",
+  "test.java.math.BigInteger#testSquareRootAndReminder",
+  "test.java.math.BigInteger#testStringConv_generic",
   "test.java.math.RoundingMode",
   "test.java.net.DatagramSocket",
   "test.java.net.Socket",
@@ -326,15 +327,17 @@ DISABLED_FUGU_TESTS = {
   "test.java.net.URLEncoder",
   "test.java.nio.channels.Channels",
   "test.java.nio.channels.SelectionKey",
+  "test.java.nio.channels.Selector",
   "test.java.nio.file",
   "test.java.security.cert",
   "test.java.security.KeyAgreement.KeyAgreementTest",
-  "test.java.security.KeyAgreement.KeySizeTest_testECDHKeySize",
+  "test.java.security.KeyAgreement.KeySizeTest#testECDHKeySize",
   "test.java.security.KeyAgreement.KeySpecTest",
   "test.java.security.KeyAgreement.MultiThreadTest",
   "test.java.security.KeyAgreement.NegativeTest",
   "test.java.security.KeyStore",
   "test.java.security.Provider",
+  "test.java.time",
   "test.java.util.Arrays",
   "test.java.util.Collection",
   "test.java.util.Collections",
@@ -388,6 +391,7 @@ def get_test_names():
   if args.gcstress or args.debug or args.mode == "jvm":
     test_names = list(t for t in test_names if not t.startswith("libcore.highmemorytest"))
     test_names = list(filter(lambda x: x not in SLOW_OJLUNI_TESTS, test_names))
+  if args.gcstress and args.debug:
     test_names = list(filter(lambda x: x not in DISABLED_GCSTRESS_DEBUG_TESTS, test_names))
   if not args.getrandom:
     test_names = list(filter(lambda x: x not in DISABLED_FUGU_TESTS, test_names))
@@ -426,6 +430,10 @@ def get_vogar_command(test_name):
   if args.mode != "jvm":
     cmd.append("--timeout {}".format(get_timeout_secs()))
     cmd.append("--toolchain d8 --language CUR")
+    # --serial-dexing instructs Vogar to spawn at most one dexer at any given
+    # moment of time which reduces overall memory usage.
+    # See http://b/233990659.
+    cmd.append("--serial-dexing")
     if args.jit:
       cmd.append("--vm-arg -Xcompiler-option --vm-arg --compiler-filter=quicken")
     cmd.append("--vm-arg -Xusejit:{}".format(str(args.jit).lower()))

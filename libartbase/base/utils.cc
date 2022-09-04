@@ -64,7 +64,7 @@
 
 namespace art {
 
-using android::base::ReadFileToString;
+using android::base::ReadFileToString;  // NOLINT - ReadFileToString is actually used
 using android::base::StringPrintf;
 
 #if defined(__arm__)
@@ -91,7 +91,7 @@ bool TouchAndFlushCacheLinesWithinPage(uintptr_t start, uintptr_t limit, size_t 
   CHECK_LT(start, limit);
   CHECK_EQ(RoundDown(start, kPageSize), RoundDown(limit - 1, kPageSize)) << "range spans pages";
   // Declare a volatile variable so the compiler does not elide reads from the page being touched.
-  volatile uint8_t v = 0;
+  [[maybe_unused]] volatile uint8_t v = 0;
   for (size_t i = 0; i < attempts; ++i) {
     // Touch page to maximize chance page is resident.
     v = *reinterpret_cast<uint8_t*>(start);

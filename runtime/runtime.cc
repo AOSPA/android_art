@@ -152,6 +152,7 @@
 #include "native_bridge_art_interface.h"
 #include "native_stack_dump.h"
 #include "nativehelper/scoped_local_ref.h"
+#include "nterp_helpers.h"
 #include "oat.h"
 #include "oat_file_manager.h"
 #include "oat_quick_method_header.h"
@@ -698,26 +699,39 @@ void Runtime::Abort(const char* msg) {
   // notreached
 }
 
-class FindNativeMethodsVisitor : public ClassVisitor {
+/**
+ * Update entrypoints (native and Java) of methods before the first fork. This
+ * helps sharing pages where ArtMethods are allocated between the zygote and
+ * forked apps.
+ */
+class UpdateMethodsPreFirstForkVisitor : public ClassVisitor {
  public:
-  FindNativeMethodsVisitor(Thread* self, ClassLinker* class_linker)
+  UpdateMethodsPreFirstForkVisitor(Thread* self, ClassLinker* class_linker)
       : vm_(down_cast<JNIEnvExt*>(self->GetJniEnv())->GetVm()),
         self_(self),
-        class_linker_(class_linker) {}
+        class_linker_(class_linker),
+        can_use_nterp_(interpreter::CanRuntimeUseNterp()) {}
 
   bool operator()(ObjPtr<mirror::Class> klass) override REQUIRES_SHARED(Locks::mutator_lock_) {
     bool is_initialized = klass->IsVisiblyInitialized();
     for (ArtMethod& method : klass->GetDeclaredMethods(kRuntimePointerSize)) {
-      if (method.IsNative() && (is_initialized || !NeedsClinitCheckBeforeCall(&method))) {
-        const void* existing = method.GetEntryPointFromJni();
-        if (method.IsCriticalNative()
-                ? class_linker_->IsJniDlsymLookupCriticalStub(existing)
-                : class_linker_->IsJniDlsymLookupStub(existing)) {
-          const void* native_code =
-              vm_->FindCodeForNativeMethod(&method, /*error_msg=*/ nullptr, /*can_suspend=*/ false);
-          if (native_code != nullptr) {
-            class_linker_->RegisterNative(self_, &method, native_code);
+      if (is_initialized || !NeedsClinitCheckBeforeCall(&method)) {
+        if (method.IsNative()) {
+          const void* existing = method.GetEntryPointFromJni();
+          if (method.IsCriticalNative()
+                  ? class_linker_->IsJniDlsymLookupCriticalStub(existing)
+                  : class_linker_->IsJniDlsymLookupStub(existing)) {
+            const void* native_code =
+                vm_->FindCodeForNativeMethod(&method, /*error_msg=*/ nullptr, /*can_suspend=*/ false);
+            if (native_code != nullptr) {
+              class_linker_->RegisterNative(self_, &method, native_code);
+            }
           }
+        }
+      } else if (can_use_nterp_) {
+        const void* existing = method.GetEntryPointFromQuickCompiledCode();
+        if (class_linker_->IsQuickResolutionStub(existing) && CanMethodUseNterp(&method)) {
+          method.SetEntryPointFromQuickCompiledCode(interpreter::GetNterpWithClinitEntryPoint());
         }
       }
     }
@@ -725,11 +739,12 @@ class FindNativeMethodsVisitor : public ClassVisitor {
   }
 
  private:
-  JavaVMExt* vm_;
-  Thread* self_;
-  ClassLinker* class_linker_;
+  JavaVMExt* const vm_;
+  Thread* const self_;
+  ClassLinker* const class_linker_;
+  const bool can_use_nterp_;
 
-  DISALLOW_COPY_AND_ASSIGN(FindNativeMethodsVisitor);
+  DISALLOW_COPY_AND_ASSIGN(UpdateMethodsPreFirstForkVisitor);
 };
 
 void Runtime::PreZygoteFork() {
@@ -743,8 +758,7 @@ void Runtime::PreZygoteFork() {
     // Ensure we call FixupStaticTrampolines on all methods that are
     // initialized.
     class_linker_->MakeInitializedClassesVisiblyInitialized(soa.Self(), /*wait=*/ true);
-    // Update native method JNI entrypoints.
-    FindNativeMethodsVisitor visitor(soa.Self(), class_linker_);
+    UpdateMethodsPreFirstForkVisitor visitor(soa.Self(), class_linker_);
     class_linker_->VisitClasses(&visitor);
   }
   heap_->PreZygoteFork();
@@ -3054,12 +3068,13 @@ bool Runtime::IsVerificationSoftFail() const {
   return verify_ == verifier::VerifyMode::kSoftFail;
 }
 
-bool Runtime::IsAsyncDeoptimizeable(uintptr_t code) const {
+bool Runtime::IsAsyncDeoptimizeable(ArtMethod* method, uintptr_t code) const {
   if (OatQuickMethodHeader::NterpMethodHeader != nullptr) {
     if (OatQuickMethodHeader::NterpMethodHeader->Contains(code)) {
       return true;
     }
   }
+
   // We only support async deopt (ie the compiled code is not explicitly asking for
   // deopt, but something else like the debugger) in debuggable JIT code.
   // We could look at the oat file where `code` is being defined,
@@ -3067,8 +3082,14 @@ bool Runtime::IsAsyncDeoptimizeable(uintptr_t code) const {
   // only rely on the JIT for debuggable apps.
   // The JIT-zygote is not debuggable so we need to be sure to exclude code from the non-private
   // region as well.
-  return IsJavaDebuggable() && GetJit() != nullptr &&
-         GetJit()->GetCodeCache()->PrivateRegionContainsPc(reinterpret_cast<const void*>(code));
+  if (GetJit() != nullptr &&
+      GetJit()->GetCodeCache()->PrivateRegionContainsPc(reinterpret_cast<const void*>(code))) {
+    // If the code is JITed code then check if it was compiled as debuggable.
+    const OatQuickMethodHeader* header = method->GetOatQuickMethodHeader(code);
+    return CodeInfo::IsDebuggable(header->GetOptimizedCodeInfoPtr());
+  }
+
+  return false;
 }
 
 LinearAlloc* Runtime::CreateLinearAlloc() {
@@ -3195,14 +3216,12 @@ void Runtime::DeoptimizeBootImage() {
   // If we've already started and we are setting this runtime to debuggable,
   // we patch entry points of methods in boot image to interpreter bridge, as
   // boot image code may be AOT compiled as not debuggable.
-  if (!GetInstrumentation()->IsForcedInterpretOnly()) {
-    UpdateEntryPointsClassVisitor visitor(GetInstrumentation());
-    GetClassLinker()->VisitClasses(&visitor);
-    jit::Jit* jit = GetJit();
-    if (jit != nullptr) {
-      // Code previously compiled may not be compiled debuggable.
-      jit->GetCodeCache()->TransitionToDebuggable();
-    }
+  UpdateEntryPointsClassVisitor visitor(GetInstrumentation());
+  GetClassLinker()->VisitClasses(&visitor);
+  jit::Jit* jit = GetJit();
+  if (jit != nullptr) {
+    // Code previously compiled may not be compiled debuggable.
+    jit->GetCodeCache()->TransitionToDebuggable();
   }
 }
 
@@ -3430,6 +3449,8 @@ void Runtime::MadviseFileForRange(size_t madvise_size_limit_bytes,
   }
 }
 
+// Return whether a boot image has a profile. This means we'll need to pre-JIT
+// methods in that profile for performance.
 bool Runtime::HasImageWithProfile() const {
   for (gc::space::ImageSpace* space : GetHeap()->GetBootImageSpaces()) {
     if (!space->GetProfileFiles().empty()) {
