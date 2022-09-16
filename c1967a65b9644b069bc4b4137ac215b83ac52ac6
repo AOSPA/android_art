@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "7c2253de_f1ff43c9",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 1
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 1000012
+      },
+      "writtenOn": "2022-09-16T22:35:18Z",
+      "side": 1,
+      "message": "ld.lld: error: version script assignment of \u0027ART_COMPILER\u0027 to symbol \u0027art::CompilerOptions::IsPreloadedClass(char const*) const\u0027 failed: symbol not defined\nld.lld: error: version script assignment of \u0027ART_COMPILER\u0027 to symbol \u0027art::CompilerOptions::ShouldCompileWithClinitCheck(art::ArtMethod*) const\u0027 failed: symbol not defined\nclang-14: error: linker command failed with exit code 1 (use -v to see invocation)\n\nGlad I didn\u0027t let this one fly :)",
+      "revId": "c1967a65b9644b069bc4b4137ac215b83ac52ac6",
+      "serverId": "3162e3d8-d894-470e-abd9-724f7b0effad"
+    }
+  ]
+}
