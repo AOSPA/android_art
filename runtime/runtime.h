@@ -302,6 +302,11 @@ class Runtime {
     return boot_class_path_locations_.empty() ? boot_class_path_ : boot_class_path_locations_;
   }
 
+  // Dynamically add an element to boot class path.
+  void AppendToBootClassPath(const std::string& filename,
+                             const std::string& location,
+                             const std::vector<std::unique_ptr<const art::DexFile>>& dex_files);
+
   const std::vector<int>& GetBootClassPathFds() const {
     return boot_class_path_fds_;
   }
@@ -1084,6 +1089,10 @@ class Runtime {
   // Return whether a boot image has a profile. This means it's an in-memory
   // image rather that an image loaded from disk.
   bool HasImageWithProfile() const;
+
+  bool GetNoSigChain() const {
+    return no_sig_chain_;
+  }
 
   // Trigger a flag reload from system properties or device congfigs.
   //

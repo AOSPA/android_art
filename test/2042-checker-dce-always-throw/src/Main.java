@@ -22,11 +22,16 @@ public class Main {
     // Basic test for non-trivial blocks (i.e. not just an invoke and a Goto)
     assertEquals(0, $noinline$testSimplifyThrowAndPrint(1));
     assertEquals(0, $noinline$testSimplifyTwoThrows(1));
+    assertEquals(0, $noinline$testSimplifyWithArgument(1));
 
     // Try catch tests
     assertEquals(0, $noinline$testDoNotSimplifyInTry(1));
     assertEquals(0, $noinline$testSimplifyInCatch(1));
-    assertEquals(0, $noinline$testDoNotSimplifyInCatchInOuterTry(1));
+    assertEquals(0, $noinline$testDoNotSimplifyInCatchInOuterTry(1, 1));
+
+    // Test that we update the phis correctly after simplifying an always throwing method, and
+    // recomputing dominance.
+    assertEquals(0, $noinline$UpdatePhisCorrectly(1, 1));
   }
 
   private static void alwaysThrows() throws Error {
@@ -97,6 +102,35 @@ public class Main {
     if (num == 0) {
       alwaysThrows();
       alwaysThrows();
+    }
+    return 0;
+  }
+
+  private static int throwIfZero(int num) {
+    if (num == 0) {
+      throw new Error("num is 0!");
+    }
+    return num / num;
+  }
+
+  /// CHECK-START: int Main.$noinline$testSimplifyWithArgument(int) dead_code_elimination$after_inlining (before)
+  /// CHECK-DAG:   InvokeStaticOrDirect block:<<InvokeBlock:B\d+>> method_name:Main.throwIfZero always_throws:true
+  /// CHECK-DAG:   InvokeVirtual method_name:java.io.PrintStream.println
+  /// CHECK-DAG:   Exit block:<<ExitBlock:B\d+>>
+  /// CHECK-DAG:   Goto block:<<InvokeBlock>> target:<<TargetBlock:B\d+>>
+  /// CHECK-EVAL:  "<<ExitBlock>>" != "<<TargetBlock>>"
+
+  /// CHECK-START: int Main.$noinline$testSimplifyWithArgument(int) dead_code_elimination$after_inlining (after)
+  /// CHECK-DAG:   InvokeStaticOrDirect block:<<InvokeBlock:B\d+>> method_name:Main.throwIfZero always_throws:true
+  /// CHECK-DAG:   Exit block:<<ExitBlock:B\d+>>
+  /// CHECK-DAG:   Goto block:<<InvokeBlock>> target:<<ExitBlock>>
+
+  /// CHECK-START: int Main.$noinline$testSimplifyWithArgument(int) dead_code_elimination$after_inlining (after)
+  /// CHECK-NOT:   InvokeVirtual method_name:java.io.PrintStream.println
+  private static int $noinline$testSimplifyWithArgument(int num) {
+    if (num == 0) {
+      throwIfZero(0);
+      System.out.println("I am unrechable!");
     }
     return 0;
   }
@@ -217,25 +251,25 @@ public class Main {
     }
   }
 
-  /// CHECK-START: int Main.$noinline$testDoNotSimplifyInCatchInOuterTry(int) dead_code_elimination$after_inlining (before)
+  /// CHECK-START: int Main.$noinline$testDoNotSimplifyInCatchInOuterTry(int, int) dead_code_elimination$after_inlining (before)
   /// CHECK-DAG:   InvokeStaticOrDirect block:<<InvokeBlock:B\d+>> method_name:Main.alwaysThrows always_throws:true
   /// CHECK-DAG:   Exit block:<<ExitBlock:B\d+>>
   /// CHECK-DAG:   Goto block:<<InvokeBlock>> target:<<TargetBlock:B\d+>>
   /// CHECK-EVAL:  "<<ExitBlock>>" != "<<TargetBlock>>"
 
-  /// CHECK-START: int Main.$noinline$testDoNotSimplifyInCatchInOuterTry(int) dead_code_elimination$after_inlining (after)
+  /// CHECK-START: int Main.$noinline$testDoNotSimplifyInCatchInOuterTry(int, int) dead_code_elimination$after_inlining (after)
   /// CHECK-DAG:   InvokeStaticOrDirect block:<<InvokeBlock:B\d+>> method_name:Main.alwaysThrows always_throws:true
   /// CHECK-DAG:   Exit block:<<ExitBlock:B\d+>>
   /// CHECK-DAG:   Goto block:<<InvokeBlock>> target:<<TargetBlock:B\d+>>
   /// CHECK-EVAL:  "<<ExitBlock>>" != "<<TargetBlock>>"
 
   // Consistency check to make sure we have the try catches in the graph at this stage.
-  /// CHECK-START: int Main.$noinline$testDoNotSimplifyInCatchInOuterTry(int) dead_code_elimination$after_inlining (before)
+  /// CHECK-START: int Main.$noinline$testDoNotSimplifyInCatchInOuterTry(int, int) dead_code_elimination$after_inlining (before)
   /// CHECK-DAG:   TryBoundary kind:entry
   /// CHECK-DAG:   TryBoundary kind:entry
 
   // Consistency check to that we do not simplify it by the last DCE pass either
-  /// CHECK-START: int Main.$noinline$testDoNotSimplifyInCatchInOuterTry(int) dead_code_elimination$final (after)
+  /// CHECK-START: int Main.$noinline$testDoNotSimplifyInCatchInOuterTry(int, int) dead_code_elimination$final (after)
   /// CHECK-DAG:   InvokeStaticOrDirect block:<<InvokeBlock:B\d+>> method_name:Main.alwaysThrows always_throws:true
   /// CHECK-DAG:   Exit block:<<ExitBlock:B\d+>>
   /// CHECK-DAG:   Goto block:<<InvokeBlock>> target:<<TargetBlock:B\d+>>
@@ -244,19 +278,61 @@ public class Main {
   // Similar to testSimplifyInCatch, but now the throw is in an outer try and we shouldn't simplify
   // it. Like in testDoNotSimplifyInTry, we need the help of the inliner to have an invoke followed
   // by a Goto.
-  private static int $noinline$testDoNotSimplifyInCatchInOuterTry(int num) {
+  private static int $noinline$testDoNotSimplifyInCatchInOuterTry(int num, int other_num) {
     try {
       try {
         throw new Error();
       } catch (Error e) {
         if (num == 0) {
-          $inline$testDoNotSimplifyInner(num);
+          // We use `other_num` here because otherwise we propagate the knowledge that `num` equals
+          // zero.
+          $inline$testDoNotSimplifyInner(other_num);
         }
         return 0;
       }
     } catch (Error e) {
       return 123;
     }
+  }
+
+  // Check that when we perform SimplifyAlwaysThrows, that the phi for `phi_value` exists, and that
+  // we correctly update it after running DCE.
+
+  /// CHECK-START: int Main.$noinline$UpdatePhisCorrectly(int, int) dead_code_elimination$after_inlining (before)
+  /// CHECK-DAG:   <<Const0:i\d+>> IntConstant 0
+  /// CHECK-DAG:   <<Const5:i\d+>> IntConstant 5
+  /// CHECK-DAG:   <<ReturnValue:i\d+>> Phi [<<Const0>>,<<Const5>>]
+  /// CHECK-DAG:   Return [<<ReturnValue>>]
+  /// CHECK-DAG:   InvokeStaticOrDirect block:<<InvokeBlock:B\d+>> method_name:Main.alwaysThrows always_throws:true
+  /// CHECK-DAG:   Exit block:<<ExitBlock:B\d+>>
+  /// CHECK-DAG:   Goto block:<<InvokeBlock>> target:<<TargetBlock:B\d+>>
+  /// CHECK-EVAL:  "<<ExitBlock>>" != "<<TargetBlock>>"
+
+  /// CHECK-START: int Main.$noinline$UpdatePhisCorrectly(int, int) dead_code_elimination$after_inlining (after)
+  /// CHECK-DAG:   <<Const0:i\d+>> IntConstant 0
+  /// CHECK-DAG:   Return [<<Const0>>]
+  /// CHECK-DAG:   InvokeStaticOrDirect block:<<InvokeBlock:B\d+>> method_name:Main.alwaysThrows always_throws:true
+  /// CHECK-DAG:   Exit block:<<ExitBlock:B\d+>>
+  /// CHECK-DAG:   Goto block:<<InvokeBlock>> target:<<ExitBlock>>
+
+  /// CHECK-START: int Main.$noinline$UpdatePhisCorrectly(int, int) dead_code_elimination$after_inlining (after)
+  /// CHECK-NOT:   Phi
+  private static int $noinline$UpdatePhisCorrectly(int num, int other_num) {
+    int phi_value = 0;
+    if (num == 0) {
+      alwaysThrows();
+
+      // This while loop is here so that the `if (num == 0)` will be several blocks instead of
+      // just one. We use `other_num` here because otherwise we propagate the knowledge that `num`
+      // equals zero.
+      while (other_num == 0) {
+        // Assign to phi_value so that the loop is not empty.
+        phi_value = 2;
+      }
+
+      phi_value = 5;
+    }
+    return phi_value;
   }
 
   static void assertEquals(int expected, int actual) {

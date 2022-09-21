@@ -607,8 +607,13 @@ class Dex2Oat final {
   }
 
   void ParseInstructionSetVariant(const std::string& option, ParserOptions* parser_options) {
-    compiler_options_->instruction_set_features_ = InstructionSetFeatures::FromVariant(
-        compiler_options_->instruction_set_, option, &parser_options->error_msg);
+    if (kIsTargetBuild) {
+      compiler_options_->instruction_set_features_ = InstructionSetFeatures::FromVariantAndHwcap(
+          compiler_options_->instruction_set_, option, &parser_options->error_msg);
+    } else {
+      compiler_options_->instruction_set_features_ = InstructionSetFeatures::FromVariant(
+          compiler_options_->instruction_set_, option, &parser_options->error_msg);
+    }
     if (compiler_options_->instruction_set_features_ == nullptr) {
       Usage("%s", parser_options->error_msg.c_str());
     }
@@ -957,7 +962,7 @@ class Dex2Oat final {
                           compiler_options_->GetNativeDebuggable());
     key_value_store_->Put(OatHeader::kCompilerFilter,
                           CompilerFilter::NameOfFilter(compiler_options_->GetCompilerFilter()));
-    key_value_store_->Put(OatHeader::kConcurrentCopying, kUseReadBarrier);
+    key_value_store_->Put(OatHeader::kConcurrentCopying, gUseReadBarrier);
     if (invocation_file_.get() != -1) {
       std::ostringstream oss;
       for (int i = 0; i < argc; ++i) {
@@ -1187,7 +1192,7 @@ class Dex2Oat final {
       if (!parser_options->boot_image_filename.empty()) {
         Usage("Option --boot-image and --force-jit-zygote cannot be specified together");
       }
-      parser_options->boot_image_filename = "boot.art:/nonx/boot-framework.art";
+      parser_options->boot_image_filename = GetJitZygoteBootImageLocation();
     }
 
     // If we have a profile, change the default compiler filter to speed-profile
@@ -2538,16 +2543,16 @@ class Dex2Oat final {
   }
 
   bool PreparePreloadedClasses() {
-    preloaded_classes_ = std::make_unique<HashSet<std::string>>();
     if (!preloaded_classes_fds_.empty()) {
       for (int fd : preloaded_classes_fds_) {
-        if (!ReadCommentedInputFromFd(fd, nullptr, preloaded_classes_.get())) {
+        if (!ReadCommentedInputFromFd(fd, nullptr, &compiler_options_->preloaded_classes_)) {
           return false;
         }
       }
     } else {
       for (const std::string& file : preloaded_classes_files_) {
-        if (!ReadCommentedInputFromFile(file.c_str(), nullptr, preloaded_classes_.get())) {
+        if (!ReadCommentedInputFromFile(
+                file.c_str(), nullptr, &compiler_options_->preloaded_classes_)) {
           return false;
         }
       }
@@ -2942,7 +2947,6 @@ class Dex2Oat final {
   const char* dirty_image_objects_filename_;
   int dirty_image_objects_fd_;
   std::unique_ptr<HashSet<std::string>> dirty_image_objects_;
-  std::unique_ptr<HashSet<std::string>> preloaded_classes_;
   std::unique_ptr<std::vector<std::string>> passes_to_run_;
   bool is_host_;
   std::string android_root_;

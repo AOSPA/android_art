@@ -1557,7 +1557,7 @@ void UnstartedRuntime::UnstartedJdkUnsafeCompareAndSwapObject(
   mirror::Object* new_value = shadow_frame->GetVRegReference(arg_offset + 5);
 
   // Must use non transactional mode.
-  if (kUseReadBarrier) {
+  if (gUseReadBarrier) {
     // Need to make sure the reference stored in the field is a to-space one before attempting the
     // CAS or the CAS could fail incorrectly.
     mirror::HeapReference<mirror::Object>* field_addr =
@@ -2263,9 +2263,6 @@ void UnstartedRuntime::Invoke(Thread* self, const CodeItemDataAccessor& accessor
 
   const auto& iter = invoke_handlers_.find(shadow_frame->GetMethod());
   if (iter != invoke_handlers_.end()) {
-    // Note: When we special case the method, we do not ensure initialization.
-    // This has been the behavior since implementation of this feature.
-
     // Clear out the result in case it's not zeroed out.
     result->SetL(nullptr);
 
@@ -2276,9 +2273,6 @@ void UnstartedRuntime::Invoke(Thread* self, const CodeItemDataAccessor& accessor
 
     self->PopShadowFrame();
   } else {
-    if (!EnsureInitialized(self, shadow_frame)) {
-      return;
-    }
     // Not special, continue with regular interpreter execution.
     ArtInterpreterToInterpreterBridge(self, accessor, shadow_frame, result);
   }

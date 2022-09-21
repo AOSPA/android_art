@@ -1346,6 +1346,17 @@ class HBasicBlock : public ArenaObject<kArenaAllocBasicBlock> {
   // are safely updated.
   void DisconnectAndDelete();
 
+  // Disconnects `this` from all its successors and updates their phis, if the successors have them.
+  // If `visited` is provided, it will use the information to know if a successor is reachable and
+  // skip updating those phis.
+  void DisconnectFromSuccessors(const ArenaBitVector* visited = nullptr);
+
+  // Removes the catch phi uses of the instructions in `this`. If `remove_instruction` is set to
+  // true, it will also remove the instructions themselves. This method assumes the instructions
+  // have been removed from all users with the exception of catch phis because of missing
+  // exceptional edges in the graph.
+  void RemoveCatchPhiUses(bool remove_instruction);
+
   void AddInstruction(HInstruction* instruction);
   // Insert `instruction` before/after an existing instruction `cursor`.
   void InsertInstructionBefore(HInstruction* instruction, HInstruction* cursor);
@@ -1554,10 +1565,10 @@ class HLoopInformationOutwardIterator : public ValueObject {
   M(Min, BinaryOperation)                                               \
   M(MonitorOperation, Instruction)                                      \
   M(Mul, BinaryOperation)                                               \
-  M(NativeDebugInfo, Instruction)                                       \
   M(Neg, UnaryOperation)                                                \
   M(NewArray, Instruction)                                              \
   M(NewInstance, Instruction)                                           \
+  M(Nop, Instruction)                                                   \
   M(Not, UnaryOperation)                                                \
   M(NotEqual, Condition)                                                \
   M(NullConstant, Instruction)                                          \
@@ -2422,7 +2433,7 @@ class HInstruction : public ArenaObject<kArenaAllocInstruction> {
         !CanThrow() &&
         !IsSuspendCheck() &&
         !IsControlFlow() &&
-        !IsNativeDebugInfo() &&
+        !IsNop() &&
         !IsParameterValue() &&
         // If we added an explicit barrier then we should keep it.
         !IsMemoryBarrier() &&
@@ -2433,9 +2444,12 @@ class HInstruction : public ArenaObject<kArenaAllocInstruction> {
     return IsRemovable() && !HasUses();
   }
 
-  // Does this instruction strictly dominate `other_instruction`?
-  // Returns false if this instruction and `other_instruction` are the same.
-  // Aborts if this instruction and `other_instruction` are both phis.
+  // Does this instruction dominate `other_instruction`?
+  // Aborts if this instruction and `other_instruction` are different phis.
+  bool Dominates(HInstruction* other_instruction) const;
+
+  // Same but with `strictly dominates` i.e. returns false if this instruction and
+  // `other_instruction` are the same.
   bool StrictlyDominates(HInstruction* other_instruction) const;
 
   int GetId() const { return id_; }
@@ -2500,7 +2514,9 @@ class HInstruction : public ArenaObject<kArenaAllocInstruction> {
   void SetLocations(LocationSummary* locations) { locations_ = locations; }
 
   void ReplaceWith(HInstruction* instruction);
-  void ReplaceUsesDominatedBy(HInstruction* dominator, HInstruction* replacement);
+  void ReplaceUsesDominatedBy(HInstruction* dominator,
+                              HInstruction* replacement,
+                              bool strictly_dominated = true);
   void ReplaceEnvUsesDominatedBy(HInstruction* dominator, HInstruction* replacement);
   void ReplaceInput(HInstruction* replacement, size_t index);
 
@@ -6767,22 +6783,27 @@ class HSuspendCheck final : public HExpression<0> {
   SlowPathCode* slow_path_;
 };
 
-// Pseudo-instruction which provides the native debugger with mapping information.
-// It ensures that we can generate line number and local variables at this point.
-class HNativeDebugInfo : public HExpression<0> {
+// Pseudo-instruction which doesn't generate any code.
+// If `emit_environment` is true, it can be used to generate an environment. It is used, for
+// example, to provide the native debugger with mapping information. It ensures that we can generate
+// line number and local variables at this point.
+class HNop : public HExpression<0> {
  public:
-  explicit HNativeDebugInfo(uint32_t dex_pc)
-      : HExpression<0>(kNativeDebugInfo, SideEffects::None(), dex_pc) {
+  explicit HNop(uint32_t dex_pc, bool needs_environment)
+      : HExpression<0>(kNop, SideEffects::None(), dex_pc), needs_environment_(needs_environment) {
   }
 
   bool NeedsEnvironment() const override {
-    return true;
+    return needs_environment_;
   }
 
-  DECLARE_INSTRUCTION(NativeDebugInfo);
+  DECLARE_INSTRUCTION(Nop);
 
  protected:
-  DEFAULT_COPY_CONSTRUCTOR(NativeDebugInfo);
+  DEFAULT_COPY_CONSTRUCTOR(Nop);
+
+ private:
+  bool needs_environment_;
 };
 
 /**

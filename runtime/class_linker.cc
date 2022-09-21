@@ -2116,7 +2116,7 @@ void ClassLinker::VisitClassRoots(RootVisitor* visitor, VisitRootFlags flags) {
   const bool tracing_enabled = Trace::IsTracingEnabled();
   Thread* const self = Thread::Current();
   WriterMutexLock mu(self, *Locks::classlinker_classes_lock_);
-  if (kUseReadBarrier) {
+  if (gUseReadBarrier) {
     // We do not track new roots for CC.
     DCHECK_EQ(0, flags & (kVisitRootFlagNewRoots |
                           kVisitRootFlagClearRootLog |
@@ -2152,7 +2152,7 @@ void ClassLinker::VisitClassRoots(RootVisitor* visitor, VisitRootFlags flags) {
         root.VisitRoot(visitor, RootInfo(kRootVMInternal));
       }
     }
-  } else if (!kUseReadBarrier && (flags & kVisitRootFlagNewRoots) != 0) {
+  } else if (!gUseReadBarrier && (flags & kVisitRootFlagNewRoots) != 0) {
     for (auto& root : new_class_roots_) {
       ObjPtr<mirror::Class> old_ref = root.Read<kWithoutReadBarrier>();
       root.VisitRoot(visitor, RootInfo(kRootStickyClass));
@@ -2173,13 +2173,13 @@ void ClassLinker::VisitClassRoots(RootVisitor* visitor, VisitRootFlags flags) {
       }
     }
   }
-  if (!kUseReadBarrier && (flags & kVisitRootFlagClearRootLog) != 0) {
+  if (!gUseReadBarrier && (flags & kVisitRootFlagClearRootLog) != 0) {
     new_class_roots_.clear();
     new_bss_roots_boot_oat_files_.clear();
   }
-  if (!kUseReadBarrier && (flags & kVisitRootFlagStartLoggingNewRoots) != 0) {
+  if (!gUseReadBarrier && (flags & kVisitRootFlagStartLoggingNewRoots) != 0) {
     log_new_roots_ = true;
-  } else if (!kUseReadBarrier && (flags & kVisitRootFlagStopLoggingNewRoots) != 0) {
+  } else if (!gUseReadBarrier && (flags & kVisitRootFlagStopLoggingNewRoots) != 0) {
     log_new_roots_ = false;
   }
   // We deliberately ignore the class roots in the image since we
@@ -4143,10 +4143,11 @@ ObjPtr<mirror::Class> ClassLinker::CreateArrayClass(Thread* self,
                                                                      class_loader)));
   if (component_type == nullptr) {
     DCHECK(self->IsExceptionPending());
-    // We need to accept erroneous classes as component types.
+    // We need to accept erroneous classes as component types. Under AOT, we
+    // don't accept them as we cannot encode the erroneous class in an image.
     const size_t component_hash = ComputeModifiedUtf8Hash(descriptor + 1);
     component_type.Assign(LookupClass(self, descriptor + 1, component_hash, class_loader.Get()));
-    if (component_type == nullptr) {
+    if (component_type == nullptr || Runtime::Current()->IsAotCompiler()) {
       DCHECK(self->IsExceptionPending());
       return nullptr;
     } else {
@@ -5087,10 +5088,18 @@ void ClassLinker::CheckProxyMethod(ArtMethod* method, ArtMethod* prototype) cons
   CHECK_EQ(prototype, method->GetInterfaceMethodIfProxy(image_pointer_size_));
 }
 
-bool ClassLinker::CanWeInitializeClass(ObjPtr<mirror::Class> klass, bool can_init_statics,
+bool ClassLinker::CanWeInitializeClass(ObjPtr<mirror::Class> klass,
+                                       bool can_init_statics,
                                        bool can_init_parents) {
   if (can_init_statics && can_init_parents) {
     return true;
+  }
+  DCHECK(Runtime::Current()->IsAotCompiler());
+
+  // We currently don't support initializing at AOT time classes that need access
+  // checks.
+  if (klass->IsVerifiedNeedsAccessChecks()) {
+    return false;
   }
   if (!can_init_statics) {
     // Check if there's a class initializer.
@@ -10176,6 +10185,18 @@ void ClassLinker::VisitClassLoaders(ClassLoaderVisitor* visitor) const {
   }
 }
 
+void ClassLinker::VisitDexCaches(DexCacheVisitor* visitor) const {
+  Thread* const self = Thread::Current();
+  for (const auto& it : dex_caches_) {
+    // Need to use DecodeJObject so that we get null for cleared JNI weak globals.
+    ObjPtr<mirror::DexCache> dex_cache = ObjPtr<mirror::DexCache>::DownCast(
+        self->DecodeJObject(it.second.weak_root));
+    if (dex_cache != nullptr) {
+      visitor->Visit(dex_cache);
+    }
+  }
+}
+
 void ClassLinker::VisitAllocators(AllocatorVisitor* visitor) const {
   for (const ClassLoaderData& data : class_loaders_) {
     LinearAlloc* alloc = data.allocator;
@@ -10276,6 +10297,15 @@ void ClassLinker::SetEnablePublicSdkChecks(bool enabled ATTRIBUTE_UNUSED) {
   // Should not be called on ClassLinker, only on AotClassLinker that overrides this.
   LOG(FATAL) << "UNREACHABLE";
   UNREACHABLE();
+}
+
+void ClassLinker::RemoveDexFromCaches(const DexFile& dex_file) {
+  ReaderMutexLock mu(Thread::Current(), *Locks::dex_lock_);
+
+  auto it = dex_caches_.find(&dex_file);
+  if (it != dex_caches_.end()) {
+      dex_caches_.erase(it);
+  }
 }
 
 // Instantiate ClassLinker::AllocClass.

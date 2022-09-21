@@ -2178,14 +2178,17 @@ class JNI {
       if (heap->IsMovableObject(s)) {
         StackHandleScope<1> hs(soa.Self());
         HandleWrapperObjPtr<mirror::String> h(hs.NewHandleWrapper(&s));
-        if (!kUseReadBarrier) {
+        if (!gUseReadBarrier && !gUseUserfaultfd) {
           heap->IncrementDisableMovingGC(soa.Self());
         } else {
-          // For the CC collector, we only need to wait for the thread flip rather
+          // For the CC and CMC collector, we only need to wait for the thread flip rather
           // than the whole GC to occur thanks to the to-space invariant.
           heap->IncrementDisableThreadFlip(soa.Self());
         }
       }
+      // Ensure that the string doesn't cause userfaults in case passed on to
+      // the kernel.
+      heap->EnsureObjectUserfaulted(s);
       if (is_copy != nullptr) {
         *is_copy = JNI_FALSE;
       }
@@ -2201,7 +2204,7 @@ class JNI {
     gc::Heap* heap = Runtime::Current()->GetHeap();
     ObjPtr<mirror::String> s = soa.Decode<mirror::String>(java_string);
     if (!s->IsCompressed() && heap->IsMovableObject(s)) {
-      if (!kUseReadBarrier) {
+      if (!gUseReadBarrier && !gUseUserfaultfd) {
         heap->DecrementDisableMovingGC(soa.Self());
       } else {
         heap->DecrementDisableThreadFlip(soa.Self());
@@ -2368,16 +2371,18 @@ class JNI {
     }
     gc::Heap* heap = Runtime::Current()->GetHeap();
     if (heap->IsMovableObject(array)) {
-      if (!kUseReadBarrier) {
+      if (!gUseReadBarrier && !gUseUserfaultfd) {
         heap->IncrementDisableMovingGC(soa.Self());
       } else {
-        // For the CC collector, we only need to wait for the thread flip rather than the whole GC
-        // to occur thanks to the to-space invariant.
+        // For the CC and CMC collector, we only need to wait for the thread flip rather
+        // than the whole GC to occur thanks to the to-space invariant.
         heap->IncrementDisableThreadFlip(soa.Self());
       }
       // Re-decode in case the object moved since IncrementDisableGC waits for GC to complete.
       array = soa.Decode<mirror::Array>(java_array);
     }
+    // Ensure that the array doesn't cause userfaults in case passed on to the kernel.
+    heap->EnsureObjectUserfaulted(array);
     if (is_copy != nullptr) {
       *is_copy = JNI_FALSE;
     }
@@ -2969,7 +2974,7 @@ class JNI {
         delete[] reinterpret_cast<uint64_t*>(elements);
       } else if (heap->IsMovableObject(array)) {
         // Non copy to a movable object must means that we had disabled the moving GC.
-        if (!kUseReadBarrier) {
+        if (!gUseReadBarrier && !gUseUserfaultfd) {
           heap->DecrementDisableMovingGC(soa.Self());
         } else {
           heap->DecrementDisableThreadFlip(soa.Self());

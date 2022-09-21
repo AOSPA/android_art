@@ -687,18 +687,25 @@ extern "C" uint64_t artQuickToInterpreterBridge(ArtMethod* method, Thread* self,
     BuildQuickShadowFrameVisitor shadow_frame_builder(sp, method->IsStatic(), shorty, shorty_len,
                                                       shadow_frame, first_arg_reg);
     shadow_frame_builder.VisitArguments();
-    self->EndAssertNoThreadSuspension(old_cause);
-
-    // Potentially run <clinit> before pushing the shadow frame. We do not want
-    // to have the called method on the stack if there is an exception.
-    if (!EnsureInitialized(self, shadow_frame)) {
-      DCHECK(self->IsExceptionPending());
-      return 0;
-    }
-
     // Push a transition back into managed code onto the linked list in thread.
     self->PushManagedStackFragment(&fragment);
     self->PushShadowFrame(shadow_frame);
+    self->EndAssertNoThreadSuspension(old_cause);
+
+    if (NeedsClinitCheckBeforeCall(method)) {
+      ObjPtr<mirror::Class> declaring_class = method->GetDeclaringClass();
+      if (UNLIKELY(!declaring_class->IsVisiblyInitialized())) {
+        // Ensure static method's class is initialized.
+        StackHandleScope<1> hs(self);
+        Handle<mirror::Class> h_class(hs.NewHandle(declaring_class));
+        if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(self, h_class, true, true)) {
+          DCHECK(Thread::Current()->IsExceptionPending()) << method->PrettyMethod();
+          self->PopManagedStackFragment(fragment);
+          return 0;
+        }
+      }
+    }
+
     result = interpreter::EnterInterpreterFromEntryPoint(self, accessor, shadow_frame);
     force_frame_pop = shadow_frame->GetForcePopFrame();
   }
@@ -1364,6 +1371,11 @@ extern "C" const void* artQuickResolutionTrampoline(
       success = linker->EnsureInitialized(soa.Self(), h_called_class, true, true);
     }
     if (success) {
+      // When the clinit check is at entry of the AOT/nterp code, we do the clinit check
+      // before doing the suspend check. To ensure the code sees the latest
+      // version of the class (the code doesn't do a read barrier to reduce
+      // size), do a suspend check now.
+      self->CheckSuspend();
       instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
       // Check if we need instrumented code here. Since resolution stubs could suspend, it is
       // possible that we instrumented the entry points after we started executing the resolution
@@ -1929,7 +1941,7 @@ class BuildGenericJniFrameVisitor final : public QuickArgumentVisitor {
         // The declaring class must be marked.
         auto* declaring_class = reinterpret_cast<mirror::CompressedReference<mirror::Class>*>(
             method->GetDeclaringClassAddressWithoutBarrier());
-        if (kUseReadBarrier) {
+        if (gUseReadBarrier) {
           artJniReadBarrier(method);
         }
         sm_.AdvancePointer(declaring_class);
@@ -2267,12 +2279,18 @@ static TwoWordReturn artInvokeCommon(uint32_t method_idx,
     uint32_t shorty_len;
     const char* shorty = dex_file->GetMethodShorty(dex_file->GetMethodId(method_idx), &shorty_len);
     {
-      // Remember the args in case a GC happens in FindMethodFromCode.
+      // Remember the args in case a GC happens in FindMethodToCall.
       ScopedObjectAccessUnchecked soa(self->GetJniEnv());
       RememberForGcArgumentVisitor visitor(sp, type == kStatic, shorty, shorty_len, &soa);
       visitor.VisitArguments();
-      method = FindMethodFromCode<type, /*access_check=*/true>(
-          method_idx, &this_object, caller_method, self);
+
+      uint32_t dex_pc = QuickArgumentVisitor::GetCallingDexPc(sp);
+      CodeItemInstructionAccessor accessor(caller_method->DexInstructions());
+      CHECK_LT(dex_pc, accessor.InsnsSizeInCodeUnits());
+      const Instruction& instr = accessor.InstructionAt(dex_pc);
+      bool string_init = false;
+      method = FindMethodToCall<type>(self, caller_method, &this_object, instr, &string_init);
+
       visitor.FixupReferences();
     }
 
