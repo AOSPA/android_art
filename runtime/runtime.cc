@@ -16,15 +16,13 @@
 
 #include "runtime.h"
 
-// sys/mount.h has to come before linux/fs.h due to redefinition of MS_RDONLY, MS_BIND, etc
-#include <sys/mount.h>
 #ifdef __linux__
-#include <linux/fs.h>
 #include <sys/prctl.h>
 #endif
 
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/mount.h>
 #include <sys/syscall.h>
 
 #if defined(__APPLE__)
@@ -125,6 +123,7 @@
 #include "native/dalvik_system_ZygoteHooks.h"
 #include "native/java_lang_Class.h"
 #include "native/java_lang_Object.h"
+#include "native/java_lang_StackStreamFactory.h"
 #include "native/java_lang_String.h"
 #include "native/java_lang_StringFactory.h"
 #include "native/java_lang_System.h"
@@ -201,10 +200,6 @@ static constexpr double kLowMemoryMinLoadFactor = 0.5;
 static constexpr double kLowMemoryMaxLoadFactor = 0.8;
 static constexpr double kNormalMinLoadFactor = 0.4;
 static constexpr double kNormalMaxLoadFactor = 0.7;
-
-// Extra added to the default heap growth multiplier. Used to adjust the GC ergonomics for the read
-// barrier config.
-static constexpr double kExtraDefaultHeapGrowthMultiplier = kUseReadBarrier ? 1.0 : 0.0;
 
 Runtime* Runtime::instance_ = nullptr;
 
@@ -408,6 +403,12 @@ Runtime::~Runtime() {
   if (oat_file_manager_ != nullptr) {
     oat_file_manager_->WaitForWorkersToBeCreated();
   }
+  // Disable GC before deleting the thread-pool and shutting down runtime as it
+  // restricts attaching new threads.
+  heap_->DisableGCForShutdown();
+  heap_->WaitForWorkersToBeCreated();
+  // Make sure to let the GC complete if it is running.
+  heap_->WaitForGcToComplete(gc::kGcCauseBackground, self);
 
   {
     ScopedTrace trace2("Wait for shutdown cond");
@@ -442,8 +443,6 @@ Runtime::~Runtime() {
     self = nullptr;
   }
 
-  // Make sure to let the GC complete if it is running.
-  heap_->WaitForGcToComplete(gc::kGcCauseBackground, self);
   heap_->DeleteThreadPool();
   if (oat_file_manager_ != nullptr) {
     oat_file_manager_->DeleteThreadPool();
@@ -1005,6 +1004,22 @@ bool Runtime::Start() {
     }
     CreateJitCodeCache(/*rwx_memory_allowed=*/true);
     CreateJit();
+#ifdef ADDRESS_SANITIZER
+    // (b/238730394): In older implementations of sanitizer + glibc there is a race between
+    // pthread_create and dlopen that could cause a deadlock. pthread_create interceptor in ASAN
+    // uses dl_pthread_iterator with a callback that could request a dl_load_lock via call to
+    // __tls_get_addr [1]. dl_pthread_iterate would already hold dl_load_lock so this could cause a
+    // deadlock. __tls_get_addr needs a dl_load_lock only when there is a dlopen happening in
+    // parallel. As a workaround we wait for the pthread_create (i.e JIT thread pool creation) to
+    // finish before going to the next phase. Creating a system class loader could need a dlopen so
+    // we wait here till threads are initialized.
+    // [1] https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/sanitizer_common/sanitizer_linux_libcdep.cpp#L408
+    // See this for more context: https://reviews.llvm.org/D98926
+    // TODO(b/238730394): Revisit this workaround once we migrate to musl libc.
+    if (jit_ != nullptr) {
+      jit_->GetThreadPool()->WaitForWorkersToBeCreated();
+    }
+#endif
   }
 
   // Send the start phase event. We have to wait till here as this is when the main thread peer
@@ -1159,7 +1174,6 @@ void Runtime::InitNonZygoteOrPostFork(
   }
 
   // Create the thread pools.
-  heap_->CreateThreadPool();
   // Avoid creating the runtime thread pool for system server since it will not be used and would
   // waste memory.
   if (!is_system_server) {
@@ -1609,9 +1623,11 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     // If low memory mode, use 1.0 as the multiplier by default.
     foreground_heap_growth_multiplier = 1.0f;
   } else {
+    // Extra added to the default heap growth multiplier for concurrent GC
+    // compaction algorithms. This is done for historical reasons.
+    // TODO: remove when we revisit heap configurations.
     foreground_heap_growth_multiplier =
-        runtime_options.GetOrDefault(Opt::ForegroundHeapGrowthMultiplier) +
-            kExtraDefaultHeapGrowthMultiplier;
+        runtime_options.GetOrDefault(Opt::ForegroundHeapGrowthMultiplier) + 1.0f;
   }
   XGcOption xgc_option = runtime_options.GetOrDefault(Opt::GcOption);
 
@@ -1639,9 +1655,9 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        image_locations_,
                        instruction_set_,
                        // Override the collector type to CC if the read barrier config.
-                       kUseReadBarrier ? gc::kCollectorTypeCC : xgc_option.collector_type_,
-                       kUseReadBarrier ? BackgroundGcOption(gc::kCollectorTypeCCBackground)
-                                       : runtime_options.GetOrDefault(Opt::BackgroundGc),
+                       gUseReadBarrier ? gc::kCollectorTypeCC : xgc_option.collector_type_,
+                       gUseReadBarrier ? BackgroundGcOption(gc::kCollectorTypeCCBackground)
+                                       : BackgroundGcOption(xgc_option.collector_type_),
                        runtime_options.GetOrDefault(Opt::LargeObjectSpace),
                        runtime_options.GetOrDefault(Opt::LargeObjectThreshold),
                        runtime_options.GetOrDefault(Opt::ParallelGCThreads),
@@ -2259,6 +2275,7 @@ void Runtime::RegisterRuntimeNativeMethods(JNIEnv* env) {
   register_java_lang_reflect_Parameter(env);
   register_java_lang_reflect_Proxy(env);
   register_java_lang_ref_Reference(env);
+  register_java_lang_StackStreamFactory(env);
   register_java_lang_String(env);
   register_java_lang_StringFactory(env);
   register_java_lang_System(env);
@@ -2610,7 +2627,7 @@ ArtMethod* Runtime::CreateCalleeSaveMethod() {
 }
 
 void Runtime::DisallowNewSystemWeaks() {
-  CHECK(!kUseReadBarrier);
+  CHECK(!gUseReadBarrier);
   monitor_list_->DisallowNewMonitors();
   intern_table_->ChangeWeakRootState(gc::kWeakRootStateNoReadsOrWrites);
   java_vm_->DisallowNewWeakGlobals();
@@ -2626,7 +2643,7 @@ void Runtime::DisallowNewSystemWeaks() {
 }
 
 void Runtime::AllowNewSystemWeaks() {
-  CHECK(!kUseReadBarrier);
+  CHECK(!gUseReadBarrier);
   monitor_list_->AllowNewMonitors();
   intern_table_->ChangeWeakRootState(gc::kWeakRootStateNormal);  // TODO: Do this in the sweeping.
   java_vm_->AllowNewWeakGlobals();
@@ -3458,6 +3475,20 @@ bool Runtime::HasImageWithProfile() const {
     }
   }
   return false;
+}
+
+void Runtime::AppendToBootClassPath(
+    const std::string& filename,
+    const std::string& location,
+    const std::vector<std::unique_ptr<const art::DexFile>>& dex_files) {
+  boot_class_path_.push_back(filename);
+  if (!boot_class_path_locations_.empty()) {
+    boot_class_path_locations_.push_back(location);
+  }
+  ScopedObjectAccess soa(Thread::Current());
+  for (const std::unique_ptr<const art::DexFile>& dex_file : dex_files) {
+    GetClassLinker()->AppendToBootClassPath(Thread::Current(), dex_file.get());
+  }
 }
 
 }  // namespace art

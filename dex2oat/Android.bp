@@ -459,6 +459,7 @@ art_cc_defaults {
     name: "art_dex2oat_tests_defaults",
     data: [
         ":art-gtest-jars-AbstractMethod",
+        ":art-gtest-jars-ArrayClassWithUnresolvedComponent",
         ":art-gtest-jars-DefaultMethods",
         ":art-gtest-jars-Dex2oatVdexPublicSdkDex",
         ":art-gtest-jars-Dex2oatVdexTestDex",
@@ -479,6 +480,7 @@ art_cc_defaults {
         ":art-gtest-jars-StaticLeafMethods",
         ":art-gtest-jars-Statics",
         ":art-gtest-jars-StringLiterals",
+        ":art-gtest-jars-SuperWithAccessChecks",
         ":art-gtest-jars-VerifierDeps",
         ":art-gtest-jars-VerifierDepsMulti",
         ":art-gtest-jars-VerifySoftFailDuringClinit",

@@ -39,8 +39,7 @@ func globalFlags(ctx android.LoadHookContext) ([]string, []string) {
 	cflags = append(cflags, opt)
 
 	tlab := false
-
-	gcType := ctx.Config().GetenvWithDefault("ART_DEFAULT_GC_TYPE", "CMS")
+	gcType := ctx.Config().GetenvWithDefault("ART_DEFAULT_GC_TYPE", "CMC")
 
 	if ctx.Config().IsEnvTrue("ART_TEST_DEBUG_GC") {
 		gcType = "SS"
@@ -48,9 +47,6 @@ func globalFlags(ctx android.LoadHookContext) ([]string, []string) {
 	}
 
 	cflags = append(cflags, "-DART_DEFAULT_GC_TYPE_IS_"+gcType)
-	if tlab {
-		cflags = append(cflags, "-DART_USE_TLAB=1")
-	}
 
 	if ctx.Config().IsEnvTrue("ART_HEAP_POISONING") {
 		cflags = append(cflags, "-DART_HEAP_POISONING=1")
@@ -70,10 +66,21 @@ func globalFlags(ctx android.LoadHookContext) ([]string, []string) {
 		asflags = append(asflags,
 			"-DART_USE_READ_BARRIER=1",
 			"-DART_READ_BARRIER_TYPE_IS_"+barrierType+"=1")
+
+		if !ctx.Config().IsEnvFalse("ART_USE_GENERATIONAL_CC") {
+			cflags = append(cflags, "-DART_USE_GENERATIONAL_CC=1")
+		}
+		// For now force CC as we don't want to make userfaultfd GC the default.
+		// Eventually, make it such that we force CC only if ART_USE_READ_BARRIER
+		// was set to true explicitly during build time.
+		cflags = append(cflags, "-DART_FORCE_USE_READ_BARRIER=1")
+		tlab = true
+	} else if gcType == "CMC" {
+		tlab = true
 	}
 
-	if !ctx.Config().IsEnvFalse("ART_USE_GENERATIONAL_CC") {
-		cflags = append(cflags, "-DART_USE_GENERATIONAL_CC=1")
+	if tlab {
+		cflags = append(cflags, "-DART_USE_TLAB=1")
 	}
 
 	cdexLevel := ctx.Config().GetenvWithDefault("ART_DEFAULT_COMPACT_DEX_LEVEL", "fast")
