@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include "oat_file_assistant_context.h"
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -23,11 +25,11 @@
 #include "arch/instruction_set.h"
 #include "base/array_ref.h"
 #include "base/logging.h"
+#include "base/mem_map.h"
 #include "class_linker.h"
 #include "dex/art_dex_file_loader.h"
 #include "gc/heap.h"
 #include "gc/space/image_space.h"
-#include "oat_file_assistant_context.h"
 
 namespace art {
 
@@ -42,6 +44,8 @@ OatFileAssistantContext::OatFileAssistantContext(
   DCHECK_IMPLIES(
       runtime_options_->boot_class_path_fds != nullptr,
       runtime_options_->boot_class_path.size() == runtime_options_->boot_class_path_fds->size());
+  // Opening dex files and boot images require MemMap.
+  MemMap::Init();
 }
 
 OatFileAssistantContext::OatFileAssistantContext(Runtime* runtime)
@@ -74,17 +78,13 @@ OatFileAssistantContext::OatFileAssistantContext(Runtime* runtime)
   std::vector<std::string>* current_bcp_checksums = nullptr;
   for (const DexFile* dex_file : runtime->GetClassLinker()->GetBootClassPath()) {
     if (!DexFileLoader::IsMultiDexLocation(dex_file->GetLocation().c_str())) {
-      // TODO(b/243128839): Investigate why this doesn't hold for
-      // cdex-redefine-stress tests.
-      // DCHECK_LT(bcp_index, runtime_options_->boot_class_path.size());
+      DCHECK_LT(bcp_index, runtime_options_->boot_class_path.size());
       current_bcp_checksums = &bcp_checksums_by_index_[bcp_index++];
     }
     DCHECK_NE(current_bcp_checksums, nullptr);
     current_bcp_checksums->push_back(StringPrintf("/%08x", dex_file->GetLocationChecksum()));
   }
-  // TODO(b/243128839): Investigate why this doesn't hold for
-  // cdex-redefine-stress tests.
-  // DCHECK_EQ(bcp_index, runtime_options_->boot_class_path.size());
+  DCHECK_EQ(bcp_index, runtime_options_->boot_class_path.size());
 
   // Fetch APEX versions from the runtime.
   apex_versions_ = runtime->GetApexVersions();
@@ -92,6 +92,23 @@ OatFileAssistantContext::OatFileAssistantContext(Runtime* runtime)
 
 const OatFileAssistantContext::RuntimeOptions& OatFileAssistantContext::GetRuntimeOptions() const {
   return *runtime_options_;
+}
+
+bool OatFileAssistantContext::FetchAll(std::string* error_msg) {
+  std::vector<InstructionSet> isas = GetSupportedInstructionSets(error_msg);
+  if (isas.empty()) {
+    return false;
+  }
+  for (InstructionSet isa : isas) {
+    GetBootImageInfoList(isa);
+  }
+  for (size_t i = 0; i < runtime_options_->boot_class_path.size(); i++) {
+    if (GetBcpChecksums(i, error_msg) == nullptr) {
+      return false;
+    }
+  }
+  GetApexVersions();
+  return true;
 }
 
 const std::vector<OatFileAssistantContext::BootImageInfo>&

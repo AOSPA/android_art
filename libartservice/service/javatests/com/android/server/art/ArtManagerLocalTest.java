@@ -38,7 +38,7 @@ import androidx.test.filters.SmallTest;
 
 import com.android.server.art.model.DeleteResult;
 import com.android.server.art.model.OptimizationStatus;
-import com.android.server.art.model.OptimizeOptions;
+import com.android.server.art.model.OptimizeParams;
 import com.android.server.art.model.OptimizeResult;
 import com.android.server.art.wrapper.AndroidPackageApi;
 import com.android.server.art.wrapper.PackageManagerLocal;
@@ -135,7 +135,7 @@ public class ArtManagerLocalTest {
         mArtManagerLocal.deleteOptimizedArtifacts(mock(PackageDataSnapshot.class), PKG_NAME);
     }
 
-    @Test(expected = IllegalStateException.class)
+    @Test(expected = IllegalArgumentException.class)
     public void testDeleteOptimizedArtifactsNoPackage() throws Exception {
         when(mPkgState.getAndroidPackage()).thenReturn(null);
 
@@ -192,7 +192,7 @@ public class ArtManagerLocalTest {
         mArtManagerLocal.getOptimizationStatus(mock(PackageDataSnapshot.class), PKG_NAME);
     }
 
-    @Test(expected = IllegalStateException.class)
+    @Test(expected = IllegalArgumentException.class)
     public void testGetOptimizationStatusNoPackage() throws Exception {
         when(mPkgState.getAndroidPackage()).thenReturn(null);
 
@@ -219,14 +219,14 @@ public class ArtManagerLocalTest {
 
     @Test
     public void testOptimizePackage() throws Exception {
-        var options = new OptimizeOptions.Builder("install").build();
+        var params = new OptimizeParams.Builder("install").build();
         var result = mock(OptimizeResult.class);
 
-        when(mDexOptHelper.dexopt(any(), same(mPkgState), same(mPkg), same(options)))
+        when(mDexOptHelper.dexopt(any(), same(mPkgState), same(mPkg), same(params)))
                 .thenReturn(result);
 
-        assertThat(mArtManagerLocal.optimizePackage(
-                           mock(PackageDataSnapshot.class), PKG_NAME, options))
+        assertThat(
+                mArtManagerLocal.optimizePackage(mock(PackageDataSnapshot.class), PKG_NAME, params))
                 .isSameInstanceAs(result);
     }
 
@@ -235,15 +235,15 @@ public class ArtManagerLocalTest {
         when(mPackageManagerLocal.getPackageState(any(), anyInt(), eq(PKG_NAME))).thenReturn(null);
 
         mArtManagerLocal.optimizePackage(mock(PackageDataSnapshot.class), PKG_NAME,
-                new OptimizeOptions.Builder("install").build());
+                new OptimizeParams.Builder("install").build());
     }
 
-    @Test(expected = IllegalStateException.class)
+    @Test(expected = IllegalArgumentException.class)
     public void testOptimizePackageNoPackage() throws Exception {
         when(mPkgState.getAndroidPackage()).thenReturn(null);
 
         mArtManagerLocal.optimizePackage(mock(PackageDataSnapshot.class), PKG_NAME,
-                new OptimizeOptions.Builder("install").build());
+                new OptimizeParams.Builder("install").build());
     }
 
     private AndroidPackageApi createPackage() {

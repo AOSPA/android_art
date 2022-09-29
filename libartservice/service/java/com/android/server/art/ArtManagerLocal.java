@@ -37,7 +37,7 @@ import com.android.server.art.IArtd;
 import com.android.server.art.model.ArtFlags;
 import com.android.server.art.model.DeleteResult;
 import com.android.server.art.model.OptimizationStatus;
-import com.android.server.art.model.OptimizeOptions;
+import com.android.server.art.model.OptimizeParams;
 import com.android.server.art.model.OptimizeResult;
 import com.android.server.art.wrapper.AndroidPackageApi;
 import com.android.server.art.wrapper.PackageManagerLocal;
@@ -64,13 +64,11 @@ public final class ArtManagerLocal {
 
     @NonNull private final Injector mInjector;
 
-    // TODO(b/236954191): Deprecate this.
+    @Deprecated
     public ArtManagerLocal() {
-        this(new Injector());
+        this(new Injector(null /* context */));
     }
 
-    // TODO(b/236954191): Expose this.
-    /** @hide */
     public ArtManagerLocal(@NonNull Context context) {
         this(new Injector(context));
     }
@@ -107,6 +105,8 @@ public final class ArtManagerLocal {
     /**
      * Deletes optimized artifacts of a package.
      *
+     * Uses the default flags ({@link ArtFlags#defaultDeleteFlags()}).
+     *
      * @throws IllegalArgumentException if the package is not found or the flags are illegal
      * @throws IllegalStateException if an internal error occurs
      */
@@ -142,8 +142,9 @@ public final class ArtManagerLocal {
                         continue;
                     }
                     for (String isa : Utils.getAllIsas(pkgState)) {
-                        freedBytes += mInjector.getArtd().deleteArtifacts(
-                                Utils.buildArtifactsPath(dexInfo.dexPath(), isa, isInDalvikCache));
+                        freedBytes +=
+                                mInjector.getArtd().deleteArtifacts(AidlUtils.buildArtifactsPath(
+                                        dexInfo.dexPath(), isa, isInDalvikCache));
                     }
                 }
             }
@@ -162,6 +163,8 @@ public final class ArtManagerLocal {
 
     /**
      * Returns the optimization status of a package.
+     *
+     * Uses the default flags ({@link ArtFlags#defaultGetStatusFlags()}).
      *
      * @throws IllegalArgumentException if the package is not found or the flags are illegal
      * @throws IllegalStateException if an internal error occurs
@@ -225,18 +228,22 @@ public final class ArtManagerLocal {
         }
     }
 
-    /** @hide */
     @NonNull
     public OptimizeResult optimizePackage(@NonNull PackageDataSnapshot snapshot,
-            @NonNull String packageName, @NonNull OptimizeOptions options) {
-        if (!options.isForPrimaryDex() && !options.isForSecondaryDex()) {
+            @NonNull String packageName, @NonNull OptimizeParams params) {
+        if ((params.getFlags() & ArtFlags.FLAG_FOR_PRIMARY_DEX) == 0
+                && (params.getFlags() & ArtFlags.FLAG_FOR_SECONDARY_DEX) == 0) {
             throw new IllegalArgumentException("Nothing to optimize");
         }
 
         PackageState pkgState = getPackageStateOrThrow(snapshot, packageName);
         AndroidPackageApi pkg = getPackageOrThrow(pkgState);
 
-        return mInjector.getDexOptHelper().dexopt(snapshot, pkgState, pkg, options);
+        try {
+            return mInjector.getDexOptHelper().dexopt(snapshot, pkgState, pkg, params);
+        } catch (RemoteException e) {
+            throw new IllegalStateException("An error occurred when calling artd", e);
+        }
     }
 
     private PackageState getPackageStateOrThrow(
@@ -252,7 +259,8 @@ public final class ArtManagerLocal {
     private AndroidPackageApi getPackageOrThrow(@NonNull PackageState pkgState) {
         AndroidPackageApi pkg = pkgState.getAndroidPackage();
         if (pkg == null) {
-            throw new IllegalStateException("Unable to get package " + pkgState.getPackageName());
+            throw new IllegalArgumentException(
+                    "Unable to get package " + pkgState.getPackageName());
         }
         return pkg;
     }
@@ -266,10 +274,6 @@ public final class ArtManagerLocal {
     public static class Injector {
         @Nullable private final Context mContext;
         @Nullable private final PackageManagerLocal mPackageManagerLocal;
-
-        Injector() {
-            this(null /* context */);
-        }
 
         Injector(@Nullable Context context) {
             mContext = context;
@@ -288,9 +292,11 @@ public final class ArtManagerLocal {
             mPackageManagerLocal = packageManagerLocal;
         }
 
-        // TODO(b/236954191): Make this @NonNull.
-        @Nullable
+        @NonNull
         public Context getContext() {
+            if (mContext == null) {
+                throw new IllegalStateException("Context is null");
+            }
             return mContext;
         }
 

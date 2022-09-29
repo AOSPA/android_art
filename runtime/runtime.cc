@@ -16,6 +16,8 @@
 
 #include "runtime.h"
 
+#include <utility>
+
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
@@ -286,7 +288,7 @@ Runtime::Runtime()
       is_native_debuggable_(false),
       async_exceptions_thrown_(false),
       non_standard_exits_enabled_(false),
-      is_java_debuggable_(false),
+      runtime_debug_state_(RuntimeDebugState::kNonJavaDebuggable),
       monitor_timeout_enable_(false),
       monitor_timeout_ns_(0),
       zygote_max_failed_boots_(0),
@@ -751,13 +753,16 @@ void Runtime::PreZygoteFork() {
     GetJit()->PreZygoteFork();
   }
   if (!heap_->HasZygoteSpace()) {
+    Thread* self = Thread::Current();
     // This is the first fork. Update ArtMethods in the boot classpath now to
     // avoid having forked apps dirty the memory.
-    ScopedObjectAccess soa(Thread::Current());
+
     // Ensure we call FixupStaticTrampolines on all methods that are
     // initialized.
-    class_linker_->MakeInitializedClassesVisiblyInitialized(soa.Self(), /*wait=*/ true);
-    UpdateMethodsPreFirstForkVisitor visitor(soa.Self(), class_linker_);
+    class_linker_->MakeInitializedClassesVisiblyInitialized(self, /*wait=*/ true);
+
+    ScopedObjectAccess soa(self);
+    UpdateMethodsPreFirstForkVisitor visitor(self, class_linker_);
     class_linker_->VisitClasses(&visitor);
   }
   heap_->PreZygoteFork();
@@ -1541,7 +1546,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   compiler_options_ = runtime_options.ReleaseOrDefault(Opt::CompilerOptions);
   for (const std::string& option : Runtime::Current()->GetCompilerOptions()) {
     if (option == "--debuggable") {
-      SetJavaDebuggable(true);
+      SetRuntimeDebugState(RuntimeDebugState::kJavaDebuggableAtInit);
       break;
     }
   }
@@ -3224,9 +3229,12 @@ class UpdateEntryPointsClassVisitor : public ClassVisitor {
   instrumentation::Instrumentation* const instrumentation_;
 };
 
-void Runtime::SetJavaDebuggable(bool value) {
-  is_java_debuggable_ = value;
-  // Do not call DeoptimizeBootImage just yet, the runtime may still be starting up.
+void Runtime::SetRuntimeDebugState(RuntimeDebugState state) {
+  if (state != RuntimeDebugState::kJavaDebuggableAtInit) {
+    // We never change the state if we started as a debuggable runtime.
+    DCHECK(runtime_debug_state_ != RuntimeDebugState::kJavaDebuggableAtInit);
+  }
+  runtime_debug_state_ = state;
 }
 
 void Runtime::DeoptimizeBootImage() {
@@ -3477,18 +3485,70 @@ bool Runtime::HasImageWithProfile() const {
   return false;
 }
 
+void Runtime::AppendToBootClassPath(const std::string& filename, const std::string& location) {
+  DCHECK(!DexFileLoader::IsMultiDexLocation(filename.c_str()));
+  boot_class_path_.push_back(filename);
+  if (!boot_class_path_locations_.empty()) {
+    DCHECK(!DexFileLoader::IsMultiDexLocation(location.c_str()));
+    boot_class_path_locations_.push_back(location);
+  }
+}
+
 void Runtime::AppendToBootClassPath(
     const std::string& filename,
     const std::string& location,
     const std::vector<std::unique_ptr<const art::DexFile>>& dex_files) {
-  boot_class_path_.push_back(filename);
-  if (!boot_class_path_locations_.empty()) {
-    boot_class_path_locations_.push_back(location);
-  }
+  AppendToBootClassPath(filename, location);
   ScopedObjectAccess soa(Thread::Current());
   for (const std::unique_ptr<const art::DexFile>& dex_file : dex_files) {
+    // The first element must not be at a multi-dex location, while other elements must be.
+    DCHECK_NE(DexFileLoader::IsMultiDexLocation(dex_file->GetLocation().c_str()),
+              dex_file.get() == dex_files.begin()->get());
     GetClassLinker()->AppendToBootClassPath(Thread::Current(), dex_file.get());
   }
+}
+
+void Runtime::AppendToBootClassPath(const std::string& filename,
+                                    const std::string& location,
+                                    const std::vector<const art::DexFile*>& dex_files) {
+  AppendToBootClassPath(filename, location);
+  ScopedObjectAccess soa(Thread::Current());
+  for (const art::DexFile* dex_file : dex_files) {
+    // The first element must not be at a multi-dex location, while other elements must be.
+    DCHECK_NE(DexFileLoader::IsMultiDexLocation(dex_file->GetLocation().c_str()),
+              dex_file == *dex_files.begin());
+    GetClassLinker()->AppendToBootClassPath(Thread::Current(), dex_file);
+  }
+}
+
+void Runtime::AppendToBootClassPath(
+    const std::string& filename,
+    const std::string& location,
+    const std::vector<std::pair<const art::DexFile*, ObjPtr<mirror::DexCache>>>&
+        dex_files_and_cache) {
+  AppendToBootClassPath(filename, location);
+  ScopedObjectAccess soa(Thread::Current());
+  for (const auto& [dex_file, dex_cache] : dex_files_and_cache) {
+    // The first element must not be at a multi-dex location, while other elements must be.
+    DCHECK_NE(DexFileLoader::IsMultiDexLocation(dex_file->GetLocation().c_str()),
+              dex_file == dex_files_and_cache.begin()->first);
+    GetClassLinker()->AppendToBootClassPath(dex_file, dex_cache);
+  }
+}
+
+void Runtime::AddExtraBootDexFiles(const std::string& filename,
+                                   const std::string& location,
+                                   std::vector<std::unique_ptr<const art::DexFile>>&& dex_files) {
+  AppendToBootClassPath(filename, location);
+  ScopedObjectAccess soa(Thread::Current());
+  if (kIsDebugBuild) {
+    for (const std::unique_ptr<const art::DexFile>& dex_file : dex_files) {
+      // The first element must not be at a multi-dex location, while other elements must be.
+      DCHECK_NE(DexFileLoader::IsMultiDexLocation(dex_file->GetLocation().c_str()),
+                dex_file.get() == dex_files.begin()->get());
+    }
+  }
+  GetClassLinker()->AddExtraBootDexFiles(Thread::Current(), std::move(dex_files));
 }
 
 }  // namespace art
