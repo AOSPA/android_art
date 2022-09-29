@@ -152,6 +152,7 @@
 #include "native_bridge_art_interface.h"
 #include "native_stack_dump.h"
 #include "nativehelper/scoped_local_ref.h"
+#include "nterp_helpers.h"
 #include "oat.h"
 #include "oat_file_manager.h"
 #include "oat_quick_method_header.h"
@@ -178,6 +179,7 @@
 #include "well_known_classes.h"
 
 #ifdef ART_TARGET_ANDROID
+#include <android/api-level.h>
 #include <android/set_abort_message.h>
 #include "com_android_apex.h"
 namespace apex = com::android::apex;
@@ -543,7 +545,7 @@ struct AbortState {
     os << "Runtime aborting...\n";
     if (Runtime::Current() == nullptr) {
       os << "(Runtime does not yet exist!)\n";
-      DumpNativeStack(os, GetTid(), nullptr, "  native: ", nullptr);
+      DumpNativeStack(os, GetTid(), "  native: ", nullptr);
       return;
     }
     Thread* self = Thread::Current();
@@ -555,7 +557,7 @@ struct AbortState {
 
     if (self == nullptr) {
       os << "(Aborting thread was not attached to runtime!)\n";
-      DumpNativeStack(os, GetTid(), nullptr, "  native: ", nullptr);
+      DumpNativeStack(os, GetTid(), "  native: ", nullptr);
     } else {
       os << "Aborting thread:\n";
       if (Locks::mutator_lock_->IsExclusiveHeld(self) || Locks::mutator_lock_->IsSharedHeld(self)) {
@@ -697,26 +699,39 @@ void Runtime::Abort(const char* msg) {
   // notreached
 }
 
-class FindNativeMethodsVisitor : public ClassVisitor {
+/**
+ * Update entrypoints (native and Java) of methods before the first fork. This
+ * helps sharing pages where ArtMethods are allocated between the zygote and
+ * forked apps.
+ */
+class UpdateMethodsPreFirstForkVisitor : public ClassVisitor {
  public:
-  FindNativeMethodsVisitor(Thread* self, ClassLinker* class_linker)
+  UpdateMethodsPreFirstForkVisitor(Thread* self, ClassLinker* class_linker)
       : vm_(down_cast<JNIEnvExt*>(self->GetJniEnv())->GetVm()),
         self_(self),
-        class_linker_(class_linker) {}
+        class_linker_(class_linker),
+        can_use_nterp_(interpreter::CanRuntimeUseNterp()) {}
 
   bool operator()(ObjPtr<mirror::Class> klass) override REQUIRES_SHARED(Locks::mutator_lock_) {
     bool is_initialized = klass->IsVisiblyInitialized();
     for (ArtMethod& method : klass->GetDeclaredMethods(kRuntimePointerSize)) {
-      if (method.IsNative() && (is_initialized || !NeedsClinitCheckBeforeCall(&method))) {
-        const void* existing = method.GetEntryPointFromJni();
-        if (method.IsCriticalNative()
-                ? class_linker_->IsJniDlsymLookupCriticalStub(existing)
-                : class_linker_->IsJniDlsymLookupStub(existing)) {
-          const void* native_code =
-              vm_->FindCodeForNativeMethod(&method, /*error_msg=*/ nullptr, /*can_suspend=*/ false);
-          if (native_code != nullptr) {
-            class_linker_->RegisterNative(self_, &method, native_code);
+      if (is_initialized || !NeedsClinitCheckBeforeCall(&method)) {
+        if (method.IsNative()) {
+          const void* existing = method.GetEntryPointFromJni();
+          if (method.IsCriticalNative()
+                  ? class_linker_->IsJniDlsymLookupCriticalStub(existing)
+                  : class_linker_->IsJniDlsymLookupStub(existing)) {
+            const void* native_code =
+                vm_->FindCodeForNativeMethod(&method, /*error_msg=*/ nullptr, /*can_suspend=*/ false);
+            if (native_code != nullptr) {
+              class_linker_->RegisterNative(self_, &method, native_code);
+            }
           }
+        }
+      } else if (can_use_nterp_) {
+        const void* existing = method.GetEntryPointFromQuickCompiledCode();
+        if (class_linker_->IsQuickResolutionStub(existing) && CanMethodUseNterp(&method)) {
+          method.SetEntryPointFromQuickCompiledCode(interpreter::GetNterpWithClinitEntryPoint());
         }
       }
     }
@@ -724,11 +739,12 @@ class FindNativeMethodsVisitor : public ClassVisitor {
   }
 
  private:
-  JavaVMExt* vm_;
-  Thread* self_;
-  ClassLinker* class_linker_;
+  JavaVMExt* const vm_;
+  Thread* const self_;
+  ClassLinker* const class_linker_;
+  const bool can_use_nterp_;
 
-  DISALLOW_COPY_AND_ASSIGN(FindNativeMethodsVisitor);
+  DISALLOW_COPY_AND_ASSIGN(UpdateMethodsPreFirstForkVisitor);
 };
 
 void Runtime::PreZygoteFork() {
@@ -742,8 +758,7 @@ void Runtime::PreZygoteFork() {
     // Ensure we call FixupStaticTrampolines on all methods that are
     // initialized.
     class_linker_->MakeInitializedClassesVisiblyInitialized(soa.Self(), /*wait=*/ true);
-    // Update native method JNI entrypoints.
-    FindNativeMethodsVisitor visitor(soa.Self(), class_linker_);
+    UpdateMethodsPreFirstForkVisitor visitor(soa.Self(), class_linker_);
     class_linker_->VisitClasses(&visitor);
   }
   heap_->PreZygoteFork();
@@ -1128,8 +1143,8 @@ void Runtime::InitNonZygoteOrPostFork(
       std::vector<std::string> jars = android::base::Split(system_server_classpath, ":");
       app_info_.RegisterAppInfo("android",
                                 jars,
-                                /*cur_profile_path=*/ "",
-                                /*ref_profile_path=*/ "",
+                                /*profile_output_filename=*/ "",
+                                /*ref_profile_filename=*/ "",
                                 AppInfo::CodeType::kPrimaryApk);
     }
 
@@ -1328,9 +1343,9 @@ static inline void CreatePreAllocatedException(Thread* self,
   detailMessageField->SetObject</* kTransactionActive= */ false>(exception->Read(), message);
 }
 
-void Runtime::InitializeApexVersions() {
+std::string Runtime::GetApexVersions(ArrayRef<const std::string> boot_class_path_locations) {
   std::vector<std::string_view> bcp_apexes;
-  for (std::string_view jar : Runtime::Current()->GetBootClassPathLocations()) {
+  for (std::string_view jar : boot_class_path_locations) {
     std::string_view apex = ApexNameFromLocation(jar);
     if (!apex.empty()) {
       bcp_apexes.push_back(apex);
@@ -1338,20 +1353,20 @@ void Runtime::InitializeApexVersions() {
   }
   static const char* kApexFileName = "/apex/apex-info-list.xml";
   // Start with empty markers.
-  apex_versions_ = std::string(bcp_apexes.size(), '/');
+  std::string empty_apex_versions(bcp_apexes.size(), '/');
   // When running on host or chroot, we just use empty markers.
   if (!kIsTargetBuild || !OS::FileExists(kApexFileName)) {
-    return;
+    return empty_apex_versions;
   }
 #ifdef ART_TARGET_ANDROID
   if (access(kApexFileName, R_OK) != 0) {
     PLOG(WARNING) << "Failed to read " << kApexFileName;
-    return;
+    return empty_apex_versions;
   }
   auto info_list = apex::readApexInfoList(kApexFileName);
   if (!info_list.has_value()) {
     LOG(WARNING) << "Failed to parse " << kApexFileName;
-    return;
+    return empty_apex_versions;
   }
 
   std::string result;
@@ -1375,8 +1390,15 @@ void Runtime::InitializeApexVersions() {
       android::base::StringAppendF(&result, "/%" PRIu64, version);
     }
   }
-  apex_versions_ = result;
+  return result;
+#else
+  return empty_apex_versions;  // Not an Android build.
 #endif
+}
+
+void Runtime::InitializeApexVersions() {
+  apex_versions_ =
+      GetApexVersions(ArrayRef<const std::string>(Runtime::Current()->GetBootClassPathLocations()));
 }
 
 void Runtime::ReloadAllFlags(const std::string& caller) {
@@ -3046,12 +3068,13 @@ bool Runtime::IsVerificationSoftFail() const {
   return verify_ == verifier::VerifyMode::kSoftFail;
 }
 
-bool Runtime::IsAsyncDeoptimizeable(uintptr_t code) const {
+bool Runtime::IsAsyncDeoptimizeable(ArtMethod* method, uintptr_t code) const {
   if (OatQuickMethodHeader::NterpMethodHeader != nullptr) {
     if (OatQuickMethodHeader::NterpMethodHeader->Contains(code)) {
       return true;
     }
   }
+
   // We only support async deopt (ie the compiled code is not explicitly asking for
   // deopt, but something else like the debugger) in debuggable JIT code.
   // We could look at the oat file where `code` is being defined,
@@ -3059,8 +3082,14 @@ bool Runtime::IsAsyncDeoptimizeable(uintptr_t code) const {
   // only rely on the JIT for debuggable apps.
   // The JIT-zygote is not debuggable so we need to be sure to exclude code from the non-private
   // region as well.
-  return IsJavaDebuggable() && GetJit() != nullptr &&
-         GetJit()->GetCodeCache()->PrivateRegionContainsPc(reinterpret_cast<const void*>(code));
+  if (GetJit() != nullptr &&
+      GetJit()->GetCodeCache()->PrivateRegionContainsPc(reinterpret_cast<const void*>(code))) {
+    // If the code is JITed code then check if it was compiled as debuggable.
+    const OatQuickMethodHeader* header = method->GetOatQuickMethodHeader(code);
+    return CodeInfo::IsDebuggable(header->GetOptimizedCodeInfoPtr());
+  }
+
+  return false;
 }
 
 LinearAlloc* Runtime::CreateLinearAlloc() {
@@ -3147,15 +3176,19 @@ class UpdateEntryPointsClassVisitor : public ClassVisitor {
     auto pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
     for (auto& m : klass->GetMethods(pointer_size)) {
       const void* code = m.GetEntryPointFromQuickCompiledCode();
+      // For java debuggable runtimes we also deoptimize native methods. For other cases (boot
+      // image profiling) we don't need to deoptimize native methods. If this changes also
+      // update Instrumentation::CanUseAotCode.
+      bool deoptimize_native_methods = Runtime::Current()->IsJavaDebuggable();
       if (Runtime::Current()->GetHeap()->IsInBootImageOatFile(code) &&
-          !m.IsNative() &&
+          (!m.IsNative() || deoptimize_native_methods) &&
           !m.IsProxyMethod()) {
         instrumentation_->InitializeMethodsCode(&m, /*aot_code=*/ nullptr);
       }
 
       if (Runtime::Current()->GetJit() != nullptr &&
           Runtime::Current()->GetJit()->GetCodeCache()->IsInZygoteExecSpace(code) &&
-          !m.IsNative()) {
+          (!m.IsNative() || deoptimize_native_methods)) {
         DCHECK(!m.IsProxyMethod());
         instrumentation_->InitializeMethodsCode(&m, /*aot_code=*/ nullptr);
       }
@@ -3183,14 +3216,12 @@ void Runtime::DeoptimizeBootImage() {
   // If we've already started and we are setting this runtime to debuggable,
   // we patch entry points of methods in boot image to interpreter bridge, as
   // boot image code may be AOT compiled as not debuggable.
-  if (!GetInstrumentation()->IsForcedInterpretOnly()) {
-    UpdateEntryPointsClassVisitor visitor(GetInstrumentation());
-    GetClassLinker()->VisitClasses(&visitor);
-    jit::Jit* jit = GetJit();
-    if (jit != nullptr) {
-      // Code previously compiled may not be compiled debuggable.
-      jit->GetCodeCache()->TransitionToDebuggable();
-    }
+  UpdateEntryPointsClassVisitor visitor(GetInstrumentation());
+  GetClassLinker()->VisitClasses(&visitor);
+  jit::Jit* jit = GetJit();
+  if (jit != nullptr) {
+    // Code previously compiled may not be compiled debuggable.
+    jit->GetCodeCache()->TransitionToDebuggable();
   }
 }
 
@@ -3361,6 +3392,22 @@ void Runtime::MadviseFileForRange(size_t madvise_size_limit_bytes,
                                   const uint8_t* map_begin,
                                   const uint8_t* map_end,
                                   const std::string& file_name) {
+#ifdef ART_TARGET_ANDROID
+  // Short-circuit the madvise optimization for background processes. This
+  // avoids IO and memory contention with foreground processes, particularly
+  // those involving app startup.
+  // Note: We can only safely short-circuit the madvise on T+, as it requires
+  // the framework to always immediately notify ART of process states.
+  static const int kApiLevel = android_get_device_api_level();
+  const bool accurate_process_state_at_startup = kApiLevel >= __ANDROID_API_T__;
+  if (accurate_process_state_at_startup) {
+    const Runtime* runtime = Runtime::Current();
+    if (runtime != nullptr && !runtime->InJankPerceptibleProcessState()) {
+      return;
+    }
+  }
+#endif  // ART_TARGET_ANDROID
+
   // Ideal blockTransferSize for madvising files (128KiB)
   static constexpr size_t kIdealIoTransferSizeBytes = 128*1024;
 
@@ -3402,6 +3449,8 @@ void Runtime::MadviseFileForRange(size_t madvise_size_limit_bytes,
   }
 }
 
+// Return whether a boot image has a profile. This means we'll need to pre-JIT
+// methods in that profile for performance.
 bool Runtime::HasImageWithProfile() const {
   for (gc::space::ImageSpace* space : GetHeap()->GetBootImageSpaces()) {
     if (!space->GetProfileFiles().empty()) {

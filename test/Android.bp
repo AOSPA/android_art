@@ -104,10 +104,10 @@ art_module_cc_defaults {
     ],
 }
 
-// Variant of art_test_defaults that installs the library in a location which
-// will be added to the default namespace, and hence also the com_android_art
-// namespace. That allows the library to have shared_libs dependencies on all
-// ART internal libraries.
+// Variant of art_test_defaults for test libraries that installs them in a
+// location which will be added to the default namespace, and hence also the
+// com_android_art namespace. That allows them to have shared_libs
+// dependencies on all ART internal libraries.
 //
 // Currently this only works for run tests where run-test-jar sets
 // LD_LIBRARY_PATH and NATIVELOADER_DEFAULT_NAMESPACE_LIBS.
@@ -170,6 +170,21 @@ art_cc_defaults {
     // eventually.
     host_supported: false,
     test_config_template: ":art-gtests-target-standalone-template",
+
+    // Support multilib variants (using different suffix per sub-architecture),
+    // which is needed on build targets with secondary architectures, as the
+    // CTS/MTS/etc test suite packaging logic flattens all test artifacts into a
+    // single `testcases` directory. Also, there is CI testing that expects
+    // 64-bit multilib test suites to work for 32-bit devices (b/233550842).
+    compile_multilib: "both",
+    multilib: {
+        lib32: {
+            suffix: "32",
+        },
+        lib64: {
+            suffix: "64",
+        },
+    },
 }
 
 // Properties common to `art_gtest_defaults` and `art_standalone_gtest_defaults`.
@@ -399,7 +414,6 @@ art_cc_defaults {
     ],
     shared_libs: [
         "libbase",
-        "libbacktrace",
         "liblog",
     ],
     target: {
@@ -469,11 +483,20 @@ filegroup {
     ],
 }
 
-// Same as above, but with a longer timeout.
+// Same as `art-run-test-target-template`, but with a longer timeout.
 filegroup {
     name: "art-run-test-target-slow-template",
     srcs: [
         "art-run-test-target-slow-template.xml",
+    ],
+}
+
+// Same as `art-run-test-target-template`, but contains additional
+// options to also make the test part of ART CTS.
+filegroup {
+    name: "art-run-test-target-cts-template",
+    srcs: [
+        "art-run-test-target-cts-template.xml",
     ],
 }
 
@@ -572,7 +595,6 @@ cc_defaults {
     name: "libartagent-defaults",
     defaults: ["art_test_internal_library_defaults"],
     shared_libs: [
-        "libbacktrace",
         "libbase",
         "liblog",
         "libnativehelper",
@@ -680,6 +702,7 @@ art_cc_defaults {
         "1932-monitor-events-misc/monitor_misc.cc",
         "1934-jvmti-signal-thread/signal_threads.cc",
         "1939-proxy-frames/local_instance.cc",
+        "1940-ddms-ext/ddm_ext.cc",
         "1941-dispose-stress/dispose_stress.cc",
         "1942-suspend-raw-monitor-exit/native_suspend_monitor.cc",
         "1943-suspend-raw-monitor-wait/native_suspend_monitor.cc",
@@ -727,7 +750,6 @@ art_cc_defaults {
         "936-search-onload/search_onload.cc",
         "980-redefine-object/redef_object.cc",
         "983-source-transform-verify/source_transform_art.cc",
-        "1940-ddms-ext/ddm_ext.cc",
         // "1952-pop-frame-jit/pop_frame.cc",
         "1959-redefine-object-instrument/fake_redef_object.cc",
         "1960-obsolete-jit-multithread-native/native_say_hi.cc",
@@ -940,10 +962,10 @@ cc_defaults {
         "common/stack_inspect.cc",
     ],
     shared_libs: [
-        "libbacktrace",
         "libbase",
         "liblog",
         "libnativehelper",
+        "libunwindstack",
     ],
 }
 
@@ -1066,6 +1088,7 @@ java_library {
         "1936-thread-end-events/src/art/Test1936.java",
         "1937-transform-soft-fail/src/art/Test1937.java",
         "1939-proxy-frames/src/art/Test1939.java",
+        "1940-ddms-ext/src-art/art/Test1940.java",
         "1941-dispose-stress/src/art/Test1941.java",
         "1942-suspend-raw-monitor-exit/src/art/Test1942.java",
         "1943-suspend-raw-monitor-wait/src/art/Test1943.java",
@@ -1211,6 +1234,7 @@ java_genrule {
         "1936-thread-end-events/expected-stdout.txt",
         "1937-transform-soft-fail/expected-stdout.txt",
         "1939-proxy-frames/expected-stdout.txt",
+        "1940-ddms-ext/expected-stdout.txt",
         "1941-dispose-stress/expected-stdout.txt",
         "1942-suspend-raw-monitor-exit/expected-stdout.txt",
         "1943-suspend-raw-monitor-wait/expected-stdout.txt",
@@ -1844,11 +1868,13 @@ genrule_defaults {
         "art_module_source_build_genrule_defaults",
     ],
     tool_files: [
+        "art_build_rules.py",
         "run-test-build.py",
         "buildfailures.json",
-        "etc/default-build",
-        "etc/default-run",
+        "etc/default-build.py",
         "etc/default-check",
+        "etc/default-run",
+        "etc/run-test-jar",
         ":art-run-test-bootclasspath",
     ],
     tools: [

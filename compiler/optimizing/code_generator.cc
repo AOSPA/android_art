@@ -389,7 +389,8 @@ void CodeGenerator::Compile(CodeAllocator* allocator) {
                                    core_spill_mask_,
                                    fpu_spill_mask_,
                                    GetGraph()->GetNumberOfVRegs(),
-                                   GetGraph()->IsCompilingBaseline());
+                                   GetGraph()->IsCompilingBaseline(),
+                                   GetGraph()->IsDebuggable());
 
   size_t frame_start = GetAssembler()->CodeSize();
   GenerateFrameEntry();
@@ -1123,7 +1124,7 @@ static void CheckLoopEntriesCanBeUsedForOsr(const HGraph& graph,
   for (HBasicBlock* block : graph.GetReversePostOrder()) {
     if (block->IsLoopHeader()) {
       HSuspendCheck* suspend_check = block->GetLoopInformation()->GetSuspendCheck();
-      if (!suspend_check->GetEnvironment()->IsFromInlinedInvoke()) {
+      if (suspend_check != nullptr && !suspend_check->GetEnvironment()->IsFromInlinedInvoke()) {
         loop_headers.push_back(suspend_check);
       }
     }

@@ -27,7 +27,7 @@ my_files := $(ART_TESTCASES_CONTENT)
 
 # Manually add system libraries that we need to run the host ART tools.
 my_files += \
-  $(foreach lib, libbacktrace libbase libc++ libicu libicu_jni liblog libsigchain libunwindstack \
+  $(foreach lib, libbase libc++ libicu libicu_jni liblog libsigchain libunwindstack \
     libziparchive libjavacore libandroidio libopenjdkd liblz4 liblzma, \
     $(call intermediates-dir-for,SHARED_LIBRARIES,$(lib),HOST)/$(lib).so:lib64/$(lib).so \
     $(call intermediates-dir-for,SHARED_LIBRARIES,$(lib),HOST,,2ND)/$(lib).so:lib/$(lib).so) \
@@ -114,6 +114,7 @@ ART_TEST_MODULES_COMMON := \
     art_dexlayout_tests \
     art_dexlist_tests \
     art_dexoptanalyzer_tests \
+    art_disassembler_tests \
     art_hiddenapi_tests \
     art_imgdiag_tests \
     art_libartbase_tests \
@@ -131,8 +132,18 @@ ART_TEST_MODULES_COMMON := \
     art_runtime_tests \
     art_sigchain_tests \
 
-ART_TEST_MODULES_TARGET := $(ART_TEST_MODULES_COMMON) art_odrefresh_tests
+ART_TEST_MODULES_TARGET := $(ART_TEST_MODULES_COMMON) \
+    art_artd_tests \
+    art_odrefresh_tests \
+
 ART_TEST_MODULES_HOST := $(ART_TEST_MODULES_COMMON)
+
+ifneq (,$(wildcard frameworks/native/libs/binder))
+  # Only include the artd host tests if we have the binder sources available and
+  # can build the libbinder_ndk dependency. It is not available as a prebuilt on
+  # master-art.
+  ART_TEST_MODULES_HOST += art_artd_tests
+endif
 
 ART_TARGET_GTEST_NAMES := $(foreach tm,$(ART_TEST_MODULES_TARGET),\
   $(foreach path,$(ART_TEST_LIST_device_$(TARGET_ARCH)_$(tm)),\

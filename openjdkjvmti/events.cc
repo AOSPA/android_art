@@ -741,7 +741,6 @@ class JvmtiMethodTraceListener final : public art::instrumentation::Instrumentat
   // Call-back for when a method is popped due to an exception throw. A method will either cause a
   // MethodExited call-back or a MethodUnwind call-back when its activation is removed.
   void MethodUnwind(art::Thread* self,
-                    art::Handle<art::mirror::Object> this_object ATTRIBUTE_UNUSED,
                     art::ArtMethod* method,
                     uint32_t dex_pc ATTRIBUTE_UNUSED)
       REQUIRES_SHARED(art::Locks::mutator_lock_) override {
@@ -1259,7 +1258,7 @@ void EventHandler::HandleLocalAccessCapabilityAdded() {
         if (m.IsNative() || m.IsProxyMethod()) {
           continue;
         } else if (!runtime_->GetClassLinker()->IsQuickToInterpreterBridge(code) &&
-                   !runtime_->IsAsyncDeoptimizeable(reinterpret_cast<uintptr_t>(code))) {
+                   !runtime_->IsAsyncDeoptimizeable(&m, reinterpret_cast<uintptr_t>(code))) {
           runtime_->GetInstrumentation()->InitializeMethodsCode(&m, /*aot_code=*/ nullptr);
         }
       }

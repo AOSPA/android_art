@@ -181,7 +181,7 @@ class OatTest : public CommonCompilerDriverTest {
     if (!oat_writer.WriteAndOpenDexFiles(
         vdex_file,
         verify,
-        /*update_input_vdex=*/ false,
+        /*use_existing_vdex=*/ false,
         copy,
         &opened_dex_files_maps,
         &opened_dex_files)) {
@@ -505,7 +505,7 @@ TEST_F(OatTest, OatHeaderSizeCheck) {
   EXPECT_EQ(68U, sizeof(OatHeader));
   EXPECT_EQ(4U, sizeof(OatMethodOffsets));
   EXPECT_EQ(4U, sizeof(OatQuickMethodHeader));
-  EXPECT_EQ(167 * static_cast<size_t>(GetInstructionSetPointerSize(kRuntimeISA)),
+  EXPECT_EQ(168 * static_cast<size_t>(GetInstructionSetPointerSize(kRuntimeISA)),
             sizeof(QuickEntryPoints));
 }
 

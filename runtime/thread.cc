@@ -41,6 +41,8 @@
 #include "android-base/stringprintf.h"
 #include "android-base/strings.h"
 
+#include "unwindstack/AndroidUnwinder.h"
+
 #include "arch/context-inl.h"
 #include "arch/context.h"
 #include "art_field-inl.h"
@@ -1391,10 +1393,15 @@ void Thread::ShortDump(std::ostream& os) const {
   tls32_.num_name_readers.fetch_sub(1 /* at least memory_order_release */);
 }
 
-void Thread::Dump(std::ostream& os, bool dump_native_stack, BacktraceMap* backtrace_map,
-                  bool force_dump_stack) const {
+void Thread::Dump(std::ostream& os, bool dump_native_stack, bool force_dump_stack) const {
   DumpState(os);
-  DumpStack(os, dump_native_stack, backtrace_map, force_dump_stack);
+  DumpStack(os, dump_native_stack, force_dump_stack);
+}
+
+void Thread::Dump(std::ostream& os, unwindstack::AndroidLocalUnwinder& unwinder,
+                  bool dump_native_stack, bool force_dump_stack) const {
+  DumpState(os);
+  DumpStack(os, unwinder, dump_native_stack, force_dump_stack);
 }
 
 ObjPtr<mirror::String> Thread::GetThreadName() const {
@@ -1981,6 +1988,9 @@ void Thread::DumpState(std::ostream& os, const Thread* thread, pid_t tid) {
     if (thread->IsStillStarting()) {
       os << " (still starting up)";
     }
+    if (thread->tls32_.disable_thread_flip_count != 0) {
+      os << " DisableFlipCount = " << thread->tls32_.disable_thread_flip_count;
+    }
     os << "\n";
   } else {
     os << '"' << ::art::GetThreadName(tid) << '"'
@@ -2277,7 +2287,14 @@ void Thread::DumpJavaStack(std::ostream& os, bool check_suspended, bool dump_loc
 
 void Thread::DumpStack(std::ostream& os,
                        bool dump_native_stack,
-                       BacktraceMap* backtrace_map,
+                       bool force_dump_stack) const {
+  unwindstack::AndroidLocalUnwinder unwinder;
+  DumpStack(os, unwinder, dump_native_stack, force_dump_stack);
+}
+
+void Thread::DumpStack(std::ostream& os,
+                       unwindstack::AndroidLocalUnwinder& unwinder,
+                       bool dump_native_stack,
                        bool force_dump_stack) const {
   // TODO: we call this code when dying but may not have suspended the thread ourself. The
   //       IsSuspended check is therefore racy with the use for dumping (normally we inhibit
@@ -2296,7 +2313,7 @@ void Thread::DumpStack(std::ostream& os,
           GetCurrentMethod(nullptr,
                            /*check_suspended=*/ !force_dump_stack,
                            /*abort_on_error=*/ !(dump_for_abort || force_dump_stack));
-      DumpNativeStack(os, GetTid(), backtrace_map, "  native: ", method);
+      DumpNativeStack(os, unwinder, GetTid(), "  native: ", method);
     }
     DumpJavaStack(os,
                   /*check_suspended=*/ !force_dump_stack,
@@ -3575,6 +3592,7 @@ void Thread::DumpThreadOffset(std::ostream& os, uint32_t offset) {
   QUICK_ENTRY_POINT_INFO(pAputObject)
   QUICK_ENTRY_POINT_INFO(pJniMethodStart)
   QUICK_ENTRY_POINT_INFO(pJniMethodEnd)
+  QUICK_ENTRY_POINT_INFO(pJniMethodEntryHook)
   QUICK_ENTRY_POINT_INFO(pJniDecodeReferenceResult)
   QUICK_ENTRY_POINT_INFO(pJniLockObject)
   QUICK_ENTRY_POINT_INFO(pJniUnlockObject)
@@ -3692,7 +3710,7 @@ void Thread::DumpThreadOffset(std::ostream& os, uint32_t offset) {
   os << offset;
 }
 
-void Thread::QuickDeliverException() {
+void Thread::QuickDeliverException(bool is_method_exit_exception) {
   // Get exception from thread.
   ObjPtr<mirror::Throwable> exception = GetException();
   CHECK(exception != nullptr);
@@ -3754,7 +3772,7 @@ void Thread::QuickDeliverException() {
   if (Dbg::IsForcedInterpreterNeededForException(this) || force_deopt || IsForceInterpreter()) {
     NthCallerVisitor visitor(this, 0, false);
     visitor.WalkStack();
-    if (Runtime::Current()->IsAsyncDeoptimizeable(visitor.caller_pc)) {
+    if (Runtime::Current()->IsAsyncDeoptimizeable(visitor.GetOuterMethod(), visitor.caller_pc)) {
       // method_type shouldn't matter due to exception handling.
       const DeoptimizationMethodType method_type = DeoptimizationMethodType::kDefault;
       // Save the exception into the deoptimization context so it can be restored
@@ -3785,7 +3803,7 @@ void Thread::QuickDeliverException() {
   // resolution.
   ClearException();
   QuickExceptionHandler exception_handler(this, false);
-  exception_handler.FindCatch(exception);
+  exception_handler.FindCatch(exception, is_method_exit_exception);
   if (exception_handler.GetClearException()) {
     // Exception was cleared as part of delivery.
     DCHECK(!IsExceptionPending());
@@ -3982,7 +4000,7 @@ class ReferenceMapVisitor : public StackVisitor {
         // (PC shall be known thanks to the runtime frame for throwing SIOOBE).
         // Note that JIT does not emit that intrinic implementation.
         const void* pc = reinterpret_cast<const void*>(GetCurrentQuickFramePc());
-        if (pc != 0u && Runtime::Current()->GetHeap()->IsInBootImageOatFile(pc)) {
+        if (pc != nullptr && Runtime::Current()->GetHeap()->IsInBootImageOatFile(pc)) {
           return;
         }
       }
@@ -4610,7 +4628,9 @@ void ScopedExceptionStorage::SuppressOldException(const char* message) {
   CHECK(self_->IsExceptionPending()) << *self_;
   ObjPtr<mirror::Throwable> old_suppressed(excp_.Get());
   excp_.Assign(self_->GetException());
-  LOG(WARNING) << message << "Suppressing old exception: " << old_suppressed->Dump();
+  if (old_suppressed != nullptr) {
+    LOG(WARNING) << message << "Suppressing old exception: " << old_suppressed->Dump();
+  }
   self_->ClearException();
 }
 

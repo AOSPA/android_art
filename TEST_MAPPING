@@ -401,10 +401,19 @@
       "name": "art-run-test-2042-checker-dce-always-throw[com.google.android.art.apex]"
     },
     {
+      "name": "art-run-test-2042-reference-processing[com.google.android.art.apex]"
+    },
+    {
+      "name": "art-run-test-2043-reference-pauses[com.google.android.art.apex]"
+    },
+    {
       "name": "art-run-test-2231-checker-heap-poisoning[com.google.android.art.apex]"
     },
     {
       "name": "art-run-test-2232-write-metrics-to-log[com.google.android.art.apex]"
+    },
+    {
+      "name": "art-run-test-2233-checker-remove-loop-suspend-check[com.google.android.art.apex]"
     },
     {
       "name": "art-run-test-2234-checker-remove-entry-suspendcheck[com.google.android.art.apex]"
@@ -1223,10 +1232,19 @@
       "name": "art-run-test-835-b216762268[com.google.android.art.apex]"
     },
     {
+      "name": "art-run-test-838-override[com.google.android.art.apex]"
+    },
+    {
+      "name": "art-run-test-839-clinit-throw[com.google.android.art.apex]"
+    },
+    {
       "name": "art-run-test-963-default-range-smali[com.google.android.art.apex]"
     },
     {
       "name": "art_libnativebridge_cts_tests[com.google.android.art.apex]"
+    },
+    {
+      "name": "art_standalone_artd_tests[com.google.android.art.apex]"
     },
     {
       "name": "art_standalone_cmdline_tests[com.google.android.art.apex]"
@@ -1288,16 +1306,19 @@
   ],
   "presubmit": [
     {
-      "name": "CtsJdwpTestCases"
+      "name": "ArtServiceTests"
     },
     {
       "name": "BootImageProfileTest"
     },
     {
-      "name": "ArtServiceTests"
+      "name": "ComposHostTestCases"
     },
     {
-      "name": "ComposHostTestCases"
+      "name": "CtsJdwpTestCases"
+    },
+    {
+      "name": "art-apex-update-rollback"
     },
     {
       "name": "art_standalone_dexpreopt_tests"
@@ -1699,10 +1720,19 @@
       "name": "art-run-test-2042-checker-dce-always-throw"
     },
     {
+      "name": "art-run-test-2042-reference-processing"
+    },
+    {
+      "name": "art-run-test-2043-reference-pauses"
+    },
+    {
       "name": "art-run-test-2231-checker-heap-poisoning"
     },
     {
       "name": "art-run-test-2232-write-metrics-to-log"
+    },
+    {
+      "name": "art-run-test-2233-checker-remove-loop-suspend-check"
     },
     {
       "name": "art-run-test-2234-checker-remove-entry-suspendcheck"
@@ -2521,10 +2551,19 @@
       "name": "art-run-test-835-b216762268"
     },
     {
+      "name": "art-run-test-838-override"
+    },
+    {
+      "name": "art-run-test-839-clinit-throw"
+    },
+    {
       "name": "art-run-test-963-default-range-smali"
     },
     {
       "name": "art_libnativebridge_cts_tests"
+    },
+    {
+      "name": "art_standalone_artd_tests"
     },
     {
       "name": "art_standalone_cmdline_tests"
@@ -2589,13 +2628,13 @@
   ],
   "hwasan-presubmit": [
     {
-      "name": "BootImageProfileTest"
-    },
-    {
       "name": "ArtServiceTests"
     },
     {
       "name": "ComposHostTestCases"
+    },
+    {
+      "name": "art-apex-update-rollback"
     },
     {
       "name": "art_standalone_dexpreopt_tests"
@@ -2997,10 +3036,19 @@
       "name": "art-run-test-2042-checker-dce-always-throw"
     },
     {
+      "name": "art-run-test-2042-reference-processing"
+    },
+    {
+      "name": "art-run-test-2043-reference-pauses"
+    },
+    {
       "name": "art-run-test-2231-checker-heap-poisoning"
     },
     {
       "name": "art-run-test-2232-write-metrics-to-log"
+    },
+    {
+      "name": "art-run-test-2233-checker-remove-loop-suspend-check"
     },
     {
       "name": "art-run-test-2234-checker-remove-entry-suspendcheck"
@@ -3819,10 +3867,19 @@
       "name": "art-run-test-835-b216762268"
     },
     {
+      "name": "art-run-test-838-override"
+    },
+    {
+      "name": "art-run-test-839-clinit-throw"
+    },
+    {
       "name": "art-run-test-963-default-range-smali"
     },
     {
       "name": "art_libnativebridge_cts_tests"
+    },
+    {
+      "name": "art_standalone_artd_tests"
     },
     {
       "name": "art_standalone_cmdline_tests"

@@ -1907,17 +1907,6 @@ OatFile* OatFile::Open(int zip_fd,
                                                                  reservation,
                                                                  error_msg);
   if (with_dlopen != nullptr) {
-    Runtime* runtime = Runtime::Current();
-    // The runtime might not be available at this point if we're running
-    // dex2oat or oatdump.
-    if (runtime != nullptr) {
-      size_t madvise_size_limit = runtime->GetMadviseWillNeedSizeOdex();
-      Runtime::MadviseFileForRange(madvise_size_limit,
-                                   with_dlopen->Size(),
-                                   with_dlopen->Begin(),
-                                   with_dlopen->End(),
-                                   oat_location);
-    }
     return with_dlopen;
   }
   if (kPrintDlOpenErrorMessage) {
@@ -2252,7 +2241,7 @@ OatFile::OatClass OatDexFile::GetOatClass(uint16_t class_def_index) const {
     return OatFile::OatClass(oat_file_,
                              ClassStatus::kNotReady,
                              /* type= */ OatClassType::kNoneCompiled,
-                             /* bitmap_size= */ 0u,
+                             /* num_methods= */ 0u,
                              /* bitmap_pointer= */ nullptr,
                              /* methods_pointer= */ nullptr);
   }

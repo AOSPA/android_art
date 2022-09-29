@@ -67,9 +67,11 @@ cc_defaults {
                 "base/mem_map_unix.cc",
             ],
             static_libs: [
+                "libcap",
                 // ZipArchive support, the order matters here to get all symbols.
                 "libziparchive",
             ],
+            whole_static_libs: ["libtinyxml2"],
             shared_libs: [
                 "libz",
                 "liblog",
@@ -79,6 +81,9 @@ cc_defaults {
                 "libbase",
             ],
             export_shared_lib_headers: ["libbase"], // ART's macros.h depends on libbase's macros.h.
+            export_static_lib_headers: [
+                "libcap",
+            ],
         },
         not_windows: {
             srcs: [
@@ -88,6 +93,7 @@ cc_defaults {
             static: {
                 cflags: ["-DART_STATIC_LIBARTBASE"],
             },
+            whole_static_libs: ["libtinyxml2"],
             shared_libs: [
                 "libziparchive",
                 "libz",
@@ -97,7 +103,13 @@ cc_defaults {
                 // For common macros.
                 "libbase",
             ],
+            static_libs: [
+                "libcap",
+            ],
             export_shared_lib_headers: ["libbase"], // ART's macros.h depends on libbase's macros.h.
+            export_static_lib_headers: [
+                "libcap",
+            ],
         },
         windows: {
             srcs: [
@@ -112,6 +124,7 @@ cc_defaults {
                 // For common macros.
                 "libbase",
             ],
+            whole_static_libs: ["libtinyxml2"],
             export_static_lib_headers: ["libbase"], // ART's macros.h depends on libbase's macros.h.
 
             cflags: ["-Wno-thread-safety"],
@@ -134,6 +147,18 @@ cc_defaults {
         "libz",
         "libziparchive",
     ],
+    target: {
+        android: {
+            whole_static_libs: [
+                "libcap",
+            ],
+        },
+        not_windows: {
+            whole_static_libs: [
+                "libcap",
+            ],
+        },
+    },
 }
 
 cc_defaults {
@@ -228,7 +253,7 @@ art_cc_defaults {
     ],
     shared_libs: [
         "libbase",
-        "libbacktrace",
+        "libunwindstack",
     ],
     header_libs: [
         "libnativehelper_header_only",
@@ -236,11 +261,13 @@ art_cc_defaults {
     static: {
         whole_static_libs: [
             "libc++fs",
+            "libcap",
         ],
     },
     shared: {
         static_libs: [
             "libc++fs",
+            "libcap",
         ],
     },
 }
@@ -390,6 +417,8 @@ cc_library_headers {
     export_include_dirs: ["."],
     shared_libs: ["libbase"],
     export_shared_lib_headers: ["libbase"],
+
+    whole_static_libs: ["libtinyxml2"],
 
     apex_available: [
         "com.android.art",

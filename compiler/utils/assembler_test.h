@@ -59,7 +59,7 @@ class AssemblerTest : public AssemblerTestBase {
     return assembler_.get();
   }
 
-  typedef std::string (*TestFn)(AssemblerTest* assembler_test, Ass* assembler);
+  using TestFn = std::string (*)(AssemblerTest *, Ass *);
 
   void DriverFn(TestFn f, const std::string& test_name) {
     DriverWrapper(f(this, assembler_.get()), test_name);
@@ -259,7 +259,7 @@ class AssemblerTest : public AssemblerTestBase {
                                               std::string (AssemblerTest::*GetName1)(const Reg1&),
                                               std::string (AssemblerTest::*GetName2)(const Reg2&),
                                               std::string (AssemblerTest::*GetName3)(const Reg3&),
-                                              std::string fmt,
+                                              const std::string& fmt,
                                               int bias) {
     std::string str;
     std::vector<int64_t> imms = CreateImmediateValuesBits(abs(imm_bits), (imm_bits > 0));

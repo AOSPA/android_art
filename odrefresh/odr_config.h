@@ -17,6 +17,7 @@
 #ifndef ART_ODREFRESH_ODR_CONFIG_H_
 #define ART_ODREFRESH_ODR_CONFIG_H_
 
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -24,6 +25,7 @@
 
 #include "android-base/file.h"
 #include "android-base/no_destructor.h"
+#include "android-base/strings.h"
 #include "arch/instruction_set.h"
 #include "base/file_utils.h"
 #include "base/globals.h"
@@ -34,13 +36,23 @@
 namespace art {
 namespace odrefresh {
 
+// The prefixes of system properties that odrefresh keeps track of. Odrefresh will recompile
+// everything if any property matching a prefix changes.
+constexpr const char* kCheckedSystemPropertyPrefixes[]{"dalvik.vm.", "ro.dalvik.vm."};
+
 struct SystemPropertyConfig {
   const char* name;
   const char* default_value;
 };
 
-// The system properties that odrefresh keeps track of. Odrefresh will recompile everything if any
-// property changes.
+// The system properties that odrefresh keeps track of, in addition to the ones matching the
+// prefixes in `kCheckedSystemPropertyPrefixes`. Odrefresh will recompile everything if any property
+// changes.
+// All phenotype flags under the `runtime_native_boot` namespace that affects the compiler's
+// behavior must be explicitly listed below. We cannot use a prefix to match all phenotype flags
+// because a default value is required for each flag. Changing the flag value from empty to the
+// default value should not trigger re-compilation. This is to comply with the phenotype flag
+// requirement (go/platform-experiments-flags#pre-requisites).
 const android::base::NoDestructor<std::vector<SystemPropertyConfig>> kSystemProperties{
     {SystemPropertyConfig{.name = "persist.device_config.runtime_native_boot.enable_uffd_gc",
                           .default_value = "false"}}};
@@ -71,6 +83,7 @@ class OdrConfig final {
   InstructionSet isa_;
   std::string program_name_;
   std::string system_server_classpath_;
+  std::string boot_image_compiler_filter_;
   std::string system_server_compiler_filter_;
   ZygoteKind zygote_kind_;
   std::string boot_classpath_;
@@ -156,6 +169,9 @@ class OdrConfig final {
   const std::string& GetSystemServerClasspath() const {
     return system_server_classpath_;
   }
+  const std::string& GetBootImageCompilerFilter() const {
+    return boot_image_compiler_filter_;
+  }
   const std::string& GetSystemServerCompilerFilter() const {
     return system_server_compiler_filter_;
   }
@@ -192,6 +208,9 @@ class OdrConfig final {
     system_server_classpath_ = classpath;
   }
 
+  void SetBootImageCompilerFilter(const std::string& filter) {
+    boot_image_compiler_filter_ = filter;
+  }
   void SetSystemServerCompilerFilter(const std::string& filter) {
     system_server_compiler_filter_ = filter;
   }

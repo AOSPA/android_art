@@ -164,6 +164,9 @@ ConcurrentCopying::ConcurrentCopying(Heap* heap,
     gc_tracing_throughput_hist_ = metrics->YoungGcTracingThroughput();
     gc_throughput_avg_ = metrics->YoungGcThroughputAvg();
     gc_tracing_throughput_avg_ = metrics->YoungGcTracingThroughputAvg();
+    gc_scanned_bytes_ = metrics->YoungGcScannedBytes();
+    gc_freed_bytes_ = metrics->YoungGcFreedBytes();
+    gc_duration_ = metrics->YoungGcDuration();
   } else {
     gc_time_histogram_ = metrics->FullGcCollectionTime();
     metrics_gc_count_ = metrics->FullGcCount();
@@ -171,6 +174,9 @@ ConcurrentCopying::ConcurrentCopying(Heap* heap,
     gc_tracing_throughput_hist_ = metrics->FullGcTracingThroughput();
     gc_throughput_avg_ = metrics->FullGcThroughputAvg();
     gc_tracing_throughput_avg_ = metrics->FullGcTracingThroughputAvg();
+    gc_scanned_bytes_ = metrics->FullGcScannedBytes();
+    gc_freed_bytes_ = metrics->FullGcFreedBytes();
+    gc_duration_ = metrics->FullGcDuration();
   }
 }
 
@@ -1080,7 +1086,35 @@ class ConcurrentCopying::ComputeLiveBytesAndMarkRefFieldsVisitor {
       REQUIRES_SHARED(Locks::heap_bitmap_lock_) {
     DCHECK_EQ(collector_->RegionSpace()->RegionIdxForRef(obj), obj_region_idx_);
     DCHECK(kHandleInterRegionRefs || collector_->immune_spaces_.ContainsObject(obj));
-    CheckReference(obj->GetFieldObject<mirror::Object, kVerifyNone, kWithoutReadBarrier>(offset));
+    mirror::Object* ref =
+            obj->GetFieldObject<mirror::Object, kVerifyNone, kWithoutReadBarrier>(offset);
+    // TODO(lokeshgidra): Remove the following condition once b/173676071 is fixed.
+    if (UNLIKELY(ref == nullptr && offset == mirror::Object::ClassOffset())) {
+      // It has been verified as a race condition (see b/173676071)! After a small
+      // wait when we reload the class pointer, it turns out to be a valid class
+      // object. So as a workaround, we can continue execution and log an error
+      // that this happened.
+      for (size_t i = 0; i < 1000; i++) {
+        // Wait for 1ms at a time. Don't wait for more than 1 second in total.
+        usleep(1000);
+        ref = obj->GetClass<kVerifyNone, kWithoutReadBarrier>();
+        if (ref != nullptr) {
+          LOG(ERROR) << "klass pointer for obj: "
+                     << obj << " (" << mirror::Object::PrettyTypeOf(obj)
+                     << ") found to be null first. Reloading after a small wait fetched klass: "
+                     << ref << " (" << mirror::Object::PrettyTypeOf(ref) << ")";
+          break;
+        }
+      }
+
+      if (UNLIKELY(ref == nullptr)) {
+        // It must be heap corruption. Remove memory protection and dump data.
+        collector_->region_space_->Unprotect();
+        LOG(FATAL_WITHOUT_ABORT) << "klass pointer for ref: " << obj << " found to be null.";
+        collector_->heap_->GetVerification()->LogHeapCorruption(obj, offset, ref, /* fatal */ true);
+      }
+    }
+    CheckReference(ref);
   }
 
   void operator()(ObjPtr<mirror::Class> klass, ObjPtr<mirror::Reference> ref) const

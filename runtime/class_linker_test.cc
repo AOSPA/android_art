@@ -598,6 +598,7 @@ struct ClassOffsets : public CheckOffsets<mirror::Class> {
 
 struct ClassExtOffsets : public CheckOffsets<mirror::ClassExt> {
   ClassExtOffsets() : CheckOffsets<mirror::ClassExt>(false, "Ldalvik/system/ClassExt;") {
+    addOffset(OFFSETOF_MEMBER(mirror::ClassExt, class_value_map_), "classValueMap");
     addOffset(OFFSETOF_MEMBER(mirror::ClassExt, erroneous_state_error_), "erroneousStateError");
     addOffset(OFFSETOF_MEMBER(mirror::ClassExt, instance_jfield_ids_), "instanceJfieldIDs");
     addOffset(OFFSETOF_MEMBER(mirror::ClassExt, jmethod_ids_), "jmethodIDs");
@@ -830,7 +831,7 @@ struct ByteBufferViewVarHandleOffsets : public CheckOffsets<mirror::ByteBufferVi
 
 // C++ fields must exactly match the fields in the Java classes. If this fails,
 // reorder the fields in the C++ class. Managed class fields are ordered by
-// ClassLinker::LinkFields.
+// ClassLinker::LinkFieldsHelper::LinkFields.
 TEST_F(ClassLinkerTest, ValidateFieldOrderOfJavaCppUnionClasses) {
   ScopedObjectAccess soa(Thread::Current());
   EXPECT_TRUE(ObjectOffsets().Check());

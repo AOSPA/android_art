@@ -217,6 +217,8 @@ class Checker:
       return False, 'Could not find %s'
     if fs_object.is_dir:
       return False, '%s is a directory'
+    if fs_object.is_symlink:
+      return False, '%s is a symlink'
     return True, ''
 
   def is_dir(self, path):
@@ -272,17 +274,22 @@ class Checker:
   def check_art_test_executable(self, filename, multilib=None):
     dirs = self.arch_dirs_for_path(ART_TEST_DIR, multilib)
     if not dirs:
-      self.fail('ART test binary missing: %s', filename)
+      self.fail('Directories for ART test binary missing: %s', filename)
+      return
     for dir in dirs:
       test_path = '%s/%s' % (dir, filename)
       self._expected_file_globs.add(test_path)
-      if not self._provider.get(test_path).is_exec:
+      file_obj = self._provider.get(test_path)
+      if not file_obj:
+        self.fail('ART test binary missing: %s', test_path)
+      elif not file_obj.is_exec:
         self.fail('%s is not executable', test_path)
 
   def check_art_test_data(self, filename):
     dirs = self.arch_dirs_for_path(ART_TEST_DIR)
     if not dirs:
-      self.fail('ART test data missing: %s', filename)
+      self.fail('Directories for ART test data missing: %s', filename)
+      return
     for dir in dirs:
       if not self.check_file('%s/%s' % (dir, filename)):
         return
@@ -471,7 +478,6 @@ class ReleaseChecker:
     self._checker.check_native_library('libart-disassembler')
     self._checker.check_native_library('libartbase')
     self._checker.check_native_library('libartpalette')
-    self._checker.check_native_library('libartservice')
     self._checker.check_native_library('libarttools')
     self._checker.check_native_library('libdt_fd_forward')
     self._checker.check_native_library('libopenjdkjvm')
@@ -504,7 +510,6 @@ class ReleaseChecker:
     # catch invalid dependencies on /system or other APEXes that should go
     # through an exported library with stubs (b/128708192 tracks implementing a
     # better approach for that).
-    self._checker.check_native_library('libbacktrace')
     self._checker.check_native_library('libbase')
     self._checker.check_native_library('libc++')
     self._checker.check_native_library('libdt_socket')
@@ -550,8 +555,8 @@ class ReleaseTargetChecker:
     self._checker.check_symlinked_multilib_executable('dex2oat')
 
     # Check internal libraries for ART.
+    self._checker.check_native_library('libartservice')
     self._checker.check_native_library('libperfetto_hprof')
-    self._checker.check_prefer64_library('artd-aidl-ndk')
 
     # Check internal Java libraries
     self._checker.check_java_library("service-art")
@@ -637,6 +642,7 @@ class DebugTargetChecker:
     self._checker.check_symlinked_multilib_executable('dex2oatd')
 
     # Check ART internal libraries.
+    self._checker.check_native_library('libartserviced')
     self._checker.check_native_library('libperfetto_hprofd')
 
     # Check internal native library dependencies.
@@ -664,6 +670,7 @@ class TestingTargetChecker:
 
   def run(self):
     # Check ART test binaries.
+    self._checker.check_art_test_executable('art_artd_tests')
     self._checker.check_art_test_executable('art_cmdline_tests')
     self._checker.check_art_test_executable('art_compiler_tests')
     self._checker.check_art_test_executable('art_dex2oat_tests')
@@ -673,6 +680,7 @@ class TestingTargetChecker:
     self._checker.check_art_test_executable('art_dexlayout_tests')
     self._checker.check_art_test_executable('art_dexlist_tests')
     self._checker.check_art_test_executable('art_dexoptanalyzer_tests')
+    self._checker.check_art_test_executable('art_disassembler_tests')
     self._checker.check_art_test_executable('art_imgdiag_tests')
     self._checker.check_art_test_executable('art_libartbase_tests')
     self._checker.check_art_test_executable('art_libartpalette_tests')

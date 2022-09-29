@@ -185,7 +185,6 @@ bool MoveToExceptionHandler(Thread* self,
       // Exception is not caught by the current method. We will unwind to the
       // caller. Notify any instrumentation listener.
       instrumentation->MethodUnwindEvent(self,
-                                         shadow_frame.GetThisObject(),
                                          shadow_frame.GetMethod(),
                                          shadow_frame.GetDexPC());
     }
@@ -255,6 +254,7 @@ ALWAYS_INLINE void CopyRegisters(ShadowFrame& caller_frame,
 
 // END DECLARATIONS.
 
+NO_STACK_PROTECTOR
 void ArtInterpreterToCompiledCodeBridge(Thread* self,
                                         ArtMethod* caller,
                                         ShadowFrame* shadow_frame,
@@ -262,25 +262,6 @@ void ArtInterpreterToCompiledCodeBridge(Thread* self,
                                         JValue* result)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   ArtMethod* method = shadow_frame->GetMethod();
-  // Ensure static methods are initialized.
-  if (method->IsStatic()) {
-    ObjPtr<mirror::Class> declaringClass = method->GetDeclaringClass();
-    if (UNLIKELY(!declaringClass->IsVisiblyInitialized())) {
-      self->PushShadowFrame(shadow_frame);
-      StackHandleScope<1> hs(self);
-      Handle<mirror::Class> h_class(hs.NewHandle(declaringClass));
-      if (UNLIKELY(!Runtime::Current()->GetClassLinker()->EnsureInitialized(
-                        self, h_class, /*can_init_fields=*/ true, /*can_init_parents=*/ true))) {
-        self->PopShadowFrame();
-        DCHECK(self->IsExceptionPending());
-        return;
-      }
-      self->PopShadowFrame();
-      DCHECK(h_class->IsInitializing());
-      // Reload from shadow frame in case the method moved, this is faster than adding a handle.
-      method = shadow_frame->GetMethod();
-    }
-  }
   // Basic checks for the arg_offset. If there's no code item, the arg_offset must be 0. Otherwise,
   // check that the arg_offset isn't greater than the number of registers. A stronger check is
   // difficult since the frame may contain space for all the registers in the method, or only enough
@@ -1411,6 +1392,7 @@ static inline bool DoCallCommon(ArtMethod* called_method,
 }
 
 template<bool is_range, bool do_assignability_check>
+NO_STACK_PROTECTOR
 bool DoCall(ArtMethod* called_method, Thread* self, ShadowFrame& shadow_frame,
             const Instruction* inst, uint16_t inst_data, JValue* result) {
   // Argument word count.

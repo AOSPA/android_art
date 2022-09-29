@@ -70,7 +70,7 @@ class ArmVIXLJNIMacroAssembler final
 
   void StoreStackOffsetToThread(ThreadOffset32 thr_offs, FrameOffset fr_offs) override;
 
-  void StoreStackPointerToThread(ThreadOffset32 thr_offs) override;
+  void StoreStackPointerToThread(ThreadOffset32 thr_offs, bool tag_sp) override;
 
   void StoreSpanning(FrameOffset dest, ManagedRegister src, FrameOffset in_off) override;
 
@@ -213,6 +213,8 @@ class ArmVIXLJNIMacroAssembler final
   void TestGcMarking(JNIMacroLabel* label, JNIMacroUnaryCondition cond) override;
   // Emit a conditional jump to the label by applying a unary condition test to object's mark bit.
   void TestMarkBit(ManagedRegister ref, JNIMacroLabel* label, JNIMacroUnaryCondition cond) override;
+  // Emit a conditional jump to label if the loaded value from specified locations is not zero.
+  void TestByteAndJumpIfNotZero(uintptr_t address, JNIMacroLabel* label) override;
   // Code at this offset will serve as the target for the Jump call.
   void Bind(JNIMacroLabel* label) override;
 

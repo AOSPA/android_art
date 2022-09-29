@@ -1182,10 +1182,6 @@ ART_QUICK_ALLOC_OBJECT_ROSALLOC art_quick_alloc_object_initialized_rosalloc, art
     str    r1, [rSELF, #THREAD_LOCAL_OBJECTS_OFFSET]
     POISON_HEAP_REF r0
     str    r0, [r2, #MIRROR_OBJECT_CLASS_OFFSET]              // Store the class pointer.
-                                                              // Fence. This is "ish" not "ishst" so
-                                                              // that the code after this allocation
-                                                              // site will see the right values in
-                                                              // the fields of the class.
     mov    r0, r2
     // No barrier. The class is already observably initialized (otherwise the fast
     // path size check above would fail) and new-instance allocations are protected
@@ -1248,10 +1244,6 @@ GENERATE_ALLOC_OBJECT_RESOLVED_TLAB art_quick_alloc_object_initialized_tlab, art
     POISON_HEAP_REF r0
     str    r0, [r3, #MIRROR_OBJECT_CLASS_OFFSET]              // Store the class pointer.
     str    r1, [r3, #MIRROR_ARRAY_LENGTH_OFFSET]              // Store the array length.
-                                                              // Fence. This is "ish" not "ishst" so
-                                                              // that the code after this allocation
-                                                              // site will see the right values in
-                                                              // the fields of the class.
     mov    r0, r3
 // new-array is special. The class is loaded and immediately goes to the Initialized state
 // before it is published. Therefore the only fence needed is for the publication of the object.
@@ -1534,15 +1526,25 @@ ENTRY art_quick_generic_jni_trampoline
     .cfi_remember_state
     .cfi_def_cfa_register sp
 
+    // store into fpr, for when it's a fpr return...
+    vmov d0, r0, r1
+
+    LOAD_RUNTIME_INSTANCE r2
+    ldr r2, [r2,  #INSTRUMENTATION_STUBS_INSTALLED_OFFSET_FROM_RUNTIME_INSTANCE]
+    cbnz r2, .Lcall_method_exit_hook
+.Lcall_method_exit_hook_done:
+
     // Tear down the callee-save frame. Skip arg registers.
     add     sp, #FRAME_SIZE_SAVE_REFS_AND_ARGS-FRAME_SIZE_SAVE_REFS_ONLY
     .cfi_adjust_cfa_offset -(FRAME_SIZE_SAVE_REFS_AND_ARGS-FRAME_SIZE_SAVE_REFS_ONLY)
     RESTORE_SAVE_REFS_ONLY_FRAME
     REFRESH_MARKING_REGISTER
 
-    // store into fpr, for when it's a fpr return...
-    vmov d0, r0, r1
     bx lr      // ret
+
+.Lcall_method_exit_hook:
+    bl art_quick_method_exit_hook
+    b .Lcall_method_exit_hook_done
 
     // Undo the unwinding information from above since it doesn't apply below.
     CFI_RESTORE_STATE_AND_DEF_CFA r10, FRAME_SIZE_SAVE_REFS_AND_ARGS
@@ -2578,14 +2580,8 @@ ENTRY art_quick_method_exit_hook
     mov r0, rSELF                             @ pass Thread::Current
     blx artMethodExitHook                     @ (Thread*, ArtMethod*, gpr_res*, fpr_res*)
 
-    .cfi_remember_state
-    cbnz r0, .Ldo_deliver_instrumentation_exception_exit @ Deliver exception
-
     // Normal return.
     RESTORE_SAVE_EVERYTHING_FRAME
     REFRESH_MARKING_REGISTER
     blx lr
-.Ldo_deliver_instrumentation_exception_exit:
-    CFI_RESTORE_STATE_AND_DEF_CFA sp, FRAME_SIZE_SAVE_EVERYTHING
-    DELIVER_PENDING_EXCEPTION_FRAME_READY
 END art_quick_method_exit_hook

@@ -1083,6 +1083,11 @@ END art_quick_check_instance_of
 
 ENTRY art_quick_aput_obj
     cbz x2, .Laput_obj_null
+#if defined(USE_READ_BARRIER) && !defined(USE_BAKER_READ_BARRIER)
+    READ_BARRIER_SLOW x3, w3, x0, MIRROR_OBJECT_CLASS_OFFSET
+    READ_BARRIER_SLOW x3, w3, x3, MIRROR_CLASS_COMPONENT_TYPE_OFFSET
+    READ_BARRIER_SLOW x4, w4, x2, MIRROR_OBJECT_CLASS_OFFSET
+#else  // !defined(USE_READ_BARRIER) || defined(USE_BAKER_READ_BARRIER)
 #ifdef USE_READ_BARRIER
     cbnz wMR, .Laput_obj_gc_marking
 #endif  // USE_READ_BARRIER
@@ -1092,6 +1097,7 @@ ENTRY art_quick_aput_obj
     UNPOISON_HEAP_REF w3
     ldr w4, [x2, #MIRROR_OBJECT_CLASS_OFFSET]          // Heap reference = 32b; zero-extends to x4.
     UNPOISON_HEAP_REF w4
+#endif  // !defined(USE_READ_BARRIER) || defined(USE_BAKER_READ_BARRIER)
     cmp w3, w4  // value's type == array's component type - trivial assignability
     bne .Laput_obj_check_assignability
 .Laput_obj_store:
@@ -1139,20 +1145,18 @@ ENTRY art_quick_aput_obj
     RESTORE_TWO_REGS x2, xLR, 16
     RESTORE_TWO_REGS_DECREASE_FRAME x0, x1, 32
 
-#ifdef USE_READ_BARRIER
+#if defined(USE_READ_BARRIER) && defined(USE_BAKER_READ_BARRIER)
     .cfi_remember_state
-#endif  // USE_READ_BARRIER
+#endif  // defined(USE_READ_BARRIER) && defined(USE_BAKER_READ_BARRIER)
     SETUP_SAVE_ALL_CALLEE_SAVES_FRAME
     mov x1, x2                      // Pass value.
     mov x2, xSELF                   // Pass Thread::Current.
     bl artThrowArrayStoreException  // (Object*, Object*, Thread*).
     brk 0                           // Unreachable.
 
-#ifdef USE_READ_BARRIER
+#if defined(USE_READ_BARRIER) && defined(USE_BAKER_READ_BARRIER)
     CFI_RESTORE_STATE_AND_DEF_CFA sp, 0
 .Laput_obj_gc_marking:
-
-#ifdef USE_BAKER_READ_BARRIER
     BAKER_RB_CHECK_GRAY_BIT_AND_LOAD \
         w3, x0, MIRROR_OBJECT_CLASS_OFFSET, .Laput_obj_mark_array_class
 .Laput_obj_mark_array_class_continue:
@@ -1162,17 +1166,10 @@ ENTRY art_quick_aput_obj
     BAKER_RB_CHECK_GRAY_BIT_AND_LOAD \
         w4, x2, MIRROR_OBJECT_CLASS_OFFSET, .Laput_obj_mark_object_class
 .Laput_obj_mark_object_class_continue:
-#else  // USE_BAKER_READ_BARRIER
-    READ_BARRIER_SLOW x3, w3, x0, MIRROR_OBJECT_CLASS_OFFSET
-    READ_BARRIER_SLOW x3, w3, x3, MIRROR_CLASS_COMPONENT_TYPE_OFFSET
-    READ_BARRIER_SLOW x4, w4, x2, MIRROR_OBJECT_CLASS_OFFSET
-#endif  // USE_BAKER_READ_BARRIER
-
     cmp w3, w4  // value's type == array's component type - trivial assignability
     bne .Laput_obj_check_assignability
     b   .Laput_obj_store
 
-#ifdef USE_BAKER_READ_BARRIER
 .Laput_obj_mark_array_class:
     BAKER_RB_LOAD_AND_MARK w3, x0, MIRROR_OBJECT_CLASS_OFFSET, art_quick_read_barrier_mark_reg03
     b .Laput_obj_mark_array_class_continue
@@ -1185,8 +1182,7 @@ ENTRY art_quick_aput_obj
 .Laput_obj_mark_object_class:
     BAKER_RB_LOAD_AND_MARK w4, x2, MIRROR_OBJECT_CLASS_OFFSET, art_quick_read_barrier_mark_reg04
     b .Laput_obj_mark_object_class_continue
-#endif  // USE_BAKER_READ_BARRIER
-#endif  // USE_READ_BARRIER
+#endif  // defined(USE_READ_BARRIER) && defined(USE_BAKER_READ_BARRIER)
 END art_quick_aput_obj
 
 // Macro to facilitate adding new allocation entrypoints.
@@ -1511,10 +1507,6 @@ ART_QUICK_ALLOC_OBJECT_ROSALLOC art_quick_alloc_object_initialized_rosalloc, art
     str    x5, [xSELF, #THREAD_LOCAL_OBJECTS_OFFSET]
     POISON_HEAP_REF w0
     str    w0, [x4, #MIRROR_OBJECT_CLASS_OFFSET]              // Store the class pointer.
-                                                              // Fence. This is "ish" not "ishst" so
-                                                              // that the code after this allocation
-                                                              // site will see the right values in
-                                                              // the fields of the class.
     mov    x0, x4
     // No barrier. The class is already observably initialized (otherwise the fast
     // path size check above would fail) and new-instance allocations are protected
@@ -1582,7 +1574,6 @@ GENERATE_ALLOC_OBJECT_RESOLVED_TLAB art_quick_alloc_object_initialized_tlab, art
     POISON_HEAP_REF \wClass
     str    \wClass, [x0, #MIRROR_OBJECT_CLASS_OFFSET]         // Store the class pointer.
     str    \wCount, [x0, #MIRROR_ARRAY_LENGTH_OFFSET]         // Store the array length.
-                                                              // Fence.
 // new-array is special. The class is loaded and immediately goes to the Initialized state
 // before it is published. Therefore the only fence needed is for the publication of the object.
 // See ClassLinker::CreateArrayClass() for more details.
@@ -1909,6 +1900,11 @@ ENTRY art_quick_generic_jni_trampoline
     .cfi_remember_state
     .cfi_def_cfa_register sp
 
+    LOAD_RUNTIME_INSTANCE x1
+    ldrb w1, [x1, #INSTRUMENTATION_STUBS_INSTALLED_OFFSET_FROM_RUNTIME_INSTANCE]
+    cbnz w1, .Lcall_method_exit_hook
+.Lcall_method_exit_hook_done:
+
     // Tear down the callee-save frame.
     RESTORE_SAVE_REFS_AND_ARGS_FRAME
     REFRESH_MARKING_REGISTER
@@ -1916,6 +1912,11 @@ ENTRY art_quick_generic_jni_trampoline
     // store into fpr, for when it's a fpr return...
     fmov d0, x0
     ret
+
+.Lcall_method_exit_hook:
+    fmov d0, x0
+    bl art_quick_method_exit_hook
+    b .Lcall_method_exit_hook_done
 
     // Undo the unwinding information from above since it doesn't apply below.
     CFI_RESTORE_STATE_AND_DEF_CFA x28, FRAME_SIZE_SAVE_REFS_AND_ARGS
@@ -2682,15 +2683,9 @@ ENTRY art_quick_method_exit_hook
     mov x0, xSELF                             // Thread::Current
     bl  artMethodExitHook                     // (Thread*, ArtMethod*, gpr_res*, fpr_res*)
 
-    .cfi_remember_state
-    cbnz x0, .Ldo_deliver_instrumentation_exception_exit // Handle exception
-
     // Normal return.
     RESTORE_SAVE_EVERYTHING_FRAME
     REFRESH_MARKING_REGISTER
     ret
-.Ldo_deliver_instrumentation_exception_exit:
-    CFI_RESTORE_STATE_AND_DEF_CFA sp, FRAME_SIZE_SAVE_EVERYTHING
-    DELIVER_PENDING_EXCEPTION_FRAME_READY
 END art_quick_method_exit_hook
 

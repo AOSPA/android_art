@@ -146,9 +146,12 @@ public class OdrefreshHostTest extends BaseHostJUnit4Test {
     @Test
     public void verifyEnableUffdGcChangeTriggersCompilation() throws Exception {
         try {
-            // Disable phenotype flag syncing.
+            // Disable phenotype flag syncing. Potentially, we can set
+            // `set_sync_disabled_for_tests` to `until_reboot`, but setting it to
+            // `persistent` prevents unrelated system crashes/restarts from affecting the
+            // test. `set_sync_disabled_for_tests` is reset in the `finally` block anyway.
             getDevice().executeShellV2Command(
-                    "device_config set_sync_disabled_for_tests until_reboot");
+                    "device_config set_sync_disabled_for_tests persistent");
 
             // Simulate that the phenotype flag is set to the default value.
             getDevice().executeShellV2Command(
@@ -195,6 +198,60 @@ public class OdrefreshHostTest extends BaseHostJUnit4Test {
             getDevice().executeShellV2Command(
                     "device_config delete runtime_native_boot enable_uffd_gc");
         }
+    }
+
+    @Test
+    public void verifySystemPropertyMismatchTriggersCompilation() throws Exception {
+        // Change a system property from empty to a value.
+        getDevice().setProperty("dalvik.vm.foo", "1");
+        long timeMs = mTestUtils.getCurrentTimeMs();
+        getDevice().executeShellV2Command(ODREFRESH_COMMAND);
+
+        // Artifacts should be re-compiled.
+        assertArtifactsModifiedAfter(getZygoteArtifacts(), timeMs);
+        assertArtifactsModifiedAfter(getSystemServerArtifacts(), timeMs);
+
+        // Run again with the same value.
+        timeMs = mTestUtils.getCurrentTimeMs();
+        getDevice().executeShellV2Command(ODREFRESH_COMMAND);
+
+        // Artifacts should not be re-compiled.
+        assertArtifactsNotModifiedAfter(getZygoteArtifacts(), timeMs);
+        assertArtifactsNotModifiedAfter(getSystemServerArtifacts(), timeMs);
+
+        // Change the system property to another value.
+        getDevice().setProperty("dalvik.vm.foo", "2");
+        timeMs = mTestUtils.getCurrentTimeMs();
+        getDevice().executeShellV2Command(ODREFRESH_COMMAND);
+
+        // Artifacts should be re-compiled.
+        assertArtifactsModifiedAfter(getZygoteArtifacts(), timeMs);
+        assertArtifactsModifiedAfter(getSystemServerArtifacts(), timeMs);
+
+        // Run again with the same value.
+        timeMs = mTestUtils.getCurrentTimeMs();
+        getDevice().executeShellV2Command(ODREFRESH_COMMAND);
+
+        // Artifacts should not be re-compiled.
+        assertArtifactsNotModifiedAfter(getZygoteArtifacts(), timeMs);
+        assertArtifactsNotModifiedAfter(getSystemServerArtifacts(), timeMs);
+
+        // Change the system property to empty.
+        getDevice().setProperty("dalvik.vm.foo", "");
+        timeMs = mTestUtils.getCurrentTimeMs();
+        getDevice().executeShellV2Command(ODREFRESH_COMMAND);
+
+        // Artifacts should be re-compiled.
+        assertArtifactsModifiedAfter(getZygoteArtifacts(), timeMs);
+        assertArtifactsModifiedAfter(getSystemServerArtifacts(), timeMs);
+
+        // Run again with the same value.
+        timeMs = mTestUtils.getCurrentTimeMs();
+        getDevice().executeShellV2Command(ODREFRESH_COMMAND);
+
+        // Artifacts should not be re-compiled.
+        assertArtifactsNotModifiedAfter(getZygoteArtifacts(), timeMs);
+        assertArtifactsNotModifiedAfter(getSystemServerArtifacts(), timeMs);
     }
 
     @Test

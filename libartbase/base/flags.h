@@ -236,8 +236,8 @@ class Flag : public FlagBase {
 //
 //     Flag<int> WriteMetricsToLog{"my-feature-test.flag", 42, FlagType::kDeviceConfig};
 //
-// This creates a boolean flag that can be read through gFlags.WriteMetricsToLog(). The default
-// value is false. Note that the default value can be left unspecified, in which the value of the
+// This creates an integer flag that can be read through gFlags.WriteMetricsToLog(). The default
+// value is 42. Note that the default value can be left unspecified, in which case the value of the
 // type's default constructor will be used.
 //
 // The flag can be set through the following generated means:
@@ -304,6 +304,12 @@ struct Flags {
   // Note that the actual write is still controlled by
   // MetricsReportingMods and MetricsReportingNumMods.
   Flag<std::string> MetricsWriteToFile{"metrics.write-to-file", "", FlagType::kCmdlineOnly};
+
+  // The output format for metrics. This is only used
+  // when writing metrics to a file; metrics written
+  // to logcat will be in human-readable text format.
+  // Supported values are "text" and "xml".
+  Flag<std::string> MetricsFormat{"metrics.format", "text", FlagType::kCmdlineOnly};
 };
 
 // This is the actual instance of all the flags.

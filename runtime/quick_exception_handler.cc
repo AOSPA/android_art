@@ -16,6 +16,7 @@
 
 #include "quick_exception_handler.h"
 #include <ios>
+#include <queue>
 
 #include "arch/context.h"
 #include "art_method-inl.h"
@@ -67,12 +68,15 @@ class CatchBlockStackVisitor final : public StackVisitor {
                          Context* context,
                          Handle<mirror::Throwable>* exception,
                          QuickExceptionHandler* exception_handler,
-                         uint32_t skip_frames)
+                         uint32_t skip_frames,
+                         bool skip_top_unwind_callback)
       REQUIRES_SHARED(Locks::mutator_lock_)
       : StackVisitor(self, context, StackVisitor::StackWalkKind::kIncludeInlinedFrames),
         exception_(exception),
         exception_handler_(exception_handler),
-        skip_frames_(skip_frames) {
+        skip_frames_(skip_frames),
+        skip_unwind_callback_(skip_top_unwind_callback) {
+    DCHECK_IMPLIES(skip_unwind_callback_, skip_frames_ == 0);
   }
 
   bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -95,7 +99,24 @@ class CatchBlockStackVisitor final : public StackVisitor {
       DCHECK(method->IsCalleeSaveMethod());
       return true;
     }
-    return HandleTryItems(method);
+    bool continue_stack_walk = HandleTryItems(method);
+    // Collect methods for which MethodUnwind callback needs to be invoked. MethodUnwind callback
+    // can potentially throw, so we want to call these after we find the catch block.
+    // We stop the stack walk when we find the catch block. If we are ending the stack walk we don't
+    // have to unwind this method so don't record it.
+    if (continue_stack_walk && !skip_unwind_callback_) {
+      // Skip unwind callback is only used when method exit callback has thrown an exception. In
+      // that case, we should have runtime method (artMethodExitHook) on top of stack and the
+      // second should be the method for which method exit was called.
+      DCHECK_IMPLIES(skip_unwind_callback_, GetFrameDepth() == 2);
+      unwound_methods_.push(method);
+    }
+    skip_unwind_callback_ = false;
+    return continue_stack_walk;
+  }
+
+  std::queue<ArtMethod*>& GetUnwoundMethods() {
+    return unwound_methods_;
   }
 
  private:
@@ -139,20 +160,29 @@ class CatchBlockStackVisitor final : public StackVisitor {
   QuickExceptionHandler* const exception_handler_;
   // The number of frames to skip searching for catches in.
   uint32_t skip_frames_;
+  // The list of methods we would skip to reach the catch block. We record these to call
+  // MethodUnwind callbacks.
+  std::queue<ArtMethod*> unwound_methods_;
+  // Specifies if the unwind callback should be ignored for method at the top of the stack.
+  bool skip_unwind_callback_;
 
   DISALLOW_COPY_AND_ASSIGN(CatchBlockStackVisitor);
 };
 
 // Finds the appropriate exception catch after calling all method exit instrumentation functions.
-// Note that this might change the exception being thrown.
-void QuickExceptionHandler::FindCatch(ObjPtr<mirror::Throwable> exception) {
+// Note that this might change the exception being thrown. If is_method_exit_exception is true
+// skip the method unwind call for the method on top of the stack as the exception was thrown by
+// method exit callback.
+void QuickExceptionHandler::FindCatch(ObjPtr<mirror::Throwable> exception,
+                                      bool is_method_exit_exception) {
   DCHECK(!is_deoptimization_);
-  instrumentation::InstrumentationStackPopper popper(self_);
+  instrumentation::Instrumentation* instr = Runtime::Current()->GetInstrumentation();
   // The number of total frames we have so far popped.
   uint32_t already_popped = 0;
   bool popped_to_top = true;
   StackHandleScope<1> hs(self_);
   MutableHandle<mirror::Throwable> exception_ref(hs.NewHandle(exception));
+  bool skip_top_unwind_callback = is_method_exit_exception;
   // Sending the instrumentation events (done by the InstrumentationStackPopper) can cause new
   // exceptions to be thrown which will override the current exception. Therefore we need to perform
   // the search for a catch in a loop until we have successfully popped all the way to a catch or
@@ -166,11 +196,15 @@ void QuickExceptionHandler::FindCatch(ObjPtr<mirror::Throwable> exception) {
     }
 
     // Walk the stack to find catch handler.
-    CatchBlockStackVisitor visitor(self_, context_,
+    CatchBlockStackVisitor visitor(self_,
+                                   context_,
                                    &exception_ref,
                                    this,
-                                   /*skip_frames=*/already_popped);
+                                   /*skip_frames=*/already_popped,
+                                   skip_top_unwind_callback);
     visitor.WalkStack(true);
+    skip_top_unwind_callback = false;
+
     uint32_t new_pop_count = handler_frame_depth_;
     DCHECK_GE(new_pop_count, already_popped);
     already_popped = new_pop_count;
@@ -195,9 +229,13 @@ void QuickExceptionHandler::FindCatch(ObjPtr<mirror::Throwable> exception) {
         handler_method_header_->IsOptimized()) {
       SetCatchEnvironmentForOptimizedHandler(&visitor);
     }
-    popped_to_top =
-        popper.PopFramesTo(reinterpret_cast<uintptr_t>(handler_quick_frame_), exception_ref);
+    popped_to_top = instr->ProcessMethodUnwindCallbacks(self_,
+                                                        visitor.GetUnwoundMethods(),
+                                                        exception_ref);
   } while (!popped_to_top);
+
+  // Pop off frames on instrumentation stack to keep it in sync with what is on the stack.
+  instr->PopInstrumentationStackUntil(self_, reinterpret_cast<uintptr_t>(handler_quick_frame_));
   if (!clear_exception_) {
     // Put exception back in root set with clear throw location.
     self_->SetException(exception_ref.Get());
@@ -361,13 +399,15 @@ class DeoptimizeStackVisitor final : public StackVisitor {
       return true;
     } else if (method->IsNative()) {
       // If we return from JNI with a pending exception and want to deoptimize, we need to skip
-      // the native method.
-      // The top method is a runtime method, the native method comes next.
-      CHECK_EQ(GetFrameDepth(), 1U);
+      // the native method. The top method is a runtime method, the native method comes next.
+      // We also deoptimize due to method instrumentation reasons from method entry / exit
+      // callbacks. In these cases native method is at the top of stack.
+      CHECK((GetFrameDepth() == 1U) || (GetFrameDepth() == 0U));
       callee_method_ = method;
       return true;
     } else if (!single_frame_deopt_ &&
-               !Runtime::Current()->IsAsyncDeoptimizeable(GetCurrentQuickFramePc())) {
+               !Runtime::Current()->IsAsyncDeoptimizeable(GetOuterMethod(),
+                                                          GetCurrentQuickFramePc())) {
       // We hit some code that's not deoptimizeable. However, Single-frame deoptimization triggered
       // from compiled code is always allowed since HDeoptimize always saves the full environment.
       LOG(WARNING) << "Got request to deoptimize un-deoptimizable method "
@@ -642,7 +682,7 @@ uintptr_t QuickExceptionHandler::UpdateInstrumentationStack() {
   uintptr_t return_pc = 0;
   if (method_tracing_active_) {
     instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
-    return_pc = instrumentation->PopFramesForDeoptimization(
+    return_pc = instrumentation->PopInstrumentationStackUntil(
         self_, reinterpret_cast<uintptr_t>(handler_quick_frame_));
   }
   return return_pc;

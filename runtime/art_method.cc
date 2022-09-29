@@ -150,10 +150,34 @@ uint16_t ArtMethod::FindObsoleteDexClassDefIndex() {
   return dex_file->GetIndexForClassDef(*class_def);
 }
 
-void ArtMethod::ThrowInvocationTimeError() {
+void ArtMethod::ThrowInvocationTimeError(ObjPtr<mirror::Object> receiver) {
   DCHECK(!IsInvokable());
   if (IsDefaultConflicting()) {
     ThrowIncompatibleClassChangeErrorForMethodConflict(this);
+  } else if (GetDeclaringClass()->IsInterface() && receiver != nullptr) {
+    // If this was an interface call, check whether there is a method in the
+    // superclass chain that isn't public. In this situation, we should throw an
+    // IllegalAccessError.
+    DCHECK(IsAbstract());
+    ObjPtr<mirror::Class> current = receiver->GetClass();
+    while (current != nullptr) {
+      for (ArtMethod& method : current->GetDeclaredMethodsSlice(kRuntimePointerSize)) {
+        ArtMethod* np_method = method.GetInterfaceMethodIfProxy(kRuntimePointerSize);
+        if (!np_method->IsStatic() &&
+            np_method->GetNameView() == GetNameView() &&
+            np_method->GetSignature() == GetSignature()) {
+          if (!np_method->IsPublic()) {
+            ThrowIllegalAccessErrorForImplementingMethod(receiver->GetClass(), np_method, this);
+            return;
+          } else if (np_method->IsAbstract()) {
+            ThrowAbstractMethodError(this);
+            return;
+          }
+        }
+      }
+      current = current->GetSuperClass();
+    }
+    ThrowAbstractMethodError(this);
   } else {
     DCHECK(IsAbstract());
     ThrowAbstractMethodError(this);
@@ -310,6 +334,7 @@ uint32_t ArtMethod::FindCatchBlock(Handle<mirror::Class> exception_type,
   return found_dex_pc;
 }
 
+NO_STACK_PROTECTOR
 void ArtMethod::Invoke(Thread* self, uint32_t* args, uint32_t args_size, JValue* result,
                        const char* shorty) {
   if (UNLIKELY(__builtin_frame_address(0) < self->GetStackEnd())) {
@@ -617,6 +642,15 @@ const OatQuickMethodHeader* ArtMethod::GetOatQuickMethodHeader(uintptr_t pc) {
   }
 
   OatQuickMethodHeader* method_header = OatQuickMethodHeader::FromEntryPoint(oat_entry_point);
+  // We could have existing Oat code for native methods but we may not use it if the runtime is java
+  // debuggable or when profiling boot class path. There is no easy way to check if the pc
+  // corresponds to QuickGenericJniStub. Since we have eliminated all the other cases, if the pc
+  // doesn't correspond to the AOT code then we must be running QuickGenericJniStub.
+  if (IsNative() && !method_header->Contains(pc)) {
+    DCHECK_NE(pc, 0u) << "PC 0 for " << PrettyMethod();
+    return nullptr;
+  }
+
   DCHECK(method_header->Contains(pc))
       << PrettyMethod()
       << " " << std::hex << pc << " " << oat_entry_point
@@ -724,16 +758,16 @@ void ArtMethod::CopyFrom(ArtMethod* src, PointerSize image_pointer_size) {
   // the entry point to the JIT code, but this would require taking the JIT code cache
   // lock to notify it, which we do not want at this level.
   Runtime* runtime = Runtime::Current();
+  const void* entry_point = GetEntryPointFromQuickCompiledCodePtrSize(image_pointer_size);
   if (runtime->UseJitCompilation()) {
-    if (runtime->GetJit()->GetCodeCache()->ContainsPc(GetEntryPointFromQuickCompiledCode())) {
+    if (runtime->GetJit()->GetCodeCache()->ContainsPc(entry_point)) {
       SetEntryPointFromQuickCompiledCodePtrSize(
           src->IsNative() ? GetQuickGenericJniStub() : GetQuickToInterpreterBridge(),
           image_pointer_size);
     }
   }
-  if (interpreter::IsNterpSupported() &&
-      (GetEntryPointFromQuickCompiledCodePtrSize(image_pointer_size) ==
-          interpreter::GetNterpEntryPoint())) {
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+  if (interpreter::IsNterpSupported() && class_linker->IsNterpEntryPoint(entry_point)) {
     // If the entrypoint is nterp, it's too early to check if the new method
     // will support it. So for simplicity, use the interpreter bridge.
     SetEntryPointFromQuickCompiledCodePtrSize(GetQuickToInterpreterBridge(), image_pointer_size);

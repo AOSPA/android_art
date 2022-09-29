@@ -40,17 +40,23 @@ class ProfileCompilationInfoTest : public CommonArtTest, public ProfileTestHelpe
     CommonArtTest::SetUp();
     allocator_.reset(new ArenaAllocator(&pool_));
 
-    dex1 = BuildDex("location1", /*checksum=*/ 1, "LUnique1;", /*num_method_ids=*/ 101);
-    dex2 = BuildDex("location2", /*checksum=*/ 2, "LUnique2;", /*num_method_ids=*/ 102);
-    dex3 = BuildDex("location3", /*checksum=*/ 3, "LUnique3;", /*num_method_ids=*/ 103);
-    dex4 = BuildDex("location4", /*checksum=*/ 4, "LUnique4;", /*num_method_ids=*/ 104);
+    dex1 = BuildDex("location1", /*location_checksum=*/ 1, "LUnique1;", /*num_method_ids=*/ 101);
+    dex2 = BuildDex("location2", /*location_checksum=*/ 2, "LUnique2;", /*num_method_ids=*/ 102);
+    dex3 = BuildDex("location3", /*location_checksum=*/ 3, "LUnique3;", /*num_method_ids=*/ 103);
+    dex4 = BuildDex("location4", /*location_checksum=*/ 4, "LUnique4;", /*num_method_ids=*/ 104);
 
-    dex1_checksum_missmatch =
-        BuildDex("location1", /*checksum=*/ 12, "LUnique1;", /*num_method_ids=*/ 101);
-    dex1_renamed =
-        BuildDex("location1-renamed", /*checksum=*/ 1, "LUnique1;", /*num_method_ids=*/ 101);
-    dex2_renamed =
-        BuildDex("location2-renamed", /*checksum=*/ 2, "LUnique2;", /*num_method_ids=*/ 102);
+    dex1_checksum_missmatch = BuildDex("location1",
+                                       /*location_checksum=*/ 12,
+                                       "LUnique1;",
+                                       /*num_method_ids=*/ 101);
+    dex1_renamed = BuildDex("location1-renamed",
+                            /*location_checksum=*/ 1,
+                            "LUnique1;",
+                            /*num_method_ids=*/ 101);
+    dex2_renamed = BuildDex("location2-renamed",
+                            /*location_checksum=*/ 2,
+                            "LUnique2;",
+                            /*num_method_ids=*/ 102);
   }
 
  protected:
@@ -350,10 +356,16 @@ TEST_F(ProfileCompilationInfoTest, MergeFdFail) {
 TEST_F(ProfileCompilationInfoTest, SaveMaxMethods) {
   ScratchFile profile;
 
-  const DexFile* dex_max1 = BuildDex(
-      "location-max1", /*checksum=*/ 5, "LUniqueMax1;", kMaxMethodIds, kMaxClassIds);
-  const DexFile* dex_max2 = BuildDex(
-      "location-max2", /*checksum=*/ 6, "LUniqueMax2;", kMaxMethodIds, kMaxClassIds);
+  const DexFile* dex_max1 = BuildDex("location-max1",
+                                     /*location_checksum=*/ 5,
+                                     "LUniqueMax1;",
+                                     kMaxMethodIds,
+                                     kMaxClassIds);
+  const DexFile* dex_max2 = BuildDex("location-max2",
+                                     /*location_checksum=*/ 6,
+                                     "LUniqueMax2;",
+                                     kMaxMethodIds,
+                                     kMaxClassIds);
 
 
   ProfileCompilationInfo saved_info;
@@ -733,11 +745,11 @@ TEST_F(ProfileCompilationInfoTest, AddMoreDexFileThanLimitRegular) {
   // Save a few methods.
   for (uint16_t i = 0; i < std::numeric_limits<ProfileIndexType>::max(); i++) {
     std::string location = std::to_string(i);
-    const DexFile* dex = BuildDex(location, /*checksum=*/ 1, "LC;", /*num_method_ids=*/ 1);
+    const DexFile* dex = BuildDex(location, /*location_checksum=*/ 1, "LC;", /*num_method_ids=*/ 1);
     ASSERT_TRUE(AddMethod(&info, dex, /*method_idx=*/ 0));
   }
   // Add an extra dex file.
-  const DexFile* dex = BuildDex("-1", /*checksum=*/ 1, "LC;", /*num_method_ids=*/ 1);
+  const DexFile* dex = BuildDex("-1", /*location_checksum=*/ 1, "LC;", /*num_method_ids=*/ 1);
   ASSERT_FALSE(AddMethod(&info, dex, /*method_idx=*/ 0));
 }
 
@@ -746,11 +758,11 @@ TEST_F(ProfileCompilationInfoTest, AddMoreDexFileThanLimitBoot) {
   // Save a few methods.
   for (uint16_t i = 0; i < std::numeric_limits<ProfileIndexType>::max(); i++) {
     std::string location = std::to_string(i);
-    const DexFile* dex = BuildDex(location, /*checksum=*/ 1, "LC;", /*num_method_ids=*/ 1);
+    const DexFile* dex = BuildDex(location, /*location_checksum=*/ 1, "LC;", /*num_method_ids=*/ 1);
     ASSERT_TRUE(AddMethod(&info, dex, /*method_idx=*/ 0));
   }
   // Add an extra dex file.
-  const DexFile* dex = BuildDex("-1", /*checksum=*/ 1, "LC;", /*num_method_ids=*/ 1);
+  const DexFile* dex = BuildDex("-1", /*location_checksum=*/ 1, "LC;", /*num_method_ids=*/ 1);
   ASSERT_FALSE(AddMethod(&info, dex, /*method_idx=*/ 0));
 }
 
@@ -944,7 +956,9 @@ TEST_F(ProfileCompilationInfoTest, UpdateProfileKeyOk) {
   AddMethod(&info, dex2, /*method_idx=*/ 0);
 
   // Update the profile keys based on the original dex files
-  ASSERT_TRUE(info.UpdateProfileKeys(dex_files));
+  bool updated = false;
+  ASSERT_TRUE(info.UpdateProfileKeys(dex_files, &updated));
+  ASSERT_TRUE(updated);
 
   // Verify that we find the methods when searched with the original dex files.
   for (const std::unique_ptr<const DexFile>& dex : dex_files) {
@@ -970,7 +984,9 @@ TEST_F(ProfileCompilationInfoTest, UpdateProfileKeyOkWithAnnotation) {
   AddMethod(&info, dex2, /*method_idx=*/ 0, Hotness::kFlagHot, annotation);
 
   // Update the profile keys based on the original dex files
-  ASSERT_TRUE(info.UpdateProfileKeys(dex_files));
+  bool updated = false;
+  ASSERT_TRUE(info.UpdateProfileKeys(dex_files, &updated));
+  ASSERT_TRUE(updated);
 
   // Verify that we find the methods when searched with the original dex files.
   for (const std::unique_ptr<const DexFile>& dex : dex_files) {
@@ -993,7 +1009,9 @@ TEST_F(ProfileCompilationInfoTest, UpdateProfileKeyOkButNoUpdate) {
   AddMethod(&info, dex2, /*method_idx=*/ 0);
 
   // Update the profile keys based on the original dex files.
-  ASSERT_TRUE(info.UpdateProfileKeys(dex_files));
+  bool updated = false;
+  ASSERT_TRUE(info.UpdateProfileKeys(dex_files, &updated));
+  ASSERT_FALSE(updated);
 
   // Verify that we did not perform any update and that we cannot find anything with the new
   // location.
@@ -1025,7 +1043,9 @@ TEST_F(ProfileCompilationInfoTest, UpdateProfileKeyFail) {
   // This will cause the rename to fail because an existing entry would already have that name.
   AddMethod(&info, dex1_renamed, /*method_idx=*/ 0);
 
-  ASSERT_FALSE(info.UpdateProfileKeys(dex_files));
+  bool updated = false;
+  ASSERT_FALSE(info.UpdateProfileKeys(dex_files, &updated));
+  ASSERT_FALSE(updated);
 
   // Release the ownership as this is held by the test class;
   for (std::unique_ptr<const DexFile>& dex : dex_files) {
@@ -1167,12 +1187,12 @@ TEST_F(ProfileCompilationInfoTest, FilteredLoadingWithClasses) {
   ScratchFile profile;
 
   const DexFile* dex1_1000 = BuildDex("location1_1000",
-                                      /*checksum=*/ 7,
+                                      /*location_checksum=*/ 7,
                                       "LC1_1000;",
                                       /*num_method_ids=*/ 1u,
                                       /*num_class_ids=*/ 1000u);
   const DexFile* dex2_1000 = BuildDex("location2_1000",
-                                      /*checksum=*/ 8,
+                                      /*location_checksum=*/ 8,
                                       "LC2_1000;",
                                       /*num_method_ids=*/ 1u,
                                       /*num_class_ids=*/ 1000u);

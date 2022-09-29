@@ -1574,6 +1574,14 @@ DEFINE_FUNCTION art_quick_generic_jni_trampoline
     CFI_REMEMBER_STATE
     CFI_DEF_CFA_REGISTER(rsp)
 
+    // store into fpr, for when it's a fpr return...
+    movq %rax, %xmm0
+
+    LOAD_RUNTIME_INSTANCE rcx
+    cmpb MACRO_LITERAL(0), INSTRUMENTATION_STUBS_INSTALLED_OFFSET_FROM_RUNTIME_INSTANCE(%rcx)
+    jne .Lcall_method_exit_hook
+.Lcall_method_exit_hook_done:
+
     // Tear down the callee-save frame.
     // Load FPRs.
     // movq %xmm0, 16(%rsp)         // doesn't make sense!!!
@@ -1603,9 +1611,11 @@ DEFINE_FUNCTION art_quick_generic_jni_trampoline
     POP r13  // Callee save.
     POP r14  // Callee save.
     POP r15  // Callee save.
-    // store into fpr, for when it's a fpr return...
-    movq %rax, %xmm0
     ret
+
+.Lcall_method_exit_hook:
+   call art_quick_method_exit_hook
+   jmp .Lcall_method_exit_hook_done
 
     // Undo the unwinding information from above since it doesn't apply below.
     CFI_RESTORE_STATE_AND_DEF_CFA rbp, 208
@@ -2164,7 +2174,6 @@ DEFINE_FUNCTION art_quick_method_entry_hook
 END_FUNCTION art_quick_method_entry_hook
 
 // On entry, method is at the bottom of the stack.
-// and r8 has should_deopt_frame value.
 DEFINE_FUNCTION art_quick_method_exit_hook
     SETUP_SAVE_EVERYTHING_FRAME
 
@@ -2175,14 +2184,7 @@ DEFINE_FUNCTION art_quick_method_exit_hook
     movq %gs:THREAD_SELF_OFFSET, %rdi           // Thread::Current
     call SYMBOL(artMethodExitHook)              // (Thread*, SP, gpr_res*, fpr_res*)
 
-    cmpq LITERAL(1), %rax
-    CFI_REMEMBER_STATE
-    je .Ldo_deliver_instrumentation_exception_exit
-
     // Normal return.
     RESTORE_SAVE_EVERYTHING_FRAME
     ret
-.Ldo_deliver_instrumentation_exception_exit:
-    CFI_RESTORE_STATE_AND_DEF_CFA rsp, FRAME_SIZE_SAVE_EVERYTHING
-    DELIVER_PENDING_EXCEPTION_FRAME_READY
 END_FUNCTION art_quick_method_entry_hook

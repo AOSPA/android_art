@@ -152,7 +152,6 @@ void ThrowWrappedBootstrapMethodError(const char* fmt, ...) {
 // ClassCastException
 
 void ThrowClassCastException(ObjPtr<mirror::Class> dest_type, ObjPtr<mirror::Class> src_type) {
-  DumpB77342775DebugData(dest_type, src_type);
   ThrowException("Ljava/lang/ClassCastException;", nullptr,
                  StringPrintf("%s cannot be cast to %s",
                               mirror::Class::PrettyDescriptor(src_type).c_str(),
@@ -238,6 +237,19 @@ void ThrowIllegalAccessError(ObjPtr<mirror::Class> referrer, const char* fmt, ..
   va_end(args);
 }
 
+void ThrowIllegalAccessErrorForImplementingMethod(ObjPtr<mirror::Class> klass,
+                                                  ArtMethod* implementation_method,
+                                                  ArtMethod* interface_method)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  DCHECK(!implementation_method->IsAbstract());
+  DCHECK(!implementation_method->IsPublic());
+  ThrowIllegalAccessError(
+      klass,
+      "Method '%s' implementing interface method '%s' is not public",
+      implementation_method->PrettyMethod().c_str(),
+      interface_method->PrettyMethod().c_str());
+}
+
 // IllegalAccessException
 
 void ThrowIllegalAccessException(const char* msg) {
@@ -281,7 +293,6 @@ void ThrowIncompatibleClassChangeErrorClassForInterfaceDispatch(ArtMethod* inter
       << "' does not implement interface '"
       << mirror::Class::PrettyDescriptor(interface_method->GetDeclaringClass())
       << "' in call to '" << ArtMethod::PrettyMethod(interface_method) << "'";
-  DumpB77342775DebugData(interface_method->GetDeclaringClass(), this_object->GetClass());
   ThrowException("Ljava/lang/IncompatibleClassChangeError;",
                  referrer != nullptr ? referrer->GetDeclaringClass() : nullptr,
                  msg.str().c_str());

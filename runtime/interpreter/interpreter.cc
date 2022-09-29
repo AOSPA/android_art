@@ -255,6 +255,7 @@ static JValue ExecuteSwitch(Thread* self,
   }
 }
 
+NO_STACK_PROTECTOR
 static inline JValue Execute(
     Thread* self,
     const CodeItemDataAccessor& accessor,
@@ -265,41 +266,22 @@ static inline JValue Execute(
   DCHECK(!shadow_frame.GetMethod()->IsAbstract());
   DCHECK(!shadow_frame.GetMethod()->IsNative());
 
+  // We cache the result of NeedsDexPcEvents in the shadow frame so we don't need to call
+  // NeedsDexPcEvents on every instruction for better performance. NeedsDexPcEvents only gets
+  // updated asynchronoulsy in a SuspendAll scope and any existing shadow frames are updated with
+  // new value. So it is safe to cache it here.
+  shadow_frame.SetNotifyDexPcMoveEvents(
+      Runtime::Current()->GetInstrumentation()->NeedsDexPcEvents(shadow_frame.GetMethod(), self));
+
   if (LIKELY(!from_deoptimize)) {  // Entering the method, but not via deoptimization.
     if (kIsDebugBuild) {
       CHECK_EQ(shadow_frame.GetDexPC(), 0u);
       self->AssertNoPendingException();
     }
-    instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
     ArtMethod *method = shadow_frame.GetMethod();
 
-    if (UNLIKELY(instrumentation->HasMethodEntryListeners())) {
-      instrumentation->MethodEnterEvent(self, method);
-      if (UNLIKELY(shadow_frame.GetForcePopFrame())) {
-        // The caller will retry this invoke or ignore the result. Just return immediately without
-        // any value.
-        DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
-        JValue ret = JValue();
-        PerformNonStandardReturn<MonitorState::kNoMonitorsLocked>(
-            self, shadow_frame, ret, instrumentation, accessor.InsSize());
-        return ret;
-      }
-      if (UNLIKELY(self->IsExceptionPending())) {
-        instrumentation->MethodUnwindEvent(self,
-                                           shadow_frame.GetThisObject(accessor.InsSize()),
-                                           method,
-                                           0);
-        JValue ret = JValue();
-        if (UNLIKELY(shadow_frame.GetForcePopFrame())) {
-          DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
-          PerformNonStandardReturn<MonitorState::kNoMonitorsLocked>(
-              self, shadow_frame, ret, instrumentation, accessor.InsSize());
-        }
-        return ret;
-      }
-    }
-
-    if (!stay_in_interpreter && !self->IsForceInterpreter()) {
+    // If we can continue in JIT and have JITed code available execute JITed code.
+    if (!stay_in_interpreter && !self->IsForceInterpreter() && !shadow_frame.GetForcePopFrame()) {
       jit::Jit* jit = Runtime::Current()->GetJit();
       if (jit != nullptr) {
         jit->MethodEntered(self, shadow_frame.GetMethod());
@@ -318,6 +300,32 @@ static inline JValue Execute(
 
           return result;
         }
+      }
+    }
+
+    instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
+    if (UNLIKELY(instrumentation->HasMethodEntryListeners() || shadow_frame.GetForcePopFrame())) {
+      instrumentation->MethodEnterEvent(self, method);
+      if (UNLIKELY(shadow_frame.GetForcePopFrame())) {
+        // The caller will retry this invoke or ignore the result. Just return immediately without
+        // any value.
+        DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
+        JValue ret = JValue();
+        PerformNonStandardReturn<MonitorState::kNoMonitorsLocked>(
+            self, shadow_frame, ret, instrumentation, accessor.InsSize());
+        return ret;
+      }
+      if (UNLIKELY(self->IsExceptionPending())) {
+        instrumentation->MethodUnwindEvent(self,
+                                           method,
+                                           0);
+        JValue ret = JValue();
+        if (UNLIKELY(shadow_frame.GetForcePopFrame())) {
+          DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
+          PerformNonStandardReturn<MonitorState::kNoMonitorsLocked>(
+              self, shadow_frame, ret, instrumentation, accessor.InsSize());
+        }
+        return ret;
       }
     }
   }
@@ -366,7 +374,7 @@ void EnterInterpreterFromInvoke(Thread* self,
     num_ins = accessor.InsSize();
   } else if (!method->IsInvokable()) {
     self->EndAssertNoThreadSuspension(old_cause);
-    method->ThrowInvocationTimeError();
+    method->ThrowInvocationTimeError(receiver);
     return;
   } else {
     DCHECK(method->IsNative()) << method->PrettyMethod();
@@ -381,7 +389,6 @@ void EnterInterpreterFromInvoke(Thread* self,
   ShadowFrameAllocaUniquePtr shadow_frame_unique_ptr =
       CREATE_SHADOW_FRAME(num_regs, last_shadow_frame, method, /* dex pc */ 0);
   ShadowFrame* shadow_frame = shadow_frame_unique_ptr.get();
-  self->PushShadowFrame(shadow_frame);
 
   size_t cur_reg = num_regs - num_ins;
   if (!method->IsStatic()) {
@@ -413,21 +420,10 @@ void EnterInterpreterFromInvoke(Thread* self,
     }
   }
   self->EndAssertNoThreadSuspension(old_cause);
-  // Do this after populating the shadow frame in case EnsureInitialized causes a GC.
-  if (method->IsStatic()) {
-    ObjPtr<mirror::Class> declaring_class = method->GetDeclaringClass();
-    if (UNLIKELY(!declaring_class->IsVisiblyInitialized())) {
-      StackHandleScope<1> hs(self);
-      Handle<mirror::Class> h_class(hs.NewHandle(declaring_class));
-      if (UNLIKELY(!Runtime::Current()->GetClassLinker()->EnsureInitialized(
-                        self, h_class, /*can_init_fields=*/ true, /*can_init_parents=*/ true))) {
-        CHECK(self->IsExceptionPending());
-        self->PopShadowFrame();
-        return;
-      }
-      DCHECK(h_class->IsInitializing());
-    }
+  if (!EnsureInitialized(self, shadow_frame)) {
+    return;
   }
+  self->PushShadowFrame(shadow_frame);
   if (LIKELY(!method->IsNative())) {
     JValue r = Execute(self, accessor, *shadow_frame, JValue(), stay_in_interpreter);
     if (result != nullptr) {
@@ -570,6 +566,7 @@ void EnterInterpreterFromDeoptimize(Thread* self,
   ret_val->SetJ(value.GetJ());
 }
 
+NO_STACK_PROTECTOR
 JValue EnterInterpreterFromEntryPoint(Thread* self, const CodeItemDataAccessor& accessor,
                                       ShadowFrame* shadow_frame) {
   DCHECK_EQ(self, Thread::Current());
@@ -586,6 +583,7 @@ JValue EnterInterpreterFromEntryPoint(Thread* self, const CodeItemDataAccessor& 
   return Execute(self, accessor, *shadow_frame, JValue());
 }
 
+NO_STACK_PROTECTOR
 void ArtInterpreterToInterpreterBridge(Thread* self,
                                        const CodeItemDataAccessor& accessor,
                                        ShadowFrame* shadow_frame,
@@ -597,23 +595,6 @@ void ArtInterpreterToInterpreterBridge(Thread* self,
   }
 
   self->PushShadowFrame(shadow_frame);
-  ArtMethod* method = shadow_frame->GetMethod();
-  // Ensure static methods are initialized.
-  const bool is_static = method->IsStatic();
-  if (is_static) {
-    ObjPtr<mirror::Class> declaring_class = method->GetDeclaringClass();
-    if (UNLIKELY(!declaring_class->IsVisiblyInitialized())) {
-      StackHandleScope<1> hs(self);
-      Handle<mirror::Class> h_class(hs.NewHandle(declaring_class));
-      if (UNLIKELY(!Runtime::Current()->GetClassLinker()->EnsureInitialized(
-                        self, h_class, /*can_init_fields=*/ true, /*can_init_parents=*/ true))) {
-        DCHECK(self->IsExceptionPending());
-        self->PopShadowFrame();
-        return;
-      }
-      DCHECK(h_class->IsInitializing());
-    }
-  }
 
   if (LIKELY(!shadow_frame->GetMethod()->IsNative())) {
     result->SetJ(Execute(self, accessor, *shadow_frame, JValue()).GetJ());
@@ -621,6 +602,7 @@ void ArtInterpreterToInterpreterBridge(Thread* self,
     // We don't expect to be asked to interpret native code (which is entered via a JNI compiler
     // generated stub) except during testing and image writing.
     CHECK(!Runtime::Current()->IsStarted());
+    bool is_static = shadow_frame->GetMethod()->IsStatic();
     ObjPtr<mirror::Object> receiver = is_static ? nullptr : shadow_frame->GetVRegReference(0);
     uint32_t* args = shadow_frame->GetVRegArgs(is_static ? 0 : 1);
     UnstartedRuntime::Jni(self, shadow_frame->GetMethod(), receiver.Ptr(), args, result);
