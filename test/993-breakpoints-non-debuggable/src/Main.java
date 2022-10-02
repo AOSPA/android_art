@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 The Android Open Source Project
+ * Copyright (C) 2017 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-import java.lang.reflect.Modifier;
-
-public abstract class MyModifier extends Modifier {
-  // Reference to MyModifier.classModifiers() shall resolve to
-  // Modifier.classModifiers() which should be easily inlined.
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.loadLibrary(args[0]);
+        art.Test993AttachAgent.loadAgent();
+        art.Test993.run(true);
+    }
 }

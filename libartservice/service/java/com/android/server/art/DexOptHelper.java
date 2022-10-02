@@ -24,10 +24,12 @@ import android.apphibernation.AppHibernationManager;
 import android.content.Context;
 import android.os.Binder;
 import android.os.PowerManager;
+import android.os.RemoteException;
 import android.os.WorkSource;
 
 import com.android.internal.annotations.VisibleForTesting;
-import com.android.server.art.model.OptimizeOptions;
+import com.android.server.art.model.ArtFlags;
+import com.android.server.art.model.OptimizeParams;
 import com.android.server.art.model.OptimizeResult;
 import com.android.server.art.wrapper.AndroidPackageApi;
 import com.android.server.art.wrapper.PackageState;
@@ -55,7 +57,7 @@ public class DexOptHelper {
 
     @NonNull private final Injector mInjector;
 
-    public DexOptHelper(@Nullable Context context) {
+    public DexOptHelper(@NonNull Context context) {
         this(new Injector(context));
     }
 
@@ -66,16 +68,16 @@ public class DexOptHelper {
 
     /**
      * DO NOT use this method directly. Use {@link
-     * ArtManagerLocal#optimizePackage(PackageDataSnapshot, String, OptimizeOptions)}.
+     * ArtManagerLocal#optimizePackage(PackageDataSnapshot, String, OptimizeParams)}.
      */
     @NonNull
     public OptimizeResult dexopt(@NonNull PackageDataSnapshot snapshot,
             @NonNull PackageState pkgState, @NonNull AndroidPackageApi pkg,
-            @NonNull OptimizeOptions options) {
+            @NonNull OptimizeParams params) throws RemoteException {
         List<DexFileOptimizeResult> results = new ArrayList<>();
         Supplier<OptimizeResult> createResult = ()
-                -> new OptimizeResult(pkgState.getPackageName(), options.getCompilerFilter(),
-                        options.getReason(), results);
+                -> new OptimizeResult(pkgState.getPackageName(), params.getCompilerFilter(),
+                        params.getReason(), results);
 
         if (!canOptimizePackage(pkgState, pkg)) {
             return createResult.get();
@@ -86,26 +88,22 @@ public class DexOptHelper {
 
         try {
             // Acquire a wake lock.
-            // The power manager service may not be ready if this method is called on boot. In this
-            // case, we don't have to acquire a wake lock because there is nothing else we can do.
             PowerManager powerManager = mInjector.getPowerManager();
-            if (powerManager != null) {
-                wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, TAG);
-                wakeLock.setWorkSource(new WorkSource(pkg.getUid()));
-                wakeLock.acquire(WAKE_LOCK_TIMEOUT_MS);
+            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, TAG);
+            wakeLock.setWorkSource(new WorkSource(pkg.getUid()));
+            wakeLock.acquire(WAKE_LOCK_TIMEOUT_MS);
+
+            if ((params.getFlags() & ArtFlags.FLAG_FOR_PRIMARY_DEX) != 0) {
+                results.addAll(mInjector.getPrimaryDexOptimizer().dexopt(pkgState, pkg, params));
             }
 
-            if (options.isForPrimaryDex()) {
-                results.addAll(mInjector.getPrimaryDexOptimizer().dexopt(pkgState, pkg, options));
-            }
-
-            if (options.isForSecondaryDex()) {
+            if ((params.getFlags() & ArtFlags.FLAG_FOR_SECONDARY_DEX) != 0) {
                 // TODO(jiakaiz): Implement this.
                 throw new UnsupportedOperationException(
                         "Optimizing secondary dex'es is not implemented yet");
             }
 
-            if (options.getIncludesDependencies()) {
+            if ((params.getFlags() & ArtFlags.FLAG_SHOULD_INCLUDE_DEPENDENCIES) != 0) {
                 // TODO(jiakaiz): Implement this.
                 throw new UnsupportedOperationException(
                         "Optimizing dependencies is not implemented yet");
@@ -127,11 +125,8 @@ public class DexOptHelper {
         }
 
         // We do not dexopt unused packages.
-        // It's possible for this to be called before app hibernation service is ready, especially
-        // on boot. In this case, we ignore the hibernation check here because there is nothing else
-        // we can do.
         AppHibernationManager ahm = mInjector.getAppHibernationManager();
-        if (ahm != null && ahm.isHibernatingGlobally(pkgState.getPackageName())
+        if (ahm.isHibernatingGlobally(pkgState.getPackageName())
                 && ahm.isOatArtifactDeletionEnabled()) {
             return false;
         }
@@ -146,10 +141,9 @@ public class DexOptHelper {
      */
     @VisibleForTesting
     public static class Injector {
-        // TODO(b/236954191): Make this @NonNull.
-        @Nullable private final Context mContext;
+        @NonNull private final Context mContext;
 
-        Injector(@Nullable Context context) {
+        Injector(@NonNull Context context) {
             mContext = context;
         }
 
@@ -158,14 +152,14 @@ public class DexOptHelper {
             return new PrimaryDexOptimizer(mContext);
         }
 
-        @Nullable
+        @NonNull
         public AppHibernationManager getAppHibernationManager() {
-            return mContext != null ? mContext.getSystemService(AppHibernationManager.class) : null;
+            return mContext.getSystemService(AppHibernationManager.class);
         }
 
-        @Nullable
+        @NonNull
         public PowerManager getPowerManager() {
-            return mContext != null ? mContext.getSystemService(PowerManager.class) : null;
+            return mContext.getSystemService(PowerManager.class);
         }
     }
 }

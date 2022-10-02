@@ -150,17 +150,22 @@ static void RemoveAsUser(HInstruction* instruction) {
   RemoveEnvironmentUses(instruction);
 }
 
-void HGraph::RemoveInstructionsAsUsersFromDeadBlocks(const ArenaBitVector& visited) const {
+void HGraph::RemoveDeadBlocksInstructionsAsUsersAndDisconnect(const ArenaBitVector& visited) const {
   for (size_t i = 0; i < blocks_.size(); ++i) {
     if (!visited.IsBitSet(i)) {
       HBasicBlock* block = blocks_[i];
       if (block == nullptr) continue;
+
+      // Remove as user.
       for (HInstructionIterator it(block->GetPhis()); !it.Done(); it.Advance()) {
         RemoveAsUser(it.Current());
       }
       for (HInstructionIterator it(block->GetInstructions()); !it.Done(); it.Advance()) {
         RemoveAsUser(it.Current());
       }
+
+      // Remove non-catch phi uses, and disconnect the block.
+      block->DisconnectFromSuccessors(&visited);
     }
   }
 }
@@ -175,7 +180,8 @@ static void RemoveCatchPhiUsesOfDeadInstruction(HInstruction* insn) {
     const HUseListNode<HInstruction*>& use = insn->GetUses().front();
     size_t use_index = use.GetIndex();
     HBasicBlock* user_block = use.GetUser()->GetBlock();
-    DCHECK(use.GetUser()->IsPhi() && user_block->IsCatchBlock());
+    DCHECK(use.GetUser()->IsPhi());
+    DCHECK(user_block->IsCatchBlock());
     for (HInstructionIterator phi_it(user_block->GetPhis()); !phi_it.Done(); phi_it.Advance()) {
       phi_it.Current()->AsPhi()->RemoveInputAt(use_index);
     }
@@ -183,14 +189,14 @@ static void RemoveCatchPhiUsesOfDeadInstruction(HInstruction* insn) {
 }
 
 void HGraph::RemoveDeadBlocks(const ArenaBitVector& visited) {
+  DCHECK(reverse_post_order_.empty()) << "We shouldn't have dominance information.";
   for (size_t i = 0; i < blocks_.size(); ++i) {
     if (!visited.IsBitSet(i)) {
       HBasicBlock* block = blocks_[i];
       if (block == nullptr) continue;
 
-      // Disconnect from its sucessors, and remove all remaining uses.
-      block->DisconnectFromSuccessors(&visited);
-      block->RemoveCatchPhiUses(/* remove_instruction = */ false);
+      // Remove all remaining uses (which should be only catch phi uses), and the instructions.
+      block->RemoveCatchPhiUsesAndInstruction(/* building_dominator_tree = */ true);
 
       // Remove the block from the list of blocks, so that further analyses
       // never see it.
@@ -218,7 +224,8 @@ GraphAnalysisResult HGraph::BuildDominatorTree() {
   // (2) Remove instructions and phis from blocks not visited during
   //     the initial DFS as users from other instructions, so that
   //     users can be safely removed before uses later.
-  RemoveInstructionsAsUsersFromDeadBlocks(visited);
+  //     Also disconnect the block from its successors, updating the successor's phis if needed.
+  RemoveDeadBlocksInstructionsAsUsersAndDisconnect(visited);
 
   // (3) Remove blocks not visited during the initial DFS.
   //     Step (5) requires dead blocks to be removed from the
@@ -2435,7 +2442,7 @@ void HBasicBlock::DisconnectAndDelete() {
   //     remove `index`-th input of all phis in the catch block since they are
   //     guaranteed dead. Note that we may miss dead inputs this way but the
   //     graph will always remain consistent.
-  RemoveCatchPhiUses(/* remove_instruction = */ true);
+  RemoveCatchPhiUsesAndInstruction(/* building_dominator_tree = */ false);
 
   // (4) Disconnect the block from its predecessors and update their
   //     control-flow instructions.
@@ -2544,20 +2551,32 @@ void HBasicBlock::DisconnectFromSuccessors(const ArenaBitVector* visited) {
   successors_.clear();
 }
 
-void HBasicBlock::RemoveCatchPhiUses(bool remove_instruction) {
+void HBasicBlock::RemoveCatchPhiUsesAndInstruction(bool building_dominator_tree) {
   for (HBackwardInstructionIterator it(GetInstructions()); !it.Done(); it.Advance()) {
     HInstruction* insn = it.Current();
     RemoveCatchPhiUsesOfDeadInstruction(insn);
-    if (remove_instruction) {
-      RemoveInstruction(insn);
+
+    // If we are building the dominator tree, we removed all input records previously.
+    // `RemoveInstruction` will try to remove them again but that's not something we support and we
+    // will crash. We check here since we won't be checking that in RemoveInstruction.
+    if (building_dominator_tree) {
+      DCHECK(insn->GetUses().empty());
+      DCHECK(insn->GetEnvUses().empty());
     }
+    RemoveInstruction(insn, /* ensure_safety= */ !building_dominator_tree);
   }
   for (HInstructionIterator it(GetPhis()); !it.Done(); it.Advance()) {
     HPhi* insn = it.Current()->AsPhi();
     RemoveCatchPhiUsesOfDeadInstruction(insn);
-    if (remove_instruction) {
-      RemovePhi(insn);
+
+    // If we are building the dominator tree, we removed all input records previously.
+    // `RemovePhi` will try to remove them again but that's not something we support and we
+    // will crash. We check here since we won't be checking that in RemovePhi.
+    if (building_dominator_tree) {
+      DCHECK(insn->GetUses().empty());
+      DCHECK(insn->GetEnvUses().empty());
     }
+    RemovePhi(insn, /* ensure_safety= */ !building_dominator_tree);
   }
 }
 
