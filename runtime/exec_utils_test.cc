@@ -18,6 +18,7 @@
 
 #include <sys/utsname.h>
 
+#include <csignal>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -28,9 +29,19 @@
 #include "base/file_utils.h"
 #include "base/memory_tool.h"
 #include "common_runtime_test.h"
+#include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
 namespace art {
+
+using ::testing::_;
+using ::testing::AllOf;
+using ::testing::Gt;
+using ::testing::HasSubstr;
+using ::testing::InSequence;
+using ::testing::MockFunction;
+using ::testing::Ne;
+using ::testing::Return;
 
 std::string PrettyArguments(const char* signature);
 std::string PrettyReturnType(const char* signature);
@@ -54,12 +65,19 @@ std::tuple<int, int> GetKernelVersion() {
   return version;
 }
 
-class AlwaysFallbackExecUtils : public ExecUtils {
+class TestingExecUtils : public ExecUtils {
+ public:
+  MOCK_METHOD(std::string, GetProcStat, (pid_t pid), (const, override));
+  MOCK_METHOD(int64_t, GetUptimeMs, (), (const, override));
+  MOCK_METHOD(int64_t, GetTicksPerSec, (), (const, override));
+};
+
+class AlwaysFallbackExecUtils : public TestingExecUtils {
  protected:
   android::base::unique_fd PidfdOpen(pid_t) const override { return android::base::unique_fd(-1); }
 };
 
-class NeverFallbackExecUtils : public ExecUtils {
+class NeverFallbackExecUtils : public TestingExecUtils {
  protected:
   android::base::unique_fd PidfdOpen(pid_t pid) const override {
     android::base::unique_fd pidfd = ExecUtils::PidfdOpen(pid);
@@ -84,7 +102,7 @@ class ExecUtilsTest : public CommonRuntimeTest, public testing::WithParamInterfa
     }
   }
 
-  std::unique_ptr<ExecUtils> exec_utils_;
+  std::unique_ptr<TestingExecUtils> exec_utils_;
 };
 
 TEST_P(ExecUtilsTest, ExecSuccess) {
@@ -103,7 +121,9 @@ TEST_P(ExecUtilsTest, ExecError) {
   std::string error_msg;
   // Historical note: Running on Valgrind failed due to some memory
   // that leaks in thread alternate signal stacks.
-  EXPECT_FALSE(exec_utils_->Exec(command, &error_msg));
+  ExecResult result = exec_utils_->ExecAndReturnResult(command, /*timeout_sec=*/-1, &error_msg);
+  EXPECT_EQ(result.status, ExecResult::kSignaled);
+  EXPECT_EQ(result.signal, SIGABRT);
   EXPECT_FALSE(error_msg.empty());
 }
 
@@ -156,9 +176,10 @@ TEST_P(ExecUtilsTest, ExecTimeout) {
   static constexpr int kWaitSeconds = 1;
   std::vector<std::string> command = SleepCommand(kSleepSeconds);
   std::string error_msg;
-  bool timed_out;
-  ASSERT_EQ(exec_utils_->ExecAndReturnCode(command, kWaitSeconds, &timed_out, &error_msg), -1);
-  EXPECT_TRUE(timed_out) << error_msg;
+  EXPECT_EQ(exec_utils_->ExecAndReturnResult(command, kWaitSeconds, &error_msg).status,
+            ExecResult::kTimedOut)
+      << error_msg;
+  EXPECT_THAT(error_msg, HasSubstr("timed out"));
 }
 
 TEST_P(ExecUtilsTest, ExecNoTimeout) {
@@ -166,10 +187,83 @@ TEST_P(ExecUtilsTest, ExecNoTimeout) {
   static constexpr int kWaitSeconds = 5;
   std::vector<std::string> command = SleepCommand(kSleepSeconds);
   std::string error_msg;
-  bool timed_out;
-  ASSERT_EQ(exec_utils_->ExecAndReturnCode(command, kWaitSeconds, &timed_out, &error_msg), 0)
+  EXPECT_EQ(exec_utils_->ExecAndReturnResult(command, kWaitSeconds, &error_msg).status,
+            ExecResult::kExited)
       << error_msg;
-  EXPECT_FALSE(timed_out);
+}
+
+TEST_P(ExecUtilsTest, ExecStat) {
+  std::vector<std::string> command;
+  command.push_back(GetBin("id"));
+
+  std::string error_msg;
+  ProcessStat stat;
+
+  // The process filename is "a) b".
+  EXPECT_CALL(*exec_utils_, GetProcStat(_))
+      .WillOnce(Return(
+          "14963 (a) b) Z 6067 14963 1 0 -1 4228108 105 0 0 0 94 5 0 0 39 19 1 0 162034388 0 0 "
+          "18446744073709551615 0 0 0 0 0 0 20999 0 0 1 0 0 17 71 0 0 0 0 0 0 0 0 0 0 0 0 9"));
+  EXPECT_CALL(*exec_utils_, GetUptimeMs()).WillOnce(Return(1620344887ll));
+  EXPECT_CALL(*exec_utils_, GetTicksPerSec()).WillOnce(Return(100));
+
+  ASSERT_EQ(
+      exec_utils_
+          ->ExecAndReturnResult(command, /*timeout_sec=*/-1, ExecCallbacks(), &stat, &error_msg)
+          .status,
+      ExecResult::kExited)
+      << error_msg;
+
+  EXPECT_EQ(stat.cpu_time_ms, 990);
+  EXPECT_EQ(stat.wall_time_ms, 1007);
+}
+
+TEST_P(ExecUtilsTest, ExecStatFailed) {
+  std::vector<std::string> command = SleepCommand(5);
+
+  std::string error_msg;
+  ProcessStat stat;
+
+  EXPECT_CALL(*exec_utils_, GetProcStat(_))
+      .WillOnce(Return(
+          "14963 (a) b) Z 6067 14963 1 0 -1 4228108 105 0 0 0 94 5 0 0 39 19 1 0 162034388 0 0 "
+          "18446744073709551615 0 0 0 0 0 0 20999 0 0 1 0 0 17 71 0 0 0 0 0 0 0 0 0 0 0 0 9"));
+  EXPECT_CALL(*exec_utils_, GetUptimeMs()).WillOnce(Return(1620344887ll));
+  EXPECT_CALL(*exec_utils_, GetTicksPerSec()).WillOnce(Return(100));
+
+  // This will always time out.
+  ASSERT_EQ(
+      exec_utils_
+          ->ExecAndReturnResult(command, /*timeout_sec=*/1, ExecCallbacks(), &stat, &error_msg)
+          .status,
+      ExecResult::kTimedOut);
+
+  EXPECT_EQ(stat.cpu_time_ms, 990);
+  EXPECT_EQ(stat.wall_time_ms, 1007);
+}
+
+TEST_P(ExecUtilsTest, ExecCallbacks) {
+  MockFunction<void(pid_t)> on_start;
+  MockFunction<void(pid_t)> on_end;
+
+  {
+    InSequence s;
+    EXPECT_CALL(on_start, Call(AllOf(Gt(0), Ne(getpid()))));
+    EXPECT_CALL(on_end, Call(AllOf(Gt(0), Ne(getpid()))));
+  }
+
+  std::vector<std::string> command;
+  command.push_back(GetBin("id"));
+
+  std::string error_msg;
+  exec_utils_->ExecAndReturnResult(command,
+                                   /*timeout_sec=*/-1,
+                                   ExecCallbacks{
+                                       .on_start = on_start.AsStdFunction(),
+                                       .on_end = on_end.AsStdFunction(),
+                                   },
+                                   /*stat=*/nullptr,
+                                   &error_msg);
 }
 
 INSTANTIATE_TEST_SUITE_P(AlwaysOrNeverFallback, ExecUtilsTest, testing::Values(true, false));
