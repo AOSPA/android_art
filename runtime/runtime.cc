@@ -288,7 +288,7 @@ Runtime::Runtime()
       is_native_debuggable_(false),
       async_exceptions_thrown_(false),
       non_standard_exits_enabled_(false),
-      runtime_debug_state_(RuntimeDebugState::kNonJavaDebuggable),
+      is_java_debuggable_(false),
       monitor_timeout_enable_(false),
       monitor_timeout_ns_(0),
       zygote_max_failed_boots_(0),
@@ -753,16 +753,13 @@ void Runtime::PreZygoteFork() {
     GetJit()->PreZygoteFork();
   }
   if (!heap_->HasZygoteSpace()) {
-    Thread* self = Thread::Current();
     // This is the first fork. Update ArtMethods in the boot classpath now to
     // avoid having forked apps dirty the memory.
-
+    ScopedObjectAccess soa(Thread::Current());
     // Ensure we call FixupStaticTrampolines on all methods that are
     // initialized.
-    class_linker_->MakeInitializedClassesVisiblyInitialized(self, /*wait=*/ true);
-
-    ScopedObjectAccess soa(self);
-    UpdateMethodsPreFirstForkVisitor visitor(self, class_linker_);
+    class_linker_->MakeInitializedClassesVisiblyInitialized(soa.Self(), /*wait=*/ true);
+    UpdateMethodsPreFirstForkVisitor visitor(soa.Self(), class_linker_);
     class_linker_->VisitClasses(&visitor);
   }
   heap_->PreZygoteFork();
@@ -806,7 +803,6 @@ void Runtime::SweepSystemWeaks(IsMarkedVisitor* visitor) {
     // from mutators. See b/32167580.
     GetJit()->GetCodeCache()->SweepRootTables(visitor);
   }
-  Thread::SweepInterpreterCaches(visitor);
 
   // All other generic system-weak holders.
   for (gc::AbstractSystemWeakHolder* holder : system_weak_holders_) {
@@ -1546,7 +1542,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   compiler_options_ = runtime_options.ReleaseOrDefault(Opt::CompilerOptions);
   for (const std::string& option : Runtime::Current()->GetCompilerOptions()) {
     if (option == "--debuggable") {
-      SetRuntimeDebugState(RuntimeDebugState::kJavaDebuggableAtInit);
+      SetJavaDebuggable(true);
       break;
     }
   }
@@ -1642,6 +1638,11 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // Cache the apex versions.
   InitializeApexVersions();
 
+  BackgroundGcOption background_gc =
+      gUseReadBarrier ? BackgroundGcOption(gc::kCollectorTypeCCBackground)
+                      : (gUseUserfaultfd ? BackgroundGcOption(xgc_option.collector_type_)
+                                         : runtime_options.GetOrDefault(Opt::BackgroundGc));
+
   heap_ = new gc::Heap(runtime_options.GetOrDefault(Opt::MemoryInitialSize),
                        runtime_options.GetOrDefault(Opt::HeapGrowthLimit),
                        runtime_options.GetOrDefault(Opt::HeapMinFree),
@@ -1661,8 +1662,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        instruction_set_,
                        // Override the collector type to CC if the read barrier config.
                        gUseReadBarrier ? gc::kCollectorTypeCC : xgc_option.collector_type_,
-                       gUseReadBarrier ? BackgroundGcOption(gc::kCollectorTypeCCBackground)
-                                       : BackgroundGcOption(xgc_option.collector_type_),
+                       background_gc,
                        runtime_options.GetOrDefault(Opt::LargeObjectSpace),
                        runtime_options.GetOrDefault(Opt::LargeObjectThreshold),
                        runtime_options.GetOrDefault(Opt::ParallelGCThreads),
@@ -3229,12 +3229,9 @@ class UpdateEntryPointsClassVisitor : public ClassVisitor {
   instrumentation::Instrumentation* const instrumentation_;
 };
 
-void Runtime::SetRuntimeDebugState(RuntimeDebugState state) {
-  if (state != RuntimeDebugState::kJavaDebuggableAtInit) {
-    // We never change the state if we started as a debuggable runtime.
-    DCHECK(runtime_debug_state_ != RuntimeDebugState::kJavaDebuggableAtInit);
-  }
-  runtime_debug_state_ = state;
+void Runtime::SetJavaDebuggable(bool value) {
+  is_java_debuggable_ = value;
+  // Do not call DeoptimizeBootImage just yet, the runtime may still be starting up.
 }
 
 void Runtime::DeoptimizeBootImage() {

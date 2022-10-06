@@ -669,16 +669,11 @@ standalone-apex-files: deapexer \
 	# Also, platform libraries are installed in prebuilts, so copy them over.
 	$(call extract-from-apex,$(RUNTIME_APEX),\
 	  $(PRIVATE_RUNTIME_APEX_DEPENDENCY_FILES)) && \
-	  for libdir in $(TARGET_OUT)/lib $(TARGET_OUT)/lib64; do \
-	    if [ -d $$libdir/bionic ]; then \
-	      mv -f $$libdir/bionic/*.so $$libdir; \
-	    fi || exit 1; \
-	  done && \
-	  for libdir in $(TARGET_OUT)/lib $(TARGET_OUT)/lib64; do \
-	    if [ -d $$libdir ]; then \
-          cp prebuilts/runtime/mainline/platform/impl/$(TARGET_ARCH)/*.so $$libdir; \
-	    fi || exit 1; \
-	  done
+	  libdir=$(TARGET_OUT)/lib$$(expr $(TARGET_ARCH) : '.*\(64\)' || :) && \
+	  if [ -d $$libdir/bionic ]; then \
+	    mv -f $$libdir/bionic/*.so $$libdir; \
+	  fi && \
+	  cp prebuilts/runtime/mainline/platform/impl/$(TARGET_ARCH)/*.so $$libdir
 	$(call extract-from-apex,$(CONSCRYPT_APEX),\
 	  $(PRIVATE_CONSCRYPT_APEX_DEPENDENCY_LIBS))
 	$(call extract-from-apex,$(I18N_APEX),\
@@ -743,7 +738,11 @@ build-art-unbundled-golem: art-runtime linker oatdump $(art_apex_jars) conscrypt
 
 build-art-host-gtests: build-art-host $(ART_TEST_HOST_GTEST_DEPENDENCIES)
 
-build-art-host-run-tests: build-art-host $(TEST_ART_RUN_TEST_DEPENDENCIES) $(ART_TEST_HOST_RUN_TEST_DEPENDENCIES)
+build-art-host-run-tests: build-art-host \
+                          $(TEST_ART_RUN_TEST_DEPENDENCIES) \
+                          $(ART_TEST_HOST_RUN_TEST_DEPENDENCIES) \
+                          art-run-test-host-data \
+                          art-run-test-jvm-data
 
 build-art-host-tests: build-art-host-gtests build-art-host-run-tests
 
@@ -751,7 +750,10 @@ build-art-host-tests: build-art-host-gtests build-art-host-run-tests
 
 build-art-target-gtests: build-art-target $(ART_TEST_TARGET_GTEST_DEPENDENCIES)
 
-build-art-target-run-tests: build-art-target $(TEST_ART_RUN_TEST_DEPENDENCIES) $(ART_TEST_TARGET_RUN_TEST_DEPENDENCIES)
+build-art-target-run-tests: build-art-target \
+                            $(TEST_ART_RUN_TEST_DEPENDENCIES) \
+                            $(ART_TEST_TARGET_RUN_TEST_DEPENDENCIES) \
+                            art-run-test-target-data
 
 build-art-target-tests: build-art-target-gtests build-art-target-run-tests
 

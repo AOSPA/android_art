@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013 The Android Open Source Project
+ * Copyright (C) 2022 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,21 +14,25 @@
  * limitations under the License.
  */
 
-#include <sstream>
-
-#include "jni.h"
-#include "runtime.h"
+#include "common_runtime_test.h"
+#include "compiler_callbacks.h"
 
 namespace art {
-namespace Test993BreakpointsNonDebuggable {
 
-extern "C" JNIEXPORT void JNICALL Java_art_Test993AttachAgent_setupJvmti(JNIEnv* env, jclass) {
-  Runtime* runtime = Runtime::Current();
-  std::ostringstream oss;
-  oss << (kIsDebugBuild ? "libtiagentd.so" : "libtiagent.so") << "=993-non-debuggable,art";
-  LOG(INFO) << "agent " << oss.str();
-  runtime->AttachAgent(env, oss.str(), nullptr);
+class JitLoadTest : public CommonRuntimeTest {
+ protected:
+  void SetUpRuntimeOptions(RuntimeOptions *options) override {
+    callbacks_.reset();
+    CommonRuntimeTest::SetUpRuntimeOptions(options);
+    options->push_back(std::make_pair("-Xusejit:true", nullptr));
+  }
+};
+
+
+TEST_F(JitLoadTest, JitLoad) {
+  Thread::Current()->TransitionFromSuspendedToRunnable();
+  runtime_->Start();
+  ASSERT_NE(runtime_->GetJit(), nullptr);
 }
 
-}  // namespace Test993BreakpointsNonDebuggable
 }  // namespace art
