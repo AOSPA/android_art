@@ -58,7 +58,7 @@ class CommonCompilerTestImpl::CodeAndMetadata {
     const uint32_t vmap_table_offset = vmap_table.empty() ? 0u
         : sizeof(OatQuickMethodHeader) + vmap_table.size();
     OatQuickMethodHeader method_header(vmap_table_offset);
-    const size_t code_alignment = GetInstructionSetAlignment(instruction_set);
+    const size_t code_alignment = GetInstructionSetCodeAlignment(instruction_set);
     DCHECK_ALIGNED_PARAM(kPageSize, code_alignment);
     code_offset_ = RoundUp(vmap_table.size() + sizeof(method_header), code_alignment);
     const uint32_t capacity = RoundUp(code_offset_ + code_size, kPageSize);
@@ -265,40 +265,6 @@ void CommonCompilerTestImpl::CompileMethod(ArtMethod* method) {
     MakeExecutable(method, compiled_method);
   }
   CompiledMethod::ReleaseSwapAllocatedCompiledMethod(&storage, compiled_method);
-}
-
-void CommonCompilerTestImpl::CompileDirectMethod(Handle<mirror::ClassLoader> class_loader,
-                                                 const char* class_name,
-                                                 const char* method_name,
-                                                 const char* signature) {
-  std::string class_descriptor(DotToDescriptor(class_name));
-  Thread* self = Thread::Current();
-  ClassLinker* class_linker = GetClassLinker();
-  ObjPtr<mirror::Class> klass =
-      class_linker->FindClass(self, class_descriptor.c_str(), class_loader);
-  CHECK(klass != nullptr) << "Class not found " << class_name;
-  auto pointer_size = class_linker->GetImagePointerSize();
-  ArtMethod* method = klass->FindClassMethod(method_name, signature, pointer_size);
-  CHECK(method != nullptr && method->IsDirect()) << "Direct method not found: "
-      << class_name << "." << method_name << signature;
-  CompileMethod(method);
-}
-
-void CommonCompilerTestImpl::CompileVirtualMethod(Handle<mirror::ClassLoader> class_loader,
-                                                  const char* class_name,
-                                                  const char* method_name,
-                                                  const char* signature) {
-  std::string class_descriptor(DotToDescriptor(class_name));
-  Thread* self = Thread::Current();
-  ClassLinker* class_linker = GetClassLinker();
-  ObjPtr<mirror::Class> klass =
-      class_linker->FindClass(self, class_descriptor.c_str(), class_loader);
-  CHECK(klass != nullptr) << "Class not found " << class_name;
-  auto pointer_size = class_linker->GetImagePointerSize();
-  ArtMethod* method = klass->FindClassMethod(method_name, signature, pointer_size);
-  CHECK(method != nullptr && !method->IsDirect()) << "Virtual method not found: "
-      << class_name << "." << method_name << signature;
-  CompileMethod(method);
 }
 
 void CommonCompilerTestImpl::ClearBootImageOption() {

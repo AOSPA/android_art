@@ -46,16 +46,6 @@ interface IArtd {
             @utf8InCpp String dexFile);
 
     /**
-     * Copies the profile. Throws if `src` does not exist. Fills `dst.profilePath.id` on success.
-     *
-     * Does not operate on a DM file.
-     *
-     * Throws fatal and non-fatal errors.
-     */
-    void copyProfile(in com.android.server.art.ProfilePath src,
-            inout com.android.server.art.OutputProfile dst);
-
-    /**
      * Copies the profile and rewrites it for the given dex file. Returns true and fills
      * `dst.profilePath.id` if the operation succeeds and `src` exists and contains entries that
      * match the given dex file.
@@ -122,5 +112,11 @@ interface IArtd {
             in @nullable com.android.server.art.ProfilePath profile,
             in @nullable com.android.server.art.VdexPath inputVdex,
             com.android.server.art.PriorityClass priorityClass,
-            in com.android.server.art.DexoptOptions dexoptOptions);
+            in com.android.server.art.DexoptOptions dexoptOptions,
+            in com.android.server.art.IArtdCancellationSignal cancellationSignal);
+
+    /**
+     * Returns a cancellation signal which can be used to cancel {@code dexopt} calls.
+     */
+    com.android.server.art.IArtdCancellationSignal createCancellationSignal();
 }

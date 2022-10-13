@@ -28,6 +28,7 @@ bootstrap_go_package {
 }
 
 art_clang_tidy_errors = [
+    "android-cloexec-dup",
     "android-cloexec-open",
     "bugprone-argument-comment",
     "bugprone-lambda-function-name",
@@ -46,13 +47,6 @@ art_clang_tidy_errors = [
     "performance-noexcept-move-constructor",
 ]
 
-art_clang_tidy_allowed = [
-    // Many files have these warnings. Move them to art_clang_tidy_errors
-    // when all files are free of these warnings.
-    "android-cloexec-dup",
-    "modernize-use-using", // TODO: move to art_clang_tidy_errors after b/236243696 is done
-]
-
 art_clang_tidy_disabled = [
     "-google-default-arguments",
     // We have local stores that are only used for debug checks.
@@ -67,6 +61,9 @@ art_clang_tidy_disabled = [
     "-modernize-return-braced-init-list",
     "-modernize-use-default-member-init",
     "-modernize-pass-by-value",
+    // The only two remaining offenders are art/openjdkjvmti/include/jvmti.h and
+    // libcore/ojluni/src/main/native/jvm.h, which are both external files by Oracle
+    "-modernize-use-using",
 ]
 
 soong_config_module_type_import {
@@ -247,7 +244,7 @@ art_module_art_global_defaults {
         },
     },
 
-    tidy_checks: art_clang_tidy_errors + art_clang_tidy_allowed + art_clang_tidy_disabled,
+    tidy_checks: art_clang_tidy_errors + art_clang_tidy_disabled,
 
     tidy_checks_as_errors: art_clang_tidy_errors,
 
