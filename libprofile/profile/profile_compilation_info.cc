@@ -2209,7 +2209,8 @@ bool ProfileCompilationInfo::GenerateTestProfile(
     return vec;
   };
   for (std::unique_ptr<const DexFile>& dex_file : dex_files) {
-    const std::string& profile_key = dex_file->GetLocation();
+    const std::string& dex_location = dex_file->GetLocation();
+    std::string profile_key = info.GetProfileDexFileBaseKey(dex_location);
     uint32_t checksum = dex_file->GetLocationChecksum();
 
     uint32_t number_of_classes = dex_file->NumClassDefs();
@@ -2387,8 +2388,8 @@ bool ProfileCompilationInfo::IsProfileFile(int fd) {
 }
 
 bool ProfileCompilationInfo::UpdateProfileKeys(
-    const std::vector<std::unique_ptr<const DexFile>>& dex_files, /*out*/ bool* updated) {
-  *updated = false;
+    const std::vector<std::unique_ptr<const DexFile>>& dex_files, /*out*/ bool* matched) {
+  *matched = false;
   for (const std::unique_ptr<const DexFile>& dex_file : dex_files) {
     for (const std::unique_ptr<DexFileData>& dex_data : info_) {
       if (dex_data->checksum == dex_file->GetLocationChecksum() &&
@@ -2408,8 +2409,8 @@ bool ProfileCompilationInfo::UpdateProfileKeys(
           // form the old key.
           dex_data->profile_key = MigrateAnnotationInfo(new_profile_key, dex_data->profile_key);
           profile_key_map_.Put(dex_data->profile_key, dex_data->profile_index);
-          *updated = true;
         }
+        *matched = true;
       }
     }
   }

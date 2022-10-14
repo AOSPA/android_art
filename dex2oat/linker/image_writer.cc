@@ -101,7 +101,7 @@ constexpr double kImageClassTableMinLoadFactor = 0.5;
 // to make them full. We never insert additional elements to them, so we do not want to waste
 // extra memory. And unlike runtime class tables, we do not want this to depend on runtime
 // properties (see `Runtime::GetHashTableMaxLoadFactor()` checking for low memory mode).
-constexpr double kImageClassTableMaxLoadFactor = 0.7;
+constexpr double kImageClassTableMaxLoadFactor = 0.6;
 
 // The actual value of `kImageInternTableMinLoadFactor` is irrelevant because image intern tables
 // are never resized, but we still need to pass a reasonable value to the constructor.
@@ -110,7 +110,7 @@ constexpr double kImageInternTableMinLoadFactor = 0.5;
 // to make them full. We never insert additional elements to them, so we do not want to waste
 // extra memory. And unlike runtime intern tables, we do not want this to depend on runtime
 // properties (see `Runtime::GetHashTableMaxLoadFactor()` checking for low memory mode).
-constexpr double kImageInternTableMaxLoadFactor = 0.7;
+constexpr double kImageInternTableMaxLoadFactor = 0.6;
 
 static ArrayRef<const uint8_t> MaybeCompressData(ArrayRef<const uint8_t> source,
                                                  ImageHeader::StorageMode image_storage_mode,
@@ -155,11 +155,19 @@ static ArrayRef<const uint8_t> MaybeCompressData(ArrayRef<const uint8_t> source,
                  << PrettyDuration(NanoTime() - compress_start_time);
   if (kIsDebugBuild) {
     dchecked_vector<uint8_t> decompressed(source.size());
-    const size_t decompressed_size = LZ4_decompress_safe(
+    size_t decompressed_size;
+    std::string error_msg;
+    bool ok = LZ4_decompress_safe_checked(
         reinterpret_cast<char*>(storage->data()),
         reinterpret_cast<char*>(decompressed.data()),
         storage->size(),
-        decompressed.size());
+        decompressed.size(),
+        &decompressed_size,
+        &error_msg);
+    if (!ok) {
+      LOG(FATAL) << error_msg;
+      UNREACHABLE();
+    }
     CHECK_EQ(decompressed_size, decompressed.size());
     CHECK_EQ(memcmp(source.data(), decompressed.data(), source.size()), 0) << image_storage_mode;
   }

@@ -48,6 +48,7 @@
         <option name="push" value="art-gtest-jars-MyClass.jar->/data/local/tmp/art_standalone_runtime_tests/art-gtest-jars-MyClass.jar" />
         <option name="push" value="art-gtest-jars-MyClassNatives.jar->/data/local/tmp/art_standalone_runtime_tests/art-gtest-jars-MyClassNatives.jar" />
         <option name="push" value="art-gtest-jars-Nested.jar->/data/local/tmp/art_standalone_runtime_tests/art-gtest-jars-Nested.jar" />
+        <option name="push" value="art-gtest-jars-NonStaticLeafMethods.jar->/data/local/tmp/art_standalone_runtime_tests/art-gtest-jars-NonStaticLeafMethods.jar" />
         <option name="push" value="art-gtest-jars-Packages.jar->/data/local/tmp/art_standalone_runtime_tests/art-gtest-jars-Packages.jar" />
         <option name="push" value="art-gtest-jars-ProfileTestMultiDex.jar->/data/local/tmp/art_standalone_runtime_tests/art-gtest-jars-ProfileTestMultiDex.jar" />
         <option name="push" value="art-gtest-jars-ProtoCompare.jar->/data/local/tmp/art_standalone_runtime_tests/art-gtest-jars-ProtoCompare.jar" />
@@ -109,6 +110,7 @@
              TODO(b/204649079): Investigate these failures and re-enable these tests. -->
         <option name="exclude-filter" value="*ExecUtilsTest.EnvSnapshotDeletionsAreNotVisible*" />
         <option name="exclude-filter" value="*ExecUtilsTest.ExecNoTimeout*" />
+        <option name="exclude-filter" value="*ExecUtilsTest.ExecStatFailed*" />
         <option name="exclude-filter" value="*ExecUtilsTest.ExecSuccess*" />
         <option name="exclude-filter" value="*ExecUtilsTest.ExecTimeout*" />
     </test>

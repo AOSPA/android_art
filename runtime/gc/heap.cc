@@ -483,6 +483,7 @@ Heap::Heap(size_t initial_size,
                                        runtime->ShouldRelocate(),
                                        /*executable=*/ !runtime->IsAotCompiler(),
                                        heap_reservation_size,
+                                       runtime->AllowInMemoryCompilation(),
                                        &boot_image_spaces,
                                        &heap_reservation)) {
     DCHECK_EQ(heap_reservation_size, heap_reservation.IsValid() ? heap_reservation.Size() : 0u);
@@ -1001,17 +1002,14 @@ void Heap::IncrementDisableThreadFlip(Thread* self) {
 void Heap::EnsureObjectUserfaulted(ObjPtr<mirror::Object> obj) {
   if (gUseUserfaultfd) {
     // Use volatile to ensure that compiler loads from memory to trigger userfaults, if required.
-    volatile uint8_t volatile_sum;
-    volatile uint8_t* start = reinterpret_cast<volatile uint8_t*>(obj.Ptr());
-    volatile uint8_t* end = AlignUp(start + obj->SizeOf(), kPageSize);
-    uint8_t sum = 0;
+    const uint8_t* start = reinterpret_cast<uint8_t*>(obj.Ptr());
+    const uint8_t* end = AlignUp(start + obj->SizeOf(), kPageSize);
     // The first page is already touched by SizeOf().
     start += kPageSize;
     while (start < end) {
-      sum += *start;
+      ForceRead(start);
       start += kPageSize;
     }
-    volatile_sum = sum;
   }
 }
 
@@ -3893,7 +3891,7 @@ void Heap::ConcurrentGC(Thread* self, GcCause cause, bool force_full, uint32_t r
       }
       // If we can't run the GC type we wanted to run, find the next appropriate one and try
       // that instead. E.g. can't do partial, so do full instead.
-      // We must ensure that we run something that ends up inrementing gcs_completed_.
+      // We must ensure that we run something that ends up incrementing gcs_completed_.
       // In the kGcTypePartial case, the initial CollectGarbageInternal call may not have that
       // effect, but the subsequent KGcTypeFull call will.
       if (CollectGarbageInternal(next_gc_type, cause, false, requested_gc_num)

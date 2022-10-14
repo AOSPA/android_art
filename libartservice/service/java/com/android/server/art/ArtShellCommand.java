@@ -17,13 +17,14 @@
 package com.android.server.art;
 
 import static com.android.server.art.model.ArtFlags.OptimizeFlags;
-import static com.android.server.art.model.OptimizationStatus.DexFileOptimizationStatus;
-import static com.android.server.art.model.OptimizeResult.DexFileOptimizeResult;
+import static com.android.server.art.model.OptimizationStatus.DexContainerFileOptimizationStatus;
+import static com.android.server.art.model.OptimizeResult.DexContainerFileOptimizeResult;
 import static com.android.server.art.model.OptimizeResult.OptimizeStatus;
 import static com.android.server.art.model.OptimizeResult.PackageOptimizeResult;
 
 import android.annotation.NonNull;
 import android.os.Binder;
+import android.os.CancellationSignal;
 import android.os.Process;
 
 import com.android.modules.utils.BasicShellCommandHandler;
@@ -36,6 +37,9 @@ import com.android.server.art.wrapper.PackageManagerLocal;
 import com.android.server.pm.snapshot.PackageDataSnapshot;
 
 import java.io.PrintWriter;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
 
 /**
  * This class handles ART shell commands.
@@ -47,6 +51,8 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
 
     private final ArtManagerLocal mArtManagerLocal;
     private final PackageManagerLocal mPackageManagerLocal;
+
+    private static Map<String, CancellationSignal> sCancellationSignalMap = new HashMap<>();
 
     public ArtShellCommand(
             ArtManagerLocal artManagerLocal, PackageManagerLocal packageManagerLocal) {
@@ -69,14 +75,7 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
             case "get-optimization-status": {
                 OptimizationStatus optimizationStatus = mArtManagerLocal.getOptimizationStatus(
                         snapshot, getNextArgRequired(), ArtFlags.defaultGetStatusFlags());
-                for (DexFileOptimizationStatus status :
-                        optimizationStatus.getDexFileOptimizationStatuses()) {
-                    pw.printf("dexFile = %s, instructionSet = %s, compilerFilter = %s, "
-                                    + "compilationReason = %s, locationDebugString = %s\n",
-                            status.getDexFile(), status.getInstructionSet(),
-                            status.getCompilerFilter(), status.getCompilationReason(),
-                            status.getLocationDebugString());
-                }
+                pw.println(optimizationStatus);
                 return 0;
             }
             case "optimize-package": {
@@ -95,23 +94,55 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
                             return 1;
                     }
                 }
-                OptimizeResult result = mArtManagerLocal.optimizePackage(
-                        snapshot, getNextArgRequired(), paramsBuilder.build());
+
+                String jobId = UUID.randomUUID().toString();
+                var signal = new CancellationSignal();
+                pw.printf("Job ID: %s\n", jobId);
+                pw.flush();
+
+                synchronized (sCancellationSignalMap) {
+                    sCancellationSignalMap.put(jobId, signal);
+                }
+
+                OptimizeResult result;
+                try {
+                    result = mArtManagerLocal.optimizePackage(
+                            snapshot, getNextArgRequired(), paramsBuilder.build(), signal);
+                } finally {
+                    synchronized (sCancellationSignalMap) {
+                        sCancellationSignalMap.remove(jobId);
+                    }
+                }
+
                 pw.println(optimizeStatusToString(result.getFinalStatus()));
                 for (PackageOptimizeResult packageResult : result.getPackageOptimizeResults()) {
                     pw.printf("[%s]\n", packageResult.getPackageName());
-                    for (DexFileOptimizeResult dexFileResult :
-                            packageResult.getDexFileOptimizeResults()) {
-                        pw.printf("dexFile = %s, instructionSet = %s, compilerFilter = %s, "
-                                        + "status = %s, dex2oatWallTimeMillis = %d, "
-                                        + "dex2oatCpuTimeMillis = %d\n",
-                                dexFileResult.getDexFile(), dexFileResult.getInstructionSet(),
-                                dexFileResult.getActualCompilerFilter(),
-                                optimizeStatusToString(dexFileResult.getStatus()),
-                                dexFileResult.getDex2oatWallTimeMillis(),
-                                dexFileResult.getDex2oatCpuTimeMillis());
+                    for (DexContainerFileOptimizeResult fileResult :
+                            packageResult.getDexContainerFileOptimizeResults()) {
+                        pw.printf("dexContainerFile = %s, isPrimaryAbi = %b, abi = %s, "
+                                        + "compilerFilter = %s, status = %s, "
+                                        + "dex2oatWallTimeMillis = %d, dex2oatCpuTimeMillis = %d\n",
+                                fileResult.getDexContainerFile(), fileResult.isPrimaryAbi(),
+                                fileResult.getAbi(), fileResult.getActualCompilerFilter(),
+                                optimizeStatusToString(fileResult.getStatus()),
+                                fileResult.getDex2oatWallTimeMillis(),
+                                fileResult.getDex2oatCpuTimeMillis());
                     }
                 }
+                return 0;
+            }
+            case "cancel": {
+                String jobId = getNextArgRequired();
+                CancellationSignal signal;
+                synchronized (sCancellationSignalMap) {
+                    signal = sCancellationSignalMap.getOrDefault(jobId, null);
+                }
+                if (signal == null) {
+                    pw.println("Job not found");
+                    return 1;
+                }
+                signal.cancel();
+                pw.println("Job cancelled");
                 return 0;
             }
             default:
@@ -144,9 +175,13 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
         pw.println("  optimize-package [-m COMPILER_FILTER] [-f] PACKAGE_NAME");
         pw.println("    Optimize a package.");
         pw.println("    By default, the command only optimizes primary dex'es.");
+        pw.println("    The command prints a job ID, which can be used to cancel the job using the"
+                + "'cancel' command.");
         pw.println("    Options:");
         pw.println("      -m Set the compiler filter.");
         pw.println("      -f Force compilation.");
+        pw.println("  cancel JOB_ID");
+        pw.println("    Cancel a job.");
     }
 
     private void enforceRoot() {
