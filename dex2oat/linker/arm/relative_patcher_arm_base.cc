@@ -17,9 +17,9 @@
 #include "linker/arm/relative_patcher_arm_base.h"
 
 #include "base/stl_util.h"
-#include "compiled_method-inl.h"
 #include "debug/method_debug_info.h"
 #include "dex/dex_file_types.h"
+#include "driver/compiled_method-inl.h"
 #include "linker/linker_patch.h"
 #include "oat.h"
 #include "oat_quick_method_header.h"
@@ -501,7 +501,8 @@ void ArmBaseRelativePatcher::ResolveMethodCalls(uint32_t quick_code_offset,
         if (!result.first) {
           break;
         }
-        uint32_t target_offset = result.second - CompiledCode::CodeDelta(instruction_set_);
+        uint32_t target_offset =
+            result.second - GetInstructionSetEntryPointAdjustment(instruction_set_);
         if (target_offset >= patch_offset) {
           DCHECK_LE(target_offset - patch_offset, max_positive_displacement);
         } else if (patch_offset - target_offset > max_negative_displacement) {

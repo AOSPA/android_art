@@ -44,6 +44,7 @@ namespace art {
 jclass WellKnownClasses::dalvik_annotation_optimization_CriticalNative;
 jclass WellKnownClasses::dalvik_annotation_optimization_FastNative;
 jclass WellKnownClasses::dalvik_annotation_optimization_NeverCompile;
+jclass WellKnownClasses::dalvik_annotation_optimization_NeverInline;
 jclass WellKnownClasses::dalvik_system_BaseDexClassLoader;
 jclass WellKnownClasses::dalvik_system_DelegateLastClassLoader;
 jclass WellKnownClasses::dalvik_system_DexClassLoader;
@@ -253,6 +254,7 @@ static jmethodID CachePrimitiveBoxingMethod(JNIEnv* env, char prim_name, const c
 #define STRING_INIT_LIST(V) \
   V(java_lang_String_init, "()V", newEmptyString, "newEmptyString", "()Ljava/lang/String;", NewEmptyString) \
   V(java_lang_String_init_B, "([B)V", newStringFromBytes_B, "newStringFromBytes", "([B)Ljava/lang/String;", NewStringFromBytes_B) \
+  V(java_lang_String_init_BB, "([BB)V", newStringFromBytes_BB, "newStringFromBytes", "([BB)Ljava/lang/String;", NewStringFromBytes_BB) \
   V(java_lang_String_init_BI, "([BI)V", newStringFromBytes_BI, "newStringFromBytes", "([BI)Ljava/lang/String;", NewStringFromBytes_BI) \
   V(java_lang_String_init_BII, "([BII)V", newStringFromBytes_BII, "newStringFromBytes", "([BII)Ljava/lang/String;", NewStringFromBytes_BII) \
   V(java_lang_String_init_BIII, "([BIII)V", newStringFromBytes_BIII, "newStringFromBytes", "([BIII)Ljava/lang/String;", NewStringFromBytes_BIII) \
@@ -345,6 +347,8 @@ void WellKnownClasses::Init(JNIEnv* env) {
   dalvik_annotation_optimization_FastNative = CacheClass(env, "dalvik/annotation/optimization/FastNative");
   dalvik_annotation_optimization_NeverCompile =
       CacheClass(env, "dalvik/annotation/optimization/NeverCompile");
+  dalvik_annotation_optimization_NeverInline =
+      CacheClass(env, "dalvik/annotation/optimization/NeverInline");
   dalvik_system_BaseDexClassLoader = CacheClass(env, "dalvik/system/BaseDexClassLoader");
   dalvik_system_DelegateLastClassLoader = CacheClass(env, "dalvik/system/DelegateLastClassLoader");
   dalvik_system_DexClassLoader = CacheClass(env, "dalvik/system/DexClassLoader");
@@ -551,6 +555,7 @@ void WellKnownClasses::Clear() {
   dalvik_annotation_optimization_CriticalNative = nullptr;
   dalvik_annotation_optimization_FastNative = nullptr;
   dalvik_annotation_optimization_NeverCompile = nullptr;
+  dalvik_annotation_optimization_NeverInline = nullptr;
   dalvik_system_BaseDexClassLoader = nullptr;
   dalvik_system_DelegateLastClassLoader = nullptr;
   dalvik_system_DexClassLoader = nullptr;

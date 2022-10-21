@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 The Android Open Source Project
+ * Copyright (C) 2022 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,14 +14,8 @@
  * limitations under the License.
  */
 
-#include "hiddenapi_flags.h"
-
-namespace art {
-namespace hiddenapi {
-
-constexpr const char* ApiList::kValueNames[ApiList::kValueCount];
-constexpr const char* ApiList::kDomainApiNames[ApiList::kDomainApiCount];
-constexpr SdkVersion ApiList::kMaxSdkVersions[ApiList::kValueCount];
-
-}  // namespace hiddenapi
-}  // namespace art
+public interface Itf {
+  public default String bar() {
+    return "Itf";
+  }
+}

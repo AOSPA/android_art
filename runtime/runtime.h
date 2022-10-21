@@ -133,6 +133,19 @@ class Runtime {
   static bool Create(const RuntimeOptions& raw_options, bool ignore_unrecognized)
       SHARED_TRYLOCK_FUNCTION(true, Locks::mutator_lock_);
 
+  enum class RuntimeDebugState {
+    // This doesn't support any debug features / method tracing. This is the expected state usually.
+    kNonJavaDebuggable,
+    // This supports method tracing and a restricted set of debug features (for ex: redefinition
+    // isn't supported). We transition to this state when method tracing has started or when the
+    // debugger was attached and transition back to NonDebuggable once the tracing has stopped /
+    // the debugger agent has detached..
+    kJavaDebuggable,
+    // The runtime was started as a debuggable runtime. This allows us to support the extended set
+    // of debug features (for ex: redefinition). We never transition out of this state.
+    kJavaDebuggableAtInit
+  };
+
   bool EnsurePluginLoaded(const char* plugin_name, std::string* error_msg);
   bool EnsurePerfettoPlugin(std::string* error_msg);
 
@@ -784,6 +797,9 @@ class Runtime {
   // Create the JIT and instrumentation and code cache.
   void CreateJit();
 
+  ArenaPool* GetLinearAllocArenaPool() {
+    return linear_alloc_arena_pool_.get();
+  }
   ArenaPool* GetArenaPool() {
     return arena_pool_.get();
   }
@@ -805,7 +821,12 @@ class Runtime {
   }
 
   bool IsJavaDebuggable() const {
-    return is_java_debuggable_;
+    return runtime_debug_state_ == RuntimeDebugState::kJavaDebuggable ||
+           runtime_debug_state_ == RuntimeDebugState::kJavaDebuggableAtInit;
+  }
+
+  bool IsJavaDebuggableAtInit() const {
+    return runtime_debug_state_ == RuntimeDebugState::kJavaDebuggableAtInit;
   }
 
   void SetProfileableFromShell(bool value) {
@@ -824,7 +845,7 @@ class Runtime {
     return is_profileable_;
   }
 
-  void SetJavaDebuggable(bool value);
+  void SetRuntimeDebugState(RuntimeDebugState state);
 
   // Deoptimize the boot image, called for Java debuggable apps.
   void DeoptimizeBootImage() REQUIRES(Locks::mutator_lock_);
@@ -1083,7 +1104,11 @@ class Runtime {
   uint64_t GetMonitorTimeoutNs() const {
     return monitor_timeout_ns_;
   }
-  // Return true if we should load oat files as executable or not.
+
+  // Return whether this is system server and it is being profiled.
+  bool IsSystemServerProfiled() const;
+
+  // Return whether we should load oat files as executable or not.
   bool GetOatFilesExecutable() const;
 
   metrics::ArtMetrics* GetMetrics() { return &metrics_; }
@@ -1238,10 +1263,13 @@ class Runtime {
 
   std::unique_ptr<ArenaPool> jit_arena_pool_;
   std::unique_ptr<ArenaPool> arena_pool_;
-  // Special low 4gb pool for compiler linear alloc. We need ArtFields to be in low 4gb if we are
-  // compiling using a 32 bit image on a 64 bit compiler in case we resolve things in the image
-  // since the field arrays are int arrays in this case.
-  std::unique_ptr<ArenaPool> low_4gb_arena_pool_;
+  // This pool is used for linear alloc if we are using userfaultfd GC, or if
+  // low 4gb pool is required for compiler linear alloc. Otherwise, use
+  // arena_pool_.
+  // We need ArtFields to be in low 4gb if we are compiling using a 32 bit image
+  // on a 64 bit compiler in case we resolve things in the image since the field
+  // arrays are int arrays in this case.
+  std::unique_ptr<ArenaPool> linear_alloc_arena_pool_;
 
   // Shared linear alloc for now.
   std::unique_ptr<LinearAlloc> linear_alloc_;
@@ -1376,7 +1404,7 @@ class Runtime {
   bool non_standard_exits_enabled_;
 
   // Whether Java code needs to be debuggable.
-  bool is_java_debuggable_;
+  RuntimeDebugState runtime_debug_state_;
 
   bool monitor_timeout_enable_;
   uint64_t monitor_timeout_ns_;
