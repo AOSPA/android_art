@@ -170,7 +170,6 @@ bool Instrumentation::ProcessMethodUnwindCallbacks(Thread* self,
   return !new_exception_thrown;
 }
 
-
 void Instrumentation::InstallStubsForClass(ObjPtr<mirror::Class> klass) {
   if (!klass->IsResolved()) {
     // We need the class to be resolved to install/uninstall stubs. Otherwise its methods
@@ -458,6 +457,14 @@ void Instrumentation::InstallStubsForMethod(ArtMethod* method) {
   UpdateEntryPoints(method, GetOptimizedCodeFor(method));
 }
 
+void Instrumentation::UpdateEntrypointsForDebuggable() {
+  Runtime* runtime = Runtime::Current();
+  // If we are transitioning from non-debuggable to debuggable, we patch
+  // entry points of methods to remove any aot / JITed entry points.
+  InstallStubsClassVisitor visitor(this);
+  runtime->GetClassLinker()->VisitClasses(&visitor);
+}
+
 // Places the instrumentation exit pc as the return PC for every quick frame. This also allows
 // deoptimization of quick frames to interpreter frames. When force_deopt is
 // true the frames have to be deoptimized. If the frame has a deoptimization
@@ -532,6 +539,14 @@ void InstrumentationInstallStack(Thread* thread, void* arg, bool deopt_all_frame
           LOG(INFO) << "Ignoring already instrumented " << frame.Dump();
         }
       } else {
+        if (!m->IsRuntimeMethod()) {
+          // Record the method so we can call method entry callbacks for all non-runtime methods on
+          // the stack. Runtime methods don't need method entry callbacks.
+          // TODO(232212577): Add tests to check the validity of the tracefiles generated.
+          // Currently the tracing tests only check a trace file is generated.
+          stack_methods_.push_back(m);
+        }
+
         if (m->IsNative() && Runtime::Current()->IsJavaDebuggable()) {
           // Native methods in debuggable runtimes don't use instrumentation stubs.
           return true;
@@ -567,10 +582,6 @@ void InstrumentationInstallStack(Thread* thread, void* arg, bool deopt_all_frame
           LOG(INFO) << "Pushing frame " << instrumentation_frame.Dump();
         }
 
-        if (!m->IsRuntimeMethod()) {
-          // Runtime methods don't need to run method entry callbacks.
-          stack_methods_.push_back(m);
-        }
         instrumentation_stack_->insert({GetReturnPcAddr(), instrumentation_frame});
         SetReturnPc(instrumentation_exit_pc_);
       }
@@ -1006,17 +1017,15 @@ void Instrumentation::UpdateStubs() {
   Locks::mutator_lock_->AssertExclusiveHeld(self);
   Locks::thread_list_lock_->AssertNotHeld(self);
   UpdateInstrumentationLevel(requested_level);
+  InstallStubsClassVisitor visitor(this);
+  runtime->GetClassLinker()->VisitClasses(&visitor);
   if (requested_level > InstrumentationLevel::kInstrumentNothing) {
-    InstallStubsClassVisitor visitor(this);
-    runtime->GetClassLinker()->VisitClasses(&visitor);
     instrumentation_stubs_installed_ = true;
     MutexLock mu(self, *Locks::thread_list_lock_);
     for (Thread* thread : Runtime::Current()->GetThreadList()->GetList()) {
       InstrumentThreadStack(thread, /* deopt_all_frames= */ false);
     }
   } else {
-    InstallStubsClassVisitor visitor(this);
-    runtime->GetClassLinker()->VisitClasses(&visitor);
     MaybeRestoreInstrumentationStack();
   }
 }
@@ -1151,7 +1160,7 @@ void Instrumentation::UpdateNativeMethodsCodeToJitCode(ArtMethod* method, const 
   // We don't do any read barrier on `method`'s declaring class in this code, as the JIT might
   // enter here on a soon-to-be deleted ArtMethod. Updating the entrypoint is OK though, as
   // the ArtMethod is still in memory.
-  if (EntryExitStubsInstalled()) {
+  if (EntryExitStubsInstalled() && CodeNeedsEntryExitStub(new_code, method)) {
     // If stubs are installed don't update.
     return;
   }
@@ -1228,6 +1237,14 @@ void Instrumentation::Undeoptimize(ArtMethod* method) {
 
   // If interpreter stubs are still needed nothing to do.
   if (InterpreterStubsInstalled()) {
+    return;
+  }
+
+  if (method->IsObsolete()) {
+    // Don't update entry points for obsolete methods. The entrypoint should
+    // have been set to InvokeObsoleteMethoStub.
+    DCHECK_EQ(method->GetEntryPointFromQuickCompiledCodePtrSize(kRuntimePointerSize),
+              GetInvokeObsoleteMethodStub());
     return;
   }
 

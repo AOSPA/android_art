@@ -33,12 +33,10 @@ namespace mirror {
 class ClassLoader;
 }  // namespace mirror
 
-class CompiledMethod;
 class CompilerOptions;
 class CumulativeLogger;
 class DexFile;
 class TimingLogger;
-class VerificationResults;
 
 template<class T> class Handle;
 
@@ -54,9 +52,6 @@ class CommonCompilerTestImpl {
   const void* MakeExecutable(ArrayRef<const uint8_t> code,
                              ArrayRef<const uint8_t> vmap_table,
                              InstructionSet instruction_set);
-
-  void MakeExecutable(ArtMethod* method, const CompiledMethod* compiled_method)
-      REQUIRES_SHARED(Locks::mutator_lock_);
 
  protected:
   void SetUp();
@@ -88,7 +83,6 @@ class CommonCompilerTestImpl {
       = InstructionSetFeatures::FromCppDefines();
 
   std::unique_ptr<CompilerOptions> compiler_options_;
-  std::unique_ptr<VerificationResults> verification_results_;
 
  protected:
   virtual ClassLinker* GetClassLinker() = 0;
@@ -96,6 +90,8 @@ class CommonCompilerTestImpl {
 
  private:
   class CodeAndMetadata;
+  class OneCompiledMethodStorage;
+
   std::vector<CodeAndMetadata> code_and_metadata_;
 };
 
