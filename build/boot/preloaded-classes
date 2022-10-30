@@ -479,7 +479,6 @@ com.sun.security.cert.internal.x509.X509V1CertImpl
 dalvik.annotation.optimization.CriticalNative
 dalvik.annotation.optimization.FastNative
 dalvik.annotation.optimization.NeverCompile
-dalvik.annotation.optimization.NeverInline
 dalvik.system.AppSpecializationHooks
 dalvik.system.BaseDexClassLoader$Reporter
 dalvik.system.BaseDexClassLoader
@@ -2441,6 +2440,7 @@ jdk.internal.math.FormattedFloatingDecimal$Form
 jdk.internal.math.FormattedFloatingDecimal
 jdk.internal.misc.JavaObjectInputStreamAccess
 jdk.internal.misc.SharedSecrets
+jdk.internal.misc.TerminatingThreadLocal
 jdk.internal.misc.Unsafe
 jdk.internal.misc.VM
 jdk.internal.reflect.Reflection

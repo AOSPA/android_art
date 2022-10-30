@@ -16,39 +16,29 @@
 
 package com.android.server.art.wrapper;
 
-import android.annotation.NonNull;
-import android.annotation.Nullable;
-
-import java.util.List;
-import java.util.stream.Collectors;
+import java.io.File;
 
 /** @hide */
-public class SharedLibraryInfo {
-    private final Object mInfo;
-
-    SharedLibraryInfo(@NonNull Object info) {
-        mInfo = info;
-    }
-
-    @NonNull
-    public List<String> getAllCodePaths() {
+public class Environment {
+    public static File getDataUserCePackageDirectory(
+            String volumeUuid, int userId, String packageName) {
         try {
-            return (List<String>) mInfo.getClass().getMethod("getAllCodePaths").invoke(mInfo);
+            return (File) Class.forName("android.os.Environment")
+                    .getMethod(
+                            "getDataUserCePackageDirectory", String.class, int.class, String.class)
+                    .invoke(null, volumeUuid, userId, packageName);
         } catch (ReflectiveOperationException e) {
             throw new RuntimeException(e);
         }
     }
 
-    @Nullable
-    public List<SharedLibraryInfo> getDependencies() {
+    public static File getDataUserDePackageDirectory(
+            String volumeUuid, int userId, String packageName) {
         try {
-            var list = (List<?>) mInfo.getClass().getMethod("getDependencies").invoke(mInfo);
-            if (list == null) {
-                return null;
-            }
-            return list.stream()
-                    .map(obj -> new SharedLibraryInfo(obj))
-                    .collect(Collectors.toList());
+            return (File) Class.forName("android.os.Environment")
+                    .getMethod(
+                            "getDataUserDePackageDirectory", String.class, int.class, String.class)
+                    .invoke(null, volumeUuid, userId, packageName);
         } catch (ReflectiveOperationException e) {
             throw new RuntimeException(e);
         }

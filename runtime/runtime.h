@@ -291,13 +291,16 @@ class Runtime {
   jobject GetSystemClassLoader() const;
 
   // Attaches the calling native thread to the runtime.
-  bool AttachCurrentThread(const char* thread_name, bool as_daemon, jobject thread_group,
-                           bool create_peer);
+  bool AttachCurrentThread(const char* thread_name,
+                           bool as_daemon,
+                           jobject thread_group,
+                           bool create_peer,
+                           bool should_run_callbacks = true);
 
   void CallExitHook(jint status);
 
   // Detaches the current native thread from the runtime.
-  void DetachCurrentThread() REQUIRES(!Locks::mutator_lock_);
+  void DetachCurrentThread(bool should_run_callbacks = true) REQUIRES(!Locks::mutator_lock_);
 
   void DumpDeoptimizations(std::ostream& os);
   void DumpForSigQuit(std::ostream& os);
@@ -612,7 +615,8 @@ class Runtime {
 
   // Transaction support.
   bool IsActiveTransaction() const;
-  void EnterTransactionMode(bool strict, mirror::Class* root);
+  // EnterTransactionMode may suspend.
+  void EnterTransactionMode(bool strict, mirror::Class* root) REQUIRES_SHARED(Locks::mutator_lock_);
   void ExitTransactionMode();
   void RollbackAllTransactions() REQUIRES_SHARED(Locks::mutator_lock_);
   // Transaction rollback and exit transaction are always done together, it's convenience to

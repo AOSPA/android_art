@@ -44,6 +44,12 @@ void DexCache::Initialize(const DexFile* dex_file, ObjPtr<ClassLoader> class_loa
   DCHECK(GetResolvedMethodTypes() == nullptr);
   DCHECK(GetResolvedCallSites() == nullptr);
 
+  DCHECK(GetStringsArray() == nullptr);
+  DCHECK(GetResolvedTypesArray() == nullptr);
+  DCHECK(GetResolvedMethodsArray() == nullptr);
+  DCHECK(GetResolvedFieldsArray() == nullptr);
+  DCHECK(GetResolvedMethodTypesArray() == nullptr);
+
   ScopedAssertNoThreadSuspension sants(__FUNCTION__);
 
   SetDexFile(dex_file);
@@ -52,48 +58,81 @@ void DexCache::Initialize(const DexFile* dex_file, ObjPtr<ClassLoader> class_loa
 
 void DexCache::VisitReflectiveTargets(ReflectiveValueVisitor* visitor) {
   bool wrote = false;
-  FieldDexCacheType* fields = GetResolvedFields();
+  auto* fields = GetResolvedFields();
   size_t num_fields = NumResolvedFields();
   // Check both the data pointer and count since the array might be initialized
   // concurrently on other thread, and we might observe just one of the values.
   for (size_t i = 0; fields != nullptr && i < num_fields; i++) {
-    auto pair(GetNativePair(fields, i));
-    if (pair.index == FieldDexCachePair::InvalidIndexForSlot(i)) {
+    auto pair(fields->GetNativePair(i));
+    if (pair.index == NativeDexCachePair<ArtField>::InvalidIndexForSlot(i)) {
       continue;
     }
     ArtField* new_val = visitor->VisitField(
         pair.object, DexCacheSourceInfo(kSourceDexCacheResolvedField, pair.index, this));
     if (UNLIKELY(new_val != pair.object)) {
       if (new_val == nullptr) {
-        pair = FieldDexCachePair(nullptr, FieldDexCachePair::InvalidIndexForSlot(i));
+        pair = NativeDexCachePair<ArtField>(
+            nullptr, NativeDexCachePair<ArtField>::InvalidIndexForSlot(i));
       } else {
         pair.object = new_val;
       }
-      SetNativePair(fields, i, pair);
+      fields->SetNativePair(i, pair);
       wrote = true;
     }
   }
-  MethodDexCacheType* methods = GetResolvedMethods();
+  auto* methods = GetResolvedMethods();
   size_t num_methods = NumResolvedMethods();
   // Check both the data pointer and count since the array might be initialized
   // concurrently on other thread, and we might observe just one of the values.
   for (size_t i = 0; methods != nullptr && i < num_methods; i++) {
-    auto pair(GetNativePair(methods, i));
-    if (pair.index == MethodDexCachePair::InvalidIndexForSlot(i)) {
+    auto pair(methods->GetNativePair(i));
+    if (pair.index == NativeDexCachePair<ArtMethod>::InvalidIndexForSlot(i)) {
       continue;
     }
     ArtMethod* new_val = visitor->VisitMethod(
         pair.object, DexCacheSourceInfo(kSourceDexCacheResolvedMethod, pair.index, this));
     if (UNLIKELY(new_val != pair.object)) {
       if (new_val == nullptr) {
-        pair = MethodDexCachePair(nullptr, MethodDexCachePair::InvalidIndexForSlot(i));
+        pair = NativeDexCachePair<ArtMethod>(
+            nullptr, NativeDexCachePair<ArtMethod>::InvalidIndexForSlot(i));
       } else {
         pair.object = new_val;
       }
-      SetNativePair(methods, i, pair);
+      methods->SetNativePair(i, pair);
       wrote = true;
     }
   }
+
+  auto* fields_array = GetResolvedFieldsArray();
+  num_fields = NumResolvedFieldsArray();
+  for (size_t i = 0; fields_array != nullptr && i < num_fields; i++) {
+    ArtField* old_val = fields_array->Get(i);
+    if (old_val == nullptr) {
+      continue;
+    }
+    ArtField* new_val = visitor->VisitField(
+        old_val, DexCacheSourceInfo(kSourceDexCacheResolvedField, i, this));
+    if (new_val != old_val) {
+      fields_array->Set(i, new_val);
+      wrote = true;
+    }
+  }
+
+  auto* methods_array = GetResolvedMethodsArray();
+  num_methods = NumResolvedMethodsArray();
+  for (size_t i = 0; methods_array != nullptr && i < num_methods; i++) {
+    ArtMethod* old_val = methods_array->Get(i);
+    if (old_val == nullptr) {
+      continue;
+    }
+    ArtMethod* new_val = visitor->VisitMethod(
+        old_val, DexCacheSourceInfo(kSourceDexCacheResolvedMethod, i, this));
+    if (new_val != old_val) {
+      methods_array->Set(i, new_val);
+      wrote = true;
+    }
+  }
+
   if (wrote) {
     WriteBarrier::ForEveryFieldWrite(this);
   }
@@ -106,12 +145,12 @@ void DexCache::ResetNativeArrays() {
   SetResolvedFields(nullptr);
   SetResolvedMethodTypes(nullptr);
   SetResolvedCallSites(nullptr);
-  SetField32<false>(NumStringsOffset(), 0);
-  SetField32<false>(NumResolvedTypesOffset(), 0);
-  SetField32<false>(NumResolvedMethodsOffset(), 0);
-  SetField32<false>(NumResolvedFieldsOffset(), 0);
-  SetField32<false>(NumResolvedMethodTypesOffset(), 0);
-  SetField32<false>(NumResolvedCallSitesOffset(), 0);
+
+  SetStringsArray(nullptr);
+  SetResolvedTypesArray(nullptr);
+  SetResolvedMethodsArray(nullptr);
+  SetResolvedFieldsArray(nullptr);
+  SetResolvedMethodTypesArray(nullptr);
 }
 
 void DexCache::SetLocation(ObjPtr<mirror::String> location) {
