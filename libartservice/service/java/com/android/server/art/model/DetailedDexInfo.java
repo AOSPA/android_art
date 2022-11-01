@@ -14,25 +14,24 @@
  * limitations under the License.
  */
 
-package com.android.server.art.wrapper;
+package com.android.server.art.model;
 
 import android.annotation.NonNull;
 
-/** @hide */
-public class PackageUserState {
-    private final Object mPkgUserState;
+import com.android.internal.annotations.Immutable;
 
-    PackageUserState(@NonNull Object pkgUserState) {
-        mPkgUserState = pkgUserState;
-    }
+/**
+ * Detailed information about a dex file.
+ *
+ * @hide
+ */
+@Immutable
+public interface DetailedDexInfo {
+    /** The path to the dex file. */
+    @NonNull String dexPath();
 
-    public boolean isInstalled() {
-        try {
-            return (boolean) mPkgUserState.getClass()
-                    .getMethod("isInstalled")
-                    .invoke(mPkgUserState);
-        } catch (ReflectiveOperationException e) {
-            throw new RuntimeException(e);
-        }
-    }
+    /**
+     * A string describing the structure of the class loader that the dex file is loaded with.
+     */
+    @NonNull String classLoaderContext();
 }
