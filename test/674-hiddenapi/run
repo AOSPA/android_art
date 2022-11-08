@@ -14,9 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Make verification soft fail so that we can re-verify boot classpath
-# methods at runtime.
-#
-# N.B. Compilation of secondary dexes can prevent hidden API checks, e.g. if
-# a blocklisted field get is inlined.
-exec ${RUN} $@ --verify-soft-fail --no-secondary-compilation
+
+def run(ctx, args):
+  # Make verification soft fail so that we can re-verify boot classpath
+  # methods at runtime.
+  #
+  # N.B. Compilation of secondary dexes can prevent hidden API checks, e.g. if
+  # a blocklisted field get is inlined.
+  ctx.default_run(args, verify_soft_fail=True, secondary_compilation=False)
+
+  ctx.run(fr"sed -i -E '/(JNI_OnLoad|JNI_OnUnload)/d' '{args.stdout_file}'")
+  ctx.run(fr"sed -i -E '/^dalvikvm(32|64) E [^]]+]/d' '{args.stderr_file}'")

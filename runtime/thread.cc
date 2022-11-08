@@ -3941,30 +3941,35 @@ void Thread::QuickDeliverException(bool is_method_exit_exception) {
   if (Dbg::IsForcedInterpreterNeededForException(this) || force_deopt || IsForceInterpreter()) {
     NthCallerVisitor visitor(this, 0, false);
     visitor.WalkStack();
-    if (Runtime::Current()->IsAsyncDeoptimizeable(visitor.GetOuterMethod(), visitor.caller_pc)) {
-      // method_type shouldn't matter due to exception handling.
-      const DeoptimizationMethodType method_type = DeoptimizationMethodType::kDefault;
-      // Save the exception into the deoptimization context so it can be restored
-      // before entering the interpreter.
-      if (force_deopt) {
-        VLOG(deopt) << "Deopting " << cf->GetMethod()->PrettyMethod() << " for frame-pop";
-        DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
-        // Get rid of the exception since we are doing a framepop instead.
-        LOG(WARNING) << "Suppressing pending exception for retry-instruction/frame-pop: "
-                     << exception->Dump();
-        ClearException();
+    if (visitor.GetCurrentQuickFrame() != nullptr) {
+      if (Runtime::Current()->IsAsyncDeoptimizeable(visitor.GetOuterMethod(), visitor.caller_pc)) {
+        // method_type shouldn't matter due to exception handling.
+        const DeoptimizationMethodType method_type = DeoptimizationMethodType::kDefault;
+        // Save the exception into the deoptimization context so it can be restored
+        // before entering the interpreter.
+        if (force_deopt) {
+          VLOG(deopt) << "Deopting " << cf->GetMethod()->PrettyMethod() << " for frame-pop";
+          DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
+          // Get rid of the exception since we are doing a framepop instead.
+          LOG(WARNING) << "Suppressing pending exception for retry-instruction/frame-pop: "
+                       << exception->Dump();
+          ClearException();
+        }
+        PushDeoptimizationContext(
+            JValue(),
+            /* is_reference= */ false,
+            (force_deopt ? nullptr : exception),
+            /* from_code= */ false,
+            method_type);
+        artDeoptimize(this);
+        UNREACHABLE();
+      } else {
+        LOG(WARNING) << "Got a deoptimization request on un-deoptimizable method "
+                     << visitor.caller->PrettyMethod();
       }
-      PushDeoptimizationContext(
-          JValue(),
-          /* is_reference= */ false,
-          (force_deopt ? nullptr : exception),
-          /* from_code= */ false,
-          method_type);
-      artDeoptimize(this);
-      UNREACHABLE();
-    } else if (visitor.caller != nullptr) {
-      LOG(WARNING) << "Got a deoptimization request on un-deoptimizable method "
-                   << visitor.caller->PrettyMethod();
+    } else {
+      // This is either top of call stack, or shadow frame.
+      DCHECK(visitor.caller == nullptr || visitor.IsShadowFrame());
     }
   }
 
@@ -4680,25 +4685,29 @@ size_t Thread::NumberOfHeldMutexes() const {
 void Thread::DeoptimizeWithDeoptimizationException(JValue* result) {
   DCHECK_EQ(GetException(), Thread::GetDeoptimizationException());
   ClearException();
-  ShadowFrame* shadow_frame = MaybePopDeoptimizedStackedShadowFrame();
-  DCHECK_NE(shadow_frame, nullptr);
   ObjPtr<mirror::Throwable> pending_exception;
   bool from_code = false;
   DeoptimizationMethodType method_type;
   PopDeoptimizationContext(result, &pending_exception, &from_code, &method_type);
   SetTopOfStack(nullptr);
-  SetTopOfShadowStack(shadow_frame);
 
   // Restore the exception that was pending before deoptimization then interpret the
   // deoptimized frames.
   if (pending_exception != nullptr) {
     SetException(pending_exception);
   }
-  interpreter::EnterInterpreterFromDeoptimize(this,
-                                              shadow_frame,
-                                              result,
-                                              from_code,
-                                              method_type);
+
+  ShadowFrame* shadow_frame = MaybePopDeoptimizedStackedShadowFrame();
+  // We may not have a shadow frame if we deoptimized at the return of the
+  // quick_to_interpreter_bridge which got directly called by art_quick_invoke_stub.
+  if (shadow_frame != nullptr) {
+    SetTopOfShadowStack(shadow_frame);
+    interpreter::EnterInterpreterFromDeoptimize(this,
+                                                shadow_frame,
+                                                result,
+                                                from_code,
+                                                method_type);
+  }
 }
 
 void Thread::SetAsyncException(ObjPtr<mirror::Throwable> new_exception) {

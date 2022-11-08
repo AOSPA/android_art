@@ -14,5 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Ask for stack traces to be dumped to a file rather than to stdout.
-./default-run "$@" --jvmti
+
+def run(ctx, args):
+  # Ask for stack traces to be dumped to a file rather than to stdout.
+  ctx.default_run(args, jvmti=True)
+
+  # The RI sends an extra event that art doesn't. Add it to the expected output.
+  if args.jvm:
+    ctx.run(fr"patch -p0 expected-stdout.txt < jvm-expected.patch >/dev/null")

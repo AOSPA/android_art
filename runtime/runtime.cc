@@ -525,6 +525,7 @@ Runtime::~Runtime() {
   // Destroy allocators before shutting down the MemMap because they may use it.
   java_vm_.reset();
   linear_alloc_.reset();
+  startup_linear_alloc_.reset();
   linear_alloc_arena_pool_.reset();
   arena_pool_.reset();
   jit_arena_pool_.reset();
@@ -957,26 +958,11 @@ bool Runtime::Start() {
   // Restore main thread state to kNative as expected by native code.
   Thread* self = Thread::Current();
 
-  self->TransitionFromRunnableToSuspended(ThreadState::kNative);
-
   started_ = true;
 
-  if (!IsImageDex2OatEnabled() || !GetHeap()->HasBootImageSpace()) {
-    ScopedObjectAccess soa(self);
-    StackHandleScope<3> hs(soa.Self());
+  class_linker_->RunEarlyRootClinits(self);
 
-    ObjPtr<mirror::ObjectArray<mirror::Class>> class_roots = GetClassLinker()->GetClassRoots();
-    auto class_class(hs.NewHandle<mirror::Class>(GetClassRoot<mirror::Class>(class_roots)));
-    auto string_class(hs.NewHandle<mirror::Class>(GetClassRoot<mirror::String>(class_roots)));
-    auto field_class(hs.NewHandle<mirror::Class>(GetClassRoot<mirror::Field>(class_roots)));
-
-    class_linker_->EnsureInitialized(soa.Self(), class_class, true, true);
-    class_linker_->EnsureInitialized(soa.Self(), string_class, true, true);
-    self->AssertNoPendingException();
-    // Field class is needed for register_java_net_InetAddress in libcore, b/28153851.
-    class_linker_->EnsureInitialized(soa.Self(), field_class, true, true);
-    self->AssertNoPendingException();
-  }
+  self->TransitionFromRunnableToSuspended(ThreadState::kNative);
 
   // InitNativeMethods needs to be after started_ so that the classes
   // it touches will have methods linked to the oat file if necessary.
@@ -1763,6 +1749,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     linear_alloc_arena_pool_.reset(new MemMapArenaPool(low_4gb));
   }
   linear_alloc_.reset(CreateLinearAlloc());
+  startup_linear_alloc_.reset(CreateLinearAlloc());
 
   small_irt_allocator_ = new SmallIrtAllocator();
 
@@ -2764,7 +2751,8 @@ void Runtime::RegisterAppInfo(const std::string& package_name,
     return;
   }
   if (!OS::FileExists(profile_output_filename.c_str(), /*check_file_type=*/ false)) {
-    LOG(WARNING) << "JIT profile information will not be recorded: profile file does not exist.";
+    LOG(WARNING) << "JIT profile information will not be recorded: profile file does not exist: "
+                 << profile_output_filename;
     return;
   }
   if (code_paths.empty()) {
@@ -3321,6 +3309,14 @@ void Runtime::ResetStartupCompleted() {
   startup_completed_.store(false, std::memory_order_seq_cst);
 }
 
+class UnlinkStartupDexCacheVisitor : public DexCacheVisitor {
+ public:
+  void Visit(ObjPtr<mirror::DexCache> dex_cache)
+      REQUIRES_SHARED(Locks::dex_lock_, Locks::mutator_lock_) override {
+    dex_cache->UnlinkStartupCaches();
+  }
+};
+
 class Runtime::NotifyStartupCompletedTask : public gc::HeapTask {
  public:
   NotifyStartupCompletedTask() : gc::HeapTask(/*target_run_time=*/ NanoTime()) {}
@@ -3328,11 +3324,25 @@ class Runtime::NotifyStartupCompletedTask : public gc::HeapTask {
   void Run(Thread* self) override {
     VLOG(startup) << "NotifyStartupCompletedTask running";
     Runtime* const runtime = Runtime::Current();
+    // Fetch the startup linear alloc before the checkpoint to play nice with
+    // 1002-notify-startup test which resets the startup state.
+    std::unique_ptr<LinearAlloc> startup_linear_alloc(runtime->ReleaseStartupLinearAlloc());
     {
-      ScopedTrace trace("Releasing app image spaces metadata");
+      ScopedTrace trace("Releasing dex caches and app image spaces metadata");
       ScopedObjectAccess soa(Thread::Current());
-      // Request empty checkpoints to make sure no threads are accessing the image space metadata
-      // section when we madvise it. Use GC exclusion to prevent deadlocks that may happen if
+
+      {
+        // Unlink dex caches that were allocated with the startup linear alloc.
+        UnlinkStartupDexCacheVisitor visitor;
+        ReaderMutexLock mu(self, *Locks::dex_lock_);
+        runtime->GetClassLinker()->VisitDexCaches(&visitor);
+      }
+
+      // Request empty checkpoints to make sure no threads are:
+      // - accessing the image space metadata section when we madvise it
+      // - accessing dex caches when we free them
+      //
+      // Use GC exclusion to prevent deadlocks that may happen if
       // multiple threads are attempting to run empty checkpoints at the same time.
       {
         // Avoid using ScopedGCCriticalSection since that does not allow thread suspension. This is
@@ -3343,6 +3353,7 @@ class Runtime::NotifyStartupCompletedTask : public gc::HeapTask {
                                                        gc::kCollectorTypeCriticalSection);
         runtime->GetThreadList()->RunEmptyCheckpoint();
       }
+
       for (gc::space::ContinuousSpace* space : runtime->GetHeap()->GetContinuousSpaces()) {
         if (space->IsImageSpace()) {
           gc::space::ImageSpace* image_space = space->AsImageSpace();
@@ -3357,6 +3368,13 @@ class Runtime::NotifyStartupCompletedTask : public gc::HeapTask {
       // Delete the thread pool used for app image loading since startup is assumed to be completed.
       ScopedTrace trace2("Delete thread pool");
       runtime->DeleteThreadPool();
+    }
+
+    {
+      // We know that after the checkpoint, there is no thread that can hold
+      // the startup linear alloc, so it's safe to delete it now.
+      ScopedTrace trace2("Delete startup linear alloc");
+      startup_linear_alloc.reset();
     }
   }
 };
