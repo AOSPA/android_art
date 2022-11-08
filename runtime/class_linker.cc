@@ -1086,19 +1086,72 @@ void ClassLinker::FinishInit(Thread* self) {
   VLOG(startup) << "ClassLinker::FinishInit exiting";
 }
 
-void ClassLinker::RunRootClinits(Thread* self) {
-  for (size_t i = 0; i < static_cast<size_t>(ClassRoot::kMax); ++i) {
-    ObjPtr<mirror::Class> c = GetClassRoot(ClassRoot(i), this);
-    if (!c->IsArrayClass() && !c->IsPrimitive()) {
-      StackHandleScope<1> hs(self);
-      Handle<mirror::Class> h_class(hs.NewHandle(c));
-      if (!EnsureInitialized(self, h_class, true, true)) {
-        LOG(FATAL) << "Exception when initializing " << h_class->PrettyClass()
-            << ": " << self->GetException()->Dump();
-      }
-    } else {
-      DCHECK(c->IsInitialized());
+static void EnsureRootInitialized(ClassLinker* class_linker,
+                                  Thread* self,
+                                  ObjPtr<mirror::Class> klass)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (!klass->IsVisiblyInitialized()) {
+    DCHECK(!klass->IsArrayClass());
+    DCHECK(!klass->IsPrimitive());
+    StackHandleScope<1> hs(self);
+    Handle<mirror::Class> h_class(hs.NewHandle(klass));
+    if (!class_linker->EnsureInitialized(
+             self, h_class, /*can_init_fields=*/ true, /*can_init_parents=*/ true)) {
+      LOG(FATAL) << "Exception when initializing " << h_class->PrettyClass()
+          << ": " << self->GetException()->Dump();
     }
+  }
+}
+
+void ClassLinker::RunEarlyRootClinits(Thread* self) {
+  StackHandleScope<1u> hs(self);
+  Handle<mirror::ObjectArray<mirror::Class>> class_roots = hs.NewHandle(GetClassRoots());
+  EnsureRootInitialized(this, self, GetClassRoot<mirror::Class>(class_roots.Get()));
+  EnsureRootInitialized(this, self, GetClassRoot<mirror::String>(class_roots.Get()));
+  // Field class is needed for register_java_net_InetAddress in libcore, b/28153851.
+  EnsureRootInitialized(this, self, GetClassRoot<mirror::Field>(class_roots.Get()));
+}
+
+void ClassLinker::RunRootClinits(Thread* self) {
+  StackHandleScope<1u> hs(self);
+  Handle<mirror::ObjectArray<mirror::Class>> class_roots = hs.NewHandle(GetClassRoots());
+  for (size_t i = 0; i < static_cast<size_t>(ClassRoot::kMax); ++i) {
+    EnsureRootInitialized(this, self, GetClassRoot(ClassRoot(i), class_roots.Get()));
+  }
+
+  // Make sure certain well-known classes are initialized. Note that well-known
+  // classes are always in the boot image, so this code is primarily intended
+  // for running without boot image but may be needed for boot image if the
+  // AOT-initialization fails due to introduction of new code to `<clinit>`.
+  jclass classes_to_initialize[] = {
+      // Initialize `StackOverflowError`.
+      WellKnownClasses::java_lang_StackOverflowError,
+  };
+  auto* vm = down_cast<JNIEnvExt*>(self->GetJniEnv())->GetVm();
+  for (jclass c : classes_to_initialize) {
+    EnsureRootInitialized(this, self, ObjPtr<mirror::Class>::DownCast(vm->DecodeGlobal(c)));
+  }
+  ArtMethod* static_methods_of_classes_to_initialize[] = {
+      // Initialize primitive boxing classes (avoid check at runtime).
+      WellKnownClasses::java_lang_Boolean_valueOf,
+      WellKnownClasses::java_lang_Byte_valueOf,
+      WellKnownClasses::java_lang_Character_valueOf,
+      WellKnownClasses::java_lang_Double_valueOf,
+      WellKnownClasses::java_lang_Float_valueOf,
+      WellKnownClasses::java_lang_Integer_valueOf,
+      WellKnownClasses::java_lang_Long_valueOf,
+      WellKnownClasses::java_lang_Short_valueOf,
+  };
+  for (ArtMethod* method : static_methods_of_classes_to_initialize) {
+    EnsureRootInitialized(this, self, method->GetDeclaringClass());
+  }
+  ArtField* static_fields_of_classes_to_initialize[] = {
+      // Initialize empty arrays needed by `StackOverflowError`.
+      WellKnownClasses::java_util_Collections_EMPTY_LIST,
+      WellKnownClasses::libcore_util_EmptyArray_STACK_TRACE_ELEMENT,
+  };
+  for (ArtField* field : static_fields_of_classes_to_initialize) {
+    EnsureRootInitialized(this, self, field->GetDeclaringClass());
   }
 }
 
@@ -3832,34 +3885,30 @@ void ClassLinker::RegisterDexFileLocked(const DexFile& dex_file,
     // dex file location is /system/priv-app/SettingsProvider/SettingsProvider.apk
     CHECK_EQ(dex_cache_location, dex_file_suffix);
   }
+
+  // Check if we need to initialize OatFile data (.data.bimg.rel.ro and .bss
+  // sections) needed for code execution.
   const OatFile* oat_file =
       (dex_file.GetOatDexFile() != nullptr) ? dex_file.GetOatDexFile()->GetOatFile() : nullptr;
-  // Clean up pass to remove null dex caches; null dex caches can occur due to class unloading
-  // and we are lazily removing null entries. Also check if we need to initialize OatFile data
-  // (.data.bimg.rel.ro and .bss sections) needed for code execution.
   bool initialize_oat_file_data = (oat_file != nullptr) && oat_file->IsExecutable();
-  JavaVMExt* const vm = self->GetJniEnv()->GetVm();
-  for (auto it = dex_caches_.begin(); it != dex_caches_.end(); ) {
-    const DexCacheData& data = it->second;
-    if (self->IsJWeakCleared(data.weak_root)) {
-      vm->DeleteWeakGlobalRef(self, data.weak_root);
-      it = dex_caches_.erase(it);
-    } else {
-      if (initialize_oat_file_data &&
-          it->first->GetOatDexFile() != nullptr &&
-          it->first->GetOatDexFile()->GetOatFile() == oat_file) {
+  if (initialize_oat_file_data) {
+    for (const auto& entry : dex_caches_) {
+      if (!self->IsJWeakCleared(entry.second.weak_root) &&
+          entry.first->GetOatDexFile() != nullptr &&
+          entry.first->GetOatDexFile()->GetOatFile() == oat_file) {
         initialize_oat_file_data = false;  // Already initialized.
+        break;
       }
-      ++it;
     }
   }
   if (initialize_oat_file_data) {
     oat_file->InitializeRelocations();
   }
+
   // Let hiddenapi assign a domain to the newly registered dex file.
   hiddenapi::InitializeDexFileDomain(dex_file, class_loader);
 
-  jweak dex_cache_jweak = vm->AddWeakGlobalRef(self, dex_cache);
+  jweak dex_cache_jweak = self->GetJniEnv()->GetVm()->AddWeakGlobalRef(self, dex_cache);
   DexCacheData data;
   data.weak_root = dex_cache_jweak;
   data.class_table = ClassTableForClassLoader(class_loader);
@@ -10270,6 +10319,23 @@ void ClassLinker::CleanupClassLoaders() {
         VLOG(class_linker) << "Freeing class loader";
         to_delete.push_back(data);
         it = class_loaders_.erase(it);
+      }
+    }
+  }
+  if (!to_delete.empty()) {
+    JavaVMExt* vm = self->GetJniEnv()->GetVm();
+    WriterMutexLock mu(self, *Locks::dex_lock_);
+    for (auto it = dex_caches_.begin(), end = dex_caches_.end(); it != end; ) {
+      const DexCacheData& data = it->second;
+      if (self->DecodeJObject(data.weak_root) == nullptr) {
+        DCHECK(to_delete.end() != std::find_if(
+            to_delete.begin(),
+            to_delete.end(),
+            [&](const ClassLoaderData& cld) { return cld.class_table == data.class_table; }));
+        vm->DeleteWeakGlobalRef(self, data.weak_root);
+        it = dex_caches_.erase(it);
+      } else {
+        ++it;
       }
     }
   }

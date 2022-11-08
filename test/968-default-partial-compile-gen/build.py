@@ -17,5 +17,7 @@ import os
 
 
 def build(ctx):
-  if os.environ["BUILD_MODE"] != "jvm":
-    ctx.default_build(experimental="default-methods")
+  ctx.bash("./generate-sources --" + ctx.mode)
+  if ctx.jvm:
+    return
+  ctx.default_build(experimental="default-methods")
