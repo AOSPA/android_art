@@ -67,7 +67,8 @@ struct SystemPropertyConfig {
 // requirement (go/platform-experiments-flags#pre-requisites).
 const android::base::NoDestructor<std::vector<SystemPropertyConfig>> kSystemProperties{
     {SystemPropertyConfig{.name = "persist.device_config.runtime_native_boot.enable_uffd_gc",
-                          .default_value = "false"}}};
+                          .default_value = "false"},
+     SystemPropertyConfig{.name = kPhDisableCompactDex, .default_value = "false"}}};
 
 // An enumeration of the possible zygote configurations on Android.
 enum class ZygoteKind : uint8_t {
@@ -267,6 +268,7 @@ class OdrConfig final {
       case art::InstructionSet::kX86:
       case art::InstructionSet::kX86_64:
         return std::make_pair(art::InstructionSet::kX86, art::InstructionSet::kX86_64);
+      case art::InstructionSet::kRiscv64:
       case art::InstructionSet::kThumb2:
       case art::InstructionSet::kNone:
         LOG(FATAL) << "Invalid instruction set " << isa_;

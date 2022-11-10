@@ -20,17 +20,11 @@ def run(ctx, args):
   # pop-frame (see b/116003018).
   test_args = ["DISABLE_CLASS_LOAD_TESTS"] if args.jvm else []
 
-  # The jitthreshold prevents the jit from compiling anything except those which
-  # we explicitly request.
-  ctx.default_run(
-      args,
-      android_runtime_option=["-Xjitthreshold:1000"],
-      jvmti=True,
-      test_args=test_args)
+  ctx.default_run(args, jvmti=True, test_args=test_args)
 
   # The RI has restrictions and bugs around some PopFrame behavior that ART lacks.
   # See b/116003018. Some configurations cannot handle the class load events in
   # quite the right way so they are disabled there too.
-  if (args.jvm or args.verify_soft_fail or not args.prebuild or
-      (args.jvmti_redefine_stress and args.host)):
-    ctx.run(fr"patch -p0 expected-stdout.txt < jvm-expected.patch")
+  if not (args.jvm or args.verify_soft_fail or not args.prebuild or
+          (args.jvmti_redefine_stress and args.host)):
+    ctx.expected_stdout = ctx.expected_stdout.with_suffix(".no-jvm.txt")

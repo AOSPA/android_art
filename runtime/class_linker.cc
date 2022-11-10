@@ -1141,6 +1141,12 @@ void ClassLinker::RunRootClinits(Thread* self) {
       WellKnownClasses::java_lang_Integer_valueOf,
       WellKnownClasses::java_lang_Long_valueOf,
       WellKnownClasses::java_lang_Short_valueOf,
+      // Ensure reflection annotation classes are initialized (avoid check at runtime).
+      WellKnownClasses::libcore_reflect_AnnotationFactory_createAnnotation,
+      WellKnownClasses::libcore_reflect_AnnotationMember_init,
+      // We're suppressing exceptions from `DdmServer` and we do not want to repeatedly
+      // suppress class initialization error (say, due to OOM), so initialize it early.
+      WellKnownClasses::org_apache_harmony_dalvik_ddmc_DdmServer_dispatch,
   };
   for (ArtMethod* method : static_methods_of_classes_to_initialize) {
     EnsureRootInitialized(this, self, method->GetDeclaringClass());
@@ -9580,6 +9586,9 @@ ObjPtr<mirror::MethodType> ClassLinker::ResolveMethodType(
   Handle<mirror::MethodType> type = hs.NewHandle(
       mirror::MethodType::Create(self, return_type, method_params));
   if (type != nullptr) {
+    // Ensure all stores for the newly created MethodType are visible, before we attempt to place
+    // it in the DexCache (b/224733324).
+    std::atomic_thread_fence(std::memory_order_release);
     dex_cache->SetResolvedMethodType(proto_idx, type.Get());
   }
 
