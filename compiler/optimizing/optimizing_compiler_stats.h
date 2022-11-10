@@ -46,6 +46,7 @@ enum class MethodCompilationStat {
   kUnresolvedFieldNotAFastAccess,
   kRemovedCheckedCast,
   kRemovedDeadInstruction,
+  kRemovedTry,
   kRemovedNullCheck,
   kNotCompiledSkipped,
   kNotCompiledInvalidBytecode,
