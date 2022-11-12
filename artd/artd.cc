@@ -36,11 +36,10 @@
 #include "android/binder_auto_utils.h"
 #include "android/binder_manager.h"
 #include "android/binder_process.h"
-#include "base/array_ref.h"
 #include "base/file_utils.h"
 #include "oat_file_assistant.h"
+#include "oat_file_assistant_context.h"
 #include "path_utils.h"
-#include "runtime.h"
 #include "tools/tools.h"
 
 namespace art {
@@ -54,28 +53,10 @@ using ::android::base::Error;
 using ::android::base::Result;
 using ::android::base::Split;
 using ::android::base::StringPrintf;
+using ::android::base::StringReplace;
 using ::ndk::ScopedAStatus;
 
 constexpr const char* kServiceName = "artd";
-
-Result<std::vector<std::string>> GetBootClassPath() {
-  const char* env_value = getenv("BOOTCLASSPATH");
-  if (env_value == nullptr || strlen(env_value) == 0) {
-    return Errorf("Failed to get environment variable 'BOOTCLASSPATH'");
-  }
-  return Split(env_value, ":");
-}
-
-Result<std::vector<std::string>> GetBootImageLocations(bool deny_art_apex_data_files) {
-  std::string error_msg;
-  std::string android_root = GetAndroidRootSafe(&error_msg);
-  if (!error_msg.empty()) {
-    return Errorf("Failed to get ANDROID_ROOT: {}", error_msg);
-  }
-
-  std::string location_str = GetDefaultBootImageLocation(android_root, deny_art_apex_data_files);
-  return Split(location_str, ":");
-}
 
 // Deletes a file. Returns the size of the deleted file, or 0 if the deleted file is empty or an
 // error occurs.
@@ -99,7 +80,42 @@ int64_t GetSizeAndDeleteFile(const std::string& path) {
   return size;
 }
 
+std::string EscapeErrorMessage(const std::string& message) {
+  return StringReplace(message, std::string("\0", /*n=*/1), "\\0", /*all=*/true);
+}
+
+// Indicates an error that should never happen (e.g., illegal arguments passed by service-art
+// internally). System server should crash if this kind of error happens.
+ScopedAStatus Fatal(const std::string& message) {
+  return ScopedAStatus::fromExceptionCodeWithMessage(EX_ILLEGAL_STATE,
+                                                     EscapeErrorMessage(message).c_str());
+}
+
+// Indicates an error that service-art should handle (e.g., I/O errors, sub-process crashes).
+// The scope of the error depends on the function that throws it, so service-art should catch the
+// error at every call site and take different actions.
+// Ideally, this should be a checked exception or an additional return value that forces service-art
+// to handle it, but `ServiceSpecificException` (a separate runtime exception type) is the best
+// approximate we have given the limitation of Java and Binder.
+ScopedAStatus NonFatal(const std::string& message) {
+  constexpr int32_t kArtdNonFatalErrorCode = 1;
+  return ScopedAStatus::fromServiceSpecificErrorWithMessage(kArtdNonFatalErrorCode,
+                                                            EscapeErrorMessage(message).c_str());
+}
+
 }  // namespace
+
+#define OR_RETURN_ERROR(func, expr)         \
+  ({                                        \
+    decltype(expr)&& tmp = (expr);          \
+    if (!tmp.ok()) {                        \
+      return (func)(tmp.error().message()); \
+    }                                       \
+    std::move(tmp).value();                 \
+  })
+
+#define OR_RETURN_FATAL(expr)     OR_RETURN_ERROR(Fatal, expr)
+#define OR_RETURN_NON_FATAL(expr) OR_RETURN_ERROR(NonFatal, expr)
 
 ScopedAStatus Artd::isAlive(bool* _aidl_return) {
   *_aidl_return = true;
@@ -107,16 +123,12 @@ ScopedAStatus Artd::isAlive(bool* _aidl_return) {
 }
 
 ScopedAStatus Artd::deleteArtifacts(const ArtifactsPath& in_artifactsPath, int64_t* _aidl_return) {
-  Result<std::string> oat_path = BuildOatPath(in_artifactsPath);
-  if (!oat_path.ok()) {
-    return ScopedAStatus::fromExceptionCodeWithMessage(EX_ILLEGAL_STATE,
-                                                       oat_path.error().message().c_str());
-  }
+  std::string oat_path = OR_RETURN_FATAL(BuildOatPath(in_artifactsPath));
 
   *_aidl_return = 0;
-  *_aidl_return += GetSizeAndDeleteFile(*oat_path);
-  *_aidl_return += GetSizeAndDeleteFile(OatPathToVdexPath(*oat_path));
-  *_aidl_return += GetSizeAndDeleteFile(OatPathToArtPath(*oat_path));
+  *_aidl_return += GetSizeAndDeleteFile(oat_path);
+  *_aidl_return += GetSizeAndDeleteFile(OatPathToVdexPath(oat_path));
+  *_aidl_return += GetSizeAndDeleteFile(OatPathToArtPath(oat_path));
 
   return ScopedAStatus::ok();
 }
@@ -125,33 +137,29 @@ ScopedAStatus Artd::getOptimizationStatus(const std::string& in_dexFile,
                                           const std::string& in_instructionSet,
                                           const std::string& in_classLoaderContext,
                                           GetOptimizationStatusResult* _aidl_return) {
-  Result<OatFileAssistant::RuntimeOptions> runtime_options = GetRuntimeOptions();
-  if (!runtime_options.ok()) {
-    return ScopedAStatus::fromExceptionCodeWithMessage(
-        EX_ILLEGAL_STATE,
-        ("Failed to get runtime options: " + runtime_options.error().message()).c_str());
+  Result<OatFileAssistantContext*> ofa_context = GetOatFileAssistantContext();
+  if (!ofa_context.ok()) {
+    return NonFatal("Failed to get runtime options: " + ofa_context.error().message());
   }
 
   std::unique_ptr<ClassLoaderContext> context;
   std::string error_msg;
-  auto oat_file_assistant = OatFileAssistant::Create(
-      in_dexFile.c_str(),
-      in_instructionSet.c_str(),
-      in_classLoaderContext.c_str(),
-      /*load_executable=*/false,
-      /*only_load_trusted_executable=*/true,
-      std::make_unique<OatFileAssistant::RuntimeOptions>(std::move(*runtime_options)),
-      &context,
-      &error_msg);
+  auto oat_file_assistant = OatFileAssistant::Create(in_dexFile.c_str(),
+                                                     in_instructionSet.c_str(),
+                                                     in_classLoaderContext.c_str(),
+                                                     /*load_executable=*/false,
+                                                     /*only_load_trusted_executable=*/true,
+                                                     ofa_context.value(),
+                                                     &context,
+                                                     &error_msg);
   if (oat_file_assistant == nullptr) {
-    return ScopedAStatus::fromExceptionCodeWithMessage(
-        EX_ILLEGAL_STATE, ("Failed to create OatFileAssistant: " + error_msg).c_str());
+    return NonFatal("Failed to create OatFileAssistant: " + error_msg);
   }
 
   std::string ignored_odex_status;
-  oat_file_assistant->GetOptimizationStatus(&_aidl_return->compilerFilter,
+  oat_file_assistant->GetOptimizationStatus(&_aidl_return->locationDebugString,
+                                            &_aidl_return->compilerFilter,
                                             &_aidl_return->compilationReason,
-                                            &_aidl_return->locationDebugString,
                                             &ignored_odex_status);
 
   // We ignore odex_status because it is not meaningful. It can only be either "up-to-date",
@@ -176,52 +184,74 @@ Result<void> Artd::Start() {
   return {};
 }
 
-Result<OatFileAssistant::RuntimeOptions> Artd::GetRuntimeOptions() {
-  // We don't cache this system property because it can change.
-  bool use_jit_zygote = UseJitZygote();
-
-  if (!HasRuntimeOptionsCache()) {
-    OR_RETURN(BuildRuntimeOptionsCache());
+Result<OatFileAssistantContext*> Artd::GetOatFileAssistantContext() {
+  if (ofa_context_ == nullptr) {
+    ofa_context_ = std::make_unique<OatFileAssistantContext>(
+        std::make_unique<OatFileAssistantContext::RuntimeOptions>(
+            OatFileAssistantContext::RuntimeOptions{
+                .image_locations = *OR_RETURN(GetBootImageLocations()),
+                .boot_class_path = *OR_RETURN(GetBootClassPath()),
+                .boot_class_path_locations = *OR_RETURN(GetBootClassPath()),
+                .deny_art_apex_data_files = DenyArtApexDataFiles(),
+            }));
   }
 
-  return OatFileAssistant::RuntimeOptions{
-      .image_locations = cached_boot_image_locations_,
-      .boot_class_path = cached_boot_class_path_,
-      .boot_class_path_locations = cached_boot_class_path_,
-      .use_jit_zygote = use_jit_zygote,
-      .deny_art_apex_data_files = cached_deny_art_apex_data_files_,
-      .apex_versions = cached_apex_versions_,
-  };
+  return ofa_context_.get();
 }
 
-Result<void> Artd::BuildRuntimeOptionsCache() {
-  // This system property can only be set by odsign on boot, so it won't change.
-  bool deny_art_apex_data_files = DenyArtApexDataFiles();
+Result<const std::vector<std::string>*> Artd::GetBootImageLocations() {
+  if (!cached_boot_image_locations_.has_value()) {
+    std::string location_str;
 
-  std::vector<std::string> image_locations =
-      OR_RETURN(GetBootImageLocations(deny_art_apex_data_files));
-  std::vector<std::string> boot_class_path = OR_RETURN(GetBootClassPath());
-  std::string apex_versions =
-      Runtime::GetApexVersions(ArrayRef<const std::string>(boot_class_path));
+    if (UseJitZygote()) {
+      location_str = GetJitZygoteBootImageLocation();
+    } else if (std::string value = props_->GetOrEmpty("dalvik.vm.boot-image"); !value.empty()) {
+      location_str = std::move(value);
+    } else {
+      std::string error_msg;
+      std::string android_root = GetAndroidRootSafe(&error_msg);
+      if (!error_msg.empty()) {
+        return Errorf("Failed to get ANDROID_ROOT: {}", error_msg);
+      }
+      location_str = GetDefaultBootImageLocation(android_root, DenyArtApexDataFiles());
+    }
 
-  cached_boot_image_locations_ = std::move(image_locations);
-  cached_boot_class_path_ = std::move(boot_class_path);
-  cached_apex_versions_ = std::move(apex_versions);
-  cached_deny_art_apex_data_files_ = deny_art_apex_data_files;
+    cached_boot_image_locations_ = Split(location_str, ":");
+  }
 
-  return {};
+  return &cached_boot_image_locations_.value();
 }
 
-bool Artd::HasRuntimeOptionsCache() const { return !cached_boot_image_locations_.empty(); }
+Result<const std::vector<std::string>*> Artd::GetBootClassPath() {
+  if (!cached_boot_class_path_.has_value()) {
+    const char* env_value = getenv("BOOTCLASSPATH");
+    if (env_value == nullptr || strlen(env_value) == 0) {
+      return Errorf("Failed to get environment variable 'BOOTCLASSPATH'");
+    }
+    cached_boot_class_path_ = Split(env_value, ":");
+  }
 
-bool Artd::UseJitZygote() const {
-  return props_->GetBool("dalvik.vm.profilebootclasspath",
-                         "persist.device_config.runtime_native_boot.profilebootclasspath",
-                         /*default_value=*/false);
+  return &cached_boot_class_path_.value();
 }
 
-bool Artd::DenyArtApexDataFiles() const {
-  return !props_->GetBool("odsign.verification.success", /*default_value=*/false);
+bool Artd::UseJitZygote() {
+  if (!cached_use_jit_zygote_.has_value()) {
+    cached_use_jit_zygote_ =
+        props_->GetBool("dalvik.vm.profilebootclasspath",
+                        "persist.device_config.runtime_native_boot.profilebootclasspath",
+                        /*default_value=*/false);
+  }
+
+  return cached_use_jit_zygote_.value();
+}
+
+bool Artd::DenyArtApexDataFiles() {
+  if (!cached_deny_art_apex_data_files_.has_value()) {
+    cached_deny_art_apex_data_files_ =
+        !props_->GetBool("odsign.verification.success", /*default_value=*/false);
+  }
+
+  return cached_deny_art_apex_data_files_.value();
 }
 
 }  // namespace artd

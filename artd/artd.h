@@ -17,13 +17,14 @@
 #ifndef ART_ARTD_ARTD_H_
 #define ART_ARTD_ARTD_H_
 
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "aidl/com/android/server/art/BnArtd.h"
 #include "android-base/result.h"
 #include "android/binder_auto_utils.h"
-#include "oat_file_assistant.h"
+#include "oat_file_assistant_context.h"
 #include "tools/system_properties.h"
 
 namespace art {
@@ -50,20 +51,24 @@ class Artd : public aidl::com::android::server::art::BnArtd {
   android::base::Result<void> Start();
 
  private:
-  android::base::Result<OatFileAssistant::RuntimeOptions> GetRuntimeOptions();
+  android::base::Result<OatFileAssistantContext*> GetOatFileAssistantContext();
 
-  android::base::Result<void> BuildRuntimeOptionsCache();
+  android::base::Result<const std::vector<std::string>*> GetBootImageLocations();
 
-  bool HasRuntimeOptionsCache() const;
+  android::base::Result<const std::vector<std::string>*> GetBootClassPath();
 
-  bool UseJitZygote() const;
+  bool UseJitZygote();
 
-  bool DenyArtApexDataFiles() const;
+  bool DenyArtApexDataFiles();
 
-  std::vector<std::string> cached_boot_image_locations_;
-  std::vector<std::string> cached_boot_class_path_;
-  std::string cached_apex_versions_;
-  bool cached_deny_art_apex_data_files_;
+  std::optional<std::vector<std::string>> cached_boot_image_locations_;
+  std::optional<std::vector<std::string>> cached_boot_class_path_;
+  std::optional<std::string> cached_apex_versions_;
+  std::optional<bool> cached_use_jit_zygote_;
+  std::optional<bool> cached_deny_art_apex_data_files_;
+
+  std::unique_ptr<OatFileAssistantContext> ofa_context_;
+
   std::unique_ptr<art::tools::SystemProperties> props_;
 };
 

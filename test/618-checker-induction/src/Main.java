@@ -607,6 +607,61 @@ public class Main {
     return closed;
   }
 
+  // Checks that we do not loop optimize if the calculation of the trip count would overflow.
+  /// CHECK-START: int Main.closedLinearStepOverflow() loop_optimization (before)
+  /// CHECK-DAG: <<Phi1:i\d+>> Phi               loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Phi2:i\d+>> Phi               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG:               Return [<<Phi1>>] loop:none
+  //
+  /// CHECK-START: int Main.closedLinearStepOverflow() loop_optimization (after)
+  /// CHECK-DAG: <<Phi1:i\d+>> Phi               loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Phi2:i\d+>> Phi               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG:               Return [<<Phi1>>] loop:none
+  private static int closedLinearStepOverflow() {
+    int closed = 0;
+    // Note that this isn't a "one-off" error. We are using MIN and MAX to make sure we overflow.
+    for (int i = Integer.MIN_VALUE; i < (Integer.MAX_VALUE - 80); i += 79) {
+      closed++;
+    }
+    return closed;
+  }
+
+  // Since we cannot guarantee that the start/end wouldn't overflow we do not perform loop
+  // optimization.
+  /// CHECK-START: int Main.$inline$closedByParameters(int, int) loop_optimization (before)
+  /// CHECK-DAG: <<Phi1:i\d+>> Phi               loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Phi2:i\d+>> Phi               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG:               Return [<<Phi1>>] loop:none
+  //
+  /// CHECK-START: int Main.$inline$closedByParameters(int, int) loop_optimization (after)
+  /// CHECK-DAG: <<Phi1:i\d+>> Phi               loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Phi2:i\d+>> Phi               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG:               Return [<<Phi1>>] loop:none
+  private static int $inline$closedByParameters(int start, int end) {
+    int closed = 0;
+    for (int i = start; i < end; i++) {
+      closed++;
+    }
+    return closed;
+  }
+
+  // Since we are inlining `closedByParameters` we know that the parameters are fixed and
+  // therefore we can perform loop optimization.
+  /// CHECK-START: int Main.closedByParametersWithInline() loop_optimization (before)
+  /// CHECK-DAG: <<Phi1:i\d+>> Phi               loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Phi2:i\d+>> Phi               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG:               Return [<<Phi1>>] loop:none
+  //
+  /// CHECK-START: int Main.closedByParametersWithInline() loop_optimization (after)
+  /// CHECK-NOT:               Phi
+  //
+  /// CHECK-START: int Main.closedByParametersWithInline() instruction_simplifier$after_bce (after)
+  /// CHECK-DAG: <<Int:i\d+>>  IntConstant 10   loop:none
+  /// CHECK-DAG:               Return [<<Int>>] loop:none
+  private static int closedByParametersWithInline() {
+    return $inline$closedByParameters(0, 10);
+  }
+
   /// CHECK-START: int Main.waterFall() loop_optimization (before)
   /// CHECK-DAG: <<Phi1:i\d+>> Phi               loop:<<Loop1:B\d+>> outer_loop:none
   /// CHECK-DAG: <<Phi2:i\d+>> Phi               loop:<<Loop2:B\d+>> outer_loop:none
@@ -829,6 +884,32 @@ public class Main {
     return k;
   }
 
+  /// CHECK-START: long Main.closedLinearInductionUnmatchedTypesNotOptimized() loop_optimization (before)
+  /// CHECK-DAG: <<Phi1:i\d+>> Phi               loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Phi2:j\d+>> Phi               loop:<<Loop>>      outer_loop:none
+  //
+  /// CHECK-START: long Main.closedLinearInductionUnmatchedTypesNotOptimized() loop_optimization (after)
+  /// CHECK-DAG: <<Phi1:i\d+>> Phi               loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Phi2:j\d+>> Phi               loop:<<Loop>>      outer_loop:none
+  private static long closedLinearInductionUnmatchedTypesNotOptimized() {
+      long sum = 0;
+      for (int i = 0; i < 10; ++i) {
+          ++sum;
+      }
+      return sum;
+  }
+
+  /// CHECK-START: short Main.closedLinearInductionNarrowingNotOptimized() loop_optimization (before)
+  /// CHECK-DAG: <<Phi1:i\d+>> Phi               loop:<<Loop:B\d+>> outer_loop:none
+  //
+  /// CHECK-START: short Main.closedLinearInductionNarrowingNotOptimized() loop_optimization (after)
+  /// CHECK-DAG: <<Phi1:i\d+>> Phi               loop:<<Loop:B\d+>> outer_loop:none
+  private static short closedLinearInductionNarrowingNotOptimized() {
+      short i = 0;
+      for (; i < 10; ++i);
+      return i;
+  }
+
   public static void main(String[] args) {
     deadSingleLoop();
     deadSingleLoopN(4);
@@ -896,6 +977,9 @@ public class Main {
     expectEquals(20, closedFeed());
     expectEquals(-10, closedLargeUp());
     expectEquals(10, closedLargeDown());
+    expectEquals(54366674, closedLinearStepOverflow());
+    expectEquals(10, $inline$closedByParameters(0, 10));
+    expectEquals(10, closedByParametersWithInline());
     expectEquals(50, waterFall());
 
     expectEquals(false, periodicBoolIdiom1());
@@ -924,6 +1008,9 @@ public class Main {
     a = new int[4];
     expectEquals(-41, exceptionExitBeforeAdd());
     expectEquals(-51, exceptionExitAfterAdd());
+
+    expectEquals(10, closedLinearInductionUnmatchedTypesNotOptimized());
+    expectEquals(10, closedLinearInductionNarrowingNotOptimized());
 
     System.out.println("passed");
   }

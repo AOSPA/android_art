@@ -353,7 +353,7 @@ class InstructionHandler {
 
   template<InvokeType type, bool is_range>
   HANDLER_ATTRIBUTES bool HandleInvoke() {
-    bool success = DoInvoke<type, is_range, do_access_check, /*is_mterp=*/ false>(
+    bool success = DoInvoke<type, is_range, do_access_check>(
         Self(), shadow_frame_, inst_, inst_data_, ResultRegister());
     return PossiblyHandlePendingExceptionOnInvoke(!success);
   }
@@ -1816,7 +1816,7 @@ class InstructionHandler {
 
 #define OPCODE_CASE(OPCODE, OPCODE_NAME, NAME, FORMAT, i, a, e, v)                                \
 template<bool do_access_check, bool transaction_active>                                           \
-ASAN_NO_INLINE static bool OP_##OPCODE_NAME(                                                      \
+ASAN_NO_INLINE NO_STACK_PROTECTOR static bool OP_##OPCODE_NAME(                                   \
     SwitchImplContext* ctx,                                                                       \
     const instrumentation::Instrumentation* instrumentation,                                      \
     Thread* self,                                                                                 \

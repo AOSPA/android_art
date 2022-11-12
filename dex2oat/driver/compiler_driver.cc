@@ -1109,6 +1109,7 @@ static void MaybeAddToImageClasses(Thread* self,
                                    HashSet<std::string>* image_classes)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   DCHECK_EQ(self, Thread::Current());
+  DCHECK(klass->IsResolved());
   Runtime* runtime = Runtime::Current();
   gc::Heap* heap = runtime->GetHeap();
   if (heap->ObjectIsInBootImageSpace(klass)) {
@@ -2231,6 +2232,19 @@ class InitializeClassVisitor : public CompilationVisitor {
     if (kIsDebugBuild) {
       // Make sure the class initialization did not leave any local references.
       self->GetJniEnv()->AssertLocalsEmpty();
+    }
+
+    if (!klass->IsVisiblyInitialized() &&
+        (is_boot_image || is_boot_image_extension) &&
+        !compiler_options.IsPreloadedClass(PrettyDescriptor(descriptor).c_str())) {
+      klass->SetInBootImageAndNotInPreloadedClasses();
+    }
+
+    if (compiler_options.CompileArtTest()) {
+      // For stress testing and unit-testing the clinit check in compiled code feature.
+      if (kIsDebugBuild || EndsWith(std::string_view(descriptor), "$NoPreloadHolder;")) {
+        klass->SetInBootImageAndNotInPreloadedClasses();
+      }
     }
   }
 

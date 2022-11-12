@@ -150,6 +150,7 @@
     "test.java.lang.Float",
     "test.java.lang.Integer",
     "test.java.lang.Long",
+    "test.java.lang.StackWalker#main",
     "test.java.lang.StrictMath.CubeRootTests",
     "test.java.lang.StrictMath.ExactArithTests",
     "test.java.lang.StrictMath.Expm1Tests",
