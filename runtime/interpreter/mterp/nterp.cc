@@ -249,76 +249,57 @@ extern "C" const char* NterpGetShortyFromInvokeCustom(ArtMethod* caller, uint16_
   return dex_file->GetShorty(proto_idx);
 }
 
+static constexpr uint8_t kInvalidInvokeType = 255u;
+static_assert(static_cast<uint8_t>(kMaxInvokeType) < kInvalidInvokeType);
+
+static constexpr uint8_t GetOpcodeInvokeType(uint8_t opcode) {
+  switch (opcode) {
+    case Instruction::INVOKE_DIRECT:
+    case Instruction::INVOKE_DIRECT_RANGE:
+      return static_cast<uint8_t>(kDirect);
+    case Instruction::INVOKE_INTERFACE:
+    case Instruction::INVOKE_INTERFACE_RANGE:
+      return static_cast<uint8_t>(kInterface);
+    case Instruction::INVOKE_STATIC:
+    case Instruction::INVOKE_STATIC_RANGE:
+      return static_cast<uint8_t>(kStatic);
+    case Instruction::INVOKE_SUPER:
+    case Instruction::INVOKE_SUPER_RANGE:
+      return static_cast<uint8_t>(kSuper);
+    case Instruction::INVOKE_VIRTUAL:
+    case Instruction::INVOKE_VIRTUAL_RANGE:
+      return static_cast<uint8_t>(kVirtual);
+
+    default:
+      return kInvalidInvokeType;
+  }
+}
+
+static constexpr std::array<uint8_t, 256u> GenerateOpcodeInvokeTypes() {
+  std::array<uint8_t, 256u> opcode_invoke_types{};
+  for (size_t opcode = 0u; opcode != opcode_invoke_types.size(); ++opcode) {
+    opcode_invoke_types[opcode] = GetOpcodeInvokeType(opcode);
+  }
+  return opcode_invoke_types;
+}
+
+static constexpr std::array<uint8_t, 256u> kOpcodeInvokeTypes = GenerateOpcodeInvokeTypes();
+
 FLATTEN
 extern "C" size_t NterpGetMethod(Thread* self, ArtMethod* caller, const uint16_t* dex_pc_ptr)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   UpdateHotness(caller);
   const Instruction* inst = Instruction::At(dex_pc_ptr);
-  InvokeType invoke_type = kStatic;
-  uint16_t method_index = 0;
-  switch (inst->Opcode()) {
-    case Instruction::INVOKE_DIRECT: {
-      method_index = inst->VRegB_35c();
-      invoke_type = kDirect;
-      break;
-    }
+  Instruction::Code opcode = inst->Opcode();
+  DCHECK(IsUint<8>(static_cast<std::underlying_type_t<Instruction::Code>>(opcode)));
+  uint8_t raw_invoke_type = kOpcodeInvokeTypes[opcode];
+  CHECK_LE(raw_invoke_type, kMaxInvokeType);
+  InvokeType invoke_type = static_cast<InvokeType>(raw_invoke_type);
 
-    case Instruction::INVOKE_INTERFACE: {
-      method_index = inst->VRegB_35c();
-      invoke_type = kInterface;
-      break;
-    }
-
-    case Instruction::INVOKE_STATIC: {
-      method_index = inst->VRegB_35c();
-      invoke_type = kStatic;
-      break;
-    }
-
-    case Instruction::INVOKE_SUPER: {
-      method_index = inst->VRegB_35c();
-      invoke_type = kSuper;
-      break;
-    }
-    case Instruction::INVOKE_VIRTUAL: {
-      method_index = inst->VRegB_35c();
-      invoke_type = kVirtual;
-      break;
-    }
-
-    case Instruction::INVOKE_DIRECT_RANGE: {
-      method_index = inst->VRegB_3rc();
-      invoke_type = kDirect;
-      break;
-    }
-
-    case Instruction::INVOKE_INTERFACE_RANGE: {
-      method_index = inst->VRegB_3rc();
-      invoke_type = kInterface;
-      break;
-    }
-
-    case Instruction::INVOKE_STATIC_RANGE: {
-      method_index = inst->VRegB_3rc();
-      invoke_type = kStatic;
-      break;
-    }
-
-    case Instruction::INVOKE_SUPER_RANGE: {
-      method_index = inst->VRegB_3rc();
-      invoke_type = kSuper;
-      break;
-    }
-
-    case Instruction::INVOKE_VIRTUAL_RANGE: {
-      method_index = inst->VRegB_3rc();
-      invoke_type = kVirtual;
-      break;
-    }
-
-    default:
-      LOG(FATAL) << "Unknown instruction " << inst->Opcode();
-  }
+  // In release mode, this is just a simple load.
+  // In debug mode, this checks that we're using the correct instruction format.
+  uint16_t method_index =
+      (opcode >= Instruction::INVOKE_VIRTUAL_RANGE) ? inst->VRegB_3rc() : inst->VRegB_35c();
 
   ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
   ArtMethod* resolved_method = caller->SkipAccessChecks()
@@ -472,61 +453,69 @@ extern "C" uint32_t NterpGetInstanceFieldOffset(Thread* self,
   return resolved_field->GetOffset().Uint32Value();
 }
 
-extern "C" mirror::Object* NterpGetClassOrAllocateObject(Thread* self,
-                                                         ArtMethod* caller,
-                                                         uint16_t* dex_pc_ptr)
+extern "C" mirror::Object* NterpGetClass(Thread* self, ArtMethod* caller, uint16_t* dex_pc_ptr)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   UpdateHotness(caller);
   const Instruction* inst = Instruction::At(dex_pc_ptr);
-  dex::TypeIndex index;
-  switch (inst->Opcode()) {
-    case Instruction::NEW_INSTANCE:
-      index = dex::TypeIndex(inst->VRegB_21c());
-      break;
-    case Instruction::CHECK_CAST:
-      index = dex::TypeIndex(inst->VRegB_21c());
-      break;
-    case Instruction::INSTANCE_OF:
-      index = dex::TypeIndex(inst->VRegC_22c());
-      break;
-    case Instruction::CONST_CLASS:
-      index = dex::TypeIndex(inst->VRegB_21c());
-      break;
-    case Instruction::NEW_ARRAY:
-      index = dex::TypeIndex(inst->VRegC_22c());
-      break;
-    default:
-      LOG(FATAL) << "Unreachable";
-  }
+  Instruction::Code opcode = inst->Opcode();
+  DCHECK(opcode == Instruction::CHECK_CAST ||
+         opcode == Instruction::INSTANCE_OF ||
+         opcode == Instruction::CONST_CLASS ||
+         opcode == Instruction::NEW_ARRAY);
+
+  // In release mode, this is just a simple load.
+  // In debug mode, this checks that we're using the correct instruction format.
+  dex::TypeIndex index = dex::TypeIndex(
+      (opcode == Instruction::CHECK_CAST || opcode == Instruction::CONST_CLASS)
+          ? inst->VRegB_21c()
+          : inst->VRegC_22c());
+
   ObjPtr<mirror::Class> c =
       ResolveVerifyAndClinit(index,
                              caller,
                              self,
                              /* can_run_clinit= */ false,
                              /* verify_access= */ !caller->SkipAccessChecks());
-  if (c == nullptr) {
+  if (UNLIKELY(c == nullptr)) {
     DCHECK(self->IsExceptionPending());
     return nullptr;
   }
 
-  if (inst->Opcode() == Instruction::NEW_INSTANCE) {
-    gc::AllocatorType allocator_type = Runtime::Current()->GetHeap()->GetCurrentAllocator();
-    if (UNLIKELY(c->IsStringClass())) {
-      // We don't cache the class for strings as we need to special case their
-      // allocation.
-      return mirror::String::AllocEmptyString(self, allocator_type).Ptr();
-    } else {
-      if (!c->IsFinalizable() && c->IsInstantiable()) {
-        // Cache non-finalizable classes for next calls.
-        UpdateCache(self, dex_pc_ptr, c.Ptr());
-      }
-      return AllocObjectFromCode(c, self, allocator_type).Ptr();
-    }
-  } else {
-    // For all other cases, cache the class.
-    UpdateCache(self, dex_pc_ptr, c.Ptr());
-  }
+  UpdateCache(self, dex_pc_ptr, c.Ptr());
   return c.Ptr();
+}
+
+extern "C" mirror::Object* NterpAllocateObject(Thread* self,
+                                               ArtMethod* caller,
+                                               uint16_t* dex_pc_ptr)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  UpdateHotness(caller);
+  const Instruction* inst = Instruction::At(dex_pc_ptr);
+  DCHECK_EQ(inst->Opcode(), Instruction::NEW_INSTANCE);
+  dex::TypeIndex index = dex::TypeIndex(inst->VRegB_21c());
+  ObjPtr<mirror::Class> c =
+      ResolveVerifyAndClinit(index,
+                             caller,
+                             self,
+                             /* can_run_clinit= */ false,
+                             /* verify_access= */ !caller->SkipAccessChecks());
+  if (UNLIKELY(c == nullptr)) {
+    DCHECK(self->IsExceptionPending());
+    return nullptr;
+  }
+
+  gc::AllocatorType allocator_type = Runtime::Current()->GetHeap()->GetCurrentAllocator();
+  if (UNLIKELY(c->IsStringClass())) {
+    // We don't cache the class for strings as we need to special case their
+    // allocation.
+    return mirror::String::AllocEmptyString(self, allocator_type).Ptr();
+  } else {
+    if (!c->IsFinalizable() && c->IsInstantiable()) {
+      // Cache non-finalizable classes for next calls.
+      UpdateCache(self, dex_pc_ptr, c.Ptr());
+    }
+    return AllocObjectFromCode(c, self, allocator_type).Ptr();
+  }
 }
 
 extern "C" mirror::Object* NterpLoadObject(Thread* self, ArtMethod* caller, uint16_t* dex_pc_ptr)
