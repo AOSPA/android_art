@@ -311,9 +311,6 @@
       "name": "art-run-test-145-alloc-tracking-stress[com.google.android.art.apex]"
     },
     {
-      "name": "art-run-test-151-OpenFileLimit[com.google.android.art.apex]"
-    },
-    {
       "name": "art-run-test-152-dead-large-object[com.google.android.art.apex]"
     },
     {
@@ -423,6 +420,12 @@
     },
     {
       "name": "art-run-test-2241-checker-inline-try-catch[com.google.android.art.apex]"
+    },
+    {
+      "name": "art-run-test-2242-checker-lse-acquire-release-operations[com.google.android.art.apex]"
+    },
+    {
+      "name": "art-run-test-2243-checker-not-inline-into-throw[com.google.android.art.apex]"
     },
     {
       "name": "art-run-test-300-package-override[com.google.android.art.apex]"
@@ -1642,9 +1645,6 @@
       "name": "art-run-test-145-alloc-tracking-stress"
     },
     {
-      "name": "art-run-test-151-OpenFileLimit"
-    },
-    {
       "name": "art-run-test-152-dead-large-object"
     },
     {
@@ -1754,6 +1754,12 @@
     },
     {
       "name": "art-run-test-2241-checker-inline-try-catch"
+    },
+    {
+      "name": "art-run-test-2242-checker-lse-acquire-release-operations"
+    },
+    {
+      "name": "art-run-test-2243-checker-not-inline-into-throw"
     },
     {
       "name": "art-run-test-300-package-override"
@@ -2967,9 +2973,6 @@
       "name": "art-run-test-145-alloc-tracking-stress"
     },
     {
-      "name": "art-run-test-151-OpenFileLimit"
-    },
-    {
       "name": "art-run-test-152-dead-large-object"
     },
     {
@@ -3079,6 +3082,12 @@
     },
     {
       "name": "art-run-test-2241-checker-inline-try-catch"
+    },
+    {
+      "name": "art-run-test-2242-checker-lse-acquire-release-operations"
+    },
+    {
+      "name": "art-run-test-2243-checker-not-inline-into-throw"
     },
     {
       "name": "art-run-test-300-package-override"

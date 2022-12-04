@@ -102,6 +102,7 @@
 #include "jni_id_type.h"
 #include "linear_alloc.h"
 #include "memory_representation.h"
+#include "metrics/statsd.h"
 #include "mirror/array.h"
 #include "mirror/class-alloc-inl.h"
 #include "mirror/class-inl.h"
@@ -870,43 +871,35 @@ static jobject CreateSystemClassLoader(Runtime* runtime) {
   }
 
   ScopedObjectAccess soa(Thread::Current());
-  ClassLinker* cl = Runtime::Current()->GetClassLinker();
+  ClassLinker* cl = runtime->GetClassLinker();
   auto pointer_size = cl->GetImagePointerSize();
 
-  StackHandleScope<2> hs(soa.Self());
-  Handle<mirror::Class> class_loader_class(
-      hs.NewHandle(soa.Decode<mirror::Class>(WellKnownClasses::java_lang_ClassLoader)));
-  CHECK(cl->EnsureInitialized(soa.Self(), class_loader_class, true, true));
+  ObjPtr<mirror::Class> class_loader_class = GetClassRoot<mirror::ClassLoader>(cl);
+  DCHECK(class_loader_class->IsInitialized());  // Class roots have been initialized.
 
   ArtMethod* getSystemClassLoader = class_loader_class->FindClassMethod(
       "getSystemClassLoader", "()Ljava/lang/ClassLoader;", pointer_size);
   CHECK(getSystemClassLoader != nullptr);
   CHECK(getSystemClassLoader->IsStatic());
 
-  JValue result = InvokeWithJValues(soa,
-                                    nullptr,
-                                    getSystemClassLoader,
-                                    nullptr);
-  JNIEnv* env = soa.Self()->GetJniEnv();
-  ScopedLocalRef<jobject> system_class_loader(env, soa.AddLocalReference<jobject>(result.GetL()));
-  CHECK(system_class_loader.get() != nullptr);
+  ObjPtr<mirror::Object> system_class_loader = getSystemClassLoader->InvokeStatic<'L'>(soa.Self());
+  CHECK(system_class_loader != nullptr);
 
-  soa.Self()->SetClassLoaderOverride(system_class_loader.get());
+  ScopedAssertNoThreadSuspension sants(__FUNCTION__);
+  jobject g_system_class_loader =
+      runtime->GetJavaVM()->AddGlobalRef(soa.Self(), system_class_loader);
+  soa.Self()->SetClassLoaderOverride(g_system_class_loader);
 
-  Handle<mirror::Class> thread_class(
-      hs.NewHandle(soa.Decode<mirror::Class>(WellKnownClasses::java_lang_Thread)));
-  CHECK(cl->EnsureInitialized(soa.Self(), thread_class, true, true));
-
+  ObjPtr<mirror::Class> thread_class =
+      WellKnownClasses::ToClass(WellKnownClasses::java_lang_Thread);
   ArtField* contextClassLoader =
       thread_class->FindDeclaredInstanceField("contextClassLoader", "Ljava/lang/ClassLoader;");
   CHECK(contextClassLoader != nullptr);
 
   // We can't run in a transaction yet.
-  contextClassLoader->SetObject<false>(
-      soa.Self()->GetPeer(),
-      soa.Decode<mirror::ClassLoader>(system_class_loader.get()).Ptr());
+  contextClassLoader->SetObject<false>(soa.Self()->GetPeer(), system_class_loader);
 
-  return env->NewGlobalRef(system_class_loader.get());
+  return g_system_class_loader;
 }
 
 std::string Runtime::GetCompilerExecutable() const {
@@ -961,6 +954,7 @@ bool Runtime::Start() {
   started_ = true;
 
   class_linker_->RunEarlyRootClinits(self);
+  InitializeIntrinsics();
 
   self->TransitionFromRunnableToSuspended(ThreadState::kNative);
 
@@ -970,11 +964,6 @@ bool Runtime::Start() {
     ScopedTrace trace2("InitNativeMethods");
     InitNativeMethods();
   }
-
-  // IntializeIntrinsics needs to be called after the WellKnownClasses::Init in InitNativeMethods
-  // because in checking the invocation types of intrinsic methods ArtMethod::GetInvokeType()
-  // needs the SignaturePolymorphic annotation class which is initialized in WellKnownClasses::Init.
-  InitializeIntrinsics();
 
   // InitializeCorePlatformApiPrivateFields() needs to be called after well known class
   // initializtion in InitNativeMethods().
@@ -1228,12 +1217,13 @@ void Runtime::InitNonZygoteOrPostFork(
   }
   if (Runtime::Current()->IsSystemServer()) {
     std::string err;
-    ScopedTrace tr("odrefresh stats logging");
+    ScopedTrace tr("odrefresh and device stats logging");
     ScopedThreadSuspension sts(Thread::Current(), ThreadState::kNative);
     // Report stats if available. This should be moved into ART Services when they are ready.
     if (!odrefresh::UploadStatsIfAvailable(&err)) {
       LOG(WARNING) << "Failed to upload odrefresh metrics: " << err;
     }
+    metrics::ReportDeviceMetrics();
   }
 
   if (LIKELY(automatically_set_jni_ids_indirection_) && CanSetJniIdType()) {

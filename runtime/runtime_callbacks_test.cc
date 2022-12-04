@@ -166,7 +166,7 @@ TEST_F(ThreadLifecycleCallbackRuntimeCallbacksTest, ThreadLifecycleCallbackJava)
 
   {
     ScopedObjectAccess soa(self);
-    MakeExecutable(soa.Decode<mirror::Class>(WellKnownClasses::java_lang_Thread));
+    MakeExecutable(WellKnownClasses::ToClass(WellKnownClasses::java_lang_Thread));
   }
 
   JNIEnv* env = self->GetJniEnv();
@@ -516,11 +516,11 @@ TEST_F(MonitorWaitCallbacksTest, WaitUnlocked) {
     {
       ScopedObjectAccess soa(self);
       cb_.SetInterestingObject(
-          soa.Decode<mirror::Class>(WellKnownClasses::java_util_Collections));
+          WellKnownClasses::java_util_Collections_EMPTY_LIST->GetDeclaringClass());
       Monitor::Wait(
           self,
           // Just a random class
-          soa.Decode<mirror::Class>(WellKnownClasses::java_util_Collections),
+          WellKnownClasses::java_util_Collections_EMPTY_LIST->GetDeclaringClass(),
           /*ms=*/0,
           /*ns=*/0,
           /*interruptShouldThrow=*/false,

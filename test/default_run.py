@@ -228,6 +228,7 @@ def default_run(ctx, args, **kwargs):
         cmdline = "true"  # We still need to run some command, so run the no-op "true" binary instead.
     proc = subprocess.run([cmdline],
                           shell=True,
+                          executable="/bin/bash",
                           env=env,
                           encoding="utf8",
                           capture_output=True)
@@ -254,9 +255,18 @@ def default_run(ctx, args, **kwargs):
         suffix = " (TIME OUT)"
       elif expected_exit_code != 0:
         suffix = " (expected {})".format(expected_exit_code)
-      raise Exception("Command returned exit code {}{}".format(proc.returncode, suffix))
+      print("Command returned exit code {}{}".format(proc.returncode, suffix), file=sys.stderr)
+      sys.exit(1)
 
     return proc
+
+  # Store copy of stdout&stderr of command in files so that we can diff them later.
+  # This may run under 'adb shell' so we are limited only to 'sh' shell feature set.
+  def tee(cmd: str):
+    # 'tee' works on stdout only, so we need to temporarily swap stdout and stderr.
+    cmd = f"({cmd} | tee -a {DEX_LOCATION}/{basename(args.stdout_file)}) 3>&1 1>&2 2>&3"
+    cmd = f"({cmd} | tee -a {DEX_LOCATION}/{basename(args.stderr_file)}) 3>&1 1>&2 2>&3"
+    return f"set -o pipefail; {cmd}"  # Use exit code of first failure in piped command.
 
   class Adb():
 
@@ -718,8 +728,9 @@ def default_run(ctx, args, **kwargs):
       print(f"Runnable test script written to {pwd}/runit.sh")
       return
     else:
-      cmdline += f" >> {args.stdout_file} 2>> {args.stderr_file}"
-      run(cmdline, env, expected_exit_code=args.expected_exit_code)
+      run(tee(cmdline),
+          env,
+          expected_exit_code=args.expected_exit_code)
       return
 
   b_path = get_apex_bootclasspath(HOST)
@@ -1098,9 +1109,7 @@ def default_run(ctx, args, **kwargs):
                        {QUOTED_DALVIKVM_BOOT_OPT} \
                        {TMP_DIR_OPTION} \
                        -XX:DumpNativeStackOnSigQuit:false \
-                       -cp {DALVIKVM_CLASSPATH} {MAIN} {ARGS} \
-                       1>> {DEX_LOCATION}/{basename(args.stdout_file)} \
-                       2>> {DEX_LOCATION}/{basename(args.stderr_file)}"
+                       -cp {DALVIKVM_CLASSPATH} {MAIN} {ARGS}"
 
   if SIMPLEPERF:
     dalvikvm_cmdline = f"simpleperf record {dalvikvm_cmdline} && simpleperf report"
@@ -1282,7 +1291,9 @@ def default_run(ctx, args, **kwargs):
     run_cmd(f"{vdex_cmdline}", env)
     run_cmd(f"{strip_cmdline}")
     run_cmd(f"{sync_cmdline}")
-    run_cmd(f"{timeout_prefix} {dalvikvm_cmdline}", env, expected_exit_code=args.expected_exit_code)
+    run_cmd(tee(f"{timeout_prefix} {dalvikvm_cmdline}"),
+            env,
+            expected_exit_code=args.expected_exit_code)
     # Copy the on-device stdout/stderr to host.
     adb.pull(f"{CHROOT}{DEX_LOCATION}/{basename(args.stdout_file)}", args.stdout_file)
     adb.pull(f"{CHROOT}{DEX_LOCATION}/{basename(args.stderr_file)}", args.stderr_file)
@@ -1404,7 +1415,7 @@ def default_run(ctx, args, **kwargs):
       subprocess.run(cmdline, env=env, shell=True)
     else:
       if TIME_OUT != "gdb":
-        run(cmdline,
+        run(tee(cmdline),
             env,
             expected_exit_code=args.expected_exit_code)
       else:

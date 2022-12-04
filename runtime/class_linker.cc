@@ -1141,6 +1141,8 @@ void ClassLinker::RunRootClinits(Thread* self) {
       WellKnownClasses::java_lang_Integer_valueOf,
       WellKnownClasses::java_lang_Long_valueOf,
       WellKnownClasses::java_lang_Short_valueOf,
+      // Ensure `DirectByteBuffer` class is initialized (avoid check at runtime).
+      WellKnownClasses::java_nio_DirectByteBuffer_init,
       // Ensure reflection annotation classes are initialized (avoid check at runtime).
       WellKnownClasses::libcore_reflect_AnnotationFactory_createAnnotation,
       WellKnownClasses::libcore_reflect_AnnotationMember_init,
@@ -1152,6 +1154,8 @@ void ClassLinker::RunRootClinits(Thread* self) {
     EnsureRootInitialized(this, self, method->GetDeclaringClass());
   }
   ArtField* static_fields_of_classes_to_initialize[] = {
+      // Ensure `VMRuntime` is initialized (avoid check at runtime).
+      WellKnownClasses::dalvik_system_VMRuntime_nonSdkApiUsageConsumer,
       // Initialize empty arrays needed by `StackOverflowError`.
       WellKnownClasses::java_util_Collections_EMPTY_LIST,
       WellKnownClasses::libcore_util_EmptyArray_STACK_TRACE_ELEMENT,
@@ -1399,10 +1403,9 @@ void ClassLinker::AddExtraBootDexFiles(
   }
 }
 
-bool ClassLinker::IsBootClassLoader(ScopedObjectAccessAlreadyRunnable& soa,
-                                    ObjPtr<mirror::ClassLoader> class_loader) {
+bool ClassLinker::IsBootClassLoader(ObjPtr<mirror::ClassLoader> class_loader) {
   return class_loader == nullptr ||
-       soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader) ==
+       WellKnownClasses::ToClass(WellKnownClasses::java_lang_BootClassLoader) ==
            class_loader->GetClass();
 }
 
@@ -2016,9 +2019,8 @@ bool ClassLinker::AddImageSpace(
   }
 
   if (app_image) {
-    ScopedObjectAccessUnchecked soa(Thread::Current());
-    ScopedAssertNoThreadSuspension sants("Checking app image", soa.Self());
-    if (IsBootClassLoader(soa, image_class_loader.Get())) {
+    ScopedAssertNoThreadSuspension sants("Checking app image");
+    if (IsBootClassLoader(image_class_loader.Get())) {
       *error_msg = "Unexpected BootClassLoader in app image";
       return false;
     }
@@ -2727,18 +2729,16 @@ do {                                                                          \
   }                                                                           \
 } while (0)
 
-bool ClassLinker::FindClassInSharedLibraries(ScopedObjectAccessAlreadyRunnable& soa,
-                                             Thread* self,
+bool ClassLinker::FindClassInSharedLibraries(Thread* self,
                                              const char* descriptor,
                                              size_t hash,
                                              Handle<mirror::ClassLoader> class_loader,
                                              /*out*/ ObjPtr<mirror::Class>* result) {
   ArtField* field = WellKnownClasses::dalvik_system_BaseDexClassLoader_sharedLibraryLoaders;
-  return FindClassInSharedLibrariesHelper(soa, self, descriptor, hash, class_loader, field, result);
+  return FindClassInSharedLibrariesHelper(self, descriptor, hash, class_loader, field, result);
 }
 
-bool ClassLinker::FindClassInSharedLibrariesHelper(ScopedObjectAccessAlreadyRunnable& soa,
-                                                   Thread* self,
+bool ClassLinker::FindClassInSharedLibrariesHelper(Thread* self,
                                                    const char* descriptor,
                                                    size_t hash,
                                                    Handle<mirror::ClassLoader> class_loader,
@@ -2756,37 +2756,35 @@ bool ClassLinker::FindClassInSharedLibrariesHelper(ScopedObjectAccessAlreadyRunn
   for (auto loader : shared_libraries.Iterate<mirror::ClassLoader>()) {
     temp_loader.Assign(loader);
     RETURN_IF_UNRECOGNIZED_OR_FOUND_OR_EXCEPTION(
-        FindClassInBaseDexClassLoader(soa, self, descriptor, hash, temp_loader, result),
+        FindClassInBaseDexClassLoader(self, descriptor, hash, temp_loader, result),
         *result,
         self);
   }
   return true;
 }
 
-bool ClassLinker::FindClassInSharedLibrariesAfter(ScopedObjectAccessAlreadyRunnable& soa,
-                                                  Thread* self,
+bool ClassLinker::FindClassInSharedLibrariesAfter(Thread* self,
                                                   const char* descriptor,
                                                   size_t hash,
                                                   Handle<mirror::ClassLoader> class_loader,
                                                   /*out*/ ObjPtr<mirror::Class>* result) {
   ArtField* field = WellKnownClasses::dalvik_system_BaseDexClassLoader_sharedLibraryLoadersAfter;
-  return FindClassInSharedLibrariesHelper(soa, self, descriptor, hash, class_loader, field, result);
+  return FindClassInSharedLibrariesHelper(self, descriptor, hash, class_loader, field, result);
 }
 
-bool ClassLinker::FindClassInBaseDexClassLoader(ScopedObjectAccessAlreadyRunnable& soa,
-                                                Thread* self,
+bool ClassLinker::FindClassInBaseDexClassLoader(Thread* self,
                                                 const char* descriptor,
                                                 size_t hash,
                                                 Handle<mirror::ClassLoader> class_loader,
                                                 /*out*/ ObjPtr<mirror::Class>* result) {
   // Termination case: boot class loader.
-  if (IsBootClassLoader(soa, class_loader.Get())) {
+  if (IsBootClassLoader(class_loader.Get())) {
     RETURN_IF_UNRECOGNIZED_OR_FOUND_OR_EXCEPTION(
         FindClassInBootClassLoaderClassPath(self, descriptor, hash, result), *result, self);
     return true;
   }
 
-  if (IsPathOrDexClassLoader(soa, class_loader) || IsInMemoryDexClassLoader(soa, class_loader)) {
+  if (IsPathOrDexClassLoader(class_loader) || IsInMemoryDexClassLoader(class_loader)) {
     // For regular path or dex class loader the search order is:
     //    - parent
     //    - shared libraries
@@ -2796,19 +2794,19 @@ bool ClassLinker::FindClassInBaseDexClassLoader(ScopedObjectAccessAlreadyRunnabl
     StackHandleScope<1> hs(self);
     Handle<mirror::ClassLoader> h_parent(hs.NewHandle(class_loader->GetParent()));
     RETURN_IF_UNRECOGNIZED_OR_FOUND_OR_EXCEPTION(
-        FindClassInBaseDexClassLoader(soa, self, descriptor, hash, h_parent, result),
+        FindClassInBaseDexClassLoader(self, descriptor, hash, h_parent, result),
         *result,
         self);
     RETURN_IF_UNRECOGNIZED_OR_FOUND_OR_EXCEPTION(
-        FindClassInSharedLibraries(soa, self, descriptor, hash, class_loader, result),
+        FindClassInSharedLibraries(self, descriptor, hash, class_loader, result),
         *result,
         self);
     RETURN_IF_UNRECOGNIZED_OR_FOUND_OR_EXCEPTION(
-        FindClassInBaseDexClassLoaderClassPath(soa, descriptor, hash, class_loader, result),
+        FindClassInBaseDexClassLoaderClassPath(self, descriptor, hash, class_loader, result),
         *result,
         self);
     RETURN_IF_UNRECOGNIZED_OR_FOUND_OR_EXCEPTION(
-        FindClassInSharedLibrariesAfter(soa, self, descriptor, hash, class_loader, result),
+        FindClassInSharedLibrariesAfter(self, descriptor, hash, class_loader, result),
         *result,
         self);
     // We did not find a class, but the class loader chain was recognized, so we
@@ -2816,7 +2814,7 @@ bool ClassLinker::FindClassInBaseDexClassLoader(ScopedObjectAccessAlreadyRunnabl
     return true;
   }
 
-  if (IsDelegateLastClassLoader(soa, class_loader)) {
+  if (IsDelegateLastClassLoader(class_loader)) {
     // For delegate last, the search order is:
     //    - boot class path
     //    - shared libraries
@@ -2825,15 +2823,15 @@ bool ClassLinker::FindClassInBaseDexClassLoader(ScopedObjectAccessAlreadyRunnabl
     RETURN_IF_UNRECOGNIZED_OR_FOUND_OR_EXCEPTION(
         FindClassInBootClassLoaderClassPath(self, descriptor, hash, result), *result, self);
     RETURN_IF_UNRECOGNIZED_OR_FOUND_OR_EXCEPTION(
-        FindClassInSharedLibraries(soa, self, descriptor, hash, class_loader, result),
+        FindClassInSharedLibraries(self, descriptor, hash, class_loader, result),
         *result,
         self);
     RETURN_IF_UNRECOGNIZED_OR_FOUND_OR_EXCEPTION(
-        FindClassInBaseDexClassLoaderClassPath(soa, descriptor, hash, class_loader, result),
+        FindClassInBaseDexClassLoaderClassPath(self, descriptor, hash, class_loader, result),
         *result,
         self);
     RETURN_IF_UNRECOGNIZED_OR_FOUND_OR_EXCEPTION(
-        FindClassInSharedLibrariesAfter(soa, self, descriptor, hash, class_loader, result),
+        FindClassInSharedLibrariesAfter(self, descriptor, hash, class_loader, result),
         *result,
         self);
 
@@ -2841,7 +2839,7 @@ bool ClassLinker::FindClassInBaseDexClassLoader(ScopedObjectAccessAlreadyRunnabl
     StackHandleScope<1> hs(self);
     Handle<mirror::ClassLoader> h_parent(hs.NewHandle(class_loader->GetParent()));
     RETURN_IF_UNRECOGNIZED_OR_FOUND_OR_EXCEPTION(
-        FindClassInBaseDexClassLoader(soa, self, descriptor, hash, h_parent, result),
+        FindClassInBaseDexClassLoader(self, descriptor, hash, h_parent, result),
         *result,
         self);
     // We did not find a class, but the class loader chain was recognized, so we
@@ -2910,14 +2908,14 @@ bool ClassLinker::FindClassInBootClassLoaderClassPath(Thread* self,
 }
 
 bool ClassLinker::FindClassInBaseDexClassLoaderClassPath(
-    ScopedObjectAccessAlreadyRunnable& soa,
+    Thread* self,
     const char* descriptor,
     size_t hash,
     Handle<mirror::ClassLoader> class_loader,
     /*out*/ ObjPtr<mirror::Class>* result) {
-  DCHECK(IsPathOrDexClassLoader(soa, class_loader) ||
-         IsInMemoryDexClassLoader(soa, class_loader) ||
-         IsDelegateLastClassLoader(soa, class_loader))
+  DCHECK(IsPathOrDexClassLoader(class_loader) ||
+         IsInMemoryDexClassLoader(class_loader) ||
+         IsDelegateLastClassLoader(class_loader))
       << "Unexpected class loader for descriptor " << descriptor;
 
   const DexFile* dex_file = nullptr;
@@ -2932,15 +2930,15 @@ bool ClassLinker::FindClassInBaseDexClassLoaderClassPath(
     }
     return true;  // Continue with the next DexFile.
   };
-  VisitClassLoaderDexFiles(soa, class_loader, find_class_def);
+  VisitClassLoaderDexFiles(self, class_loader, find_class_def);
 
   if (class_def != nullptr) {
-    *result = DefineClass(soa.Self(), descriptor, hash, class_loader, *dex_file, *class_def);
+    *result = DefineClass(self, descriptor, hash, class_loader, *dex_file, *class_def);
     if (UNLIKELY(*result == nullptr)) {
-      CHECK(soa.Self()->IsExceptionPending()) << descriptor;
-      FilterDexFileCaughtExceptions(soa.Self(), this);
+      CHECK(self->IsExceptionPending()) << descriptor;
+      FilterDexFileCaughtExceptions(self, this);
     } else {
-      DCHECK(!soa.Self()->IsExceptionPending());
+      DCHECK(!self->IsExceptionPending());
     }
   }
   // A BaseDexClassLoader is always a known lookup.
@@ -2996,7 +2994,7 @@ ObjPtr<mirror::Class> ClassLinker::FindClass(Thread* self,
   } else {
     ScopedObjectAccessUnchecked soa(self);
     bool known_hierarchy =
-        FindClassInBaseDexClassLoader(soa, self, descriptor, hash, class_loader, &result_ptr);
+        FindClassInBaseDexClassLoader(self, descriptor, hash, class_loader, &result_ptr);
     if (result_ptr != nullptr) {
       // The chain was understood and we found the class. We still need to add the class to
       // the class table to protect from racy programs that can try and redefine the path list
@@ -10188,7 +10186,7 @@ ObjPtr<mirror::ClassLoader> ClassLinker::CreateWellKnownClassLoader(
   DCHECK(parent_field != nullptr);
   if (parent_loader.Get() == nullptr) {
     ScopedObjectAccessUnchecked soa(self);
-    ObjPtr<mirror::Object> boot_loader(soa.Decode<mirror::Class>(
+    ObjPtr<mirror::Object> boot_loader(WellKnownClasses::ToClass(
         WellKnownClasses::java_lang_BootClassLoader)->AllocObject(self));
     parent_field->SetObject<false>(h_class_loader.Get(), boot_loader);
   } else {
