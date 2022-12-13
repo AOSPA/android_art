@@ -891,7 +891,7 @@ static jobject CreateSystemClassLoader(Runtime* runtime) {
   soa.Self()->SetClassLoaderOverride(g_system_class_loader);
 
   ObjPtr<mirror::Class> thread_class =
-      WellKnownClasses::ToClass(WellKnownClasses::java_lang_Thread);
+      WellKnownClasses::java_lang_Thread_init->GetDeclaringClass();
   ArtField* contextClassLoader =
       thread_class->FindDeclaredInstanceField("contextClassLoader", "Ljava/lang/ClassLoader;");
   CHECK(contextClassLoader != nullptr);
@@ -2226,12 +2226,26 @@ void Runtime::InitThreadGroups(Thread* self) {
   ScopedObjectAccess soa(self);
   ArtField* main_thread_group_field = WellKnownClasses::java_lang_ThreadGroup_mainThreadGroup;
   ArtField* system_thread_group_field = WellKnownClasses::java_lang_ThreadGroup_systemThreadGroup;
-  ObjPtr<mirror::Class> thread_group_class = main_thread_group_field->GetDeclaringClass();
+  // Note: This is running before `ClassLinker::RunRootClinits()`, so we cannot rely on
+  // `ThreadGroup` and `Thread` being initialized.
+  // TODO: Clean up initialization order after all well-known methods are converted to `ArtMethod*`
+  // (and therefore the `WellKnownClasses::Init()` shall not initialize any classes).
+  StackHandleScope<2u> hs(self);
+  Handle<mirror::Class> thread_group_class =
+      hs.NewHandle(main_thread_group_field->GetDeclaringClass());
+  bool initialized = GetClassLinker()->EnsureInitialized(
+      self, thread_group_class, /*can_init_fields=*/ true, /*can_init_parents=*/ true);
+  CHECK(initialized);
+  Handle<mirror::Class> thread_class =
+      hs.NewHandle(WellKnownClasses::java_lang_Thread_init->GetDeclaringClass());
+  initialized = GetClassLinker()->EnsureInitialized(
+      self, thread_class, /*can_init_fields=*/ true, /*can_init_parents=*/ true);
+  CHECK(initialized);
   main_thread_group_ =
-      soa.Vm()->AddGlobalRef(self, main_thread_group_field->GetObject(thread_group_class));
+      soa.Vm()->AddGlobalRef(self, main_thread_group_field->GetObject(thread_group_class.Get()));
   CHECK_IMPLIES(main_thread_group_ == nullptr, IsAotCompiler());
   system_thread_group_ =
-      soa.Vm()->AddGlobalRef(self, system_thread_group_field->GetObject(thread_group_class));
+      soa.Vm()->AddGlobalRef(self, system_thread_group_field->GetObject(thread_group_class.Get()));
   CHECK_IMPLIES(system_thread_group_ == nullptr, IsAotCompiler());
 }
 
@@ -3299,11 +3313,28 @@ void Runtime::ResetStartupCompleted() {
   startup_completed_.store(false, std::memory_order_seq_cst);
 }
 
-class UnlinkStartupDexCacheVisitor : public DexCacheVisitor {
+class CollectStartupDexCacheVisitor : public DexCacheVisitor {
  public:
+  explicit CollectStartupDexCacheVisitor(VariableSizedHandleScope& handles) : handles_(handles) {}
+
   void Visit(ObjPtr<mirror::DexCache> dex_cache)
       REQUIRES_SHARED(Locks::dex_lock_, Locks::mutator_lock_) override {
-    dex_cache->UnlinkStartupCaches();
+    handles_.NewHandle(dex_cache);
+  }
+
+ private:
+  VariableSizedHandleScope& handles_;
+};
+
+class UnlinkVisitor {
+ public:
+  UnlinkVisitor() {}
+
+  void VisitRootIfNonNull(StackReference<mirror::Object>* ref)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (!ref->IsNull()) {
+      ref->AsMirrorPtr()->AsDexCache()->UnlinkStartupCaches();
+    }
   }
 };
 
@@ -3321,9 +3352,10 @@ class Runtime::NotifyStartupCompletedTask : public gc::HeapTask {
       ScopedTrace trace("Releasing dex caches and app image spaces metadata");
       ScopedObjectAccess soa(Thread::Current());
 
+      // Collect dex caches that were allocated with the startup linear alloc.
+      VariableSizedHandleScope handles(soa.Self());
       {
-        // Unlink dex caches that were allocated with the startup linear alloc.
-        UnlinkStartupDexCacheVisitor visitor;
+        CollectStartupDexCacheVisitor visitor(handles);
         ReaderMutexLock mu(self, *Locks::dex_lock_);
         runtime->GetClassLinker()->VisitDexCaches(&visitor);
       }
@@ -3341,6 +3373,12 @@ class Runtime::NotifyStartupCompletedTask : public gc::HeapTask {
         gc::ScopedInterruptibleGCCriticalSection sigcs(self,
                                                        gc::kGcCauseRunEmptyCheckpoint,
                                                        gc::kCollectorTypeCriticalSection);
+        // Do the unlinking of dex cache arrays in the GC critical section to
+        // avoid GC not seeing these arrays. We do it before the checkpoint so
+        // we know after the checkpoint, no thread is holding onto the array.
+        UnlinkVisitor visitor;
+        handles.VisitRoots(visitor);
+
         runtime->GetThreadList()->RunEmptyCheckpoint();
       }
 

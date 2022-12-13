@@ -16,11 +16,8 @@
 
 
 def run(ctx, args):
-  # The test logs error messages which is expected, discard them.
-  ctx.env.ANDROID_LOG_TAGS = "*:f"
-
   ctx.default_run(
       args,
-      external_log_tags=True,
+      android_log_tags="*:f",
       runtime_option=["-XX:FinalizerTimeoutMs=500"],
       expected_exit_code=2)

@@ -13,20 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import subprocess, os
-
-
 def build(ctx):
   ctx.default_build()
   if ctx.jvm:
     return
   # Change the generated dex file to have a v35 magic number if it is version 38
-  with open("classes.dex", "rb+") as f:
+  with open(ctx.test_dir / "classes.dex", "rb+") as f:
     assert f.read(8) == b"dex\n038\x00"
     f.seek(0)
     f.write(b"dex\n035\x00")
-  os.remove("180-native-default-method.jar")
-  cmd = [
-      ctx.soong_zip, "-o", "180-native-default-method.jar", "-f", "classes.dex"
-  ]
-  subprocess.run(cmd, check=True)
+  (ctx.test_dir / "180-native-default-method.jar").unlink()
+  ctx.soong_zip([
+      "-o", ctx.test_dir / "180-native-default-method.jar", "-j",
+      "-f", ctx.test_dir / "classes.dex"
+  ])
