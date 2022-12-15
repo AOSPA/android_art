@@ -2825,12 +2825,14 @@ class JNI {
     // We therefore call Buffer.isDirect(). One path that creates such a buffer is
     // FileChannel.map() if the file size is zero.
     //
-    // NB GetDirectBufferAddress() does not need to call Buffer.isDirect() since it is only
+    // NB GetDirectBufferAddress() does not need to call `Buffer.isDirect()` since it is only
     // able return a valid address if the Buffer address field is not-null.
-    ArtMethod* is_direct_method = buffer->GetClass()->FindVirtualMethodForVirtual(
-        WellKnownClasses::java_nio_Buffer_isDirect, kRuntimePointerSize);
-    uint8_t direct = is_direct_method->InvokeInstance<'Z'>(soa.Self(), buffer.Get());
-    if (direct == 0u) {
+    //
+    // Note: We can hit a `StackOverflowError` during the invocation but `Buffer.isDirect()`
+    // implementations should not otherwise throw any exceptions.
+    bool direct = WellKnownClasses::java_nio_Buffer_isDirect->InvokeVirtual<'Z'>(
+        soa.Self(), buffer.Get());
+    if (UNLIKELY(soa.Self()->IsExceptionPending()) || !direct) {
       return -1;
     }
 
@@ -2852,7 +2854,7 @@ class JNI {
       return JNIGlobalRefType;
     case kWeakGlobal:
       return JNIWeakGlobalRefType;
-    case kJniTransitionOrInvalid:
+    case kJniTransition:
       // Assume value is in a JNI transition frame.
       return JNILocalRefType;
     }

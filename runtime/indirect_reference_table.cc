@@ -14,10 +14,10 @@
  * limitations under the License.
  */
 
-#include "base/bit_utils.h"
-#include "base/globals.h"
 #include "indirect_reference_table-inl.h"
 
+#include "base/bit_utils.h"
+#include "base/globals.h"
 #include "base/mutator_locked_dumpable.h"
 #include "base/systrace.h"
 #include "base/utils.h"
@@ -26,8 +26,9 @@
 #include "jni/jni_internal.h"
 #include "mirror/object-inl.h"
 #include "nth_caller_visitor.h"
+#include "object_callbacks.h"
 #include "reference_table.h"
-#include "runtime.h"
+#include "runtime-inl.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread.h"
 
@@ -41,10 +42,10 @@ static constexpr bool kDebugIRT = false;
 // Maximum table size we allow.
 static constexpr size_t kMaxTableSizeInBytes = 128 * MB;
 
-const char* GetIndirectRefKindString(const IndirectRefKind& kind) {
+const char* GetIndirectRefKindString(IndirectRefKind kind) {
   switch (kind) {
-    case kJniTransitionOrInvalid:
-      return "JniTransitionOrInvalid";
+    case kJniTransition:
+      return "JniTransition";
     case kLocal:
       return "Local";
     case kGlobal:
@@ -113,23 +114,23 @@ void SmallIrtAllocator::Deallocate(IrtEntry* unneeded) {
   small_irt_freelist_ = unneeded;
 }
 
-IndirectReferenceTable::IndirectReferenceTable(size_t max_count,
-                                               IndirectRefKind desired_kind,
-                                               ResizableCapacity resizable,
-                                               std::string* error_msg)
+IndirectReferenceTable::IndirectReferenceTable(IndirectRefKind kind, ResizableCapacity resizable)
     : segment_state_(kIRTFirstSegment),
       table_(nullptr),
-      kind_(desired_kind),
-      max_entries_(max_count),
+      kind_(kind),
+      max_entries_(0u),
       current_num_holes_(0),
       resizable_(resizable) {
+  CHECK_NE(kind, kJniTransition);
+}
+
+bool IndirectReferenceTable::Initialize(size_t max_count, std::string* error_msg) {
   CHECK(error_msg != nullptr);
-  CHECK_NE(desired_kind, kJniTransitionOrInvalid);
 
   // Overflow and maximum check.
   CHECK_LE(max_count, kMaxTableSizeInBytes / sizeof(IrtEntry));
 
-  if (max_entries_ <= kSmallIrtEntries) {
+  if (max_count <= kSmallIrtEntries) {
     table_ = Runtime::Current()->GetSmallIrtAllocator()->Allocate(error_msg);
     if (table_ != nullptr) {
       max_entries_ = kSmallIrtEntries;
@@ -139,20 +140,18 @@ IndirectReferenceTable::IndirectReferenceTable(size_t max_count,
   if (table_ == nullptr) {
     const size_t table_bytes = RoundUp(max_count * sizeof(IrtEntry), kPageSize);
     table_mem_map_ = NewIRTMap(table_bytes, error_msg);
-    if (!table_mem_map_.IsValid() && error_msg->empty()) {
-      *error_msg = "Unable to map memory for indirect ref table";
+    if (!table_mem_map_.IsValid()) {
+      DCHECK(!error_msg->empty());
+      return false;
     }
 
-    if (table_mem_map_.IsValid()) {
-      table_ = reinterpret_cast<IrtEntry*>(table_mem_map_.Begin());
-    } else {
-      table_ = nullptr;
-    }
+    table_ = reinterpret_cast<IrtEntry*>(table_mem_map_.Begin());
     // Take into account the actual length.
     max_entries_ = table_bytes / sizeof(IrtEntry);
   }
   segment_state_ = kIRTFirstSegment;
   last_known_previous_state_ = kIRTFirstSegment;
+  return true;
 }
 
 IndirectReferenceTable::~IndirectReferenceTable() {
@@ -421,7 +420,7 @@ bool IndirectReferenceTable::Remove(IRTSegmentState previous_state, IndirectRef 
   // TODO: We should eagerly check the ref kind against the `kind_` instead of
   // relying on this weak check and postponing the rest until `CheckEntry()` below.
   // Passing the wrong kind shall currently result in misleading warnings.
-  if (GetIndirectRefKind(iref) == kJniTransitionOrInvalid) {
+  if (GetIndirectRefKind(iref) == kJniTransition) {
     auto* self = Thread::Current();
     ScopedObjectAccess soa(self);
     if (self->IsJniTransitionReference(reinterpret_cast<jobject>(iref))) {
@@ -529,10 +528,29 @@ void IndirectReferenceTable::Trim() {
 
 void IndirectReferenceTable::VisitRoots(RootVisitor* visitor, const RootInfo& root_info) {
   BufferedRootVisitor<kDefaultBufferedRootCount> root_visitor(visitor, root_info);
-  for (auto ref : *this) {
+  for (size_t i = 0, capacity = Capacity(); i != capacity; ++i) {
+    GcRoot<mirror::Object>* ref = table_[i].GetReference();
     if (!ref->IsNull()) {
       root_visitor.VisitRoot(*ref);
       DCHECK(!ref->IsNull());
+    }
+  }
+}
+
+void IndirectReferenceTable::SweepJniWeakGlobals(IsMarkedVisitor* visitor) {
+  CHECK_EQ(kind_, kWeakGlobal);
+  MutexLock mu(Thread::Current(), *Locks::jni_weak_globals_lock_);
+  Runtime* const runtime = Runtime::Current();
+  for (size_t i = 0, capacity = Capacity(); i != capacity; ++i) {
+    GcRoot<mirror::Object>* entry = table_[i].GetReference();
+    // Need to skip null here to distinguish between null entries and cleared weak ref entries.
+    if (!entry->IsNull()) {
+      mirror::Object* obj = entry->Read<kWithoutReadBarrier>();
+      mirror::Object* new_obj = visitor->IsMarked(obj);
+      if (new_obj == nullptr) {
+        new_obj = runtime->GetClearedJniWeakGlobal();
+      }
+      *entry = GcRoot<mirror::Object>(new_obj);
     }
   }
 }

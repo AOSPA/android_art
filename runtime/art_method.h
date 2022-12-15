@@ -357,17 +357,19 @@ class ArtMethod final {
   }
 
   void SetMemorySharedMethod() REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (!IsIntrinsic() && !IsAbstract()) {
+    uint32_t access_flags = GetAccessFlags();
+    if (!IsIntrinsic(access_flags) && !IsAbstract(access_flags)) {
       AddAccessFlags(kAccMemorySharedMethod);
       SetHotCounter();
     }
   }
 
   void ClearMemorySharedMethod() REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (IsIntrinsic() || IsAbstract()) {
+    uint32_t access_flags = GetAccessFlags();
+    if (IsIntrinsic(access_flags) || IsAbstract(access_flags)) {
       return;
     }
-    if (IsMemorySharedMethod()) {
+    if (IsMemorySharedMethod(access_flags)) {
       ClearAccessFlags(kAccMemorySharedMethod);
     }
   }
@@ -675,6 +677,27 @@ class ArtMethod final {
                  typename detail::ShortyTraits<ArgType>::Type... args)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  template <char ReturnType, char... ArgType>
+  typename detail::ShortyTraits<ReturnType>::Type
+  InvokeFinal(Thread* self,
+              ObjPtr<mirror::Object> receiver,
+              typename detail::ShortyTraits<ArgType>::Type... args)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  template <char ReturnType, char... ArgType>
+  typename detail::ShortyTraits<ReturnType>::Type
+  InvokeVirtual(Thread* self,
+                ObjPtr<mirror::Object> receiver,
+                typename detail::ShortyTraits<ArgType>::Type... args)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  template <char ReturnType, char... ArgType>
+  typename detail::ShortyTraits<ReturnType>::Type
+  InvokeInterface(Thread* self,
+                  ObjPtr<mirror::Object> receiver,
+                  typename detail::ShortyTraits<ArgType>::Type... args)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   const void* GetEntryPointFromQuickCompiledCode() const {
     return GetEntryPointFromQuickCompiledCodePtrSize(kRuntimePointerSize);
   }
@@ -797,7 +820,11 @@ class ArtMethod final {
   }
 
   bool HasCodeItem() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return !IsRuntimeMethod() && !IsNative() && !IsProxyMethod() && !IsAbstract();
+    uint32_t access_flags = GetAccessFlags();
+    return !IsNative(access_flags) &&
+           !IsAbstract(access_flags) &&
+           !IsRuntimeMethod() &&
+           !IsProxyMethod();
   }
 
   // We need to explicitly indicate whether the code item is obtained from the compact dex file,
