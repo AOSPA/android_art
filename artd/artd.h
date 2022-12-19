@@ -17,6 +17,7 @@
 #ifndef ART_ARTD_ARTD_H_
 #define ART_ARTD_ARTD_H_
 
+#include <sys/stat.h>
 #include <sys/types.h>
 
 #include <csignal>
@@ -36,6 +37,7 @@
 #include "android-base/result.h"
 #include "android-base/thread_annotations.h"
 #include "android/binder_auto_utils.h"
+#include "base/os.h"
 #include "exec_utils.h"
 #include "oat_file_assistant_context.h"
 #include "tools/cmdline_builder.h"
@@ -70,8 +72,12 @@ class Artd : public aidl::com::android::server::art::BnArtd {
   explicit Artd(std::unique_ptr<art::tools::SystemProperties> props =
                     std::make_unique<art::tools::SystemProperties>(),
                 std::unique_ptr<ExecUtils> exec_utils = std::make_unique<ExecUtils>(),
-                std::function<int(pid_t, int)> kill_func = kill)
-      : props_(std::move(props)), exec_utils_(std::move(exec_utils)), kill_(std::move(kill_func)) {}
+                std::function<int(pid_t, int)> kill_func = kill,
+                std::function<int(int, struct stat*)> fstat_func = fstat)
+      : props_(std::move(props)),
+        exec_utils_(std::move(exec_utils)),
+        kill_(std::move(kill_func)),
+        fstat_(std::move(fstat_func)) {}
 
   ndk::ScopedAStatus isAlive(bool* _aidl_return) override;
 
@@ -109,7 +115,8 @@ class Artd : public aidl::com::android::server::art::BnArtd {
       const std::vector<aidl::com::android::server::art::ProfilePath>& in_profiles,
       const std::optional<aidl::com::android::server::art::ProfilePath>& in_referenceProfile,
       aidl::com::android::server::art::OutputProfile* in_outputProfile,
-      const std::string& in_dexFile,
+      const std::vector<std::string>& in_dexFiles,
+      const aidl::com::android::server::art::MergeProfileOptions& in_options,
       bool* _aidl_return) override;
 
   ndk::ScopedAStatus getArtifactsVisibility(
@@ -162,7 +169,11 @@ class Artd : public aidl::com::android::server::art::BnArtd {
 
   android::base::Result<const std::vector<std::string>*> GetBootClassPath() EXCLUDES(cache_mu_);
 
+  bool UseJitZygote() EXCLUDES(cache_mu_);
   bool UseJitZygoteLocked() REQUIRES(cache_mu_);
+
+  const std::string& GetUserDefinedBootImageLocations() EXCLUDES(cache_mu_);
+  const std::string& GetUserDefinedBootImageLocationsLocked() REQUIRES(cache_mu_);
 
   bool DenyArtApexDataFiles() EXCLUDES(cache_mu_);
   bool DenyArtApexDataFilesLocked() REQUIRES(cache_mu_);
@@ -182,6 +193,8 @@ class Artd : public aidl::com::android::server::art::BnArtd {
 
   bool ShouldCreateSwapFileForDexopt();
 
+  void AddBootImageFlags(/*out*/ art::tools::CmdlineBuilder& args);
+
   void AddCompilerConfigFlags(const std::string& instruction_set,
                               const std::string& compiler_filter,
                               aidl::com::android::server::art::PriorityClass priority_class,
@@ -191,10 +204,13 @@ class Artd : public aidl::com::android::server::art::BnArtd {
   void AddPerfConfigFlags(aidl::com::android::server::art::PriorityClass priority_class,
                           /*out*/ art::tools::CmdlineBuilder& args);
 
+  android::base::Result<struct stat> Fstat(const art::File& file) const;
+
   std::mutex cache_mu_;
   std::optional<std::vector<std::string>> cached_boot_image_locations_ GUARDED_BY(cache_mu_);
   std::optional<std::vector<std::string>> cached_boot_class_path_ GUARDED_BY(cache_mu_);
   std::optional<bool> cached_use_jit_zygote_ GUARDED_BY(cache_mu_);
+  std::optional<std::string> cached_user_defined_boot_image_locations_ GUARDED_BY(cache_mu_);
   std::optional<bool> cached_deny_art_apex_data_files_ GUARDED_BY(cache_mu_);
 
   std::mutex ofa_context_mu_;
@@ -203,6 +219,7 @@ class Artd : public aidl::com::android::server::art::BnArtd {
   const std::unique_ptr<art::tools::SystemProperties> props_;
   const std::unique_ptr<ExecUtils> exec_utils_;
   const std::function<int(pid_t, int)> kill_;
+  const std::function<int(int, struct stat*)> fstat_;
 };
 
 }  // namespace artd

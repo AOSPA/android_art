@@ -27,7 +27,7 @@
 
 #include "jni.h"
 
-#include "art_method-inl.h"
+#include "art_method-alloc-inl.h"
 #include "base/mem_map.h"
 #include "base/mutex.h"
 #include "class_linker.h"
@@ -44,7 +44,7 @@
 #include "scoped_thread_state_change-inl.h"
 #include "thread-inl.h"
 #include "thread_list.h"
-#include "well_known_classes.h"
+#include "well_known_classes-inl.h"
 
 namespace art {
 
@@ -165,26 +165,20 @@ TEST_F(ThreadLifecycleCallbackRuntimeCallbacksTest, ThreadLifecycleCallbackJava)
   cb_.state = CallbackState::kBase;  // Ignore main thread attach.
 
   ScopedObjectAccess soa(self);
-  MakeExecutable(WellKnownClasses::java_lang_Thread_init->GetDeclaringClass());
+  MakeExecutable(WellKnownClasses::java_lang_Thread.Get());
 
-  StackHandleScope<2u> hs(self);
+  StackHandleScope<3u> hs(self);
   Handle<mirror::String> thread_name = hs.NewHandle(
       mirror::String::AllocFromModifiedUtf8(self, "ThreadLifecycleCallback test thread"));
   ASSERT_TRUE(thread_name != nullptr);
 
-  DCHECK(WellKnownClasses::java_lang_Thread_init->GetDeclaringClass()->IsInitialized());
-  Handle<mirror::Object> thread = hs.NewHandle(
-      WellKnownClasses::java_lang_Thread_init->GetDeclaringClass()->AllocObject(self));
-  ASSERT_TRUE(thread != nullptr);
-
-  WellKnownClasses::java_lang_Thread_init->InvokeInstance<'V', 'L', 'L', 'I', 'Z'>(
-      self,
-      thread.Get(),
-      soa.Decode<mirror::Object>(runtime_->GetMainThreadGroup()),
-      thread_name.Get(),
-      kMinThreadPriority,
-      /*daemon=*/ false);
+  Handle<mirror::Object> thread_group =
+      hs.NewHandle(soa.Decode<mirror::Object>(runtime_->GetMainThreadGroup()));
+  Handle<mirror::Object> thread =
+      WellKnownClasses::java_lang_Thread_init->NewObject<'L', 'L', 'I', 'Z'>(
+          hs, self, thread_group, thread_name, kMinThreadPriority, /*daemon=*/ false);
   ASSERT_FALSE(self->IsExceptionPending());
+  ASSERT_TRUE(thread != nullptr);
 
   ArtMethod* start_method =
       thread->GetClass()->FindClassMethod("start", "()V", kRuntimePointerSize);
@@ -515,12 +509,11 @@ TEST_F(MonitorWaitCallbacksTest, WaitUnlocked) {
     ASSERT_TRUE(started);
     {
       ScopedObjectAccess soa(self);
-      cb_.SetInterestingObject(
-          WellKnownClasses::java_util_Collections_EMPTY_LIST->GetDeclaringClass());
+      cb_.SetInterestingObject(WellKnownClasses::java_util_Collections.Get());
       Monitor::Wait(
           self,
           // Just a random class
-          WellKnownClasses::java_util_Collections_EMPTY_LIST->GetDeclaringClass(),
+          WellKnownClasses::java_util_Collections.Get(),
           /*ms=*/0,
           /*ns=*/0,
           /*interruptShouldThrow=*/false,

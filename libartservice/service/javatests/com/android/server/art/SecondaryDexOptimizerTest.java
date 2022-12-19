@@ -16,8 +16,8 @@
 
 package com.android.server.art;
 
-import static com.android.server.art.DexUseManager.DetailedSecondaryDexInfo;
-import static com.android.server.art.DexUseManager.SecondaryDexInfo;
+import static com.android.server.art.DexUseManagerLocal.DetailedSecondaryDexInfo;
+import static com.android.server.art.DexUseManagerLocal.SecondaryDexInfo;
 import static com.android.server.art.GetDexoptNeededResult.ArtifactsLocation;
 import static com.android.server.art.OutputArtifacts.PermissionSettings;
 import static com.android.server.art.model.OptimizeResult.DexContainerFileOptimizeResult;
@@ -95,13 +95,15 @@ public class SecondaryDexOptimizerTest {
             | DexoptTrigger.COMPILER_FILTER_IS_SAME
             | DexoptTrigger.PRIMARY_BOOT_IMAGE_BECOMES_USABLE;
 
+    private final MergeProfileOptions mMergeProfileOptions = new MergeProfileOptions();
+
     @Rule
     public StaticMockitoRule mockitoRule =
             new StaticMockitoRule(SystemProperties.class, Constants.class);
 
     @Mock private SecondaryDexOptimizer.Injector mInjector;
     @Mock private IArtd mArtd;
-    @Mock private DexUseManager mDexUseManager;
+    @Mock private DexUseManagerLocal mDexUseManager;
     private PackageState mPkgState;
     private AndroidPackage mPkg;
     private CancellationSignal mCancellationSignal;
@@ -182,7 +184,8 @@ public class SecondaryDexOptimizerTest {
         // It should use profile for dex 1.
 
         verify(mArtd).mergeProfiles(deepEq(List.of(mDex1CurProfile)), deepEq(mDex1RefProfile),
-                deepEq(mDex1PrivateOutputProfile), eq(DEX_1));
+                deepEq(mDex1PrivateOutputProfile), deepEq(List.of(DEX_1)),
+                deepEq(mMergeProfileOptions));
 
         verify(mArtd).getDexoptNeeded(
                 eq(DEX_1), eq("arm64"), any(), eq("speed-profile"), eq(mBetterOrSameDexoptTrigger));
@@ -196,7 +199,7 @@ public class SecondaryDexOptimizerTest {
         // It should use "speed" for dex 2 for both ISAs and make the artifacts public.
 
         verify(mArtd, never()).isProfileUsable(deepEq(mDex2RefProfile), any());
-        verify(mArtd, never()).mergeProfiles(any(), deepEq(mDex2RefProfile), any(), any());
+        verify(mArtd, never()).mergeProfiles(any(), deepEq(mDex2RefProfile), any(), any(), any());
 
         verify(mArtd).getDexoptNeeded(
                 eq(DEX_2), eq("arm64"), any(), eq("speed"), eq(mDefaultDexoptTrigger));
@@ -211,7 +214,7 @@ public class SecondaryDexOptimizerTest {
         // It should use "verify" for dex 3 and make the artifacts private.
 
         verify(mArtd, never()).isProfileUsable(deepEq(mDex3RefProfile), any());
-        verify(mArtd, never()).mergeProfiles(any(), deepEq(mDex3RefProfile), any(), any());
+        verify(mArtd, never()).mergeProfiles(any(), deepEq(mDex3RefProfile), any(), any(), any());
 
         verify(mArtd).getDexoptNeeded(
                 eq(DEX_3), eq("arm64"), isNull(), eq("verify"), eq(mDefaultDexoptTrigger));
@@ -295,7 +298,7 @@ public class SecondaryDexOptimizerTest {
                 .when(mArtd.getProfileVisibility(deepEq(mDex3RefProfile)))
                 .thenReturn(FileVisibility.NOT_OTHER_READABLE);
 
-        lenient().when(mArtd.mergeProfiles(any(), any(), any(), any())).thenReturn(true);
+        lenient().when(mArtd.mergeProfiles(any(), any(), any(), any(), any())).thenReturn(true);
     }
 
     private GetDexoptNeededResult dexoptIsNeeded() {

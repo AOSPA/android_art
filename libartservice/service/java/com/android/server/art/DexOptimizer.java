@@ -37,6 +37,7 @@ import android.util.Log;
 import android.util.Pair;
 
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.server.LocalManagerRegistry;
 import com.android.server.art.model.ArtFlags;
 import com.android.server.art.model.DetailedDexInfo;
 import com.android.server.art.model.OptimizeParams;
@@ -270,9 +271,19 @@ public abstract class DexOptimizer<DexInfoType extends DetailedDexInfo> {
         }
 
         // We cannot do AOT compilation if we don't have a valid class loader context.
-        if (dexInfo.classLoaderContext() == null
-                && DexFile.isOptimizedCompilerFilter(targetCompilerFilter)) {
-            return "verify";
+        if (dexInfo.classLoaderContext() == null) {
+            return DexFile.isOptimizedCompilerFilter(targetCompilerFilter) ? "verify"
+                                                                           : targetCompilerFilter;
+        }
+
+        // This application wants to use the embedded dex in the APK, rather than extracted or
+        // locally compiled variants, so we only verify it.
+        // "verify" does not prevent dex2oat from extracting the dex code, but in practice, dex2oat
+        // won't extract the dex code because the APK is uncompressed, and the assumption is that
+        // such applications always use uncompressed APKs.
+        if (mPkg.isUseEmbeddedDex()) {
+            return DexFile.isOptimizedCompilerFilter(targetCompilerFilter) ? "verify"
+                                                                           : targetCompilerFilter;
         }
 
         return targetCompilerFilter;
@@ -490,8 +501,8 @@ public abstract class DexOptimizer<DexInfoType extends DetailedDexInfo> {
         OutputProfile output = buildOutputProfile(dexInfo, false /* isPublic */);
 
         try {
-            if (mInjector.getArtd().mergeProfiles(
-                        getCurProfiles(dexInfo), referenceProfile, output, dexInfo.dexPath())) {
+            if (mInjector.getArtd().mergeProfiles(getCurProfiles(dexInfo), referenceProfile, output,
+                        List.of(dexInfo.dexPath()), new MergeProfileOptions())) {
                 return ProfilePath.tmpProfilePath(output.profilePath);
             }
         } catch (ServiceSpecificException e) {
@@ -633,8 +644,9 @@ public abstract class DexOptimizer<DexInfoType extends DetailedDexInfo> {
         }
 
         @NonNull
-        public DexUseManager getDexUseManager() {
-            return DexUseManager.getInstance();
+        public DexUseManagerLocal getDexUseManager() {
+            return Objects.requireNonNull(
+                    LocalManagerRegistry.getManager(DexUseManagerLocal.class));
         }
 
         @NonNull
