@@ -16,6 +16,9 @@
 
 package com.android.server.art;
 
+import static android.os.ParcelFileDescriptor.AutoCloseInputStream;
+
+import static com.android.server.art.ArtManagerLocal.SnapshotProfileException;
 import static com.android.server.art.model.ArtFlags.OptimizeFlags;
 import static com.android.server.art.model.OptimizationStatus.DexContainerFileOptimizationStatus;
 import static com.android.server.art.model.OptimizeResult.DexContainerFileOptimizeResult;
@@ -24,8 +27,12 @@ import static com.android.server.art.model.OptimizeResult.PackageOptimizeResult;
 
 import android.annotation.NonNull;
 import android.os.Binder;
+import android.os.Build;
 import android.os.CancellationSignal;
+import android.os.ParcelFileDescriptor;
 import android.os.Process;
+
+import androidx.annotation.RequiresApi;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.modules.utils.BasicShellCommandHandler;
@@ -36,6 +43,12 @@ import com.android.server.art.model.OptimizeParams;
 import com.android.server.art.model.OptimizeResult;
 import com.android.server.pm.PackageManagerLocal;
 
+import libcore.io.Streams;
+
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.util.HashMap;
 import java.util.Map;
@@ -52,18 +65,21 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
 
     private final ArtManagerLocal mArtManagerLocal;
     private final PackageManagerLocal mPackageManagerLocal;
-    private final DexUseManager mDexUseManager = DexUseManager.getInstance();
+    private final DexUseManagerLocal mDexUseManager;
 
     @GuardedBy("sCancellationSignalMap")
     @NonNull
     private static final Map<String, CancellationSignal> sCancellationSignalMap = new HashMap<>();
 
-    public ArtShellCommand(
-            ArtManagerLocal artManagerLocal, PackageManagerLocal packageManagerLocal) {
+    public ArtShellCommand(@NonNull ArtManagerLocal artManagerLocal,
+            @NonNull PackageManagerLocal packageManagerLocal,
+            @NonNull DexUseManagerLocal dexUseManager) {
         mArtManagerLocal = artManagerLocal;
         mPackageManagerLocal = packageManagerLocal;
+        mDexUseManager = dexUseManager;
     }
 
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     @Override
     public int onCommand(String cmd) {
         enforceRoot();
@@ -101,6 +117,13 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
                             case "--include-dependencies":
                                 paramsBuilder.setFlags(ArtFlags.FLAG_SHOULD_INCLUDE_DEPENDENCIES,
                                         ArtFlags.FLAG_SHOULD_INCLUDE_DEPENDENCIES);
+                                break;
+                            case "--split":
+                                String splitName = getNextArgRequired();
+                                paramsBuilder
+                                        .setFlags(ArtFlags.FLAG_FOR_SINGLE_SPLIT,
+                                                ArtFlags.FLAG_FOR_SINGLE_SPLIT)
+                                        .setSplitName(!splitName.isEmpty() ? splitName : null);
                                 break;
                             default:
                                 pw.println("Error: Unknown option: " + opt);
@@ -140,7 +163,7 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
                     return 0;
                 }
                 case "dex-use-notify": {
-                    mArtManagerLocal.notifyDexContainersLoaded(snapshot, getNextArgRequired(),
+                    mDexUseManager.notifyDexContainersLoaded(snapshot, getNextArgRequired(),
                             Map.of(getNextArgRequired(), getNextArgRequired()));
                     return 0;
                 }
@@ -157,7 +180,7 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
                     return 0;
                 }
                 case "dex-use-get-secondary": {
-                    for (DexUseManager.SecondaryDexInfo info :
+                    for (DexUseManagerLocal.SecondaryDexInfo info :
                             mDexUseManager.getSecondaryDexInfo(getNextArgRequired())) {
                         pw.println(info);
                     }
@@ -219,6 +242,29 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
                             return 1;
                     }
                 }
+                case "snapshot-app-profile": {
+                    String outputPath = getNextArgRequired();
+                    ParcelFileDescriptor fd;
+                    try {
+                        fd = mArtManagerLocal.snapshotAppProfile(
+                                snapshot, getNextArgRequired(), getNextOption());
+                    } catch (SnapshotProfileException e) {
+                        throw new RuntimeException(e);
+                    }
+                    writeFdContentsToFile(fd, outputPath);
+                    return 0;
+                }
+                case "snapshot-boot-image-profile": {
+                    String outputPath = getNextArgRequired();
+                    ParcelFileDescriptor fd;
+                    try {
+                        fd = mArtManagerLocal.snapshotBootImageProfile(snapshot);
+                    } catch (SnapshotProfileException e) {
+                        throw new RuntimeException(e);
+                    }
+                    writeFdContentsToFile(fd, outputPath);
+                    return 0;
+                }
                 default:
                     // Handles empty, help, and invalid commands.
                     return handleDefaultCommands(cmd);
@@ -247,7 +293,8 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
         pw.println("    Print the optimization status of a package.");
         pw.println("    By default, the command only prints the optimization status of primary "
                 + "dex'es.");
-        pw.println("  optimize-package [-m COMPILER_FILTER] [-f] PACKAGE_NAME");
+        pw.println("  optimize-package [-m COMPILER_FILTER] [-f] [--secondary-dex] ");
+        pw.println("      [--include-dependencies] [--split SPLIT_NAME] PACKAGE_NAME");
         pw.println("    Optimize a package.");
         pw.println("    By default, the command only optimizes primary dex'es.");
         pw.println("    The command prints a job ID, which can be used to cancel the job using the"
@@ -255,8 +302,10 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
         pw.println("    Options:");
         pw.println("      -m Set the compiler filter.");
         pw.println("      -f Force compilation.");
-        pw.println("      --secondary-dex Only compile secondary dex.");
+        pw.println("      --secondary-dex Only optimize secondary dex.");
         pw.println("      --include-dependencies Include dependencies.");
+        pw.println("      --split SPLIT_NAME Only optimize the given split. If SPLIT_NAME is an");
+        pw.println("        empty string, only optimize the base APK.");
         pw.println("  optimize-packages REASON");
         pw.println("    Run batch optimization for the given reason.");
         pw.println("    The command prints a job ID, which can be used to cancel the job using the"
@@ -294,6 +343,11 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
         pw.println("        This state will be lost when the system_server process exits.");
         pw.println("      --enable: Enable the background dexopt job to be started by the job");
         pw.println("        scheduler again, if previously disabled by --disable.");
+        pw.println("  snapshot-app-profile OUTPUT_PATH PACKAGE_NAME [SPLIT_NAME]");
+        pw.println("    Snapshot the profile of the given app and save it to the output path.");
+        pw.println("    If SPLIT_NAME is empty, the command snapshots the base APK.");
+        pw.println("  snapshot-boot-image-profile OUTPUT_PATH");
+        pw.println("    Snapshot the boot image profile and save it to the output path.");
     }
 
     private void enforceRoot() {
@@ -334,6 +388,16 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
                         fileResult.getDex2oatWallTimeMillis(), fileResult.getDex2oatCpuTimeMillis(),
                         fileResult.getSizeBytes(), fileResult.getSizeBeforeBytes());
             }
+        }
+    }
+
+    private void writeFdContentsToFile(
+            @NonNull ParcelFileDescriptor fd, @NonNull String outputPath) {
+        try (InputStream inputStream = new AutoCloseInputStream(fd);
+                OutputStream outputStream = new FileOutputStream(outputPath)) {
+            Streams.copy(inputStream, outputStream);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
     }
 
