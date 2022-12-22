@@ -37,7 +37,6 @@
 #include "class_linker.h"
 #include "class_table-inl.h"
 #include "code_info_table_deduper.h"
-#include "compiled_method-inl.h"
 #include "debug/method_debug_info.h"
 #include "dex/art_dex_file_loader.h"
 #include "dex/class_accessor-inl.h"
@@ -49,6 +48,7 @@
 #include "dex/verification_results.h"
 #include "dex_container.h"
 #include "dexlayout.h"
+#include "driver/compiled_method-inl.h"
 #include "driver/compiler_driver-inl.h"
 #include "driver/compiler_options.h"
 #include "gc/space/image_space.h"
@@ -384,6 +384,7 @@ class OatWriter::OatDexFile {
     << "file_offset=" << file_offset << " offset_=" << offset_
 
 OatWriter::OatWriter(const CompilerOptions& compiler_options,
+                     const VerificationResults* verification_results,
                      TimingLogger* timings,
                      ProfileCompilationInfo* info,
                      CompactDexLevel compact_dex_level)
@@ -395,6 +396,7 @@ OatWriter::OatWriter(const CompilerOptions& compiler_options,
     zipped_dex_file_locations_(),
     compiler_driver_(nullptr),
     compiler_options_(compiler_options),
+    verification_results_(verification_results),
     image_writer_(nullptr),
     extract_dex_files_into_vdex_(true),
     vdex_begin_(nullptr),
@@ -1013,7 +1015,7 @@ class OatWriter::InitOatClassesMethodVisitor : public DexMethodVisitor {
     ClassStatus status;
     bool found = writer_->compiler_driver_->GetCompiledClass(class_ref, &status);
     if (!found) {
-      const VerificationResults* results = writer_->compiler_options_.GetVerificationResults();
+      const VerificationResults* results = writer_->verification_results_;
       if (results != nullptr && results->IsClassRejected(class_ref)) {
         // The oat class status is used only for verification of resolved classes,
         // so use ClassStatus::kErrorResolved whether the class was resolved or unresolved
@@ -1351,7 +1353,7 @@ class OatWriter::LayoutReserveOffsetCodeMethodVisitor : public OrderedMethodVisi
 
     ArrayRef<const uint8_t> quick_code = compiled_method->GetQuickCode();
     uint32_t code_size = quick_code.size() * sizeof(uint8_t);
-    uint32_t thumb_offset = compiled_method->CodeDelta();
+    uint32_t thumb_offset = compiled_method->GetEntryPointAdjustment();
 
     // Deduplicate code arrays if we are not producing debuggable code.
     bool deduped = true;
@@ -1486,7 +1488,7 @@ class OatWriter::LayoutReserveOffsetCodeMethodVisitor : public OrderedMethodVisi
     offset_ = relative_patcher_->ReserveSpace(offset_, compiled_method, method_ref);
     offset_ += CodeAlignmentSize(offset_, *compiled_method);
     DCHECK_ALIGNED_PARAM(offset_ + sizeof(OatQuickMethodHeader),
-                         GetInstructionSetAlignment(compiled_method->GetInstructionSet()));
+                         GetInstructionSetCodeAlignment(compiled_method->GetInstructionSet()));
     return offset_ + sizeof(OatQuickMethodHeader) + thumb_offset;
   }
 
@@ -1797,9 +1799,10 @@ class OatWriter::WriteCodeMethodVisitor : public OrderedMethodVisitor {
         DCHECK_OFFSET_();
       }
       DCHECK_ALIGNED_PARAM(offset_ + sizeof(OatQuickMethodHeader),
-                           GetInstructionSetAlignment(compiled_method->GetInstructionSet()));
-      DCHECK_EQ(method_offsets.code_offset_,
-                offset_ + sizeof(OatQuickMethodHeader) + compiled_method->CodeDelta())
+                           GetInstructionSetCodeAlignment(compiled_method->GetInstructionSet()));
+      DCHECK_EQ(
+          method_offsets.code_offset_,
+          offset_ + sizeof(OatQuickMethodHeader) + compiled_method->GetEntryPointAdjustment())
           << dex_file_->PrettyMethod(method_ref.index);
       const OatQuickMethodHeader& method_header =
           oat_class->method_headers_[method_offsets_index];
@@ -2396,22 +2399,22 @@ size_t OatWriter::InitOatCode(size_t offset) {
     const bool generate_debug_info = GetCompilerOptions().GenerateAnyDebugInfo();
     size_t adjusted_offset = offset;
 
-    #define DO_TRAMPOLINE(field, fn_name)                                   \
-      /* Pad with at least four 0xFFs so we can do DCHECKs in OatQuickMethodHeader */ \
-      offset = CompiledCode::AlignCode(offset + 4, instruction_set);        \
-      adjusted_offset = offset + CompiledCode::CodeDelta(instruction_set);  \
-      oat_header_->Set ## fn_name ## Offset(adjusted_offset);               \
-      (field) = compiler_driver_->Create ## fn_name();                      \
-      if (generate_debug_info) {                                            \
-        debug::MethodDebugInfo info = {};                                   \
-        info.custom_name = #fn_name;                                        \
-        info.isa = instruction_set;                                         \
-        info.is_code_address_text_relative = true;                          \
-        /* Use the code offset rather than the `adjusted_offset`. */        \
-        info.code_address = offset - oat_header_->GetExecutableOffset();    \
-        info.code_size = (field)->size();                                   \
-        method_info_.push_back(std::move(info));                            \
-      }                                                                     \
+    #define DO_TRAMPOLINE(field, fn_name)                                                 \
+      /* Pad with at least four 0xFFs so we can do DCHECKs in OatQuickMethodHeader */     \
+      offset = CompiledCode::AlignCode(offset + 4, instruction_set);                      \
+      adjusted_offset = offset + GetInstructionSetEntryPointAdjustment(instruction_set);  \
+      oat_header_->Set ## fn_name ## Offset(adjusted_offset);                             \
+      (field) = compiler_driver_->Create ## fn_name();                                    \
+      if (generate_debug_info) {                                                          \
+        debug::MethodDebugInfo info = {};                                                 \
+        info.custom_name = #fn_name;                                                      \
+        info.isa = instruction_set;                                                       \
+        info.is_code_address_text_relative = true;                                        \
+        /* Use the code offset rather than the `adjusted_offset`. */                      \
+        info.code_address = offset - oat_header_->GetExecutableOffset();                  \
+        info.code_size = (field)->size();                                                 \
+        method_info_.push_back(std::move(info));                                          \
+      }                                                                                   \
       offset += (field)->size();
 
     DO_TRAMPOLINE(jni_dlsym_lookup_trampoline_, JniDlsymLookupTrampoline);

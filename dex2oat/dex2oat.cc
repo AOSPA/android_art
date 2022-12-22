@@ -39,6 +39,7 @@
 #endif
 
 #include "android-base/parseint.h"
+#include "android-base/properties.h"
 #include "android-base/scopeguard.h"
 #include "android-base/stringprintf.h"
 #include "android-base/strings.h"
@@ -65,6 +66,7 @@
 #include "base/zip_archive.h"
 #include "class_linker.h"
 #include "class_loader_context.h"
+#include "class_root-inl.h"
 #include "cmdline_parser.h"
 #include "compiler.h"
 #include "compiler_callbacks.h"
@@ -1100,6 +1102,19 @@ class Dex2Oat final {
     AssignIfExists(args, M::PublicSdk, &public_sdk_);
     AssignIfExists(args, M::ApexVersions, &apex_versions_argument_);
 
+    // Check for phenotype flag to override compact_dex_level_, if it isn't "none" already.
+    // TODO(b/256664509): Clean this up.
+    if (compact_dex_level_ != CompactDexLevel::kCompactDexLevelNone) {
+      std::string ph_disable_compact_dex =
+          android::base::GetProperty(kPhDisableCompactDex, "false");
+      if (ph_disable_compact_dex == "true") {
+        LOG(WARNING)
+            << "Overriding --compact-dex-level due to "
+               "persist.device_config.runtime_native_boot.disable_compact_dex set to `true`";
+        compact_dex_level_ = CompactDexLevel::kCompactDexLevelNone;
+      }
+    }
+
     AssignIfExists(args, M::Backend, &compiler_kind_);
     parser_options->requested_specific_compiler = args.Exists(M::Backend);
 
@@ -1820,7 +1835,7 @@ class Dex2Oat final {
   }
 
   // Set up and create the compiler driver and then invoke it to compile all the dex files.
-  jobject Compile() {
+  jobject Compile() REQUIRES(!Locks::mutator_lock_) {
     ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
 
     TimingLogger::ScopedTiming t("dex2oat Compile", timings_);
@@ -1884,6 +1899,7 @@ class Dex2Oat final {
     compiler_options_->profile_compilation_info_ = profile_compilation_info_.get();
 
     driver_.reset(new CompilerDriver(compiler_options_.get(),
+                                     verification_results_.get(),
                                      compiler_kind_,
                                      thread_count_,
                                      swap_fd_));
@@ -1969,7 +1985,6 @@ class Dex2Oat final {
                         timings_,
                         &compiler_options_->image_classes_);
     callbacks_->SetVerificationResults(nullptr);  // Should not be needed anymore.
-    compiler_options_->verification_results_ = verification_results_.get();
     driver_->CompileAll(class_loader, dex_files, timings_);
     driver_->FreeThreadPools();
     return class_loader;
@@ -2638,6 +2653,7 @@ class Dex2Oat final {
       bool do_oat_writer_layout = DoDexLayoutOptimizations() || DoOatLayoutOptimizations();
       oat_writers_.emplace_back(new linker::OatWriter(
           *compiler_options_,
+          verification_results_.get(),
           timings_,
           do_oat_writer_layout ? profile_compilation_info_.get() : nullptr,
           compact_dex_level_));
@@ -2736,18 +2752,14 @@ class Dex2Oat final {
     interpreter::UnstartedRuntime::Initialize();
 
     Thread* self = Thread::Current();
+    runtime_->GetClassLinker()->RunEarlyRootClinits(self);
+    InitializeIntrinsics();
+    WellKnownClasses::Init(self->GetJniEnv());
     runtime_->RunRootClinits(self);
 
     // Runtime::Create acquired the mutator_lock_ that is normally given away when we
     // Runtime::Start, give it away now so that we don't starve GC.
     self->TransitionFromRunnableToSuspended(ThreadState::kNative);
-
-    // Now that we are in native state, initialize well known classes and
-    // intrinsics if we don't have a boot image.
-    WellKnownClasses::Init(self->GetJniEnv());
-    if (IsBootImage() || runtime_->GetHeap()->GetBootImageSpaces().empty()) {
-      InitializeIntrinsics();
-    }
 
     WatchDog::SetRuntime(runtime_.get());
 
@@ -3058,7 +3070,8 @@ class ScopedGlobalRef {
   jobject obj_;
 };
 
-static dex2oat::ReturnCode DoCompilation(Dex2Oat& dex2oat) {
+static dex2oat::ReturnCode DoCompilation(Dex2Oat& dex2oat) REQUIRES(!Locks::mutator_lock_) {
+  Locks::mutator_lock_->AssertNotHeld(Thread::Current());
   dex2oat.LoadClassProfileDescriptors();
   jobject class_loader = dex2oat.Compile();
   // Keep the class loader that was used for compilation live for the rest of the compilation

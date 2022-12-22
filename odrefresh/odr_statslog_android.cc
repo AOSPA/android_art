@@ -71,12 +71,12 @@ int32_t TranslateStatus(int32_t art_metrics_status) {
       return metrics::statsd::ODREFRESH_REPORTED__STATUS__STATUS_IO_ERROR;
     case OdrMetrics::Status::kDex2OatError:
       return metrics::statsd::ODREFRESH_REPORTED__STATUS__STATUS_DEX2OAT_ERROR;
-    case OdrMetrics::Status::kTimeLimitExceeded:
-      return metrics::statsd::ODREFRESH_REPORTED__STATUS__STATUS_TIME_LIMIT_EXCEEDED;
     case OdrMetrics::Status::kStagingFailed:
       return metrics::statsd::ODREFRESH_REPORTED__STATUS__STATUS_STAGING_FAILED;
     case OdrMetrics::Status::kInstallFailed:
       return metrics::statsd::ODREFRESH_REPORTED__STATUS__STATUS_INSTALL_FAILED;
+    case OdrMetrics::Status::kDalvikCachePermissionDenied:
+      return metrics::statsd::ODREFRESH_REPORTED__STATUS__STATUS_DALVIK_CACHE_PERMISSION_DENIED;
   }
 
   LOG(ERROR) << "Unknown status value: " << art_metrics_status;
@@ -159,7 +159,16 @@ bool UploadStatsIfAvailable(/*out*/std::string* error_msg) {
       record.cache_space_free_end_mib,
       record.primary_bcp_compilation_millis,
       record.secondary_bcp_compilation_millis,
-      record.system_server_compilation_millis);
+      record.system_server_compilation_millis,
+      record.primary_bcp_dex2oat_result.status,
+      record.primary_bcp_dex2oat_result.exit_code,
+      record.primary_bcp_dex2oat_result.signal,
+      record.secondary_bcp_dex2oat_result.status,
+      record.secondary_bcp_dex2oat_result.exit_code,
+      record.secondary_bcp_dex2oat_result.signal,
+      record.system_server_dex2oat_result.status,
+      record.system_server_dex2oat_result.exit_code,
+      record.system_server_dex2oat_result.signal);
   if (bytes_written <= 0) {
     *error_msg = android::base::StringPrintf("stats_write returned %d", bytes_written);
     return false;

@@ -535,7 +535,7 @@ JValue InvokeWithVarArgs(const ScopedObjectAccessAlreadyRunnable& soa,
     ThrowStackOverflowError(soa.Self());
     return JValue();
   }
-  bool is_string_init = method->GetDeclaringClass()->IsStringClass() && method->IsConstructor();
+  bool is_string_init = method->IsStringConstructor();
   if (is_string_init) {
     // Replace calls to String.<init> with equivalent StringFactory call.
     method = WellKnownClasses::StringInitToStringFactory(method);
@@ -577,7 +577,7 @@ JValue InvokeWithJValues(const ScopedObjectAccessAlreadyRunnable& soa,
     ThrowStackOverflowError(soa.Self());
     return JValue();
   }
-  bool is_string_init = method->GetDeclaringClass()->IsStringClass() && method->IsConstructor();
+  bool is_string_init = method->IsStringConstructor();
   if (is_string_init) {
     // Replace calls to String.<init> with equivalent StringFactory call.
     method = WellKnownClasses::StringInitToStringFactory(method);
@@ -620,7 +620,7 @@ JValue InvokeVirtualOrInterfaceWithJValues(const ScopedObjectAccessAlreadyRunnab
   }
   ObjPtr<mirror::Object> receiver = soa.Decode<mirror::Object>(obj);
   ArtMethod* method = FindVirtualMethod(receiver, interface_method);
-  bool is_string_init = method->GetDeclaringClass()->IsStringClass() && method->IsConstructor();
+  bool is_string_init = method->IsStringConstructor();
   if (is_string_init) {
     // Replace calls to String.<init> with equivalent StringFactory call.
     method = WellKnownClasses::StringInitToStringFactory(method);
@@ -664,7 +664,7 @@ JValue InvokeVirtualOrInterfaceWithVarArgs(const ScopedObjectAccessAlreadyRunnab
 
   ObjPtr<mirror::Object> receiver = soa.Decode<mirror::Object>(obj);
   ArtMethod* method = FindVirtualMethod(receiver, interface_method);
-  bool is_string_init = method->GetDeclaringClass()->IsStringClass() && method->IsConstructor();
+  bool is_string_init = method->IsStringConstructor();
   if (is_string_init) {
     // Replace calls to String.<init> with equivalent StringFactory call.
     method = WellKnownClasses::StringInitToStringFactory(method);
@@ -840,7 +840,7 @@ ObjPtr<mirror::Object> BoxPrimitive(Primitive::Type src_class, const JValue& val
     return nullptr;
   }
 
-  jmethodID m = nullptr;
+  ArtMethod* m = nullptr;
   const char* shorty;
   switch (src_class) {
   case Primitive::kPrimBoolean:
@@ -891,11 +891,8 @@ ObjPtr<mirror::Object> BoxPrimitive(Primitive::Type src_class, const JValue& val
     arg_array.Append(value.GetI());
   }
 
-  jni::DecodeArtMethod(m)->Invoke(soa.Self(),
-                                  arg_array.GetArray(),
-                                  arg_array.GetNumBytes(),
-                                  &result,
-                                  shorty);
+  DCHECK(m->GetDeclaringClass()->IsInitialized());  // By `ClassLinker::RunRootClinits()`.
+  m->Invoke(soa.Self(), arg_array.GetArray(), arg_array.GetNumBytes(), &result, shorty);
   return result.GetL();
 }
 

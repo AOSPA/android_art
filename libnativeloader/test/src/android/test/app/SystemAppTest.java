@@ -16,25 +16,67 @@
 
 package android.test.app;
 
-import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertThrows;
-
-import androidx.test.filters.SmallTest;
+import android.test.lib.TestUtils;
+import android.test.productsharedlib.ProductSharedLib;
+import android.test.systemextsharedlib.SystemExtSharedLib;
+import android.test.systemsharedlib.SystemSharedLib;
+import android.test.vendorsharedlib.VendorSharedLib;
+import androidx.test.filters.MediumTest;
 import androidx.test.runner.AndroidJUnit4;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
-// These tests are run in both /system and /system_ext.
-@SmallTest
+// These tests are run from /system/app, /system/priv-app, and /system_ext/app.
+@MediumTest
 @RunWith(AndroidJUnit4.class)
 public class SystemAppTest {
     @Test
-    public void testLoadLibraries() {
+    public void testLoadExtendedPublicLibraries() {
         System.loadLibrary("foo.oem1");
         System.loadLibrary("bar.oem1");
         System.loadLibrary("foo.oem2");
         System.loadLibrary("bar.oem2");
         System.loadLibrary("foo.product1");
         System.loadLibrary("bar.product1");
+    }
+
+    @Test
+    public void testLoadPrivateLibraries() {
+        System.loadLibrary("system_private1");
+        System.loadLibrary("systemext_private1");
+        TestUtils.assertLibraryNotFound(() -> System.loadLibrary("product_private1"));
+        TestUtils.assertLibraryNotFound(() -> System.loadLibrary("vendor_private1"));
+    }
+
+    @Test
+    public void testLoadPrivateLibrariesViaSystemSharedLib() {
+        SystemSharedLib.loadLibrary("system_private2");
+        SystemSharedLib.loadLibrary("systemext_private2");
+        TestUtils.assertLibraryNotFound(() -> SystemSharedLib.loadLibrary("product_private2"));
+        TestUtils.assertLibraryNotFound(() -> SystemSharedLib.loadLibrary("vendor_private2"));
+    }
+
+    @Test
+    public void testLoadPrivateLibrariesViaSystemExtSharedLib() {
+        SystemExtSharedLib.loadLibrary("system_private3");
+        SystemExtSharedLib.loadLibrary("systemext_private3");
+        TestUtils.assertLibraryNotFound(() -> SystemExtSharedLib.loadLibrary("product_private3"));
+        TestUtils.assertLibraryNotFound(() -> SystemExtSharedLib.loadLibrary("vendor_private3"));
+    }
+
+    @Test
+    public void testLoadPrivateLibrariesViaProductSharedLib() {
+        ProductSharedLib.loadLibrary("system_private4");
+        ProductSharedLib.loadLibrary("systemext_private4");
+        TestUtils.assertLibraryNotFound(() -> ProductSharedLib.loadLibrary("product_private4"));
+        TestUtils.assertLibraryNotFound(() -> ProductSharedLib.loadLibrary("vendor_private4"));
+    }
+
+    @Test
+    public void testLoadPrivateLibrariesViaVendorSharedLib() {
+        VendorSharedLib.loadLibrary("system_private5");
+        VendorSharedLib.loadLibrary("systemext_private5");
+        TestUtils.assertLibraryNotFound(() -> VendorSharedLib.loadLibrary("product_private5"));
+        TestUtils.assertLibraryNotFound(() -> VendorSharedLib.loadLibrary("vendor_private5"));
     }
 }

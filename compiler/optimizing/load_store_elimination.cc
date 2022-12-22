@@ -319,7 +319,7 @@
  * a hash map to the HeapLocationCollector.
  */
 
-namespace art {
+namespace art HIDDEN {
 
 #define LSE_VLOG \
   if (::art::LoadStoreElimination::kVerboseLoggingMode && VLOG_IS_ON(compiler)) LOG(INFO)
@@ -855,25 +855,6 @@ class LSEVisitor final : private HGraphDelegateVisitor {
     }
   }
 
-  // `instruction` is being removed. Try to see if the null check on it
-  // can be removed. This can happen if the same value is set in two branches
-  // but not in dominators. Such as:
-  //   int[] a = foo();
-  //   if () {
-  //     a[0] = 2;
-  //   } else {
-  //     a[0] = 2;
-  //   }
-  //   // a[0] can now be replaced with constant 2, and the null check on it can be removed.
-  void TryRemovingNullCheck(HInstruction* instruction) {
-    HInstruction* prev = instruction->GetPrevious();
-    if ((prev != nullptr) && prev->IsNullCheck() && (prev == instruction->InputAt(0))) {
-      // Previous instruction is a null check for this instruction. Remove the null check.
-      prev->ReplaceWith(prev->InputAt(0));
-      prev->GetBlock()->RemoveInstruction(prev);
-    }
-  }
-
   HInstruction* GetDefaultValue(DataType::Type type) {
     switch (type) {
       case DataType::Type::kReference:
@@ -993,13 +974,63 @@ class LSEVisitor final : private HGraphDelegateVisitor {
                << " but LSE should be the only source of predicated-ifield-gets!";
   }
 
+  void HandleAcquireLoad(HInstruction* instruction) {
+    DCHECK((instruction->IsInstanceFieldGet() && instruction->AsInstanceFieldGet()->IsVolatile()) ||
+           (instruction->IsStaticFieldGet() && instruction->AsStaticFieldGet()->IsVolatile()) ||
+           (instruction->IsMonitorOperation() && instruction->AsMonitorOperation()->IsEnter()))
+        << "Unexpected instruction " << instruction->GetId() << ": " << instruction->DebugName();
+
+    // Acquire operations e.g. MONITOR_ENTER change the thread's view of the memory, so we must
+    // invalidate all current values.
+    ScopedArenaVector<ValueRecord>& heap_values =
+        heap_values_for_[instruction->GetBlock()->GetBlockId()];
+    for (size_t i = 0u, size = heap_values.size(); i != size; ++i) {
+      KeepStores(heap_values[i].stored_by);
+      heap_values[i].stored_by = Value::PureUnknown();
+      heap_values[i].value = Value::PartialUnknown(heap_values[i].value);
+    }
+
+    // Note that there's no need to record the load as subsequent acquire loads shouldn't be
+    // eliminated either.
+  }
+
+  void HandleReleaseStore(HInstruction* instruction) {
+    DCHECK((instruction->IsInstanceFieldSet() && instruction->AsInstanceFieldSet()->IsVolatile()) ||
+           (instruction->IsStaticFieldSet() && instruction->AsStaticFieldSet()->IsVolatile()) ||
+           (instruction->IsMonitorOperation() && !instruction->AsMonitorOperation()->IsEnter()))
+        << "Unexpected instruction " << instruction->GetId() << ": " << instruction->DebugName();
+
+    // Release operations e.g. MONITOR_EXIT do not affect this thread's view of the memory, but
+    // they will push the modifications for other threads to see. Therefore, we must keep the
+    // stores but there's no need to clobber the value.
+    ScopedArenaVector<ValueRecord>& heap_values =
+        heap_values_for_[instruction->GetBlock()->GetBlockId()];
+    for (size_t i = 0u, size = heap_values.size(); i != size; ++i) {
+      KeepStores(heap_values[i].stored_by);
+      heap_values[i].stored_by = Value::PureUnknown();
+    }
+
+    // Note that there's no need to record the store as subsequent release store shouldn't be
+    // eliminated either.
+  }
+
   void VisitInstanceFieldGet(HInstanceFieldGet* instruction) override {
+    if (instruction->IsVolatile()) {
+      HandleAcquireLoad(instruction);
+      return;
+    }
+
     HInstruction* object = instruction->InputAt(0);
     const FieldInfo& field = instruction->GetFieldInfo();
     VisitGetLocation(instruction, heap_location_collector_.GetFieldHeapLocation(object, &field));
   }
 
   void VisitInstanceFieldSet(HInstanceFieldSet* instruction) override {
+    if (instruction->IsVolatile()) {
+      HandleReleaseStore(instruction);
+      return;
+    }
+
     HInstruction* object = instruction->InputAt(0);
     const FieldInfo& field = instruction->GetFieldInfo();
     HInstruction* value = instruction->InputAt(1);
@@ -1008,17 +1039,35 @@ class LSEVisitor final : private HGraphDelegateVisitor {
   }
 
   void VisitStaticFieldGet(HStaticFieldGet* instruction) override {
+    if (instruction->IsVolatile()) {
+      HandleAcquireLoad(instruction);
+      return;
+    }
+
     HInstruction* cls = instruction->InputAt(0);
     const FieldInfo& field = instruction->GetFieldInfo();
     VisitGetLocation(instruction, heap_location_collector_.GetFieldHeapLocation(cls, &field));
   }
 
   void VisitStaticFieldSet(HStaticFieldSet* instruction) override {
+    if (instruction->IsVolatile()) {
+      HandleReleaseStore(instruction);
+      return;
+    }
+
     HInstruction* cls = instruction->InputAt(0);
     const FieldInfo& field = instruction->GetFieldInfo();
     HInstruction* value = instruction->InputAt(1);
     size_t idx = heap_location_collector_.GetFieldHeapLocation(cls, &field);
     VisitSetLocation(instruction, idx, value);
+  }
+
+  void VisitMonitorOperation(HMonitorOperation* monitor_op) override {
+    if (monitor_op->IsEnter()) {
+      HandleAcquireLoad(monitor_op);
+    } else {
+      HandleReleaseStore(monitor_op);
+    }
   }
 
   void VisitArrayGet(HArrayGet* instruction) override {
@@ -1040,8 +1089,8 @@ class LSEVisitor final : private HGraphDelegateVisitor {
   }
 
   void VisitDeoptimize(HDeoptimize* instruction) override {
-    // If we are in a try catch, even singletons are observable.
-    const bool in_try_catch = instruction->GetBlock()->GetTryCatchInformation() != nullptr;
+    // If we are in a try, even singletons are observable.
+    const bool inside_a_try = instruction->GetBlock()->IsTryBlock();
     HBasicBlock* block = instruction->GetBlock();
     ScopedArenaVector<ValueRecord>& heap_values = heap_values_for_[block->GetBlockId()];
     for (size_t i = 0u, size = heap_values.size(); i != size; ++i) {
@@ -1053,7 +1102,7 @@ class LSEVisitor final : private HGraphDelegateVisitor {
       // for singletons that don't escape in the deoptimization environment.
       bool observable = true;
       ReferenceInfo* info = heap_location_collector_.GetHeapLocation(i)->GetReferenceInfo();
-      if (!in_try_catch && info->IsSingleton()) {
+      if (!inside_a_try && info->IsSingleton()) {
         HInstruction* reference = info->GetReference();
         // Finalizable objects always escape.
         const bool finalizable_object =
@@ -1099,10 +1148,8 @@ class LSEVisitor final : private HGraphDelegateVisitor {
 
   void HandleThrowingInstruction(HInstruction* instruction) {
     DCHECK(instruction->CanThrow());
-    // If we are inside of a try catch, singletons can become visible since we may not exit the
-    // method.
-    HandleExit(instruction->GetBlock(),
-               instruction->GetBlock()->GetTryCatchInformation() != nullptr);
+    // If we are inside of a try, singletons can become visible since we may not exit the method.
+    HandleExit(instruction->GetBlock(), instruction->GetBlock()->IsTryBlock());
   }
 
   void VisitMethodEntryHook(HMethodEntryHook* method_entry) override {
@@ -1157,18 +1204,11 @@ class LSEVisitor final : private HGraphDelegateVisitor {
     HandleThrowingInstruction(check_cast);
   }
 
-  void VisitMonitorOperation(HMonitorOperation* monitor_op) override {
-    if (monitor_op->CanThrow()) {
-      HandleThrowingInstruction(monitor_op);
-    }
-  }
-
   void HandleInvoke(HInstruction* instruction) {
     // If `instruction` can throw we have to presume all stores are visible.
     const bool can_throw = instruction->CanThrow();
-    // If we are in a try catch, even singletons are observable.
-    const bool can_throw_in_try_catch =
-        can_throw && instruction->GetBlock()->GetTryCatchInformation() != nullptr;
+    // If we are in a try, even singletons are observable.
+    const bool can_throw_inside_a_try = can_throw && instruction->GetBlock()->IsTryBlock();
     SideEffects side_effects = instruction->GetSideEffects();
     ScopedArenaVector<ValueRecord>& heap_values =
         heap_values_for_[instruction->GetBlock()->GetBlockId()];
@@ -1194,7 +1234,7 @@ class LSEVisitor final : private HGraphDelegateVisitor {
                               return cohort.PrecedesBlock(blk);
                             });
       };
-      if (!can_throw_in_try_catch &&
+      if (!can_throw_inside_a_try &&
           (ref_info->IsSingleton() ||
            // partial and we aren't currently escaping and we haven't escaped yet.
            (ref_info->IsPartialSingleton() && partial_singleton_did_not_escape(ref_info, blk)))) {
@@ -1243,8 +1283,8 @@ class LSEVisitor final : private HGraphDelegateVisitor {
   }
 
   void VisitNewInstance(HNewInstance* new_instance) override {
-    // If we are in a try catch, even singletons are observable.
-    const bool in_try_catch = new_instance->GetBlock()->GetTryCatchInformation() != nullptr;
+    // If we are in a try, even singletons are observable.
+    const bool inside_a_try = new_instance->GetBlock()->IsTryBlock();
     ReferenceInfo* ref_info = heap_location_collector_.FindReferenceInfoOf(new_instance);
     if (ref_info == nullptr) {
       // new_instance isn't used for field accesses. No need to process it.
@@ -1273,7 +1313,7 @@ class LSEVisitor final : private HGraphDelegateVisitor {
           heap_values[i].value = Value::ForInstruction(new_instance->GetLoadClass());
           heap_values[i].stored_by = Value::PureUnknown();
         }
-      } else if (in_try_catch || IsEscapingObject(info, block, i)) {
+      } else if (inside_a_try || IsEscapingObject(info, block, i)) {
         // Since NewInstance can throw, we presume all previous stores could be visible.
         KeepStores(heap_values[i].stored_by);
         heap_values[i].stored_by = Value::PureUnknown();
@@ -1282,8 +1322,8 @@ class LSEVisitor final : private HGraphDelegateVisitor {
   }
 
   void VisitNewArray(HNewArray* new_array) override {
-    // If we are in a try catch, even singletons are observable.
-    const bool in_try_catch = new_array->GetBlock()->GetTryCatchInformation() != nullptr;
+    // If we are in a try, even singletons are observable.
+    const bool inside_a_try = new_array->GetBlock()->IsTryBlock();
     ReferenceInfo* ref_info = heap_location_collector_.FindReferenceInfoOf(new_array);
     if (ref_info == nullptr) {
       // new_array isn't used for array accesses. No need to process it.
@@ -1308,7 +1348,7 @@ class LSEVisitor final : private HGraphDelegateVisitor {
         // Array elements are set to default heap values.
         heap_values[i].value = Value::Default();
         heap_values[i].stored_by = Value::PureUnknown();
-      } else if (in_try_catch || IsEscapingObject(info, block, i)) {
+      } else if (inside_a_try || IsEscapingObject(info, block, i)) {
         // Since NewArray can throw, we presume all previous stores could be visible.
         KeepStores(heap_values[i].stored_by);
         heap_values[i].stored_by = Value::PureUnknown();
@@ -1712,8 +1752,7 @@ void LSEVisitor::MergePredecessorRecords(HBasicBlock* block) {
   ScopedArenaVector<ValueRecord>& heap_values = heap_values_for_[block->GetBlockId()];
   DCHECK(heap_values.empty());
   size_t num_heap_locations = heap_location_collector_.GetNumberOfHeapLocations();
-  if (block->GetPredecessors().empty() || (block->GetTryCatchInformation() != nullptr &&
-                                           block->GetTryCatchInformation()->IsCatchBlock())) {
+  if (block->GetPredecessors().empty() || block->IsCatchBlock()) {
     DCHECK_IMPLIES(block->GetPredecessors().empty(), block->IsEntryBlock());
     heap_values.resize(num_heap_locations,
                        {/*value=*/Value::PureUnknown(), /*stored_by=*/Value::PureUnknown()});
@@ -1884,7 +1923,6 @@ void LSEVisitor::VisitGetLocation(HInstruction* instruction, size_t idx) {
     }
     HInstruction* heap_value = FindSubstitute(record.value.GetInstruction());
     AddRemovedLoad(instruction, heap_value);
-    TryRemovingNullCheck(instruction);
   }
 }
 
@@ -2645,7 +2683,6 @@ void LSEVisitor::ProcessLoopPhiWithUnknownInput(PhiPlaceholder loop_phi_with_unk
             record.value = local_heap_values[idx];
             HInstruction* heap_value = local_heap_values[idx].GetInstruction();
             AddRemovedLoad(load_or_store, heap_value);
-            TryRemovingNullCheck(load_or_store);
           }
         }
       }
@@ -2704,7 +2741,6 @@ void LSEVisitor::ProcessLoadsRequiringLoopPhis() {
       record.value = Replacement(record.value);
       HInstruction* heap_value = record.value.GetInstruction();
       AddRemovedLoad(load, heap_value);
-      TryRemovingNullCheck(load);
     }
   }
 }

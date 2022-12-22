@@ -332,22 +332,9 @@
           "test.java.time"]
 },
 {
-  description: "vogar does not respect '@BeforeMethod' and '@AfterMethod' annotations yet",
-  result: ERROR,
-  bug: 231283845,
-  names: ["test.java.lang.invoke.MethodTypeTest#testGeneric",
-          "test.java.lang.invoke.MethodTypeTest#testMakeGeneric"]
-},
-{
   description: "Timing out after ojluni tests were enabled",
   result: ERROR,
   bug: 231439593,
   names: ["org.apache.harmony.tests.java.math.BigIntegerConstructorsTest#testConstructorPrime"]
-},
-{
-  description: "Segfault with poison build on LUCI in multi-threaded MH test",
-  result: ERROR,
-  bug: 241199625,
-  names: ["libcore.java.lang.invoke.MethodHandleCombinersTest#testThrowCatchExceptionMultiThreaded"]
 }
 ]

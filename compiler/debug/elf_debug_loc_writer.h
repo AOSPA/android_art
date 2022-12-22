@@ -21,7 +21,6 @@
 #include <map>
 
 #include "arch/instruction_set.h"
-#include "compiled_method.h"
 #include "debug/method_debug_info.h"
 #include "dwarf/debug_info_entry_writer.h"
 #include "dwarf/register.h"
@@ -38,6 +37,8 @@ static Reg GetDwarfCoreReg(InstructionSet isa, int machine_reg) {
       return Reg::ArmCore(machine_reg);
     case InstructionSet::kArm64:
       return Reg::Arm64Core(machine_reg);
+    case InstructionSet::kRiscv64:
+      return Reg::Riscv64Core(machine_reg);
     case InstructionSet::kX86:
       return Reg::X86Core(machine_reg);
     case InstructionSet::kX86_64:
@@ -55,6 +56,8 @@ static Reg GetDwarfFpReg(InstructionSet isa, int machine_reg) {
       return Reg::ArmFp(machine_reg);
     case InstructionSet::kArm64:
       return Reg::Arm64Fp(machine_reg);
+    case InstructionSet::kRiscv64:
+      return Reg::Riscv64Fp(machine_reg);
     case InstructionSet::kX86:
       return Reg::X86Fp(machine_reg);
     case InstructionSet::kX86_64:

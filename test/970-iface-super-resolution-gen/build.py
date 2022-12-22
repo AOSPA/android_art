@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from art_build_rules import build_run_test
+import os
 
-build_run_test(experimental="default-methods")
+
+def build(ctx):
+  ctx.bash("./generate-sources --" + ctx.mode)
+  ctx.default_build(experimental="default-methods")

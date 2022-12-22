@@ -30,7 +30,7 @@
 #include "managed_register.h"
 #include "offsets.h"
 
-namespace art {
+namespace art HIDDEN {
 
 class ArenaAllocator;
 class DebugFrameOpCodeWriterForAssembler;
@@ -214,6 +214,8 @@ class JNIMacroAssembler : public DeletableArenaObject<kArenaAllocAssembler> {
                     Offset src_offset,
                     ManagedRegister scratch,
                     size_t size) = 0;
+
+  virtual void Move(ManagedRegister dst, size_t value) = 0;
 
   virtual void MemoryBarrier(ManagedRegister scratch) = 0;
 

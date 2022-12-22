@@ -24,7 +24,7 @@
 
 using namespace vixl::aarch64;  // NOLINT(build/namespaces)
 
-namespace art {
+namespace art HIDDEN {
 namespace arm64 {
 
 #ifdef ___
@@ -643,6 +643,12 @@ void Arm64JNIMacroAssembler::Move(ManagedRegister m_dst, ManagedRegister m_src, 
   }
 }
 
+void Arm64JNIMacroAssembler::Move(ManagedRegister m_dst, size_t value) {
+  Arm64ManagedRegister dst = m_dst.AsArm64();
+  DCHECK(dst.IsXRegister());
+  ___ Mov(reg_x(dst.AsXRegister()), value);
+}
+
 void Arm64JNIMacroAssembler::CopyRawPtrFromThread(FrameOffset fr_offs, ThreadOffset64 tr_offs) {
   UseScratchRegisterScope temps(asm_.GetVIXLAssembler());
   Register scratch = temps.AcquireX();
@@ -1118,9 +1124,9 @@ void Arm64JNIMacroAssembler::RemoveFrame(size_t frame_size,
   asm_.UnspillRegisters(core_reg_list, frame_size - core_reg_size);
   asm_.UnspillRegisters(fp_reg_list, frame_size - core_reg_size - fp_reg_size);
 
-  // Emit marking register refresh even with uffd-GC as we are still using the
+  // Emit marking register refresh even with all GCs as we are still using the
   // register due to nterp's dependency.
-  if ((gUseReadBarrier || gUseUserfaultfd) && kUseBakerReadBarrier) {
+  if (kReserveMarkingRegister) {
     vixl::aarch64::Register mr = reg_x(MR);  // Marking Register.
     vixl::aarch64::Register tr = reg_x(TR);  // Thread Register.
 

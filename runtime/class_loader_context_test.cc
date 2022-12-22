@@ -18,6 +18,10 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
+#include <fstream>
+
+#include "android-base/stringprintf.h"
 #include "android-base/strings.h"
 #include "art_field-inl.h"
 #include "base/dchecked_vector.h"
@@ -42,6 +46,23 @@ namespace art {
 
 class ClassLoaderContextTest : public CommonRuntimeTest {
  public:
+  ClassLoaderContextTest() {
+    use_boot_image_ = true;  // Make the Runtime creation cheaper.
+  }
+
+  void SetUp() override {
+    CommonRuntimeTest::SetUp();
+    scratch_dir_ = std::make_unique<ScratchDir>();
+    scratch_path_ = scratch_dir_->GetPath();
+    // Remove the trailing '/';
+    scratch_path_.resize(scratch_path_.length() - 1);
+  }
+
+  void TearDown() override {
+    scratch_dir_.reset();
+    CommonRuntimeTest::TearDown();
+  }
+
   void VerifyContextSize(ClassLoaderContext* context, size_t expected_size) {
     ASSERT_TRUE(context != nullptr);
     ASSERT_EQ(expected_size, context->GetParentChainSize());
@@ -226,7 +247,7 @@ class ClassLoaderContextTest : public CommonRuntimeTest {
       REQUIRES_SHARED(Locks::mutator_lock_) {
     ASSERT_TRUE(class_loader->GetClass() == soa.Decode<mirror::Class>(type));
 
-    std::vector<const DexFile*> class_loader_dex_files = GetDexFiles(soa, class_loader);
+    std::vector<const DexFile*> class_loader_dex_files = GetDexFiles(soa.Self(), class_loader);
     ASSERT_EQ(expected_dex_files.size(), class_loader_dex_files.size());
 
     for (size_t i = 0; i < expected_dex_files.size(); i++) {
@@ -339,6 +360,9 @@ class ClassLoaderContextTest : public CommonRuntimeTest {
     *out = in.substr(start_position);
     return true;
   }
+
+  std::unique_ptr<ScratchDir> scratch_dir_;
+  std::string scratch_path_;
 
  private:
   void VerifyClassLoaderInfo(ClassLoaderContext* context,
@@ -654,9 +678,9 @@ TEST_F(ClassLoaderContextTest, CreateClassLoader) {
       soa.Decode<mirror::ClassLoader>(jclass_loader));
 
   ASSERT_TRUE(class_loader->GetClass() ==
-      soa.Decode<mirror::Class>(WellKnownClasses::dalvik_system_PathClassLoader));
+      WellKnownClasses::ToClass(WellKnownClasses::dalvik_system_PathClassLoader));
   ASSERT_TRUE(class_loader->GetParent()->GetClass() ==
-      soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
+      WellKnownClasses::ToClass(WellKnownClasses::java_lang_BootClassLoader));
 
   // For the first class loader the class path dex files must come first and then the
   // compilation sources.
@@ -695,7 +719,7 @@ TEST_F(ClassLoaderContextTest, CreateClassLoaderWithEmptyContext) {
                             WellKnownClasses::dalvik_system_PathClassLoader,
                             compilation_sources_raw);
   ASSERT_TRUE(class_loader->GetParent()->GetClass() ==
-      soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
+      WellKnownClasses::ToClass(WellKnownClasses::java_lang_BootClassLoader));
 }
 
 TEST_F(ClassLoaderContextTest, CreateClassLoaderWithComplexChain) {
@@ -765,7 +789,7 @@ TEST_F(ClassLoaderContextTest, CreateClassLoaderWithComplexChain) {
                             class_loader_3_dex_files);
   // The last class loader should have the BootClassLoader as a parent.
   ASSERT_TRUE(class_loader_3->GetParent()->GetClass() ==
-      soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
+      WellKnownClasses::ToClass(WellKnownClasses::java_lang_BootClassLoader));
 }
 
 TEST_F(ClassLoaderContextTest, CreateClassLoaderWithSharedLibraries) {
@@ -815,8 +839,7 @@ TEST_F(ClassLoaderContextTest, CreateClassLoaderWithSharedLibraries) {
                             class_loader_1_dex_files);
 
   // Verify the shared libraries.
-  ArtField* field =
-      jni::DecodeArtField(WellKnownClasses::dalvik_system_BaseDexClassLoader_sharedLibraryLoaders);
+  ArtField* field = WellKnownClasses::dalvik_system_BaseDexClassLoader_sharedLibraryLoaders;
   ObjPtr<mirror::Object> raw_shared_libraries = field->GetObject(class_loader_1.Get());
   ASSERT_TRUE(raw_shared_libraries != nullptr);
 
@@ -848,11 +871,11 @@ TEST_F(ClassLoaderContextTest, CreateClassLoaderWithSharedLibraries) {
 
   // All class loaders should have the BootClassLoader as a parent.
   ASSERT_TRUE(class_loader_1->GetParent()->GetClass() ==
-      soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
+      WellKnownClasses::ToClass(WellKnownClasses::java_lang_BootClassLoader));
   ASSERT_TRUE(class_loader_2->GetParent()->GetClass() ==
-      soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
+      WellKnownClasses::ToClass(WellKnownClasses::java_lang_BootClassLoader));
   ASSERT_TRUE(class_loader_3->GetParent()->GetClass() ==
-      soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
+      WellKnownClasses::ToClass(WellKnownClasses::java_lang_BootClassLoader));
 }
 
 TEST_F(ClassLoaderContextTest, CreateClassLoaderWithSharedLibrariesInParentToo) {
@@ -900,8 +923,7 @@ TEST_F(ClassLoaderContextTest, CreateClassLoaderWithSharedLibrariesInParentToo) 
                             class_loader_1_dex_files);
 
   // Verify its shared library.
-  ArtField* field =
-      jni::DecodeArtField(WellKnownClasses::dalvik_system_BaseDexClassLoader_sharedLibraryLoaders);
+  ArtField* field = WellKnownClasses::dalvik_system_BaseDexClassLoader_sharedLibraryLoaders;
   ObjPtr<mirror::Object> raw_shared_libraries = field->GetObject(class_loader_1.Get());
   ASSERT_TRUE(raw_shared_libraries != nullptr);
 
@@ -948,11 +970,11 @@ TEST_F(ClassLoaderContextTest, CreateClassLoaderWithSharedLibrariesInParentToo) 
 
   // Class loaders should have the BootClassLoader as a parent.
   ASSERT_TRUE(class_loader_2->GetParent()->GetClass() ==
-      soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
+      WellKnownClasses::ToClass(WellKnownClasses::java_lang_BootClassLoader));
   ASSERT_TRUE(class_loader_3->GetParent()->GetClass() ==
-      soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
+      WellKnownClasses::ToClass(WellKnownClasses::java_lang_BootClassLoader));
   ASSERT_TRUE(class_loader_4->GetParent()->GetClass() ==
-      soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
+      WellKnownClasses::ToClass(WellKnownClasses::java_lang_BootClassLoader));
 }
 
 TEST_F(ClassLoaderContextTest, CreateClassLoaderWithSharedLibrariesDependencies) {
@@ -1000,8 +1022,7 @@ TEST_F(ClassLoaderContextTest, CreateClassLoaderWithSharedLibrariesDependencies)
                             class_loader_1_dex_files);
 
   // Verify its shared library.
-  ArtField* field =
-      jni::DecodeArtField(WellKnownClasses::dalvik_system_BaseDexClassLoader_sharedLibraryLoaders);
+  ArtField* field = WellKnownClasses::dalvik_system_BaseDexClassLoader_sharedLibraryLoaders;
   ObjPtr<mirror::Object> raw_shared_libraries = field->GetObject(class_loader_1.Get());
   ASSERT_TRUE(raw_shared_libraries != nullptr);
 
@@ -1048,11 +1069,11 @@ TEST_F(ClassLoaderContextTest, CreateClassLoaderWithSharedLibrariesDependencies)
 
   // Class loaders should have the BootClassLoader as a parent.
   ASSERT_TRUE(class_loader_2->GetParent()->GetClass() ==
-      soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
+      WellKnownClasses::ToClass(WellKnownClasses::java_lang_BootClassLoader));
   ASSERT_TRUE(class_loader_3->GetParent()->GetClass() ==
-      soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
+      WellKnownClasses::ToClass(WellKnownClasses::java_lang_BootClassLoader));
   ASSERT_TRUE(class_loader_4->GetParent()->GetClass() ==
-      soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
+      WellKnownClasses::ToClass(WellKnownClasses::java_lang_BootClassLoader));
 }
 
 TEST_F(ClassLoaderContextTest, RemoveSourceLocations) {
@@ -1115,8 +1136,7 @@ TEST_F(ClassLoaderContextTest, CreateClassLoaderWithSameSharedLibraries) {
                             class_loader_1_dex_files);
 
   // Verify its shared library.
-  ArtField* field =
-      jni::DecodeArtField(WellKnownClasses::dalvik_system_BaseDexClassLoader_sharedLibraryLoaders);
+  ArtField* field = WellKnownClasses::dalvik_system_BaseDexClassLoader_sharedLibraryLoaders;
   ObjPtr<mirror::Object> raw_shared_libraries = field->GetObject(class_loader_1.Get());
   ASSERT_TRUE(raw_shared_libraries != nullptr);
 
@@ -1151,9 +1171,9 @@ TEST_F(ClassLoaderContextTest, CreateClassLoaderWithSameSharedLibraries) {
 
   // Class loaders should have the BootClassLoader as a parent.
   ASSERT_TRUE(class_loader_2->GetParent()->GetClass() ==
-      soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
+      WellKnownClasses::ToClass(WellKnownClasses::java_lang_BootClassLoader));
   ASSERT_TRUE(class_loader_3->GetParent()->GetClass() ==
-      soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
+      WellKnownClasses::ToClass(WellKnownClasses::java_lang_BootClassLoader));
 }
 
 TEST_F(ClassLoaderContextTest, EncodeInOatFile) {
@@ -1597,6 +1617,28 @@ TEST_F(ClassLoaderContextTest, VerifyClassLoaderContextMatchWithIMCSL) {
   VerifyClassLoaderSharedLibraryIMC(context.get(), 0, 1, "<unknown>:<unknown>");
 
   ASSERT_EQ(context->VerifyClassLoaderContextMatch(context_spec),
+            ClassLoaderContext::VerificationResult::kVerifies);
+}
+
+TEST_F(ClassLoaderContextTest, VerifyClassLoaderContextMatchAfterResolvingSymlinks) {
+  {
+    std::ofstream ofs(scratch_path_ + "/foo.jar");
+    ASSERT_TRUE(ofs);
+  }
+  std::filesystem::create_directory_symlink(scratch_path_, scratch_path_ + "/bar");
+
+  std::string context_spec =
+      android::base::StringPrintf("PCL[%s/foo.jar*123:%s/foo.jar!classes2.dex*456]",
+                                  scratch_path_.c_str(),
+                                  scratch_path_.c_str());
+  std::unique_ptr<ClassLoaderContext> context = ParseContextWithChecksums(context_spec);
+  PretendContextOpenedDexFilesForChecksums(context.get());
+
+  std::string context_spec_with_symlinks =
+      android::base::StringPrintf("PCL[%s/bar/foo.jar*123:%s/bar/foo.jar!classes2.dex*456]",
+                                  scratch_path_.c_str(),
+                                  scratch_path_.c_str());
+  ASSERT_EQ(context->VerifyClassLoaderContextMatch(context_spec_with_symlinks),
             ClassLoaderContext::VerificationResult::kVerifies);
 }
 

@@ -29,6 +29,7 @@
 #include "base/array_ref.h"
 #include "base/intrusive_forward_list.h"
 #include "base/iteration_range.h"
+#include "base/macros.h"
 #include "base/mutex.h"
 #include "base/quasi_atomic.h"
 #include "base/stl_util.h"
@@ -51,7 +52,7 @@
 #include "mirror/method_type.h"
 #include "offsets.h"
 
-namespace art {
+namespace art HIDDEN {
 
 class ArenaStack;
 class CodeGenerator;
@@ -137,6 +138,7 @@ enum GraphAnalysisResult {
   kAnalysisInvalidBytecode,
   kAnalysisFailThrowCatchLoop,
   kAnalysisFailAmbiguousArrayOp,
+  kAnalysisFailInliningIrreducibleLoop,
   kAnalysisFailIrreducibleLoopAndStringInit,
   kAnalysisFailPhiEquivalentInOsr,
   kAnalysisSuccess,
@@ -486,9 +488,11 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   // Update the loop and try membership of `block`, which was spawned from `reference`.
   // In case `reference` is a back edge, `replace_if_back_edge` notifies whether `block`
   // should be the new back edge.
+  // `has_more_specific_try_catch_info` will be set to true when inlining a try catch.
   void UpdateLoopAndTryInformationOfNewBlock(HBasicBlock* block,
                                              HBasicBlock* reference,
-                                             bool replace_if_back_edge);
+                                             bool replace_if_back_edge,
+                                             bool has_more_specific_try_catch_info = false);
 
   // Need to add a couple of blocks to test if the loop body is entered and
   // put deoptimization instructions, etc.
@@ -735,7 +739,7 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   void IncrementNumberOfCHAGuards() { number_of_cha_guards_++; }
 
  private:
-  void RemoveInstructionsAsUsersFromDeadBlocks(const ArenaBitVector& visited) const;
+  void RemoveDeadBlocksInstructionsAsUsersAndDisconnect(const ArenaBitVector& visited) const;
   void RemoveDeadBlocks(const ArenaBitVector& visited);
 
   template <class InstructionType, typename ValueType>
@@ -1351,11 +1355,14 @@ class HBasicBlock : public ArenaObject<kArenaAllocBasicBlock> {
   // skip updating those phis.
   void DisconnectFromSuccessors(const ArenaBitVector* visited = nullptr);
 
-  // Removes the catch phi uses of the instructions in `this`. If `remove_instruction` is set to
-  // true, it will also remove the instructions themselves. This method assumes the instructions
-  // have been removed from all users with the exception of catch phis because of missing
-  // exceptional edges in the graph.
-  void RemoveCatchPhiUses(bool remove_instruction);
+  // Removes the catch phi uses of the instructions in `this`, and then remove the instruction
+  // itself. If `building_dominator_tree` is true, it will not remove the instruction as user, since
+  // we do it in a previous step. This is a special case for building up the dominator tree: we want
+  // to eliminate uses before inputs but we don't have domination information, so we remove all
+  // connections from input/uses first before removing any instruction.
+  // This method assumes the instructions have been removed from all users with the exception of
+  // catch phis because of missing exceptional edges in the graph.
+  void RemoveCatchPhiUsesAndInstruction(bool building_dominator_tree);
 
   void AddInstruction(HInstruction* instruction);
   // Insert `instruction` before/after an existing instruction `cursor`.
@@ -8450,7 +8457,7 @@ class HIntermediateAddress final : public HExpression<2> {
 #include "nodes_x86.h"
 #endif
 
-namespace art {
+namespace art HIDDEN {
 
 class OptimizingCompilerStats;
 

@@ -183,6 +183,10 @@ class InstrumentationTest : public CommonRuntimeTest {
   static constexpr const char* kClientOneKey = "TestClient1";
   static constexpr const char* kClientTwoKey = "TestClient2";
 
+  InstrumentationTest() {
+    use_boot_image_ = true;  // Make the Runtime creation cheaper.
+  }
+
   void CheckConfigureStubs(const char* key, Instrumentation::InstrumentationLevel level) {
     ScopedObjectAccess soa(Thread::Current());
     instrumentation::Instrumentation* instr = Runtime::Current()->GetInstrumentation();
@@ -222,7 +226,7 @@ class InstrumentationTest : public CommonRuntimeTest {
 
     mirror::Object* const event_obj = nullptr;
     const uint32_t event_dex_pc = 0;
-    ShadowFrameAllocaUniquePtr test_frame = CREATE_SHADOW_FRAME(0, nullptr, event_method, 0);
+    ShadowFrameAllocaUniquePtr test_frame = CREATE_SHADOW_FRAME(0, event_method, 0);
 
     // Check the listener is registered and is notified of the event.
     EXPECT_TRUE(HasEventListener(instr, instrumentation_event));

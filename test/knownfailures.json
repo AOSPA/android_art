@@ -81,7 +81,7 @@
     },
     {
         "tests" : "629-vdex-speed",
-        "variant": "interp-ac | interpreter | jit",
+        "variant": "interp-ac | interpreter | no-prebuild | debuggable | trace",
         "description": "629 requires compilation."
     },
     {
@@ -383,16 +383,10 @@
         "variant": "interp-ac"
     },
     {
-        "tests": ["629-vdex-speed",
-                  "634-vdex-duplicate"],
-        "description": ["Profile driven dexlayout does not work with vdex or dex verifier."],
-        "variant": "speed-profile"
-    },
-    {
         "test_patterns": ["616-cha.*"],
         "description": ["cha tests rely on knowing the exact set of optimizations available. ",
                         "Debuggable runtimes change the set of optimizations."],
-        "variant": "debuggable"
+        "variant": "debuggable | trace"
     },
     {
         "test_patterns": ["616-cha.*"],
@@ -550,6 +544,7 @@
             "674-hiddenapi",
             "690-hiddenapi-same-name-methods",
             "804-class-extends-itself",
+            "842-vdex-hard-failure",
             "921-hello-failure",
             "999-redefine-hiddenapi"
         ],
@@ -712,10 +707,9 @@
         "description": "Test disabled due to redefine-stress disabling intrinsics which changes the trace output slightly."
     },
     {
-        "tests": ["137-cfi", "629-vdex-speed"],
-        "description": [ "Tests require speed compilation which is no longer the default for",
-                          "no-prebuild or no-image configs."],
-        "variant": "no-prebuild | no-image"
+        "tests": ["137-cfi"],
+        "description": [ "Tests require speed compilation which is no longer the default for no-prebuild"],
+        "variant": "no-prebuild"
     },
     {
         "tests": ["059-finalizer-throw", "063-process-manager"],
@@ -758,13 +752,6 @@
         "tests": "664-aget-verifier",
         "description": ["Aget on potentially null array fails verification."],
         "bug": "b/64683522"
-    },
-    {
-        "tests": ["628-vdex",
-                  "629-vdex-speed",
-                  "634-vdex-duplicate"],
-        "variant": "cdex-fast",
-        "description": ["Tests that depend on input-vdex are not supported with compact dex"]
     },
     {
         "tests": ["661-oat-writer-layout"],
@@ -1030,6 +1017,7 @@
           "816-illegal-new-array",
           "819-verification-runtime",
           "823-cha-inlining",
+          "842-vdex-hard-failure",
           "900-hello-plugin",
           "901-hello-ti-agent",
           "903-hello-tagging",
@@ -1073,6 +1061,7 @@
           "988-method-trace",
           "989-method-trace-throw",
           "993-breakpoints",
+          "993-breakpoints-non-debuggable",
           "1002-notify-startup",
           "1003-metadata-section-strings",
           "1336-short-finalizer-timeout",
@@ -1139,7 +1128,7 @@
                   "2006-virtual-structural-finalizing",
                   "2007-virtual-structural-finalizable"
                 ],
-        "env_vars": {"ART_USE_READ_BARRIER": "false"},
+        "env_vars": {"ART_USE_READ_BARRIER": "false", "ART_DEFAULT_GC_TYPE": "CMS"},
         "description": ["Relies on the accuracy of the Heap::VisitObjects function which is broken",
                         " when READ_BARRIER==false (I.e. On CMS collector)."],
         "bug": "b/147207934"
@@ -1175,6 +1164,8 @@
                   "833-background-verification",
                   "836-32768classes",
                   "837-deopt",
+                  "844-exception",
+                  "844-exception2",
                   "999-redefine-hiddenapi",
                   "1000-non-moving-space-stress",
                   "1001-app-image-regions",
@@ -1225,7 +1216,8 @@
                   "2036-structural-subclass-shadow",
                   "2038-hiddenapi-jvmti-ext",
                   "2040-huge-native-alloc",
-                  "2238-checker-polymorphic-recursive-inlining"],
+                  "2238-checker-polymorphic-recursive-inlining",
+                  "2240-tracing-non-invokable-method"],
         "variant": "jvm",
         "description": ["Doesn't run on RI."]
     },
@@ -1314,7 +1306,7 @@
     },
     {
         "tests": ["1339-dead-reference-safe"],
-        "variant": "debuggable",
+        "variant": "debuggable | trace",
         "description": [ "Fails to eliminate dead reference when debuggable." ]
     },
     {
@@ -1333,14 +1325,11 @@
         "description": ["Test containing Checker assertions expecting Baker read barriers."]
     },
     {
-        "tests": ["2009-structural-local-ref",
-                  "2035-structural-native-method",
-	          "2036-structural-subclass-shadow",
-	          "2040-huge-native-alloc",
-	          "905-object-free"],
+        "tests": ["2040-huge-native-alloc"],
         "env_vars": {"ART_USE_READ_BARRIER": "false"},
+	"variant": "debug",
         "bug": "b/242181443",
-        "description": ["Tests temporarily disabled for userfaultfd GC. Remove once native GC-root updation is implemented."]
+        "description": ["Test fails due to delay delebrately added in the userfaultfd GC between marking and compaction."]
     },
     {
         "tests": ["1004-checker-volatile-ref-load"],
@@ -1386,7 +1375,7 @@
     },
     {
         "tests": ["2043-reference-pauses"],
-        "env_vars": {"ART_USE_READ_BARRIER": "false"},
+        "env_vars": {"ART_USE_READ_BARRIER": "false", "ART_DEFAULT_GC_TYPE": "CMS"},
         "variant": "host",
         "bug": "b/232459100",
         "description": ["Fails intermittently for CMS."]
@@ -1449,7 +1438,7 @@
     },
     {
         "tests": ["692-vdex-secondary-loader"],
-        "env_vars": {"ART_USE_READ_BARRIER": "false"},
+        "env_vars": {"ART_USE_READ_BARRIER": "false", "ART_DEFAULT_GC_TYPE": "CMS"},
         "description": ["Uses the low-ram flag which does not work with CMS"]
     },
     {
@@ -1547,6 +1536,18 @@
         "tests": ["715-clinit-implicit-parameter-annotations"],
         "description": ["Change for Annotation.toString() in JDK 17."],
         "bug": "b/243500721",
+        "variant": "jvm"
+    },
+    {
+        "tests": ["1907-suspend-list-self-twice"],
+        "description": ["Change of behavior when used with JDK 17."],
+        "bug": "b/243139124",
+        "variant": "jvm"
+    },
+    {
+        "tests": ["1921-suspend-native-recursive-monitor"],
+        "description": ["Change of behavior when used with JDK 17."],
+        "bug": "b/242985234",
         "variant": "jvm"
     }
 ]

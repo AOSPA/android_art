@@ -57,6 +57,9 @@
 
 namespace art {
 
+// Should be the same as dalvik.system.DexFile.ENFORCE_READ_ONLY_JAVA_DCL
+static constexpr uint64_t kEnforceReadOnlyJavaDcl = 218865702;
+
 using android::base::StringPrintf;
 
 static bool ConvertJavaArrayToDexFiles(
@@ -314,6 +317,30 @@ static jobject DexFile_openDexFileNative(JNIEnv* env,
   ScopedUtfChars sourceName(env, javaSourceName);
   if (sourceName.c_str() == nullptr) {
     return nullptr;
+  }
+
+  if (kIsTargetAndroid) {
+    const int uid = getuid();
+    // The following UIDs are exempted:
+    // * Root (0): root processes always have write access to files.
+    // * System (1000): /data/app/**.apk are owned by AID_SYSTEM;
+    //   loading installed APKs in system_server is allowed.
+    // * Shell (2000): directly calling dalvikvm/app_process in ADB shell
+    //   to run JARs with CLI is allowed.
+    if (uid != 0 && uid != 1000 && uid != 2000) {
+      Runtime* const runtime = Runtime::Current();
+      CompatFramework& compatFramework = runtime->GetCompatFramework();
+      if (compatFramework.IsChangeEnabled(kEnforceReadOnlyJavaDcl)) {
+        if (access(sourceName.c_str(), W_OK) == 0) {
+          LOG(ERROR) << "Attempt to load writable dex file: " << sourceName.c_str();
+          ScopedLocalRef<jclass> se(env, env->FindClass("java/lang/SecurityException"));
+          std::string message(
+              StringPrintf("Writable dex file '%s' is not allowed.", sourceName.c_str()));
+          env->ThrowNew(se.get(), message.c_str());
+          return nullptr;
+        }
+      }
+    }
   }
 
   std::vector<std::string> error_msgs;
@@ -590,6 +617,8 @@ static jstring DexFile_getDexFileStatus(JNIEnv* env,
     return nullptr;
   }
 
+  // The API doesn't support passing a class loader context, so skip the class loader context check
+  // and assume that it's OK.
   OatFileAssistant oat_file_assistant(filename.c_str(),
                                       target_instruction_set,
                                       /* context= */ nullptr,
@@ -732,6 +761,36 @@ static jboolean DexFile_isProfileGuidedCompilerFilter(JNIEnv* env,
     return JNI_FALSE;
   }
   return CompilerFilter::DependsOnProfile(filter) ? JNI_TRUE : JNI_FALSE;
+}
+
+static jboolean DexFile_isVerifiedCompilerFilter(JNIEnv* env,
+                                                 jclass javeDexFileClass ATTRIBUTE_UNUSED,
+                                                 jstring javaCompilerFilter) {
+  ScopedUtfChars compiler_filter(env, javaCompilerFilter);
+  if (env->ExceptionCheck()) {
+    return -1;
+  }
+
+  CompilerFilter::Filter filter;
+  if (!CompilerFilter::ParseCompilerFilter(compiler_filter.c_str(), &filter)) {
+    return JNI_FALSE;
+  }
+  return CompilerFilter::IsVerificationEnabled(filter) ? JNI_TRUE : JNI_FALSE;
+}
+
+static jboolean DexFile_isOptimizedCompilerFilter(JNIEnv* env,
+                                                  jclass javeDexFileClass ATTRIBUTE_UNUSED,
+                                                  jstring javaCompilerFilter) {
+  ScopedUtfChars compiler_filter(env, javaCompilerFilter);
+  if (env->ExceptionCheck()) {
+    return -1;
+  }
+
+  CompilerFilter::Filter filter;
+  if (!CompilerFilter::ParseCompilerFilter(compiler_filter.c_str(), &filter)) {
+    return JNI_FALSE;
+  }
+  return CompilerFilter::IsAotCompilationEnabled(filter) ? JNI_TRUE : JNI_FALSE;
 }
 
 static jstring DexFile_getNonProfileGuidedCompilerFilter(JNIEnv* env,
@@ -905,7 +964,7 @@ static void DexFile_setTrusted(JNIEnv* env, jclass, jobject j_cookie) {
   ScopedObjectAccess soa(env);
 
   // Currently only allow this for debuggable apps.
-  if (!runtime->IsJavaDebuggable()) {
+  if (!runtime->IsJavaDebuggableAtInit()) {
     ThrowSecurityException("Can't exempt class, process is not debuggable.");
     return;
   }
@@ -957,6 +1016,8 @@ static JNINativeMethod gMethods[] = {
                 ")V"),
   NATIVE_METHOD(DexFile, isValidCompilerFilter, "(Ljava/lang/String;)Z"),
   NATIVE_METHOD(DexFile, isProfileGuidedCompilerFilter, "(Ljava/lang/String;)Z"),
+  NATIVE_METHOD(DexFile, isVerifiedCompilerFilter, "(Ljava/lang/String;)Z"),
+  NATIVE_METHOD(DexFile, isOptimizedCompilerFilter, "(Ljava/lang/String;)Z"),
   NATIVE_METHOD(DexFile,
                 getNonProfileGuidedCompilerFilter,
                 "(Ljava/lang/String;)Ljava/lang/String;"),

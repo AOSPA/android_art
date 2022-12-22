@@ -26,8 +26,9 @@
 
 #include "base/atomic.h"
 #include "base/globals.h"
+#include "base/macros.h"
 
-namespace art {
+namespace art HIDDEN {
 
 enum class MethodCompilationStat {
   kAttemptBytecodeCompilation = 0,
@@ -59,6 +60,7 @@ enum class MethodCompilationStat {
   kNotCompiledSpaceFilter,
   kNotCompiledUnhandledInstruction,
   kNotCompiledUnsupportedIsa,
+  kNotCompiledInliningIrreducibleLoop,
   kNotCompiledIrreducibleLoopAndStringInit,
   kNotCompiledPhiEquivalentInOsr,
   kInlinedMonomorphicCall,
@@ -94,11 +96,14 @@ enum class MethodCompilationStat {
   kNotInlinedInfiniteLoop,
   kNotInlinedTryCatchCaller,
   kNotInlinedTryCatchCallee,
+  kNotInlinedTryCatchDisabled,
   kNotInlinedRegisterAllocator,
   kNotInlinedCannotBuild,
+  kNotInlinedNeverInlineAnnotation,
   kNotInlinedNotCompilable,
   kNotInlinedNotVerified,
   kNotInlinedCodeItem,
+  kNotInlinedEndsWithThrow,
   kNotInlinedWont,
   kNotInlinedRecursiveBudget,
   kNotInlinedPolymorphicRecursiveBudget,

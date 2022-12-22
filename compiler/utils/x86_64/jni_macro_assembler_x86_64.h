@@ -28,7 +28,7 @@
 #include "utils/assembler.h"
 #include "utils/jni_macro_assembler.h"
 
-namespace art {
+namespace art HIDDEN {
 namespace x86_64 {
 
 class X86_64JNIMacroAssembler final : public JNIMacroAssemblerFwd<X86_64Assembler,
@@ -94,6 +94,8 @@ class X86_64JNIMacroAssembler final : public JNIMacroAssemblerFwd<X86_64Assemble
                      ArrayRef<FrameOffset> refs) override;
 
   void Move(ManagedRegister dest, ManagedRegister src, size_t size) override;
+
+  void Move(ManagedRegister dest, size_t value) override;
 
   void CopyRawPtrFromThread(FrameOffset fr_offs, ThreadOffset64 thr_offs) override;
 

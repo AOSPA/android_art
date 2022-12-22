@@ -447,9 +447,8 @@ class JvmtiParkListener : public art::ParkCallback {
     if (handler_->IsEventEnabledAnywhere(ArtJvmtiEvent::kMonitorWait)) {
       art::Thread* self = art::Thread::Current();
       art::JNIEnvExt* jnienv = self->GetJniEnv();
-      art::ArtField* parkBlockerField = art::jni::DecodeArtField(
-          art::WellKnownClasses::java_lang_Thread_parkBlocker);
-      art::ObjPtr<art::mirror::Object> blocker_obj = parkBlockerField->GetObj(self->GetPeer());
+      art::ObjPtr<art::mirror::Object> blocker_obj =
+          art::WellKnownClasses::java_lang_Thread_parkBlocker->GetObj(self->GetPeer());
       if (blocker_obj.IsNull()) {
         blocker_obj = self->GetPeer();
       }
@@ -505,9 +504,8 @@ class JvmtiParkListener : public art::ParkCallback {
     if (handler_->IsEventEnabledAnywhere(ArtJvmtiEvent::kMonitorWaited)) {
       art::Thread* self = art::Thread::Current();
       art::JNIEnvExt* jnienv = self->GetJniEnv();
-      art::ArtField* parkBlockerField = art::jni::DecodeArtField(
-          art::WellKnownClasses::java_lang_Thread_parkBlocker);
-      art::ObjPtr<art::mirror::Object> blocker_obj = parkBlockerField->GetObj(self->GetPeer());
+      art::ObjPtr<art::mirror::Object> blocker_obj =
+          art::WellKnownClasses::java_lang_Thread_parkBlocker->GetObj(self->GetPeer());
       if (blocker_obj.IsNull()) {
         blocker_obj = self->GetPeer();
       }
@@ -1255,7 +1253,7 @@ void EventHandler::HandleLocalAccessCapabilityAdded() {
       }
       for (auto& m : klass->GetMethods(art::kRuntimePointerSize)) {
         const void* code = m.GetEntryPointFromQuickCompiledCode();
-        if (m.IsNative() || m.IsProxyMethod()) {
+        if (m.IsNative() || m.IsProxyMethod() || !m.IsInvokable()) {
           continue;
         } else if (!runtime_->GetClassLinker()->IsQuickToInterpreterBridge(code) &&
                    !runtime_->IsAsyncDeoptimizeable(&m, reinterpret_cast<uintptr_t>(code))) {

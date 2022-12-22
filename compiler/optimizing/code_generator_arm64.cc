@@ -27,7 +27,6 @@
 #include "class_root-inl.h"
 #include "class_table.h"
 #include "code_generator_utils.h"
-#include "compiled_method.h"
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "entrypoints/quick/quick_entrypoints_enum.h"
 #include "gc/accounting/card_table.h"
@@ -58,7 +57,7 @@ using vixl::EmissionCheckScope;
 #error "ARM64 Codegen VIXL macro-assembler macro already defined."
 #endif
 
-namespace art {
+namespace art HIDDEN {
 
 template<class MirrorType>
 class GcRoot;
@@ -825,6 +824,9 @@ class MethodEntryExitHooksSlowPathARM64 : public SlowPathCodeARM64 {
     CodeGeneratorARM64* arm64_codegen = down_cast<CodeGeneratorARM64*>(codegen);
     __ Bind(GetEntryLabel());
     SaveLiveRegisters(codegen, locations);
+    if (instruction_->IsMethodExitHook()) {
+      __ Mov(vixl::aarch64::x4, arm64_codegen->GetFrameSize());
+    }
     arm64_codegen->InvokeRuntime(entry_point, instruction_, instruction_->GetDexPc(), this);
     RestoreLiveRegisters(codegen, locations);
     __ B(GetExitLabel());
@@ -1169,9 +1171,21 @@ void InstructionCodeGeneratorARM64::GenerateMethodEntryExitHook(HInstruction* in
       new (codegen_->GetScopedAllocator()) MethodEntryExitHooksSlowPathARM64(instruction);
   codegen_->AddSlowPath(slow_path);
 
+  if (instruction->IsMethodExitHook()) {
+    // Check if we are required to check if the caller needs a deoptimization. Strictly speaking it
+    // would be sufficient to check if CheckCallerForDeopt bit is set. Though it is faster to check
+    // if it is just non-zero. kCHA bit isn't used in debuggable runtimes as cha optimization is
+    // disabled in debuggable runtime. The other bit is used when this method itself requires a
+    // deoptimization due to redefinition. So it is safe to just check for non-zero value here.
+    __ Ldr(value, MemOperand(sp, codegen_->GetStackOffsetOfShouldDeoptimizeFlag()));
+    __ Cbnz(value, slow_path->GetEntryLabel());
+  }
+
   uint64_t address = reinterpret_cast64<uint64_t>(Runtime::Current()->GetInstrumentation());
-  int offset = instrumentation::Instrumentation::NeedsEntryExitHooksOffset().Int32Value();
-  __ Mov(temp, address + offset);
+  MemberOffset  offset = instruction->IsMethodExitHook() ?
+      instrumentation::Instrumentation::HaveMethodExitListenersOffset() :
+      instrumentation::Instrumentation::HaveMethodEntryListenersOffset();
+  __ Mov(temp, address + offset.Int32Value());
   __ Ldrb(value, MemOperand(temp, 0));
   __ Cbnz(value, slow_path->GetEntryLabel());
   __ Bind(slow_path->GetExitLabel());
@@ -1242,6 +1256,7 @@ void CodeGeneratorARM64::GenerateFrameEntry() {
   if (GetCompilerOptions().ShouldCompileWithClinitCheck(GetGraph()->GetArtMethod())) {
     UseScratchRegisterScope temps(masm);
     vixl::aarch64::Label resolution;
+    vixl::aarch64::Label memory_barrier;
 
     Register temp1 = temps.AcquireW();
     Register temp2 = temps.AcquireW();
@@ -1254,6 +1269,11 @@ void CodeGeneratorARM64::GenerateFrameEntry() {
     __ Ldrb(temp2, HeapOperand(temp1, status_byte_offset));
     __ Cmp(temp2, shifted_visibly_initialized_value);
     __ B(hs, &frame_entry_label_);
+
+    // Check if we're initialized and jump to code that does a memory barrier if
+    // so.
+    __ Cmp(temp2, shifted_initialized_value);
+    __ B(hs, &memory_barrier);
 
     // Check if we're initializing and the thread initializing is the one
     // executing the code.
@@ -1271,6 +1291,9 @@ void CodeGeneratorARM64::GenerateFrameEntry() {
         GetThreadOffset<kArm64PointerSize>(kQuickQuickResolutionTrampoline);
     __ Ldr(temp1.X(), MemOperand(tr, entrypoint_offset.Int32Value()));
     __ Br(temp1.X());
+
+    __ Bind(&memory_barrier);
+    GenerateMemoryBarrier(MemBarrierKind::kAnyAny);
   }
   __ Bind(&frame_entry_label_);
 

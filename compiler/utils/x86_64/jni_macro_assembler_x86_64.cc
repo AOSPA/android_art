@@ -22,7 +22,7 @@
 #include "lock_word.h"
 #include "thread.h"
 
-namespace art {
+namespace art HIDDEN {
 namespace x86_64 {
 
 static dwarf::Reg DWARFReg(Register reg) {
@@ -482,6 +482,12 @@ void X86_64JNIMacroAssembler::Move(ManagedRegister mdest, ManagedRegister msrc, 
       UNIMPLEMENTED(FATAL) << ": Move " << dest << ", " << src;
     }
   }
+}
+
+
+void X86_64JNIMacroAssembler::Move(ManagedRegister mdest, size_t value) {
+  X86_64ManagedRegister dest = mdest.AsX86_64();
+  __ movq(dest.AsCpuRegister(), Immediate(value));
 }
 
 void X86_64JNIMacroAssembler::CopyRef(FrameOffset dest, FrameOffset src) {

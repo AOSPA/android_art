@@ -89,7 +89,7 @@
 #include "jni/jni_id_manager.h"
 #include "jvmti.h"
 #include "jvmti_allocator.h"
-#include "linear_alloc.h"
+#include "linear_alloc-inl.h"
 #include "mirror/array-alloc-inl.h"
 #include "mirror/array.h"
 #include "mirror/class-alloc-inl.h"
@@ -310,7 +310,9 @@ class ObsoleteMethodStackVisitor : public art::StackVisitor {
         art::ClassLinker* cl = runtime->GetClassLinker();
         auto ptr_size = cl->GetImagePointerSize();
         const size_t method_size = art::ArtMethod::Size(ptr_size);
-        auto* method_storage = allocator_->Alloc(art::Thread::Current(), method_size);
+        auto* method_storage = allocator_->Alloc(art::Thread::Current(),
+                                                 method_size,
+                                                 art::LinearAllocKind::kArtMethod);
         CHECK(method_storage != nullptr) << "Unable to allocate storage for obsolete version of '"
                                          << old_method->PrettyMethod() << "'";
         new_obsolete_method = new (method_storage) art::ArtMethod();
@@ -512,8 +514,15 @@ template jvmtiError Redefiner::GetClassRedefinitionError<RedefinitionType::kStru
 art::MemMap Redefiner::MoveDataToMemMap(const std::string& original_location,
                                         art::ArrayRef<const unsigned char> data,
                                         std::string* error_msg) {
+  std::string modified_location = StringPrintf("%s-transformed", original_location.c_str());
+  // A dangling multi-dex location appended to bootclasspath can cause inaccuracy in oat file
+  // validation. For simplicity, just convert it to a normal location.
+  size_t pos = modified_location.find(art::DexFileLoader::kMultiDexSeparator);
+  if (pos != std::string::npos) {
+    modified_location[pos] = '-';
+  }
   art::MemMap map = art::MemMap::MapAnonymous(
-      StringPrintf("%s-transformed", original_location.c_str()).c_str(),
+      modified_location.c_str(),
       data.size(),
       PROT_READ|PROT_WRITE,
       /*low_4gb=*/ false,
@@ -544,6 +553,13 @@ Redefiner::ClassRedefinition::ClassRedefinition(
 Redefiner::ClassRedefinition::~ClassRedefinition() {
   if (driver_ != nullptr && lock_acquired_) {
     GetMirrorClass()->MonitorExit(driver_->self_);
+  }
+  if (art::kIsDebugBuild) {
+    if (dex_file_ != nullptr) {
+      art::Thread* self = art::Thread::Current();
+      art::ClassLinker* cl = art::Runtime::Current()->GetClassLinker();
+      CHECK(!cl->IsDexFileRegistered(self, *dex_file_));
+    }
   }
 }
 
@@ -1217,6 +1233,8 @@ class RedefinitionDataHolder {
     actually_structural_(redefinitions_->size(), false),
     initial_structural_(redefinitions_->size(), false) {}
 
+  ~RedefinitionDataHolder() REQUIRES_SHARED(art::Locks::mutator_lock_);
+
   bool IsNull() const REQUIRES_SHARED(art::Locks::mutator_lock_) {
     return arr_.IsNull();
   }
@@ -1423,8 +1441,9 @@ class RedefinitionDataIter {
 
   RedefinitionDataIter(const RedefinitionDataIter&) = default;
   RedefinitionDataIter(RedefinitionDataIter&&) = default;
-  RedefinitionDataIter& operator=(const RedefinitionDataIter&) = default;
-  RedefinitionDataIter& operator=(RedefinitionDataIter&&) = default;
+  // Assignments are deleted because holder_ is a reference.
+  RedefinitionDataIter& operator=(const RedefinitionDataIter&) = delete;
+  RedefinitionDataIter& operator=(RedefinitionDataIter&&) = delete;
 
   bool operator==(const RedefinitionDataIter& other) const
       REQUIRES_SHARED(art::Locks::mutator_lock_) {
@@ -1611,6 +1630,24 @@ RedefinitionDataIter RedefinitionDataHolder::begin() {
 
 RedefinitionDataIter RedefinitionDataHolder::end() {
   return RedefinitionDataIter(Length(), *this);
+}
+
+RedefinitionDataHolder::~RedefinitionDataHolder() {
+  art::Thread* self = art::Thread::Current();
+  art::ClassLinker* cl = art::Runtime::Current()->GetClassLinker();
+  for (RedefinitionDataIter data = begin(); data != end(); ++data) {
+    art::ObjPtr<art::mirror::DexCache> dex_cache = data.GetNewDexCache();
+    // When redefinition fails, the dex file will be deleted in the
+    // `ClassRedefinition` destructor. To avoid having a heap `DexCache` pointing
+    // to a dangling pointer, we clear the entries of those dex caches that are
+    // not registered in the runtime.
+    if (dex_cache != nullptr &&
+        dex_cache->GetDexFile() != nullptr &&
+        !cl->IsDexFileRegistered(self, *dex_cache->GetDexFile())) {
+      dex_cache->ResetNativeArrays();
+      dex_cache->SetDexFile(nullptr);
+    }
+  }
 }
 
 bool Redefiner::ClassRedefinition::CheckVerification(const RedefinitionDataIter& iter) {
@@ -1805,13 +1842,12 @@ bool Redefiner::ClassRedefinition::CollectAndCreateNewInstances(
 
 bool Redefiner::ClassRedefinition::FinishRemainingCommonAllocations(
     /*out*/RedefinitionDataIter* cur_data) {
-  art::ScopedObjectAccessUnchecked soa(driver_->self_);
   art::StackHandleScope<2> hs(driver_->self_);
   cur_data->SetMirrorClass(GetMirrorClass());
   // This shouldn't allocate
   art::Handle<art::mirror::ClassLoader> loader(hs.NewHandle(GetClassLoader()));
   // The bootclasspath is handled specially so it doesn't have a j.l.DexFile.
-  if (!art::ClassLinker::IsBootClassLoader(soa, loader.Get())) {
+  if (!art::ClassLinker::IsBootClassLoader(loader.Get())) {
     cur_data->SetSourceClassLoader(loader.Get());
     art::Handle<art::mirror::Object> dex_file_obj(hs.NewHandle(
         ClassLoaderHelper::FindSourceDexFileObject(driver_->self_, loader)));
@@ -2221,6 +2257,11 @@ bool Redefiner::FinishAllRemainingCommonAllocations(RedefinitionDataHolder& hold
 }
 
 void Redefiner::ClassRedefinition::ReleaseDexFile() {
+  if (art::kIsDebugBuild) {
+    art::Thread* self = art::Thread::Current();
+    art::ClassLinker* cl = art::Runtime::Current()->GetClassLinker();
+    CHECK(cl->IsDexFileRegistered(self, *dex_file_));
+  }
   dex_file_.release();  // NOLINT b/117926937
 }
 
@@ -2480,7 +2521,9 @@ jvmtiError Redefiner::Run() {
     art::ClassLinker* cl = runtime_->GetClassLinker();
     if (data.GetSourceClassLoader() == nullptr) {
       // AppendToBootClassPath includes dex file registration.
-      cl->AppendToBootClassPath(&data.GetRedefinition().GetDexFile(), data.GetNewDexCache());
+      const art::DexFile& dex_file = data.GetRedefinition().GetDexFile();
+      runtime_->AppendToBootClassPath(
+          dex_file.GetLocation(), dex_file.GetLocation(), {{&dex_file, data.GetNewDexCache()}});
     } else {
       cl->RegisterExistingDexCache(data.GetNewDexCache(), data.GetSourceClassLoader());
     }

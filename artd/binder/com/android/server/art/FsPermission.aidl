@@ -19,6 +19,8 @@ package com.android.server.art;
 /**
  * Represents the Linux filesystem permission of a file or a directory.
  *
+ * If both `uid` and `gid` are negative, no `chown` will be performed.
+ *
  * If none of the booleans are set, the default permission bits are `rw-r-----` for a file, and
  * `rwxr-x---` for a directory.
  *

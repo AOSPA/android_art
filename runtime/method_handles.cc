@@ -81,7 +81,7 @@ bool GetUnboxedPrimitiveType(ObjPtr<mirror::Class> klass, Primitive::Type* type)
 ObjPtr<mirror::Class> GetBoxedPrimitiveClass(Primitive::Type type)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   ScopedAssertNoThreadSuspension ants(__FUNCTION__);
-  jmethodID m = nullptr;
+  ArtMethod* m = nullptr;
   switch (type) {
 #define CASE_PRIMITIVE(primitive, _, java_name, __)              \
     case primitive:                                              \
@@ -93,7 +93,7 @@ ObjPtr<mirror::Class> GetBoxedPrimitiveClass(Primitive::Type type)
     case Primitive::Type::kPrimVoid:
       return nullptr;
   }
-  return jni::DecodeArtMethod(m)->GetDeclaringClass();
+  return m->GetDeclaringClass();
 }
 
 bool GetUnboxedTypeAndValue(ObjPtr<mirror::Object> o, Primitive::Type* type, JValue* value)
@@ -393,7 +393,7 @@ static inline bool MethodHandleInvokeTransform(Thread* self,
 
   const char* old_cause = self->StartAssertNoThreadSuspension("MethodHandleInvokeTransform");
   ShadowFrameAllocaUniquePtr shadow_frame_unique_ptr =
-      CREATE_SHADOW_FRAME(kNumRegsForTransform, &shadow_frame, called_method, /* dex pc */ 0);
+      CREATE_SHADOW_FRAME(kNumRegsForTransform, called_method, /* dex pc */ 0);
   ShadowFrame* new_shadow_frame = shadow_frame_unique_ptr.get();
   new_shadow_frame->SetVRegReference(0, method_handle.Get());
   new_shadow_frame->SetVRegReference(1, sf.Get());
@@ -459,7 +459,7 @@ ArtMethod* RefineTargetMethod(Thread* self,
   } else if (handle_kind == mirror::MethodHandle::Kind::kInvokeDirect) {
     // String constructors are a special case, they are replaced with
     // StringFactory methods.
-    if (target_method->IsConstructor() && target_method->GetDeclaringClass()->IsStringClass()) {
+    if (target_method->IsStringConstructor()) {
       DCHECK(handle_type->GetRType()->IsStringClass());
       return WellKnownClasses::StringInitToStringFactory(target_method);
     }
@@ -777,7 +777,7 @@ static bool DoMethodHandleInvokeMethod(Thread* self,
 
   const char* old_cause = self->StartAssertNoThreadSuspension("DoMethodHandleInvokeMethod");
   ShadowFrameAllocaUniquePtr shadow_frame_unique_ptr =
-      CREATE_SHADOW_FRAME(num_regs, &shadow_frame, called_method, /* dex pc */ 0);
+      CREATE_SHADOW_FRAME(num_regs, called_method, /* dex pc */ 0);
   ShadowFrame* new_shadow_frame = shadow_frame_unique_ptr.get();
   CopyArgumentsFromCallerFrame(shadow_frame, new_shadow_frame, operands, first_dest_reg);
   self->EndAssertNoThreadSuspension(old_cause);
@@ -920,7 +920,7 @@ void MethodHandleInvokeExactWithFrame(Thread* self,
   ArtMethod* invoke_exact =
       jni::DecodeArtMethod(WellKnownClasses::java_lang_invoke_MethodHandle_invokeExact);
   ShadowFrameAllocaUniquePtr shadow_frame =
-      CREATE_SHADOW_FRAME(num_vregs, /*link*/ nullptr, invoke_exact, /*dex_pc*/ 0);
+      CREATE_SHADOW_FRAME(num_vregs, invoke_exact, /*dex_pc*/ 0);
   emulated_frame->WriteToShadowFrame(self, callsite_type, 0, shadow_frame.get());
   self->EndAssertNoThreadSuspension(old_cause);
 

@@ -18,6 +18,7 @@
 #define ART_COMPILER_OPTIMIZING_CODE_GENERATOR_ARM_VIXL_H_
 
 #include "base/enums.h"
+#include "base/macros.h"
 #include "class_root.h"
 #include "code_generator.h"
 #include "common_arm.h"
@@ -36,7 +37,7 @@
 #include "aarch32/macro-assembler-aarch32.h"
 #pragma GCC diagnostic pop
 
-namespace art {
+namespace art HIDDEN {
 
 namespace linker {
 class Thumb2RelativePatcherTest;
@@ -84,7 +85,7 @@ static const vixl::aarch32::RegisterList kCoreCalleeSaves = vixl::aarch32::Regis
                                 vixl::aarch32::r6,
                                 vixl::aarch32::r7),
     // Do not consider r8 as a callee-save register with Baker read barriers.
-    ((gUseReadBarrier && kUseBakerReadBarrier)
+    (kReserveMarkingRegister
          ? vixl::aarch32::RegisterList()
          : vixl::aarch32::RegisterList(vixl::aarch32::r8)),
     vixl::aarch32::RegisterList(vixl::aarch32::r10,
@@ -602,7 +603,6 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
   struct PcRelativePatchInfo {
     PcRelativePatchInfo(const DexFile* dex_file, uint32_t off_or_idx)
         : target_dex_file(dex_file), offset_or_index(off_or_idx) { }
-    PcRelativePatchInfo(PcRelativePatchInfo&& other) = default;
 
     // Target dex file or null for .data.bmig.rel.ro patches.
     const DexFile* target_dex_file;

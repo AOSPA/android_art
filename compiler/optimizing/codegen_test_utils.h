@@ -20,6 +20,7 @@
 #include "arch/arm/registers_arm.h"
 #include "arch/instruction_set.h"
 #include "arch/x86/registers_x86.h"
+#include "base/macros.h"
 #include "code_simulator.h"
 #include "code_simulator_container.h"
 #include "common_compiler_test.h"
@@ -43,7 +44,7 @@
 #include "code_generator_x86_64.h"
 #endif
 
-namespace art {
+namespace art HIDDEN {
 
 using CreateCodegenFn = CodeGenerator* (*)(HGraph*, const CompilerOptions&);
 
@@ -254,15 +255,11 @@ static void Run(const InternalCodeAllocator& allocator,
     Runtime* GetRuntime() override { return nullptr; }
   };
   CodeHolder code_holder;
-  const void* code_ptr =
+  const void* method_code =
       code_holder.MakeExecutable(allocator.GetMemory(), ArrayRef<const uint8_t>(), target_isa);
 
   using fptr = Expected (*)();
-  fptr f = reinterpret_cast<fptr>(reinterpret_cast<uintptr_t>(code_ptr));
-  if (target_isa == InstructionSet::kThumb2) {
-    // For thumb we need the bottom bit set.
-    f = reinterpret_cast<fptr>(reinterpret_cast<uintptr_t>(f) + 1);
-  }
+  fptr f = reinterpret_cast<fptr>(reinterpret_cast<uintptr_t>(method_code));
   VerifyGeneratedCode(target_isa, f, has_result, expected);
 }
 

@@ -22,7 +22,7 @@
 #include "thread.h"
 #include "utils/assembler.h"
 
-namespace art {
+namespace art HIDDEN {
 namespace x86 {
 
 static Register GetScratchRegister() {
@@ -410,6 +410,11 @@ void X86JNIMacroAssembler::Move(ManagedRegister mdest, ManagedRegister msrc, siz
       UNIMPLEMENTED(FATAL) << ": Move " << dest << ", " << src;
     }
   }
+}
+
+void X86JNIMacroAssembler::Move(ManagedRegister mdest, size_t value) {
+  X86ManagedRegister dest = mdest.AsX86();
+  __ movl(dest.AsCpuRegister(), Immediate(value));
 }
 
 void X86JNIMacroAssembler::CopyRef(FrameOffset dest, FrameOffset src) {

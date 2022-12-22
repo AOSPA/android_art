@@ -25,7 +25,7 @@ if [ ! -d art ]; then
   exit 1
 fi
 
-TARGET_ARCH=$(source build/envsetup.sh > /dev/null; get_build_var TARGET_ARCH)
+TARGET_ARCH=$(build/soong/soong_ui.bash --dumpvar-mode TARGET_ARCH)
 
 # Logic for setting out_dir from build/make/core/envsetup.mk:
 if [[ -z $OUT_DIR ]]; then
@@ -168,6 +168,8 @@ if [[ $build_target == "yes" ]]; then
 
   # Extract prebuilt APEXes.
   debugfs=$ANDROID_HOST_OUT/bin/debugfs_static
+  fsckerofs=$ANDROID_HOST_OUT/bin/fsck.erofs
+  blkid=$ANDROID_HOST_OUT/bin/blkid
   for apex in ${apexes[@]}; do
     dir="$ANDROID_PRODUCT_OUT/system/apex/${apex}"
     apexbase="$ANDROID_PRODUCT_OUT/system/apex/${apex}"
@@ -181,7 +183,8 @@ if [[ $build_target == "yes" ]]; then
       msginfo "Extracting APEX file:" "${file}"
       rm -rf $dir
       mkdir -p $dir
-      $ANDROID_HOST_OUT/bin/deapexer --debugfs_path $debugfs extract $file $dir
+      $ANDROID_HOST_OUT/bin/deapexer --debugfs_path $debugfs --fsckerofs_path $fsckerofs \
+        --blkid_path $blkid extract $file $dir
     fi
   done
 
@@ -193,11 +196,9 @@ if [[ $build_target == "yes" ]]; then
     "heapprofd_client_api.so"
     "libandroid_runtime_lazy.so"
     "libartpalette-system.so"
-    "libbase.so"
     "libbinder.so"
     "libbinder_ndk.so"
     "libcutils.so"
-    "liblog.so"
     "libutils.so"
     "libvndksupport.so"
   )

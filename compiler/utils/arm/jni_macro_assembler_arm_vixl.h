@@ -29,7 +29,7 @@
 #include "utils/assembler.h"
 #include "utils/jni_macro_assembler.h"
 
-namespace art {
+namespace art HIDDEN {
 namespace arm {
 
 class ArmVIXLJNIMacroAssembler final
@@ -99,6 +99,8 @@ class ArmVIXLJNIMacroAssembler final
                      ArrayRef<FrameOffset> refs) override;
 
   void Move(ManagedRegister dest, ManagedRegister src, size_t size) override;
+
+  void Move(ManagedRegister dest, size_t value) override;
 
   void CopyRawPtrFromThread(FrameOffset fr_offs, ThreadOffset32 thr_offs) override;
 

@@ -131,7 +131,14 @@ class ClassLinkerTest : public CommonRuntimeTest {
     EXPECT_TRUE(JavaLangObject->GetSuperClass() == nullptr);
     EXPECT_FALSE(JavaLangObject->HasSuperClass());
     EXPECT_TRUE(JavaLangObject->GetClassLoader() == nullptr);
-    class_linker_->MakeInitializedClassesVisiblyInitialized(Thread::Current(), /*wait=*/ true);
+    {
+      Thread* self = Thread::Current();
+      StackHandleScope<1> hs(self);
+      HandleWrapperObjPtr<mirror::Class> h(hs.NewHandleWrapper(&JavaLangObject));
+      ScopedThreadSuspension sts(self, ThreadState::kNative);
+      class_linker_->MakeInitializedClassesVisiblyInitialized(self, /*wait=*/ true);
+      // HandleWrapperObjPtr restores JavaLangObject here after becoming runnable again.
+    }
     EXPECT_EQ(ClassStatus::kVisiblyInitialized, JavaLangObject->GetStatus());
     EXPECT_FALSE(JavaLangObject->IsErroneous());
     EXPECT_TRUE(JavaLangObject->IsLoaded());
@@ -677,20 +684,18 @@ struct DexCacheOffsets : public CheckOffsets<mirror::DexCache> {
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, class_loader_), "classLoader");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, dex_file_), "dexFile");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, location_), "location");
-    addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_preresolved_strings_), "numPreResolvedStrings");
-    addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_resolved_call_sites_), "numResolvedCallSites");
-    addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_resolved_fields_), "numResolvedFields");
-    addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_resolved_method_types_), "numResolvedMethodTypes");
-    addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_resolved_methods_), "numResolvedMethods");
-    addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_resolved_types_), "numResolvedTypes");
-    addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_strings_), "numStrings");
-    addOffset(OFFSETOF_MEMBER(mirror::DexCache, preresolved_strings_), "preResolvedStrings");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, resolved_call_sites_), "resolvedCallSites");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, resolved_fields_), "resolvedFields");
+    addOffset(OFFSETOF_MEMBER(mirror::DexCache, resolved_fields_array_), "resolvedFieldsArray");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, resolved_method_types_), "resolvedMethodTypes");
+    addOffset(OFFSETOF_MEMBER(mirror::DexCache, resolved_method_types_array_),
+              "resolvedMethodTypesArray");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, resolved_methods_), "resolvedMethods");
+    addOffset(OFFSETOF_MEMBER(mirror::DexCache, resolved_methods_array_), "resolvedMethodsArray");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, resolved_types_), "resolvedTypes");
+    addOffset(OFFSETOF_MEMBER(mirror::DexCache, resolved_types_array_), "resolvedTypesArray");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, strings_), "strings");
+    addOffset(OFFSETOF_MEMBER(mirror::DexCache, strings_array_), "stringsArray");
   }
 };
 
@@ -1706,7 +1711,7 @@ class ClassLinkerClassLoaderTest : public ClassLinkerTest {
       }
       ASSERT_TRUE(klass == nullptr);
     } else if (expected_class_loader_obj == nullptr) {
-      ASSERT_TRUE(ClassLinker::IsBootClassLoader(soa, klass->GetClassLoader()));
+      ASSERT_TRUE(ClassLinker::IsBootClassLoader(klass->GetClassLoader()));
     } else {
       ASSERT_TRUE(klass != nullptr) << descriptor;
       Handle<mirror::ClassLoader> expected_class_loader(

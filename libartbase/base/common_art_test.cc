@@ -73,15 +73,7 @@ ScratchDir::ScratchDir(bool keep_files) : keep_files_(keep_files) {
 
 ScratchDir::~ScratchDir() {
   if (!keep_files_) {
-    // Recursively delete the directory and all its content.
-    nftw(path_.c_str(), [](const char* name, const struct stat*, int type, struct FTW *) {
-      if (type == FTW_F) {
-        unlink(name);
-      } else if (type == FTW_DP) {
-        rmdir(name);
-      }
-      return 0;
-    }, 256 /* max open file descriptors */, FTW_DEPTH);
+    std::filesystem::remove_all(path_);
   }
 }
 
@@ -340,7 +332,7 @@ void CommonArtTestImpl::SetUp() {
   android_system_ext_.append("/system_ext");
   int mkdir_result = mkdir(android_system_ext_.c_str(), 0700);
   ASSERT_EQ(mkdir_result, 0);
-  setenv("ANDROID_SYSTEM_EXT", android_system_ext_.c_str(), 1);
+  setenv("SYSTEM_EXT_ROOT", android_system_ext_.c_str(), 1);
 
   std::string system_ext_framework = android_system_ext_ + "/framework";
   mkdir_result = mkdir(system_ext_framework.c_str(), 0700);

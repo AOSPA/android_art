@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from art_build_rules import build_run_test
 
-build_run_test(api_level=28)
+def build(ctx):
+  ctx.bash("./generate-sources")
+  ctx.default_build(api_level=28)

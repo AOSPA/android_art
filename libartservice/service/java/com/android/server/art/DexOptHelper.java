@@ -16,26 +16,40 @@
 
 package com.android.server.art;
 
-import static com.android.server.art.model.OptimizeResult.DexFileOptimizeResult;
+import static com.android.server.art.model.OptimizeResult.DexContainerFileOptimizeResult;
+import static com.android.server.art.model.OptimizeResult.PackageOptimizeResult;
 
 import android.annotation.NonNull;
-import android.annotation.Nullable;
 import android.apphibernation.AppHibernationManager;
 import android.content.Context;
 import android.os.Binder;
+import android.os.CancellationSignal;
 import android.os.PowerManager;
+import android.os.RemoteException;
 import android.os.WorkSource;
 
 import com.android.internal.annotations.VisibleForTesting;
-import com.android.server.art.model.OptimizeOptions;
+import com.android.server.art.model.ArtFlags;
+import com.android.server.art.model.OptimizeParams;
 import com.android.server.art.model.OptimizeResult;
-import com.android.server.art.wrapper.AndroidPackageApi;
-import com.android.server.art.wrapper.PackageState;
-import com.android.server.pm.snapshot.PackageDataSnapshot;
+import com.android.server.pm.PackageManagerLocal;
+import com.android.server.pm.pkg.AndroidPackage;
+import com.android.server.pm.pkg.PackageState;
+import com.android.server.pm.pkg.SharedLibrary;
 
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedList;
 import java.util.List;
+import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
 /**
  * A helper class to handle dexopt.
@@ -48,14 +62,14 @@ public class DexOptHelper {
     private static final String TAG = "DexoptHelper";
 
     /**
-     * Timeout of the wake lock. This is required by AndroidLint, but we set it to a value larger
-     * than artd's {@code kLongTimeoutSec} so that it should normally never triggered.
+     * Timeout of the wake lock. This is required by AndroidLint, but we set it to a very large
+     * value so that it should normally never triggered.
      */
-    private static final int WAKE_LOCK_TIMEOUT_MS = 11 * 60 * 1000; // 11 minutes.
+    private static final long WAKE_LOCK_TIMEOUT_MS = TimeUnit.DAYS.toMillis(1);
 
     @NonNull private final Injector mInjector;
 
-    public DexOptHelper(@Nullable Context context) {
+    public DexOptHelper(@NonNull Context context) {
         this(new Injector(context));
     }
 
@@ -66,77 +80,169 @@ public class DexOptHelper {
 
     /**
      * DO NOT use this method directly. Use {@link
-     * ArtManagerLocal#optimizePackage(PackageDataSnapshot, String, OptimizeOptions)}.
+     * ArtManagerLocal#optimizePackage(PackageManagerLocal.FilteredSnapshot, String,
+     * OptimizeParams)}.
      */
     @NonNull
-    public OptimizeResult dexopt(@NonNull PackageDataSnapshot snapshot,
-            @NonNull PackageState pkgState, @NonNull AndroidPackageApi pkg,
-            @NonNull OptimizeOptions options) {
-        List<DexFileOptimizeResult> results = new ArrayList<>();
-        Supplier<OptimizeResult> createResult = ()
-                -> new OptimizeResult(pkgState.getPackageName(), options.getCompilerFilter(),
-                        options.getReason(), results);
+    public OptimizeResult dexopt(@NonNull PackageManagerLocal.FilteredSnapshot snapshot,
+            @NonNull List<String> packageNames, @NonNull OptimizeParams params,
+            @NonNull CancellationSignal cancellationSignal, @NonNull Executor executor) {
+        return dexoptPackages(
+                getPackageStates(snapshot, packageNames,
+                        (params.getFlags() & ArtFlags.FLAG_SHOULD_INCLUDE_DEPENDENCIES) != 0),
+                params, cancellationSignal, executor);
+    }
 
-        if (!canOptimizePackage(pkgState, pkg)) {
-            return createResult.get();
-        }
-
+    /**
+     * DO NOT use this method directly. Use {@link
+     * ArtManagerLocal#optimizePackage(PackageManagerLocal.FilteredSnapshot, String,
+     * OptimizeParams)}.
+     */
+    @NonNull
+    private OptimizeResult dexoptPackages(@NonNull List<PackageState> pkgStates,
+            @NonNull OptimizeParams params, @NonNull CancellationSignal cancellationSignal,
+            @NonNull Executor executor) {
+        int callingUid = Binder.getCallingUid();
         long identityToken = Binder.clearCallingIdentity();
         PowerManager.WakeLock wakeLock = null;
 
         try {
             // Acquire a wake lock.
-            // The power manager service may not be ready if this method is called on boot. In this
-            // case, we don't have to acquire a wake lock because there is nothing else we can do.
             PowerManager powerManager = mInjector.getPowerManager();
-            if (powerManager != null) {
-                wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, TAG);
-                wakeLock.setWorkSource(new WorkSource(pkg.getUid()));
-                wakeLock.acquire(WAKE_LOCK_TIMEOUT_MS);
+            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, TAG);
+            wakeLock.setWorkSource(new WorkSource(callingUid));
+            wakeLock.acquire(WAKE_LOCK_TIMEOUT_MS);
+
+            List<Future<PackageOptimizeResult>> futures = new ArrayList<>();
+            for (PackageState pkgState : pkgStates) {
+                futures.add(Utils.execute(
+                        executor, () -> dexoptPackage(pkgState, params, cancellationSignal)));
             }
 
-            if (options.isForPrimaryDex()) {
-                results.addAll(mInjector.getPrimaryDexOptimizer().dexopt(pkgState, pkg, options));
-            }
+            List<PackageOptimizeResult> results =
+                    futures.stream().map(Utils::getFuture).collect(Collectors.toList());
 
-            if (options.isForSecondaryDex()) {
-                // TODO(jiakaiz): Implement this.
-                throw new UnsupportedOperationException(
-                        "Optimizing secondary dex'es is not implemented yet");
-            }
-
-            if (options.getIncludesDependencies()) {
-                // TODO(jiakaiz): Implement this.
-                throw new UnsupportedOperationException(
-                        "Optimizing dependencies is not implemented yet");
-            }
+            return new OptimizeResult(params.getCompilerFilter(), params.getReason(), results);
         } finally {
             if (wakeLock != null) {
                 wakeLock.release();
             }
             Binder.restoreCallingIdentity(identityToken);
         }
+    }
+
+    /**
+     * DO NOT use this method directly. Use {@link
+     * ArtManagerLocal#optimizePackage(PackageManagerLocal.FilteredSnapshot, String,
+     * OptimizeParams)}.
+     */
+    @NonNull
+    private PackageOptimizeResult dexoptPackage(@NonNull PackageState pkgState,
+            @NonNull OptimizeParams params, @NonNull CancellationSignal cancellationSignal) {
+        List<DexContainerFileOptimizeResult> results = new ArrayList<>();
+        Supplier<PackageOptimizeResult> createResult = ()
+                -> new PackageOptimizeResult(
+                        pkgState.getPackageName(), results, cancellationSignal.isCanceled());
+
+        AndroidPackage pkg = Utils.getPackageOrThrow(pkgState);
+
+        if (!canOptimizePackage(pkgState, pkg)) {
+            return createResult.get();
+        }
+
+        try {
+            if ((params.getFlags() & ArtFlags.FLAG_FOR_PRIMARY_DEX) != 0) {
+                if (cancellationSignal.isCanceled()) {
+                    return createResult.get();
+                }
+
+                results.addAll(
+                        mInjector.getPrimaryDexOptimizer(pkgState, pkg, params, cancellationSignal)
+                                .dexopt());
+            }
+
+            if ((params.getFlags() & ArtFlags.FLAG_FOR_SECONDARY_DEX) != 0) {
+                if (cancellationSignal.isCanceled()) {
+                    return createResult.get();
+                }
+
+                results.addAll(
+                        mInjector
+                                .getSecondaryDexOptimizer(pkgState, pkg, params, cancellationSignal)
+                                .dexopt());
+            }
+        } catch (RemoteException e) {
+            throw new IllegalStateException("An error occurred when calling artd", e);
+        }
 
         return createResult.get();
     }
 
     private boolean canOptimizePackage(
-            @NonNull PackageState pkgState, @NonNull AndroidPackageApi pkg) {
-        if (!pkg.isHasCode()) {
+            @NonNull PackageState pkgState, @NonNull AndroidPackage pkg) {
+        if (!pkg.getSplits().get(0).isHasCode()) {
             return false;
         }
 
         // We do not dexopt unused packages.
-        // It's possible for this to be called before app hibernation service is ready, especially
-        // on boot. In this case, we ignore the hibernation check here because there is nothing else
-        // we can do.
         AppHibernationManager ahm = mInjector.getAppHibernationManager();
-        if (ahm != null && ahm.isHibernatingGlobally(pkgState.getPackageName())
+        if (ahm.isHibernatingGlobally(pkgState.getPackageName())
                 && ahm.isOatArtifactDeletionEnabled()) {
             return false;
         }
 
         return true;
+    }
+
+    @NonNull
+    private List<PackageState> getPackageStates(
+            @NonNull PackageManagerLocal.FilteredSnapshot snapshot,
+            @NonNull List<String> packageNames, boolean includeDependencies) {
+        var pkgStates = new LinkedHashMap<String, PackageState>();
+        Set<String> visitedLibraries = new HashSet<>();
+        Queue<SharedLibrary> queue = new LinkedList<>();
+
+        Consumer<SharedLibrary> maybeEnqueue = library -> {
+            // The package name is not null if the library is an APK.
+            // TODO(jiakaiz): Support JAR libraries.
+            if (library.getPackageName() != null && !visitedLibraries.contains(library.getName())) {
+                visitedLibraries.add(library.getName());
+                queue.add(library);
+            }
+        };
+
+        for (String packageName : packageNames) {
+            PackageState pkgState = Utils.getPackageStateOrThrow(snapshot, packageName);
+            AndroidPackage pkg = Utils.getPackageOrThrow(pkgState);
+            pkgStates.put(packageName, pkgState);
+            if (includeDependencies && canOptimizePackage(pkgState, pkg)) {
+                for (SharedLibrary library : pkgState.getUsesLibraries()) {
+                    maybeEnqueue.accept(library);
+                }
+            }
+        }
+
+        SharedLibrary library;
+        while ((library = queue.poll()) != null) {
+            String packageName = library.getPackageName();
+            PackageState pkgState = Utils.getPackageStateOrThrow(snapshot, packageName);
+            AndroidPackage pkg = pkgState.getAndroidPackage();
+            if (pkg != null && canOptimizePackage(pkgState, pkg)) {
+                pkgStates.put(packageName, pkgState);
+
+                // Note that `library.getDependencies()` is different from
+                // `pkgState.getUsesLibraries()`. Different libraries can belong to the same
+                // package. `pkgState.getUsesLibraries()` returns a union of dependencies of
+                // libraries that belong to the same package, which is not what we want here.
+                // Therefore, this loop cannot be unified with the one above.
+                for (SharedLibrary dep : library.getDependencies()) {
+                    maybeEnqueue.accept(dep);
+                }
+            }
+        }
+
+        // `LinkedHashMap` guarantees deterministic order.
+        return new ArrayList<>(pkgStates.values());
     }
 
     /**
@@ -146,26 +252,34 @@ public class DexOptHelper {
      */
     @VisibleForTesting
     public static class Injector {
-        // TODO(b/236954191): Make this @NonNull.
-        @Nullable private final Context mContext;
+        @NonNull private final Context mContext;
 
-        Injector(@Nullable Context context) {
+        Injector(@NonNull Context context) {
             mContext = context;
         }
 
         @NonNull
-        PrimaryDexOptimizer getPrimaryDexOptimizer() {
-            return new PrimaryDexOptimizer(mContext);
+        PrimaryDexOptimizer getPrimaryDexOptimizer(@NonNull PackageState pkgState,
+                @NonNull AndroidPackage pkg, @NonNull OptimizeParams params,
+                @NonNull CancellationSignal cancellationSignal) {
+            return new PrimaryDexOptimizer(mContext, pkgState, pkg, params, cancellationSignal);
         }
 
-        @Nullable
+        @NonNull
+        SecondaryDexOptimizer getSecondaryDexOptimizer(@NonNull PackageState pkgState,
+                @NonNull AndroidPackage pkg, @NonNull OptimizeParams params,
+                @NonNull CancellationSignal cancellationSignal) {
+            return new SecondaryDexOptimizer(mContext, pkgState, pkg, params, cancellationSignal);
+        }
+
+        @NonNull
         public AppHibernationManager getAppHibernationManager() {
-            return mContext != null ? mContext.getSystemService(AppHibernationManager.class) : null;
+            return mContext.getSystemService(AppHibernationManager.class);
         }
 
-        @Nullable
+        @NonNull
         public PowerManager getPowerManager() {
-            return mContext != null ? mContext.getSystemService(PowerManager.class) : null;
+            return mContext.getSystemService(PowerManager.class);
         }
     }
 }

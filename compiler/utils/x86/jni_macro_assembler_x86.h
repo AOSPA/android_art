@@ -27,7 +27,7 @@
 #include "offsets.h"
 #include "utils/jni_macro_assembler.h"
 
-namespace art {
+namespace art HIDDEN {
 namespace x86 {
 
 class X86JNIMacroLabel;
@@ -91,6 +91,8 @@ class X86JNIMacroAssembler final : public JNIMacroAssemblerFwd<X86Assembler, Poi
                      ArrayRef<FrameOffset> refs) override;
 
   void Move(ManagedRegister dest, ManagedRegister src, size_t size) override;
+
+  void Move(ManagedRegister dest, size_t value) override;
 
   void CopyRawPtrFromThread(FrameOffset fr_offs, ThreadOffset32 thr_offs) override;
 

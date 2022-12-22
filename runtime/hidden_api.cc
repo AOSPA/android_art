@@ -149,7 +149,7 @@ void InitializeDexFileDomain(const DexFile& dex_file, ObjPtr<mirror::ClassLoader
 void InitializeCorePlatformApiPrivateFields() {
   // The following fields in WellKnownClasses correspond to private fields in the Core Platform
   // API that cannot be otherwise expressed and propagated through tooling (b/144502743).
-  jfieldID private_core_platform_api_fields[] = {
+  ArtField* private_core_platform_api_fields[] = {
     WellKnownClasses::java_io_FileDescriptor_descriptor,
     WellKnownClasses::java_nio_Buffer_address,
     WellKnownClasses::java_nio_Buffer_elementSizeShift,
@@ -158,8 +158,7 @@ void InitializeCorePlatformApiPrivateFields() {
   };
 
   ScopedObjectAccess soa(Thread::Current());
-  for (const auto private_core_platform_api_field : private_core_platform_api_fields) {
-    ArtField* field = jni::DecodeArtField(private_core_platform_api_field);
+  for (ArtField* field : private_core_platform_api_fields) {
     const uint32_t access_flags = field->GetAccessFlags();
     uint32_t new_access_flags = access_flags | kAccCorePlatformApi;
     DCHECK(new_access_flags != access_flags);
@@ -367,30 +366,35 @@ void MemberSignature::LogAccessToEventLog(uint32_t sampled_value,
   if (runtime->IsAotCompiler()) {
     return;
   }
-  JNIEnvExt* env = Thread::Current()->GetJniEnv();
-  const std::string& package_name = Runtime::Current()->GetProcessPackageName();
-  ScopedLocalRef<jstring> package_str(env, env->NewStringUTF(package_name.c_str()));
-  if (env->ExceptionCheck()) {
-    env->ExceptionClear();
-    LOG(ERROR) << "Unable to allocate string for package name which called hidden api";
-  }
+
+  const std::string& package_name = runtime->GetProcessPackageName();
   std::ostringstream signature_str;
   Dump(signature_str);
-  ScopedLocalRef<jstring> signature_jstr(env,
-      env->NewStringUTF(signature_str.str().c_str()));
-  if (env->ExceptionCheck()) {
-    env->ExceptionClear();
+
+  ScopedObjectAccess soa(Thread::Current());
+  StackHandleScope<2u> hs(soa.Self());
+  Handle<mirror::String> package_str = hs.NewHandle(
+      mirror::String::AllocFromModifiedUtf8(soa.Self(), package_name.c_str()));
+  if (soa.Self()->IsExceptionPending()) {
+    soa.Self()->ClearException();
+    LOG(ERROR) << "Unable to allocate string for package name which called hidden api";
+  }
+  Handle<mirror::String> signature_jstr = hs.NewHandle(
+      mirror::String::AllocFromModifiedUtf8(soa.Self(), signature_str.str().c_str()));
+  if (soa.Self()->IsExceptionPending()) {
+    soa.Self()->ClearException();
     LOG(ERROR) << "Unable to allocate string for hidden api method signature";
   }
-  env->CallStaticVoidMethod(WellKnownClasses::dalvik_system_VMRuntime,
-      WellKnownClasses::dalvik_system_VMRuntime_hiddenApiUsed,
-      sampled_value,
-      package_str.get(),
-      signature_jstr.get(),
-      static_cast<jint>(access_method),
-      access_denied);
-  if (env->ExceptionCheck()) {
-    env->ExceptionClear();
+  WellKnownClasses::dalvik_system_VMRuntime_hiddenApiUsed
+      ->InvokeStatic<'V', 'I', 'L', 'L', 'I', 'Z'>(
+          soa.Self(),
+          static_cast<jint>(sampled_value),
+          package_str.Get(),
+          signature_jstr.Get(),
+          static_cast<jint>(access_method),
+          static_cast<uint8_t>(access_denied ? 1u : 0u));
+  if (soa.Self()->IsExceptionPending()) {
+    soa.Self()->ClearException();
     LOG(ERROR) << "Unable to report hidden api usage";
   }
 #else
@@ -408,26 +412,30 @@ void MemberSignature::NotifyHiddenApiListener(AccessMethod access_method) {
 
   Runtime* runtime = Runtime::Current();
   if (!runtime->IsAotCompiler()) {
-    ScopedObjectAccessUnchecked soa(Thread::Current());
+    ScopedObjectAccess soa(Thread::Current());
+    StackHandleScope<2u> hs(soa.Self());
 
-    ScopedLocalRef<jobject> consumer_object(soa.Env(),
-        soa.Env()->GetStaticObjectField(
-            WellKnownClasses::dalvik_system_VMRuntime,
-            WellKnownClasses::dalvik_system_VMRuntime_nonSdkApiUsageConsumer));
+    ArtField* consumer_field = WellKnownClasses::dalvik_system_VMRuntime_nonSdkApiUsageConsumer;
+    DCHECK(consumer_field->GetDeclaringClass()->IsInitialized());
+    Handle<mirror::Object> consumer_object =
+        hs.NewHandle(consumer_field->GetObject(consumer_field->GetDeclaringClass()));
+
     // If the consumer is non-null, we call back to it to let it know that we
     // have encountered an API that's in one of our lists.
     if (consumer_object != nullptr) {
       std::ostringstream member_signature_str;
       Dump(member_signature_str);
 
-      ScopedLocalRef<jobject> signature_str(
-          soa.Env(),
-          soa.Env()->NewStringUTF(member_signature_str.str().c_str()));
+      Handle<mirror::String> signature_str = hs.NewHandle(
+          mirror::String::AllocFromModifiedUtf8(soa.Self(), member_signature_str.str().c_str()));
+      // FIXME: Handle OOME. For now, crash immediatelly (do not continue with a pending exception).
+      CHECK(signature_str != nullptr);
 
       // Call through to Consumer.accept(String memberSignature);
-      soa.Env()->CallVoidMethod(consumer_object.get(),
-                                WellKnownClasses::java_util_function_Consumer_accept,
-                                signature_str.get());
+      ArtMethod* accept_method = consumer_object->GetClass()->FindVirtualMethodForInterface(
+          WellKnownClasses::java_util_function_Consumer_accept, kRuntimePointerSize);
+      accept_method->InvokeInstance<'V', 'L'>(
+          soa.Self(), consumer_object.Get(), signature_str.Get());
     }
   }
 }

@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include <android-base/test_utils.h>
+
 #include <memory>
 #include <type_traits>
 
@@ -91,7 +93,7 @@ class ExceptionTest : public CommonRuntimeTest {
 
     const size_t stack_maps_size = stack_map.size();
     const size_t header_size = sizeof(OatQuickMethodHeader);
-    const size_t code_alignment = GetInstructionSetAlignment(kRuntimeISA);
+    const size_t code_alignment = GetInstructionSetCodeAlignment(kRuntimeISA);
 
     fake_header_code_and_maps_.resize(stack_maps_size + header_size + code_size + code_alignment);
     // NB: The start of the vector might not have been allocated the desired alignment.
@@ -194,15 +196,22 @@ TEST_F(ExceptionTest, StackTraceElement) {
 
   OatQuickMethodHeader* header = OatQuickMethodHeader::FromEntryPoint(
       method_g_->GetEntryPointFromQuickCompiledCode());
-  fake_stack.push_back(header->ToNativeQuickPc(
-      method_g_, kDexPc, /* is_for_catch_handler= */ false));  // return pc
+  // Untag native pc when running with hwasan since the pcs on the stack aren't tagged and we use
+  // this to create a fake stack. See OatQuickMethodHeader::Contains where we untag code pointers
+  // before comparing it with the PC from the stack.
+  uintptr_t native_pc = header->ToNativeQuickPc(method_g_, kDexPc);
+  if (running_with_hwasan()) {
+    // TODO(228989263): Use HWASanUntag once we have a hwasan target for tests too. HWASanUntag
+    // uses static checks which won't work if we don't have a dedicated target.
+    native_pc = (native_pc & ((1ULL << 56) - 1));
+  }
+  fake_stack.push_back(native_pc);  // return pc
 
   // Create/push fake 16byte stack frame for method g
   fake_stack.push_back(reinterpret_cast<uintptr_t>(method_g_));
   fake_stack.push_back(0);
   fake_stack.push_back(0);
-  fake_stack.push_back(header->ToNativeQuickPc(
-      method_g_, kDexPc, /* is_for_catch_handler= */ false));  // return pc
+  fake_stack.push_back(native_pc);  // return pc.
 
   // Create/push fake 16byte stack frame for method f
   fake_stack.push_back(reinterpret_cast<uintptr_t>(method_f_));

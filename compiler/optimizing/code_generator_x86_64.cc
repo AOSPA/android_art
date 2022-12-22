@@ -21,7 +21,6 @@
 #include "class_root-inl.h"
 #include "class_table.h"
 #include "code_generator_utils.h"
-#include "compiled_method.h"
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "gc/accounting/card_table.h"
 #include "gc/space/image_space.h"
@@ -45,7 +44,7 @@
 #include "utils/x86_64/constants_x86_64.h"
 #include "utils/x86_64/managed_register_x86_64.h"
 
-namespace art {
+namespace art HIDDEN {
 
 template<class MirrorType>
 class GcRoot;
@@ -986,6 +985,10 @@ class MethodEntryExitHooksSlowPathX86_64 : public SlowPathCode {
         (instruction_->IsMethodEntryHook()) ? kQuickMethodEntryHook : kQuickMethodExitHook;
     __ Bind(GetEntryLabel());
     SaveLiveRegisters(codegen, locations);
+    if (instruction_->IsMethodExitHook()) {
+      // Load FrameSize to pass to the exit hook.
+      __ movq(CpuRegister(R8), Immediate(codegen->GetFrameSize()));
+    }
     x86_64_codegen->InvokeRuntime(entry_point, instruction_, instruction_->GetDexPc(), this);
     RestoreLiveRegisters(codegen, locations);
     __ jmp(GetExitLabel());
@@ -1561,9 +1564,22 @@ void InstructionCodeGeneratorX86_64::GenerateMethodEntryExitHook(HInstruction* i
       new (codegen_->GetScopedAllocator()) MethodEntryExitHooksSlowPathX86_64(instruction);
   codegen_->AddSlowPath(slow_path);
 
+  if (instruction->IsMethodExitHook()) {
+    // Check if we are required to check if the caller needs a deoptimization. Strictly speaking it
+    // would be sufficient to check if CheckCallerForDeopt bit is set. Though it is faster to check
+    // if it is just non-zero. kCHA bit isn't used in debuggable runtimes as cha optimization is
+    // disabled in debuggable runtime. The other bit is used when this method itself requires a
+    // deoptimization due to redefinition. So it is safe to just check for non-zero value here.
+    __ cmpl(Address(CpuRegister(RSP), codegen_->GetStackOffsetOfShouldDeoptimizeFlag()),
+            Immediate(0));
+    __ j(kNotEqual, slow_path->GetEntryLabel());
+  }
+
   uint64_t address = reinterpret_cast64<uint64_t>(Runtime::Current()->GetInstrumentation());
-  int offset = instrumentation::Instrumentation::NeedsEntryExitHooksOffset().Int32Value();
-  __ movq(CpuRegister(TMP), Immediate(address + offset));
+  MemberOffset  offset = instruction->IsMethodExitHook() ?
+      instrumentation::Instrumentation::HaveMethodExitListenersOffset()
+      : instrumentation::Instrumentation::HaveMethodEntryListenersOffset();
+  __ movq(CpuRegister(TMP), Immediate(address + offset.Int32Value()));
   __ cmpb(Address(CpuRegister(TMP), 0), Immediate(0));
   __ j(kNotEqual, slow_path->GetEntryLabel());
   __ Bind(slow_path->GetExitLabel());

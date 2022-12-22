@@ -18,10 +18,14 @@
 #define ART_RUNTIME_QUICK_EXCEPTION_HANDLER_H_
 
 #include <android-base/logging.h>
+#include <cstdint>
+#include <optional>
 
+#include "base/array_ref.h"
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "deoptimization_kind.h"
+#include "stack_map.h"
 #include "stack_reference.h"
 
 namespace art {
@@ -103,12 +107,21 @@ class QuickExceptionHandler {
     return *handler_quick_frame_;
   }
 
-  uint32_t GetHandlerDexPc() const {
-    return handler_dex_pc_;
+  ArrayRef<const uint32_t> GetHandlerDexPcList() const {
+    DCHECK(handler_dex_pc_list_.has_value());
+    return ArrayRef<const uint32_t>(handler_dex_pc_list_.value());
   }
 
-  void SetHandlerDexPc(uint32_t dex_pc) {
-    handler_dex_pc_ = dex_pc;
+  void SetHandlerDexPcList(std::vector<uint32_t>&& handler_dex_pc_list) {
+    handler_dex_pc_list_ = handler_dex_pc_list;
+  }
+
+  uint32_t GetCatchStackMapRow() const {
+    return catch_stack_map_row_;
+  }
+
+  void SetCatchStackMapRow(uint32_t stack_map_row) {
+    catch_stack_map_row_ = stack_map_row;
   }
 
   bool GetClearException() const {
@@ -151,8 +164,12 @@ class QuickExceptionHandler {
   const OatQuickMethodHeader* handler_method_header_;
   // The value for argument 0.
   uintptr_t handler_quick_arg0_;
-  // The handler's dex PC, zero implies an uncaught exception.
-  uint32_t handler_dex_pc_;
+  // The handler's dex PC list including the inline dex_pcs. The dex_pcs are ordered from outermost
+  // to innermost. An empty list implies an uncaught exception.
+  // Marked as optional so that we can make sure we destroy it before doing a long jump.
+  std::optional<std::vector<uint32_t>> handler_dex_pc_list_;
+  // StackMap row corresponding to the found catch.
+  uint32_t catch_stack_map_row_;
   // Should the exception be cleared as the catch block has no move-exception?
   bool clear_exception_;
   // Frame depth of the catch handler or the upcall.

@@ -263,25 +263,6 @@ void ArtInterpreterToCompiledCodeBridge(Thread* self,
                                         JValue* result)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   ArtMethod* method = shadow_frame->GetMethod();
-  // Ensure static methods are initialized.
-  if (method->IsStatic()) {
-    ObjPtr<mirror::Class> declaringClass = method->GetDeclaringClass();
-    if (UNLIKELY(!declaringClass->IsVisiblyInitialized())) {
-      self->PushShadowFrame(shadow_frame);
-      StackHandleScope<1> hs(self);
-      Handle<mirror::Class> h_class(hs.NewHandle(declaringClass));
-      if (UNLIKELY(!Runtime::Current()->GetClassLinker()->EnsureInitialized(
-                        self, h_class, /*can_init_fields=*/ true, /*can_init_parents=*/ true))) {
-        self->PopShadowFrame();
-        DCHECK(self->IsExceptionPending());
-        return;
-      }
-      self->PopShadowFrame();
-      DCHECK(h_class->IsInitializing());
-      // Reload from shadow frame in case the method moved, this is faster than adding a handle.
-      method = shadow_frame->GetMethod();
-    }
-  }
   // Basic checks for the arg_offset. If there's no code item, the arg_offset must be 0. Otherwise,
   // check that the arg_offset isn't greater than the number of registers. A stronger check is
   // difficult since the frame may contain space for all the registers in the method, or only enough
@@ -1019,11 +1000,9 @@ static ObjPtr<mirror::CallSite> InvokeBootstrapMethod(Thread* self,
   // Set-up a shadow frame for invoking the bootstrap method handle.
   ShadowFrameAllocaUniquePtr bootstrap_frame =
       CREATE_SHADOW_FRAME(call_site_type->NumberOfVRegs(),
-                          nullptr,
                           referrer,
                           shadow_frame.GetDexPC());
-  ScopedStackedShadowFramePusher pusher(
-      self, bootstrap_frame.get(), StackedShadowFrameType::kShadowFrameUnderConstruction);
+  ScopedStackedShadowFramePusher pusher(self, bootstrap_frame.get());
   ShadowFrameSetter setter(bootstrap_frame.get(), 0u);
 
   // The first parameter is a MethodHandles lookup instance.
@@ -1282,7 +1261,7 @@ static inline bool DoCallCommon(ArtMethod* called_method,
   // Allocate shadow frame on the stack.
   const char* old_cause = self->StartAssertNoThreadSuspension("DoCallCommon");
   ShadowFrameAllocaUniquePtr shadow_frame_unique_ptr =
-      CREATE_SHADOW_FRAME(num_regs, &shadow_frame, called_method, /* dex pc */ 0);
+      CREATE_SHADOW_FRAME(num_regs, called_method, /* dex pc */ 0);
   ShadowFrame* new_shadow_frame = shadow_frame_unique_ptr.get();
 
   // Initialize new shadow frame by copying the registers from the callee shadow frame.
@@ -1290,8 +1269,7 @@ static inline bool DoCallCommon(ArtMethod* called_method,
     // Slow path.
     // We might need to do class loading, which incurs a thread state change to kNative. So
     // register the shadow frame as under construction and allow suspension again.
-    ScopedStackedShadowFramePusher pusher(
-        self, new_shadow_frame, StackedShadowFrameType::kShadowFrameUnderConstruction);
+    ScopedStackedShadowFramePusher pusher(self, new_shadow_frame);
     self->EndAssertNoThreadSuspension(old_cause);
 
     // ArtMethod here is needed to check type information of the call site against the callee.

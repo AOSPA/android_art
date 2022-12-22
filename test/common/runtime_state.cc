@@ -18,6 +18,7 @@
 
 #include <android-base/logging.h>
 #include <android-base/macros.h>
+#include <sys/resource.h>
 
 #include "art_field.h"
 #include "art_method-inl.h"
@@ -449,6 +450,23 @@ extern "C" JNIEXPORT jlong JNICALL Java_Main_genericFieldOffset(JNIEnv* env, jcl
 extern "C" JNIEXPORT jboolean JNICALL Java_Main_isObsoleteObject(JNIEnv* env, jclass, jclass c) {
   ScopedObjectAccess soa(env);
   return soa.Decode<mirror::Class>(c)->IsObsoleteObject();
+}
+
+extern "C" JNIEXPORT void JNICALL Java_Main_forceInterpreterOnThread(JNIEnv* env,
+                                                                     jclass cls ATTRIBUTE_UNUSED) {
+  ScopedObjectAccess soa(env);
+  MutexLock thread_list_mu(soa.Self(), *Locks::thread_list_lock_);
+  soa.Self()->IncrementForceInterpreterCount();
+}
+
+extern "C" JNIEXPORT void JNICALL Java_Main_setAsyncExceptionsThrown(JNIEnv* env ATTRIBUTE_UNUSED,
+                                                                     jclass cls ATTRIBUTE_UNUSED) {
+  Runtime::Current()->SetAsyncExceptionsThrown();
+}
+
+extern "C" JNIEXPORT void JNICALL Java_Main_setRlimitNoFile(JNIEnv*, jclass, jint value) {
+  rlimit limit { static_cast<rlim_t>(value), static_cast<rlim_t>(value) };
+  setrlimit(RLIMIT_NOFILE, &limit);
 }
 
 }  // namespace art

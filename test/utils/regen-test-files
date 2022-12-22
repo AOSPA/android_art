@@ -94,14 +94,12 @@ runnable_test_exceptions = frozenset([
   "1004-checker-volatile-ref-load",
   "133-static-invoke-super",
   "1338-gc-no-los",
-  "151-OpenFileLimit",
   "159-app-image-fields",
   "160-read-barrier-stress",
   "163-app-image-methods",
   "165-lock-owner-proxy",
   "168-vmstack-annotated",
   "176-app-image-string",
-  "2232-write-metrics-to-log",
   "304-method-tracing",
   "628-vdex",
   "643-checker-bogus-ic",
@@ -205,13 +203,17 @@ known_failing_tests = frozenset([
   "832-cha-recursive",
   # 837-deopt: Dependency on `libarttest`.
   "837-deopt",
+  # 844-exception: Dependency on `libarttest`.
+  "844-exception",
+  # 844-exception2: Dependency on `libarttest`.
+  "844-exception2",
+  # 993-breakpoints-non-debuggable: This test needs native code.
+  "993-breakpoints-non-debuggable",
 ])
 
 known_failing_on_hwasan_tests = frozenset([
   "BootImageProfileTest", # b/232012605
   "CtsJdwpTestCases", # times out
-  "art_standalone_compiler_tests", # b/230392320
-  "art_standalone_dex2oat_tests",  # b/228881278
 ])
 
 # ART gtests that do not need root access to the device.
@@ -232,7 +234,6 @@ art_gtest_user_module_names = [
     "art_standalone_libprofile_tests",
     "art_standalone_oatdump_tests",
     "art_standalone_odrefresh_tests",
-    "art_standalone_runtime_compiler_tests",
     "art_standalone_runtime_tests",
     "art_standalone_sigchain_tests",
     "libnativeloader_test",
@@ -240,9 +241,9 @@ art_gtest_user_module_names = [
 
 # ART gtests that need root access to the device.
 art_gtest_eng_only_module_names = [
-    "libnativeloader_e2e_tests",
     "art_standalone_dexoptanalyzer_tests",
     "art_standalone_profman_tests",
+    "libnativeloader_e2e_tests",
 ]
 
 # All supported ART gtests.
@@ -250,23 +251,9 @@ art_gtest_module_names = sorted(art_gtest_user_module_names + art_gtest_eng_only
 
 # ART gtests supported in MTS that do not need root access to the device.
 art_gtest_mts_user_module_names = copy.copy(art_gtest_user_module_names)
-# Temporarily disable `art_standalone_odrefresh_tests` in MTS,
-# as it is currently failing in Mainline testing
-# (b/206335809); a fix is in the works but may take some time
-# to land.
-#
-# TODO(b/206335809): Re-enable this test when the fix has landed.
-art_gtest_mts_user_module_names.remove("art_standalone_odrefresh_tests")
 
 # ART gtests supported in Mainline presubmits.
 art_gtests_mainline_presubmit_module_names = copy.copy(art_gtest_module_names)
-# Temporarily disable `art_standalone_odrefresh_tests` in Mainline
-# presubmits, as it is currently failing in Mainline testing
-# (b/206335809); a fix is in the works but may take some time to
-# land.
-#
-# TODO(b/206335809): Re-enable this test when the fix has landed.
-art_gtests_mainline_presubmit_module_names.remove("art_standalone_odrefresh_tests")
 
 # Tests exhibiting a flaky behavior, currently exluded from MTS for
 # the stake of stability / confidence (b/209958457).
@@ -302,6 +289,15 @@ flaky_tests_excluded_from_mts = [
     ]
 ]
 
+# Tests failing because of linking issues, currently exluded from MTS
+# to minimize noise in continuous runs while we investigate.
+#
+# TODO(b/247108425): Address the linking issues and re-enable these
+# tests.
+failing_tests_excluded_from_mts = [
+    "art_standalone_compiler_tests JniCompilerTest*",
+]
+
 # Is `run_test` a Checker test (i.e. a test containing Checker
 # assertions)?
 def is_checker_test(run_test):
@@ -326,36 +322,37 @@ class Generator:
                    for run_test in os.listdir(self.art_test_dir)
                    if re.match("^[0-9]{3,}-", run_test)])
 
-  # Read build file (Bash script) and return a canonized version of it
-  # (without comments, blank lines, "debugging" statements, etc.).
-  def canonize_build_script(self, build_file):
+  # Return the metadata of a test, if any.
+  def get_test_metadata(self, run_test):
+    run_test_path = os.path.join(self.art_test_dir, run_test)
+    metadata_file = os.path.join(run_test_path, "test-metadata.json")
+    metadata = {}
+    if os.path.exists(metadata_file):
+      with open(metadata_file, "r") as f:
+        try:
+          metadata = json.load(f)
+        except json.decoder.JSONDecodeError:
+          logging.error(f"Unable to parse test metadata file `{metadata_file}`")
+          raise
+    return metadata
 
-    def is_comment(line):
-      return re.match("^\\s*#", line)
-
-    def is_blank(line):
-      return re.match("^\\s*$", line)
-
-    def is_import(line):
-      return re.match("^\\s*from .* import .*", line)
-
-    # Should `line` be kept in the canonized build script?
-    def keep_line(line):
-      return not (is_comment(line) or is_blank(line) or is_import(line))
-
-    with open(build_file, "r") as f:
-      lines = f.readlines()
-    return list(filter(keep_line, lines))
-
-  # Can the build script in `build_file` be safely ignored?
-  def can_ignore_build_script(self, build_file):
-    build_script = self.canonize_build_script(build_file)
-    if len(build_script) == 1:
-      if build_script[0] == 'build_run_test(experimental="var-handles")\n':
-        # Soong builds JARs with VarHandle support by default (i.e. by
-        # using an API level greater or equal to 28), so we can ignore
-        # build scripts that just request support for this feature.
-        return True
+  # Can the build script of `run_test` be safely ignored?
+  def can_ignore_build_script(self, run_test):
+    # Check whether there are test metadata with build parameters
+    # enabling us to safely ignore the build script.
+    metadata = self.get_test_metadata(run_test)
+    build_param = metadata.get("build-param", {})
+    # Ignore build scripts that are just about preventing building for
+    # the JVM and/or using VarHandles (Soong builds JARs with
+    # VarHandle support by default (i.e. by using an API level greater
+    # or equal to 28), so we can ignore build scripts that just
+    # request support for this feature.)
+    experimental_var_handles = {"experimental": "var-handles"}
+    jvm_supported_false = {"jvm-supported": "false"}
+    if (build_param == experimental_var_handles or
+        build_param == jvm_supported_false or
+        build_param == experimental_var_handles | jvm_supported_false):
+      return True
     return False
 
   # Is building `run_test` supported?
@@ -369,7 +366,7 @@ class Generator:
         os.path.isfile(os.path.join(run_test_path, "javac_wrapper.sh"))):
       return False
     if os.path.isfile(os.path.join(run_test_path, "build.py")):
-      if not self.can_ignore_build_script(os.path.join(run_test_path, "build.py")):
+      if not self.can_ignore_build_script(run_test):
         return False
     # Skip tests with sources outside the `src` directory.
     for subdir in ["jasmin",
@@ -402,19 +399,33 @@ class Generator:
     # All other tests are considered buildable.
     return True
 
-  # Is (successfully) running `run_test` supported?
-  # TODO(b/147812905): Add run-time support for more tests.
-  def is_runnable(self, run_test):
-    run_test_path = os.path.join(self.art_test_dir, run_test)
+  # Can the run script of `run_test` be safely ignored?
+  def can_ignore_run_script(self, run_test):
     # Unconditionally consider some identified tests that have a
     # (not-yet-handled) custom `run` script as runnable.
+    #
     # TODO(rpl): Get rid of this exception mechanism by supporting
     # these tests' `run` scripts properly.
     if run_test in runnable_test_exceptions:
       return True
-    # Skip tests with a custom `run` script.
-    if os.path.isfile(os.path.join(run_test_path, "run")):
-      return False
+    # Check whether there are test metadata with run parameters
+    # enabling us to safely ignore the run script.
+    metadata = self.get_test_metadata(run_test)
+    run_param = metadata.get("run-param", {})
+    if run_param.get("default-run", ""):
+      return True
+    return False
+
+  # Is (successfully) running `run_test` supported?
+  # TODO(b/147812905): Add run-time support for more tests.
+  def is_runnable(self, run_test):
+    run_test_path = os.path.join(self.art_test_dir, run_test)
+
+    # Skip tests with non-default run rules, unless these run rules
+    # can be safely ignored.
+    if os.path.isfile(os.path.join(run_test_path, "run.py")):
+      if not self.can_ignore_run_script(run_test):
+        return False
     # Skip tests known to fail.
     if run_test in known_failing_tests:
       return False
@@ -442,11 +453,7 @@ class Generator:
     bp_file = os.path.join(run_test_path, "Android.bp")
 
     # Optional test metadata (JSON file).
-    metadata_file = os.path.join(run_test_path, "test-metadata.json")
-    metadata = {}
-    if os.path.exists(metadata_file):
-      with open(metadata_file, "r") as f:
-        metadata = json.load(f)
+    metadata = self.get_test_metadata(run_test)
 
     run_test_module_name = ART_RUN_TEST_MODULE_NAME_PREFIX + run_test
 
@@ -716,17 +723,22 @@ class Generator:
       include.setAttribute("name", f"mts-art-tests-list-user-shard-{s:02}")
       configuration.appendChild(include)
 
-    # Excluded flaky tests.
-    xml_comment = root.createComment(f" Excluded flaky tests (b/209958457). ")
-    configuration.appendChild(xml_comment)
-
     def append_test_exclusion(test):
       option = root.createElement("option")
       option.setAttribute("name", "compatibility:exclude-filter")
       option.setAttribute("value", test)
       configuration.appendChild(option)
 
+    # Excluded flaky tests.
+    xml_comment = root.createComment(" Excluded flaky tests (b/209958457). ")
+    configuration.appendChild(xml_comment)
     for t in flaky_tests_excluded_from_mts:
+      append_test_exclusion(t)
+
+    # Excluded failing tests.
+    xml_comment = root.createComment(" Excluded failing tests (b/247108425). ")
+    configuration.appendChild(xml_comment)
+    for t in failing_tests_excluded_from_mts:
       append_test_exclusion(t)
 
     xml_str = root.toprettyxml(indent = XML_INDENT, encoding = "utf-8")
