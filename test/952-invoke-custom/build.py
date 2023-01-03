@@ -16,4 +16,6 @@
 
 def build(ctx):
   ctx.bash("./generate-sources")
-  ctx.default_build(use_desugar=False, api_level=28)
+  ctx.default_build(use_desugar=False,
+                    api_level=28,
+                    javac_classpath=[ctx.test_dir / "transformer.jar"])

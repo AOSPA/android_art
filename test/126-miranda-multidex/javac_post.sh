@@ -16,7 +16,6 @@
 
 set -e # Stop on error - the caller script may not have this set.
 
-$JAVAC "$@"
-
-mkdir classes-ex
-mv classes/Super.class classes-ex
+if [[ "$1" == "classes2" ]]; then
+  mv classes/MirandaInterface.class classes2
+fi

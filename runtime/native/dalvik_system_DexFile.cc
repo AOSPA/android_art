@@ -28,6 +28,7 @@
 #include "base/logging.h"
 #include "base/os.h"
 #include "base/stl_util.h"
+#include "base/transform_iterator.h"
 #include "base/utils.h"
 #include "base/zip_archive.h"
 #include "class_linker.h"
@@ -53,7 +54,13 @@
 #include "oat_file_manager.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
-#include "well_known_classes.h"
+#include "string_array_utils.h"
+#include "thread-current-inl.h"
+
+#ifdef ART_TARGET_ANDROID
+#include <android/api-level.h>
+#include <sys/system_properties.h>
+#endif  // ART_TARGET_ANDROID
 
 namespace art {
 
@@ -306,6 +313,57 @@ static jobject DexFile_openInMemoryDexFilesNative(JNIEnv* env,
   return CreateCookieFromOatFileManagerResult(env, dex_files, oat_file, error_msgs);
 }
 
+#ifdef ART_TARGET_ANDROID
+static bool isReadOnlyJavaDclEnforced(JNIEnv* env) {
+  static bool is_at_least_u = [] {
+    const int api_level = android_get_device_api_level();
+    if (api_level > __ANDROID_API_T__) {
+      return true;
+    } else if (api_level == __ANDROID_API_T__) {
+      // Check if running U preview
+      char value[92] = {0};
+      if (__system_property_get("ro.build.version.preview_sdk", value) >= 0 && atoi(value) > 0) {
+        return true;
+      }
+    }
+    return false;
+  }();
+  if (is_at_least_u) {
+    // The reason why we are calling the AppCompat framework through JVM
+    // instead of directly using the CompatFramework C++ API is because feature
+    // overrides only apply to the Java API.
+    // CtsLibcoreTestCases is part of mainline modules, which requires the same test
+    // to run on older Android versions; the target SDK of CtsLibcoreTestCases is locked
+    // to the lowest supported API level (at the time of writing, it's API 31).
+    // We would need to be able to manually enable the compat change in CTS tests.
+    ScopedLocalRef<jclass> compat(env, env->FindClass("android/compat/Compatibility"));
+    jmethodID mId = env->GetStaticMethodID(compat.get(), "isChangeEnabled", "(J)Z");
+    return env->CallStaticBooleanMethod(compat.get(), mId, kEnforceReadOnlyJavaDcl) == JNI_TRUE;
+  } else {
+    return false;
+  }
+}
+#else   // ART_TARGET_ANDROID
+constexpr static bool isReadOnlyJavaDclEnforced(JNIEnv*) {
+  (void)kEnforceReadOnlyJavaDcl;
+  return false;
+}
+#endif  // ART_TARGET_ANDROID
+
+static bool isReadOnlyJavaDclChecked() {
+  if (!kIsTargetAndroid) {
+    return false;
+  }
+  const int uid = getuid();
+  // The following UIDs are exempted:
+  // * Root (0): root processes always have write access to files.
+  // * System (1000): /data/app/**.apk are owned by AID_SYSTEM;
+  //   loading installed APKs in system_server is allowed.
+  // * Shell (2000): directly calling dalvikvm/app_process in ADB shell
+  //   to run JARs with CLI is allowed.
+  return uid != 0 && uid != 1000 && uid != 2000;
+}
+
 // TODO(calin): clean up the unused parameters (here and in libcore).
 static jobject DexFile_openDexFileNative(JNIEnv* env,
                                          jclass,
@@ -319,27 +377,14 @@ static jobject DexFile_openDexFileNative(JNIEnv* env,
     return nullptr;
   }
 
-  if (kIsTargetAndroid) {
-    const int uid = getuid();
-    // The following UIDs are exempted:
-    // * Root (0): root processes always have write access to files.
-    // * System (1000): /data/app/**.apk are owned by AID_SYSTEM;
-    //   loading installed APKs in system_server is allowed.
-    // * Shell (2000): directly calling dalvikvm/app_process in ADB shell
-    //   to run JARs with CLI is allowed.
-    if (uid != 0 && uid != 1000 && uid != 2000) {
-      Runtime* const runtime = Runtime::Current();
-      CompatFramework& compatFramework = runtime->GetCompatFramework();
-      if (compatFramework.IsChangeEnabled(kEnforceReadOnlyJavaDcl)) {
-        if (access(sourceName.c_str(), W_OK) == 0) {
-          LOG(ERROR) << "Attempt to load writable dex file: " << sourceName.c_str();
-          ScopedLocalRef<jclass> se(env, env->FindClass("java/lang/SecurityException"));
-          std::string message(
-              StringPrintf("Writable dex file '%s' is not allowed.", sourceName.c_str()));
-          env->ThrowNew(se.get(), message.c_str());
-          return nullptr;
-        }
-      }
+  if (isReadOnlyJavaDclChecked() && access(sourceName.c_str(), W_OK) == 0) {
+    LOG(ERROR) << "Attempt to load writable dex file: " << sourceName.c_str();
+    if (isReadOnlyJavaDclEnforced(env)) {
+      ScopedLocalRef<jclass> se(env, env->FindClass("java/lang/SecurityException"));
+      std::string message(
+          StringPrintf("Writable dex file '%s' is not allowed.", sourceName.c_str()));
+      env->ThrowNew(se.get(), message.c_str());
+      return nullptr;
     }
   }
 
@@ -509,23 +554,12 @@ static jobjectArray DexFile_getClassNameList(JNIEnv* env, jclass, jobject cookie
   }
 
   // Now create output array and copy the set into it.
-  jobjectArray result = env->NewObjectArray(descriptors.size(),
-                                            WellKnownClasses::java_lang_String,
-                                            nullptr);
-  if (result != nullptr) {
-    auto it = descriptors.begin();
-    auto it_end = descriptors.end();
-    jsize i = 0;
-    for (; it != it_end; it++, ++i) {
-      std::string descriptor(DescriptorToDot(*it));
-      ScopedLocalRef<jstring> jdescriptor(env, env->NewStringUTF(descriptor.c_str()));
-      if (jdescriptor.get() == nullptr) {
-        return nullptr;
-      }
-      env->SetObjectArrayElement(result, i, jdescriptor.get());
-    }
-  }
-  return result;
+  ScopedObjectAccess soa(Thread::ForEnv(env));
+  auto descriptor_to_dot = [](const char* descriptor) { return DescriptorToDot(descriptor); };
+  return soa.AddLocalReference<jobjectArray>(CreateStringArray(
+      soa.Self(),
+      descriptors.size(),
+      MakeTransformRange(descriptors, descriptor_to_dot)));
 }
 
 static jint GetDexOptNeeded(JNIEnv* env,
@@ -656,23 +690,11 @@ static jobjectArray DexFile_getDexFileOptimizationStatus(JNIEnv* env,
   OatFileAssistant::GetOptimizationStatus(
       filename.c_str(), target_instruction_set, &compilation_filter, &compilation_reason);
 
-  ScopedLocalRef<jstring> j_compilation_filter(env, env->NewStringUTF(compilation_filter.c_str()));
-  if (j_compilation_filter.get() == nullptr) {
-    return nullptr;
-  }
-  ScopedLocalRef<jstring> j_compilation_reason(env, env->NewStringUTF(compilation_reason.c_str()));
-  if (j_compilation_reason.get() == nullptr) {
-    return nullptr;
-  }
-
-  // Now create output array and copy the set into it.
-  jobjectArray result = env->NewObjectArray(2,
-                                            WellKnownClasses::java_lang_String,
-                                            nullptr);
-  env->SetObjectArrayElement(result, 0, j_compilation_filter.get());
-  env->SetObjectArrayElement(result, 1, j_compilation_reason.get());
-
-  return result;
+  ScopedObjectAccess soa(Thread::ForEnv(env));
+  return soa.AddLocalReference<jobjectArray>(CreateStringArray(soa.Self(), {
+      compilation_filter.c_str(),
+      compilation_reason.c_str()
+  }));
 }
 
 static jint DexFile_getDexOptNeeded(JNIEnv* env,
@@ -791,6 +813,11 @@ static jboolean DexFile_isOptimizedCompilerFilter(JNIEnv* env,
     return JNI_FALSE;
   }
   return CompilerFilter::IsAotCompilationEnabled(filter) ? JNI_TRUE : JNI_FALSE;
+}
+
+static jboolean DexFile_isReadOnlyJavaDclEnforced(JNIEnv* env,
+                                                  jclass javeDexFileClass ATTRIBUTE_UNUSED) {
+  return (isReadOnlyJavaDclChecked() && isReadOnlyJavaDclEnforced(env)) ? JNI_TRUE : JNI_FALSE;
 }
 
 static jstring DexFile_getNonProfileGuidedCompilerFilter(JNIEnv* env,
@@ -915,31 +942,16 @@ static jobjectArray DexFile_getDexFileOutputPaths(JNIEnv* env,
     oat_filename = best_oat_file->GetLocation();
     is_vdex_only = best_oat_file->IsBackedByVdexOnly();
   }
-  ScopedLocalRef<jstring> joatFilename(env, env->NewStringUTF(oat_filename.c_str()));
-  if (joatFilename.get() == nullptr) {
-    return nullptr;
-  }
 
-  if (is_vdex_only) {
-    jobjectArray result = env->NewObjectArray(1,
-                                              WellKnownClasses::java_lang_String,
-                                              nullptr);
-    env->SetObjectArrayElement(result, 0, joatFilename.get());
-    return result;
-  } else {
+  const char* filenames[] = { oat_filename.c_str(), nullptr };
+  ArrayRef<const char* const> used_filenames(filenames, 1u);
+  if (!is_vdex_only) {
     vdex_filename = GetVdexFilename(oat_filename);
-    ScopedLocalRef<jstring> jvdexFilename(env, env->NewStringUTF(vdex_filename.c_str()));
-    if (jvdexFilename.get() == nullptr) {
-      return nullptr;
-    }
-
-    jobjectArray result = env->NewObjectArray(2,
-                                              WellKnownClasses::java_lang_String,
-                                              nullptr);
-    env->SetObjectArrayElement(result, 0, jvdexFilename.get());
-    env->SetObjectArrayElement(result, 1, joatFilename.get());
-    return result;
+    filenames[1] = vdex_filename.c_str();
+    used_filenames = ArrayRef<const char* const>(filenames, 2u);
   }
+  ScopedObjectAccess soa(Thread::ForEnv(env));
+  return soa.AddLocalReference<jobjectArray>(CreateStringArray(soa.Self(), used_filenames));
 }
 
 static jlong DexFile_getStaticSizeOfDexFile(JNIEnv* env, jclass, jobject cookie) {
@@ -983,57 +995,60 @@ static void DexFile_setTrusted(JNIEnv* env, jclass, jobject j_cookie) {
 }
 
 static JNINativeMethod gMethods[] = {
-  NATIVE_METHOD(DexFile, closeDexFile, "(Ljava/lang/Object;)Z"),
-  NATIVE_METHOD(DexFile,
-                defineClassNative,
-                "(Ljava/lang/String;"
-                "Ljava/lang/ClassLoader;"
-                "Ljava/lang/Object;"
-                "Ldalvik/system/DexFile;"
-                ")Ljava/lang/Class;"),
-  NATIVE_METHOD(DexFile, getClassNameList, "(Ljava/lang/Object;)[Ljava/lang/String;"),
-  NATIVE_METHOD(DexFile, isDexOptNeeded, "(Ljava/lang/String;)Z"),
-  NATIVE_METHOD(DexFile, getDexOptNeeded,
-                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZZ)I"),
-  NATIVE_METHOD(DexFile, openDexFileNative,
-                "(Ljava/lang/String;"
-                "Ljava/lang/String;"
-                "I"
-                "Ljava/lang/ClassLoader;"
-                "[Ldalvik/system/DexPathList$Element;"
-                ")Ljava/lang/Object;"),
-  NATIVE_METHOD(DexFile, openInMemoryDexFilesNative,
-                "([Ljava/nio/ByteBuffer;"
-                "[[B"
-                "[I"
-                "[I"
-                "Ljava/lang/ClassLoader;"
-                "[Ldalvik/system/DexPathList$Element;"
-                ")Ljava/lang/Object;"),
-  NATIVE_METHOD(DexFile, verifyInBackgroundNative,
-                "(Ljava/lang/Object;"
-                "Ljava/lang/ClassLoader;"
-                ")V"),
-  NATIVE_METHOD(DexFile, isValidCompilerFilter, "(Ljava/lang/String;)Z"),
-  NATIVE_METHOD(DexFile, isProfileGuidedCompilerFilter, "(Ljava/lang/String;)Z"),
-  NATIVE_METHOD(DexFile, isVerifiedCompilerFilter, "(Ljava/lang/String;)Z"),
-  NATIVE_METHOD(DexFile, isOptimizedCompilerFilter, "(Ljava/lang/String;)Z"),
-  NATIVE_METHOD(DexFile,
-                getNonProfileGuidedCompilerFilter,
-                "(Ljava/lang/String;)Ljava/lang/String;"),
-  NATIVE_METHOD(DexFile,
-                getSafeModeCompilerFilter,
-                "(Ljava/lang/String;)Ljava/lang/String;"),
-  NATIVE_METHOD(DexFile, isBackedByOatFile, "(Ljava/lang/Object;)Z"),
-  NATIVE_METHOD(DexFile, getDexFileStatus,
-                "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
-  NATIVE_METHOD(DexFile, getDexFileOutputPaths,
-                "(Ljava/lang/String;Ljava/lang/String;)[Ljava/lang/String;"),
-  NATIVE_METHOD(DexFile, getStaticSizeOfDexFile, "(Ljava/lang/Object;)J"),
-  NATIVE_METHOD(DexFile, getDexFileOptimizationStatus,
-                "(Ljava/lang/String;Ljava/lang/String;)[Ljava/lang/String;"),
-  NATIVE_METHOD(DexFile, setTrusted, "(Ljava/lang/Object;)V")
-};
+    NATIVE_METHOD(DexFile, closeDexFile, "(Ljava/lang/Object;)Z"),
+    NATIVE_METHOD(DexFile,
+                  defineClassNative,
+                  "(Ljava/lang/String;"
+                  "Ljava/lang/ClassLoader;"
+                  "Ljava/lang/Object;"
+                  "Ldalvik/system/DexFile;"
+                  ")Ljava/lang/Class;"),
+    NATIVE_METHOD(DexFile, getClassNameList, "(Ljava/lang/Object;)[Ljava/lang/String;"),
+    NATIVE_METHOD(DexFile, isDexOptNeeded, "(Ljava/lang/String;)Z"),
+    NATIVE_METHOD(DexFile,
+                  getDexOptNeeded,
+                  "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZZ)I"),
+    NATIVE_METHOD(DexFile,
+                  openDexFileNative,
+                  "(Ljava/lang/String;"
+                  "Ljava/lang/String;"
+                  "I"
+                  "Ljava/lang/ClassLoader;"
+                  "[Ldalvik/system/DexPathList$Element;"
+                  ")Ljava/lang/Object;"),
+    NATIVE_METHOD(DexFile,
+                  openInMemoryDexFilesNative,
+                  "([Ljava/nio/ByteBuffer;"
+                  "[[B"
+                  "[I"
+                  "[I"
+                  "Ljava/lang/ClassLoader;"
+                  "[Ldalvik/system/DexPathList$Element;"
+                  ")Ljava/lang/Object;"),
+    NATIVE_METHOD(DexFile,
+                  verifyInBackgroundNative,
+                  "(Ljava/lang/Object;"
+                  "Ljava/lang/ClassLoader;"
+                  ")V"),
+    NATIVE_METHOD(DexFile, isValidCompilerFilter, "(Ljava/lang/String;)Z"),
+    NATIVE_METHOD(DexFile, isProfileGuidedCompilerFilter, "(Ljava/lang/String;)Z"),
+    NATIVE_METHOD(DexFile, isVerifiedCompilerFilter, "(Ljava/lang/String;)Z"),
+    NATIVE_METHOD(DexFile, isOptimizedCompilerFilter, "(Ljava/lang/String;)Z"),
+    NATIVE_METHOD(DexFile, isReadOnlyJavaDclEnforced, "()Z"),
+    NATIVE_METHOD(
+        DexFile, getNonProfileGuidedCompilerFilter, "(Ljava/lang/String;)Ljava/lang/String;"),
+    NATIVE_METHOD(DexFile, getSafeModeCompilerFilter, "(Ljava/lang/String;)Ljava/lang/String;"),
+    NATIVE_METHOD(DexFile, isBackedByOatFile, "(Ljava/lang/Object;)Z"),
+    NATIVE_METHOD(
+        DexFile, getDexFileStatus, "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
+    NATIVE_METHOD(DexFile,
+                  getDexFileOutputPaths,
+                  "(Ljava/lang/String;Ljava/lang/String;)[Ljava/lang/String;"),
+    NATIVE_METHOD(DexFile, getStaticSizeOfDexFile, "(Ljava/lang/Object;)J"),
+    NATIVE_METHOD(DexFile,
+                  getDexFileOptimizationStatus,
+                  "(Ljava/lang/String;Ljava/lang/String;)[Ljava/lang/String;"),
+    NATIVE_METHOD(DexFile, setTrusted, "(Ljava/lang/Object;)V")};
 
 void register_dalvik_system_DexFile(JNIEnv* env) {
   REGISTER_NATIVE_METHODS("dalvik/system/DexFile");

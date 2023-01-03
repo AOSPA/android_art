@@ -312,7 +312,8 @@ Runtime::Runtime()
       verifier_logging_threshold_ms_(100),
       verifier_missing_kthrow_fatal_(false),
       perfetto_hprof_enabled_(false),
-      perfetto_javaheapprof_enabled_(false) {
+      perfetto_javaheapprof_enabled_(false),
+      out_of_memory_error_hook_(nullptr) {
   static_assert(Runtime::kCalleeSaveSize ==
                     static_cast<uint32_t>(CalleeSaveType::kLastCalleeSaveType), "Unexpected size");
   CheckConstants();
@@ -433,8 +434,8 @@ Runtime::~Runtime() {
   if (IsFinishedStarting()) {
     ScopedTrace trace2("Waiting for Daemons");
     self->ClearException();
-    self->GetJniEnv()->CallStaticVoidMethod(WellKnownClasses::java_lang_Daemons,
-                                            WellKnownClasses::java_lang_Daemons_stop);
+    ScopedObjectAccess soa(self);
+    WellKnownClasses::java_lang_Daemons_stop->InvokeStatic<'V'>(self);
   }
 
   // Shutdown any trace running.
@@ -511,8 +512,8 @@ Runtime::~Runtime() {
   monitor_pool_ = nullptr;
   delete class_linker_;
   class_linker_ = nullptr;
-  delete small_irt_allocator_;
-  small_irt_allocator_ = nullptr;
+  delete small_lrt_allocator_;
+  small_lrt_allocator_ = nullptr;
   delete heap_;
   heap_ = nullptr;
   delete intern_table_;
@@ -1029,24 +1030,14 @@ bool Runtime::Start() {
                             GetInstructionSetString(kRuntimeISA));
   }
 
-  StartDaemonThreads();
-
-  // Make sure the environment is still clean (no lingering local refs from starting daemon
-  // threads).
   {
     ScopedObjectAccess soa(self);
+    StartDaemonThreads();
     self->GetJniEnv()->AssertLocalsEmpty();
-  }
 
-  // Send the initialized phase event. Send it after starting the Daemon threads so that agents
-  // cannot delay the daemon threads from starting forever.
-  {
-    ScopedObjectAccess soa(self);
+    // Send the initialized phase event. Send it after starting the Daemon threads so that agents
+    // cannot delay the daemon threads from starting forever.
     callbacks_->NextRuntimePhase(RuntimePhaseCallback::RuntimePhase::kInit);
-  }
-
-  {
-    ScopedObjectAccess soa(self);
     self->GetJniEnv()->AssertLocalsEmpty();
   }
 
@@ -1258,15 +1249,11 @@ void Runtime::StartDaemonThreads() {
 
   Thread* self = Thread::Current();
 
-  // Must be in the kNative state for calling native methods.
-  CHECK_EQ(self->GetState(), ThreadState::kNative);
+  DCHECK_EQ(self->GetState(), ThreadState::kRunnable);
 
-  JNIEnv* env = self->GetJniEnv();
-  env->CallStaticVoidMethod(WellKnownClasses::java_lang_Daemons,
-                            WellKnownClasses::java_lang_Daemons_start);
-  if (env->ExceptionCheck()) {
-    env->ExceptionDescribe();
-    LOG(FATAL) << "Error starting java.lang.Daemons";
+  WellKnownClasses::java_lang_Daemons_start->InvokeStatic<'V'>(self);
+  if (UNLIKELY(self->IsExceptionPending())) {
+    LOG(FATAL) << "Error starting java.lang.Daemons: " << self->GetException()->Dump();
   }
 
   VLOG(startup) << "Runtime::StartDaemonThreads exiting";
@@ -1733,14 +1720,14 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // when we have 64 bit ArtMethod pointers.
   const bool low_4gb = IsAotCompiler() && Is64BitInstructionSet(kRuntimeISA);
   if (gUseUserfaultfd) {
-    linear_alloc_arena_pool_.reset(new GcVisitedArenaPool(low_4gb));
+    linear_alloc_arena_pool_.reset(new GcVisitedArenaPool(low_4gb, IsZygote()));
   } else if (low_4gb) {
     linear_alloc_arena_pool_.reset(new MemMapArenaPool(low_4gb));
   }
   linear_alloc_.reset(CreateLinearAlloc());
   startup_linear_alloc_.reset(CreateLinearAlloc());
 
-  small_irt_allocator_ = new SmallIrtAllocator();
+  small_lrt_allocator_ = new jni::SmallLrtAllocator();
 
   BlockSignals();
   InitPlatformSignalHandlers();
@@ -2171,10 +2158,6 @@ void Runtime::InitNativeMethods() {
   // Set up the native methods provided by the runtime itself.
   RegisterRuntimeNativeMethods(env);
 
-  // Initialize classes used in JNI. The initialization requires runtime native
-  // methods to be loaded first.
-  WellKnownClasses::Init(env);
-
   // Then set up libjavacore / libopenjdk / libicu_jni ,which are just
   // a regular JNI libraries with a regular JNI_OnLoad. Most JNI libraries can
   // just use System.loadLibrary, but libcore can't because it's the library
@@ -2183,20 +2166,26 @@ void Runtime::InitNativeMethods() {
   // By setting calling class to java.lang.Object, the caller location for these
   // JNI libs is core-oj.jar in the ART APEX, and hence they are loaded from the
   // com_android_art linker namespace.
+  jclass java_lang_Object;
+  {
+    ScopedObjectAccess soa(self);
+    java_lang_Object = reinterpret_cast<jclass>(
+        GetJavaVM()->AddGlobalRef(self, GetClassRoot<mirror::Object>(GetClassLinker())));
+  }
 
   // libicu_jni has to be initialized before libopenjdk{d} due to runtime dependency from
   // libopenjdk{d} to Icu4cMetadata native methods in libicu_jni. See http://b/143888405
   {
     std::string error_msg;
     if (!java_vm_->LoadNativeLibrary(
-          env, "libicu_jni.so", nullptr, WellKnownClasses::java_lang_Object, &error_msg)) {
+          env, "libicu_jni.so", nullptr, java_lang_Object, &error_msg)) {
       LOG(FATAL) << "LoadNativeLibrary failed for \"libicu_jni.so\": " << error_msg;
     }
   }
   {
     std::string error_msg;
     if (!java_vm_->LoadNativeLibrary(
-          env, "libjavacore.so", nullptr, WellKnownClasses::java_lang_Object, &error_msg)) {
+          env, "libjavacore.so", nullptr, java_lang_Object, &error_msg)) {
       LOG(FATAL) << "LoadNativeLibrary failed for \"libjavacore.so\": " << error_msg;
     }
   }
@@ -2206,10 +2195,11 @@ void Runtime::InitNativeMethods() {
                                                 : "libopenjdk.so";
     std::string error_msg;
     if (!java_vm_->LoadNativeLibrary(
-          env, kOpenJdkLibrary, nullptr, WellKnownClasses::java_lang_Object, &error_msg)) {
+          env, kOpenJdkLibrary, nullptr, java_lang_Object, &error_msg)) {
       LOG(FATAL) << "LoadNativeLibrary failed for \"" << kOpenJdkLibrary << "\": " << error_msg;
     }
   }
+  env->DeleteGlobalRef(java_lang_Object);
 
   // Initialize well known classes that may invoke runtime native methods.
   WellKnownClasses::LateInit(env);
@@ -3135,6 +3125,42 @@ LinearAlloc* Runtime::CreateLinearAlloc() {
   return pool != nullptr
       ? new LinearAlloc(pool, gUseUserfaultfd)
       : new LinearAlloc(arena_pool_.get(), /*track_allocs=*/ false);
+}
+
+class Runtime::SetupLinearAllocForZygoteFork : public AllocatorVisitor {
+ public:
+  explicit SetupLinearAllocForZygoteFork(Thread* self) : self_(self) {}
+
+  bool Visit(LinearAlloc* alloc) override {
+    alloc->SetupForPostZygoteFork(self_);
+    return true;
+  }
+
+ private:
+  Thread* self_;
+};
+
+void Runtime::SetupLinearAllocForPostZygoteFork(Thread* self) {
+  if (gUseUserfaultfd) {
+    // Setup all the linear-allocs out there for post-zygote fork. This will
+    // basically force the arena allocator to ask for a new arena for the next
+    // allocation. All arenas allocated from now on will be in the userfaultfd
+    // visited space.
+    if (GetLinearAlloc() != nullptr) {
+      GetLinearAlloc()->SetupForPostZygoteFork(self);
+    }
+    if (GetStartupLinearAlloc() != nullptr) {
+      GetStartupLinearAlloc()->SetupForPostZygoteFork(self);
+    }
+    {
+      Locks::mutator_lock_->AssertNotHeld(self);
+      ReaderMutexLock mu2(self, *Locks::mutator_lock_);
+      ReaderMutexLock mu3(self, *Locks::classlinker_classes_lock_);
+      SetupLinearAllocForZygoteFork visitor(self);
+      GetClassLinker()->VisitAllocators(&visitor);
+    }
+    static_cast<GcVisitedArenaPool*>(GetLinearAllocArenaPool())->SetupPostZygoteMode();
+  }
 }
 
 double Runtime::GetHashTableMinLoadFactor() const {
