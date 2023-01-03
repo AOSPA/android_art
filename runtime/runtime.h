@@ -68,6 +68,10 @@ class JitCodeCache;
 class JitOptions;
 }  // namespace jit
 
+namespace jni {
+class SmallLrtAllocator;
+}  // namespace jni
+
 namespace mirror {
 class Array;
 class ClassLoader;
@@ -107,7 +111,6 @@ class Plugin;
 struct RuntimeArgumentMap;
 class RuntimeCallbacks;
 class SignalCatcher;
-class SmallIrtAllocator;
 class StackOverflowHandler;
 class SuspensionHandler;
 class ThreadList;
@@ -370,8 +373,8 @@ class Runtime {
     return class_linker_;
   }
 
-  SmallIrtAllocator* GetSmallIrtAllocator() const {
-    return small_irt_allocator_;
+  jni::SmallLrtAllocator* GetSmallLrtAllocator() const {
+    return small_lrt_allocator_;
   }
 
   jni::JniIdManager* GetJniIdManager() const {
@@ -911,6 +914,11 @@ class Runtime {
 
   // Create a normal LinearAlloc or low 4gb version if we are 64 bit AOT compiler.
   LinearAlloc* CreateLinearAlloc();
+  // Setup linear-alloc allocators to stop using the current arena so that the
+  // next allocations, which would be after zygote fork, happens in userfaultfd
+  // visited space.
+  void SetupLinearAllocForPostZygoteFork(Thread* self)
+      REQUIRES(!Locks::mutator_lock_, !Locks::classlinker_classes_lock_);
 
   OatFileManager& GetOatFileManager() const {
     DCHECK(oat_file_manager_ != nullptr);
@@ -1164,6 +1172,17 @@ class Runtime {
 
   bool AllowInMemoryCompilation() const { return allow_in_memory_compilation_; }
 
+  // Used by plugin code to attach a hook for OOME.
+  void SetOutOfMemoryErrorHook(void (*hook)()) {
+    out_of_memory_error_hook_ = hook;
+  }
+
+  void OutOfMemoryErrorHook() {
+    if (out_of_memory_error_hook_ != nullptr) {
+      out_of_memory_error_hook_();
+    }
+  }
+
  private:
   static void InitPlatformSignalHandlers();
 
@@ -1177,7 +1196,7 @@ class Runtime {
   void RegisterRuntimeNativeMethods(JNIEnv* env);
   void InitMetrics();
 
-  void StartDaemonThreads();
+  void StartDaemonThreads() REQUIRES_SHARED(Locks::mutator_lock_);
   void StartSignalCatcher();
 
   void MaybeSaveJitProfilingInfo();
@@ -1303,7 +1322,7 @@ class Runtime {
 
   SignalCatcher* signal_catcher_;
 
-  SmallIrtAllocator* small_irt_allocator_;
+  jni::SmallLrtAllocator* small_lrt_allocator_;
 
   std::unique_ptr<jni::JniIdManager> jni_id_manager_;
 
@@ -1564,6 +1583,9 @@ class Runtime {
   bool perfetto_hprof_enabled_;
   bool perfetto_javaheapprof_enabled_;
 
+  // Called on out of memory error
+  void (*out_of_memory_error_hook_)();
+
   metrics::ArtMetrics metrics_;
   std::unique_ptr<metrics::MetricsReporter> metrics_reporter_;
 
@@ -1584,6 +1606,7 @@ class Runtime {
   friend class ScopedThreadPoolUsage;
   friend class OatFileAssistantTest;
   class NotifyStartupCompletedTask;
+  class SetupLinearAllocForZygoteFork;
 
   DISALLOW_COPY_AND_ASSIGN(Runtime);
 };

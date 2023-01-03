@@ -2495,8 +2495,7 @@ void Thread::AssertPendingException() const {
 void Thread::AssertPendingOOMException() const {
   AssertPendingException();
   auto* e = GetException();
-  CHECK_EQ(e->GetClass(), DecodeJObject(WellKnownClasses::java_lang_OutOfMemoryError)->AsClass())
-      << e->Dump();
+  CHECK_EQ(e->GetClass(), WellKnownClasses::java_lang_OutOfMemoryError.Get()) << e->Dump();
 }
 
 void Thread::AssertNoPendingException() const {
@@ -2769,9 +2768,9 @@ ObjPtr<mirror::Object> Thread::DecodeJObject(jobject obj) const {
   bool expect_null = false;
   // The "kinds" below are sorted by the frequency we expect to encounter them.
   if (kind == kLocal) {
-    IndirectReferenceTable& locals = tlsPtr_.jni_env->locals_;
+    jni::LocalReferenceTable& locals = tlsPtr_.jni_env->locals_;
     // Local references do not need a read barrier.
-    result = locals.Get<kWithoutReadBarrier>(ref);
+    result = locals.Get(ref);
   } else if (kind == kJniTransition) {
     // The `jclass` for a static method points to the CompressedReference<> in the
     // `ArtMethod::declaring_class_`. Other `jobject` arguments point to spilled stack
