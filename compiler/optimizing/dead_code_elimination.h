@@ -42,6 +42,31 @@ class HDeadCodeElimination : public HOptimization {
   bool RemoveDeadBlocks();
   void RemoveDeadInstructions();
   bool SimplifyAlwaysThrows();
+  // Simplify the pattern:
+  //
+  //        B1    B2    ...
+  //       goto  goto  goto
+  //         \    |    /
+  //          \   |   /
+  //             B3
+  //     i1 = phi(input, input)
+  //     (i2 = condition on i1)
+  //        if i1 (or i2)
+  //          /     \
+  //         /       \
+  //        B4       B5
+  //
+  // Into:
+  //
+  //       B1      B2    ...
+  //        |      |      |
+  //       B4      B5    B?
+  //
+  // Note that individual edges can be redirected (for example B2->B3
+  // can be redirected as B2->B5) without applying this optimization
+  // to other incoming edges.
+  //
+  // Note that we rely on the dead code elimination to get rid of B3.
   bool SimplifyIfs();
   void ConnectSuccessiveBlocks();
 
@@ -64,6 +89,28 @@ class HDeadCodeElimination : public HOptimization {
   // that are referencing the same try, and removes the tries which don't contain any throwing
   // instructions.
   bool RemoveUnneededTries();
+
+  // Adds a phi in `block`, if `block` and its dominator have the same (or opposite) condition.
+  // For example it turns:
+  // if(cond)
+  //   /  \
+  //  B1  B2
+  //   \ /
+  // if(cond)
+  //   /  \
+  //  B3  B4
+  //
+  // into:
+  // if(cond)
+  //   /  \
+  //  B1  B2
+  //   \ /
+  // if(Phi(1, 0))
+  //   /  \
+  //  B3  B4
+  //
+  // Following this, SimplifyIfs is able to connect B1->B3 and B2->B4 effectively skipping an if.
+  void MaybeAddPhi(HBasicBlock* block);
 
   DISALLOW_COPY_AND_ASSIGN(HDeadCodeElimination);
 };
