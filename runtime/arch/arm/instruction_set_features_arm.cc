@@ -54,6 +54,7 @@ ArmFeaturesUniquePtr ArmInstructionSetFeatures::FromVariant(
   static const char* arm_variants_with_armv8a[] = {
       "cortex-a32",
       "cortex-a35",
+      "cortex-a510",
       "cortex-a53",
       "cortex-a53.a57",
       "cortex-a53.a72",
