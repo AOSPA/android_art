@@ -57,11 +57,11 @@ template <> struct ShortyTraits<'V'> {
 };
 
 template <> struct ShortyTraits<'Z'> {
-  // We're using `uint8_t` for `boolean`, see `JValue`.
-  using Type = uint8_t;
-  static Type Get(const JValue& value) { return value.GetZ(); }
+  // Despite using `uint8_t` for `boolean` in `JValue`, we shall use `bool` here.
+  using Type = bool;
+  static Type Get(const JValue& value) { return value.GetZ() != 0u; }
   static constexpr size_t kVRegCount = 1u;
-  static void Set(uint32_t* args, Type value) { args[0] = static_cast<uint32_t>(value); }
+  static void Set(uint32_t* args, Type value) { args[0] = static_cast<uint32_t>(value ? 1u : 0u); }
 };
 
 template <> struct ShortyTraits<'B'> {
@@ -180,6 +180,7 @@ template <char ReturnType, char... ArgType>
 inline typename detail::ShortyTraits<ReturnType>::Type
 ArtMethod::InvokeStatic(Thread* self, typename detail::ShortyTraits<ArgType>::Type... args) {
   DCHECK(IsStatic());
+  DCHECK(GetDeclaringClass()->IsInitialized());  // Used only for initialized well-known classes.
   JValue result;
   constexpr auto shorty = detail::MaterializeShorty<ReturnType, ArgType...>();
   auto vregs = detail::MaterializeVRegs<ArgType...>(args...);
@@ -192,12 +193,54 @@ typename detail::ShortyTraits<ReturnType>::Type
 ArtMethod::InvokeInstance(Thread* self,
                           ObjPtr<mirror::Object> receiver,
                           typename detail::ShortyTraits<ArgType>::Type... args) {
+  DCHECK(!GetDeclaringClass()->IsInterface());
   DCHECK(!IsStatic());
   JValue result;
   constexpr auto shorty = detail::MaterializeShorty<ReturnType, ArgType...>();
   auto vregs = detail::MaterializeVRegs<'L', ArgType...>(receiver, args...);
   Invoke(self, vregs.data(), sizeof(vregs), &result, shorty.data());
   return detail::ShortyTraits<ReturnType>::Get(result);
+}
+
+template <char ReturnType, char... ArgType>
+typename detail::ShortyTraits<ReturnType>::Type
+ArtMethod::InvokeFinal(Thread* self,
+                       ObjPtr<mirror::Object> receiver,
+                       typename detail::ShortyTraits<ArgType>::Type... args) {
+  DCHECK(!GetDeclaringClass()->IsInterface());
+  DCHECK(!IsStatic());
+  DCHECK(IsFinal() || GetDeclaringClass()->IsFinal());
+  DCHECK(receiver != nullptr);
+  return InvokeInstance<ReturnType, ArgType...>(self, receiver, args...);
+}
+
+template <char ReturnType, char... ArgType>
+typename detail::ShortyTraits<ReturnType>::Type
+ArtMethod::InvokeVirtual(Thread* self,
+                         ObjPtr<mirror::Object> receiver,
+                         typename detail::ShortyTraits<ArgType>::Type... args) {
+  DCHECK(!GetDeclaringClass()->IsInterface());
+  DCHECK(!IsStatic());
+  DCHECK(!IsFinal());
+  DCHECK(receiver != nullptr);
+  ArtMethod* target_method =
+      receiver->GetClass()->FindVirtualMethodForVirtual(this, kRuntimePointerSize);
+  DCHECK(target_method != nullptr);
+  return target_method->InvokeInstance<ReturnType, ArgType...>(self, receiver, args...);
+}
+
+template <char ReturnType, char... ArgType>
+typename detail::ShortyTraits<ReturnType>::Type
+ArtMethod::InvokeInterface(Thread* self,
+                           ObjPtr<mirror::Object> receiver,
+                           typename detail::ShortyTraits<ArgType>::Type... args) {
+  DCHECK(GetDeclaringClass()->IsInterface());
+  DCHECK(!IsStatic());
+  DCHECK(receiver != nullptr);
+  ArtMethod* target_method =
+      receiver->GetClass()->FindVirtualMethodForInterface(this, kRuntimePointerSize);
+  DCHECK(target_method != nullptr);
+  return target_method->InvokeInstance<ReturnType, ArgType...>(self, receiver, args...);
 }
 
 template <ReadBarrierOption kReadBarrierOption>

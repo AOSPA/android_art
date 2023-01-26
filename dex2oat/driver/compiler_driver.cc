@@ -87,7 +87,7 @@
 #include "verifier/class_verifier.h"
 #include "verifier/verifier_deps.h"
 #include "verifier/verifier_enums.h"
-#include "well_known_classes.h"
+#include "well_known_classes-inl.h"
 
 namespace art {
 
@@ -1041,21 +1041,22 @@ static void AddClassLoaderClasses(/* out */ HashSet<std::string>* image_classes)
 
 static void VerifyClassLoaderClassesAreImageClasses(/* out */ HashSet<std::string>* image_classes) {
   ScopedObjectAccess soa(Thread::Current());
-  jclass class_loader_classes[] = {
-      WellKnownClasses::dalvik_system_BaseDexClassLoader,
-      WellKnownClasses::dalvik_system_DelegateLastClassLoader,
-      WellKnownClasses::dalvik_system_DexClassLoader,
-      WellKnownClasses::dalvik_system_DexFile,
-      WellKnownClasses::dalvik_system_DexPathList,
-      WellKnownClasses::dalvik_system_DexPathList__Element,
-      WellKnownClasses::dalvik_system_InMemoryDexClassLoader,
-      WellKnownClasses::dalvik_system_PathClassLoader,
-      WellKnownClasses::java_lang_BootClassLoader,
-      WellKnownClasses::java_lang_ClassLoader,
+  ScopedAssertNoThreadSuspension sants(__FUNCTION__);
+  ObjPtr<mirror::Class> class_loader_classes[] = {
+      WellKnownClasses::dalvik_system_BaseDexClassLoader.Get(),
+      WellKnownClasses::dalvik_system_DelegateLastClassLoader.Get(),
+      WellKnownClasses::dalvik_system_DexClassLoader.Get(),
+      WellKnownClasses::dalvik_system_DexFile.Get(),
+      WellKnownClasses::dalvik_system_DexPathList.Get(),
+      WellKnownClasses::dalvik_system_DexPathList__Element.Get(),
+      WellKnownClasses::dalvik_system_InMemoryDexClassLoader.Get(),
+      WellKnownClasses::dalvik_system_PathClassLoader.Get(),
+      WellKnownClasses::java_lang_BootClassLoader.Get(),
+      WellKnownClasses::java_lang_ClassLoader.Get(),
   };
-  for (jclass klass : class_loader_classes) {
+  for (ObjPtr<mirror::Class> klass : class_loader_classes) {
     std::string temp;
-    std::string_view descriptor = soa.Decode<mirror::Class>(klass)->GetDescriptor(&temp);
+    std::string_view descriptor = klass->GetDescriptor(&temp);
     CHECK(image_classes->find(descriptor) != image_classes->end());
   }
   ArtField* class_loader_fields[] = {
@@ -1738,6 +1739,9 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
       class_loader,
       dex_files,
       &error_msg)) {
+    // Clear the information we have as we are going to re-verify and we do not
+    // want to keep that a class is verified.
+    verifier_deps->ClearData(dex_files);
     LOG(WARNING) << "Fast verification failed: " << error_msg;
     return false;
   }
@@ -1764,8 +1768,10 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
         // the type.
         ClassReference ref(dex_file, accessor.GetClassDefIndex());
         const ClassStatus existing = ClassStatus::kNotReady;
-        ClassStateTable::InsertResult result = compiled_classes_.Insert(ref, existing, status);
-        CHECK_EQ(result, ClassStateTable::kInsertResultSuccess) << ref.dex_file->GetLocation();
+        // Note: when dex files are compiled inidividually, the class may have
+        // been verified in a previous stage. This means this insertion can
+        // fail, but that's OK.
+        compiled_classes_.Insert(ref, existing, status);
       } else {
         // Update the class status, so later compilation stages know they don't need to verify
         // the class.

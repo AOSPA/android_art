@@ -83,6 +83,7 @@ using ::aidl::com::android::server::art::FsPermission;
 using ::aidl::com::android::server::art::GetDexoptNeededResult;
 using ::aidl::com::android::server::art::GetOptimizationStatusResult;
 using ::aidl::com::android::server::art::IArtdCancellationSignal;
+using ::aidl::com::android::server::art::MergeProfileOptions;
 using ::aidl::com::android::server::art::OutputArtifacts;
 using ::aidl::com::android::server::art::OutputProfile;
 using ::aidl::com::android::server::art::PriorityClass;
@@ -117,9 +118,7 @@ constexpr int kShortTimeoutSec = 60;  // 1 minute.
 // would take down the system server.
 constexpr int kLongTimeoutSec = 570;  // 9.5 minutes.
 
-// Deletes a file. Returns the size of the deleted file, or 0 if the deleted file is empty or an
-// error occurs.
-int64_t GetSizeAndDeleteFile(const std::string& path) {
+std::optional<int64_t> GetSize(std::string_view path) {
   std::error_code ec;
   int64_t size = std::filesystem::file_size(path, ec);
   if (ec) {
@@ -127,15 +126,26 @@ int64_t GetSizeAndDeleteFile(const std::string& path) {
     if (ec.value() != ENOENT) {
       LOG(ERROR) << "Failed to get the file size of '{}': {}"_format(path, ec.message());
     }
+    return std::nullopt;
+  }
+  return size;
+}
+
+// Deletes a file. Returns the size of the deleted file, or 0 if the deleted file is empty or an
+// error occurs.
+int64_t GetSizeAndDeleteFile(const std::string& path) {
+  std::optional<int64_t> size = GetSize(path);
+  if (!size.has_value()) {
     return 0;
   }
 
+  std::error_code ec;
   if (!std::filesystem::remove(path, ec)) {
     LOG(ERROR) << "Failed to remove '{}': {}"_format(path, ec.message());
     return 0;
   }
 
-  return size;
+  return size.value();
 }
 
 std::string EscapeErrorMessage(const std::string& message) {
@@ -502,6 +512,7 @@ ndk::ScopedAStatus Artd::copyAndRewriteProfile(const ProfilePath& in_src,
   OR_RETURN_NON_FATAL(dst->Keep());
   *_aidl_return = true;
   in_dst->profilePath.id = dst->TempId();
+  in_dst->profilePath.tmpPath = dst->TempPath();
   return ScopedAStatus::ok();
 }
 
@@ -561,7 +572,8 @@ ndk::ScopedAStatus Artd::getDmFileVisibility(const DexMetadataPath& in_dmFile,
 ndk::ScopedAStatus Artd::mergeProfiles(const std::vector<ProfilePath>& in_profiles,
                                        const std::optional<ProfilePath>& in_referenceProfile,
                                        OutputProfile* in_outputProfile,
-                                       const std::string& in_dexFile,
+                                       const std::vector<std::string>& in_dexFiles,
+                                       const MergeProfileOptions& in_options,
                                        bool* _aidl_return) {
   std::vector<std::string> profile_paths;
   for (const ProfilePath& profile : in_profiles) {
@@ -573,7 +585,9 @@ ndk::ScopedAStatus Artd::mergeProfiles(const std::vector<ProfilePath>& in_profil
   }
   std::string output_profile_path =
       OR_RETURN_FATAL(BuildFinalProfilePath(in_outputProfile->profilePath));
-  OR_RETURN_FATAL(ValidateDexPath(in_dexFile));
+  for (const std::string& dex_file : in_dexFiles) {
+    OR_RETURN_FATAL(ValidateDexPath(dex_file));
+  }
 
   CmdlineBuilder args;
   FdLogger fd_logger;
@@ -620,14 +634,20 @@ ndk::ScopedAStatus Artd::mergeProfiles(const std::vector<ProfilePath>& in_profil
   args.Add("--reference-profile-file-fd=%d", output_profile_file->Fd());
   fd_logger.Add(*output_profile_file);
 
-  std::unique_ptr<File> dex_file = OR_RETURN_NON_FATAL(OpenFileForReading(in_dexFile));
-  args.Add("--apk-fd=%d", dex_file->Fd());
-  fd_logger.Add(*dex_file);
+  std::vector<std::unique_ptr<File>> dex_files;
+  for (const std::string& dex_path : in_dexFiles) {
+    std::unique_ptr<File> dex_file = OR_RETURN_NON_FATAL(OpenFileForReading(dex_path));
+    args.Add("--apk-fd=%d", dex_file->Fd());
+    fd_logger.Add(*dex_file);
+    dex_files.push_back(std::move(dex_file));
+  }
 
   args.AddIfNonEmpty("--min-new-classes-percent-change=%s",
                      props_->GetOrEmpty("dalvik.vm.bgdexopt.new-classes-percent"))
       .AddIfNonEmpty("--min-new-methods-percent-change=%s",
-                     props_->GetOrEmpty("dalvik.vm.bgdexopt.new-methods-percent"));
+                     props_->GetOrEmpty("dalvik.vm.bgdexopt.new-methods-percent"))
+      .AddIf(in_options.forceMerge, "--force-merge")
+      .AddIf(in_options.forBootImage, "--boot-image-merge");
 
   LOG(INFO) << "Running profman: " << Join(args.Get(), /*separator=*/" ")
             << "\nOpened FDs: " << fd_logger;
@@ -645,13 +665,16 @@ ndk::ScopedAStatus Artd::mergeProfiles(const std::vector<ProfilePath>& in_profil
     return ScopedAStatus::ok();
   }
 
-  if (result.value() != ProfmanResult::kCompile) {
+  ProfmanResult::ProcessingResult expected_result =
+      in_options.forceMerge ? ProfmanResult::kSuccess : ProfmanResult::kCompile;
+  if (result.value() != expected_result) {
     return NonFatal("profman returned an unexpected code: {}"_format(result.value()));
   }
 
   OR_RETURN_NON_FATAL(output_profile_file->Keep());
   *_aidl_return = true;
   in_outputProfile->profilePath.id = output_profile_file->TempId();
+  in_outputProfile->profilePath.tmpPath = output_profile_file->TempPath();
   return ScopedAStatus::ok();
 }
 
@@ -738,6 +761,34 @@ ndk::ScopedAStatus Artd::dexopt(
   FdLogger fd_logger;
 
   const FsPermission& fs_permission = in_outputArtifacts.permissionSettings.fileFsPermission;
+
+  std::unique_ptr<File> dex_file = OR_RETURN_NON_FATAL(OpenFileForReading(in_dexFile));
+  args.Add("--zip-fd=%d", dex_file->Fd()).Add("--zip-location=%s", in_dexFile);
+  fd_logger.Add(*dex_file);
+  struct stat dex_st = OR_RETURN_NON_FATAL(Fstat(*dex_file));
+  if ((dex_st.st_mode & S_IROTH) == 0) {
+    if (fs_permission.isOtherReadable) {
+      return NonFatal(
+          "Outputs cannot be other-readable because the dex file '{}' is not other-readable"_format(
+              dex_file->GetPath()));
+    }
+    // Negative numbers mean no `chown`. 0 means root.
+    // Note: this check is more strict than it needs to be. For example, it doesn't allow the
+    // outputs to belong to a group that is a subset of the dex file's group. This is for
+    // simplicity, and it's okay as we don't have to handle such complicated cases in practice.
+    if ((fs_permission.uid > 0 && static_cast<uid_t>(fs_permission.uid) != dex_st.st_uid) ||
+        (fs_permission.gid > 0 && static_cast<gid_t>(fs_permission.gid) != dex_st.st_uid &&
+         static_cast<gid_t>(fs_permission.gid) != dex_st.st_gid)) {
+      return NonFatal(
+          "Outputs' owner doesn't match the dex file '{}' (outputs: {}:{}, dex file: {}:{})"_format(
+              dex_file->GetPath(),
+              fs_permission.uid,
+              fs_permission.gid,
+              dex_st.st_uid,
+              dex_st.st_gid));
+    }
+  }
+
   std::unique_ptr<NewFile> oat_file = OR_RETURN_NON_FATAL(NewFile::Create(oat_path, fs_permission));
   args.Add("--oat-fd=%d", oat_file->Fd()).Add("--oat-location=%s", oat_path);
   fd_logger.Add(*oat_file);
@@ -754,6 +805,7 @@ ndk::ScopedAStatus Artd::dexopt(
   if (in_dexoptOptions.generateAppImage) {
     art_file = OR_RETURN_NON_FATAL(NewFile::Create(art_path, fs_permission));
     args.Add("--app-image-fd=%d", art_file->Fd());
+    args.AddIfNonEmpty("--image-format=%s", props_->GetOrEmpty("dalvik.vm.appimageformat"));
     fd_logger.Add(*art_file);
     files_to_commit.push_back(art_file.get());
   } else {
@@ -767,10 +819,6 @@ ndk::ScopedAStatus Artd::dexopt(
     args.Add("--swap-fd=%d", swap_file->Fd());
     fd_logger.Add(*swap_file);
   }
-
-  std::unique_ptr<File> dex_file = OR_RETURN_NON_FATAL(OpenFileForReading(in_dexFile));
-  args.Add("--zip-fd=%d", dex_file->Fd()).Add("--zip-location=%s", in_dexFile);
-  fd_logger.Add(*dex_file);
 
   std::vector<std::unique_ptr<File>> context_files;
   if (context != nullptr) {
@@ -811,8 +859,16 @@ ndk::ScopedAStatus Artd::dexopt(
     profile_file = OR_RETURN_NON_FATAL(OpenFileForReading(profile_path.value()));
     args.Add("--profile-file-fd=%d", profile_file->Fd());
     fd_logger.Add(*profile_file);
+    struct stat profile_st = OR_RETURN_NON_FATAL(Fstat(*profile_file));
+    if (fs_permission.isOtherReadable && (profile_st.st_mode & S_IROTH) == 0) {
+      return NonFatal(
+          "Outputs cannot be other-readable because the profile '{}' is not other-readable"_format(
+              profile_file->GetPath()));
+    }
+    // TODO(b/260228411): Check uid and gid.
   }
 
+  AddBootImageFlags(args);
   AddCompilerConfigFlags(
       in_instructionSet, in_compilerFilter, in_priorityClass, in_dexoptOptions, args);
   AddPerfConfigFlags(in_priorityClass, args);
@@ -857,11 +913,22 @@ ndk::ScopedAStatus Artd::dexopt(
   LOG(INFO) << "dex2oat returned code {}"_format(result.value());
 
   if (result.value() != 0) {
-    return NonFatal("dex2oat returned an unexpected code: %d"_format(result.value()));
+    return NonFatal("dex2oat returned an unexpected code: {}"_format(result.value()));
   }
 
-  NewFile::CommitAllOrAbandon(files_to_commit, files_to_delete);
+  int64_t size_bytes = 0;
+  int64_t size_before_bytes = 0;
+  for (const NewFile* file : files_to_commit) {
+    size_bytes += GetSize(file->TempPath()).value_or(0);
+    size_before_bytes += GetSize(file->FinalPath()).value_or(0);
+  }
+  for (std::string_view path : files_to_delete) {
+    size_before_bytes += GetSize(path).value_or(0);
+  }
+  OR_RETURN_NON_FATAL(NewFile::CommitAllOrAbandon(files_to_commit, files_to_delete));
 
+  _aidl_return->sizeBytes = size_bytes;
+  _aidl_return->sizeBeforeBytes = size_before_bytes;
   return ScopedAStatus::ok();
 }
 
@@ -920,12 +987,14 @@ Result<OatFileAssistantContext*> Artd::GetOatFileAssistantContext() {
 }
 
 Result<const std::vector<std::string>*> Artd::GetBootImageLocations() {
+  std::lock_guard<std::mutex> lock(cache_mu_);
+
   if (!cached_boot_image_locations_.has_value()) {
     std::string location_str;
 
-    if (UseJitZygote()) {
+    if (UseJitZygoteLocked()) {
       location_str = GetJitZygoteBootImageLocation();
-    } else if (std::string value = props_->GetOrEmpty("dalvik.vm.boot-image"); !value.empty()) {
+    } else if (std::string value = GetUserDefinedBootImageLocationsLocked(); !value.empty()) {
       location_str = std::move(value);
     } else {
       std::string error_msg;
@@ -933,7 +1002,7 @@ Result<const std::vector<std::string>*> Artd::GetBootImageLocations() {
       if (!error_msg.empty()) {
         return Errorf("Failed to get ANDROID_ROOT: {}", error_msg);
       }
-      location_str = GetDefaultBootImageLocation(android_root, DenyArtApexDataFiles());
+      location_str = GetDefaultBootImageLocation(android_root, DenyArtApexDataFilesLocked());
     }
 
     cached_boot_image_locations_ = Split(location_str, ":");
@@ -943,6 +1012,8 @@ Result<const std::vector<std::string>*> Artd::GetBootImageLocations() {
 }
 
 Result<const std::vector<std::string>*> Artd::GetBootClassPath() {
+  std::lock_guard<std::mutex> lock(cache_mu_);
+
   if (!cached_boot_class_path_.has_value()) {
     const char* env_value = getenv("BOOTCLASSPATH");
     if (env_value == nullptr || strlen(env_value) == 0) {
@@ -955,17 +1026,40 @@ Result<const std::vector<std::string>*> Artd::GetBootClassPath() {
 }
 
 bool Artd::UseJitZygote() {
+  std::lock_guard<std::mutex> lock(cache_mu_);
+  return UseJitZygoteLocked();
+}
+
+bool Artd::UseJitZygoteLocked() {
   if (!cached_use_jit_zygote_.has_value()) {
     cached_use_jit_zygote_ =
-        props_->GetBool("dalvik.vm.profilebootclasspath",
-                        "persist.device_config.runtime_native_boot.profilebootclasspath",
+        props_->GetBool("persist.device_config.runtime_native_boot.profilebootclasspath",
+                        "dalvik.vm.profilebootclasspath",
                         /*default_value=*/false);
   }
 
   return cached_use_jit_zygote_.value();
 }
 
+const std::string& Artd::GetUserDefinedBootImageLocations() {
+  std::lock_guard<std::mutex> lock(cache_mu_);
+  return GetUserDefinedBootImageLocationsLocked();
+}
+
+const std::string& Artd::GetUserDefinedBootImageLocationsLocked() {
+  if (!cached_user_defined_boot_image_locations_.has_value()) {
+    cached_user_defined_boot_image_locations_ = props_->GetOrEmpty("dalvik.vm.boot-image");
+  }
+
+  return cached_user_defined_boot_image_locations_.value();
+}
+
 bool Artd::DenyArtApexDataFiles() {
+  std::lock_guard<std::mutex> lock(cache_mu_);
+  return DenyArtApexDataFilesLocked();
+}
+
+bool Artd::DenyArtApexDataFilesLocked() {
   if (!cached_deny_art_apex_data_files_.has_value()) {
     cached_deny_art_apex_data_files_ =
         !props_->GetBool("odsign.verification.success", /*default_value=*/false);
@@ -992,6 +1086,14 @@ Result<std::string> Artd::GetDex2Oat() {
 bool Artd::ShouldCreateSwapFileForDexopt() {
   // Create a swap file by default. Dex2oat will decide whether to use it or not.
   return props_->GetBool("dalvik.vm.dex2oat-swap", /*default_value=*/true);
+}
+
+void Artd::AddBootImageFlags(/*out*/ CmdlineBuilder& args) {
+  if (UseJitZygote()) {
+    args.Add("--force-jit-zygote");
+  } else {
+    args.AddIfNonEmpty("--boot-image=%s", GetUserDefinedBootImageLocations());
+  }
 }
 
 void Artd::AddCompilerConfigFlags(const std::string& instruction_set,
@@ -1060,10 +1162,10 @@ void Artd::AddPerfConfigFlags(PriorityClass priority_class, /*out*/ CmdlineBuild
              "--compile-individually");
 }
 
-android::base::Result<int> Artd::ExecAndReturnCode(const std::vector<std::string>& args,
-                                                   int timeout_sec,
-                                                   const ExecCallbacks& callbacks,
-                                                   ProcessStat* stat) const {
+Result<int> Artd::ExecAndReturnCode(const std::vector<std::string>& args,
+                                    int timeout_sec,
+                                    const ExecCallbacks& callbacks,
+                                    ProcessStat* stat) const {
   std::string error_msg;
   ExecResult result =
       exec_utils_->ExecAndReturnResult(args, timeout_sec, callbacks, stat, &error_msg);
@@ -1071,6 +1173,14 @@ android::base::Result<int> Artd::ExecAndReturnCode(const std::vector<std::string
     return Error() << error_msg;
   }
   return result.exit_code;
+}
+
+Result<struct stat> Artd::Fstat(const File& file) const {
+  struct stat st;
+  if (fstat_(file.Fd(), &st) != 0) {
+    return Errorf("Unable to fstat file '{}'", file.GetPath());
+  }
+  return st;
 }
 
 }  // namespace artd

@@ -195,6 +195,8 @@ known_failing_tests = frozenset([
   #           at Main.main(Main.java:20)
   #
   "821-many-args",
+  # 823-cha-inlining: Dependency on `libarttest`.
+  "823-cha-inlining",
   # 826-infinite-loop: The test expects an argument passed to `Main.main` (the test library,
   # usually `arttestd` or `arttest)`, but the ART run-test TradeFed test runner
   # (`com.android.tradefed.testtype.ArtRunTest`) does not implement this yet.
@@ -207,6 +209,8 @@ known_failing_tests = frozenset([
   "844-exception",
   # 844-exception2: Dependency on `libarttest`.
   "844-exception2",
+  # 966-default-conflict: Dependency on `libarttest`.
+  "966-default-conflict",
   # 993-breakpoints-non-debuggable: This test needs native code.
   "993-breakpoints-non-debuggable",
 ])
@@ -257,46 +261,47 @@ art_gtests_mainline_presubmit_module_names = copy.copy(art_gtest_module_names)
 
 # Tests exhibiting a flaky behavior, currently exluded from MTS for
 # the stake of stability / confidence (b/209958457).
-flaky_tests_excluded_from_mts = [
-    ("CtsLibcoreFileIOTestCases" +
-     " android.cts.FileChannelInterProcessLockTest#" + m) for m in [
+flaky_tests_excluded_from_mts = {
+    "CtsLibcoreFileIOTestCases": [
+        ("android.cts.FileChannelInterProcessLockTest#" + m) for m in [
          "test_lockJJZ_Exclusive_asyncChannel",
          "test_lockJJZ_Exclusive_syncChannel",
          "test_lock_differentChannelTypes",
          "test_lockJJZ_Shared_asyncChannel",
          "test_lockJJZ_Shared_syncChannel",
+        ]
+    ],
+    "CtsLibcoreTestCases": [
+        ("com.android.org.conscrypt.javax.net.ssl.SSLSocketVersionCompatibilityTest#" + m + c)
+        for (m, c) in itertools.product(
+            [
+                "test_SSLSocket_interrupt_read_withoutAutoClose",
+                "test_SSLSocket_setSoWriteTimeout",
+            ],
+            [
+                "[0: TLSv1.2 client, TLSv1.2 server]",
+                "[1: TLSv1.2 client, TLSv1.3 server]",
+                "[2: TLSv1.3 client, TLSv1.2 server]",
+                "[3: TLSv1.3 client, TLSv1.3 server]",
+            ]
+        )
+    ] + [
+        ("libcore.dalvik.system.DelegateLastClassLoaderTest#" + m) for m in [
+            "testLookupOrderNodelegate_getResource",
+            "testLookupOrder_getResource",
+        ]
     ]
-] + [
-    ("CtsLibcoreTestCases" +
-     " com.android.org.conscrypt.javax.net.ssl.SSLSocketVersionCompatibilityTest#" + m + c)
-    for (m, c) in itertools.product(
-         [
-             "test_SSLSocket_interrupt_read_withoutAutoClose",
-             "test_SSLSocket_setSoWriteTimeout",
-         ],
-         [
-             "[0: TLSv1.2 client, TLSv1.2 server]",
-             "[1: TLSv1.2 client, TLSv1.3 server]",
-             "[2: TLSv1.3 client, TLSv1.2 server]",
-             "[3: TLSv1.3 client, TLSv1.3 server]",
-         ]
-     )
-] + [
-    ("CtsLibcoreTestCases" +
-     " libcore.dalvik.system.DelegateLastClassLoaderTest#" + m) for m in [
-         "testLookupOrderNodelegate_getResource",
-         "testLookupOrder_getResource",
-    ]
-]
+}
 
 # Tests failing because of linking issues, currently exluded from MTS
-# to minimize noise in continuous runs while we investigate.
+# and Mainline Presubmits to minimize noise in continuous runs while
+# we investigate.
 #
 # TODO(b/247108425): Address the linking issues and re-enable these
 # tests.
-failing_tests_excluded_from_mts = [
-    "art_standalone_compiler_tests JniCompilerTest*",
-]
+failing_tests_excluded_from_mts_and_mainline_presubmits = {
+    "art_standalone_compiler_tests": ["JniCompilerTest*"],
+}
 
 # Is `run_test` a Checker test (i.e. a test containing Checker
 # assertions)?
@@ -378,8 +383,7 @@ class Generator:
                    "src-bcpex",
                    "src-ex",
                    "src-ex2",
-                   "src-multidex",
-                   "src2"]:
+                   "src-multidex"]:
       if os.path.isdir(os.path.join(run_test_path, subdir)):
         return False
     # Skip tests that have both an `src` directory and an `src-art` directory.
@@ -415,6 +419,33 @@ class Generator:
     if run_param.get("default-run", ""):
       return True
     return False
+
+  def gen_libs_list_impl(self, library_type, libraries):
+    if len(libraries) == 0:
+      return ""
+    libraries_joined = """,
+              """.join(libraries)
+    return f"""
+          {library_type}: [
+              {libraries_joined}
+          ],"""
+
+  def gen_libs_list(self, libraries):
+    return self.gen_libs_list_impl("libs", libraries);
+
+  def gen_static_libs_list(self, libraries):
+    return self.gen_libs_list_impl("static_libs", libraries);
+
+  def gen_java_library_rule(self, name, src_dir, libraries):
+    return f"""\
+
+
+      // Library with {src_dir}/ sources for the test.
+      java_library {{
+          name: "{name}",
+          defaults: ["art-run-test-defaults"],{self.gen_libs_list(libraries)}
+          srcs: ["{src_dir}/**/*.java"],
+      }}"""
 
   # Is (successfully) running `run_test` supported?
   # TODO(b/147812905): Add run-time support for more tests.
@@ -490,6 +521,16 @@ class Generator:
     else:
       source_dir = "src"
 
+    src_library_rules = []
+    test_libraries = []
+    if os.path.isdir(os.path.join(run_test_path, "src2")):
+      src_library_rules.append(self.gen_java_library_rule(
+          f"{run_test_module_name}-{source_dir}",
+          source_dir,
+          test_libraries))
+      test_libraries.append(f"\"{run_test_module_name}-src\"")
+      source_dir = "src2"
+
     with open(bp_file, "w") as f:
       logging.debug(f"Writing `{bp_file}`.")
       f.write(textwrap.dedent(f"""\
@@ -504,14 +545,14 @@ class Generator:
           // to get the below license kinds:
           //   SPDX-license-identifier-Apache-2.0
           default_applicable_licenses: ["art_license"],
-      }}
+      }}{''.join(src_library_rules)}
 
       // Test's Dex code.
       java_test {{
           name: "{run_test_module_name}",
           defaults: ["art-run-test-defaults"],
           test_config_template: ":{test_config_template}",
-          srcs: ["{source_dir}/**/*.java"],
+          srcs: ["{source_dir}/**/*.java"],{self.gen_static_libs_list(test_libraries)}
           data: [
               ":{run_test_module_name}-expected-stdout",
               ":{run_test_module_name}-expected-stderr",
@@ -541,15 +582,22 @@ class Generator:
     run_test_module_names = [ART_RUN_TEST_MODULE_NAME_PREFIX + t for t in art_run_tests]
 
     # Mainline presubmits.
+    mainline_presubmit_apex_suffix = "[com.google.android.art.apex]"
     mainline_other_presubmit_tests = [
         "ComposHostTestCases",
     ]
     mainline_presubmit_tests = (mainline_other_presubmit_tests + run_test_module_names +
                                 art_gtests_mainline_presubmit_module_names)
-    mainline_presubmit_tests_with_apex = [t + "[com.google.android.art.apex]"
-                                          for t
-                                          in mainline_presubmit_tests]
-    mainline_presubmit_tests_dict = [{"name": t} for t in mainline_presubmit_tests_with_apex]
+    mainline_presubmit_tests_dict = [
+        ({"name": t + mainline_presubmit_apex_suffix,
+          "options": [
+              {"exclude-filter": e}
+              for e in failing_tests_excluded_from_mts_and_mainline_presubmits[t]
+          ]}
+         if t in failing_tests_excluded_from_mts_and_mainline_presubmits
+         else {"name": t + mainline_presubmit_apex_suffix})
+        for t in mainline_presubmit_tests
+    ]
 
     # Presubmits.
     other_presubmit_tests = [
@@ -732,14 +780,16 @@ class Generator:
     # Excluded flaky tests.
     xml_comment = root.createComment(" Excluded flaky tests (b/209958457). ")
     configuration.appendChild(xml_comment)
-    for t in flaky_tests_excluded_from_mts:
-      append_test_exclusion(t)
+    for module in flaky_tests_excluded_from_mts:
+      for testcase in flaky_tests_excluded_from_mts[module]:
+        append_test_exclusion(f"{module} {testcase}")
 
     # Excluded failing tests.
     xml_comment = root.createComment(" Excluded failing tests (b/247108425). ")
     configuration.appendChild(xml_comment)
-    for t in failing_tests_excluded_from_mts:
-      append_test_exclusion(t)
+    for module in failing_tests_excluded_from_mts_and_mainline_presubmits:
+      for testcase in failing_tests_excluded_from_mts_and_mainline_presubmits[module]:
+        append_test_exclusion(f"{module} {testcase}")
 
     xml_str = root.toprettyxml(indent = XML_INDENT, encoding = "utf-8")
 

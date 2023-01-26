@@ -45,6 +45,7 @@ import android.os.UserHandle;
 import androidx.test.filters.SmallTest;
 import androidx.test.runner.AndroidJUnit4;
 
+import com.android.server.art.model.ArtFlags;
 import com.android.server.art.model.OptimizeParams;
 import com.android.server.art.model.OptimizeResult;
 import com.android.server.art.testing.TestingUtils;
@@ -65,9 +66,6 @@ import java.util.stream.Collectors;
 @SmallTest
 @RunWith(AndroidJUnit4.class)
 public class PrimaryDexOptimizerTest extends PrimaryDexOptimizerTestBase {
-    private final OptimizeParams mOptimizeParams =
-            new OptimizeParams.Builder("install").setCompilerFilter("speed-profile").build();
-
     private final String mDexPath = "/data/app/foo/base.apk";
     private final ProfilePath mRefProfile =
             AidlUtils.buildProfilePathForPrimaryRef(PKG_NAME, "primary");
@@ -92,8 +90,12 @@ public class PrimaryDexOptimizerTest extends PrimaryDexOptimizerTestBase {
             | DexoptTrigger.PRIMARY_BOOT_IMAGE_BECOMES_USABLE
             | DexoptTrigger.COMPILER_FILTER_IS_SAME | DexoptTrigger.COMPILER_FILTER_IS_WORSE;
 
-    private final DexoptResult mDexoptResult =
-            createDexoptResult(false /* cancelled */, 200 /* wallTimeMs */, 200 /* cpuTimeMs */);
+    private final MergeProfileOptions mMergeProfileOptions = new MergeProfileOptions();
+
+    private final DexoptResult mDexoptResult = createDexoptResult(false /* cancelled */);
+
+    private OptimizeParams mOptimizeParams =
+            new OptimizeParams.Builder("install").setCompilerFilter("speed-profile").build();
 
     private PrimaryDexOptimizer mPrimaryDexOptimizer;
 
@@ -209,11 +211,13 @@ public class PrimaryDexOptimizerTest extends PrimaryDexOptimizerTestBase {
 
         verify(mArtd).getDexoptNeeded(
                 eq(mDexPath), eq("arm64"), any(), eq("speed-profile"), eq(mDefaultDexoptTrigger));
-        checkDexoptWithPrivateProfile(verify(mArtd), mDexPath, "arm64", mRefProfile);
+        checkDexoptWithProfile(verify(mArtd), mDexPath, "arm64", mRefProfile,
+                false /* isOtherReadable */, true /* generateAppImage */);
 
         verify(mArtd).getDexoptNeeded(
                 eq(mDexPath), eq("arm"), any(), eq("speed-profile"), eq(mDefaultDexoptTrigger));
-        checkDexoptWithPrivateProfile(verify(mArtd), mDexPath, "arm", mRefProfile);
+        checkDexoptWithProfile(verify(mArtd), mDexPath, "arm", mRefProfile,
+                false /* isOtherReadable */, true /* generateAppImage */);
 
         // There is no profile for split 0, so it should fall back to "verify".
         verify(mArtd).getDexoptNeeded(
@@ -241,8 +245,10 @@ public class PrimaryDexOptimizerTest extends PrimaryDexOptimizerTestBase {
 
         mPrimaryDexOptimizer.dexopt();
 
-        checkDexoptWithPublicProfile(verify(mArtd), mDexPath, "arm64", mRefProfile);
-        checkDexoptWithPublicProfile(verify(mArtd), mDexPath, "arm", mRefProfile);
+        checkDexoptWithProfile(verify(mArtd), mDexPath, "arm64", mRefProfile,
+                true /* isOtherReadable */, true /* generateAppImage */);
+        checkDexoptWithProfile(verify(mArtd), mDexPath, "arm", mRefProfile,
+                true /* isOtherReadable */, true /* generateAppImage */);
 
         verifyProfileNotUsed(mPrebuiltProfile);
         verifyProfileNotUsed(mDmProfile);
@@ -261,10 +267,12 @@ public class PrimaryDexOptimizerTest extends PrimaryDexOptimizerTestBase {
         inOrder.verify(mArtd).copyAndRewriteProfile(
                 deepEq(mPrebuiltProfile), deepEq(mPublicOutputProfile), eq(mDexPath));
 
-        checkDexoptWithPublicProfile(inOrder.verify(mArtd), mDexPath, "arm64",
-                ProfilePath.tmpProfilePath(mPublicOutputProfile.profilePath));
-        checkDexoptWithPublicProfile(inOrder.verify(mArtd), mDexPath, "arm",
-                ProfilePath.tmpProfilePath(mPublicOutputProfile.profilePath));
+        checkDexoptWithProfile(inOrder.verify(mArtd), mDexPath, "arm64",
+                ProfilePath.tmpProfilePath(mPublicOutputProfile.profilePath),
+                true /* isOtherReadable */, true /* generateAppImage */);
+        checkDexoptWithProfile(inOrder.verify(mArtd), mDexPath, "arm",
+                ProfilePath.tmpProfilePath(mPublicOutputProfile.profilePath),
+                true /* isOtherReadable */, true /* generateAppImage */);
 
         inOrder.verify(mArtd).commitTmpProfile(deepEq(mPublicOutputProfile.profilePath));
 
@@ -277,7 +285,7 @@ public class PrimaryDexOptimizerTest extends PrimaryDexOptimizerTestBase {
         when(mPkgState.getStateForUser(eq(UserHandle.of(0)))).thenReturn(mPkgUserStateInstalled);
         when(mPkgState.getStateForUser(eq(UserHandle.of(2)))).thenReturn(mPkgUserStateInstalled);
 
-        when(mArtd.mergeProfiles(any(), any(), any(), any())).thenReturn(true);
+        when(mArtd.mergeProfiles(any(), any(), any(), any(), any())).thenReturn(true);
 
         makeProfileUsable(mRefProfile);
         when(mArtd.getProfileVisibility(deepEq(mRefProfile)))
@@ -292,18 +300,21 @@ public class PrimaryDexOptimizerTest extends PrimaryDexOptimizerTestBase {
                                        0 /* userId */, PKG_NAME, "primary"),
                         AidlUtils.buildProfilePathForPrimaryCur(
                                 2 /* userId */, PKG_NAME, "primary"))),
-                deepEq(mRefProfile), deepEq(mPrivateOutputProfile), eq(mDexPath));
+                deepEq(mRefProfile), deepEq(mPrivateOutputProfile), deepEq(List.of(mDexPath)),
+                deepEq(mMergeProfileOptions));
 
         // It should use `mBetterOrSameDexoptTrigger` and the merged profile for both ISAs.
         inOrder.verify(mArtd).getDexoptNeeded(eq(mDexPath), eq("arm64"), any(), eq("speed-profile"),
                 eq(mBetterOrSameDexoptTrigger));
-        checkDexoptWithPrivateProfile(inOrder.verify(mArtd), mDexPath, "arm64",
-                ProfilePath.tmpProfilePath(mPrivateOutputProfile.profilePath));
+        checkDexoptWithProfile(inOrder.verify(mArtd), mDexPath, "arm64",
+                ProfilePath.tmpProfilePath(mPrivateOutputProfile.profilePath),
+                false /* isOtherReadable */, true /* generateAppImage */);
 
         inOrder.verify(mArtd).getDexoptNeeded(eq(mDexPath), eq("arm"), any(), eq("speed-profile"),
                 eq(mBetterOrSameDexoptTrigger));
-        checkDexoptWithPrivateProfile(inOrder.verify(mArtd), mDexPath, "arm",
-                ProfilePath.tmpProfilePath(mPrivateOutputProfile.profilePath));
+        checkDexoptWithProfile(inOrder.verify(mArtd), mDexPath, "arm",
+                ProfilePath.tmpProfilePath(mPrivateOutputProfile.profilePath),
+                false /* isOtherReadable */, true /* generateAppImage */);
 
         inOrder.verify(mArtd).commitTmpProfile(deepEq(mPrivateOutputProfile.profilePath));
 
@@ -318,7 +329,7 @@ public class PrimaryDexOptimizerTest extends PrimaryDexOptimizerTestBase {
         when(mPkgState.getStateForUser(eq(UserHandle.of(0)))).thenReturn(mPkgUserStateInstalled);
         when(mPkgState.getStateForUser(eq(UserHandle.of(2)))).thenReturn(mPkgUserStateInstalled);
 
-        when(mArtd.mergeProfiles(any(), any(), any(), any())).thenReturn(false);
+        when(mArtd.mergeProfiles(any(), any(), any(), any(), any())).thenReturn(false);
 
         makeProfileUsable(mRefProfile);
         when(mArtd.getProfileVisibility(deepEq(mRefProfile)))
@@ -329,11 +340,13 @@ public class PrimaryDexOptimizerTest extends PrimaryDexOptimizerTestBase {
         // It should still use "speed-profile", but with the existing reference profile only.
         verify(mArtd).getDexoptNeeded(
                 eq(mDexPath), eq("arm64"), any(), eq("speed-profile"), eq(mDefaultDexoptTrigger));
-        checkDexoptWithPublicProfile(verify(mArtd), mDexPath, "arm64", mRefProfile);
+        checkDexoptWithProfile(verify(mArtd), mDexPath, "arm64", mRefProfile,
+                true /* isOtherReadable */, true /* generateAppImage */);
 
         verify(mArtd).getDexoptNeeded(
                 eq(mDexPath), eq("arm"), any(), eq("speed-profile"), eq(mDefaultDexoptTrigger));
-        checkDexoptWithPublicProfile(verify(mArtd), mDexPath, "arm", mRefProfile);
+        checkDexoptWithProfile(verify(mArtd), mDexPath, "arm", mRefProfile,
+                true /* isOtherReadable */, true /* generateAppImage */);
 
         verify(mArtd, never()).deleteProfile(any());
         verify(mArtd, never()).commitTmpProfile(any());
@@ -350,10 +363,12 @@ public class PrimaryDexOptimizerTest extends PrimaryDexOptimizerTestBase {
         verify(mArtd).copyAndRewriteProfile(
                 deepEq(mDmProfile), deepEq(mPublicOutputProfile), eq(mDexPath));
 
-        checkDexoptWithPublicProfile(verify(mArtd), mDexPath, "arm64",
-                ProfilePath.tmpProfilePath(mPublicOutputProfile.profilePath));
-        checkDexoptWithPublicProfile(verify(mArtd), mDexPath, "arm",
-                ProfilePath.tmpProfilePath(mPublicOutputProfile.profilePath));
+        checkDexoptWithProfile(verify(mArtd), mDexPath, "arm64",
+                ProfilePath.tmpProfilePath(mPublicOutputProfile.profilePath),
+                true /* isOtherReadable */, true /* generateAppImage */);
+        checkDexoptWithProfile(verify(mArtd), mDexPath, "arm",
+                ProfilePath.tmpProfilePath(mPublicOutputProfile.profilePath),
+                true /* isOtherReadable */, true /* generateAppImage */);
 
         verifyProfileNotUsed(mRefProfile);
         verifyProfileNotUsed(mPrebuiltProfile);
@@ -402,13 +417,15 @@ public class PrimaryDexOptimizerTest extends PrimaryDexOptimizerTestBase {
         // It should re-compile anyway.
         verify(mArtd).getDexoptNeeded(
                 eq(mDexPath), eq("arm64"), any(), eq("speed-profile"), eq(mForceDexoptTrigger));
-        checkDexoptWithPublicProfile(verify(mArtd), mDexPath, "arm64",
-                ProfilePath.tmpProfilePath(mPublicOutputProfile.profilePath));
+        checkDexoptWithProfile(verify(mArtd), mDexPath, "arm64",
+                ProfilePath.tmpProfilePath(mPublicOutputProfile.profilePath),
+                true /* isOtherReadable */, true /* generateAppImage */);
 
         verify(mArtd).getDexoptNeeded(
                 eq(mDexPath), eq("arm"), any(), eq("speed-profile"), eq(mForceDexoptTrigger));
-        checkDexoptWithPublicProfile(verify(mArtd), mDexPath, "arm",
-                ProfilePath.tmpProfilePath(mPublicOutputProfile.profilePath));
+        checkDexoptWithProfile(verify(mArtd), mDexPath, "arm",
+                ProfilePath.tmpProfilePath(mPublicOutputProfile.profilePath),
+                true /* isOtherReadable */, true /* generateAppImage */);
 
         checkDexoptWithNoProfile(verify(mArtd), mSplit0DexPath, "arm64", "speed");
         checkDexoptWithNoProfile(verify(mArtd), mSplit0DexPath, "arm", "speed");
@@ -451,11 +468,13 @@ public class PrimaryDexOptimizerTest extends PrimaryDexOptimizerTestBase {
 
         verify(mArtd).getDexoptNeeded(eq(mSplit0DexPath), eq("arm64"), any(), eq("speed-profile"),
                 eq(mDefaultDexoptTrigger));
-        checkDexoptWithPrivateProfile(verify(mArtd), mSplit0DexPath, "arm64", mSplit0RefProfile);
+        checkDexoptWithProfile(verify(mArtd), mSplit0DexPath, "arm64", mSplit0RefProfile,
+                false /* isOtherReadable */, false /* generateAppImage */);
 
         verify(mArtd).getDexoptNeeded(eq(mSplit0DexPath), eq("arm"), any(), eq("speed-profile"),
                 eq(mDefaultDexoptTrigger));
-        checkDexoptWithPrivateProfile(verify(mArtd), mSplit0DexPath, "arm", mSplit0RefProfile);
+        checkDexoptWithProfile(verify(mArtd), mSplit0DexPath, "arm", mSplit0RefProfile,
+                false /* isOtherReadable */, false /* generateAppImage */);
     }
 
     @Test
@@ -467,8 +486,7 @@ public class PrimaryDexOptimizerTest extends PrimaryDexOptimizerTestBase {
 
         doAnswer(invocation -> {
             verify(artdCancellationSignal).cancel();
-            return createDexoptResult(
-                    true /* cancelled */, 200 /* wallTimeMs */, 200 /* cpuTimeMs */);
+            return createDexoptResult(true /* cancelled */);
         })
                 .when(mArtd)
                 .dexopt(any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), any(),
@@ -501,8 +519,7 @@ public class PrimaryDexOptimizerTest extends PrimaryDexOptimizerTestBase {
         doAnswer(invocation -> {
             dexoptStarted.release();
             assertThat(dexoptCancelled.tryAcquire(TIMEOUT_SEC, TimeUnit.SECONDS)).isTrue();
-            return createDexoptResult(
-                    true /* cancelled */, 200 /* wallTimeMs */, 200 /* cpuTimeMs */);
+            return createDexoptResult(true /* cancelled */);
         })
                 .when(mArtd)
                 .dexopt(any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), any(),
@@ -535,22 +552,57 @@ public class PrimaryDexOptimizerTest extends PrimaryDexOptimizerTestBase {
                         any());
     }
 
-    private void checkDexoptWithPublicProfile(
-            IArtd artd, String dexPath, String isa, ProfilePath profile) throws Exception {
-        artd.dexopt(
-                argThat(artifacts
-                        -> artifacts.permissionSettings.fileFsPermission.isOtherReadable == true),
-                eq(dexPath), eq(isa), any(), eq("speed-profile"), deepEq(profile), any(), any(),
-                anyInt(), argThat(dexoptOptions -> dexoptOptions.generateAppImage == true), any());
+    @Test
+    public void testDexoptBaseApk() throws Exception {
+        mOptimizeParams =
+                new OptimizeParams.Builder("install")
+                        .setCompilerFilter("speed-profile")
+                        .setFlags(ArtFlags.FLAG_FOR_PRIMARY_DEX | ArtFlags.FLAG_FOR_SINGLE_SPLIT)
+                        .setSplitName(null)
+                        .build();
+        mPrimaryDexOptimizer = new PrimaryDexOptimizer(
+                mInjector, mPkgState, mPkg, mOptimizeParams, mCancellationSignal);
+
+        mPrimaryDexOptimizer.dexopt();
+
+        verify(mArtd, times(2))
+                .dexopt(any(), eq(mDexPath), any(), any(), any(), any(), any(), any(), anyInt(),
+                        any(), any());
+        verify(mArtd, never())
+                .dexopt(any(), eq(mSplit0DexPath), any(), any(), any(), any(), any(), any(),
+                        anyInt(), any(), any());
     }
 
-    private void checkDexoptWithPrivateProfile(
-            IArtd artd, String dexPath, String isa, ProfilePath profile) throws Exception {
-        artd.dexopt(
-                argThat(artifacts
-                        -> artifacts.permissionSettings.fileFsPermission.isOtherReadable == false),
+    @Test
+    public void testDexoptSplitApk() throws Exception {
+        mOptimizeParams =
+                new OptimizeParams.Builder("install")
+                        .setCompilerFilter("speed-profile")
+                        .setFlags(ArtFlags.FLAG_FOR_PRIMARY_DEX | ArtFlags.FLAG_FOR_SINGLE_SPLIT)
+                        .setSplitName("split_0")
+                        .build();
+        mPrimaryDexOptimizer = new PrimaryDexOptimizer(
+                mInjector, mPkgState, mPkg, mOptimizeParams, mCancellationSignal);
+
+        mPrimaryDexOptimizer.dexopt();
+
+        verify(mArtd, never())
+                .dexopt(any(), eq(mDexPath), any(), any(), any(), any(), any(), any(), anyInt(),
+                        any(), any());
+        verify(mArtd, times(2))
+                .dexopt(any(), eq(mSplit0DexPath), any(), any(), any(), any(), any(), any(),
+                        anyInt(), any(), any());
+    }
+
+    private void checkDexoptWithProfile(IArtd artd, String dexPath, String isa, ProfilePath profile,
+            boolean isOtherReadable, boolean generateAppImage) throws Exception {
+        artd.dexopt(argThat(artifacts
+                            -> artifacts.permissionSettings.fileFsPermission.isOtherReadable
+                                    == isOtherReadable),
                 eq(dexPath), eq(isa), any(), eq("speed-profile"), deepEq(profile), any(), any(),
-                anyInt(), argThat(dexoptOptions -> dexoptOptions.generateAppImage == true), any());
+                anyInt(),
+                argThat(dexoptOptions -> dexoptOptions.generateAppImage == generateAppImage),
+                any());
     }
 
     private void checkDexoptWithNoProfile(

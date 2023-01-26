@@ -61,7 +61,7 @@
 #include "thread-inl.h"
 #include "transaction.h"
 #include "unstarted_runtime_list.h"
-#include "well_known_classes.h"
+#include "well_known_classes-inl.h"
 
 namespace art {
 namespace interpreter {
@@ -658,8 +658,7 @@ void UnstartedRuntime::UnstartedClassLoaderGetResourceAsStream(
     StackHandleScope<1> hs(self);
     Handle<mirror::Class> this_classloader_class(hs.NewHandle(this_obj->GetClass()));
 
-    if (self->DecodeJObject(WellKnownClasses::java_lang_BootClassLoader) !=
-            this_classloader_class.Get()) {
+    if (WellKnownClasses::java_lang_BootClassLoader != this_classloader_class.Get()) {
       AbortTransactionOrFail(self,
                              "Unsupported classloader type %s for getResourceAsStream",
                              mirror::Class::PrettyClass(this_classloader_class.Get()).c_str());
@@ -1112,18 +1111,14 @@ void UnstartedRuntime::UnstartedThreadCurrentThread(
     // thread as unstarted to the ThreadGroup. A faked-up main thread peer is good enough for
     // these purposes.
     Runtime::Current()->InitThreadGroups(self);
-    jobject main_peer =
-        self->CreateCompileTimePeer(self->GetJniEnv(),
-                                    "main",
-                                    false,
-                                    Runtime::Current()->GetMainThreadGroup());
+    ObjPtr<mirror::Object> main_peer = self->CreateCompileTimePeer(
+        "main", /*as_daemon=*/ false, Runtime::Current()->GetMainThreadGroup());
     if (main_peer == nullptr) {
       AbortTransactionOrFail(self, "Failed allocating peer");
       return;
     }
 
-    result->SetL(self->DecodeJObject(main_peer));
-    self->GetJniEnv()->DeleteLocalRef(main_peer);
+    result->SetL(main_peer);
   } else {
     AbortTransactionOrFail(self,
                            "Thread.currentThread() does not support %s",

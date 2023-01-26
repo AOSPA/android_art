@@ -33,12 +33,12 @@ import android.text.TextUtils;
 import android.util.Log;
 
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.server.art.model.ArtFlags;
 import com.android.server.art.model.OptimizeParams;
 import com.android.server.art.model.OptimizeResult;
 import com.android.server.pm.PackageManagerLocal;
 import com.android.server.pm.pkg.AndroidPackage;
 import com.android.server.pm.pkg.PackageState;
-import com.android.server.pm.pkg.PackageUserState;
 
 import dalvik.system.DexFile;
 
@@ -46,6 +46,7 @@ import com.google.auto.value.AutoValue;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /** @hide */
 public class PrimaryDexOptimizer extends DexOptimizer<DetailedPrimaryDexInfo> {
@@ -86,8 +87,13 @@ public class PrimaryDexOptimizer extends DexOptimizer<DetailedPrimaryDexInfo> {
 
     @Override
     protected boolean isOptimizable(@NonNull DetailedPrimaryDexInfo dexInfo) {
-        // TODO(jiakaiz): Support optimizing a single split.
-        return dexInfo.hasCode();
+        if (!dexInfo.hasCode()) {
+            return false;
+        }
+        if ((mParams.getFlags() & ArtFlags.FLAG_FOR_SINGLE_SPLIT) != 0) {
+            return Objects.equals(mParams.getSplitName(), dexInfo.splitName());
+        }
+        return true;
     }
 
     @Override
@@ -151,10 +157,11 @@ public class PrimaryDexOptimizer extends DexOptimizer<DetailedPrimaryDexInfo> {
         // them (e.g., move them around).
         // We don't need the "read" bit for "others" on the directories because others only need to
         // access the files in the directories, but they don't need to "ls" the directories.
-        FsPermission dirFsPermission = AidlUtils.buildFsPermission(Process.SYSTEM_UID,
-                Process.SYSTEM_UID, false /* isOtherReadable */, true /* isOtherExecutable */);
-        FsPermission fileFsPermission =
-                AidlUtils.buildFsPermission(Process.SYSTEM_UID, mSharedGid, canBePublic);
+        FsPermission dirFsPermission = AidlUtils.buildFsPermission(Process.SYSTEM_UID /* uid */,
+                Process.SYSTEM_UID /* gid */, false /* isOtherReadable */,
+                true /* isOtherExecutable */);
+        FsPermission fileFsPermission = AidlUtils.buildFsPermission(
+                Process.SYSTEM_UID /* uid */, mSharedGid /* gid */, canBePublic);
         // For primary dex, we can use the default SELinux context.
         SeContext seContext = null;
         return AidlUtils.buildPermissionSettings(dirFsPermission, fileFsPermission, seContext);
@@ -169,41 +176,31 @@ public class PrimaryDexOptimizer extends DexOptimizer<DetailedPrimaryDexInfo> {
     @Override
     @NonNull
     protected ProfilePath buildRefProfilePath(@NonNull DetailedPrimaryDexInfo dexInfo) {
-        String profileName = getProfileName(dexInfo.splitName());
-        return AidlUtils.buildProfilePathForPrimaryRef(mPkgState.getPackageName(), profileName);
+        return PrimaryDexUtils.buildRefProfilePath(mPkgState, dexInfo);
     }
 
     @Override
-    protected boolean isAppImageAllowed() {
-        // Disable app images if the app requests for the splits to be loaded in isolation because
-        // app images are unsupported for multiple class loaders (b/72696798).
+    protected boolean isAppImageAllowed(@NonNull DetailedPrimaryDexInfo dexInfo) {
+        // Only allow app image for the base APK because having multiple app images is not
+        // supported.
+        // Additionally, disable app images if the app requests for the splits to be loaded in
+        // isolation because app images are unsupported for multiple class loaders (b/72696798).
         // TODO(jiakaiz): Investigate whether this is still the best choice today.
-        return !PrimaryDexUtils.isIsolatedSplitLoading(mPkg);
+        return dexInfo.splitName() == null && !PrimaryDexUtils.isIsolatedSplitLoading(mPkg);
     }
 
     @Override
     @NonNull
     protected OutputProfile buildOutputProfile(
             @NonNull DetailedPrimaryDexInfo dexInfo, boolean isPublic) {
-        String profileName = getProfileName(dexInfo.splitName());
-        return AidlUtils.buildOutputProfileForPrimary(
-                mPkgState.getPackageName(), profileName, Process.SYSTEM_UID, mSharedGid, isPublic);
+        return PrimaryDexUtils.buildOutputProfile(
+                mPkgState, dexInfo, Process.SYSTEM_UID, mSharedGid, isPublic);
     }
 
     @Override
     @NonNull
     protected List<ProfilePath> getCurProfiles(@NonNull DetailedPrimaryDexInfo dexInfo) {
-        List<ProfilePath> profiles = new ArrayList<>();
-        for (UserHandle handle :
-                mInjector.getUserManager().getUserHandles(true /* excludeDying */)) {
-            int userId = handle.getIdentifier();
-            PackageUserState userState = mPkgState.getStateForUser(handle);
-            if (userState.isInstalled()) {
-                profiles.add(AidlUtils.buildProfilePathForPrimaryCur(
-                        userId, mPkgState.getPackageName(), getProfileName(dexInfo.splitName())));
-            }
-        }
-        return profiles;
+        return PrimaryDexUtils.getCurProfiles(mInjector.getUserManager(), mPkgState, dexInfo);
     }
 
     @Override
@@ -217,10 +214,5 @@ public class PrimaryDexOptimizer extends DexOptimizer<DetailedPrimaryDexInfo> {
         return !TextUtils.isEmpty(mPkg.getSdkLibraryName())
                 || !TextUtils.isEmpty(mPkg.getStaticSharedLibraryName())
                 || !mPkg.getLibraryNames().isEmpty();
-    }
-
-    @NonNull
-    private String getProfileName(@Nullable String splitName) {
-        return splitName == null ? "primary" : splitName + ".split";
     }
 }

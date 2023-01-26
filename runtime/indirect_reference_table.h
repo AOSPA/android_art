@@ -37,6 +37,7 @@
 
 namespace art {
 
+class IsMarkedVisitor;
 class RootInfo;
 
 namespace mirror {
@@ -74,8 +75,6 @@ class Object;
 // If there's more than one segment, we don't guarantee that the table will fill completely before
 // we fail due to lack of space. We do ensure that the current segment will pack tightly, which
 // should satisfy JNI requirements (e.g. EnsureLocalCapacity).
-//
-// Only SynchronizedGet is synchronized.
 
 // Indirect reference definition.  This must be interchangeable with JNI's jobject, and it's
 // convenient to let null be null, so we use void*.
@@ -90,16 +89,17 @@ using IndirectRef = void*;
 
 // Indirect reference kind, used as the two low bits of IndirectRef.
 //
-// For convenience these match up with enum jobjectRefType from jni.h.
+// For convenience these match up with enum jobjectRefType from jni.h, except that
+// we use value 0 for JNI transitions instead of marking invalid reference type.
 enum IndirectRefKind {
-  kJniTransitionOrInvalid = 0,  // <<JNI transition frame reference or invalid reference>>
-  kLocal                  = 1,  // <<local reference>>
-  kGlobal                 = 2,  // <<global reference>>
-  kWeakGlobal             = 3,  // <<weak global reference>>
-  kLastKind               = kWeakGlobal
+  kJniTransition = 0,  // <<JNI transition frame reference>>
+  kLocal         = 1,  // <<local reference>>
+  kGlobal        = 2,  // <<global reference>>
+  kWeakGlobal    = 3,  // <<weak global reference>>
+  kLastKind      = kWeakGlobal
 };
 std::ostream& operator<<(std::ostream& os, IndirectRefKind rhs);
-const char* GetIndirectRefKindString(const IndirectRefKind& kind);
+const char* GetIndirectRefKindString(IndirectRefKind kind);
 
 // Table definition.
 //
@@ -181,42 +181,6 @@ class IrtEntry {
 static_assert(sizeof(IrtEntry) == 2 * sizeof(uint32_t), "Unexpected sizeof(IrtEntry)");
 static_assert(IsPowerOfTwo(sizeof(IrtEntry)), "Unexpected sizeof(IrtEntry)");
 
-class IrtIterator {
- public:
-  IrtIterator(IrtEntry* table, size_t i, size_t capacity) REQUIRES_SHARED(Locks::mutator_lock_)
-      : table_(table), i_(i), capacity_(capacity) {
-    // capacity_ is used in some target; has warning with unused attribute.
-    UNUSED(capacity_);
-  }
-
-  IrtIterator& operator++() REQUIRES_SHARED(Locks::mutator_lock_) {
-    ++i_;
-    return *this;
-  }
-
-  GcRoot<mirror::Object>* operator*() REQUIRES_SHARED(Locks::mutator_lock_) {
-    // This does not have a read barrier as this is used to visit roots.
-    return table_[i_].GetReference();
-  }
-
-  bool equals(const IrtIterator& rhs) const {
-    return (i_ == rhs.i_ && table_ == rhs.table_);
-  }
-
- private:
-  IrtEntry* const table_;
-  size_t i_;
-  const size_t capacity_;
-};
-
-bool inline operator==(const IrtIterator& lhs, const IrtIterator& rhs) {
-  return lhs.equals(rhs);
-}
-
-bool inline operator!=(const IrtIterator& lhs, const IrtIterator& rhs) {
-  return !lhs.equals(rhs);
-}
-
 // We initially allocate local reference tables with a very small number of entries, packing
 // multiple tables into a single page. If we need to expand one, we allocate them in units of
 // pages.
@@ -257,17 +221,14 @@ class IndirectReferenceTable {
     kYes
   };
 
-  // WARNING: Construction of the IndirectReferenceTable may fail.
-  // error_msg must not be null. If error_msg is set by the constructor, then
-  // construction has failed and the IndirectReferenceTable will be in an
-  // invalid state. Use IsValid to check whether the object is in an invalid
-  // state.
+  // Constructs an uninitialized indirect reference table. Use `Initialize()` to initialize it.
+  IndirectReferenceTable(IndirectRefKind kind, ResizableCapacity resizable);
+
+  // Initialize the indirect reference table.
+  //
   // Max_count is the minimum initial capacity (resizable), or minimum total capacity
   // (not resizable). A value of 1 indicates an implementation-convenient small size.
-  IndirectReferenceTable(size_t max_count,
-                         IndirectRefKind kind,
-                         ResizableCapacity resizable,
-                         std::string* error_msg);
+  bool Initialize(size_t max_count, std::string* error_msg);
 
   ~IndirectReferenceTable();
 
@@ -293,13 +254,6 @@ class IndirectReferenceTable {
   template<ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   ObjPtr<mirror::Object> Get(IndirectRef iref) const REQUIRES_SHARED(Locks::mutator_lock_)
       ALWAYS_INLINE;
-
-  // Synchronized get which reads a reference, acquiring a lock if necessary.
-  template<ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
-  ObjPtr<mirror::Object> SynchronizedGet(IndirectRef iref) const
-      REQUIRES_SHARED(Locks::mutator_lock_) {
-    return Get<kReadBarrierOption>(iref);
-  }
 
   // Updates an existing indirect reference to point to a new object.
   void Update(IndirectRef iref, ObjPtr<mirror::Object> obj) REQUIRES_SHARED(Locks::mutator_lock_);
@@ -343,15 +297,6 @@ class IndirectReferenceTable {
   // without recovering holes. Thus this is a conservative estimate.
   size_t FreeCapacity() const;
 
-  // Note IrtIterator does not have a read barrier as it's used to visit roots.
-  IrtIterator begin() {
-    return IrtIterator(table_, 0, Capacity());
-  }
-
-  IrtIterator end() {
-    return IrtIterator(table_, Capacity(), Capacity());
-  }
-
   void VisitRoots(RootVisitor* visitor, const RootInfo& root_info)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -379,6 +324,10 @@ class IndirectReferenceTable {
   /* Reference validation for CheckJNI. */
   bool IsValidReference(IndirectRef, /*out*/std::string* error_msg) const
       REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void SweepJniWeakGlobals(IsMarkedVisitor* visitor)
+      REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(!Locks::jni_weak_globals_lock_);
 
  private:
   static constexpr uint32_t kShiftedSerialMask = (1u << kIRTSerialBits) - 1;
@@ -447,10 +396,10 @@ class IndirectReferenceTable {
   // Mem map where we store the indirect refs. If it's invalid, and table_ is non-null, then
   // table_ is valid, but was allocated via allocSmallIRT();
   MemMap table_mem_map_;
-  // bottom of the stack. Do not directly access the object references
+  // Bottom of the stack. Do not directly access the object references
   // in this as they are roots. Use Get() that has a read barrier.
   IrtEntry* table_;
-  // bit mask, ORed into all irefs.
+  // Bit mask, ORed into all irefs.
   const IndirectRefKind kind_;
 
   // max #of entries allowed (modulo resizing).

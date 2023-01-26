@@ -22,7 +22,7 @@
 #include <utility>
 
 #include "art_field-inl.h"
-#include "art_method-inl.h"
+#include "art_method-alloc-inl.h"
 #include "base/allocator.h"
 #include "base/atomic.h"
 #include "base/casts.h"
@@ -64,7 +64,7 @@
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread.h"
-#include "well_known_classes.h"
+#include "well_known_classes-inl.h"
 
 namespace art {
 
@@ -2777,17 +2777,9 @@ class JNI {
     jint capacity_arg = static_cast<jint>(capacity);
 
     ScopedObjectAccess soa(env);
-    DCHECK(WellKnownClasses::java_nio_DirectByteBuffer_init->GetDeclaringClass()->IsInitialized());
-    Thread* self = soa.Self();
-    StackHandleScope<1u> hs(self);
-    Handle<mirror::Object> result = hs.NewHandle(
-        WellKnownClasses::java_nio_DirectByteBuffer_init->GetDeclaringClass()->AllocObject(self));
-    DCHECK_EQ(result == nullptr, self->IsExceptionPending());
-    if (result != nullptr) {
-      WellKnownClasses::java_nio_DirectByteBuffer_init->InvokeInstance<'V', 'J', 'I'>(
-          self, result.Get(), address_arg, capacity_arg);
-    }
-    return self->IsExceptionPending() ? nullptr : soa.AddLocalReference<jobject>(result.Get());
+    return soa.AddLocalReference<jobject>(
+        WellKnownClasses::java_nio_DirectByteBuffer_init->NewObject<'J', 'I'>(
+            soa.Self(), address_arg, capacity_arg));
   }
 
   static void* GetDirectBufferAddress(JNIEnv* env, jobject java_buffer) {
@@ -2800,7 +2792,7 @@ class JNI {
     ObjPtr<mirror::Object> buffer = soa.Decode<mirror::Object>(java_buffer);
 
     // Return null if |java_buffer| is not a java.nio.Buffer instance.
-    if (!buffer->InstanceOf(WellKnownClasses::java_nio_Buffer_address->GetDeclaringClass())) {
+    if (!buffer->InstanceOf(WellKnownClasses::java_nio_Buffer.Get())) {
       return nullptr;
     }
 
@@ -2816,7 +2808,7 @@ class JNI {
     ScopedObjectAccess soa(env);
     StackHandleScope<1u> hs(soa.Self());
     Handle<mirror::Object> buffer = hs.NewHandle(soa.Decode<mirror::Object>(java_buffer));
-    if (!buffer->InstanceOf(WellKnownClasses::java_nio_Buffer_capacity->GetDeclaringClass())) {
+    if (!buffer->InstanceOf(WellKnownClasses::java_nio_Buffer.Get())) {
       return -1;
     }
 
@@ -2825,12 +2817,14 @@ class JNI {
     // We therefore call Buffer.isDirect(). One path that creates such a buffer is
     // FileChannel.map() if the file size is zero.
     //
-    // NB GetDirectBufferAddress() does not need to call Buffer.isDirect() since it is only
+    // NB GetDirectBufferAddress() does not need to call `Buffer.isDirect()` since it is only
     // able return a valid address if the Buffer address field is not-null.
-    ArtMethod* is_direct_method = buffer->GetClass()->FindVirtualMethodForVirtual(
-        WellKnownClasses::java_nio_Buffer_isDirect, kRuntimePointerSize);
-    uint8_t direct = is_direct_method->InvokeInstance<'Z'>(soa.Self(), buffer.Get());
-    if (direct == 0u) {
+    //
+    // Note: We can hit a `StackOverflowError` during the invocation but `Buffer.isDirect()`
+    // implementations should not otherwise throw any exceptions.
+    bool direct = WellKnownClasses::java_nio_Buffer_isDirect->InvokeVirtual<'Z'>(
+        soa.Self(), buffer.Get());
+    if (UNLIKELY(soa.Self()->IsExceptionPending()) || !direct) {
       return -1;
     }
 
@@ -2852,7 +2846,7 @@ class JNI {
       return JNIGlobalRefType;
     case kWeakGlobal:
       return JNIWeakGlobalRefType;
-    case kJniTransitionOrInvalid:
+    case kJniTransition:
       // Assume value is in a JNI transition frame.
       return JNILocalRefType;
     }

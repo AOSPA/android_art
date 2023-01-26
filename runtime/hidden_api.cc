@@ -392,7 +392,7 @@ void MemberSignature::LogAccessToEventLog(uint32_t sampled_value,
           package_str.Get(),
           signature_jstr.Get(),
           static_cast<jint>(access_method),
-          static_cast<uint8_t>(access_denied ? 1u : 0u));
+          access_denied);
   if (soa.Self()->IsExceptionPending()) {
     soa.Self()->ClearException();
     LOG(ERROR) << "Unable to report hidden api usage";
@@ -432,9 +432,7 @@ void MemberSignature::NotifyHiddenApiListener(AccessMethod access_method) {
       CHECK(signature_str != nullptr);
 
       // Call through to Consumer.accept(String memberSignature);
-      ArtMethod* accept_method = consumer_object->GetClass()->FindVirtualMethodForInterface(
-          WellKnownClasses::java_util_function_Consumer_accept, kRuntimePointerSize);
-      accept_method->InvokeInstance<'V', 'L'>(
+      WellKnownClasses::java_util_function_Consumer_accept->InvokeInterface<'V', 'L'>(
           soa.Self(), consumer_object.Get(), signature_str.Get());
     }
   }

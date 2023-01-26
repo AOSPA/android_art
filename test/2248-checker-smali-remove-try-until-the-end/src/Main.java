@@ -14,17 +14,6 @@
  * limitations under the License.
  */
 
-package com.android.server.art.wrapper;
-
-/** @hide */
-public class Process {
-    public static boolean isIsolated(int uid) {
-        try {
-            return (boolean) Class.forName("android.os.Process")
-                    .getMethod("isIsolated", int.class)
-                    .invoke(null, uid);
-        } catch (ReflectiveOperationException e) {
-            throw new RuntimeException(e);
-        }
-    }
+public class Main {
+    public static void main(String[] args) {}
 }

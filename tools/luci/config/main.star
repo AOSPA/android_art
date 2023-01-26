@@ -154,7 +154,12 @@ luci.gitiles_poller(
     refs = ["refs/heads/master-art"],
 )
 
-def ci_builder(name, category, short_name):
+def ci_builder(name, category, short_name, dimensions=None):
+    dimensions = dimensions or {}  # Initialize if it is None.
+    if category.startswith("host"):
+      dimensions["os"] = ["Linux"]
+    else:
+      dimensions["builder"] = name
     luci.builder(
         name = name,
         bucket = "ci",
@@ -163,11 +168,8 @@ def ci_builder(name, category, short_name):
             cipd_version = "refs/heads/main",
             name = "art",
         ),
-        dimensions = {
+        dimensions = dimensions | {
             "pool": "luci.art.ci",
-
-            # Some builders require specific hardware, so we make the assignment in bots.cfg
-            "builder": name,
         },
         service_account = "art-ci-builder@chops-service-accounts.iam.gserviceaccount.com",
 
@@ -202,11 +204,14 @@ def ci_builder(name, category, short_name):
         short_name = short_name,
     )
 
+# userfault-GC configurations must be run on Pixel 6.
+userfault_gc_target_dims = {"device_type": "oriole"}
+
 ci_builder("angler-armv7-debug", "angler|armv7", "dbg")
-ci_builder("angler-armv7-non-gen-cc", "angler|armv7", "ngen")
+ci_builder("angler-armv7-non-gen-cc", "angler|armv7", "ngen", userfault_gc_target_dims)
 ci_builder("angler-armv7-ndebug", "angler|armv7", "ndbg")
 ci_builder("angler-armv8-debug", "angler|armv8", "dbg")
-ci_builder("angler-armv8-non-gen-cc", "angler|armv8", "ngen")
+ci_builder("angler-armv8-non-gen-cc", "angler|armv8", "ngen", userfault_gc_target_dims)
 ci_builder("angler-armv8-ndebug", "angler|armv8", "ndbg")
 ci_builder("bullhead-armv7-gcstress-ndebug", "bullhead|armv7|gcstress", "dbg")
 ci_builder("bullhead-armv8-gcstress-debug", "bullhead|armv8|gcstress", "dbg")

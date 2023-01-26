@@ -30,8 +30,14 @@ import com.android.tradefed.testtype.IAbi;
 import com.android.tradefed.testtype.junit4.AfterClassWithInfo;
 import com.android.tradefed.testtype.junit4.BaseHostJUnit4Test;
 import com.android.tradefed.testtype.junit4.BeforeClassWithInfo;
+import com.android.tradefed.testtype.junit4.DeviceTestRunOptions;
 import com.android.tradefed.util.CommandResult;
+
 import com.google.common.io.ByteStreams;
+
+import org.junit.Test;
+import org.junit.runner.RunWith;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
@@ -39,10 +45,9 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
-import org.junit.Test;
-import org.junit.runner.RunWith;
 
 /**
  * Test libnativeloader behavior for apps and libs in various partitions by overlaying them over
@@ -119,33 +124,41 @@ public class LibnativeloaderTest extends BaseHostJUnit4Test {
     public void testSystemPrivApp() throws Exception {
         // There's currently no difference in the tests between /system/priv-app and /system/app, so
         // let's reuse the same one.
-        runDeviceTests("android.test.app.system_priv", "android.test.app.SystemAppTest");
+        runTests("android.test.app.system_priv", "android.test.app.SystemAppTest");
     }
 
     @Test
     public void testSystemApp() throws Exception {
-        runDeviceTests("android.test.app.system", "android.test.app.SystemAppTest");
+        runTests("android.test.app.system", "android.test.app.SystemAppTest");
     }
 
     @Test
     public void testSystemExtApp() throws Exception {
         // /system_ext should behave the same as /system, so run the same test class there.
-        runDeviceTests("android.test.app.system_ext", "android.test.app.SystemAppTest");
+        runTests("android.test.app.system_ext", "android.test.app.SystemAppTest");
     }
 
     @Test
     public void testProductApp() throws Exception {
-        runDeviceTests("android.test.app.product", "android.test.app.ProductAppTest");
+        runTests("android.test.app.product", "android.test.app.ProductAppTest");
     }
 
     @Test
     public void testVendorApp() throws Exception {
-        runDeviceTests("android.test.app.vendor", "android.test.app.VendorAppTest");
+        runTests("android.test.app.vendor", "android.test.app.VendorAppTest");
     }
 
     @Test
     public void testDataApp() throws Exception {
-        runDeviceTests("android.test.app.data", "android.test.app.DataAppTest");
+        runTests("android.test.app.data", "android.test.app.DataAppTest");
+    }
+
+    private void runTests(String pkgName, String testClassName) throws Exception {
+        DeviceContext ctx = new DeviceContext(getTestInformation());
+        var options = new DeviceTestRunOptions(pkgName)
+                              .setTestClassName(testClassName)
+                              .addInstrumentationArg("libDirName", ctx.libDirName());
+        runDeviceTests(options);
     }
 
     // Utility class that keeps track of a set of paths the need to be deleted after testing.
@@ -209,32 +222,59 @@ public class LibnativeloaderTest extends BaseHostJUnit4Test {
 
         public void close() throws DeviceNotAvailableException { mCleanup.cleanup(); }
 
-        void pushExtendedPublicSystemOemLibs(ZipFile libApk) throws Exception {
-            pushNativeTestLib(libApk, "/system/${LIB}/libfoo.oem1.so");
-            pushNativeTestLib(libApk, "/system/${LIB}/libbar.oem1.so");
-            pushString("libfoo.oem1.so\n"
-                            + "libbar.oem1.so\n",
-                    "/system/etc/public.libraries-oem1.txt");
+        // Helper class to both push a library to device and record it in a public.libraries-xxx.txt
+        // file.
+        class PublicLibs {
+            private ZipFile mLibApk;
+            private List<String> mPublicLibs = new ArrayList<String>();
 
-            pushNativeTestLib(libApk, "/system/${LIB}/libfoo.oem2.so");
-            pushNativeTestLib(libApk, "/system/${LIB}/libbar.oem2.so");
-            pushString("libfoo.oem2.so\n"
-                            + "libbar.oem2.so\n",
-                    "/system/etc/public.libraries-oem2.txt");
+            PublicLibs(ZipFile libApk) {
+                mLibApk = libApk;
+            }
+
+            void addLib(String dir, String name) throws Exception {
+                pushNativeTestLib(mLibApk, dir + "/" + name);
+                mPublicLibs.add(name);
+            }
+
+            void pushPublicLibrariesFile(String path) throws DeviceNotAvailableException {
+                pushString(mPublicLibs.stream().collect(Collectors.joining("\n")) + "\n", path);
+            }
+        }
+
+        void pushExtendedPublicSystemOemLibs(ZipFile libApk) throws Exception {
+            var oem1Libs = new PublicLibs(libApk);
+            // Push libextpub<n>.oem1.so for each test. Since we cannot unload them, we need a fresh
+            // never-before-loaded library in each loadLibrary call.
+            for (int i = 1; i <= 2; ++i) {
+                oem1Libs.addLib("/system/${LIB}", "libsystem_extpub" + i + ".oem1.so");
+            }
+            oem1Libs.addLib("/system/${LIB}", "libsystem_extpub.oem1.so");
+            oem1Libs.pushPublicLibrariesFile("/system/etc/public.libraries-oem1.txt");
+
+            var oem2Libs = new PublicLibs(libApk);
+            oem2Libs.addLib("/system/${LIB}", "libsystem_extpub.oem2.so");
+            // libextpub_nouses.oem2.so is a library that the test apps don't have
+            // <uses-native-library> dependencies for.
+            oem2Libs.addLib("/system/${LIB}", "libsystem_extpub_nouses.oem2.so");
+            oem2Libs.pushPublicLibrariesFile("/system/etc/public.libraries-oem2.txt");
         }
 
         void pushExtendedPublicProductLibs(ZipFile libApk) throws Exception {
-            pushNativeTestLib(libApk, "/product/${LIB}/libfoo.product1.so");
-            pushNativeTestLib(libApk, "/product/${LIB}/libbar.product1.so");
-            pushString("libfoo.product1.so\n"
-                            + "libbar.product1.so\n",
-                    "/product/etc/public.libraries-product1.txt");
+            var product1Libs = new PublicLibs(libApk);
+            // Push libfoo<n>.product1.so for each test. Since we cannot unload them, we need a
+            // fresh never-before-loaded library in each loadLibrary call.
+            for (int i = 1; i <= 2; ++i) {
+                product1Libs.addLib("/product/${LIB}", "libproduct_extpub" + i + ".product1.so");
+            }
+            product1Libs.addLib("/product/${LIB}", "libproduct_extpub.product1.so");
+            product1Libs.pushPublicLibrariesFile("/product/etc/public.libraries-product1.txt");
         }
 
         void pushPrivateLibs(ZipFile libApk) throws Exception {
             // Push the libraries once for each test. Since we cannot unload them, we need a fresh
             // never-before-loaded library in each loadLibrary call.
-            for (int i = 1; i <= 5; ++i) {
+            for (int i = 1; i <= 6; ++i) {
                 pushNativeTestLib(libApk, "/system/${LIB}/libsystem_private" + i + ".so");
                 pushNativeTestLib(libApk, "/system_ext/${LIB}/libsystemext_private" + i + ".so");
                 pushNativeTestLib(libApk, "/product/${LIB}/libproduct_private" + i + ".so");
@@ -272,6 +312,10 @@ public class LibnativeloaderTest extends BaseHostJUnit4Test {
             return mTestArch;
         }
 
+        String libDirName() throws DeviceNotAvailableException {
+            return getTestArch().contains("64") ? "lib64" : "lib";
+        }
+
         // Pushes the given file contents to the device at the given destination path. destPath is
         // assumed to have no risk of overlapping with existing files, and is deleted in tearDown(),
         // along with any directory levels that had to be created.
@@ -305,8 +349,7 @@ public class LibnativeloaderTest extends BaseHostJUnit4Test {
                 libraryTempFile = writeStreamToTempFile("libnativeloader_testlib.so", inStream);
             }
 
-            String libDir = getTestArch().contains("64") ? "lib64" : "lib";
-            destPath = destPath.replace("${LIB}", libDir);
+            destPath = destPath.replace("${LIB}", libDirName());
 
             mCleanup.addPath(destPath);
             assertThat(mDevice.pushFile(libraryTempFile, destPath)).isTrue();

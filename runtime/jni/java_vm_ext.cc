@@ -44,7 +44,6 @@
 #include "nativehelper/scoped_local_ref.h"
 #include "nativehelper/scoped_utf_chars.h"
 #include "nativeloader/native_loader.h"
-#include "object_callbacks.h"
 #include "parsed_options.h"
 #include "runtime-inl.h"
 #include "runtime_options.h"
@@ -53,7 +52,7 @@
 #include "thread-inl.h"
 #include "thread_list.h"
 #include "ti/agent.h"
-#include "well_known_classes.h"
+#include "well_known_classes-inl.h"
 
 namespace art {
 
@@ -306,6 +305,7 @@ class Libraries {
       *detail += "No implementation found for ";
       *detail += m->PrettyMethod();
       *detail += " (tried " + jni_short_name + " and " + jni_long_name + ")";
+      *detail += " - is the library loaded, e.g. System.loadLibrary?";
     }
     return nullptr;
   }
@@ -495,9 +495,7 @@ const JNIInvokeInterface gJniInvokeInterface = {
   JII::AttachCurrentThreadAsDaemon
 };
 
-JavaVMExt::JavaVMExt(Runtime* runtime,
-                     const RuntimeArgumentMap& runtime_options,
-                     std::string* error_msg)
+JavaVMExt::JavaVMExt(Runtime* runtime, const RuntimeArgumentMap& runtime_options)
     : runtime_(runtime),
       check_jni_abort_hook_(nullptr),
       check_jni_abort_hook_data_(nullptr),
@@ -506,13 +504,10 @@ JavaVMExt::JavaVMExt(Runtime* runtime,
       tracing_enabled_(runtime_options.Exists(RuntimeArgumentMap::JniTrace)
                        || VLOG_IS_ON(third_party_jni)),
       trace_(runtime_options.GetOrDefault(RuntimeArgumentMap::JniTrace)),
-      globals_(kGlobalsMax, kGlobal, IndirectReferenceTable::ResizableCapacity::kNo, error_msg),
+      globals_(kGlobal, IndirectReferenceTable::ResizableCapacity::kNo),
       libraries_(new Libraries),
       unchecked_functions_(&gJniInvokeInterface),
-      weak_globals_(kWeakGlobalsMax,
-                    kWeakGlobal,
-                    IndirectReferenceTable::ResizableCapacity::kNo,
-                    error_msg),
+      weak_globals_(kWeakGlobal, IndirectReferenceTable::ResizableCapacity::kNo),
       allow_accessing_weak_globals_(true),
       weak_globals_add_condition_("weak globals add condition",
                                   (CHECK(Locks::jni_weak_globals_lock_ != nullptr),
@@ -527,21 +522,23 @@ JavaVMExt::JavaVMExt(Runtime* runtime,
   SetCheckJniEnabled(runtime_options.Exists(RuntimeArgumentMap::CheckJni) || kIsDebugBuild);
 }
 
+bool JavaVMExt::Initialize(std::string* error_msg) {
+  return globals_.Initialize(kGlobalsMax, error_msg) &&
+         weak_globals_.Initialize(kWeakGlobalsMax, error_msg);
+}
+
 JavaVMExt::~JavaVMExt() {
   UnloadBootNativeLibraries();
 }
 
-// Checking "globals" and "weak_globals" usually requires locks, but we
-// don't need the locks to check for validity when constructing the
-// object. Use NO_THREAD_SAFETY_ANALYSIS for this.
 std::unique_ptr<JavaVMExt> JavaVMExt::Create(Runtime* runtime,
                                              const RuntimeArgumentMap& runtime_options,
-                                             std::string* error_msg) NO_THREAD_SAFETY_ANALYSIS {
-  std::unique_ptr<JavaVMExt> java_vm(new JavaVMExt(runtime, runtime_options, error_msg));
-  if (java_vm && java_vm->globals_.IsValid() && java_vm->weak_globals_.IsValid()) {
-    return java_vm;
+                                             std::string* error_msg) {
+  std::unique_ptr<JavaVMExt> java_vm(new JavaVMExt(runtime, runtime_options));
+  if (!java_vm->Initialize(error_msg)) {
+    return nullptr;
   }
-  return nullptr;
+  return java_vm;
 }
 
 jint JavaVMExt::HandleGetEnv(/*out*/void** env, jint version) {
@@ -834,7 +831,7 @@ void JavaVMExt::BroadcastForNewWeakGlobals() {
 }
 
 ObjPtr<mirror::Object> JavaVMExt::DecodeGlobal(IndirectRef ref) {
-  return globals_.SynchronizedGet(ref);
+  return globals_.Get(ref);
 }
 
 void JavaVMExt::UpdateGlobal(Thread* self, IndirectRef ref, ObjPtr<mirror::Object> result) {
@@ -851,7 +848,7 @@ ObjPtr<mirror::Object> JavaVMExt::DecodeWeakGlobal(Thread* self, IndirectRef ref
   // if MayAccessWeakGlobals is false.
   DCHECK_EQ(IndirectReferenceTable::GetIndirectRefKind(ref), kWeakGlobal);
   if (LIKELY(MayAccessWeakGlobals(self))) {
-    return weak_globals_.SynchronizedGet(ref);
+    return weak_globals_.Get(ref);
   }
   MutexLock mu(self, *Locks::jni_weak_globals_lock_);
   return DecodeWeakGlobalLocked(self, ref);
@@ -879,7 +876,7 @@ ObjPtr<mirror::Object> JavaVMExt::DecodeWeakGlobalDuringShutdown(Thread* self, I
   if (!gUseReadBarrier) {
     DCHECK(allow_accessing_weak_globals_.load(std::memory_order_seq_cst));
   }
-  return weak_globals_.SynchronizedGet(ref);
+  return weak_globals_.Get(ref);
 }
 
 bool JavaVMExt::IsWeakGlobalCleared(Thread* self, IndirectRef ref) {
@@ -1172,23 +1169,6 @@ void* JavaVMExt::FindCodeForNativeMethod(ArtMethod* m, std::string* error_msg, b
   return native_method;
 }
 
-void JavaVMExt::SweepJniWeakGlobals(IsMarkedVisitor* visitor) {
-  MutexLock mu(Thread::Current(), *Locks::jni_weak_globals_lock_);
-  Runtime* const runtime = Runtime::Current();
-  for (auto* entry : weak_globals_) {
-    // Need to skip null here to distinguish between null entries and cleared weak ref entries.
-    if (!entry->IsNull()) {
-      // Since this is called by the GC, we don't need a read barrier.
-      mirror::Object* obj = entry->Read<kWithoutReadBarrier>();
-      mirror::Object* new_obj = visitor->IsMarked(obj);
-      if (new_obj == nullptr) {
-        new_obj = runtime->GetClearedJniWeakGlobal();
-      }
-      *entry = GcRoot<mirror::Object>(new_obj);
-    }
-  }
-}
-
 void JavaVMExt::TrimGlobals() {
   WriterMutexLock mu(Thread::Current(), *Locks::jni_globals_lock_);
   globals_.Trim();
@@ -1205,12 +1185,14 @@ jstring JavaVMExt::GetLibrarySearchPath(JNIEnv* env, jobject class_loader) {
   if (class_loader == nullptr) {
     return nullptr;
   }
-  if (!env->IsInstanceOf(class_loader, WellKnownClasses::dalvik_system_BaseDexClassLoader)) {
+  ScopedObjectAccess soa(env);
+  ObjPtr<mirror::Object> mirror_class_loader = soa.Decode<mirror::Object>(class_loader);
+  if (!mirror_class_loader->InstanceOf(WellKnownClasses::dalvik_system_BaseDexClassLoader.Get())) {
     return nullptr;
   }
-  return reinterpret_cast<jstring>(env->CallObjectMethod(
-      class_loader,
-      WellKnownClasses::dalvik_system_BaseDexClassLoader_getLdLibraryPath));
+  return soa.AddLocalReference<jstring>(
+      WellKnownClasses::dalvik_system_BaseDexClassLoader_getLdLibraryPath->InvokeVirtual<'L'>(
+          soa.Self(), mirror_class_loader));
 }
 
 // JNI Invocation interface.

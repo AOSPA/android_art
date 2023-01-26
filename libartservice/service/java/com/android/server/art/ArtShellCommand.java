@@ -16,6 +16,9 @@
 
 package com.android.server.art;
 
+import static android.os.ParcelFileDescriptor.AutoCloseInputStream;
+
+import static com.android.server.art.ArtManagerLocal.SnapshotProfileException;
 import static com.android.server.art.model.ArtFlags.OptimizeFlags;
 import static com.android.server.art.model.OptimizationStatus.DexContainerFileOptimizationStatus;
 import static com.android.server.art.model.OptimizeResult.DexContainerFileOptimizeResult;
@@ -24,9 +27,14 @@ import static com.android.server.art.model.OptimizeResult.PackageOptimizeResult;
 
 import android.annotation.NonNull;
 import android.os.Binder;
+import android.os.Build;
 import android.os.CancellationSignal;
+import android.os.ParcelFileDescriptor;
 import android.os.Process;
 
+import androidx.annotation.RequiresApi;
+
+import com.android.internal.annotations.GuardedBy;
 import com.android.modules.utils.BasicShellCommandHandler;
 import com.android.server.art.model.ArtFlags;
 import com.android.server.art.model.DeleteResult;
@@ -35,6 +43,12 @@ import com.android.server.art.model.OptimizeParams;
 import com.android.server.art.model.OptimizeResult;
 import com.android.server.pm.PackageManagerLocal;
 
+import libcore.io.Streams;
+
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.util.HashMap;
 import java.util.Map;
@@ -51,16 +65,21 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
 
     private final ArtManagerLocal mArtManagerLocal;
     private final PackageManagerLocal mPackageManagerLocal;
-    private final DexUseManager mDexUseManager = DexUseManager.getInstance();
+    private final DexUseManagerLocal mDexUseManager;
 
-    private static Map<String, CancellationSignal> sCancellationSignalMap = new HashMap<>();
+    @GuardedBy("sCancellationSignalMap")
+    @NonNull
+    private static final Map<String, CancellationSignal> sCancellationSignalMap = new HashMap<>();
 
-    public ArtShellCommand(
-            ArtManagerLocal artManagerLocal, PackageManagerLocal packageManagerLocal) {
+    public ArtShellCommand(@NonNull ArtManagerLocal artManagerLocal,
+            @NonNull PackageManagerLocal packageManagerLocal,
+            @NonNull DexUseManagerLocal dexUseManager) {
         mArtManagerLocal = artManagerLocal;
         mPackageManagerLocal = packageManagerLocal;
+        mDexUseManager = dexUseManager;
     }
 
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     @Override
     public int onCommand(String cmd) {
         enforceRoot();
@@ -99,46 +118,34 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
                                 paramsBuilder.setFlags(ArtFlags.FLAG_SHOULD_INCLUDE_DEPENDENCIES,
                                         ArtFlags.FLAG_SHOULD_INCLUDE_DEPENDENCIES);
                                 break;
+                            case "--split":
+                                String splitName = getNextArgRequired();
+                                paramsBuilder
+                                        .setFlags(ArtFlags.FLAG_FOR_SINGLE_SPLIT,
+                                                ArtFlags.FLAG_FOR_SINGLE_SPLIT)
+                                        .setSplitName(!splitName.isEmpty() ? splitName : null);
+                                break;
                             default:
                                 pw.println("Error: Unknown option: " + opt);
                                 return 1;
                         }
                     }
 
-                    String jobId = UUID.randomUUID().toString();
-                    var signal = new CancellationSignal();
-                    pw.printf("Job ID: %s\n", jobId);
-                    pw.flush();
-
-                    synchronized (sCancellationSignalMap) {
-                        sCancellationSignalMap.put(jobId, signal);
-                    }
-
                     OptimizeResult result;
-                    try {
-                        result = mArtManagerLocal.optimizePackage(
-                                snapshot, getNextArgRequired(), paramsBuilder.build(), signal);
-                    } finally {
-                        synchronized (sCancellationSignalMap) {
-                            sCancellationSignalMap.remove(jobId);
-                        }
+                    try (var signal = new WithCancellationSignal(pw)) {
+                        result = mArtManagerLocal.optimizePackage(snapshot, getNextArgRequired(),
+                                paramsBuilder.build(), signal.get());
                     }
-
-                    pw.println(optimizeStatusToString(result.getFinalStatus()));
-                    for (PackageOptimizeResult packageResult : result.getPackageOptimizeResults()) {
-                        pw.printf("[%s]\n", packageResult.getPackageName());
-                        for (DexContainerFileOptimizeResult fileResult :
-                                packageResult.getDexContainerFileOptimizeResults()) {
-                            pw.printf("dexContainerFile = %s, isPrimaryAbi = %b, abi = %s, "
-                                            + "compilerFilter = %s, status = %s, "
-                                            + "dex2oatWallTimeMillis = %d, dex2oatCpuTimeMillis = %d\n",
-                                    fileResult.getDexContainerFile(), fileResult.isPrimaryAbi(),
-                                    fileResult.getAbi(), fileResult.getActualCompilerFilter(),
-                                    optimizeStatusToString(fileResult.getStatus()),
-                                    fileResult.getDex2oatWallTimeMillis(),
-                                    fileResult.getDex2oatCpuTimeMillis());
-                        }
+                    printOptimizeResult(pw, result);
+                    return 0;
+                }
+                case "optimize-packages": {
+                    OptimizeResult result;
+                    try (var signal = new WithCancellationSignal(pw)) {
+                        result = mArtManagerLocal.optimizePackages(
+                                snapshot, getNextArgRequired(), signal.get());
                     }
+                    printOptimizeResult(pw, result);
                     return 0;
                 }
                 case "cancel": {
@@ -156,7 +163,7 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
                     return 0;
                 }
                 case "dex-use-notify": {
-                    mArtManagerLocal.notifyDexContainersLoaded(snapshot, getNextArgRequired(),
+                    mDexUseManager.notifyDexContainersLoaded(snapshot, getNextArgRequired(),
                             Map.of(getNextArgRequired(), getNextArgRequired()));
                     return 0;
                 }
@@ -173,7 +180,7 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
                     return 0;
                 }
                 case "dex-use-get-secondary": {
-                    for (DexUseManager.SecondaryDexInfo info :
+                    for (DexUseManagerLocal.SecondaryDexInfo info :
                             mDexUseManager.getSecondaryDexInfo(getNextArgRequired())) {
                         pw.println(info);
                     }
@@ -198,6 +205,65 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
                     } catch (Exception e) {
                         throw new RuntimeException(e);
                     }
+                }
+                case "bg-dexopt-job": {
+                    String opt = getNextOption();
+                    if (opt == null) {
+                        mArtManagerLocal.startBackgroundDexoptJob();
+                        return 0;
+                    }
+                    switch (opt) {
+                        case "--cancel": {
+                            mArtManagerLocal.cancelBackgroundDexoptJob();
+                            return 0;
+                        }
+                        case "--enable": {
+                            // This operation requires the uid to be "system" (1000).
+                            long identityToken = Binder.clearCallingIdentity();
+                            try {
+                                mArtManagerLocal.scheduleBackgroundDexoptJob();
+                            } finally {
+                                Binder.restoreCallingIdentity(identityToken);
+                            }
+                            return 0;
+                        }
+                        case "--disable": {
+                            // This operation requires the uid to be "system" (1000).
+                            long identityToken = Binder.clearCallingIdentity();
+                            try {
+                                mArtManagerLocal.unscheduleBackgroundDexoptJob();
+                            } finally {
+                                Binder.restoreCallingIdentity(identityToken);
+                            }
+                            return 0;
+                        }
+                        default:
+                            pw.println("Error: Unknown option: " + opt);
+                            return 1;
+                    }
+                }
+                case "snapshot-app-profile": {
+                    String outputPath = getNextArgRequired();
+                    ParcelFileDescriptor fd;
+                    try {
+                        fd = mArtManagerLocal.snapshotAppProfile(
+                                snapshot, getNextArgRequired(), getNextOption());
+                    } catch (SnapshotProfileException e) {
+                        throw new RuntimeException(e);
+                    }
+                    writeFdContentsToFile(fd, outputPath);
+                    return 0;
+                }
+                case "snapshot-boot-image-profile": {
+                    String outputPath = getNextArgRequired();
+                    ParcelFileDescriptor fd;
+                    try {
+                        fd = mArtManagerLocal.snapshotBootImageProfile(snapshot);
+                    } catch (SnapshotProfileException e) {
+                        throw new RuntimeException(e);
+                    }
+                    writeFdContentsToFile(fd, outputPath);
+                    return 0;
                 }
                 default:
                     // Handles empty, help, and invalid commands.
@@ -227,7 +293,8 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
         pw.println("    Print the optimization status of a package.");
         pw.println("    By default, the command only prints the optimization status of primary "
                 + "dex'es.");
-        pw.println("  optimize-package [-m COMPILER_FILTER] [-f] PACKAGE_NAME");
+        pw.println("  optimize-package [-m COMPILER_FILTER] [-f] [--secondary-dex] ");
+        pw.println("      [--include-dependencies] [--split SPLIT_NAME] PACKAGE_NAME");
         pw.println("    Optimize a package.");
         pw.println("    By default, the command only optimizes primary dex'es.");
         pw.println("    The command prints a job ID, which can be used to cancel the job using the"
@@ -235,8 +302,14 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
         pw.println("    Options:");
         pw.println("      -m Set the compiler filter.");
         pw.println("      -f Force compilation.");
-        pw.println("      --secondary-dex Only compile secondary dex.");
+        pw.println("      --secondary-dex Only optimize secondary dex.");
         pw.println("      --include-dependencies Include dependencies.");
+        pw.println("      --split SPLIT_NAME Only optimize the given split. If SPLIT_NAME is an");
+        pw.println("        empty string, only optimize the base APK.");
+        pw.println("  optimize-packages REASON");
+        pw.println("    Run batch optimization for the given reason.");
+        pw.println("    The command prints a job ID, which can be used to cancel the job using the"
+                + "'cancel' command.");
         pw.println("  cancel JOB_ID");
         pw.println("    Cancel a job.");
         pw.println("  dex-use-notify PACKAGE_NAME DEX_PATH CLASS_LOADER_CONTEXT");
@@ -254,6 +327,27 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
         pw.println("    Save dex use information to a file in binary proto format.");
         pw.println("  dex-use-load PATH");
         pw.println("    Load dex use information from a file in binary proto format.");
+        pw.println("  bg-dexopt-job [--cancel | --disable | --enable]");
+        pw.println("    Control the background dexopt job.");
+        pw.println("    Without flags, it starts a background dexopt job immediately. It does");
+        pw.println("      nothing if a job is already started either automatically by the system");
+        pw.println("      or through this command. This command is not blocking.");
+        pw.println("    Options:");
+        pw.println("      --cancel Cancel any currently running background dexopt job");
+        pw.println("        immediately. This cancels jobs started either automatically by the");
+        pw.println("        system or through this command. This command is not blocking.");
+        pw.println("      --disable: Disable the background dexopt job from being started by the");
+        pw.println("        job scheduler. If a job is already started by the job scheduler and");
+        pw.println("        is running, it will be cancelled immediately. Does not affect");
+        pw.println("        jobs started through this command or by the system in other ways.");
+        pw.println("        This state will be lost when the system_server process exits.");
+        pw.println("      --enable: Enable the background dexopt job to be started by the job");
+        pw.println("        scheduler again, if previously disabled by --disable.");
+        pw.println("  snapshot-app-profile OUTPUT_PATH PACKAGE_NAME [SPLIT_NAME]");
+        pw.println("    Snapshot the profile of the given app and save it to the output path.");
+        pw.println("    If SPLIT_NAME is empty, the command snapshots the base APK.");
+        pw.println("  snapshot-boot-image-profile OUTPUT_PATH");
+        pw.println("    Snapshot the boot image profile and save it to the output path.");
     }
 
     private void enforceRoot() {
@@ -276,5 +370,60 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
                 return "CANCELLED";
         }
         throw new IllegalArgumentException("Unknown optimize status " + status);
+    }
+
+    private void printOptimizeResult(@NonNull PrintWriter pw, @NonNull OptimizeResult result) {
+        pw.println(optimizeStatusToString(result.getFinalStatus()));
+        for (PackageOptimizeResult packageResult : result.getPackageOptimizeResults()) {
+            pw.printf("[%s]\n", packageResult.getPackageName());
+            for (DexContainerFileOptimizeResult fileResult :
+                    packageResult.getDexContainerFileOptimizeResults()) {
+                pw.printf("dexContainerFile = %s, isPrimaryAbi = %b, abi = %s, "
+                                + "compilerFilter = %s, status = %s, "
+                                + "dex2oatWallTimeMillis = %d, dex2oatCpuTimeMillis = %d, "
+                                + "sizeBytes = %d, sizeBeforeBytes = %d\n",
+                        fileResult.getDexContainerFile(), fileResult.isPrimaryAbi(),
+                        fileResult.getAbi(), fileResult.getActualCompilerFilter(),
+                        optimizeStatusToString(fileResult.getStatus()),
+                        fileResult.getDex2oatWallTimeMillis(), fileResult.getDex2oatCpuTimeMillis(),
+                        fileResult.getSizeBytes(), fileResult.getSizeBeforeBytes());
+            }
+        }
+    }
+
+    private void writeFdContentsToFile(
+            @NonNull ParcelFileDescriptor fd, @NonNull String outputPath) {
+        try (InputStream inputStream = new AutoCloseInputStream(fd);
+                OutputStream outputStream = new FileOutputStream(outputPath)) {
+            Streams.copy(inputStream, outputStream);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static class WithCancellationSignal implements AutoCloseable {
+        @NonNull private final CancellationSignal mSignal = new CancellationSignal();
+        @NonNull private final String mJobId;
+
+        public WithCancellationSignal(@NonNull PrintWriter pw) {
+            mJobId = UUID.randomUUID().toString();
+            pw.printf("Job ID: %s\n", mJobId);
+            pw.flush();
+
+            synchronized (sCancellationSignalMap) {
+                sCancellationSignalMap.put(mJobId, mSignal);
+            }
+        }
+
+        @NonNull
+        public CancellationSignal get() {
+            return mSignal;
+        }
+
+        public void close() {
+            synchronized (sCancellationSignalMap) {
+                sCancellationSignalMap.remove(mJobId);
+            }
+        }
     }
 }
