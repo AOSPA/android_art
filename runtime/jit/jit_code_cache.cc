@@ -127,31 +127,19 @@ class JitCodeCache::JniStubData {
     DCHECK(entrypoint == OatQuickMethodHeader::FromCodePointer(GetCode())->GetEntryPoint());
     instrumentation::Instrumentation* instrum = Runtime::Current()->GetInstrumentation();
     for (ArtMethod* m : GetMethods()) {
-      // Because `m` might be in the process of being deleted:
-      // - Call the dedicated method instead of the more generic UpdateMethodsCode
-      // - Check the class status without a full read barrier; use ReadBarrier::IsMarked().
-      bool can_set_entrypoint = true;
-      if (NeedsClinitCheckBeforeCall(m)) {
-        // To avoid resurrecting an unreachable object, we must not use a full read
-        // barrier but we do not want to miss updating an entrypoint under common
-        // circumstances, i.e. during a GC the class becomes visibly initialized,
-        // the method becomes hot, we compile the thunk and want to update the
-        // entrypoint while the method's declaring class field still points to the
-        // from-space class object with the old status. Therefore we read the
-        // declaring class without a read barrier and check if it's already marked.
-        // If yes, we check the status of the to-space class object as intended.
-        // Otherwise, there is no to-space object and the from-space class object
-        // contains the most recent value of the status field; even if this races
-        // with another thread doing a read barrier and updating the status, that's
-        // no different from a race with a thread that just updates the status.
-        // Such race can happen only for the zygote method pre-compilation, as we
-        // otherwise compile only thunks for methods of visibly initialized classes.
-        ObjPtr<mirror::Class> klass = m->GetDeclaringClass<kWithoutReadBarrier>();
-        ObjPtr<mirror::Class> marked = ReadBarrier::IsMarked(klass.Ptr());
-        ObjPtr<mirror::Class> checked_klass = (marked != nullptr) ? marked : klass;
-        can_set_entrypoint = checked_klass->IsVisiblyInitialized();
-      }
-      if (can_set_entrypoint) {
+      // Because `m` might be in the process of being deleted,
+      //   - use the `ArtMethod::StillNeedsClinitCheckMayBeDead()` to check if
+      //     we can update the entrypoint, and
+      //   - call `Instrumentation::UpdateNativeMethodsCodeToJitCode` instead of the
+      //     more generic function `Instrumentation::UpdateMethodsCode()`.
+      // The `ArtMethod::StillNeedsClinitCheckMayBeDead()` checks the class status
+      // in the to-space object if any even if the method's declaring class points to
+      // the from-space class object. This way we do not miss updating an entrypoint
+      // even under uncommon circumstances, when during a GC the class becomes visibly
+      // initialized, the method becomes hot, we compile the thunk and want to update
+      // the entrypoint while the method's declaring class field still points to the
+      // from-space class object with the old status.
+      if (!m->StillNeedsClinitCheckMayBeDead()) {
         instrum->UpdateNativeMethodsCodeToJitCode(m, entrypoint);
       }
     }
@@ -220,9 +208,10 @@ JitCodeCache* JitCodeCache::Create(bool used_only_for_profile_data,
     }
   }
 
-  size_t initial_capacity = Runtime::Current()->GetJITOptions()->GetCodeCacheInitialCapacity();
+  Runtime* runtime = Runtime::Current();
+  size_t initial_capacity = runtime->GetJITOptions()->GetCodeCacheInitialCapacity();
   // Check whether the provided max capacity in options is below 1GB.
-  size_t max_capacity = Runtime::Current()->GetJITOptions()->GetCodeCacheMaxCapacity();
+  size_t max_capacity = runtime->GetJITOptions()->GetCodeCacheMaxCapacity();
   // We need to have 32 bit offsets from method headers in code cache which point to things
   // in the data cache. If the maps are more than 4G apart, having multiple maps wouldn't work.
   // Ensure we're below 1 GB to be safe.
@@ -242,6 +231,11 @@ JitCodeCache* JitCodeCache::Create(bool used_only_for_profile_data,
                          is_zygote,
                          error_msg)) {
     return nullptr;
+  }
+
+  if (region.HasCodeMapping()) {
+    const MemMap* exec_pages = region.GetExecPages();
+    runtime->AddGeneratedCodeRange(exec_pages->Begin(), exec_pages->Size());
   }
 
   std::unique_ptr<JitCodeCache> jit_code_cache(new JitCodeCache());
@@ -278,7 +272,16 @@ JitCodeCache::JitCodeCache()
       histogram_profiling_info_memory_use_("Memory used for profiling info", 16) {
 }
 
-JitCodeCache::~JitCodeCache() {}
+JitCodeCache::~JitCodeCache() {
+  if (private_region_.HasCodeMapping()) {
+    const MemMap* exec_pages = private_region_.GetExecPages();
+    Runtime::Current()->RemoveGeneratedCodeRange(exec_pages->Begin(), exec_pages->Size());
+  }
+  if (shared_region_.HasCodeMapping()) {
+    const MemMap* exec_pages = shared_region_.GetExecPages();
+    Runtime::Current()->RemoveGeneratedCodeRange(exec_pages->Begin(), exec_pages->Size());
+  }
+}
 
 bool JitCodeCache::PrivateRegionContainsPc(const void* ptr) const {
   return private_region_.IsInExecSpace(ptr);
@@ -289,7 +292,9 @@ bool JitCodeCache::ContainsPc(const void* ptr) const {
 }
 
 bool JitCodeCache::ContainsMethod(ArtMethod* method) {
-  MutexLock mu(Thread::Current(), *Locks::jit_lock_);
+  Thread* self = Thread::Current();
+  ScopedDebugDisallowReadBarriers sddrb(self);
+  MutexLock mu(self, *Locks::jit_lock_);
   if (UNLIKELY(method->IsNative())) {
     auto it = jni_stubs_map_.find(JniStubKey(method));
     if (it != jni_stubs_map_.end() &&
@@ -312,7 +317,9 @@ bool JitCodeCache::ContainsMethod(ArtMethod* method) {
 
 const void* JitCodeCache::GetJniStubCode(ArtMethod* method) {
   DCHECK(method->IsNative());
-  MutexLock mu(Thread::Current(), *Locks::jit_lock_);
+  Thread* self = Thread::Current();
+  ScopedDebugDisallowReadBarriers sddrb(self);
+  MutexLock mu(self, *Locks::jit_lock_);
   auto it = jni_stubs_map_.find(JniStubKey(method));
   if (it != jni_stubs_map_.end()) {
     JniStubData& data = it->second;
@@ -324,12 +331,14 @@ const void* JitCodeCache::GetJniStubCode(ArtMethod* method) {
 }
 
 const void* JitCodeCache::GetSavedEntryPointOfPreCompiledMethod(ArtMethod* method) {
+  Thread* self = Thread::Current();
+  ScopedDebugDisallowReadBarriers sddrb(self);
   if (method->IsPreCompiled()) {
     const void* code_ptr = nullptr;
     if (method->GetDeclaringClass()->IsBootStrapClassLoaded()) {
       code_ptr = zygote_map_.GetCodeFor(method);
     } else {
-      MutexLock mu(Thread::Current(), *Locks::jit_lock_);
+      MutexLock mu(self, *Locks::jit_lock_);
       auto it = saved_compiled_methods_map_.find(method);
       if (it != saved_compiled_methods_map_.end()) {
         code_ptr = it->second;
@@ -400,7 +409,9 @@ static const uint8_t* GetRootTable(const void* code_ptr, uint32_t* number_of_roo
 }
 
 void JitCodeCache::SweepRootTables(IsMarkedVisitor* visitor) {
-  MutexLock mu(Thread::Current(), *Locks::jit_lock_);
+  Thread* self = Thread::Current();
+  ScopedDebugDisallowReadBarriers sddrb(self);
+  MutexLock mu(self, *Locks::jit_lock_);
   for (const auto& entry : method_code_map_) {
     uint32_t number_of_roots = 0;
     const uint8_t* root_table = GetRootTable(entry.first, &number_of_roots);
@@ -505,6 +516,7 @@ void JitCodeCache::FreeAllMethodHeaders(
 
 void JitCodeCache::RemoveMethodsIn(Thread* self, const LinearAlloc& alloc) {
   ScopedTrace trace(__PRETTY_FUNCTION__);
+  ScopedDebugDisallowReadBarriers sddrb(self);
   // We use a set to first collect all method_headers whose code need to be
   // removed. We need to free the underlying code after we remove CHA dependencies
   // for entries in this set. And it's more efficient to iterate through
@@ -699,32 +711,37 @@ bool JitCodeCache::Commit(Thread* self,
     // compiled code is considered invalidated by some class linking, but below we still make the
     // compiled code valid for the method.  Need cha_lock_ for checking all single-implementation
     // flags and register dependencies.
-    MutexLock cha_mu(self, *Locks::cha_lock_);
-    bool single_impl_still_valid = true;
-    for (ArtMethod* single_impl : cha_single_implementation_list) {
-      if (!single_impl->HasSingleImplementation()) {
-        // Simply discard the compiled code. Clear the counter so that it may be recompiled later.
-        // Hopefully the class hierarchy will be more stable when compilation is retried.
-        single_impl_still_valid = false;
-        ClearMethodCounter(method, /*was_warm=*/ false);
-        break;
+    {
+      ScopedDebugDisallowReadBarriers sddrb(self);
+      MutexLock cha_mu(self, *Locks::cha_lock_);
+      bool single_impl_still_valid = true;
+      for (ArtMethod* single_impl : cha_single_implementation_list) {
+        if (!single_impl->HasSingleImplementation()) {
+          // Simply discard the compiled code. Clear the counter so that it may be recompiled later.
+          // Hopefully the class hierarchy will be more stable when compilation is retried.
+          single_impl_still_valid = false;
+          ClearMethodCounter(method, /*was_warm=*/ false);
+          break;
+        }
+      }
+
+      // Discard the code if any single-implementation assumptions are now invalid.
+      if (UNLIKELY(!single_impl_still_valid)) {
+        VLOG(jit) << "JIT discarded jitted code due to invalid single-implementation assumptions.";
+        return false;
+      }
+      DCHECK(cha_single_implementation_list.empty() || !Runtime::Current()->IsJavaDebuggable())
+          << "Should not be using cha on debuggable apps/runs!";
+
+      ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+      for (ArtMethod* single_impl : cha_single_implementation_list) {
+        class_linker->GetClassHierarchyAnalysis()->AddDependency(
+            single_impl, method, method_header);
       }
     }
 
-    // Discard the code if any single-implementation assumptions are now invalid.
-    if (UNLIKELY(!single_impl_still_valid)) {
-      VLOG(jit) << "JIT discarded jitted code due to invalid single-implementation assumptions.";
-      return false;
-    }
-    DCHECK(cha_single_implementation_list.empty() || !Runtime::Current()->IsJavaDebuggable())
-        << "Should not be using cha on debuggable apps/runs!";
-
-    ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-    for (ArtMethod* single_impl : cha_single_implementation_list) {
-      class_linker->GetClassHierarchyAnalysis()->AddDependency(single_impl, method, method_header);
-    }
-
     if (UNLIKELY(method->IsNative())) {
+      ScopedDebugDisallowReadBarriers sddrb(self);
       auto it = jni_stubs_map_.find(JniStubKey(method));
       DCHECK(it != jni_stubs_map_.end())
           << "Entry inserted in NotifyCompilationOf() should be alive.";
@@ -735,14 +752,17 @@ bool JitCodeCache::Commit(Thread* self,
       data->UpdateEntryPoints(method_header->GetEntryPoint());
     } else {
       if (method->IsPreCompiled() && IsSharedRegion(*region)) {
+        ScopedDebugDisallowReadBarriers sddrb(self);
         zygote_map_.Put(code_ptr, method);
       } else {
+        ScopedDebugDisallowReadBarriers sddrb(self);
         method_code_map_.Put(code_ptr, method);
       }
       if (compilation_kind == CompilationKind::kOsr) {
+        ScopedDebugDisallowReadBarriers sddrb(self);
         osr_code_map_.Put(method, code_ptr);
-      } else if (NeedsClinitCheckBeforeCall(method) &&
-                 !method->GetDeclaringClass()->IsVisiblyInitialized()) {
+      } else if (method->StillNeedsClinitCheck()) {
+        ScopedDebugDisallowReadBarriers sddrb(self);
         // This situation currently only occurs in the jit-zygote mode.
         DCHECK(!garbage_collect_code_);
         DCHECK(method->IsPreCompiled());
@@ -783,7 +803,9 @@ bool JitCodeCache::RemoveMethod(ArtMethod* method, bool release_memory) {
   // This function is used only for testing and only with non-native methods.
   CHECK(!method->IsNative());
 
-  MutexLock mu(Thread::Current(), *Locks::jit_lock_);
+  Thread* self = Thread::Current();
+  ScopedDebugDisallowReadBarriers sddrb(self);
+  MutexLock mu(self, *Locks::jit_lock_);
 
   bool osr = osr_code_map_.find(method) != osr_code_map_.end();
   bool in_cache = RemoveMethodLocked(method, release_memory);
@@ -852,7 +874,9 @@ bool JitCodeCache::RemoveMethodLocked(ArtMethod* method, bool release_memory) {
 // any cached information it has on the method. All threads must be suspended before calling this
 // method. The compiled code for the method (if there is any) must not be in any threads call stack.
 void JitCodeCache::NotifyMethodRedefined(ArtMethod* method) {
-  MutexLock mu(Thread::Current(), *Locks::jit_lock_);
+  Thread* self = Thread::Current();
+  ScopedDebugDisallowReadBarriers sddrb(self);
+  MutexLock mu(self, *Locks::jit_lock_);
   RemoveMethodLocked(method, /* release_memory= */ true);
 }
 
@@ -863,7 +887,9 @@ void JitCodeCache::NotifyMethodRedefined(ArtMethod* method) {
 // shouldn't be used since it is no longer logically in the jit code cache.
 // TODO We should add DCHECKS that validate that the JIT is paused when this method is entered.
 void JitCodeCache::MoveObsoleteMethod(ArtMethod* old_method, ArtMethod* new_method) {
-  MutexLock mu(Thread::Current(), *Locks::jit_lock_);
+  Thread* self = Thread::Current();
+  ScopedDebugDisallowReadBarriers sddrb(self);
+  MutexLock mu(self, *Locks::jit_lock_);
   if (old_method->IsNative()) {
     // Update methods in jni_stubs_map_.
     for (auto& entry : jni_stubs_map_) {
@@ -890,11 +916,14 @@ void JitCodeCache::TransitionToDebuggable() {
   // Check that none of our methods have an entrypoint in the zygote exec
   // space (this should be taken care of by
   // ClassLinker::UpdateEntryPointsClassVisitor.
+  Thread* self = Thread::Current();
+  ScopedDebugDisallowReadBarriers sddrb(self);
   {
-    MutexLock mu(Thread::Current(), *Locks::jit_lock_);
+    MutexLock mu(self, *Locks::jit_lock_);
     if (kIsDebugBuild) {
-      for (const auto& it : method_code_map_) {
-        ArtMethod* method = it.second;
+      // TODO: Check `jni_stubs_map_`?
+      for (const auto& entry : method_code_map_) {
+        ArtMethod* method = entry.second;
         DCHECK(!method->IsPreCompiled());
         DCHECK(!IsInZygoteExecSpace(method->GetEntryPointFromQuickCompiledCode()));
       }
@@ -1155,6 +1184,7 @@ void JitCodeCache::GarbageCollectCache(Thread* self) {
 
       // Start polling the liveness of compiled code to prepare for the next full collection.
       if (next_collection_will_be_full) {
+        ScopedDebugDisallowReadBarriers sddrb(self);
         for (auto it : profiling_infos_) {
           it.second->ResetCounter();
         }
@@ -1186,6 +1216,7 @@ void JitCodeCache::GarbageCollectCache(Thread* self) {
 
 void JitCodeCache::RemoveUnmarkedCode(Thread* self) {
   ScopedTrace trace(__FUNCTION__);
+  ScopedDebugDisallowReadBarriers sddrb(self);
   std::unordered_set<OatQuickMethodHeader*> method_headers;
   {
     MutexLock mu(self, *Locks::jit_lock_);
@@ -1233,6 +1264,7 @@ void JitCodeCache::SetGarbageCollectCode(bool value) {
 }
 
 void JitCodeCache::RemoveMethodBeingCompiled(ArtMethod* method, CompilationKind kind) {
+  ScopedDebugDisallowReadBarriers sddrb(Thread::Current());
   DCHECK(IsMethodBeingCompiled(method, kind));
   switch (kind) {
     case CompilationKind::kOsr:
@@ -1248,6 +1280,7 @@ void JitCodeCache::RemoveMethodBeingCompiled(ArtMethod* method, CompilationKind 
 }
 
 void JitCodeCache::AddMethodBeingCompiled(ArtMethod* method, CompilationKind kind) {
+  ScopedDebugDisallowReadBarriers sddrb(Thread::Current());
   DCHECK(!IsMethodBeingCompiled(method, kind));
   switch (kind) {
     case CompilationKind::kOsr:
@@ -1263,6 +1296,7 @@ void JitCodeCache::AddMethodBeingCompiled(ArtMethod* method, CompilationKind kin
 }
 
 bool JitCodeCache::IsMethodBeingCompiled(ArtMethod* method, CompilationKind kind) {
+  ScopedDebugDisallowReadBarriers sddrb(Thread::Current());
   switch (kind) {
     case CompilationKind::kOsr:
       return ContainsElement(current_osr_compilations_, method);
@@ -1274,12 +1308,14 @@ bool JitCodeCache::IsMethodBeingCompiled(ArtMethod* method, CompilationKind kind
 }
 
 bool JitCodeCache::IsMethodBeingCompiled(ArtMethod* method) {
+  ScopedDebugDisallowReadBarriers sddrb(Thread::Current());
   return ContainsElement(current_optimized_compilations_, method) ||
       ContainsElement(current_osr_compilations_, method) ||
       ContainsElement(current_baseline_compilations_, method);
 }
 
 ProfilingInfo* JitCodeCache::GetProfilingInfo(ArtMethod* method, Thread* self) {
+  ScopedDebugDisallowReadBarriers sddrb(self);
   MutexLock mu(self, *Locks::jit_lock_);
   DCHECK(IsMethodBeingCompiled(method))
       << "GetProfilingInfo should only be called when the method is being compiled";
@@ -1291,6 +1327,7 @@ ProfilingInfo* JitCodeCache::GetProfilingInfo(ArtMethod* method, Thread* self) {
 }
 
 void JitCodeCache::ResetHotnessCounter(ArtMethod* method, Thread* self) {
+  ScopedDebugDisallowReadBarriers sddrb(self);
   MutexLock mu(self, *Locks::jit_lock_);
   auto it = profiling_infos_.find(method);
   DCHECK(it != profiling_infos_.end());
@@ -1301,6 +1338,7 @@ void JitCodeCache::ResetHotnessCounter(ArtMethod* method, Thread* self) {
 void JitCodeCache::DoCollection(Thread* self, bool collect_profiling_info) {
   ScopedTrace trace(__FUNCTION__);
   {
+    ScopedDebugDisallowReadBarriers sddrb(self);
     MutexLock mu(self, *Locks::jit_lock_);
 
     // Update to interpreter the methods that have baseline entrypoints and whose baseline
@@ -1389,7 +1427,9 @@ OatQuickMethodHeader* JitCodeCache::LookupMethodHeader(uintptr_t pc, ArtMethod* 
     CHECK(method != nullptr);
   }
 
-  MutexLock mu(Thread::Current(), *Locks::jit_lock_);
+  Thread* self = Thread::Current();
+  ScopedDebugDisallowReadBarriers sddrb(self);
+  MutexLock mu(self, *Locks::jit_lock_);
   OatQuickMethodHeader* method_header = nullptr;
   ArtMethod* found_method = nullptr;  // Only for DCHECK(), not for JNI stubs.
   if (method != nullptr && UNLIKELY(method->IsNative())) {
@@ -1444,7 +1484,9 @@ OatQuickMethodHeader* JitCodeCache::LookupMethodHeader(uintptr_t pc, ArtMethod* 
 }
 
 OatQuickMethodHeader* JitCodeCache::LookupOsrMethodHeader(ArtMethod* method) {
-  MutexLock mu(Thread::Current(), *Locks::jit_lock_);
+  Thread* self = Thread::Current();
+  ScopedDebugDisallowReadBarriers sddrb(self);
+  MutexLock mu(self, *Locks::jit_lock_);
   auto it = osr_code_map_.find(method);
   if (it == osr_code_map_.end()) {
     return nullptr;
@@ -1470,9 +1512,10 @@ ProfilingInfo* JitCodeCache::AddProfilingInfo(Thread* self,
   return info;
 }
 
-ProfilingInfo* JitCodeCache::AddProfilingInfoInternal(Thread* self ATTRIBUTE_UNUSED,
+ProfilingInfo* JitCodeCache::AddProfilingInfoInternal(Thread* self,
                                                       ArtMethod* method,
                                                       const std::vector<uint32_t>& entries) {
+  ScopedDebugDisallowReadBarriers sddrb(self);
   // Check whether some other thread has concurrently created it.
   auto it = profiling_infos_.find(method);
   if (it != profiling_infos_.end()) {
@@ -1505,11 +1548,14 @@ void JitCodeCache::GetProfiledMethods(const std::set<std::string>& dex_base_loca
                                       std::vector<ProfileMethodInfo>& methods) {
   Thread* self = Thread::Current();
   WaitUntilInlineCacheAccessible(self);
+  // TODO: Avoid read barriers for potentially dead methods.
+  // ScopedDebugDisallowReadBarriers sddrb(self);
   MutexLock mu(self, *Locks::jit_lock_);
   ScopedTrace trace(__FUNCTION__);
-  for (auto it : profiling_infos_) {
-    ProfilingInfo* info = it.second;
-    ArtMethod* method = info->GetMethod();
+  for (const auto& entry : profiling_infos_) {
+    ArtMethod* method = entry.first;
+    ProfilingInfo* info = entry.second;
+    DCHECK_EQ(method, info->GetMethod());
     const DexFile* dex_file = method->GetDexFile();
     const std::string base_location = DexFileLoader::GetBaseLocation(dex_file->GetLocation());
     if (!ContainsElement(dex_base_locations, base_location)) {
@@ -1589,7 +1635,9 @@ void JitCodeCache::GetProfiledMethods(const std::set<std::string>& dex_base_loca
 }
 
 bool JitCodeCache::IsOsrCompiled(ArtMethod* method) {
-  MutexLock mu(Thread::Current(), *Locks::jit_lock_);
+  Thread* self = Thread::Current();
+  ScopedDebugDisallowReadBarriers sddrb(self);
+  MutexLock mu(self, *Locks::jit_lock_);
   return osr_code_map_.find(method) != osr_code_map_.end();
 }
 
@@ -1636,7 +1684,7 @@ bool JitCodeCache::NotifyCompilationOf(ArtMethod* method,
     }
   }
 
-  if (NeedsClinitCheckBeforeCall(method) && !prejit) {
+  if (method->NeedsClinitCheckBeforeCall() && !prejit) {
     // We do not need a synchronization barrier for checking the visibly initialized status
     // or checking the initialized status just for requesting visible initialization.
     ClassStatus status = method->GetDeclaringClass()
@@ -1659,6 +1707,7 @@ bool JitCodeCache::NotifyCompilationOf(ArtMethod* method,
     }
   }
 
+  ScopedDebugDisallowReadBarriers sddrb(self);
   if (compilation_kind == CompilationKind::kOsr) {
     MutexLock mu(self, *Locks::jit_lock_);
     if (osr_code_map_.find(method) != osr_code_map_.end()) {
@@ -1715,6 +1764,7 @@ bool JitCodeCache::NotifyCompilationOf(ArtMethod* method,
 }
 
 ProfilingInfo* JitCodeCache::NotifyCompilerUse(ArtMethod* method, Thread* self) {
+  ScopedDebugDisallowReadBarriers sddrb(self);
   MutexLock mu(self, *Locks::jit_lock_);
   auto it = profiling_infos_.find(method);
   if (it == profiling_infos_.end()) {
@@ -1728,6 +1778,7 @@ ProfilingInfo* JitCodeCache::NotifyCompilerUse(ArtMethod* method, Thread* self) 
 }
 
 void JitCodeCache::DoneCompilerUse(ArtMethod* method, Thread* self) {
+  ScopedDebugDisallowReadBarriers sddrb(self);
   MutexLock mu(self, *Locks::jit_lock_);
   auto it = profiling_infos_.find(method);
   DCHECK(it != profiling_infos_.end());
@@ -1736,6 +1787,7 @@ void JitCodeCache::DoneCompilerUse(ArtMethod* method, Thread* self) {
 
 void JitCodeCache::DoneCompiling(ArtMethod* method, Thread* self) {
   DCHECK_EQ(Thread::Current(), self);
+  ScopedDebugDisallowReadBarriers sddrb(self);
   MutexLock mu(self, *Locks::jit_lock_);
   if (UNLIKELY(method->IsNative())) {
     auto it = jni_stubs_map_.find(JniStubKey(method));
@@ -1750,28 +1802,33 @@ void JitCodeCache::DoneCompiling(ArtMethod* method, Thread* self) {
 }
 
 void JitCodeCache::InvalidateAllCompiledCode() {
-  art::MutexLock mu(Thread::Current(), *Locks::jit_lock_);
+  Thread* self = Thread::Current();
+  ScopedDebugDisallowReadBarriers sddrb(self);
+  art::MutexLock mu(self, *Locks::jit_lock_);
   VLOG(jit) << "Invalidating all compiled code";
-  ClassLinker* linker = Runtime::Current()->GetClassLinker();
-  for (auto it : method_code_map_) {
-    ArtMethod* meth = it.second;
+  Runtime* runtime = Runtime::Current();
+  ClassLinker* linker = runtime->GetClassLinker();
+  instrumentation::Instrumentation* instr = runtime->GetInstrumentation();
+  // TODO: Clear `jni_stubs_map_`?
+  for (const auto& entry : method_code_map_) {
+    ArtMethod* meth = entry.second;
     // We were compiled, so we must be warm.
     ClearMethodCounter(meth, /*was_warm=*/true);
-    if (meth->IsObsolete()) {
+    if (UNLIKELY(meth->IsObsolete())) {
       linker->SetEntryPointsForObsoleteMethod(meth);
     } else {
-      Runtime::Current()->GetInstrumentation()->InitializeMethodsCode(meth, /*aot_code=*/ nullptr);
+      instr->InitializeMethodsCode(meth, /*aot_code=*/ nullptr);
     }
   }
 
-  for (auto it : zygote_map_) {
-    if (it.method == nullptr) {
+  for (const auto& entry : zygote_map_) {
+    if (entry.method == nullptr) {
       continue;
     }
-    if (it.method->IsPreCompiled()) {
-      it.method->ClearPreCompiled();
+    if (entry.method->IsPreCompiled()) {
+      entry.method->ClearPreCompiled();
     }
-    Runtime::Current()->GetInstrumentation()->InitializeMethodsCode(it.method,
+    Runtime::Current()->GetInstrumentation()->InitializeMethodsCode(entry.method,
                                                                     /*aot_code=*/nullptr);
   }
 
@@ -1792,7 +1849,9 @@ void JitCodeCache::InvalidateCompiledCodeFor(ArtMethod* method,
     Runtime::Current()->GetInstrumentation()->InitializeMethodsCode(method, /*aot_code=*/ nullptr);
     ClearMethodCounter(method, /*was_warm=*/ true);
   } else {
-    MutexLock mu(Thread::Current(), *Locks::jit_lock_);
+    Thread* self = Thread::Current();
+    ScopedDebugDisallowReadBarriers sddrb(self);
+    MutexLock mu(self, *Locks::jit_lock_);
     auto it = osr_code_map_.find(method);
     if (it != osr_code_map_.end() && OatQuickMethodHeader::FromCodePointer(it->second) == header) {
       // Remove the OSR method, to avoid using it again.
@@ -1844,7 +1903,8 @@ void JitCodeCache::PostForkChildAction(bool is_system_server, bool is_zygote) {
   // We do this now and not in Jit::PostForkChildAction, as system server calls
   // JitCodeCache::PostForkChildAction first, and then does some code loading
   // that may result in new JIT tasks that we want to keep.
-  ThreadPool* pool = Runtime::Current()->GetJit()->GetThreadPool();
+  Runtime* runtime = Runtime::Current();
+  ThreadPool* pool = runtime->GetJit()->GetThreadPool();
   if (pool != nullptr) {
     pool->RemoveAllTasks(self);
   }
@@ -1855,7 +1915,7 @@ void JitCodeCache::PostForkChildAction(bool is_system_server, bool is_zygote) {
   // to write to them.
   shared_region_.ResetWritableMappings();
 
-  if (is_zygote || Runtime::Current()->IsSafeMode()) {
+  if (is_zygote || runtime->IsSafeMode()) {
     // Don't create a private region for a child zygote. Regions are usually map shared
     // (to satisfy dual-view), and we don't want children of a child zygote to inherit it.
     return;
@@ -1870,8 +1930,8 @@ void JitCodeCache::PostForkChildAction(bool is_system_server, bool is_zygote) {
   histogram_code_memory_use_.Reset();
   histogram_profiling_info_memory_use_.Reset();
 
-  size_t initial_capacity = Runtime::Current()->GetJITOptions()->GetCodeCacheInitialCapacity();
-  size_t max_capacity = Runtime::Current()->GetJITOptions()->GetCodeCacheMaxCapacity();
+  size_t initial_capacity = runtime->GetJITOptions()->GetCodeCacheInitialCapacity();
+  size_t max_capacity = runtime->GetJITOptions()->GetCodeCacheMaxCapacity();
   std::string error_msg;
   if (!private_region_.Initialize(initial_capacity,
                                   max_capacity,
@@ -1879,6 +1939,10 @@ void JitCodeCache::PostForkChildAction(bool is_system_server, bool is_zygote) {
                                   is_zygote,
                                   &error_msg)) {
     LOG(WARNING) << "Could not create private region after zygote fork: " << error_msg;
+  }
+  if (private_region_.HasCodeMapping()) {
+    const MemMap* exec_pages = private_region_.GetExecPages();
+    runtime->AddGeneratedCodeRange(exec_pages->Begin(), exec_pages->Size());
   }
 }
 
