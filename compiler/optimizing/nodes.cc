@@ -2788,6 +2788,9 @@ HInstruction* HGraph::InlineInto(HGraph* outer_graph, HInvoke* invoke) {
   if (HasTryCatch()) {
     outer_graph->SetHasTryCatch(true);
   }
+  if (HasMonitorOperations()) {
+    outer_graph->SetHasMonitorOperations(true);
+  }
   if (HasSIMD()) {
     outer_graph->SetHasSIMD(true);
   }
@@ -2893,19 +2896,8 @@ HInstruction* HGraph::InlineInto(HGraph* outer_graph, HInvoke* invoke) {
       HInstruction* last = predecessor->GetLastInstruction();
 
       // At this point we might either have:
-      // A) Return/ReturnVoid/Throw as the last instruction
-      // B) `Return/ReturnVoid->TryBoundary->Goto` as the last instruction chain
-      // C) `Return/ReturnVoid->Goto` as the last instruction chain. This exists when we added the
-      //     extra Goto because we had a TryBoundary which we could eliminate in DCE after
-      //     substituting arguments.
-      // D) `Throw->TryBoundary` as the last instruction chain
-
-      const bool saw_goto = last->IsGoto();
-      if (saw_goto) {
-        DCHECK(predecessor->IsSingleGoto());
-        predecessor = predecessor->GetSinglePredecessor();
-        last = predecessor->GetLastInstruction();
-      }
+      // A) Return/ReturnVoid/Throw as the last instruction, or
+      // B) `Return/ReturnVoid/Throw->TryBoundary` as the last instruction chain
 
       const bool saw_try_boundary = last->IsTryBoundary();
       if (saw_try_boundary) {
@@ -2915,27 +2907,42 @@ HInstruction* HGraph::InlineInto(HGraph* outer_graph, HInvoke* invoke) {
         last = predecessor->GetLastInstruction();
       }
 
-      // Check that if we have an instruction chain, it is one of the allowed ones.
-      DCHECK_IMPLIES(saw_goto, last->IsReturnVoid() || last->IsReturn());
-
       if (last->IsThrow()) {
-        DCHECK(!at->IsTryBlock());
-        // The chain `Throw->TryBoundary` is allowed but not `Throw->TryBoundary->Goto` since that
-        // would mean a Goto will point to exit after ReplaceSuccessor.
-        DCHECK(!saw_goto);
+        if (at->IsTryBlock()) {
+          DCHECK(!saw_try_boundary) << "We don't support inlining of try blocks into try blocks.";
+          // Create a TryBoundary of kind:exit and point it to the Exit block.
+          HBasicBlock* new_block = outer_graph->SplitEdge(predecessor, to);
+          new_block->AddInstruction(
+              new (allocator) HTryBoundary(HTryBoundary::BoundaryKind::kExit, last->GetDexPc()));
+          new_block->ReplaceSuccessor(to, outer_graph->GetExitBlock());
 
-        // We either have `Throw->TryBoundary` or `Throw`. We want to point the whole chain to the
-        // exit, so we recompute `predecessor`
-        predecessor = to->GetPredecessors()[pred];
-        predecessor->ReplaceSuccessor(to, outer_graph->GetExitBlock());
+          // Copy information from the predecessor.
+          new_block->SetLoopInformation(predecessor->GetLoopInformation());
+          TryCatchInformation* try_catch_info = predecessor->GetTryCatchInformation();
+          new_block->SetTryCatchInformation(try_catch_info);
+          for (HBasicBlock* xhandler :
+               try_catch_info->GetTryEntry().GetBlock()->GetExceptionalSuccessors()) {
+            new_block->AddSuccessor(xhandler);
+          }
+          DCHECK(try_catch_info->GetTryEntry().HasSameExceptionHandlersAs(
+              *new_block->GetLastInstruction()->AsTryBoundary()));
+        } else {
+          // We either have `Throw->TryBoundary` or `Throw`. We want to point the whole chain to the
+          // exit, so we recompute `predecessor`
+          predecessor = to->GetPredecessors()[pred];
+          predecessor->ReplaceSuccessor(to, outer_graph->GetExitBlock());
+        }
+
         --pred;
         // We need to re-run dominance information, as the exit block now has
-        // a new dominator.
+        // a new predecessor and potential new dominator.
+        // TODO(solanes): See if it's worth it to hand-modify the domination chain instead of
+        // rerunning the dominance for the whole graph.
         rerun_dominance = true;
         if (predecessor->GetLoopInformation() != nullptr) {
-          // The exit block and blocks post dominated by the exit block do not belong
-          // to any loop. Because we do not compute the post dominators, we need to re-run
-          // loop analysis to get the loop information correct.
+          // The loop information might have changed e.g. `predecessor` might not be in a loop
+          // anymore. We only do this if `predecessor` has loop information as it is impossible for
+          // predecessor to end up in a loop if it wasn't in one before.
           rerun_loop_analysis = true;
         }
       } else {
@@ -2960,6 +2967,19 @@ HInstruction* HGraph::InlineInto(HGraph* outer_graph, HInvoke* invoke) {
         }
         predecessor->AddInstruction(new (allocator) HGoto(last->GetDexPc()));
         predecessor->RemoveInstruction(last);
+
+        if (saw_try_boundary) {
+          predecessor = to->GetPredecessors()[pred];
+          DCHECK(predecessor->EndsWithTryBoundary());
+          DCHECK_EQ(predecessor->GetNormalSuccessors().size(), 1u);
+          if (predecessor->GetSuccessors()[0]->GetPredecessors().size() > 1) {
+            outer_graph->SplitCriticalEdge(predecessor, to);
+            rerun_dominance = true;
+            if (predecessor->GetLoopInformation() != nullptr) {
+              rerun_loop_analysis = true;
+            }
+          }
+        }
       }
     }
     if (rerun_loop_analysis) {

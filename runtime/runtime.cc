@@ -165,6 +165,7 @@
 #include "reflection.h"
 #include "runtime_callbacks.h"
 #include "runtime_common.h"
+#include "runtime_image.h"
 #include "runtime_intrinsics.h"
 #include "runtime_options.h"
 #include "scoped_thread_state_change-inl.h"
@@ -725,7 +726,7 @@ class UpdateMethodsPreFirstForkVisitor : public ClassVisitor {
   bool operator()(ObjPtr<mirror::Class> klass) override REQUIRES_SHARED(Locks::mutator_lock_) {
     bool is_initialized = klass->IsVisiblyInitialized();
     for (ArtMethod& method : klass->GetDeclaredMethods(kRuntimePointerSize)) {
-      if (is_initialized || !NeedsClinitCheckBeforeCall(&method)) {
+      if (is_initialized || !method.NeedsClinitCheckBeforeCall()) {
         if (method.IsNative()) {
           const void* existing = method.GetEntryPointFromJni();
           if (method.IsCriticalNative()
@@ -841,6 +842,18 @@ bool Runtime::ParseOptions(const RuntimeOptions& raw_options,
 static bool IsSafeToCallAbort() NO_THREAD_SAFETY_ANALYSIS {
   Runtime* runtime = Runtime::Current();
   return runtime != nullptr && runtime->IsStarted() && !runtime->IsShuttingDownLocked();
+}
+
+void Runtime::AddGeneratedCodeRange(const void* start, size_t size) {
+  if (HandlesSignalsInCompiledCode()) {
+    fault_manager.AddGeneratedCodeRange(start, size);
+  }
+}
+
+void Runtime::RemoveGeneratedCodeRange(const void* start, size_t size) {
+  if (HandlesSignalsInCompiledCode()) {
+    fault_manager.RemoveGeneratedCodeRange(start, size);
+  }
 }
 
 bool Runtime::Create(RuntimeArgumentMap&& runtime_options) {
@@ -987,7 +1000,6 @@ bool Runtime::Start() {
     if (!jit::Jit::LoadCompilerLibrary(&error_msg)) {
       LOG(WARNING) << "Failed to load JIT compiler with error " << error_msg;
     }
-    CreateJitCodeCache(/*rwx_memory_allowed=*/true);
     CreateJit();
 #ifdef ADDRESS_SANITIZER
     // (b/238730394): In older implementations of sanitizer + glibc there is a race between
@@ -1561,6 +1573,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
         << (core_platform_api_policy_ == hiddenapi::EnforcementPolicy::kEnabled ? "true" : "false");
   }
 
+  // Dex2Oat's Runtime does not need the signal chain or the fault handler
+  // and it passes the `NoSigChain` option to `Runtime` to indicate this.
   no_sig_chain_ = runtime_options.Exists(Opt::NoSigChain);
   force_native_bridge_ = runtime_options.Exists(Opt::ForceNativeBridge);
 
@@ -1752,31 +1766,34 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
       break;
   }
 
-  if (!no_sig_chain_) {
-    // Dex2Oat's Runtime does not need the signal chain or the fault handler.
-    if (implicit_null_checks_ || implicit_so_checks_ || implicit_suspend_checks_) {
-      fault_manager.Init();
+  if (HandlesSignalsInCompiledCode()) {
+    fault_manager.Init();
 
-      // These need to be in a specific order.  The null point check handler must be
-      // after the suspend check and stack overflow check handlers.
-      //
-      // Note: the instances attach themselves to the fault manager and are handled by it. The
-      //       manager will delete the instance on Shutdown().
-      if (implicit_suspend_checks_) {
-        new SuspensionHandler(&fault_manager);
-      }
+    // These need to be in a specific order.  The null point check handler must be
+    // after the suspend check and stack overflow check handlers.
+    //
+    // Note: the instances attach themselves to the fault manager and are handled by it. The
+    //       manager will delete the instance on Shutdown().
+    if (implicit_suspend_checks_) {
+      new SuspensionHandler(&fault_manager);
+    }
 
-      if (implicit_so_checks_) {
-        new StackOverflowHandler(&fault_manager);
-      }
+    if (implicit_so_checks_) {
+      new StackOverflowHandler(&fault_manager);
+    }
 
-      if (implicit_null_checks_) {
-        new NullPointerHandler(&fault_manager);
-      }
+    if (implicit_null_checks_) {
+      new NullPointerHandler(&fault_manager);
+    }
 
-      if (kEnableJavaStackTraceHandler) {
-        new JavaStackTraceHandler(&fault_manager);
-      }
+    if (kEnableJavaStackTraceHandler) {
+      new JavaStackTraceHandler(&fault_manager);
+    }
+
+    if (interpreter::CanRuntimeUseNterp()) {
+      // Nterp code can use signal handling just like the compiled managed code.
+      OatQuickMethodHeader* nterp_header = OatQuickMethodHeader::NterpMethodHeader;
+      fault_manager.AddGeneratedCodeRange(nterp_header->GetCode(), nterp_header->GetCodeSize());
     }
   }
 
@@ -3002,7 +3019,9 @@ void Runtime::AddCurrentRuntimeFeaturesAsDex2OatArguments(std::vector<std::strin
   }
 }
 
-void Runtime::CreateJitCodeCache(bool rwx_memory_allowed) {
+void Runtime::CreateJit() {
+  DCHECK(jit_code_cache_ == nullptr);
+  DCHECK(jit_ == nullptr);
   if (kIsDebugBuild && GetInstrumentation()->IsForcedInterpretOnly()) {
     DCHECK(!jit_options_->UseJitCompilation());
   }
@@ -3011,28 +3030,19 @@ void Runtime::CreateJitCodeCache(bool rwx_memory_allowed) {
     return;
   }
 
+  if (IsSafeMode()) {
+    LOG(INFO) << "Not creating JIT because of SafeMode.";
+    return;
+  }
+
   std::string error_msg;
   bool profiling_only = !jit_options_->UseJitCompilation();
   jit_code_cache_.reset(jit::JitCodeCache::Create(profiling_only,
-                                                  rwx_memory_allowed,
+                                                  /*rwx_memory_allowed=*/ true,
                                                   IsZygote(),
                                                   &error_msg));
   if (jit_code_cache_.get() == nullptr) {
     LOG(WARNING) << "Failed to create JIT Code Cache: " << error_msg;
-  }
-}
-
-void Runtime::CreateJit() {
-  DCHECK(jit_ == nullptr);
-  if (jit_code_cache_.get() == nullptr) {
-    if (!IsSafeMode()) {
-      LOG(WARNING) << "Missing code cache, cannot create JIT.";
-    }
-    return;
-  }
-  if (IsSafeMode()) {
-    LOG(INFO) << "Not creating JIT because of SafeMode.";
-    jit_code_cache_.reset();
     return;
   }
 
@@ -3369,6 +3379,19 @@ class Runtime::NotifyStartupCompletedTask : public gc::HeapTask {
   void Run(Thread* self) override {
     VLOG(startup) << "NotifyStartupCompletedTask running";
     Runtime* const runtime = Runtime::Current();
+    {
+      std::string compiler_filter;
+      std::string compilation_reason;
+      runtime->GetAppInfo()->GetPrimaryApkOptimizationStatus(&compiler_filter, &compilation_reason);
+      CompilerFilter::Filter filter;
+      if (CompilerFilter::ParseCompilerFilter(compiler_filter.c_str(), &filter) &&
+          !CompilerFilter::IsAotCompilationEnabled(filter)) {
+        std::string error_msg;
+        if (!RuntimeImage::WriteImageToDisk(&error_msg)) {
+          LOG(DEBUG) << "Could not write temporary image to disk " << error_msg;
+        }
+      }
+    }
     // Fetch the startup linear alloc before the checkpoint to play nice with
     // 1002-notify-startup test which resets the startup state.
     std::unique_ptr<LinearAlloc> startup_linear_alloc(runtime->ReleaseStartupLinearAlloc());
