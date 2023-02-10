@@ -299,7 +299,13 @@ class ClassLinker::VisiblyInitializedCallback final
     }
   }
 
-  static constexpr size_t kMaxClasses = 16;
+  // Making classes initialized in bigger batches helps with app startup for
+  // apps that initialize a lot of classes by running fewer checkpoints.
+  // (On the other hand, bigger batches make class initialization checks more
+  // likely to take a slow path but that is mitigated by making partially
+  // filled buffers visibly initialized if we take the slow path many times.
+  // See `Thread::kMakeVisiblyInitializedCounterTriggerCount`.)
+  static constexpr size_t kMaxClasses = 48;
 
   ClassLinker* const class_linker_;
   size_t num_classes_;
@@ -1163,6 +1169,8 @@ void ClassLinker::RunRootClinits(Thread* self) {
       WellKnownClasses::java_lang_invoke_MethodHandles_lookup,
       // Ensure `DirectByteBuffer` class is initialized (avoid check at runtime).
       WellKnownClasses::java_nio_DirectByteBuffer_init,
+      // Ensure `FloatingDecimal` class is initialized (avoid check at runtime).
+      WellKnownClasses::jdk_internal_math_FloatingDecimal_getBinaryToASCIIConverter_D,
       // Ensure reflection annotation classes are initialized (avoid check at runtime).
       WellKnownClasses::libcore_reflect_AnnotationFactory_createAnnotation,
       WellKnownClasses::libcore_reflect_AnnotationMember_init,

@@ -19,8 +19,13 @@ package com.android.server.art;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.SystemApi;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.os.Binder;
 import android.os.Build;
+import android.os.Environment;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.ServiceSpecificException;
@@ -34,6 +39,7 @@ import com.android.internal.annotations.Immutable;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.server.LocalManagerRegistry;
 import com.android.server.art.model.DetailedDexInfo;
+import com.android.server.art.model.DexContainerFileUseInfo;
 import com.android.server.art.proto.DexUseProto;
 import com.android.server.art.proto.Int32Value;
 import com.android.server.art.proto.PackageDexUseProto;
@@ -41,7 +47,6 @@ import com.android.server.art.proto.PrimaryDexUseProto;
 import com.android.server.art.proto.PrimaryDexUseRecordProto;
 import com.android.server.art.proto.SecondaryDexUseProto;
 import com.android.server.art.proto.SecondaryDexUseRecordProto;
-import com.android.server.art.wrapper.Environment;
 import com.android.server.pm.PackageManagerLocal;
 import com.android.server.pm.pkg.AndroidPackage;
 import com.android.server.pm.pkg.PackageState;
@@ -54,7 +59,9 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -62,6 +69,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 
@@ -71,19 +81,37 @@ import java.util.stream.Collectors;
  * This class collects data sent directly by apps, and hence the data should be trusted as little as
  * possible.
  *
+ * To avoid overwriting data, {@link #load()} must be called exactly once, during initialization.
+ *
  * @hide
  */
 @SystemApi(client = SystemApi.Client.SYSTEM_SERVER)
 public class DexUseManagerLocal {
     private static final String TAG = "DexUseManagerLocal";
+    private static final String FILENAME = "/data/system/package-dex-usage.pb";
+
+    /**
+     * The minimum interval between disk writes.
+     *
+     * In practice, the interval will be much longer because we use a debouncer to postpone the disk
+     * write to the end of a series of changes. Note that in theory we could postpone the disk write
+     * indefinitely, and therefore we could lose data if the device isn't shut down in the normal
+     * way, but that's fine because the data isn't crucial and is recoverable.
+     *
+     * @hide
+     */
+    @VisibleForTesting public static final long INTERVAL_MS = 15_000;
 
     private static final Object sLock = new Object();
     @GuardedBy("sLock") @Nullable private static DexUseManagerLocal sInstance = null;
 
     @NonNull private final Injector mInjector;
+    @NonNull private final Debouncer mDebouncer;
 
     private final Object mLock = new Object();
-    @GuardedBy("mLock") @NonNull private DexUse mDexUse = new DexUse();
+    @GuardedBy("mLock") @NonNull private DexUse mDexUse; // Initialized by `load`.
+    @GuardedBy("mLock") private int mRevision = 0;
+    @GuardedBy("mLock") private int mLastCommittedRevision = 0;
 
     /**
      * Creates the singleton instance.
@@ -99,24 +127,57 @@ public class DexUseManagerLocal {
      * @throws IllegalStateException if the instance is already created
      */
     @NonNull
-    public static DexUseManagerLocal createInstance() {
+    public static DexUseManagerLocal createInstance(@NonNull Context context) {
         synchronized (sLock) {
             if (sInstance != null) {
                 throw new IllegalStateException("DexUseManagerLocal is already created");
             }
-            sInstance = new DexUseManagerLocal();
+            sInstance = new DexUseManagerLocal(context);
             return sInstance;
         }
     }
 
-    private DexUseManagerLocal() {
-        this(new Injector());
+    private DexUseManagerLocal(@NonNull Context context) {
+        this(new Injector(context));
     }
 
     /** @hide */
     @VisibleForTesting
     public DexUseManagerLocal(@NonNull Injector injector) {
         mInjector = injector;
+        mDebouncer = new Debouncer(INTERVAL_MS, mInjector::createScheduledExecutor);
+        load();
+    }
+
+    /** Notifies dex use manager that {@link Context#registerReceiver} is ready for use. */
+    public void systemReady() {
+        // Save the data when the device is being shut down. The receiver is blocking, with a
+        // 10s timeout.
+        mInjector.getContext().registerReceiver(new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                context.unregisterReceiver(this);
+                save();
+            }
+        }, new IntentFilter(Intent.ACTION_SHUTDOWN));
+    }
+
+    /**
+     * Returns the information about the use of all secondary dex files owned by the given package,
+     * or an empty list if the package does not own any secondary dex file or it does not exist.
+     */
+    @NonNull
+    public List<DexContainerFileUseInfo> getSecondaryDexContainerFileUseInfo(
+            @NonNull String packageName) {
+        return getSecondaryDexInfo(packageName)
+                .stream()
+                .map(info
+                        -> DexContainerFileUseInfo.create(info.dexPath(), info.userHandle(),
+                                info.loaders()
+                                        .stream()
+                                        .map(loader -> loader.loadingPackageName())
+                                        .collect(Collectors.toSet())))
+                .collect(Collectors.toList());
     }
 
     /**
@@ -124,7 +185,6 @@ public class DexUseManagerLocal {
      *
      * @hide
      */
-    @VisibleForTesting
     @NonNull
     public Set<DexLoader> getPrimaryDexLoaders(
             @NonNull String packageName, @NonNull String dexPath) {
@@ -373,18 +433,18 @@ public class DexUseManagerLocal {
 
     private static boolean isOwningPackageForSecondaryDex(
             @NonNull PackageState pkgState, @NonNull String dexPath) {
-        String volumeUuid =
-                new com.android.server.art.wrapper.PackageState(pkgState).getVolumeUuid();
+        AndroidPackage pkg = Utils.getPackageOrThrow(pkgState);
+        UUID storageUuid = pkg.getStorageUuid();
         UserHandle handle = Binder.getCallingUserHandle();
 
-        File ceDir = Environment.getDataUserCePackageDirectory(
-                volumeUuid, handle.getIdentifier(), pkgState.getPackageName());
+        File ceDir = Environment.getDataCePackageDirectoryForUser(
+                storageUuid, handle, pkgState.getPackageName());
         if (Paths.get(dexPath).startsWith(ceDir.toPath())) {
             return true;
         }
 
-        File deDir = Environment.getDataUserDePackageDirectory(
-                volumeUuid, handle.getIdentifier(), pkgState.getPackageName());
+        File deDir = Environment.getDataDePackageDirectoryForUser(
+                storageUuid, handle, pkgState.getPackageName());
         if (Paths.get(dexPath).startsWith(deDir.toPath())) {
             return true;
         }
@@ -404,7 +464,9 @@ public class DexUseManagerLocal {
                                     DexLoader.create(loadingPackageName, isolatedProcess),
                                     k -> new PrimaryDexUseRecord());
             record.mLastUsedAtMs = lastUsedAtMs;
+            mRevision++;
         }
+        maybeSaveAsync();
     }
 
     private void addSecondaryDexUse(@NonNull String owningPackageName, @NonNull String dexPath,
@@ -423,15 +485,9 @@ public class DexUseManagerLocal {
             record.mClassLoaderContext = classLoaderContext;
             record.mAbiName = abiName;
             record.mLastUsedAtMs = lastUsedAtMs;
+            mRevision++;
         }
-    }
-
-    /** @hide */
-    @VisibleForTesting
-    public void clear() {
-        synchronized (mLock) {
-            mDexUse = new DexUse();
-        }
+        maybeSaveAsync();
     }
 
     /** @hide */
@@ -443,38 +499,81 @@ public class DexUseManagerLocal {
         return builder.build().toString();
     }
 
-    /** @hide */
-    public void save(@NonNull String filename) throws IOException {
-        try (OutputStream out = new FileOutputStream(filename)) {
-            var builder = DexUseProto.newBuilder();
-            synchronized (mLock) {
-                mDexUse.toProto(builder);
+    private void save() {
+        var builder = DexUseProto.newBuilder();
+        int thisRevision;
+        synchronized (mLock) {
+            if (mRevision <= mLastCommittedRevision) {
+                return;
             }
-            builder.build().writeTo(out);
+            mDexUse.toProto(builder);
+            thisRevision = mRevision;
+        }
+        var file = new File(mInjector.getFilename());
+        File tempFile = null;
+        try {
+            tempFile = File.createTempFile(file.getName(), null /* suffix */, file.getParentFile());
+            try (OutputStream out = new FileOutputStream(tempFile.getPath())) {
+                builder.build().writeTo(out);
+            }
+            synchronized (mLock) {
+                // Check revision again in case `mLastCommittedRevision` has changed since the check
+                // above, to avoid ABA race.
+                if (thisRevision > mLastCommittedRevision) {
+                    Files.move(tempFile.toPath(), file.toPath(),
+                            StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                    mLastCommittedRevision = thisRevision;
+                }
+            }
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to save dex use data", e);
+        } finally {
+            Utils.deleteIfExistsSafe(tempFile);
         }
     }
 
-    /** @hide */
-    public void load(@NonNull String filename) throws IOException {
-        try (InputStream in = new FileInputStream(filename)) {
-            var proto = DexUseProto.parseFrom(in);
-            var dexUse = new DexUse();
-            dexUse.fromProto(proto);
-            synchronized (mLock) {
-                mDexUse = dexUse;
+    private void maybeSaveAsync() {
+        mDebouncer.maybeRunAsync(this::save);
+    }
+
+    /** This should only be called during initialization. */
+    private void load() {
+        DexUseProto proto = null;
+        try (InputStream in = new FileInputStream(mInjector.getFilename())) {
+            proto = DexUseProto.parseFrom(in);
+        } catch (IOException e) {
+            // Nothing else we can do but to start from scratch.
+            Log.e(TAG, "Failed to load dex use data", e);
+        }
+        synchronized (mLock) {
+            if (mDexUse != null) {
+                throw new IllegalStateException("Load has already been attempted");
+            }
+            mDexUse = new DexUse();
+            if (proto != null) {
+                mDexUse.fromProto(proto);
             }
         }
     }
 
     private static boolean isUsedByOtherApps(
             @NonNull Set<DexLoader> loaders, @NonNull String owningPackageName) {
+        return loaders.stream().anyMatch(loader -> isLoaderOtherApp(loader, owningPackageName));
+    }
+
+    /**
+     * Returns true if {@code loader} is considered as "other app" (i.e., its process UID is
+     * different from the UID of the package represented by {@code owningPackageName}).
+     *
+     * @hide
+     */
+    public static boolean isLoaderOtherApp(
+            @NonNull DexLoader loader, @NonNull String owningPackageName) {
         // If the dex file is loaded by an isolated process of the same app, it can also be
         // considered as "used by other apps" because isolated processes are sandboxed and can only
         // read world readable files, so they need the optimized artifacts to be world readable. An
         // example of such a package is webview.
-        return loaders.stream().anyMatch(loader
-                -> !loader.loadingPackageName().equals(owningPackageName)
-                        || loader.isolatedProcess());
+        return !loader.loadingPackageName().equals(owningPackageName) || loader.isolatedProcess();
     }
 
     private static void validateInputs(@NonNull PackageManagerLocal.FilteredSnapshot snapshot,
@@ -769,7 +868,11 @@ public class DexUseManagerLocal {
      */
     @VisibleForTesting
     public static class Injector {
-        Injector() {
+        @NonNull private final Context mContext;
+
+        Injector(@NonNull Context context) {
+            mContext = context;
+
             // Call the getters for various dependencies, to ensure correct initialization order.
             ArtModuleServiceInitializer.getArtModuleServiceManager();
         }
@@ -781,6 +884,21 @@ public class DexUseManagerLocal {
 
         public long getCurrentTimeMillis() {
             return System.currentTimeMillis();
+        }
+
+        @NonNull
+        public String getFilename() {
+            return FILENAME;
+        }
+
+        @NonNull
+        public ScheduledExecutorService createScheduledExecutor() {
+            return Executors.newSingleThreadScheduledExecutor();
+        }
+
+        @NonNull
+        public Context getContext() {
+            return mContext;
         }
     }
 }

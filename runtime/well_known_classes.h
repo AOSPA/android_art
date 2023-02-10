@@ -95,6 +95,7 @@ struct WellKnownClasses {
   static jclass dalvik_annotation_optimization_NeverCompile;
   static jclass dalvik_annotation_optimization_NeverInline;
   static jclass java_lang_annotation_Annotation__array;
+  static jclass java_lang_ClassValue;
   static jclass java_lang_reflect_Parameter__array;
   static jclass java_lang_StringFactory;
   static jclass java_lang_System;
@@ -149,6 +150,9 @@ struct WellKnownClasses {
   static ArtMethod* java_nio_Buffer_isDirect;
   static ArtMethod* java_nio_DirectByteBuffer_init;
   static ArtMethod* java_util_function_Consumer_accept;
+  static ArtMethod* jdk_internal_math_FloatingDecimal_getBinaryToASCIIConverter_D;
+  static ArtMethod* jdk_internal_math_FloatingDecimal_getBinaryToASCIIConverter_F;
+  static ArtMethod* jdk_internal_math_FloatingDecimal_BinaryToASCIIBuffer_getChars;
   static ArtMethod* libcore_reflect_AnnotationFactory_createAnnotation;
   static ArtMethod* libcore_reflect_AnnotationMember_init;
   static ArtMethod* org_apache_harmony_dalvik_ddmc_DdmServer_broadcast;
@@ -192,8 +196,9 @@ struct WellKnownClasses {
   static ArtField* java_nio_ByteBuffer_hb;
   static ArtField* java_nio_ByteBuffer_isReadOnly;
   static ArtField* java_nio_ByteBuffer_offset;
-
   static ArtField* java_util_Collections_EMPTY_LIST;
+  static ArtField* jdk_internal_math_FloatingDecimal_BinaryToASCIIBuffer_buffer;
+  static ArtField* jdk_internal_math_FloatingDecimal_ExceptionalBinaryToASCIIBuffer_image;
   static ArtField* libcore_util_EmptyArray_STACK_TRACE_ELEMENT;
   static ArtField* org_apache_harmony_dalvik_ddmc_Chunk_data;
   static ArtField* org_apache_harmony_dalvik_ddmc_Chunk_length;

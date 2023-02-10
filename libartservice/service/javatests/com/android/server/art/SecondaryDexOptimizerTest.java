@@ -17,7 +17,6 @@
 package com.android.server.art;
 
 import static com.android.server.art.DexUseManagerLocal.DetailedSecondaryDexInfo;
-import static com.android.server.art.DexUseManagerLocal.SecondaryDexInfo;
 import static com.android.server.art.GetDexoptNeededResult.ArtifactsLocation;
 import static com.android.server.art.OutputArtifacts.PermissionSettings;
 import static com.android.server.art.model.OptimizeResult.DexContainerFileOptimizeResult;
@@ -164,22 +163,22 @@ public class SecondaryDexOptimizerTest {
         assertThat(mSecondaryDexOptimizer.dexopt())
                 .comparingElementsUsing(TestingUtils.<DexContainerFileOptimizeResult>deepEquality())
                 .containsExactly(
-                        new DexContainerFileOptimizeResult(DEX_1, true /* isPrimaryAbi */,
+                        DexContainerFileOptimizeResult.create(DEX_1, true /* isPrimaryAbi */,
                                 "arm64-v8a", "speed-profile", OptimizeResult.OPTIMIZE_PERFORMED,
                                 0 /* dex2oatWallTimeMillis */, 0 /* dex2oatCpuTimeMillis */,
                                 0 /* sizeBytes */, 0 /* sizeBeforeBytes */,
                                 false /* isSkippedDueToStorageLow */),
-                        new DexContainerFileOptimizeResult(DEX_2, true /* isPrimaryAbi */,
+                        DexContainerFileOptimizeResult.create(DEX_2, true /* isPrimaryAbi */,
                                 "arm64-v8a", "speed", OptimizeResult.OPTIMIZE_PERFORMED,
                                 0 /* dex2oatWallTimeMillis */, 0 /* dex2oatCpuTimeMillis */,
                                 0 /* sizeBytes */, 0 /* sizeBeforeBytes */,
                                 false /* isSkippedDueToStorageLow */),
-                        new DexContainerFileOptimizeResult(DEX_2, false /* isPrimaryAbi */,
+                        DexContainerFileOptimizeResult.create(DEX_2, false /* isPrimaryAbi */,
                                 "armeabi-v7a", "speed", OptimizeResult.OPTIMIZE_PERFORMED,
                                 0 /* dex2oatWallTimeMillis */, 0 /* dex2oatCpuTimeMillis */,
                                 0 /* sizeBytes */, 0 /* sizeBeforeBytes */,
                                 false /* isSkippedDueToStorageLow */),
-                        new DexContainerFileOptimizeResult(DEX_3, true /* isPrimaryAbi */,
+                        DexContainerFileOptimizeResult.create(DEX_3, true /* isPrimaryAbi */,
                                 "arm64-v8a", "verify", OptimizeResult.OPTIMIZE_PERFORMED,
                                 0 /* dex2oatWallTimeMillis */, 0 /* dex2oatCpuTimeMillis */,
                                 0 /* sizeBytes */, 0 /* sizeBeforeBytes */,
@@ -237,20 +236,14 @@ public class SecondaryDexOptimizerTest {
     }
 
     private PackageState createPackageState() {
-        // TODO(b/254029037): Change PackageSetting to PackageState.
-        var pkgState = mock(PackageSetting.class);
+        var pkgState = mock(PackageState.class);
         lenient().when(pkgState.getPackageName()).thenReturn(PKG_NAME);
         lenient().when(pkgState.getPrimaryCpuAbi()).thenReturn("arm64-v8a");
         lenient().when(pkgState.getSecondaryCpuAbi()).thenReturn("armeabi-v7a");
         lenient().when(pkgState.getAppId()).thenReturn(APP_ID);
+        lenient().when(pkgState.getSeInfo()).thenReturn("se-info");
         AndroidPackage pkg = createPackage();
         lenient().when(pkgState.getAndroidPackage()).thenReturn(pkg);
-
-        // TODO(b/254029037): Mock the real API instead of the hidden API.
-        var transientState = mock(PackageStateUnserialized.class);
-        lenient().when(transientState.getOverrideSeInfo()).thenReturn("se-info");
-        lenient().when(pkgState.getTransientState()).thenReturn(transientState);
-
         return pkgState;
     }
 

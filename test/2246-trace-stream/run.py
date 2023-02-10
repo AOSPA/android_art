@@ -16,7 +16,7 @@
 
 
 def run(ctx, args):
-  # The expected output is different in debuggable and non debuggable. Just
-  # enable debuggable for now.
-  # TODO(mythria): Also add tests for non-debuggable mode.
-  ctx.default_run(args, Xcompiler_option=["--debuggable"])
+  # The expected output non debuggable isn't consistent in all configurations.
+  # Investigate why the output is different and update the test to work for non
+  # debuggable runtimes too.
+  ctx.default_run(args,  Xcompiler_option=["--debuggable"])
