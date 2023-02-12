@@ -47,6 +47,7 @@ template <typename T> class Handle;
 template <typename T> class MutableHandle;
 struct NthCallerVisitor;
 union JValue;
+class OatQuickMethodHeader;
 class SHARED_LOCKABLE ReaderWriterMutex;
 class ShadowFrame;
 class Thread;
@@ -240,6 +241,11 @@ class Instrumentation {
 
   // Calls UndeoptimizeEverything which may visit class linker classes through ConfigureStubs.
   void DisableDeoptimization(const char* key)
+      REQUIRES(Locks::mutator_lock_, Roles::uninterruptible_);
+
+  // Enables entry exit hooks support. This is called in preparation for debug requests that require
+  // calling method entry / exit hooks.
+  void EnableEntryExitHooks(const char* key)
       REQUIRES(Locks::mutator_lock_, Roles::uninterruptible_);
 
   bool AreAllMethodsDeoptimized() const {
@@ -602,6 +608,9 @@ class Instrumentation {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   InstrumentationLevel GetCurrentInstrumentationLevel() const;
+
+  bool MethodSupportsExitEvents(ArtMethod* method, const OatQuickMethodHeader* header)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
  private:
   // Returns true if moving to the given instrumentation level requires the installation of stubs.

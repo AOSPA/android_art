@@ -50,6 +50,7 @@ jclass WellKnownClasses::dalvik_annotation_optimization_FastNative;
 jclass WellKnownClasses::dalvik_annotation_optimization_NeverCompile;
 jclass WellKnownClasses::dalvik_annotation_optimization_NeverInline;
 jclass WellKnownClasses::java_lang_annotation_Annotation__array;
+jclass WellKnownClasses::java_lang_ClassValue;
 jclass WellKnownClasses::java_lang_reflect_Parameter__array;
 jclass WellKnownClasses::java_lang_StringFactory;
 jclass WellKnownClasses::java_lang_System;
@@ -104,6 +105,9 @@ ArtMethod* WellKnownClasses::java_lang_reflect_Proxy_invoke;
 ArtMethod* WellKnownClasses::java_nio_Buffer_isDirect;
 ArtMethod* WellKnownClasses::java_nio_DirectByteBuffer_init;
 ArtMethod* WellKnownClasses::java_util_function_Consumer_accept;
+ArtMethod* WellKnownClasses::jdk_internal_math_FloatingDecimal_getBinaryToASCIIConverter_D;
+ArtMethod* WellKnownClasses::jdk_internal_math_FloatingDecimal_getBinaryToASCIIConverter_F;
+ArtMethod* WellKnownClasses::jdk_internal_math_FloatingDecimal_BinaryToASCIIBuffer_getChars;
 ArtMethod* WellKnownClasses::libcore_reflect_AnnotationFactory_createAnnotation;
 ArtMethod* WellKnownClasses::libcore_reflect_AnnotationMember_init;
 ArtMethod* WellKnownClasses::org_apache_harmony_dalvik_ddmc_DdmServer_broadcast;
@@ -148,6 +152,8 @@ ArtField* WellKnownClasses::java_nio_ByteBuffer_hb;
 ArtField* WellKnownClasses::java_nio_ByteBuffer_isReadOnly;
 ArtField* WellKnownClasses::java_nio_ByteBuffer_offset;
 ArtField* WellKnownClasses::java_util_Collections_EMPTY_LIST;
+ArtField* WellKnownClasses::jdk_internal_math_FloatingDecimal_BinaryToASCIIBuffer_buffer;
+ArtField* WellKnownClasses::jdk_internal_math_FloatingDecimal_ExceptionalBinaryToASCIIBuffer_image;
 ArtField* WellKnownClasses::libcore_util_EmptyArray_STACK_TRACE_ELEMENT;
 ArtField* WellKnownClasses::org_apache_harmony_dalvik_ddmc_Chunk_data;
 ArtField* WellKnownClasses::org_apache_harmony_dalvik_ddmc_Chunk_length;
@@ -318,6 +324,7 @@ void WellKnownClasses::Init(JNIEnv* env) {
       CacheClass(env, "dalvik/annotation/optimization/NeverInline");
 
   java_lang_annotation_Annotation__array = CacheClass(env, "[Ljava/lang/annotation/Annotation;");
+  java_lang_ClassValue = CacheClass(env, "java/lang/ClassValue");
   java_lang_reflect_Parameter__array = CacheClass(env, "[Ljava/lang/reflect/Parameter;");
   java_lang_StringFactory = CacheClass(env, "java/lang/StringFactory");
   java_lang_System = CacheClass(env, "java/lang/System");
@@ -352,7 +359,7 @@ void WellKnownClasses::InitFieldsAndMethodsOnly(JNIEnv* env) {
   java_lang_Short_valueOf =
       CachePrimitiveBoxingMethod(class_linker, self, 'S', "Ljava/lang/Short;");
 
-  StackHandleScope<39u> hs(self);
+  StackHandleScope<42u> hs(self);
   Handle<mirror::Class> d_s_bdcl =
       hs.NewHandle(FindSystemClass(class_linker, self, "Ldalvik/system/BaseDexClassLoader;"));
   Handle<mirror::Class> d_s_dlcl =
@@ -421,6 +428,12 @@ void WellKnownClasses::InitFieldsAndMethodsOnly(JNIEnv* env) {
       hs.NewHandle(FindSystemClass(class_linker, self, "Ljava/util/Collections;"));
   Handle<mirror::Class> j_u_f_c =
       hs.NewHandle(FindSystemClass(class_linker, self, "Ljava/util/function/Consumer;"));
+  Handle<mirror::Class> j_i_m_fd =
+      hs.NewHandle(FindSystemClass(class_linker, self, "Ljdk/internal/math/FloatingDecimal;"));
+  Handle<mirror::Class> j_i_m_fd_btab = hs.NewHandle(FindSystemClass(
+      class_linker, self, "Ljdk/internal/math/FloatingDecimal$BinaryToASCIIBuffer;"));
+  Handle<mirror::Class> j_i_m_fd_ebtab = hs.NewHandle(FindSystemClass(
+      class_linker, self, "Ljdk/internal/math/FloatingDecimal$ExceptionalBinaryToASCIIBuffer;"));
   Handle<mirror::Class> l_r_af =
       hs.NewHandle(FindSystemClass(class_linker, self, "Llibcore/reflect/AnnotationFactory;"));
   Handle<mirror::Class> l_r_am =
@@ -604,6 +617,21 @@ void WellKnownClasses::InitFieldsAndMethodsOnly(JNIEnv* env) {
   java_util_function_Consumer_accept = CacheMethod(
       j_u_f_c.Get(), /*is_static=*/ false, "accept", "(Ljava/lang/Object;)V", pointer_size);
 
+  jdk_internal_math_FloatingDecimal_getBinaryToASCIIConverter_D = CacheMethod(
+      j_i_m_fd.Get(),
+      /*is_static=*/ true,
+      "getBinaryToASCIIConverter",
+      "(D)Ljdk/internal/math/FloatingDecimal$BinaryToASCIIConverter;",
+      pointer_size);
+  jdk_internal_math_FloatingDecimal_getBinaryToASCIIConverter_F = CacheMethod(
+      j_i_m_fd.Get(),
+      /*is_static=*/ true,
+      "getBinaryToASCIIConverter",
+      "(F)Ljdk/internal/math/FloatingDecimal$BinaryToASCIIConverter;",
+      pointer_size);
+  jdk_internal_math_FloatingDecimal_BinaryToASCIIBuffer_getChars =
+      CacheMethod(j_i_m_fd_btab.Get(), /*is_static=*/ false, "getChars", "([C)I", pointer_size);
+
   libcore_reflect_AnnotationFactory_createAnnotation = CacheMethod(
       l_r_af.Get(),
       /*is_static=*/ true,
@@ -712,6 +740,11 @@ void WellKnownClasses::InitFieldsAndMethodsOnly(JNIEnv* env) {
   java_util_Collections_EMPTY_LIST =
       CacheField(j_u_c.Get(), /*is_static=*/ true, "EMPTY_LIST", "Ljava/util/List;");
 
+  jdk_internal_math_FloatingDecimal_BinaryToASCIIBuffer_buffer =
+      CacheField(j_i_m_fd_btab.Get(), /*is_static=*/ false, "buffer", "[C");
+  jdk_internal_math_FloatingDecimal_ExceptionalBinaryToASCIIBuffer_image = CacheField(
+      j_i_m_fd_ebtab.Get(), /*is_static=*/ false, "image", "Ljava/lang/String;");
+
   libcore_util_EmptyArray_STACK_TRACE_ELEMENT = CacheField(
       l_u_ea.Get(), /*is_static=*/ true, "STACK_TRACE_ELEMENT", "[Ljava/lang/StackTraceElement;");
 
@@ -765,6 +798,7 @@ void WellKnownClasses::Clear() {
   dalvik_annotation_optimization_NeverCompile = nullptr;
   dalvik_annotation_optimization_NeverInline = nullptr;
   java_lang_annotation_Annotation__array = nullptr;
+  java_lang_ClassValue = nullptr;
   java_lang_reflect_Parameter__array = nullptr;
   java_lang_StringFactory = nullptr;
   java_lang_System = nullptr;
@@ -819,6 +853,9 @@ void WellKnownClasses::Clear() {
   java_lang_reflect_Proxy_invoke = nullptr;
   java_nio_Buffer_isDirect = nullptr;
   java_nio_DirectByteBuffer_init = nullptr;
+  jdk_internal_math_FloatingDecimal_getBinaryToASCIIConverter_D = nullptr;
+  jdk_internal_math_FloatingDecimal_getBinaryToASCIIConverter_F = nullptr;
+  jdk_internal_math_FloatingDecimal_BinaryToASCIIBuffer_getChars = nullptr;
   libcore_reflect_AnnotationFactory_createAnnotation = nullptr;
   libcore_reflect_AnnotationMember_init = nullptr;
   org_apache_harmony_dalvik_ddmc_DdmServer_broadcast = nullptr;
@@ -857,6 +894,8 @@ void WellKnownClasses::Clear() {
   java_nio_ByteBuffer_isReadOnly = nullptr;
   java_nio_ByteBuffer_offset = nullptr;
   java_util_Collections_EMPTY_LIST = nullptr;
+  jdk_internal_math_FloatingDecimal_BinaryToASCIIBuffer_buffer = nullptr;
+  jdk_internal_math_FloatingDecimal_ExceptionalBinaryToASCIIBuffer_image = nullptr;
   libcore_util_EmptyArray_STACK_TRACE_ELEMENT = nullptr;
   org_apache_harmony_dalvik_ddmc_Chunk_data = nullptr;
   org_apache_harmony_dalvik_ddmc_Chunk_length = nullptr;

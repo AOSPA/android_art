@@ -47,6 +47,7 @@ cc_defaults {
     ],
     static_libs: [
         "libc++fs",
+        "libmodules-utils-build",
     ],
     tidy: true,
     tidy_disabled_srcs: [":art-apex-cache-info"],
@@ -122,6 +123,7 @@ art_cc_binary {
     local_include_dirs: ["include"],
     header_libs: ["libbase_headers"],
     srcs: ["odrefresh_broken.cc"],
+    installable: false,
     apex_available: ["test_jitzygote_com.android.art"],
 }
 

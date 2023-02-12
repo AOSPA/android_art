@@ -22,6 +22,7 @@ import static com.android.server.art.DexUseManagerLocal.SecondaryDexInfo;
 
 import static com.google.common.truth.Truth.assertThat;
 
+import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.argThat;
 import static org.mockito.Mockito.eq;
@@ -29,15 +30,22 @@ import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
 import android.os.Binder;
+import android.os.Environment;
 import android.os.Process;
 import android.os.SystemProperties;
 import android.os.UserHandle;
+import android.os.storage.StorageManager;
 
 import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
+import com.android.server.art.model.DexContainerFileUseInfo;
+import com.android.server.art.testing.MockClock;
 import com.android.server.art.testing.StaticMockitoRule;
-import com.android.server.art.wrapper.Environment;
 import com.android.server.pm.PackageManagerLocal;
 import com.android.server.pm.pkg.AndroidPackage;
 import com.android.server.pm.pkg.AndroidPackageSplit;
@@ -49,9 +57,7 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
-import org.junit.runners.Parameterized.Parameter;
-import org.junit.runners.Parameterized.Parameters;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 
 import java.io.File;
@@ -60,9 +66,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 @SmallTest
-@RunWith(Parameterized.class)
+@RunWith(AndroidJUnit4.class)
 public class DexUseManagerTest {
     private static final String LOADING_PKG_NAME = "com.example.loadingpackage";
     private static final String OWNING_PKG_NAME = "com.example.owningpackage";
@@ -72,8 +79,6 @@ public class DexUseManagerTest {
     @Rule
     public StaticMockitoRule mockitoRule =
             new StaticMockitoRule(SystemProperties.class, Constants.class, Process.class);
-
-    @Parameter(0) public String mVolumeUuid;
 
     private final UserHandle mUserHandle = Binder.getCallingUserHandle();
 
@@ -87,17 +92,12 @@ public class DexUseManagerTest {
     @Mock private PackageManagerLocal.FilteredSnapshot mSnapshot;
     @Mock private DexUseManagerLocal.Injector mInjector;
     @Mock private IArtd mArtd;
+    @Mock private Context mContext;
     private DexUseManagerLocal mDexUseManager;
     private String mCeDir;
     private String mDeDir;
-
-    @Parameters(name = "volumeUuid={0}")
-    public static Iterable<? extends Object> data() {
-        List<String> volumeUuids = new ArrayList<>();
-        volumeUuids.add(null);
-        volumeUuids.add("volume-abcd");
-        return volumeUuids;
-    }
+    private MockClock mMockClock;
+    private ArgumentCaptor<BroadcastReceiver> mBroadcastReceiverCaptor;
 
     @Before
     public void setUp() throws Exception {
@@ -122,19 +122,34 @@ public class DexUseManagerTest {
                 .thenReturn(
                         Map.of(LOADING_PKG_NAME, loadingPkgState, OWNING_PKG_NAME, owningPkgState));
 
+        mBroadcastReceiverCaptor = ArgumentCaptor.forClass(BroadcastReceiver.class);
+        lenient()
+                .when(mContext.registerReceiver(mBroadcastReceiverCaptor.capture(), any()))
+                .thenReturn(mock(Intent.class));
+
         mCeDir = Environment
-                         .getDataUserCePackageDirectory(mVolumeUuid,
-                                 Binder.getCallingUserHandle().getIdentifier(), OWNING_PKG_NAME)
+                         .getDataCePackageDirectoryForUser(StorageManager.UUID_DEFAULT,
+                                 Binder.getCallingUserHandle(), OWNING_PKG_NAME)
                          .toString();
         mDeDir = Environment
-                         .getDataUserDePackageDirectory(mVolumeUuid,
-                                 Binder.getCallingUserHandle().getIdentifier(), OWNING_PKG_NAME)
+                         .getDataDePackageDirectoryForUser(StorageManager.UUID_DEFAULT,
+                                 Binder.getCallingUserHandle(), OWNING_PKG_NAME)
                          .toString();
+        mMockClock = new MockClock();
+
+        File tempFile = File.createTempFile("package-dex-usage", ".pb");
+        tempFile.deleteOnExit();
 
         lenient().when(mInjector.getArtd()).thenReturn(mArtd);
         lenient().when(mInjector.getCurrentTimeMillis()).thenReturn(0l);
+        lenient().when(mInjector.getFilename()).thenReturn(tempFile.getPath());
+        lenient()
+                .when(mInjector.createScheduledExecutor())
+                .thenAnswer(invocation -> mMockClock.createScheduledExecutor());
+        lenient().when(mInjector.getContext()).thenReturn(mContext);
 
         mDexUseManager = new DexUseManagerLocal(mInjector);
+        mDexUseManager.systemReady();
     }
 
     @Test
@@ -197,16 +212,23 @@ public class DexUseManagerTest {
     /** Checks that it ignores and dedups things correctly. */
     @Test
     public void testPrimaryDexMultipleEntries() throws Exception {
-        verifyPrimaryDexMultipleEntries(false /* saveAndLoad */);
+        verifyPrimaryDexMultipleEntries(false /* saveAndLoad */, false /* shutdown */);
     }
 
-    /** Checks that it saves and loads data correctly. */
+    /** Checks that it saves data after some time has passed and loads data correctly. */
     @Test
     public void testPrimaryDexMultipleEntriesPersisted() throws Exception {
-        verifyPrimaryDexMultipleEntries(true /*saveAndLoad */);
+        verifyPrimaryDexMultipleEntries(true /*saveAndLoad */, false /* shutdown */);
     }
 
-    private void verifyPrimaryDexMultipleEntries(boolean saveAndLoad) throws Exception {
+    /** Checks that it saves data when the device is being shutdown and loads data correctly. */
+    @Test
+    public void testPrimaryDexMultipleEntriesPersistedDueToShutdown() throws Exception {
+        verifyPrimaryDexMultipleEntries(true /*saveAndLoad */, true /* shutdown */);
+    }
+
+    private void verifyPrimaryDexMultipleEntries(boolean saveAndLoad, boolean shutdown)
+            throws Exception {
         when(mInjector.getCurrentTimeMillis()).thenReturn(1000l);
 
         // These should be ignored.
@@ -234,11 +256,13 @@ public class DexUseManagerTest {
                 mSnapshot, OWNING_PKG_NAME, Map.of(BASE_APK, "CLC"));
 
         if (saveAndLoad) {
-            File tempFile = File.createTempFile("dex-use", ".pb");
-            tempFile.deleteOnExit();
-            mDexUseManager.save(tempFile.getPath());
-            mDexUseManager.clear();
-            mDexUseManager.load(tempFile.getPath());
+            if (shutdown) {
+                mBroadcastReceiverCaptor.getValue().onReceive(mContext, mock(Intent.class));
+            } else {
+                // MockClock runs tasks synchronously.
+                mMockClock.advanceTime(DexUseManagerLocal.INTERVAL_MS);
+            }
+            mDexUseManager = new DexUseManagerLocal(mInjector);
         }
 
         assertThat(mDexUseManager.getPrimaryDexLoaders(OWNING_PKG_NAME, BASE_APK))
@@ -335,16 +359,23 @@ public class DexUseManagerTest {
     /** Checks that it ignores and dedups things correctly. */
     @Test
     public void testSecondaryDexMultipleEntries() throws Exception {
-        verifySecondaryDexMultipleEntries(false /*saveAndLoad */);
+        verifySecondaryDexMultipleEntries(false /*saveAndLoad */, false /* shutdown */);
     }
 
-    /** Checks that it saves and loads data correctly. */
+    /** Checks that it saves data after some time has passed and loads data correctly. */
     @Test
     public void testSecondaryDexMultipleEntriesPersisted() throws Exception {
-        verifySecondaryDexMultipleEntries(true /*saveAndLoad */);
+        verifySecondaryDexMultipleEntries(true /*saveAndLoad */, false /* shutdown */);
     }
 
-    private void verifySecondaryDexMultipleEntries(boolean saveAndLoad) throws Exception {
+    /** Checks that it saves data when the device is being shutdown and loads data correctly. */
+    @Test
+    public void testSecondaryDexMultipleEntriesPersistedDueToShutdown() throws Exception {
+        verifySecondaryDexMultipleEntries(true /*saveAndLoad */, true /* shutdown */);
+    }
+
+    private void verifySecondaryDexMultipleEntries(boolean saveAndLoad, boolean shutdown)
+            throws Exception {
         when(mInjector.getCurrentTimeMillis()).thenReturn(1000l);
 
         // These should be ignored.
@@ -380,11 +411,13 @@ public class DexUseManagerTest {
                 Map.of(mCeDir + "/foo.apk", SecondaryDexInfo.UNSUPPORTED_CLASS_LOADER_CONTEXT));
 
         if (saveAndLoad) {
-            File tempFile = File.createTempFile("dex-use", ".pb");
-            tempFile.deleteOnExit();
-            mDexUseManager.save(tempFile.getPath());
-            mDexUseManager.clear();
-            mDexUseManager.load(tempFile.getPath());
+            if (shutdown) {
+                mBroadcastReceiverCaptor.getValue().onReceive(mContext, mock(Intent.class));
+            } else {
+                // MockClock runs tasks synchronously.
+                mMockClock.advanceTime(DexUseManagerLocal.INTERVAL_MS);
+            }
+            mDexUseManager = new DexUseManagerLocal(mInjector);
         }
 
         List<? extends SecondaryDexInfo> dexInfoList =
@@ -413,6 +446,14 @@ public class DexUseManagerTest {
                                 Set.of(DexLoader.create(
                                         OWNING_PKG_NAME, false /* isolatedProcess */)),
                                 false /* isUsedByOtherApps */, mDefaultIsDexFilePublic));
+
+        assertThat(mDexUseManager.getSecondaryDexContainerFileUseInfo(OWNING_PKG_NAME))
+                .containsExactly(DexContainerFileUseInfo.create(mCeDir + "/foo.apk", mUserHandle,
+                                         Set.of(OWNING_PKG_NAME, LOADING_PKG_NAME)),
+                        DexContainerFileUseInfo.create(mCeDir + "/bar.apk", mUserHandle,
+                                Set.of(OWNING_PKG_NAME, LOADING_PKG_NAME)),
+                        DexContainerFileUseInfo.create(
+                                mCeDir + "/baz.apk", mUserHandle, Set.of(OWNING_PKG_NAME)));
 
         assertThat(mDexUseManager.getPackageLastUsedAtMs(OWNING_PKG_NAME)).isEqualTo(2000l);
     }
@@ -511,8 +552,26 @@ public class DexUseManagerTest {
         mDexUseManager.notifyDexContainersLoaded(mSnapshot, OWNING_PKG_NAME, map);
     }
 
+    @Test
+    public void testFileNotFound() {
+        // It should fail to load the file.
+        when(mInjector.getFilename()).thenReturn("/nonexisting/file");
+        mDexUseManager = new DexUseManagerLocal(mInjector);
+
+        // Add some arbitrary data to see if it works fine after a failed load.
+        mDexUseManager.notifyDexContainersLoaded(
+                mSnapshot, LOADING_PKG_NAME, Map.of(mCeDir + "/foo.apk", "CLC"));
+
+        assertThat(mDexUseManager.getSecondaryDexInfo(OWNING_PKG_NAME))
+                .containsExactly(DetailedSecondaryDexInfo.create(mCeDir + "/foo.apk", mUserHandle,
+                        "CLC", Set.of("armeabi-v7a"),
+                        Set.of(DexLoader.create(LOADING_PKG_NAME, false /* isolatedProcess */)),
+                        true /* isUsedByOtherApps */, mDefaultIsDexFilePublic));
+    }
+
     private AndroidPackage createPackage(String packageName) {
         AndroidPackage pkg = mock(AndroidPackage.class);
+        lenient().when(pkg.getStorageUuid()).thenReturn(StorageManager.UUID_DEFAULT);
 
         var baseSplit = mock(AndroidPackageSplit.class);
         lenient().when(baseSplit.getPath()).thenReturn("/data/app/" + packageName + "/base.apk");
@@ -535,7 +594,6 @@ public class DexUseManagerTest {
         AndroidPackage pkg = createPackage(packageName);
         lenient().when(pkgState.getAndroidPackage()).thenReturn(pkg);
         lenient().when(pkgState.getPrimaryCpuAbi()).thenReturn(primaryAbi);
-        lenient().when(pkgState.getVolumeUuid()).thenReturn(mVolumeUuid);
         return pkgState;
     }
 }

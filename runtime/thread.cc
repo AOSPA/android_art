@@ -134,7 +134,7 @@ namespace art {
 using android::base::StringAppendV;
 using android::base::StringPrintf;
 
-extern "C" NO_RETURN void artDeoptimize(Thread* self);
+extern "C" NO_RETURN void artDeoptimize(Thread* self, bool skip_method_exit_callbacks);
 
 bool Thread::is_started_ = false;
 pthread_key_t Thread::pthread_key_self_;
@@ -3872,7 +3872,7 @@ void Thread::DumpThreadOffset(std::ostream& os, uint32_t offset) {
   os << offset;
 }
 
-void Thread::QuickDeliverException(bool is_method_exit_exception) {
+void Thread::QuickDeliverException(bool skip_method_exit_callbacks) {
   // Get exception from thread.
   ObjPtr<mirror::Throwable> exception = GetException();
   CHECK(exception != nullptr);
@@ -3880,7 +3880,7 @@ void Thread::QuickDeliverException(bool is_method_exit_exception) {
     // This wasn't a real exception, so just clear it here. If there was an actual exception it
     // will be recorded in the DeoptimizationContext and it will be restored later.
     ClearException();
-    artDeoptimize(this);
+    artDeoptimize(this, skip_method_exit_callbacks);
     UNREACHABLE();
   }
 
@@ -3902,36 +3902,7 @@ void Thread::QuickDeliverException(bool is_method_exit_exception) {
   // deoptimization. It may happen if a debugger is attached and requests new events (single-step,
   // breakpoint, ...) when the exception is reported.
   //
-  // Note we need to check for both force_frame_pop and force_retry_instruction. The first is
-  // expected to happen fairly regularly but the second can only happen if we are using
-  // instrumentation trampolines (for example with DDMS tracing). That forces us to do deopt later
-  // and see every frame being popped. We don't need to handle it any differently.
-  ShadowFrame* cf;
-  bool force_deopt = false;
-  if (Runtime::Current()->AreNonStandardExitsEnabled() || kIsDebugBuild) {
-    NthCallerVisitor visitor(this, 0, false);
-    visitor.WalkStack();
-    cf = visitor.GetCurrentShadowFrame();
-    if (cf == nullptr) {
-      cf = FindDebuggerShadowFrame(visitor.GetFrameId());
-    }
-    bool force_frame_pop = cf != nullptr && cf->GetForcePopFrame();
-    bool force_retry_instr = cf != nullptr && cf->GetForceRetryInstruction();
-    if (kIsDebugBuild && force_frame_pop) {
-      DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
-      NthCallerVisitor penultimate_visitor(this, 1, false);
-      penultimate_visitor.WalkStack();
-      ShadowFrame* penultimate_frame = penultimate_visitor.GetCurrentShadowFrame();
-      if (penultimate_frame == nullptr) {
-        penultimate_frame = FindDebuggerShadowFrame(penultimate_visitor.GetFrameId());
-      }
-    }
-    if (force_retry_instr) {
-      DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
-    }
-    force_deopt = force_frame_pop || force_retry_instr;
-  }
-  if (Dbg::IsForcedInterpreterNeededForException(this) || force_deopt || IsForceInterpreter()) {
+    if (Dbg::IsForcedInterpreterNeededForException(this) || IsForceInterpreter()) {
     NthCallerVisitor visitor(this, 0, false);
     visitor.WalkStack();
     if (visitor.GetCurrentQuickFrame() != nullptr) {
@@ -3940,21 +3911,13 @@ void Thread::QuickDeliverException(bool is_method_exit_exception) {
         const DeoptimizationMethodType method_type = DeoptimizationMethodType::kDefault;
         // Save the exception into the deoptimization context so it can be restored
         // before entering the interpreter.
-        if (force_deopt) {
-          VLOG(deopt) << "Deopting " << cf->GetMethod()->PrettyMethod() << " for frame-pop";
-          DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
-          // Get rid of the exception since we are doing a framepop instead.
-          LOG(WARNING) << "Suppressing pending exception for retry-instruction/frame-pop: "
-                       << exception->Dump();
-          ClearException();
-        }
         PushDeoptimizationContext(
             JValue(),
             /* is_reference= */ false,
-            (force_deopt ? nullptr : exception),
+            exception,
             /* from_code= */ false,
             method_type);
-        artDeoptimize(this);
+        artDeoptimize(this, skip_method_exit_callbacks);
         UNREACHABLE();
       } else {
         LOG(WARNING) << "Got a deoptimization request on un-deoptimizable method "
@@ -3970,7 +3933,7 @@ void Thread::QuickDeliverException(bool is_method_exit_exception) {
   // resolution.
   ClearException();
   QuickExceptionHandler exception_handler(this, false);
-  exception_handler.FindCatch(exception, is_method_exit_exception);
+  exception_handler.FindCatch(exception, skip_method_exit_callbacks);
   if (exception_handler.GetClearException()) {
     // Exception was cleared as part of delivery.
     DCHECK(!IsExceptionPending());

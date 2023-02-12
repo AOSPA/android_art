@@ -55,7 +55,7 @@
 #include "thread_list.h"
 
 namespace art {
-extern "C" NO_RETURN void artDeoptimize(Thread* self);
+extern "C" NO_RETURN void artDeoptimize(Thread* self, bool skip_method_exit_callbacks);
 extern "C" NO_RETURN void artDeliverPendingExceptionFromCode(Thread* self);
 
 namespace instrumentation {
@@ -211,41 +211,42 @@ static bool IsProxyInit(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_)
 
 // Returns true if we need entry exit stub to call entry hooks. JITed code
 // directly call entry / exit hooks and don't need the stub.
-static bool CodeNeedsEntryExitStub(const void* entry_point, ArtMethod* method)
+static bool CodeSupportsEntryExitHooks(const void* entry_point, ArtMethod* method)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  // Proxy.init should never have entry/exit stubs.
+  // Proxy.init should always run with the switch interpreter where entry / exit hooks are
+  // supported.
   if (IsProxyInit(method)) {
-    return false;
+    return true;
   }
 
-  // In some tests runtime isn't setup fully and hence the entry points could
-  // be nullptr.
+  // In some tests runtime isn't setup fully and hence the entry points could be nullptr.
+  // just be conservative and return false here.
   if (entry_point == nullptr) {
-    return true;
+    return false;
   }
 
   // Code running in the interpreter doesn't need entry/exit stubs.
   if (Runtime::Current()->GetClassLinker()->IsQuickToInterpreterBridge(entry_point)) {
-    return false;
+    return true;
   }
 
   // When jiting code for debuggable runtimes / instrumentation is active  we generate the code to
-  // call method entry / exit hooks when required. Hence it is not required to update to
-  // instrumentation entry point for JITed code in debuggable mode.
+  // call method entry / exit hooks when required.
   jit::Jit* jit = Runtime::Current()->GetJit();
   if (jit != nullptr && jit->GetCodeCache()->ContainsPc(entry_point)) {
-    // If JITed code was compiled with instrumentation support we don't need entry / exit stub.
+    // If JITed code was compiled with instrumentation support we support entry / exit hooks.
     OatQuickMethodHeader* header = OatQuickMethodHeader::FromEntryPoint(entry_point);
-    return !CodeInfo::IsDebuggable(header->GetOptimizedCodeInfoPtr());
+    return CodeInfo::IsDebuggable(header->GetOptimizedCodeInfoPtr());
   }
 
-  // GenericJni trampoline can handle entry / exit hooks in debuggable runtimes.
-  if (Runtime::Current()->GetClassLinker()->IsQuickGenericJniStub(entry_point) &&
-      Runtime::Current()->IsJavaDebuggable()) {
-    return false;
+  // GenericJni trampoline can handle entry / exit hooks.
+  if (Runtime::Current()->GetClassLinker()->IsQuickGenericJniStub(entry_point)) {
+    return true;
   }
 
-  return true;
+  // The remaining cases are nterp / oat code / JIT code that isn't compiled with instrumentation
+  // support.
+  return false;
 }
 
 static void UpdateEntryPoints(ArtMethod* method, const void* quick_code)
@@ -266,8 +267,7 @@ static void UpdateEntryPoints(ArtMethod* method, const void* quick_code)
     }
     const Instrumentation* instr = Runtime::Current()->GetInstrumentation();
     if (instr->EntryExitStubsInstalled()) {
-      DCHECK(quick_code == GetQuickInstrumentationEntryPoint() ||
-             !CodeNeedsEntryExitStub(quick_code, method));
+      DCHECK(CodeSupportsEntryExitHooks(quick_code, method));
     }
   }
   // If the method is from a boot image, don't dirty it if the entrypoint
@@ -362,16 +362,7 @@ void Instrumentation::InitializeMethodsCode(ArtMethod* method, const void* aot_c
   }
 
   // Use instrumentation entrypoints if instrumentation is installed.
-  if (UNLIKELY(EntryExitStubsInstalled()) && !IsProxyInit(method)) {
-    if (!method->IsNative() && InterpretOnly(method)) {
-      UpdateEntryPoints(method, GetQuickToInterpreterBridge());
-    } else {
-      UpdateEntryPoints(method, GetQuickInstrumentationEntryPoint());
-    }
-    return;
-  }
-
-  if (UNLIKELY(IsForcedInterpretOnly() || IsDeoptimized(method))) {
+  if (UNLIKELY(EntryExitStubsInstalled() || IsForcedInterpretOnly() || IsDeoptimized(method))) {
     UpdateEntryPoints(
         method, method->IsNative() ? GetQuickGenericJniStub() : GetQuickToInterpreterBridge());
     return;
@@ -439,9 +430,11 @@ void Instrumentation::InstallStubsForMethod(ArtMethod* method) {
   }
 
   if (EntryExitStubsInstalled()) {
-    // Install the instrumentation entry point if needed.
-    if (CodeNeedsEntryExitStub(method->GetEntryPointFromQuickCompiledCode(), method)) {
-      UpdateEntryPoints(method, GetQuickInstrumentationEntryPoint());
+    // Install interpreter bridge / GenericJni stub if the existing code doesn't support
+    // entry / exit hooks.
+    if (!CodeSupportsEntryExitHooks(method->GetEntryPointFromQuickCompiledCode(), method)) {
+      UpdateEntryPoints(
+          method, method->IsNative() ? GetQuickGenericJniStub() : GetQuickToInterpreterBridge());
     }
     return;
   }
@@ -464,6 +457,30 @@ void Instrumentation::UpdateEntrypointsForDebuggable() {
   runtime->GetClassLinker()->VisitClasses(&visitor);
 }
 
+bool Instrumentation::MethodSupportsExitEvents(ArtMethod* method,
+                                               const OatQuickMethodHeader* header) {
+  if (header == nullptr) {
+    // Header can be a nullptr for runtime / proxy methods that doesn't support method exit hooks
+    // or for native methods that use generic jni stubs. Generic jni stubs support method exit
+    // hooks.
+    return method->IsNative();
+  }
+
+  if (header->IsNterpMethodHeader()) {
+    // Nterp doesn't support method exit events
+    return false;
+  }
+
+  DCHECK(header->IsOptimized());
+  if (CodeInfo::IsDebuggable(header->GetOptimizedCodeInfoPtr())) {
+    // For optimized code, we only support method entry / exit hooks if they are compiled as
+    // debuggable.
+    return true;
+  }
+
+  return false;
+}
+
 // Places the instrumentation exit pc as the return PC for every quick frame. This also allows
 // deoptimization of quick frames to interpreter frames. When force_deopt is
 // true the frames have to be deoptimized. If the frame has a deoptimization
@@ -479,14 +496,8 @@ void InstrumentationInstallStack(Thread* thread, void* arg, bool deopt_all_frame
   struct InstallStackVisitor final : public StackVisitor {
     InstallStackVisitor(Thread* thread_in,
                         Context* context,
-                        uintptr_t instrumentation_exit_pc,
-                        uint64_t force_deopt_id,
                         bool deopt_all_frames)
         : StackVisitor(thread_in, context, kInstrumentationStackWalk),
-          instrumentation_stack_(thread_in->GetInstrumentationStack()),
-          instrumentation_exit_pc_(instrumentation_exit_pc),
-          reached_existing_instrumentation_frames_(false),
-          force_deopt_id_(force_deopt_id),
           deopt_all_frames_(deopt_all_frames),
           runtime_methods_need_deopt_check_(false) {}
 
@@ -498,6 +509,8 @@ void InstrumentationInstallStack(Thread* thread, void* arg, bool deopt_all_frame
         }
         return true;  // Ignore upcalls and runtime methods.
       }
+
+      // Handle interpreter frame.
       if (GetCurrentQuickFrame() == nullptr) {
         // Since we are updating the instrumentation related information we have to recalculate
         // NeedsDexPcEvents. For example, when a new method or thread is deoptimized / interpreter
@@ -513,85 +526,40 @@ void InstrumentationInstallStack(Thread* thread, void* arg, bool deopt_all_frame
         stack_methods_.push_back(m);
         return true;  // Continue.
       }
-      uintptr_t return_pc = GetReturnPc();
+
+      DCHECK(!m->IsRuntimeMethod());
       if (kVerboseInstrumentation) {
-        LOG(INFO) << "  Installing exit stub in " << DescribeLocation();
+        LOG(INFO) << " Processing quick frame for updating exit hooks " << DescribeLocation();
       }
-      if (return_pc == instrumentation_exit_pc_) {
-        auto it = instrumentation_stack_->find(GetReturnPcAddr());
-        CHECK(it != instrumentation_stack_->end());
-        const InstrumentationStackFrame& frame = it->second;
 
-        // We've reached a frame which has already been installed with instrumentation exit stub.
-        // We should have already installed instrumentation or be interpreter on previous frames.
-        reached_existing_instrumentation_frames_ = true;
-
-        // Trampolines get replaced with their actual method in the stack,
-        // so don't do the check below for runtime methods.
-        if (!frame.method_->IsRuntimeMethod()) {
-          CHECK_EQ(m->GetNonObsoleteMethod(), frame.method_->GetNonObsoleteMethod())
-              << "Expected " << ArtMethod::PrettyMethod(m)
-              << ", Found " << ArtMethod::PrettyMethod(frame.method_);
-        }
-        return_pc = frame.return_pc_;
-        if (kVerboseInstrumentation) {
-          LOG(INFO) << "Ignoring already instrumented " << frame.Dump();
-        }
-      } else {
-        if (!m->IsRuntimeMethod()) {
-          // Record the method so we can call method entry callbacks for all non-runtime methods on
-          // the stack. Runtime methods don't need method entry callbacks.
-          // TODO(232212577): Add tests to check the validity of the tracefiles generated.
-          // Currently the tracing tests only check a trace file is generated.
-          stack_methods_.push_back(m);
-        }
-
-        if (m->IsNative() && Runtime::Current()->IsJavaDebuggable()) {
-          // Native methods in debuggable runtimes don't use instrumentation stubs.
-          return true;
-        }
-
-        // If it is a JITed frame then just set the deopt bit if required
-        // otherwise continue
-        const OatQuickMethodHeader* method_header = GetCurrentOatQuickMethodHeader();
-        if (method_header != nullptr && method_header->HasShouldDeoptimizeFlag()) {
-          if (deopt_all_frames_) {
-            runtime_methods_need_deopt_check_ = true;
-            SetShouldDeoptimizeFlag(DeoptimizeFlagValue::kForceDeoptForRedefinition);
-          }
-          SetShouldDeoptimizeFlag(DeoptimizeFlagValue::kCheckCallerForDeopt);
-          return true;
-        }
-        CHECK_NE(return_pc, 0U);
-        DCHECK(!m->IsRuntimeMethod());
-        if (UNLIKELY(reached_existing_instrumentation_frames_)) {
-          // We already saw an existing instrumentation frame so this should be a runtime-method
-          // inserted by the interpreter or runtime.
-          std::string thread_name;
-          GetThread()->GetThreadName(thread_name);
-          LOG(FATAL) << "While walking " << thread_name << " found unexpected non-runtime method"
-                     << " without instrumentation exit return or interpreter frame."
-                     << " method is " << GetMethod()->PrettyMethod()
-                     << " return_pc is " << std::hex << return_pc;
-          UNREACHABLE();
-        }
-
-        InstrumentationStackFrame instrumentation_frame(
-            GetThisObject().Ptr(), m, return_pc, false, force_deopt_id_);
-        if (kVerboseInstrumentation) {
-          LOG(INFO) << "Pushing frame " << instrumentation_frame.Dump();
-        }
-
-        instrumentation_stack_->insert({GetReturnPcAddr(), instrumentation_frame});
-        SetReturnPc(instrumentation_exit_pc_);
+      const OatQuickMethodHeader* method_header = GetCurrentOatQuickMethodHeader();
+      if (Runtime::Current()->GetInstrumentation()->MethodSupportsExitEvents(m, method_header)) {
+        // It is unexpected to see a method enter event but not a method exit event so record stack
+        // methods only for frames that support method exit events. Even if we deoptimize we make
+        // sure that we only call method exit event if the frame supported it in the first place.
+        // For ex: deoptimizing from JITed code with debug support calls a method exit hook but
+        // deoptimizing from nterp doesn't.
+        stack_methods_.push_back(m);
       }
+
+      // If it is a JITed frame then just set the deopt bit if required otherwise continue.
+      // We need kForceDeoptForRedefinition to ensure we don't use any JITed code after a
+      // redefinition. We support redefinition only if the runtime has started off as a
+      // debuggable runtime which makes sure we don't use any AOT or Nterp code.
+      // The CheckCallerForDeopt is an optimization which we only do for non-native JITed code for
+      // now. We can extend it to native methods but that needs reserving an additional stack slot.
+      // We don't do it currently since that wasn't important for debugger performance.
+      if (method_header != nullptr && method_header->HasShouldDeoptimizeFlag()) {
+        if (deopt_all_frames_) {
+          runtime_methods_need_deopt_check_ = true;
+          SetShouldDeoptimizeFlag(DeoptimizeFlagValue::kForceDeoptForRedefinition);
+        }
+        SetShouldDeoptimizeFlag(DeoptimizeFlagValue::kCheckCallerForDeopt);
+      }
+
       return true;  // Continue.
     }
-    std::map<uintptr_t, InstrumentationStackFrame>* const instrumentation_stack_;
     std::vector<ArtMethod*> stack_methods_;
-    const uintptr_t instrumentation_exit_pc_;
-    bool reached_existing_instrumentation_frames_;
-    uint64_t force_deopt_id_;
     bool deopt_all_frames_;
     bool runtime_methods_need_deopt_check_;
   };
@@ -603,11 +571,8 @@ void InstrumentationInstallStack(Thread* thread, void* arg, bool deopt_all_frame
 
   Instrumentation* instrumentation = reinterpret_cast<Instrumentation*>(arg);
   std::unique_ptr<Context> context(Context::Create());
-  uintptr_t instrumentation_exit_pc = reinterpret_cast<uintptr_t>(GetQuickInstrumentationExitPc());
   InstallStackVisitor visitor(thread,
                               context.get(),
-                              instrumentation_exit_pc,
-                              instrumentation->current_force_deopt_id_,
                               deopt_all_frames);
   visitor.WalkStack(true);
 
@@ -665,14 +630,10 @@ static void InstrumentationRestoreStack(Thread* thread, void* arg)
 
   struct RestoreStackVisitor final : public StackVisitor {
     RestoreStackVisitor(Thread* thread_in,
-                        uintptr_t instrumentation_exit_pc,
                         Instrumentation* instrumentation)
         : StackVisitor(thread_in, nullptr, kInstrumentationStackWalk),
           thread_(thread_in),
-          instrumentation_exit_pc_(instrumentation_exit_pc),
           instrumentation_(instrumentation),
-          instrumentation_stack_(thread_in->GetInstrumentationStack()),
-          frames_removed_(0),
           runtime_methods_need_deopt_check_(false) {}
 
     bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -697,41 +658,10 @@ static void InstrumentationRestoreStack(Thread* thread, void* arg)
         }
         UnsetShouldDeoptimizeFlag(DeoptimizeFlagValue::kCheckCallerForDeopt);
       }
-      auto it = instrumentation_stack_->find(GetReturnPcAddr());
-      if (it != instrumentation_stack_->end()) {
-        const InstrumentationStackFrame& instrumentation_frame = it->second;
-        if (kVerboseInstrumentation) {
-          LOG(INFO) << "  Removing exit stub in " << DescribeLocation();
-        }
-        if (instrumentation_frame.interpreter_entry_) {
-          CHECK(m == Runtime::Current()->GetCalleeSaveMethod(CalleeSaveType::kSaveRefsAndArgs));
-        } else {
-          CHECK_EQ(m->GetNonObsoleteMethod(),
-                   instrumentation_frame.method_->GetNonObsoleteMethod())
-              << ArtMethod::PrettyMethod(m)
-              << " and " << instrumentation_frame.method_->GetNonObsoleteMethod()->PrettyMethod();
-        }
-        SetReturnPc(instrumentation_frame.return_pc_);
-        if (instrumentation_->ShouldNotifyMethodEnterExitEvents() &&
-            !m->IsRuntimeMethod()) {
-          // Create the method exit events. As the methods didn't really exit the result is 0.
-          // We only do this if no debugger is attached to prevent from posting events twice.
-          JValue val;
-          instrumentation_->MethodExitEvent(thread_, m, OptionalFrame{}, val);
-        }
-        frames_removed_++;
-      } else {
-        if (kVerboseInstrumentation) {
-          LOG(INFO) << "  No exit stub in " << DescribeLocation();
-        }
-      }
       return true;  // Continue.
     }
     Thread* const thread_;
-    const uintptr_t instrumentation_exit_pc_;
     Instrumentation* const instrumentation_;
-    std::map<uintptr_t, instrumentation::InstrumentationStackFrame>* const instrumentation_stack_;
-    size_t frames_removed_;
     bool runtime_methods_need_deopt_check_;
   };
   if (kVerboseInstrumentation) {
@@ -739,19 +669,13 @@ static void InstrumentationRestoreStack(Thread* thread, void* arg)
     thread->GetThreadName(thread_name);
     LOG(INFO) << "Removing exit stubs in " << thread_name;
   }
-  std::map<uintptr_t, instrumentation::InstrumentationStackFrame>* stack =
-      thread->GetInstrumentationStack();
   Instrumentation* instrumentation = reinterpret_cast<Instrumentation*>(arg);
-  uintptr_t instrumentation_exit_pc =
-      reinterpret_cast<uintptr_t>(GetQuickInstrumentationExitPc());
-  RestoreStackVisitor visitor(thread, instrumentation_exit_pc, instrumentation);
+  RestoreStackVisitor visitor(thread, instrumentation);
   visitor.WalkStack(true);
   DCHECK_IMPLIES(visitor.runtime_methods_need_deopt_check_, thread->IsDeoptCheckRequired());
   if (!visitor.runtime_methods_need_deopt_check_) {
     thread->SetDeoptCheckRequired(false);
   }
-  CHECK_EQ(visitor.frames_removed_, stack->size());
-  stack->clear();
 }
 
 void Instrumentation::DeoptimizeAllThreadFrames() {
@@ -963,6 +887,11 @@ void Instrumentation::UpdateInstrumentationLevel(InstrumentationLevel requested_
   instrumentation_level_ = requested_level;
 }
 
+void Instrumentation::EnableEntryExitHooks(const char* key) {
+  DCHECK(Runtime::Current()->IsJavaDebuggable());
+  ConfigureStubs(key, InstrumentationLevel::kInstrumentWithInstrumentationStubs);
+}
+
 void Instrumentation::MaybeRestoreInstrumentationStack() {
   // Restore stack only if there is no method currently deoptimized.
   if (!IsDeoptimizedMethodsEmpty()) {
@@ -1139,12 +1068,11 @@ void Instrumentation::UpdateMethodsCodeImpl(ArtMethod* method, const void* new_c
     return;
   }
 
-  if (EntryExitStubsInstalled() && CodeNeedsEntryExitStub(new_code, method)) {
-    DCHECK(method->GetEntryPointFromQuickCompiledCode() == GetQuickInstrumentationEntryPoint() ||
-        class_linker->IsQuickToInterpreterBridge(method->GetEntryPointFromQuickCompiledCode()))
-              << EntryPointString(method->GetEntryPointFromQuickCompiledCode())
-              << " " << method->PrettyMethod();
-    // If the code we want to update the method with still needs entry/exit stub, just skip.
+  if (EntryExitStubsInstalled() && !CodeSupportsEntryExitHooks(new_code, method)) {
+    DCHECK(CodeSupportsEntryExitHooks(method->GetEntryPointFromQuickCompiledCode(), method))
+        << EntryPointString(method->GetEntryPointFromQuickCompiledCode()) << " "
+        << method->PrettyMethod();
+    // If we need entry / exit stubs but the new_code doesn't support entry / exit hooks just skip.
     return;
   }
 
@@ -1156,8 +1084,9 @@ void Instrumentation::UpdateNativeMethodsCodeToJitCode(ArtMethod* method, const 
   // We don't do any read barrier on `method`'s declaring class in this code, as the JIT might
   // enter here on a soon-to-be deleted ArtMethod. Updating the entrypoint is OK though, as
   // the ArtMethod is still in memory.
-  if (EntryExitStubsInstalled() && CodeNeedsEntryExitStub(new_code, method)) {
-    // If stubs are installed don't update.
+  if (EntryExitStubsInstalled() && !CodeSupportsEntryExitHooks(new_code, method)) {
+    // If the new code doesn't support entry exit hooks but we need them don't update with the new
+    // code.
     return;
   }
   UpdateEntryPoints(method, new_code);
@@ -1249,11 +1178,7 @@ void Instrumentation::Undeoptimize(ArtMethod* method) {
   if (InterpretOnly(method)) {
     UpdateEntryPoints(method, GetQuickToInterpreterBridge());
   } else if (method->StillNeedsClinitCheck()) {
-    if (EntryExitStubsInstalled()) {
-      UpdateEntryPoints(method, GetQuickInstrumentationEntryPoint());
-    } else {
-      UpdateEntryPoints(method, GetQuickResolutionStub());
-    }
+    UpdateEntryPoints(method, GetQuickResolutionStub());
   } else {
     UpdateEntryPoints(method, GetMaybeInstrumentedCodeForInvoke(method));
   }
@@ -1349,8 +1274,8 @@ const void* Instrumentation::GetMaybeInstrumentedCodeForInvoke(ArtMethod* method
   // This is called by resolution trampolines and that should never be getting proxy methods.
   DCHECK(!method->IsProxyMethod()) << method->PrettyMethod();
   const void* code = GetCodeForInvoke(method);
-  if (EntryExitStubsInstalled() && CodeNeedsEntryExitStub(code, method)) {
-    return GetQuickInstrumentationEntryPoint();
+  if (EntryExitStubsInstalled() && !CodeSupportsEntryExitHooks(code, method)) {
+    return method->IsNative() ? GetQuickGenericJniStub() : GetQuickToInterpreterBridge();
   }
   return code;
 }
@@ -1634,7 +1559,9 @@ void Instrumentation::DeoptimizeIfNeeded(Thread* self,
                                     nullptr,
                                     /* from_code= */ false,
                                     type);
-    artDeoptimize(self);
+    // This is requested from suspend points or when returning from runtime methods so exit
+    // callbacks wouldn't be run yet. So don't skip method callbacks.
+    artDeoptimize(self, /* skip_method_exit_callbacks= */ false);
   }
 }
 

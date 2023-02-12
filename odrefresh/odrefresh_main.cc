@@ -43,6 +43,7 @@ using ::art::odrefresh::ExitCode;
 using ::art::odrefresh::kCheckedSystemPropertyPrefixes;
 using ::art::odrefresh::kIgnoredSystemProperties;
 using ::art::odrefresh::kSystemProperties;
+using ::art::odrefresh::kSystemPropertySystemServerCompilerFilterOverride;
 using ::art::odrefresh::OdrCompilationLog;
 using ::art::odrefresh::OdrConfig;
 using ::art::odrefresh::OdrMetrics;
@@ -177,6 +178,7 @@ int InitializeConfig(int argc, char** argv, OdrConfig* config) {
 
   if (config->GetSystemServerCompilerFilter().empty()) {
     std::string filter = GetProperty("dalvik.vm.systemservercompilerfilter", "");
+    filter = GetProperty(kSystemPropertySystemServerCompilerFilterOverride, filter);
     config->SetSystemServerCompilerFilter(filter);
   }
 
@@ -255,16 +257,21 @@ int main(int argc, char** argv) {
   // by others and prevents system_server from loading generated artifacts.
   umask(S_IWGRP | S_IWOTH);
 
-  // Explicitly initialize logging (b/201042799).
-  android::base::InitLogging(argv, android::base::LogdLogger(android::base::SYSTEM));
-
   OdrConfig config(argv[0]);
   int n = InitializeConfig(argc, argv, &config);
+
+  // Explicitly initialize logging (b/201042799).
+  // But not in CompOS mode - logd doesn't exist in Microdroid (b/265153235).
+  if (!config.GetCompilationOsMode()) {
+    android::base::InitLogging(argv, android::base::LogdLogger(android::base::SYSTEM));
+  }
+
   argv += n;
   argc -= n;
   if (argc != 1) {
     ArgumentError("Expected 1 argument, but have %d.", argc);
   }
+
   GetSystemProperties(config.MutableSystemProperties());
 
   OdrMetrics metrics(config.GetArtifactDirectory());
