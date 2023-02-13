@@ -1901,7 +1901,7 @@ ENTRY art_quick_generic_jni_trampoline
     .cfi_def_cfa_register sp
 
     LOAD_RUNTIME_INSTANCE x1
-    ldrb w1, [x1, #INSTRUMENTATION_STUBS_INSTALLED_OFFSET_FROM_RUNTIME_INSTANCE]
+    ldrb w1, [x1, #RUN_EXIT_HOOKS_OFFSET_FROM_RUNTIME_INSTANCE]
     cbnz w1, .Lcall_method_exit_hook
 .Lcall_method_exit_hook_done:
 
@@ -1962,77 +1962,6 @@ END art_quick_to_interpreter_bridge
  * Called to attempt to execute an obsolete method.
  */
 ONE_ARG_RUNTIME_EXCEPTION art_invoke_obsolete_method_stub, artInvokeObsoleteMethod
-
-
-//
-// Instrumentation-related stubs
-//
-    .extern artInstrumentationMethodEntryFromCode
-ENTRY art_quick_instrumentation_entry
-    SETUP_SAVE_REFS_AND_ARGS_FRAME
-
-    mov   x20, x0             // Preserve method reference in a callee-save.
-
-    mov   x2, xSELF
-    mov   x3, sp  // Pass SP
-    bl    artInstrumentationMethodEntryFromCode  // (Method*, Object*, Thread*, SP)
-
-    mov   xIP0, x0            // x0 = result of call.
-    mov   x0, x20             // Reload method reference.
-
-    RESTORE_SAVE_REFS_AND_ARGS_FRAME  // Note: will restore xSELF
-    REFRESH_MARKING_REGISTER
-    cbz   xIP0, 1f            // Deliver the pending exception if method is null.
-    adr   xLR, art_quick_instrumentation_exit
-    br    xIP0                // Tail-call method with lr set to art_quick_instrumentation_exit.
-
-1:
-    DELIVER_PENDING_EXCEPTION
-END art_quick_instrumentation_entry
-
-    .extern artInstrumentationMethodExitFromCode
-ENTRY art_quick_instrumentation_exit
-    mov   xLR, #0             // Clobber LR for later checks.
-    SETUP_SAVE_EVERYTHING_FRAME
-
-    add   x3, sp, #16         // Pass floating-point result pointer, in kSaveEverything frame.
-    add   x2, sp, #272        // Pass integer result pointer, in kSaveEverything frame.
-    mov   x1, sp              // Pass SP.
-    mov   x0, xSELF           // Pass Thread.
-    bl   artInstrumentationMethodExitFromCode    // (Thread*, SP, gpr_res*, fpr_res*)
-
-    cbz   x0, .Ldo_deliver_instrumentation_exception
-    .cfi_remember_state
-                              // Handle error
-    cbnz  x1, .Ldeoptimize
-    // Normal return.
-    str   x0, [sp, #FRAME_SIZE_SAVE_EVERYTHING - 8]
-                              // Set return pc.
-    RESTORE_SAVE_EVERYTHING_FRAME
-    REFRESH_MARKING_REGISTER
-    br    lr
-.Ldo_deliver_instrumentation_exception:
-    CFI_RESTORE_STATE_AND_DEF_CFA sp, FRAME_SIZE_SAVE_EVERYTHING
-    DELIVER_PENDING_EXCEPTION_FRAME_READY
-.Ldeoptimize:
-    str   x1, [sp, #FRAME_SIZE_SAVE_EVERYTHING - 8]
-                              // Set return pc.
-    RESTORE_SAVE_EVERYTHING_FRAME
-    // Jump to art_quick_deoptimize.
-    b     art_quick_deoptimize
-END art_quick_instrumentation_exit
-
-    /*
-     * Instrumentation has requested that we deoptimize into the interpreter. The deoptimization
-     * will long jump to the upcall with a special exception of -1.
-     */
-    .extern artDeoptimize
-ENTRY art_quick_deoptimize
-    SETUP_SAVE_EVERYTHING_FRAME
-    mov    x0, xSELF          // Pass thread.
-    bl     artDeoptimize      // (Thread*)
-    brk 0
-END art_quick_deoptimize
 
     /*
      * Compiled code has requested that we deoptimize into the interpreter. The deoptimization

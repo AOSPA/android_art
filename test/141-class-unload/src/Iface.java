@@ -14,16 +14,8 @@
  * limitations under the License.
  */
 
-package com.android.server.art;
-
-/**
- * The result of {@code IArtd.getOptimizationStatus}. Each field corresponds to a field in
- * {@code com.android.server.art.model.OptimizationStatus.DexFileOptimizationStatus}.
- *
- * @hide
- */
-parcelable GetOptimizationStatusResult {
-    @utf8InCpp String compilerFilter;
-    @utf8InCpp String compilationReason;
-    @utf8InCpp String locationDebugString;
+public interface Iface {
+    default void invokeRun(Runnable r) {
+        r.run();
+    }
 }

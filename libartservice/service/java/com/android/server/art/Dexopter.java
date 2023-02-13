@@ -20,8 +20,8 @@ import static com.android.server.art.GetDexoptNeededResult.ArtifactsLocation;
 import static com.android.server.art.OutputArtifacts.PermissionSettings;
 import static com.android.server.art.ProfilePath.TmpProfilePath;
 import static com.android.server.art.Utils.Abi;
-import static com.android.server.art.model.ArtFlags.OptimizeFlags;
-import static com.android.server.art.model.OptimizeResult.DexContainerFileOptimizeResult;
+import static com.android.server.art.model.ArtFlags.DexoptFlags;
+import static com.android.server.art.model.DexoptResult.DexContainerFileDexoptResult;
 
 import android.R;
 import android.annotation.NonNull;
@@ -42,8 +42,8 @@ import com.android.internal.annotations.VisibleForTesting;
 import com.android.server.LocalManagerRegistry;
 import com.android.server.art.model.ArtFlags;
 import com.android.server.art.model.DetailedDexInfo;
-import com.android.server.art.model.OptimizeParams;
-import com.android.server.art.model.OptimizeResult;
+import com.android.server.art.model.DexoptParams;
+import com.android.server.art.model.DexoptResult;
 import com.android.server.pm.pkg.AndroidPackage;
 import com.android.server.pm.pkg.PackageState;
 
@@ -57,18 +57,18 @@ import java.util.List;
 import java.util.Objects;
 
 /** @hide */
-public abstract class DexOptimizer<DexInfoType extends DetailedDexInfo> {
-    private static final String TAG = "DexOptimizer";
+public abstract class Dexopter<DexInfoType extends DetailedDexInfo> {
+    private static final String TAG = "Dexopter";
 
     @NonNull protected final Injector mInjector;
     @NonNull protected final PackageState mPkgState;
     /** This is always {@code mPkgState.getAndroidPackage()} and guaranteed to be non-null. */
     @NonNull protected final AndroidPackage mPkg;
-    @NonNull protected final OptimizeParams mParams;
+    @NonNull protected final DexoptParams mParams;
     @NonNull protected final CancellationSignal mCancellationSignal;
 
-    protected DexOptimizer(@NonNull Injector injector, @NonNull PackageState pkgState,
-            @NonNull AndroidPackage pkg, @NonNull OptimizeParams params,
+    protected Dexopter(@NonNull Injector injector, @NonNull PackageState pkgState,
+            @NonNull AndroidPackage pkg, @NonNull DexoptParams params,
             @NonNull CancellationSignal cancellationSignal) {
         mInjector = injector;
         mPkgState = pkgState;
@@ -83,23 +83,23 @@ public abstract class DexOptimizer<DexInfoType extends DetailedDexInfo> {
 
     /**
      * DO NOT use this method directly. Use {@link
-     * ArtManagerLocal#optimizePackage(PackageManagerLocal.FilteredSnapshot, String,
-     * OptimizeParams)}.
+     * ArtManagerLocal#dexoptPackage(PackageManagerLocal.FilteredSnapshot, String,
+     * DexoptParams)}.
      */
     @NonNull
-    public final List<DexContainerFileOptimizeResult> dexopt() throws RemoteException {
-        List<DexContainerFileOptimizeResult> results = new ArrayList<>();
+    public final List<DexContainerFileDexoptResult> dexopt() throws RemoteException {
+        List<DexContainerFileDexoptResult> results = new ArrayList<>();
 
         for (DexInfoType dexInfo : getDexInfoList()) {
             ProfilePath profile = null;
             boolean succeeded = true;
             try {
-                if (!isOptimizable(dexInfo)) {
+                if (!isDexoptable(dexInfo)) {
                     continue;
                 }
 
                 String compilerFilter = adjustCompilerFilter(mParams.getCompilerFilter(), dexInfo);
-                if (compilerFilter.equals(OptimizeParams.COMPILER_FILTER_NOOP)) {
+                if (compilerFilter.equals(DexoptParams.COMPILER_FILTER_NOOP)) {
                     continue;
                 }
 
@@ -127,7 +127,7 @@ public abstract class DexOptimizer<DexInfoType extends DetailedDexInfo> {
                         }
                     }
                     if (profile == null) {
-                        // A profile guided optimization with no profile is essentially 'verify',
+                        // A profile guided dexopt with no profile is essentially 'verify',
                         // and dex2oat already makes this transformation. However, we need to
                         // explicitly make this transformation here to guide the later decisions
                         // such as whether the artifacts can be public and whether dexopt is needed.
@@ -149,7 +149,7 @@ public abstract class DexOptimizer<DexInfoType extends DetailedDexInfo> {
                         getDexoptOptions(dexInfo, isProfileGuidedCompilerFilter);
 
                 for (Abi abi : getAllAbis(dexInfo)) {
-                    @OptimizeResult.OptimizeStatus int status = OptimizeResult.OPTIMIZE_SKIPPED;
+                    @DexoptResult.DexoptResultStatus int status = DexoptResult.DEXOPT_SKIPPED;
                     long wallTimeMs = 0;
                     long cpuTimeMs = 0;
                     long sizeBytes = 0;
@@ -157,17 +157,16 @@ public abstract class DexOptimizer<DexInfoType extends DetailedDexInfo> {
                     boolean isSkippedDueToStorageLow = false;
                     try {
                         var target = DexoptTarget.<DexInfoType>builder()
-                                                      .setDexInfo(dexInfo)
-                                                      .setIsa(abi.isa())
-                                                      .setIsInDalvikCache(isInDalvikCache())
-                                                      .setCompilerFilter(compilerFilter)
-                                                      .build();
-                        var options =
-                                GetDexoptNeededOptions.builder()
-                                        .setProfileMerged(profileMerged)
-                                        .setFlags(mParams.getFlags())
-                                        .setNeedsToBePublic(needsToBeShared)
-                                        .build();
+                                             .setDexInfo(dexInfo)
+                                             .setIsa(abi.isa())
+                                             .setIsInDalvikCache(isInDalvikCache())
+                                             .setCompilerFilter(compilerFilter)
+                                             .build();
+                        var options = GetDexoptNeededOptions.builder()
+                                              .setProfileMerged(profileMerged)
+                                              .setFlags(mParams.getFlags())
+                                              .setNeedsToBePublic(needsToBeShared)
+                                              .build();
 
                         GetDexoptNeededResult getDexoptNeededResult =
                                 getDexoptNeeded(target, options);
@@ -204,17 +203,17 @@ public abstract class DexOptimizer<DexInfoType extends DetailedDexInfo> {
                             }
                         });
 
-                        DexoptResult dexoptResult = dexoptFile(target, profile,
+                        ArtdDexoptResult dexoptResult = dexoptFile(target, profile,
                                 getDexoptNeededResult, permissionSettings,
                                 mParams.getPriorityClass(), dexoptOptions, artdCancellationSignal);
-                        status = dexoptResult.cancelled ? OptimizeResult.OPTIMIZE_CANCELLED
-                                                        : OptimizeResult.OPTIMIZE_PERFORMED;
+                        status = dexoptResult.cancelled ? DexoptResult.DEXOPT_CANCELLED
+                                                        : DexoptResult.DEXOPT_PERFORMED;
                         wallTimeMs = dexoptResult.wallTimeMs;
                         cpuTimeMs = dexoptResult.cpuTimeMs;
                         sizeBytes = dexoptResult.sizeBytes;
                         sizeBeforeBytes = dexoptResult.sizeBeforeBytes;
 
-                        if (status == OptimizeResult.OPTIMIZE_CANCELLED) {
+                        if (status == DexoptResult.DEXOPT_CANCELLED) {
                             return results;
                         }
                     } catch (ServiceSpecificException e) {
@@ -225,13 +224,13 @@ public abstract class DexOptimizer<DexInfoType extends DetailedDexInfo> {
                                         mPkgState.getPackageName(), dexInfo.dexPath(), abi.isa(),
                                         dexInfo.classLoaderContext()),
                                 e);
-                        status = OptimizeResult.OPTIMIZE_FAILED;
+                        status = DexoptResult.DEXOPT_FAILED;
                     } finally {
-                        results.add(DexContainerFileOptimizeResult.create(dexInfo.dexPath(),
+                        results.add(DexContainerFileDexoptResult.create(dexInfo.dexPath(),
                                 abi.isPrimaryAbi(), abi.name(), compilerFilter, status, wallTimeMs,
                                 cpuTimeMs, sizeBytes, sizeBeforeBytes, isSkippedDueToStorageLow));
-                        if (status != OptimizeResult.OPTIMIZE_SKIPPED
-                                && status != OptimizeResult.OPTIMIZE_PERFORMED) {
+                        if (status != DexoptResult.DEXOPT_SKIPPED
+                                && status != DexoptResult.DEXOPT_PERFORMED) {
                             succeeded = false;
                         }
                         // Make sure artd does not leak even if the caller holds
@@ -428,7 +427,7 @@ public abstract class DexOptimizer<DexInfoType extends DetailedDexInfo> {
         return dexoptTrigger;
     }
 
-    private DexoptResult dexoptFile(@NonNull DexoptTarget<DexInfoType> target,
+    private ArtdDexoptResult dexoptFile(@NonNull DexoptTarget<DexInfoType> target,
             @Nullable ProfilePath profile, @NonNull GetDexoptNeededResult getDexoptNeededResult,
             @NonNull PermissionSettings permissionSettings, @PriorityClass int priorityClass,
             @NonNull DexoptOptions dexoptOptions, IArtdCancellationSignal artdCancellationSignal)
@@ -543,8 +542,8 @@ public abstract class DexOptimizer<DexInfoType extends DetailedDexInfo> {
     /** Returns information about all dex files. */
     @NonNull protected abstract List<DexInfoType> getDexInfoList();
 
-    /** Returns true if the given dex file should be optimized. */
-    protected abstract boolean isOptimizable(@NonNull DexInfoType dexInfo);
+    /** Returns true if the given dex file should be dexopted. */
+    protected abstract boolean isDexoptable(@NonNull DexInfoType dexInfo);
 
     /**
      * Returns true if the artifacts should be shared with other apps. Note that this must imply
@@ -604,7 +603,7 @@ public abstract class DexOptimizer<DexInfoType extends DetailedDexInfo> {
         abstract @NonNull String compilerFilter();
 
         static <DexInfoType extends DetailedDexInfo> Builder<DexInfoType> builder() {
-            return new AutoValue_DexOptimizer_DexoptTarget.Builder<DexInfoType>();
+            return new AutoValue_Dexopter_DexoptTarget.Builder<DexInfoType>();
         }
 
         @AutoValue.Builder
@@ -619,17 +618,17 @@ public abstract class DexOptimizer<DexInfoType extends DetailedDexInfo> {
 
     @AutoValue
     abstract static class GetDexoptNeededOptions {
-        abstract @OptimizeFlags int flags();
+        abstract @DexoptFlags int flags();
         abstract boolean profileMerged();
         abstract boolean needsToBePublic();
 
         static Builder builder() {
-            return new AutoValue_DexOptimizer_GetDexoptNeededOptions.Builder();
+            return new AutoValue_Dexopter_GetDexoptNeededOptions.Builder();
         }
 
         @AutoValue.Builder
         abstract static class Builder {
-            abstract Builder setFlags(@OptimizeFlags int value);
+            abstract Builder setFlags(@DexoptFlags int value);
             abstract Builder setProfileMerged(boolean value);
             abstract Builder setNeedsToBePublic(boolean value);
             abstract GetDexoptNeededOptions build();

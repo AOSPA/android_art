@@ -16,17 +16,16 @@
 
 package com.android.server.art;
 
-import static com.android.server.art.ArtManagerLocal.OptimizePackageDoneCallback;
-import static com.android.server.art.model.OptimizeResult.DexContainerFileOptimizeResult;
-import static com.android.server.art.model.OptimizeResult.OptimizeStatus;
-import static com.android.server.art.model.OptimizeResult.PackageOptimizeResult;
+import static com.android.server.art.ArtManagerLocal.DexoptDoneCallback;
+import static com.android.server.art.model.DexoptResult.DexContainerFileDexoptResult;
+import static com.android.server.art.model.DexoptResult.DexoptResultStatus;
+import static com.android.server.art.model.DexoptResult.PackageDexoptResult;
 
 import static com.google.common.truth.Truth.assertThat;
 
 import static org.junit.Assert.assertThrows;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyLong;
-import static org.mockito.Mockito.argThat;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.lenient;
@@ -46,9 +45,11 @@ import androidx.test.filters.SmallTest;
 
 import com.android.server.art.model.ArtFlags;
 import com.android.server.art.model.Config;
+import com.android.server.art.model.DexoptParams;
+import com.android.server.art.model.DexoptResult;
 import com.android.server.art.model.OperationProgress;
-import com.android.server.art.model.OptimizeParams;
-import com.android.server.art.model.OptimizeResult;
+import com.android.server.art.testing.StaticMockitoRule;
+import com.android.server.art.wrapper.PackageStateWrapper;
 import com.android.server.pm.PackageManagerLocal;
 import com.android.server.pm.pkg.AndroidPackage;
 import com.android.server.pm.pkg.AndroidPackageSplit;
@@ -57,6 +58,7 @@ import com.android.server.pm.pkg.SharedLibrary;
 
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.InOrder;
@@ -73,7 +75,7 @@ import java.util.stream.Collectors;
 
 @SmallTest
 @RunWith(MockitoJUnitRunner.StrictStubs.class)
-public class DexOptHelperTest {
+public class DexoptHelperTest {
     private static final String PKG_NAME_FOO = "com.example.foo";
     private static final String PKG_NAME_BAR = "com.example.bar";
     private static final String PKG_NAME_LIB1 = "com.example.lib1";
@@ -82,9 +84,11 @@ public class DexOptHelperTest {
     private static final String PKG_NAME_LIB4 = "com.example.lib4";
     private static final String PKG_NAME_LIBBAZ = "com.example.libbaz";
 
-    @Mock private DexOptHelper.Injector mInjector;
-    @Mock private PrimaryDexOptimizer mPrimaryDexOptimizer;
-    @Mock private SecondaryDexOptimizer mSecondaryDexOptimizer;
+    @Rule public StaticMockitoRule mockitoRule = new StaticMockitoRule(PackageStateWrapper.class);
+
+    @Mock private DexoptHelper.Injector mInjector;
+    @Mock private PrimaryDexopter mPrimaryDexopter;
+    @Mock private SecondaryDexopter mSecondaryDexopter;
     @Mock private AppHibernationManager mAhm;
     @Mock private PowerManager mPowerManager;
     @Mock private PowerManager.WakeLock mWakeLock;
@@ -103,12 +107,12 @@ public class DexOptHelperTest {
     private AndroidPackage mPkgLibbaz;
     private CancellationSignal mCancellationSignal;
     private ExecutorService mExecutor;
-    private List<DexContainerFileOptimizeResult> mPrimaryResults;
-    private List<DexContainerFileOptimizeResult> mSecondaryResults;
+    private List<DexContainerFileDexoptResult> mPrimaryResults;
+    private List<DexContainerFileDexoptResult> mSecondaryResults;
     private Config mConfig;
-    private OptimizeParams mParams;
+    private DexoptParams mParams;
     private List<String> mRequestedPackages;
-    private DexOptHelper mDexOptHelper;
+    private DexoptHelper mDexoptHelper;
 
     @Before
     public void setUp() throws Exception {
@@ -125,24 +129,24 @@ public class DexOptHelperTest {
 
         preparePackagesAndLibraries();
 
-        mPrimaryResults = createResults("/data/app/foo/base.apk",
-                OptimizeResult.OPTIMIZE_PERFORMED /* status1 */,
-                OptimizeResult.OPTIMIZE_PERFORMED /* status2 */);
+        mPrimaryResults =
+                createResults("/data/app/foo/base.apk", DexoptResult.DEXOPT_PERFORMED /* status1 */,
+                        DexoptResult.DEXOPT_PERFORMED /* status2 */);
         mSecondaryResults = createResults("/data/user_de/0/foo/foo.apk",
-                OptimizeResult.OPTIMIZE_PERFORMED /* status1 */,
-                OptimizeResult.OPTIMIZE_PERFORMED /* status2 */);
+                DexoptResult.DEXOPT_PERFORMED /* status1 */,
+                DexoptResult.DEXOPT_PERFORMED /* status2 */);
 
         lenient()
-                .when(mInjector.getPrimaryDexOptimizer(any(), any(), any(), any()))
-                .thenReturn(mPrimaryDexOptimizer);
-        lenient().when(mPrimaryDexOptimizer.dexopt()).thenReturn(mPrimaryResults);
+                .when(mInjector.getPrimaryDexopter(any(), any(), any(), any()))
+                .thenReturn(mPrimaryDexopter);
+        lenient().when(mPrimaryDexopter.dexopt()).thenReturn(mPrimaryResults);
 
         lenient()
-                .when(mInjector.getSecondaryDexOptimizer(any(), any(), any(), any()))
-                .thenReturn(mSecondaryDexOptimizer);
-        lenient().when(mSecondaryDexOptimizer.dexopt()).thenReturn(mSecondaryResults);
+                .when(mInjector.getSecondaryDexopter(any(), any(), any(), any()))
+                .thenReturn(mSecondaryDexopter);
+        lenient().when(mSecondaryDexopter.dexopt()).thenReturn(mSecondaryResults);
 
-        mParams = new OptimizeParams.Builder("install")
+        mParams = new DexoptParams.Builder("install")
                           .setCompilerFilter("speed-profile")
                           .setFlags(ArtFlags.FLAG_FOR_SECONDARY_DEX
                                           | ArtFlags.FLAG_SHOULD_INCLUDE_DEPENDENCIES,
@@ -154,7 +158,7 @@ public class DexOptHelperTest {
         lenient().when(mInjector.getPowerManager()).thenReturn(mPowerManager);
         lenient().when(mInjector.getConfig()).thenReturn(mConfig);
 
-        mDexOptHelper = new DexOptHelper(mInjector);
+        mDexoptHelper = new DexoptHelper(mInjector);
     }
 
     @After
@@ -165,34 +169,34 @@ public class DexOptHelperTest {
     @Test
     public void testDexopt() throws Exception {
         // Only package libbaz fails.
-        var failingPrimaryDexOptimizer = mock(PrimaryDexOptimizer.class);
-        List<DexContainerFileOptimizeResult> partialFailureResults = createResults(
-                "/data/app/foo/base.apk", OptimizeResult.OPTIMIZE_PERFORMED /* status1 */,
-                OptimizeResult.OPTIMIZE_FAILED /* status2 */);
-        lenient().when(failingPrimaryDexOptimizer.dexopt()).thenReturn(partialFailureResults);
-        when(mInjector.getPrimaryDexOptimizer(same(mPkgStateLibbaz), any(), any(), any()))
-                .thenReturn(failingPrimaryDexOptimizer);
+        var failingPrimaryDexopter = mock(PrimaryDexopter.class);
+        List<DexContainerFileDexoptResult> partialFailureResults =
+                createResults("/data/app/foo/base.apk", DexoptResult.DEXOPT_PERFORMED /* status1 */,
+                        DexoptResult.DEXOPT_FAILED /* status2 */);
+        lenient().when(failingPrimaryDexopter.dexopt()).thenReturn(partialFailureResults);
+        when(mInjector.getPrimaryDexopter(same(mPkgStateLibbaz), any(), any(), any()))
+                .thenReturn(failingPrimaryDexopter);
 
-        OptimizeResult result = mDexOptHelper.dexopt(
+        DexoptResult result = mDexoptHelper.dexopt(
                 mSnapshot, mRequestedPackages, mParams, mCancellationSignal, mExecutor);
 
         assertThat(result.getRequestedCompilerFilter()).isEqualTo("speed-profile");
         assertThat(result.getReason()).isEqualTo("install");
-        assertThat(result.getFinalStatus()).isEqualTo(OptimizeResult.OPTIMIZE_FAILED);
+        assertThat(result.getFinalStatus()).isEqualTo(DexoptResult.DEXOPT_FAILED);
 
         // The requested packages must come first.
-        assertThat(result.getPackageOptimizeResults()).hasSize(6);
-        checkPackageResult(result, 0 /* index */, PKG_NAME_FOO, OptimizeResult.OPTIMIZE_PERFORMED,
+        assertThat(result.getPackageDexoptResults()).hasSize(6);
+        checkPackageResult(result, 0 /* index */, PKG_NAME_FOO, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults, mSecondaryResults));
-        checkPackageResult(result, 1 /* index */, PKG_NAME_BAR, OptimizeResult.OPTIMIZE_PERFORMED,
+        checkPackageResult(result, 1 /* index */, PKG_NAME_BAR, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults, mSecondaryResults));
-        checkPackageResult(result, 2 /* index */, PKG_NAME_LIBBAZ, OptimizeResult.OPTIMIZE_FAILED,
+        checkPackageResult(result, 2 /* index */, PKG_NAME_LIBBAZ, DexoptResult.DEXOPT_FAILED,
                 List.of(partialFailureResults, mSecondaryResults));
-        checkPackageResult(result, 3 /* index */, PKG_NAME_LIB1, OptimizeResult.OPTIMIZE_PERFORMED,
+        checkPackageResult(result, 3 /* index */, PKG_NAME_LIB1, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults, mSecondaryResults));
-        checkPackageResult(result, 4 /* index */, PKG_NAME_LIB2, OptimizeResult.OPTIMIZE_PERFORMED,
+        checkPackageResult(result, 4 /* index */, PKG_NAME_LIB2, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults, mSecondaryResults));
-        checkPackageResult(result, 5 /* index */, PKG_NAME_LIB4, OptimizeResult.OPTIMIZE_PERFORMED,
+        checkPackageResult(result, 5 /* index */, PKG_NAME_LIB4, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults, mSecondaryResults));
 
         // The order matters. It should acquire the wake lock only once, at the beginning, and
@@ -202,29 +206,29 @@ public class DexOptHelperTest {
         InOrder inOrder = inOrder(mInjector, mWakeLock);
         inOrder.verify(mWakeLock).setWorkSource(any());
         inOrder.verify(mWakeLock).acquire(anyLong());
-        inOrder.verify(mInjector).getPrimaryDexOptimizer(
+        inOrder.verify(mInjector).getPrimaryDexopter(
                 same(mPkgStateFoo), same(mPkgFoo), same(mParams), same(mCancellationSignal));
-        inOrder.verify(mInjector).getSecondaryDexOptimizer(
+        inOrder.verify(mInjector).getSecondaryDexopter(
                 same(mPkgStateFoo), same(mPkgFoo), same(mParams), same(mCancellationSignal));
-        inOrder.verify(mInjector).getPrimaryDexOptimizer(
+        inOrder.verify(mInjector).getPrimaryDexopter(
                 same(mPkgStateBar), same(mPkgBar), same(mParams), same(mCancellationSignal));
-        inOrder.verify(mInjector).getSecondaryDexOptimizer(
+        inOrder.verify(mInjector).getSecondaryDexopter(
                 same(mPkgStateBar), same(mPkgBar), same(mParams), same(mCancellationSignal));
-        inOrder.verify(mInjector).getPrimaryDexOptimizer(
+        inOrder.verify(mInjector).getPrimaryDexopter(
                 same(mPkgStateLibbaz), same(mPkgLibbaz), same(mParams), same(mCancellationSignal));
-        inOrder.verify(mInjector).getSecondaryDexOptimizer(
+        inOrder.verify(mInjector).getSecondaryDexopter(
                 same(mPkgStateLibbaz), same(mPkgLibbaz), same(mParams), same(mCancellationSignal));
-        inOrder.verify(mInjector).getPrimaryDexOptimizer(
+        inOrder.verify(mInjector).getPrimaryDexopter(
                 same(mPkgStateLib1), same(mPkgLib1), same(mParams), same(mCancellationSignal));
-        inOrder.verify(mInjector).getSecondaryDexOptimizer(
+        inOrder.verify(mInjector).getSecondaryDexopter(
                 same(mPkgStateLib1), same(mPkgLib1), same(mParams), same(mCancellationSignal));
-        inOrder.verify(mInjector).getPrimaryDexOptimizer(
+        inOrder.verify(mInjector).getPrimaryDexopter(
                 same(mPkgStateLib2), same(mPkgLib2), same(mParams), same(mCancellationSignal));
-        inOrder.verify(mInjector).getSecondaryDexOptimizer(
+        inOrder.verify(mInjector).getSecondaryDexopter(
                 same(mPkgStateLib2), same(mPkgLib2), same(mParams), same(mCancellationSignal));
-        inOrder.verify(mInjector).getPrimaryDexOptimizer(
+        inOrder.verify(mInjector).getPrimaryDexopter(
                 same(mPkgStateLib4), same(mPkgLib4), same(mParams), same(mCancellationSignal));
-        inOrder.verify(mInjector).getSecondaryDexOptimizer(
+        inOrder.verify(mInjector).getSecondaryDexopter(
                 same(mPkgStateLib4), same(mPkgLib4), same(mParams), same(mCancellationSignal));
         inOrder.verify(mWakeLock).release();
 
@@ -235,51 +239,51 @@ public class DexOptHelperTest {
 
     @Test
     public void testDexoptNoDependencies() throws Exception {
-        mParams = new OptimizeParams.Builder("install")
+        mParams = new DexoptParams.Builder("install")
                           .setCompilerFilter("speed-profile")
                           .setFlags(ArtFlags.FLAG_FOR_SECONDARY_DEX,
                                   ArtFlags.FLAG_FOR_SECONDARY_DEX
                                           | ArtFlags.FLAG_SHOULD_INCLUDE_DEPENDENCIES)
                           .build();
 
-        OptimizeResult result = mDexOptHelper.dexopt(
+        DexoptResult result = mDexoptHelper.dexopt(
                 mSnapshot, mRequestedPackages, mParams, mCancellationSignal, mExecutor);
 
-        assertThat(result.getPackageOptimizeResults()).hasSize(3);
-        checkPackageResult(result, 0 /* index */, PKG_NAME_FOO, OptimizeResult.OPTIMIZE_PERFORMED,
+        assertThat(result.getPackageDexoptResults()).hasSize(3);
+        checkPackageResult(result, 0 /* index */, PKG_NAME_FOO, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults, mSecondaryResults));
-        checkPackageResult(result, 1 /* index */, PKG_NAME_BAR, OptimizeResult.OPTIMIZE_PERFORMED,
+        checkPackageResult(result, 1 /* index */, PKG_NAME_BAR, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults, mSecondaryResults));
-        checkPackageResult(result, 2 /* index */, PKG_NAME_LIBBAZ,
-                OptimizeResult.OPTIMIZE_PERFORMED, List.of(mPrimaryResults, mSecondaryResults));
+        checkPackageResult(result, 2 /* index */, PKG_NAME_LIBBAZ, DexoptResult.DEXOPT_PERFORMED,
+                List.of(mPrimaryResults, mSecondaryResults));
 
         verifyNoMoreDexopt(3 /* expectedPrimaryTimes */, 3 /* expectedSecondaryTimes */);
     }
 
     @Test
     public void testDexoptPrimaryOnly() throws Exception {
-        mParams = new OptimizeParams.Builder("install")
+        mParams = new DexoptParams.Builder("install")
                           .setCompilerFilter("speed-profile")
                           .setFlags(ArtFlags.FLAG_SHOULD_INCLUDE_DEPENDENCIES,
                                   ArtFlags.FLAG_FOR_SECONDARY_DEX
                                           | ArtFlags.FLAG_SHOULD_INCLUDE_DEPENDENCIES)
                           .build();
 
-        OptimizeResult result = mDexOptHelper.dexopt(
+        DexoptResult result = mDexoptHelper.dexopt(
                 mSnapshot, mRequestedPackages, mParams, mCancellationSignal, mExecutor);
 
-        assertThat(result.getPackageOptimizeResults()).hasSize(6);
-        checkPackageResult(result, 0 /* index */, PKG_NAME_FOO, OptimizeResult.OPTIMIZE_PERFORMED,
+        assertThat(result.getPackageDexoptResults()).hasSize(6);
+        checkPackageResult(result, 0 /* index */, PKG_NAME_FOO, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults));
-        checkPackageResult(result, 1 /* index */, PKG_NAME_BAR, OptimizeResult.OPTIMIZE_PERFORMED,
+        checkPackageResult(result, 1 /* index */, PKG_NAME_BAR, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults));
-        checkPackageResult(result, 2 /* index */, PKG_NAME_LIBBAZ,
-                OptimizeResult.OPTIMIZE_PERFORMED, List.of(mPrimaryResults));
-        checkPackageResult(result, 3 /* index */, PKG_NAME_LIB1, OptimizeResult.OPTIMIZE_PERFORMED,
+        checkPackageResult(result, 2 /* index */, PKG_NAME_LIBBAZ, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults));
-        checkPackageResult(result, 4 /* index */, PKG_NAME_LIB2, OptimizeResult.OPTIMIZE_PERFORMED,
+        checkPackageResult(result, 3 /* index */, PKG_NAME_LIB1, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults));
-        checkPackageResult(result, 5 /* index */, PKG_NAME_LIB4, OptimizeResult.OPTIMIZE_PERFORMED,
+        checkPackageResult(result, 4 /* index */, PKG_NAME_LIB2, DexoptResult.DEXOPT_PERFORMED,
+                List.of(mPrimaryResults));
+        checkPackageResult(result, 5 /* index */, PKG_NAME_LIB4, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults));
 
         verifyNoMoreDexopt(6 /* expectedPrimaryTimes */, 0 /* expectedSecondaryTimes */);
@@ -287,54 +291,54 @@ public class DexOptHelperTest {
 
     @Test
     public void testDexoptPrimaryOnlyNoDependencies() throws Exception {
-        mParams = new OptimizeParams.Builder("install")
+        mParams = new DexoptParams.Builder("install")
                           .setCompilerFilter("speed-profile")
                           .setFlags(0,
                                   ArtFlags.FLAG_FOR_SECONDARY_DEX
                                           | ArtFlags.FLAG_SHOULD_INCLUDE_DEPENDENCIES)
                           .build();
 
-        OptimizeResult result = mDexOptHelper.dexopt(
+        DexoptResult result = mDexoptHelper.dexopt(
                 mSnapshot, mRequestedPackages, mParams, mCancellationSignal, mExecutor);
 
-        assertThat(result.getPackageOptimizeResults()).hasSize(3);
-        checkPackageResult(result, 0 /* index */, PKG_NAME_FOO, OptimizeResult.OPTIMIZE_PERFORMED,
+        assertThat(result.getPackageDexoptResults()).hasSize(3);
+        checkPackageResult(result, 0 /* index */, PKG_NAME_FOO, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults));
-        checkPackageResult(result, 1 /* index */, PKG_NAME_BAR, OptimizeResult.OPTIMIZE_PERFORMED,
+        checkPackageResult(result, 1 /* index */, PKG_NAME_BAR, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults));
-        checkPackageResult(result, 2 /* index */, PKG_NAME_LIBBAZ,
-                OptimizeResult.OPTIMIZE_PERFORMED, List.of(mPrimaryResults));
+        checkPackageResult(result, 2 /* index */, PKG_NAME_LIBBAZ, DexoptResult.DEXOPT_PERFORMED,
+                List.of(mPrimaryResults));
 
         verifyNoMoreDexopt(3 /* expectedPrimaryTimes */, 0 /* expectedSecondaryTimes */);
     }
 
     @Test
     public void testDexoptCancelledBetweenDex2oatInvocations() throws Exception {
-        when(mPrimaryDexOptimizer.dexopt()).thenAnswer(invocation -> {
+        when(mPrimaryDexopter.dexopt()).thenAnswer(invocation -> {
             mCancellationSignal.cancel();
             return mPrimaryResults;
         });
 
-        OptimizeResult result = mDexOptHelper.dexopt(
+        DexoptResult result = mDexoptHelper.dexopt(
                 mSnapshot, mRequestedPackages, mParams, mCancellationSignal, mExecutor);
 
-        assertThat(result.getFinalStatus()).isEqualTo(OptimizeResult.OPTIMIZE_CANCELLED);
+        assertThat(result.getFinalStatus()).isEqualTo(DexoptResult.DEXOPT_CANCELLED);
 
-        assertThat(result.getPackageOptimizeResults()).hasSize(6);
-        checkPackageResult(result, 0 /* index */, PKG_NAME_FOO, OptimizeResult.OPTIMIZE_CANCELLED,
+        assertThat(result.getPackageDexoptResults()).hasSize(6);
+        checkPackageResult(result, 0 /* index */, PKG_NAME_FOO, DexoptResult.DEXOPT_CANCELLED,
                 List.of(mPrimaryResults));
         checkPackageResult(
-                result, 1 /* index */, PKG_NAME_BAR, OptimizeResult.OPTIMIZE_CANCELLED, List.of());
-        checkPackageResult(result, 2 /* index */, PKG_NAME_LIBBAZ,
-                OptimizeResult.OPTIMIZE_CANCELLED, List.of());
+                result, 1 /* index */, PKG_NAME_BAR, DexoptResult.DEXOPT_CANCELLED, List.of());
         checkPackageResult(
-                result, 3 /* index */, PKG_NAME_LIB1, OptimizeResult.OPTIMIZE_CANCELLED, List.of());
+                result, 2 /* index */, PKG_NAME_LIBBAZ, DexoptResult.DEXOPT_CANCELLED, List.of());
         checkPackageResult(
-                result, 4 /* index */, PKG_NAME_LIB2, OptimizeResult.OPTIMIZE_CANCELLED, List.of());
+                result, 3 /* index */, PKG_NAME_LIB1, DexoptResult.DEXOPT_CANCELLED, List.of());
         checkPackageResult(
-                result, 5 /* index */, PKG_NAME_LIB4, OptimizeResult.OPTIMIZE_CANCELLED, List.of());
+                result, 4 /* index */, PKG_NAME_LIB2, DexoptResult.DEXOPT_CANCELLED, List.of());
+        checkPackageResult(
+                result, 5 /* index */, PKG_NAME_LIB4, DexoptResult.DEXOPT_CANCELLED, List.of());
 
-        verify(mInjector).getPrimaryDexOptimizer(
+        verify(mInjector).getPrimaryDexopter(
                 same(mPkgStateFoo), same(mPkgFoo), same(mParams), same(mCancellationSignal));
 
         verifyNoMoreDexopt(1 /* expectedPrimaryTimes */, 0 /* expectedSecondaryTimes */);
@@ -345,13 +349,13 @@ public class DexOptHelperTest {
         when(mPkgFoo.getSplits().get(0).isHasCode()).thenReturn(false);
 
         mRequestedPackages = List.of(PKG_NAME_FOO);
-        OptimizeResult result = mDexOptHelper.dexopt(
+        DexoptResult result = mDexoptHelper.dexopt(
                 mSnapshot, mRequestedPackages, mParams, mCancellationSignal, mExecutor);
 
-        assertThat(result.getFinalStatus()).isEqualTo(OptimizeResult.OPTIMIZE_SKIPPED);
-        assertThat(result.getPackageOptimizeResults()).hasSize(1);
+        assertThat(result.getFinalStatus()).isEqualTo(DexoptResult.DEXOPT_SKIPPED);
+        assertThat(result.getPackageDexoptResults()).hasSize(1);
         checkPackageResult(
-                result, 0 /* index */, PKG_NAME_FOO, OptimizeResult.OPTIMIZE_SKIPPED, List.of());
+                result, 0 /* index */, PKG_NAME_FOO, DexoptResult.DEXOPT_SKIPPED, List.of());
 
         verifyNoDexopt();
     }
@@ -361,12 +365,12 @@ public class DexOptHelperTest {
         when(mPkgLib1.getSplits().get(0).isHasCode()).thenReturn(false);
 
         mRequestedPackages = List.of(PKG_NAME_FOO);
-        OptimizeResult result = mDexOptHelper.dexopt(
+        DexoptResult result = mDexoptHelper.dexopt(
                 mSnapshot, mRequestedPackages, mParams, mCancellationSignal, mExecutor);
 
-        assertThat(result.getFinalStatus()).isEqualTo(OptimizeResult.OPTIMIZE_PERFORMED);
-        assertThat(result.getPackageOptimizeResults()).hasSize(1);
-        checkPackageResult(result, 0 /* index */, PKG_NAME_FOO, OptimizeResult.OPTIMIZE_PERFORMED,
+        assertThat(result.getFinalStatus()).isEqualTo(DexoptResult.DEXOPT_PERFORMED);
+        assertThat(result.getPackageDexoptResults()).hasSize(1);
+        checkPackageResult(result, 0 /* index */, PKG_NAME_FOO, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults, mSecondaryResults));
 
         verifyNoMoreDexopt(1 /* expectedPrimaryTimes */, 1 /* expectedSecondaryTimes */);
@@ -377,12 +381,12 @@ public class DexOptHelperTest {
         lenient().when(mAhm.isHibernatingGlobally(PKG_NAME_FOO)).thenReturn(true);
 
         mRequestedPackages = List.of(PKG_NAME_FOO);
-        OptimizeResult result = mDexOptHelper.dexopt(
+        DexoptResult result = mDexoptHelper.dexopt(
                 mSnapshot, mRequestedPackages, mParams, mCancellationSignal, mExecutor);
 
-        assertThat(result.getFinalStatus()).isEqualTo(OptimizeResult.OPTIMIZE_SKIPPED);
+        assertThat(result.getFinalStatus()).isEqualTo(DexoptResult.DEXOPT_SKIPPED);
         checkPackageResult(
-                result, 0 /* index */, PKG_NAME_FOO, OptimizeResult.OPTIMIZE_SKIPPED, List.of());
+                result, 0 /* index */, PKG_NAME_FOO, DexoptResult.DEXOPT_SKIPPED, List.of());
 
         verifyNoDexopt();
     }
@@ -392,30 +396,30 @@ public class DexOptHelperTest {
         lenient().when(mAhm.isHibernatingGlobally(PKG_NAME_FOO)).thenReturn(true);
         lenient().when(mAhm.isOatArtifactDeletionEnabled()).thenReturn(false);
 
-        OptimizeResult result = mDexOptHelper.dexopt(
+        DexoptResult result = mDexoptHelper.dexopt(
                 mSnapshot, mRequestedPackages, mParams, mCancellationSignal, mExecutor);
 
-        assertThat(result.getPackageOptimizeResults()).hasSize(6);
-        checkPackageResult(result, 0 /* index */, PKG_NAME_FOO, OptimizeResult.OPTIMIZE_PERFORMED,
+        assertThat(result.getPackageDexoptResults()).hasSize(6);
+        checkPackageResult(result, 0 /* index */, PKG_NAME_FOO, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults, mSecondaryResults));
-        checkPackageResult(result, 1 /* index */, PKG_NAME_BAR, OptimizeResult.OPTIMIZE_PERFORMED,
+        checkPackageResult(result, 1 /* index */, PKG_NAME_BAR, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults, mSecondaryResults));
-        checkPackageResult(result, 2 /* index */, PKG_NAME_LIBBAZ,
-                OptimizeResult.OPTIMIZE_PERFORMED, List.of(mPrimaryResults, mSecondaryResults));
-        checkPackageResult(result, 3 /* index */, PKG_NAME_LIB1, OptimizeResult.OPTIMIZE_PERFORMED,
+        checkPackageResult(result, 2 /* index */, PKG_NAME_LIBBAZ, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults, mSecondaryResults));
-        checkPackageResult(result, 4 /* index */, PKG_NAME_LIB2, OptimizeResult.OPTIMIZE_PERFORMED,
+        checkPackageResult(result, 3 /* index */, PKG_NAME_LIB1, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults, mSecondaryResults));
-        checkPackageResult(result, 5 /* index */, PKG_NAME_LIB4, OptimizeResult.OPTIMIZE_PERFORMED,
+        checkPackageResult(result, 4 /* index */, PKG_NAME_LIB2, DexoptResult.DEXOPT_PERFORMED,
+                List.of(mPrimaryResults, mSecondaryResults));
+        checkPackageResult(result, 5 /* index */, PKG_NAME_LIB4, DexoptResult.DEXOPT_PERFORMED,
                 List.of(mPrimaryResults, mSecondaryResults));
     }
 
     @Test
     public void testDexoptAlwaysReleasesWakeLock() throws Exception {
-        when(mPrimaryDexOptimizer.dexopt()).thenThrow(IllegalStateException.class);
+        when(mPrimaryDexopter.dexopt()).thenThrow(IllegalStateException.class);
 
         try {
-            mDexOptHelper.dexopt(
+            mDexoptHelper.dexopt(
                     mSnapshot, mRequestedPackages, mParams, mCancellationSignal, mExecutor);
         } catch (Exception ignored) {
         }
@@ -427,7 +431,7 @@ public class DexOptHelperTest {
     public void testDexoptPackageNotFound() throws Exception {
         when(mSnapshot.getPackageState(any())).thenReturn(null);
 
-        mDexOptHelper.dexopt(
+        mDexoptHelper.dexopt(
                 mSnapshot, mRequestedPackages, mParams, mCancellationSignal, mExecutor);
 
         verifyNoDexopt();
@@ -437,7 +441,7 @@ public class DexOptHelperTest {
     public void testDexoptNoPackage() throws Exception {
         lenient().when(mPkgStateFoo.getAndroidPackage()).thenReturn(null);
 
-        mDexOptHelper.dexopt(
+        mDexoptHelper.dexopt(
                 mSnapshot, mRequestedPackages, mParams, mCancellationSignal, mExecutor);
 
         verifyNoDexopt();
@@ -446,42 +450,42 @@ public class DexOptHelperTest {
     @Test
     public void testDexoptSplit() throws Exception {
         mRequestedPackages = List.of(PKG_NAME_FOO);
-        mParams = new OptimizeParams.Builder("install")
+        mParams = new DexoptParams.Builder("install")
                           .setCompilerFilter("speed-profile")
                           .setFlags(ArtFlags.FLAG_FOR_PRIMARY_DEX | ArtFlags.FLAG_FOR_SINGLE_SPLIT)
                           .setSplitName("split_0")
                           .build();
 
-        mDexOptHelper.dexopt(
+        mDexoptHelper.dexopt(
                 mSnapshot, mRequestedPackages, mParams, mCancellationSignal, mExecutor);
     }
 
     @Test
     public void testDexoptSplitNotFound() throws Exception {
         mRequestedPackages = List.of(PKG_NAME_FOO);
-        mParams = new OptimizeParams.Builder("install")
+        mParams = new DexoptParams.Builder("install")
                           .setCompilerFilter("speed-profile")
                           .setFlags(ArtFlags.FLAG_FOR_PRIMARY_DEX | ArtFlags.FLAG_FOR_SINGLE_SPLIT)
                           .setSplitName("split_bogus")
                           .build();
 
         assertThrows(IllegalArgumentException.class, () -> {
-            mDexOptHelper.dexopt(
+            mDexoptHelper.dexopt(
                     mSnapshot, mRequestedPackages, mParams, mCancellationSignal, mExecutor);
         });
     }
 
     @Test
     public void testCallbacks() throws Exception {
-        List<OptimizeResult> list1 = new ArrayList<>();
-        mConfig.addOptimizePackageDoneCallback(
+        List<DexoptResult> list1 = new ArrayList<>();
+        mConfig.addDexoptDoneCallback(
                 false /* onlyIncludeUpdates */, Runnable::run, result -> list1.add(result));
 
-        List<OptimizeResult> list2 = new ArrayList<>();
-        mConfig.addOptimizePackageDoneCallback(
+        List<DexoptResult> list2 = new ArrayList<>();
+        mConfig.addDexoptDoneCallback(
                 false /* onlyIncludeUpdates */, Runnable::run, result -> list2.add(result));
 
-        OptimizeResult result = mDexOptHelper.dexopt(
+        DexoptResult result = mDexoptHelper.dexopt(
                 mSnapshot, mRequestedPackages, mParams, mCancellationSignal, mExecutor);
 
         assertThat(list1).containsExactly(result);
@@ -490,18 +494,17 @@ public class DexOptHelperTest {
 
     @Test
     public void testCallbackRemoved() throws Exception {
-        List<OptimizeResult> list1 = new ArrayList<>();
-        OptimizePackageDoneCallback callback1 = result -> list1.add(result);
-        mConfig.addOptimizePackageDoneCallback(
-                false /* onlyIncludeUpdates */, Runnable::run, callback1);
+        List<DexoptResult> list1 = new ArrayList<>();
+        DexoptDoneCallback callback1 = result -> list1.add(result);
+        mConfig.addDexoptDoneCallback(false /* onlyIncludeUpdates */, Runnable::run, callback1);
 
-        List<OptimizeResult> list2 = new ArrayList<>();
-        mConfig.addOptimizePackageDoneCallback(
+        List<DexoptResult> list2 = new ArrayList<>();
+        mConfig.addDexoptDoneCallback(
                 false /* onlyIncludeUpdates */, Runnable::run, result -> list2.add(result));
 
-        mConfig.removeOptimizePackageDoneCallback(callback1);
+        mConfig.removeDexoptDoneCallback(callback1);
 
-        OptimizeResult result = mDexOptHelper.dexopt(
+        DexoptResult result = mDexoptHelper.dexopt(
                 mSnapshot, mRequestedPackages, mParams, mCancellationSignal, mExecutor);
 
         assertThat(list1).isEmpty();
@@ -510,18 +513,16 @@ public class DexOptHelperTest {
 
     @Test(expected = IllegalStateException.class)
     public void testCallbackAlreadyAdded() throws Exception {
-        List<OptimizeResult> list = new ArrayList<>();
-        OptimizePackageDoneCallback callback = result -> list.add(result);
-        mConfig.addOptimizePackageDoneCallback(
-                false /* onlyIncludeUpdates */, Runnable::run, callback);
-        mConfig.addOptimizePackageDoneCallback(
-                false /* onlyIncludeUpdates */, Runnable::run, callback);
+        List<DexoptResult> list = new ArrayList<>();
+        DexoptDoneCallback callback = result -> list.add(result);
+        mConfig.addDexoptDoneCallback(false /* onlyIncludeUpdates */, Runnable::run, callback);
+        mConfig.addDexoptDoneCallback(false /* onlyIncludeUpdates */, Runnable::run, callback);
     }
 
-    // Tests `addOptimizePackageDoneCallback` with `onlyIncludeUpdates` being true and false.
+    // Tests `addDexoptDoneCallback` with `onlyIncludeUpdates` being true and false.
     @Test
     public void testCallbackWithFailureResults() throws Exception {
-        mParams = new OptimizeParams.Builder("install")
+        mParams = new DexoptParams.Builder("install")
                           .setCompilerFilter("speed-profile")
                           .setFlags(0,
                                   ArtFlags.FLAG_FOR_SECONDARY_DEX
@@ -529,52 +530,52 @@ public class DexOptHelperTest {
                           .build();
 
         // This list should collect all results.
-        List<OptimizeResult> listAll = new ArrayList<>();
-        mConfig.addOptimizePackageDoneCallback(
+        List<DexoptResult> listAll = new ArrayList<>();
+        mConfig.addDexoptDoneCallback(
                 false /* onlyIncludeUpdates */, Runnable::run, result -> listAll.add(result));
 
         // This list should only collect results that have updates.
-        List<OptimizeResult> listOnlyIncludeUpdates = new ArrayList<>();
-        mConfig.addOptimizePackageDoneCallback(true /* onlyIncludeUpdates */, Runnable::run,
+        List<DexoptResult> listOnlyIncludeUpdates = new ArrayList<>();
+        mConfig.addDexoptDoneCallback(true /* onlyIncludeUpdates */, Runnable::run,
                 result -> listOnlyIncludeUpdates.add(result));
 
         // Dexopt partially fails on package "foo".
-        List<DexContainerFileOptimizeResult> partialFailureResults = createResults(
-                "/data/app/foo/base.apk", OptimizeResult.OPTIMIZE_PERFORMED /* status1 */,
-                OptimizeResult.OPTIMIZE_FAILED /* status2 */);
-        var fooPrimaryDexOptimizer = mock(PrimaryDexOptimizer.class);
-        when(mInjector.getPrimaryDexOptimizer(same(mPkgStateFoo), any(), any(), any()))
-                .thenReturn(fooPrimaryDexOptimizer);
-        when(fooPrimaryDexOptimizer.dexopt()).thenReturn(partialFailureResults);
+        List<DexContainerFileDexoptResult> partialFailureResults =
+                createResults("/data/app/foo/base.apk", DexoptResult.DEXOPT_PERFORMED /* status1 */,
+                        DexoptResult.DEXOPT_FAILED /* status2 */);
+        var fooPrimaryDexopter = mock(PrimaryDexopter.class);
+        when(mInjector.getPrimaryDexopter(same(mPkgStateFoo), any(), any(), any()))
+                .thenReturn(fooPrimaryDexopter);
+        when(fooPrimaryDexopter.dexopt()).thenReturn(partialFailureResults);
 
         // Dexopt totally fails on package "bar".
-        List<DexContainerFileOptimizeResult> totalFailureResults = createResults(
-                "/data/app/bar/base.apk", OptimizeResult.OPTIMIZE_FAILED /* status1 */,
-                OptimizeResult.OPTIMIZE_FAILED /* status2 */);
-        var barPrimaryDexOptimizer = mock(PrimaryDexOptimizer.class);
-        when(mInjector.getPrimaryDexOptimizer(same(mPkgStateBar), any(), any(), any()))
-                .thenReturn(barPrimaryDexOptimizer);
-        when(barPrimaryDexOptimizer.dexopt()).thenReturn(totalFailureResults);
+        List<DexContainerFileDexoptResult> totalFailureResults =
+                createResults("/data/app/bar/base.apk", DexoptResult.DEXOPT_FAILED /* status1 */,
+                        DexoptResult.DEXOPT_FAILED /* status2 */);
+        var barPrimaryDexopter = mock(PrimaryDexopter.class);
+        when(mInjector.getPrimaryDexopter(same(mPkgStateBar), any(), any(), any()))
+                .thenReturn(barPrimaryDexopter);
+        when(barPrimaryDexopter.dexopt()).thenReturn(totalFailureResults);
 
-        OptimizeResult resultWithSomeUpdates = mDexOptHelper.dexopt(mSnapshot,
+        DexoptResult resultWithSomeUpdates = mDexoptHelper.dexopt(mSnapshot,
                 List.of(PKG_NAME_FOO, PKG_NAME_BAR), mParams, mCancellationSignal, mExecutor);
-        OptimizeResult resultWithNoUpdates = mDexOptHelper.dexopt(
+        DexoptResult resultWithNoUpdates = mDexoptHelper.dexopt(
                 mSnapshot, List.of(PKG_NAME_BAR), mParams, mCancellationSignal, mExecutor);
 
         assertThat(listAll).containsExactly(resultWithSomeUpdates, resultWithNoUpdates);
 
         assertThat(listOnlyIncludeUpdates).hasSize(1);
         assertThat(listOnlyIncludeUpdates.get(0)
-                           .getPackageOptimizeResults()
+                           .getPackageDexoptResults()
                            .stream()
-                           .map(PackageOptimizeResult::getPackageName)
+                           .map(PackageDexoptResult::getPackageName)
                            .collect(Collectors.toList()))
                 .containsExactly(PKG_NAME_FOO);
     }
 
     @Test
     public void testProgressCallback() throws Exception {
-        mParams = new OptimizeParams.Builder("install")
+        mParams = new DexoptParams.Builder("install")
                           .setCompilerFilter("speed-profile")
                           .setFlags(ArtFlags.FLAG_FOR_SECONDARY_DEX,
                                   ArtFlags.FLAG_FOR_SECONDARY_DEX
@@ -586,7 +587,7 @@ public class DexOptHelperTest {
         var progressCallbackExecutor = new DelayedExecutor();
         Consumer<OperationProgress> progressCallback = mock(Consumer.class);
 
-        mDexOptHelper.dexopt(mSnapshot, mRequestedPackages, mParams, mCancellationSignal, mExecutor,
+        mDexoptHelper.dexopt(mSnapshot, mRequestedPackages, mParams, mCancellationSignal, mExecutor,
                 progressCallbackExecutor, progressCallback);
 
         progressCallbackExecutor.runAll();
@@ -626,7 +627,7 @@ public class DexOptHelperTest {
         PackageState pkgState = mock(PackageState.class);
         lenient().when(pkgState.getPackageName()).thenReturn(packageName);
         lenient().when(pkgState.getAppId()).thenReturn(12345);
-        lenient().when(pkgState.getUsesLibraries()).thenReturn(deps);
+        lenient().when(PackageStateWrapper.getSharedLibraryDependencies(pkgState)).thenReturn(deps);
         AndroidPackage pkg = createPackage(multiSplit);
         lenient().when(pkgState.getAndroidPackage()).thenReturn(pkg);
         return pkgState;
@@ -695,37 +696,37 @@ public class DexOptHelperTest {
     }
 
     private void verifyNoDexopt() {
-        verify(mInjector, never()).getPrimaryDexOptimizer(any(), any(), any(), any());
-        verify(mInjector, never()).getSecondaryDexOptimizer(any(), any(), any(), any());
+        verify(mInjector, never()).getPrimaryDexopter(any(), any(), any(), any());
+        verify(mInjector, never()).getSecondaryDexopter(any(), any(), any(), any());
     }
 
     private void verifyNoMoreDexopt(int expectedPrimaryTimes, int expectedSecondaryTimes) {
         verify(mInjector, times(expectedPrimaryTimes))
-                .getPrimaryDexOptimizer(any(), any(), any(), any());
+                .getPrimaryDexopter(any(), any(), any(), any());
         verify(mInjector, times(expectedSecondaryTimes))
-                .getSecondaryDexOptimizer(any(), any(), any(), any());
+                .getSecondaryDexopter(any(), any(), any(), any());
     }
 
-    private List<DexContainerFileOptimizeResult> createResults(
-            String dexPath, @OptimizeStatus int status1, @OptimizeStatus int status2) {
-        return List.of(DexContainerFileOptimizeResult.create(dexPath, true /* isPrimaryAbi */,
+    private List<DexContainerFileDexoptResult> createResults(
+            String dexPath, @DexoptResultStatus int status1, @DexoptResultStatus int status2) {
+        return List.of(DexContainerFileDexoptResult.create(dexPath, true /* isPrimaryAbi */,
                                "arm64-v8a", "verify", status1, 100 /* dex2oatWallTimeMillis */,
                                400 /* dex2oatCpuTimeMillis */, 0 /* sizeBytes */,
                                0 /* sizeBeforeBytes */, false /* isSkippedDueToStorageLow */),
-                DexContainerFileOptimizeResult.create(dexPath, false /* isPrimaryAbi */,
+                DexContainerFileDexoptResult.create(dexPath, false /* isPrimaryAbi */,
                         "armeabi-v7a", "verify", status2, 100 /* dex2oatWallTimeMillis */,
                         400 /* dex2oatCpuTimeMillis */, 0 /* sizeBytes */, 0 /* sizeBeforeBytes */,
                         false /* isSkippedDueToStorageLow */));
     }
 
-    private void checkPackageResult(OptimizeResult result, int index, String packageName,
-            @OptimizeResult.OptimizeStatus int status,
-            List<List<DexContainerFileOptimizeResult>> dexContainerFileOptimizeResults) {
-        PackageOptimizeResult packageResult = result.getPackageOptimizeResults().get(index);
+    private void checkPackageResult(DexoptResult result, int index, String packageName,
+            @DexoptResult.DexoptResultStatus int status,
+            List<List<DexContainerFileDexoptResult>> dexContainerFileDexoptResults) {
+        PackageDexoptResult packageResult = result.getPackageDexoptResults().get(index);
         assertThat(packageResult.getPackageName()).isEqualTo(packageName);
         assertThat(packageResult.getStatus()).isEqualTo(status);
-        assertThat(packageResult.getDexContainerFileOptimizeResults())
-                .containsExactlyElementsIn(dexContainerFileOptimizeResults.stream()
+        assertThat(packageResult.getDexContainerFileDexoptResults())
+                .containsExactlyElementsIn(dexContainerFileDexoptResults.stream()
                                                    .flatMap(r -> r.stream())
                                                    .collect(Collectors.toList()));
     }
