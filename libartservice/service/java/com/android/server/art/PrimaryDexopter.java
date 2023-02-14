@@ -34,8 +34,8 @@ import android.util.Log;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.server.art.model.ArtFlags;
-import com.android.server.art.model.OptimizeParams;
-import com.android.server.art.model.OptimizeResult;
+import com.android.server.art.model.DexoptParams;
+import com.android.server.art.model.DexoptResult;
 import com.android.server.pm.PackageManagerLocal;
 import com.android.server.pm.pkg.AndroidPackage;
 import com.android.server.pm.pkg.PackageState;
@@ -49,20 +49,20 @@ import java.util.List;
 import java.util.Objects;
 
 /** @hide */
-public class PrimaryDexOptimizer extends DexOptimizer<DetailedPrimaryDexInfo> {
-    private static final String TAG = "PrimaryDexOptimizer";
+public class PrimaryDexopter extends Dexopter<DetailedPrimaryDexInfo> {
+    private static final String TAG = "PrimaryDexopter";
 
     private final int mSharedGid;
 
-    public PrimaryDexOptimizer(@NonNull Context context, @NonNull PackageState pkgState,
-            @NonNull AndroidPackage pkg, @NonNull OptimizeParams params,
+    public PrimaryDexopter(@NonNull Context context, @NonNull PackageState pkgState,
+            @NonNull AndroidPackage pkg, @NonNull DexoptParams params,
             @NonNull CancellationSignal cancellationSignal) {
         this(new Injector(context), pkgState, pkg, params, cancellationSignal);
     }
 
     @VisibleForTesting
-    public PrimaryDexOptimizer(@NonNull Injector injector, @NonNull PackageState pkgState,
-            @NonNull AndroidPackage pkg, @NonNull OptimizeParams params,
+    public PrimaryDexopter(@NonNull Injector injector, @NonNull PackageState pkgState,
+            @NonNull AndroidPackage pkg, @NonNull DexoptParams params,
             @NonNull CancellationSignal cancellationSignal) {
         super(injector, pkgState, pkg, params, cancellationSignal);
 
@@ -86,7 +86,7 @@ public class PrimaryDexOptimizer extends DexOptimizer<DetailedPrimaryDexInfo> {
     }
 
     @Override
-    protected boolean isOptimizable(@NonNull DetailedPrimaryDexInfo dexInfo) {
+    protected boolean isDexoptable(@NonNull DetailedPrimaryDexInfo dexInfo) {
         if (!dexInfo.hasCode()) {
             return false;
         }

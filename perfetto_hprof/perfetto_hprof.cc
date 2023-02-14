@@ -1033,7 +1033,7 @@ void DumpPerfetto(art::Thread* self) {
     });
 }
 
-void DumpPerfettoOutOfMemory() {
+void DumpPerfettoOutOfMemory() REQUIRES_SHARED(art::Locks::mutator_lock_) {
   art::Thread* self = art::Thread::Current();
   if (!self) {
     LOG(FATAL_WITHOUT_ABORT) << "no thread in DumpPerfettoOutOfMemory";
@@ -1048,6 +1048,8 @@ void DumpPerfettoOutOfMemory() {
     }
     g_oome_triggered = true;
   }
+
+  art::ScopedThreadSuspension sts(self, art::ThreadState::kSuspended);
   // If we fork & resume the original process execution it will most likely exit
   // ~immediately due to the OOME error thrown. When the system detects that
   // that, it will cleanup by killing all processes in the cgroup (including

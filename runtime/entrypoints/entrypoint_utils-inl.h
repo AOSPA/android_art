@@ -289,7 +289,6 @@ inline ObjPtr<mirror::Object> AllocObjectFromCodeInitialized(ObjPtr<mirror::Clas
 }
 
 
-template <bool kAccessCheck>
 ALWAYS_INLINE
 inline ObjPtr<mirror::Class> CheckArrayAlloc(dex::TypeIndex type_idx,
                                              int32_t component_count,
@@ -311,7 +310,7 @@ inline ObjPtr<mirror::Class> CheckArrayAlloc(dex::TypeIndex type_idx,
     }
     CHECK(klass->IsArrayClass()) << klass->PrettyClass();
   }
-  if (kAccessCheck) {
+  if (!method->SkipAccessChecks()) {
     ObjPtr<mirror::Class> referrer = method->GetDeclaringClass();
     if (UNLIKELY(!referrer->CanAccess(klass))) {
       ThrowIllegalAccessErrorClass(referrer, klass);
@@ -326,7 +325,7 @@ inline ObjPtr<mirror::Class> CheckArrayAlloc(dex::TypeIndex type_idx,
 // it cannot be resolved, throw an error. If it can, use it to create an array.
 // When verification/compiler hasn't been able to verify access, optionally perform an access
 // check.
-template <bool kAccessCheck, bool kInstrumented>
+template <bool kInstrumented>
 ALWAYS_INLINE
 inline ObjPtr<mirror::Array> AllocArrayFromCode(dex::TypeIndex type_idx,
                                                 int32_t component_count,
@@ -334,8 +333,7 @@ inline ObjPtr<mirror::Array> AllocArrayFromCode(dex::TypeIndex type_idx,
                                                 Thread* self,
                                                 gc::AllocatorType allocator_type) {
   bool slow_path = false;
-  ObjPtr<mirror::Class> klass =
-      CheckArrayAlloc<kAccessCheck>(type_idx, component_count, method, &slow_path);
+  ObjPtr<mirror::Class> klass = CheckArrayAlloc(type_idx, component_count, method, &slow_path);
   if (UNLIKELY(slow_path)) {
     if (klass == nullptr) {
       return nullptr;
@@ -519,6 +517,7 @@ ArtMethod* FindMethodToCall(Thread* self,
                             ArtMethod* caller,
                             ObjPtr<mirror::Object>* this_object,
                             const Instruction& inst,
+                            bool only_lookup_tls_cache,
                             /*out*/ bool* string_init)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   PointerSize pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
@@ -526,6 +525,9 @@ ArtMethod* FindMethodToCall(Thread* self,
   // Try to find the method in thread-local cache.
   size_t tls_value = 0u;
   if (!self->GetInterpreterCache()->Get(self, &inst, &tls_value)) {
+    if (only_lookup_tls_cache) {
+      return nullptr;
+    }
     DCHECK(!self->IsExceptionPending());
     // NterpGetMethod can suspend, so save this_object.
     StackHandleScope<1> hs(self);

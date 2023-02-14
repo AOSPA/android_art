@@ -20,7 +20,6 @@ import static com.android.server.art.GetDexoptNeededResult.ArtifactsLocation;
 
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyBoolean;
-import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.argThat;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.lenient;
@@ -33,6 +32,7 @@ import android.os.UserManager;
 import android.os.storage.StorageManager;
 
 import com.android.server.art.testing.StaticMockitoRule;
+import com.android.server.art.wrapper.PackageStateWrapper;
 import com.android.server.pm.pkg.AndroidPackage;
 import com.android.server.pm.pkg.AndroidPackageSplit;
 import com.android.server.pm.pkg.PackageState;
@@ -47,16 +47,16 @@ import org.mockito.Mock;
 import java.util.ArrayList;
 import java.util.List;
 
-public class PrimaryDexOptimizerTestBase {
+public class PrimaryDexopterTestBase {
     protected static final String PKG_NAME = "com.example.foo";
     protected static final int UID = 12345;
     protected static final int SHARED_GID = UserHandle.getSharedAppGid(UID);
 
     @Rule
-    public StaticMockitoRule mockitoRule =
-            new StaticMockitoRule(SystemProperties.class, Constants.class);
+    public StaticMockitoRule mockitoRule = new StaticMockitoRule(
+            SystemProperties.class, Constants.class, PackageStateWrapper.class);
 
-    @Mock protected PrimaryDexOptimizer.Injector mInjector;
+    @Mock protected PrimaryDexopter.Injector mInjector;
     @Mock protected IArtd mArtd;
     @Mock protected UserManager mUserManager;
     @Mock protected DexUseManagerLocal mDexUseManager;
@@ -148,10 +148,10 @@ public class PrimaryDexOptimizerTestBase {
         lenient().when(pkgState.isSystem()).thenReturn(false);
         lenient().when(pkgState.isUpdatedSystemApp()).thenReturn(false);
         lenient().when(pkgState.getAppId()).thenReturn(UID);
-        lenient().when(pkgState.getUsesLibraries()).thenReturn(new ArrayList<>());
         lenient()
-                .when(pkgState.getStateForUser(any()))
-                .thenReturn(mPkgUserStateNotInstalled);
+                .when(PackageStateWrapper.getSharedLibraryDependencies(pkgState))
+                .thenReturn(new ArrayList<>());
+        lenient().when(pkgState.getStateForUser(any())).thenReturn(mPkgUserStateNotInstalled);
         AndroidPackage pkg = createPackage();
         lenient().when(pkgState.getAndroidPackage()).thenReturn(pkg);
         return pkgState;
@@ -183,9 +183,9 @@ public class PrimaryDexOptimizerTestBase {
         return result;
     }
 
-    protected DexoptResult createDexoptResult(boolean cancelled, long wallTimeMs, long cpuTimeMs,
-            long sizeBytes, long sizeBeforeBytes) {
-        var result = new DexoptResult();
+    protected ArtdDexoptResult createArtdDexoptResult(boolean cancelled, long wallTimeMs,
+            long cpuTimeMs, long sizeBytes, long sizeBeforeBytes) {
+        var result = new ArtdDexoptResult();
         result.cancelled = cancelled;
         result.wallTimeMs = wallTimeMs;
         result.cpuTimeMs = cpuTimeMs;
@@ -194,8 +194,8 @@ public class PrimaryDexOptimizerTestBase {
         return result;
     }
 
-    protected DexoptResult createDexoptResult(boolean cancelled) {
-        return createDexoptResult(cancelled, 0 /* wallTimeMs */, 0 /* cpuTimeMs */,
+    protected ArtdDexoptResult createArtdDexoptResult(boolean cancelled) {
+        return createArtdDexoptResult(cancelled, 0 /* wallTimeMs */, 0 /* cpuTimeMs */,
                 0 /* sizeBytes */, 0 /* sizeBeforeBytes */);
     }
 }

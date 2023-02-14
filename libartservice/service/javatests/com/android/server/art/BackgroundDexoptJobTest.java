@@ -40,12 +40,12 @@ import android.os.SystemProperties;
 import androidx.test.filters.SmallTest;
 import androidx.test.runner.AndroidJUnit4;
 
-import com.android.server.art.BackgroundDexOptJob.CompletedResult;
-import com.android.server.art.BackgroundDexOptJob.FatalErrorResult;
-import com.android.server.art.BackgroundDexOptJob.Result;
+import com.android.server.art.BackgroundDexoptJob.CompletedResult;
+import com.android.server.art.BackgroundDexoptJob.FatalErrorResult;
+import com.android.server.art.BackgroundDexoptJob.Result;
 import com.android.server.art.model.ArtFlags;
 import com.android.server.art.model.Config;
-import com.android.server.art.model.OptimizeResult;
+import com.android.server.art.model.DexoptResult;
 import com.android.server.art.testing.StaticMockitoRule;
 import com.android.server.pm.PackageManagerLocal;
 
@@ -62,23 +62,23 @@ import java.util.concurrent.TimeUnit;
 
 @SmallTest
 @RunWith(AndroidJUnit4.class)
-public class BackgroundDexOptJobTest {
+public class BackgroundDexoptJobTest {
     private static final long TIMEOUT_SEC = 1;
 
     @Rule
     public StaticMockitoRule mockitoRule =
-            new StaticMockitoRule(SystemProperties.class, BackgroundDexOptJobService.class);
+            new StaticMockitoRule(SystemProperties.class, BackgroundDexoptJobService.class);
 
-    @Mock private BackgroundDexOptJob.Injector mInjector;
+    @Mock private BackgroundDexoptJob.Injector mInjector;
     @Mock private ArtManagerLocal mArtManagerLocal;
     @Mock private PackageManagerLocal mPackageManagerLocal;
     @Mock private PackageManagerLocal.FilteredSnapshot mSnapshot;
     @Mock private JobScheduler mJobScheduler;
-    @Mock private OptimizeResult mOptimizeResult;
-    @Mock private BackgroundDexOptJobService mJobService;
+    @Mock private DexoptResult mDexoptResult;
+    @Mock private BackgroundDexoptJobService mJobService;
     @Mock private JobParameters mJobParameters;
     private Config mConfig;
-    private BackgroundDexOptJob mBackgroundDexOptJob;
+    private BackgroundDexoptJob mBackgroundDexoptJob;
     private Semaphore mJobFinishedCalled = new Semaphore(0);
 
     @Before
@@ -96,8 +96,8 @@ public class BackgroundDexOptJobTest {
         lenient().when(mInjector.getConfig()).thenReturn(mConfig);
         lenient().when(mInjector.getJobScheduler()).thenReturn(mJobScheduler);
 
-        mBackgroundDexOptJob = new BackgroundDexOptJob(mInjector);
-        lenient().when(BackgroundDexOptJobService.getJob()).thenReturn(mBackgroundDexOptJob);
+        mBackgroundDexoptJob = new BackgroundDexoptJob(mInjector);
+        lenient().when(BackgroundDexoptJobService.getJob()).thenReturn(mBackgroundDexoptJob);
 
         lenient()
                 .doAnswer(invocation -> {
@@ -114,52 +114,52 @@ public class BackgroundDexOptJobTest {
 
     @Test
     public void testStart() {
-        when(mArtManagerLocal.optimizePackages(
+        when(mArtManagerLocal.dexoptPackages(
                      same(mSnapshot), eq(ReasonMapping.REASON_BG_DEXOPT), any(), any(), any()))
-                .thenReturn(mOptimizeResult);
+                .thenReturn(mDexoptResult);
 
-        Result result = Utils.getFuture(mBackgroundDexOptJob.start());
+        Result result = Utils.getFuture(mBackgroundDexoptJob.start());
         assertThat(result).isInstanceOf(CompletedResult.class);
-        assertThat(((CompletedResult) result).dexoptResult()).isSameInstanceAs(mOptimizeResult);
+        assertThat(((CompletedResult) result).dexoptResult()).isSameInstanceAs(mDexoptResult);
     }
 
     @Test
     public void testStartAlreadyRunning() {
-        Semaphore optimizeDone = new Semaphore(0);
-        when(mArtManagerLocal.optimizePackages(any(), any(), any(), any(), any()))
+        Semaphore dexoptDone = new Semaphore(0);
+        when(mArtManagerLocal.dexoptPackages(any(), any(), any(), any(), any()))
                 .thenAnswer(invocation -> {
-                    assertThat(optimizeDone.tryAcquire(TIMEOUT_SEC, TimeUnit.SECONDS)).isTrue();
-                    return mOptimizeResult;
+                    assertThat(dexoptDone.tryAcquire(TIMEOUT_SEC, TimeUnit.SECONDS)).isTrue();
+                    return mDexoptResult;
                 });
 
-        Future<Result> future1 = mBackgroundDexOptJob.start();
-        Future<Result> future2 = mBackgroundDexOptJob.start();
+        Future<Result> future1 = mBackgroundDexoptJob.start();
+        Future<Result> future2 = mBackgroundDexoptJob.start();
         assertThat(future1).isSameInstanceAs(future2);
 
-        optimizeDone.release();
+        dexoptDone.release();
         Utils.getFuture(future1);
 
-        verify(mArtManagerLocal, times(1)).optimizePackages(any(), any(), any(), any(), any());
+        verify(mArtManagerLocal, times(1)).dexoptPackages(any(), any(), any(), any(), any());
     }
 
     @Test
     public void testStartAnother() {
-        when(mArtManagerLocal.optimizePackages(any(), any(), any(), any(), any()))
-                .thenReturn(mOptimizeResult);
+        when(mArtManagerLocal.dexoptPackages(any(), any(), any(), any(), any()))
+                .thenReturn(mDexoptResult);
 
-        Future<Result> future1 = mBackgroundDexOptJob.start();
+        Future<Result> future1 = mBackgroundDexoptJob.start();
         Utils.getFuture(future1);
-        Future<Result> future2 = mBackgroundDexOptJob.start();
+        Future<Result> future2 = mBackgroundDexoptJob.start();
         Utils.getFuture(future2);
         assertThat(future1).isNotSameInstanceAs(future2);
     }
 
     @Test
     public void testStartFatalError() {
-        when(mArtManagerLocal.optimizePackages(any(), any(), any(), any(), any()))
+        when(mArtManagerLocal.dexoptPackages(any(), any(), any(), any(), any()))
                 .thenThrow(IllegalStateException.class);
 
-        Result result = Utils.getFuture(mBackgroundDexOptJob.start());
+        Result result = Utils.getFuture(mBackgroundDexoptJob.start());
         assertThat(result).isInstanceOf(FatalErrorResult.class);
     }
 
@@ -169,29 +169,28 @@ public class BackgroundDexOptJobTest {
                 .when(SystemProperties.getBoolean(eq("pm.dexopt.disable_bg_dexopt"), anyBoolean()))
                 .thenReturn(true);
 
-        when(mArtManagerLocal.optimizePackages(any(), any(), any(), any(), any()))
-                .thenReturn(mOptimizeResult);
+        when(mArtManagerLocal.dexoptPackages(any(), any(), any(), any(), any()))
+                .thenReturn(mDexoptResult);
 
         // The `start` method should ignore the system property. The system property is for
         // `schedule`.
-        Utils.getFuture(mBackgroundDexOptJob.start());
+        Utils.getFuture(mBackgroundDexoptJob.start());
     }
 
     @Test
     public void testCancel() {
-        Semaphore optimizeCancelled = new Semaphore(0);
-        when(mArtManagerLocal.optimizePackages(any(), any(), any(), any(), any()))
+        Semaphore dexoptCancelled = new Semaphore(0);
+        when(mArtManagerLocal.dexoptPackages(any(), any(), any(), any(), any()))
                 .thenAnswer(invocation -> {
-                    assertThat(optimizeCancelled.tryAcquire(TIMEOUT_SEC, TimeUnit.SECONDS))
-                            .isTrue();
+                    assertThat(dexoptCancelled.tryAcquire(TIMEOUT_SEC, TimeUnit.SECONDS)).isTrue();
                     var cancellationSignal = invocation.<CancellationSignal>getArgument(2);
                     assertThat(cancellationSignal.isCanceled()).isTrue();
-                    return mOptimizeResult;
+                    return mDexoptResult;
                 });
 
-        Future<Result> future = mBackgroundDexOptJob.start();
-        mBackgroundDexOptJob.cancel();
-        optimizeCancelled.release();
+        Future<Result> future = mBackgroundDexoptJob.start();
+        mBackgroundDexoptJob.cancel();
+        dexoptCancelled.release();
         Utils.getFuture(future);
     }
 
@@ -200,10 +199,10 @@ public class BackgroundDexOptJobTest {
         var captor = ArgumentCaptor.forClass(JobInfo.class);
         when(mJobScheduler.schedule(captor.capture())).thenReturn(JobScheduler.RESULT_SUCCESS);
 
-        assertThat(mBackgroundDexOptJob.schedule()).isEqualTo(ArtFlags.SCHEDULE_SUCCESS);
+        assertThat(mBackgroundDexoptJob.schedule()).isEqualTo(ArtFlags.SCHEDULE_SUCCESS);
 
         JobInfo jobInfo = captor.getValue();
-        assertThat(jobInfo.getIntervalMillis()).isEqualTo(BackgroundDexOptJob.JOB_INTERVAL_MS);
+        assertThat(jobInfo.getIntervalMillis()).isEqualTo(BackgroundDexoptJob.JOB_INTERVAL_MS);
         assertThat(jobInfo.isRequireDeviceIdle()).isTrue();
         assertThat(jobInfo.isRequireCharging()).isTrue();
         assertThat(jobInfo.isRequireBatteryNotLow()).isTrue();
@@ -215,7 +214,7 @@ public class BackgroundDexOptJobTest {
         when(SystemProperties.getBoolean(eq("pm.dexopt.disable_bg_dexopt"), anyBoolean()))
                 .thenReturn(true);
 
-        assertThat(mBackgroundDexOptJob.schedule())
+        assertThat(mBackgroundDexoptJob.schedule())
                 .isEqualTo(ArtFlags.SCHEDULE_DISABLED_BY_SYSPROP);
 
         verify(mJobScheduler, never()).schedule(any());
@@ -231,10 +230,10 @@ public class BackgroundDexOptJobTest {
         var captor = ArgumentCaptor.forClass(JobInfo.class);
         when(mJobScheduler.schedule(captor.capture())).thenReturn(JobScheduler.RESULT_SUCCESS);
 
-        assertThat(mBackgroundDexOptJob.schedule()).isEqualTo(ArtFlags.SCHEDULE_SUCCESS);
+        assertThat(mBackgroundDexoptJob.schedule()).isEqualTo(ArtFlags.SCHEDULE_SUCCESS);
 
         JobInfo jobInfo = captor.getValue();
-        assertThat(jobInfo.getIntervalMillis()).isEqualTo(BackgroundDexOptJob.JOB_INTERVAL_MS);
+        assertThat(jobInfo.getIntervalMillis()).isEqualTo(BackgroundDexoptJob.JOB_INTERVAL_MS);
         assertThat(jobInfo.isRequireDeviceIdle()).isTrue();
         assertThat(jobInfo.isRequireCharging()).isTrue();
         assertThat(jobInfo.isRequireBatteryNotLow()).isFalse();
@@ -250,7 +249,7 @@ public class BackgroundDexOptJobTest {
         var captor = ArgumentCaptor.forClass(JobInfo.class);
         when(mJobScheduler.schedule(captor.capture())).thenReturn(JobScheduler.RESULT_SUCCESS);
 
-        assertThat(mBackgroundDexOptJob.schedule()).isEqualTo(ArtFlags.SCHEDULE_SUCCESS);
+        assertThat(mBackgroundDexoptJob.schedule()).isEqualTo(ArtFlags.SCHEDULE_SUCCESS);
 
         JobInfo jobInfo = captor.getValue();
         assertThat(jobInfo.isRequireBatteryNotLow()).isTrue();
@@ -261,22 +260,22 @@ public class BackgroundDexOptJobTest {
         mConfig.setScheduleBackgroundDexoptJobCallback(
                 Runnable::run, builder -> { builder.setRequiresStorageNotLow(true); });
 
-        mBackgroundDexOptJob.schedule();
+        mBackgroundDexoptJob.schedule();
     }
 
     @Test
     public void testUnschedule() {
-        mBackgroundDexOptJob.unschedule();
+        mBackgroundDexoptJob.unschedule();
         verify(mJobScheduler).cancel(anyInt());
     }
 
     @Test
     public void testWantsRescheduleFalsePerformed() throws Exception {
-        when(mOptimizeResult.getFinalStatus()).thenReturn(OptimizeResult.OPTIMIZE_PERFORMED);
-        when(mArtManagerLocal.optimizePackages(any(), any(), any(), any(), any()))
-                .thenReturn(mOptimizeResult);
+        when(mDexoptResult.getFinalStatus()).thenReturn(DexoptResult.DEXOPT_PERFORMED);
+        when(mArtManagerLocal.dexoptPackages(any(), any(), any(), any(), any()))
+                .thenReturn(mDexoptResult);
 
-        mBackgroundDexOptJob.onStartJob(mJobService, mJobParameters);
+        mBackgroundDexoptJob.onStartJob(mJobService, mJobParameters);
         assertThat(mJobFinishedCalled.tryAcquire(TIMEOUT_SEC, TimeUnit.SECONDS)).isTrue();
 
         verify(mJobService).jobFinished(any(), eq(false) /* wantsReschedule */);
@@ -284,10 +283,10 @@ public class BackgroundDexOptJobTest {
 
     @Test
     public void testWantsRescheduleFalseFatalError() throws Exception {
-        when(mArtManagerLocal.optimizePackages(any(), any(), any(), any(), any()))
+        when(mArtManagerLocal.dexoptPackages(any(), any(), any(), any(), any()))
                 .thenThrow(RuntimeException.class);
 
-        mBackgroundDexOptJob.onStartJob(mJobService, mJobParameters);
+        mBackgroundDexoptJob.onStartJob(mJobService, mJobParameters);
         assertThat(mJobFinishedCalled.tryAcquire(TIMEOUT_SEC, TimeUnit.SECONDS)).isTrue();
 
         verify(mJobService).jobFinished(any(), eq(false) /* wantsReschedule */);
@@ -295,11 +294,11 @@ public class BackgroundDexOptJobTest {
 
     @Test
     public void testWantsRescheduleTrue() throws Exception {
-        when(mOptimizeResult.getFinalStatus()).thenReturn(OptimizeResult.OPTIMIZE_CANCELLED);
-        when(mArtManagerLocal.optimizePackages(any(), any(), any(), any(), any()))
-                .thenReturn(mOptimizeResult);
+        when(mDexoptResult.getFinalStatus()).thenReturn(DexoptResult.DEXOPT_CANCELLED);
+        when(mArtManagerLocal.dexoptPackages(any(), any(), any(), any(), any()))
+                .thenReturn(mDexoptResult);
 
-        mBackgroundDexOptJob.onStartJob(mJobService, mJobParameters);
+        mBackgroundDexoptJob.onStartJob(mJobService, mJobParameters);
         assertThat(mJobFinishedCalled.tryAcquire(TIMEOUT_SEC, TimeUnit.SECONDS)).isTrue();
 
         verify(mJobService).jobFinished(any(), eq(true) /* wantsReschedule */);
