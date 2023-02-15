@@ -14,15 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -e # Stop on error - the caller script may not have this set.
 
-$JAVAC "$@"
-
-# Classes available at compile time, but not at runtime.
-rm -f classes/android/test/anno/MissingAnnotation.class
-rm -f 'classes/android/test/anno/ClassWithInnerAnnotationClass$MissingInnerAnnotationClass.class'
-
-# overwrite RenamedEnum in classes
-if [ -f classes2/android/test/anno/RenamedEnumClass.java ] ; then
-  mv classes2/android/test/anno/RenamedEnumClass.java classes/android/test/anno/RenamedEnumClass.java
-fi
+def run(ctx, args):
+  # Limit the Java heap to 20MiB to force more GCs.
+  ctx.default_run(args, runtime_option=["-Xmx20m"])

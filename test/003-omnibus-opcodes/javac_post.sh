@@ -16,13 +16,4 @@
 
 set -e # Stop on error - the caller script may not have this set.
 
-if [[ "$*" != *"classes2"* ]]; then
-  # First invocation: compile src/ files.
-  $JAVAC "$@"
-else
-  # Second invocation: move MirandaInterface.class for placement in
-  # a secondary dex file. There are no other source files for the
-  # secondary DEX so no compilation required.
-  mv classes/MirandaInterface.class classes2
-fi
-exit $?
+rm -f classes/UnresClass.class

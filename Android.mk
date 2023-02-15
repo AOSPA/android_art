@@ -471,7 +471,6 @@ PRIVATE_ART_APEX_DEPENDENCY_LIBS := \
   lib/libprofile.so \
   lib/libsigchain.so \
   lib/libunwindstack.so \
-  lib/libziparchive.so \
   lib64/libadbconnection.so \
   lib64/libandroidio.so \
   lib64/libartbase.so \
@@ -500,7 +499,6 @@ PRIVATE_ART_APEX_DEPENDENCY_LIBS := \
   lib64/libprofile.so \
   lib64/libsigchain.so \
   lib64/libunwindstack.so \
-  lib64/libziparchive.so \
 
 PRIVATE_RUNTIME_APEX_DEPENDENCY_FILES := \
   bin/linker \
@@ -553,7 +551,7 @@ define extract-from-apex
     rm -rf $$apex_dir && \
     mkdir -p $$apex_dir && \
     debugfs=$(HOST_OUT)/bin/debugfs_static && \
-    blkid=$(HOST_OUT)/bin/blkid && \
+    blkid=$(HOST_OUT)/bin/blkid_static && \
     fsckerofs=$(HOST_OUT)/bin/fsck.erofs && \
     $(HOST_OUT)/bin/deapexer --debugfs_path $$debugfs --blkid_path $$blkid \
 		--fsckerofs_path $$fsckerofs extract $$apex_file $$apex_dir; \

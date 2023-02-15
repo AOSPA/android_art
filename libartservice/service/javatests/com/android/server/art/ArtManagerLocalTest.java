@@ -20,6 +20,8 @@ import static android.os.ParcelFileDescriptor.AutoCloseInputStream;
 
 import static com.android.server.art.model.OptimizationStatus.DexContainerFileOptimizationStatus;
 import static com.android.server.art.testing.TestingUtils.deepEq;
+import static com.android.server.art.testing.TestingUtils.inAnyOrder;
+import static com.android.server.art.testing.TestingUtils.inAnyOrderDeepEquals;
 
 import static com.google.common.truth.Truth.assertThat;
 
@@ -77,8 +79,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ForkJoinPool;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
 @SmallTest
 @RunWith(Parameterized.class)
@@ -125,12 +128,21 @@ public class ArtManagerLocalTest {
         lenient().when(mInjector.getConfig()).thenReturn(mConfig);
         lenient().when(mInjector.getAppHibernationManager()).thenReturn(mAppHibernationManager);
         lenient().when(mInjector.getUserManager()).thenReturn(mUserManager);
+        lenient().when(mInjector.isSystemUiPackage(any())).thenReturn(false);
+        lenient().when(mInjector.isSystemUiPackage(PKG_NAME_SYS_UI)).thenReturn(true);
 
         lenient().when(SystemProperties.get(eq("pm.dexopt.install"))).thenReturn("speed-profile");
         lenient().when(SystemProperties.get(eq("pm.dexopt.bg-dexopt"))).thenReturn("speed-profile");
         lenient().when(SystemProperties.get(eq("pm.dexopt.first-boot"))).thenReturn("verify");
         lenient()
+                .when(SystemProperties.get(eq("pm.dexopt.boot-after-mainline-update")))
+                .thenReturn("verify");
+        lenient()
                 .when(SystemProperties.getInt(eq("pm.dexopt.bg-dexopt.concurrency"), anyInt()))
+                .thenReturn(3);
+        lenient()
+                .when(SystemProperties.getInt(
+                        eq("pm.dexopt.boot-after-mainline-update.concurrency"), anyInt()))
                 .thenReturn(3);
 
         // No ISA translation.
@@ -156,16 +168,9 @@ public class ArtManagerLocalTest {
                     .when(mSnapshot.getPackageState(pkgState.getPackageName()))
                     .thenReturn(pkgState);
         }
-        lenient()
-                .doAnswer(invocation -> {
-                    var consumer = invocation.<Consumer<PackageState>>getArgument(0);
-                    for (PackageState pkgState : pkgStates) {
-                        consumer.accept(pkgState);
-                    }
-                    return null;
-                })
-                .when(mSnapshot)
-                .forAllPackageStates(any());
+        var packageStateMap = pkgStates.stream().collect(
+                Collectors.toMap(PackageState::getPackageName, it -> it));
+        lenient().when(mSnapshot.getPackageStates()).thenReturn(packageStateMap);
         mPkgState = mSnapshot.getPackageState(PKG_NAME);
         mPkg = mPkgState.getAndroidPackage();
 
@@ -344,11 +349,28 @@ public class ArtManagerLocalTest {
         var cancellationSignal = new CancellationSignal();
 
         // It should use the default package list and params.
-        when(mDexOptHelper.dexopt(any(), deepEq(List.of(PKG_NAME, PKG_NAME_SYS_UI)), any(),
-                     same(cancellationSignal), any()))
+        when(mDexOptHelper.dexopt(any(), inAnyOrder(PKG_NAME, PKG_NAME_SYS_UI), any(),
+                     same(cancellationSignal), any(), any(), any()))
                 .thenReturn(result);
 
-        assertThat(mArtManagerLocal.optimizePackages(mSnapshot, "bg-dexopt", cancellationSignal))
+        assertThat(mArtManagerLocal.optimizePackages(mSnapshot, "bg-dexopt", cancellationSignal,
+                           null /* processCallbackExecutor */, null /* processCallback */))
+                .isSameInstanceAs(result);
+    }
+
+    @Test
+    public void testOptimizePackagesBootAfterMainlineUpdate() throws Exception {
+        var result = mock(OptimizeResult.class);
+        var cancellationSignal = new CancellationSignal();
+
+        // It should only optimize system UI.
+        when(mDexOptHelper.dexopt(
+                     any(), deepEq(List.of(PKG_NAME_SYS_UI)), any(), any(), any(), any(), any()))
+                .thenReturn(result);
+
+        assertThat(mArtManagerLocal.optimizePackages(mSnapshot, "boot-after-mainline-update",
+                           cancellationSignal, null /* processCallbackExecutor */,
+                           null /* processCallback */))
                 .isSameInstanceAs(result);
     }
 
@@ -358,8 +380,8 @@ public class ArtManagerLocalTest {
         var result = mock(OptimizeResult.class);
         var cancellationSignal = new CancellationSignal();
 
-        mArtManagerLocal.setOptimizePackagesCallback(Executors.newSingleThreadExecutor(),
-                (snapshot, reason, defaultPackages, builder) -> {
+        mArtManagerLocal.setOptimizePackagesCallback(
+                ForkJoinPool.commonPool(), (snapshot, reason, defaultPackages, builder) -> {
                     assertThat(reason).isEqualTo("bg-dexopt");
                     assertThat(defaultPackages).containsExactly(PKG_NAME, PKG_NAME_SYS_UI);
                     builder.setPackages(List.of(PKG_NAME)).setOptimizeParams(params);
@@ -367,10 +389,11 @@ public class ArtManagerLocalTest {
 
         // It should use the overridden package list and params.
         when(mDexOptHelper.dexopt(any(), deepEq(List.of(PKG_NAME)), same(params),
-                     same(cancellationSignal), any()))
+                     same(cancellationSignal), any(), any(), any()))
                 .thenReturn(result);
 
-        assertThat(mArtManagerLocal.optimizePackages(mSnapshot, "bg-dexopt", cancellationSignal))
+        assertThat(mArtManagerLocal.optimizePackages(mSnapshot, "bg-dexopt", cancellationSignal,
+                           null /* processCallbackExecutor */, null /* processCallback */))
                 .isSameInstanceAs(result);
     }
 
@@ -380,18 +403,19 @@ public class ArtManagerLocalTest {
         var result = mock(OptimizeResult.class);
         var cancellationSignal = new CancellationSignal();
 
-        mArtManagerLocal.setOptimizePackagesCallback(Executors.newSingleThreadExecutor(),
-                (snapshot, reason, defaultPackages, builder) -> {
+        mArtManagerLocal.setOptimizePackagesCallback(
+                ForkJoinPool.commonPool(), (snapshot, reason, defaultPackages, builder) -> {
                     builder.setPackages(List.of(PKG_NAME)).setOptimizeParams(params);
                 });
         mArtManagerLocal.clearOptimizePackagesCallback();
 
         // It should use the default package list and params.
-        when(mDexOptHelper.dexopt(any(), deepEq(List.of(PKG_NAME, PKG_NAME_SYS_UI)),
-                     not(same(params)), same(cancellationSignal), any()))
+        when(mDexOptHelper.dexopt(any(), inAnyOrder(PKG_NAME, PKG_NAME_SYS_UI), not(same(params)),
+                     same(cancellationSignal), any(), any(), any()))
                 .thenReturn(result);
 
-        assertThat(mArtManagerLocal.optimizePackages(mSnapshot, "bg-dexopt", cancellationSignal))
+        assertThat(mArtManagerLocal.optimizePackages(mSnapshot, "bg-dexopt", cancellationSignal,
+                           null /* processCallbackExecutor */, null /* processCallback */))
                 .isSameInstanceAs(result);
     }
 
@@ -400,12 +424,13 @@ public class ArtManagerLocalTest {
         var params = new OptimizeParams.Builder("first-boot").build();
         var cancellationSignal = new CancellationSignal();
 
-        mArtManagerLocal.setOptimizePackagesCallback(Executors.newSingleThreadExecutor(),
-                (snapshot, reason, defaultPackages, builder) -> {
+        mArtManagerLocal.setOptimizePackagesCallback(
+                ForkJoinPool.commonPool(), (snapshot, reason, defaultPackages, builder) -> {
                     builder.setOptimizeParams(params);
                 });
 
-        mArtManagerLocal.optimizePackages(mSnapshot, "bg-dexopt", cancellationSignal);
+        mArtManagerLocal.optimizePackages(mSnapshot, "bg-dexopt", cancellationSignal,
+                null /* processCallbackExecutor */, null /* processCallback */);
     }
 
     @Test
@@ -512,7 +537,8 @@ public class ArtManagerLocalTest {
         options.forBootImage = true;
 
         when(mArtd.mergeProfiles(
-                     deepEq(List.of(AidlUtils.buildProfilePathForPrimaryRef("android", "primary"),
+                     inAnyOrderDeepEquals(
+                             AidlUtils.buildProfilePathForPrimaryRef("android", "primary"),
                              AidlUtils.buildProfilePathForPrimaryCur(
                                      0 /* userId */, "android", "primary"),
                              AidlUtils.buildProfilePathForPrimaryCur(
@@ -537,7 +563,7 @@ public class ArtManagerLocalTest {
                              AidlUtils.buildProfilePathForPrimaryCur(
                                      0 /* userId */, PKG_NAME_HIBERNATING, "primary"),
                              AidlUtils.buildProfilePathForPrimaryCur(
-                                     1 /* userId */, PKG_NAME_HIBERNATING, "primary"))),
+                                     1 /* userId */, PKG_NAME_HIBERNATING, "primary")),
                      isNull(),
                      deepEq(AidlUtils.buildOutputProfileForPrimary("android", "primary",
                              Process.SYSTEM_UID, Process.SYSTEM_UID, false /* isPublic */)),
