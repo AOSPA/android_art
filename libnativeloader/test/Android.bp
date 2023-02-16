@@ -134,6 +134,14 @@ android_test_helper_app {
     srcs: ["src/android/test/app/ProductAppTest.java"],
 }
 
+android_test_helper_app {
+    name: "loadlibrarytest_vendor_app",
+    defaults: ["loadlibrarytest_app_defaults"],
+    vendor: true,
+    manifest: "loadlibrarytest_vendor_app_manifest.xml",
+    srcs: ["src/android/test/app/VendorAppTest.java"],
+}
+
 // A normal app installed in /data.
 android_test_helper_app {
     name: "loadlibrarytest_data_app",
@@ -160,6 +168,7 @@ java_test_host {
         ":loadlibrarytest_system_app",
         ":loadlibrarytest_system_ext_app",
         ":loadlibrarytest_product_app",
+        ":loadlibrarytest_vendor_app",
         ":loadlibrarytest_data_app",
     ],
     test_config: "libnativeloader_e2e_tests.xml",
