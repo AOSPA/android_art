@@ -341,32 +341,47 @@ MemMap MemMap::MapAnonymous(const char* name,
   // We need to store and potentially set an error number for pretty printing of errors
   int saved_errno = 0;
 
-  void* actual = MapInternal(addr,
-                             page_aligned_byte_count,
-                             prot,
-                             flags,
-                             fd.get(),
-                             0,
-                             low_4gb);
-  saved_errno = errno;
+  void* actual;
+#ifndef ART_TARGET_ANDROID
+  int max_retries = 512;
+  for (int retries = 0; retries < max_retries; retries++) {
+    if (retries > 0 && error_msg)
+      LOG(WARNING) << *error_msg << " Retrying!";
+#endif
+    actual = MapInternal(addr,
+                               page_aligned_byte_count,
+                               prot,
+                               flags,
+                               fd.get(),
+                               0,
+                               low_4gb);
+    saved_errno = errno;
 
-  if (actual == MAP_FAILED) {
-    if (error_msg != nullptr) {
-      if (kIsDebugBuild || VLOG_IS_ON(oat)) {
-        PrintFileToLog("/proc/self/maps", LogSeverity::WARNING);
+    if (actual == MAP_FAILED) {
+      if (error_msg != nullptr) {
+        if (kIsDebugBuild || VLOG_IS_ON(oat)) {
+          PrintFileToLog("/proc/self/maps", LogSeverity::WARNING);
+        }
+
+        *error_msg = StringPrintf("Failed anonymous mmap(%p, %zd, 0x%x, 0x%x, %d, 0): %s. "
+                                      "See process maps in the log.",
+                                  addr,
+                                  page_aligned_byte_count,
+                                  prot,
+                                  flags,
+                                  fd.get(),
+                                  strerror(saved_errno));
       }
-
-      *error_msg = StringPrintf("Failed anonymous mmap(%p, %zd, 0x%x, 0x%x, %d, 0): %s. "
-                                    "See process maps in the log.",
-                                addr,
-                                page_aligned_byte_count,
-                                prot,
-                                flags,
-                                fd.get(),
-                                strerror(saved_errno));
+#ifndef ART_TARGET_ANDROID
+      if (retries == max_retries - 1)
+#endif
+        return Invalid();
     }
-    return Invalid();
+#ifndef ART_TARGET_ANDROID
+    else
+      break;
   }
+#endif
   if (!CheckMapRequest(addr, actual, page_aligned_byte_count, error_msg)) {
     return Invalid();
   }
