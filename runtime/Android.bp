@@ -310,6 +310,8 @@ libart_cc_defaults {
         "arch/arm/registers_arm.cc",
         "arch/arm64/instruction_set_features_arm64.cc",
         "arch/arm64/registers_arm64.cc",
+        "arch/riscv64/instruction_set_features_riscv64.cc",
+        "arch/riscv64/registers_riscv64.cc",
         "arch/x86/instruction_set_features_x86.cc",
         "arch/x86/registers_x86.cc",
         "arch/x86_64/registers_x86_64.cc",
@@ -360,6 +362,12 @@ libart_cc_defaults {
                 "arch/arm64/thread_arm64.cc",
                 "monitor_pool.cc",
                 "arch/arm64/fault_handler_arm64.cc",
+            ],
+        },
+        riscv64: {
+            srcs: [
+                "arch/riscv64/context_riscv64.cc",
+                "arch/riscv64/quick_entrypoints_riscv64.S",
             ],
         },
         x86: {
@@ -592,6 +600,7 @@ gensrcs {
         "jni_id_type.h",
         "linear_alloc.h",
         "lock_word.h",
+        "oat.h",
         "oat_file.h",
         "process_state.h",
         "reflective_value_visitor.h",
@@ -819,6 +828,7 @@ art_cc_defaults {
         "arch/instruction_set_features_test.cc",
         "arch/memcmp16_test.cc",
         "arch/stub_test.cc",
+        "arch/riscv64/instruction_set_features_riscv64_test.cc",
         "arch/x86/instruction_set_features_x86_test.cc",
         "arch/x86_64/instruction_set_features_x86_64_test.cc",
         "art_method_test.cc",

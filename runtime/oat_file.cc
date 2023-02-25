@@ -50,6 +50,7 @@
 #include "base/systrace.h"
 #include "base/unix_file/fd_file.h"
 #include "base/utils.h"
+#include "class_loader_context.h"
 #include "dex/art_dex_file_loader.h"
 #include "dex/dex_file.h"
 #include "dex/dex_file_loader.h"
@@ -282,7 +283,7 @@ bool OatFileBase::LoadVdex(const std::string& vdex_filename,
                            std::string* error_msg) {
   vdex_ = VdexFile::OpenAtAddress(vdex_begin_,
                                   vdex_end_ - vdex_begin_,
-                                  /*mmap_reuse=*/ vdex_begin_ != nullptr,
+                                  /*mmap_reuse=*/vdex_begin_ != nullptr,
                                   vdex_filename,
                                   writable,
                                   low_4gb,
@@ -307,16 +308,15 @@ bool OatFileBase::LoadVdex(int vdex_fd,
     if (rc == -1) {
       PLOG(WARNING) << "Failed getting length of vdex file";
     } else {
-      vdex_ = VdexFile::OpenAtAddress(
-          vdex_begin_,
-          vdex_end_ - vdex_begin_,
-          /*mmap_reuse=*/ vdex_begin_ != nullptr,
-          vdex_fd,
-          s.st_size,
-          vdex_filename,
-          writable,
-          low_4gb,
-          error_msg);
+      vdex_ = VdexFile::OpenAtAddress(vdex_begin_,
+                                      vdex_end_ - vdex_begin_,
+                                      /*mmap_reuse=*/vdex_begin_ != nullptr,
+                                      vdex_fd,
+                                      s.st_size,
+                                      vdex_filename,
+                                      writable,
+                                      low_4gb,
+                                      error_msg);
       if (vdex_.get() == nullptr) {
         *error_msg = "Failed opening vdex file.";
         return false;
@@ -793,23 +793,25 @@ bool OatFileBase::Setup(int zip_fd,
         if (zip_fd != -1) {
           loaded = dex_file_loader.OpenZip(zip_fd,
                                            dex_file_location,
-                                           /*verify=*/ false,
-                                           /*verify_checksum=*/ false,
+                                           /*verify=*/false,
+                                           /*verify_checksum=*/false,
+                                           /*allow_no_dex_files=*/false,
                                            error_msg,
                                            &new_dex_files);
         } else if (dex_fd != -1) {
           // Note that we assume dex_fds are backing by jars.
           loaded = dex_file_loader.OpenZipFromOwnedFd(dex_fd,
                                                       dex_file_location,
-                                                      /*verify=*/ false,
-                                                      /*verify_checksum=*/ false,
+                                                      /*verify=*/false,
+                                                      /*verify_checksum=*/false,
+                                                      /*allow_no_dex_files=*/false,
                                                       error_msg,
                                                       &new_dex_files);
         } else {
           loaded = dex_file_loader.Open(dex_file_name.c_str(),
                                         dex_file_location,
-                                        /*verify=*/ false,
-                                        /*verify_checksum=*/ false,
+                                        /*verify=*/false,
+                                        /*verify_checksum=*/false,
                                         error_msg,
                                         &new_dex_files);
         }
@@ -1694,7 +1696,7 @@ bool ElfOatFile::ElfFileOpen(File* file,
   ScopedTrace trace(__PRETTY_FUNCTION__);
   elf_file_.reset(ElfFile::Open(file,
                                 writable,
-                                /*program_header_only=*/ true,
+                                /*program_header_only=*/true,
                                 low_4gb,
                                 error_msg));
   if (elf_file_ == nullptr) {
@@ -1709,15 +1711,16 @@ bool ElfOatFile::ElfFileOpen(File* file,
 class OatFileBackedByVdex final : public OatFileBase {
  public:
   explicit OatFileBackedByVdex(const std::string& filename)
-      : OatFileBase(filename, /*executable=*/ false) {}
+      : OatFileBase(filename, /*executable=*/false) {}
 
   static OatFileBackedByVdex* Open(const std::vector<const DexFile*>& dex_files,
                                    std::unique_ptr<VdexFile>&& vdex_file,
-                                   const std::string& location) {
+                                   const std::string& location,
+                                   ClassLoaderContext* context) {
     std::unique_ptr<OatFileBackedByVdex> oat_file(new OatFileBackedByVdex(location));
     // SetVdex will take ownership of the VdexFile.
     oat_file->SetVdex(vdex_file.release());
-    oat_file->SetupHeader(dex_files.size());
+    oat_file->SetupHeader(dex_files.size(), context);
     // Initialize OatDexFiles.
     std::string error_msg;
     if (!oat_file->Setup(dex_files, &error_msg)) {
@@ -1730,6 +1733,7 @@ class OatFileBackedByVdex final : public OatFileBase {
   static OatFileBackedByVdex* Open(int zip_fd,
                                    std::unique_ptr<VdexFile>&& unique_vdex_file,
                                    const std::string& dex_location,
+                                   ClassLoaderContext* context,
                                    std::string* error_msg) {
     VdexFile* vdex_file = unique_vdex_file.get();
     std::unique_ptr<OatFileBackedByVdex> oat_file(new OatFileBackedByVdex(vdex_file->GetName()));
@@ -1798,7 +1802,7 @@ class OatFileBackedByVdex final : public OatFileBase {
           oat_file->oat_dex_files_.Put(canonical_key, oat_dex_file);
         }
       }
-      oat_file->SetupHeader(oat_file->oat_dex_files_storage_.size());
+      oat_file->SetupHeader(oat_file->oat_dex_files_storage_.size(), context);
     } else {
       // No need for any verification when loading dex files as we already have
       // a vdex file.
@@ -1807,22 +1811,23 @@ class OatFileBackedByVdex final : public OatFileBase {
       if (zip_fd != -1) {
         loaded = dex_file_loader.OpenZip(zip_fd,
                                          dex_location,
-                                         /*verify=*/ false,
-                                         /*verify_checksum=*/ false,
+                                         /*verify=*/false,
+                                         /*verify_checksum=*/false,
+                                         /*allow_no_dex_files=*/false,
                                          error_msg,
                                          &oat_file->external_dex_files_);
       } else {
         loaded = dex_file_loader.Open(dex_location.c_str(),
                                       dex_location,
-                                      /*verify=*/ false,
-                                      /*verify_checksum=*/ false,
+                                      /*verify=*/false,
+                                      /*verify_checksum=*/false,
                                       error_msg,
                                       &oat_file->external_dex_files_);
       }
       if (!loaded) {
         return nullptr;
       }
-      oat_file->SetupHeader(oat_file->external_dex_files_.size());
+      oat_file->SetupHeader(oat_file->external_dex_files_.size(), context);
       if (!oat_file->Setup(MakeNonOwningPointerVector(oat_file->external_dex_files_), error_msg)) {
         return nullptr;
       }
@@ -1831,7 +1836,7 @@ class OatFileBackedByVdex final : public OatFileBase {
     return oat_file.release();
   }
 
-  void SetupHeader(size_t number_of_dex_files) {
+  void SetupHeader(size_t number_of_dex_files, ClassLoaderContext* context) {
     DCHECK(!IsExecutable());
 
     // Create a fake OatHeader with a key store to help debugging.
@@ -1839,9 +1844,13 @@ class OatFileBackedByVdex final : public OatFileBase {
         InstructionSetFeatures::FromCppDefines();
     SafeMap<std::string, std::string> store;
     store.Put(OatHeader::kCompilerFilter, CompilerFilter::NameOfFilter(CompilerFilter::kVerify));
-    store.Put(OatHeader::kCompilationReasonKey, "vdex");
+    store.Put(OatHeader::kCompilationReasonKey, kReasonVdex);
     store.Put(OatHeader::kConcurrentCopying,
               gUseReadBarrier ? OatHeader::kTrueValue : OatHeader::kFalseValue);
+    if (context != nullptr) {
+      store.Put(OatHeader::kClassPathKey, context->EncodeContextForOatFile(""));
+    }
+
     oat_header_.reset(OatHeader::Create(kRuntimeISA,
                                         isa_features.get(),
                                         number_of_dex_files,
@@ -1925,7 +1934,7 @@ OatFile* OatFile::Open(int zip_fd,
                                                                  vdex_filename,
                                                                  oat_filename,
                                                                  oat_location,
-                                                                 /*writable=*/ false,
+                                                                 /*writable=*/false,
                                                                  executable,
                                                                  low_4gb,
                                                                  dex_filenames,
@@ -1955,7 +1964,7 @@ OatFile* OatFile::Open(int zip_fd,
                                                                 vdex_filename,
                                                                 oat_filename,
                                                                 oat_location,
-                                                                /*writable=*/ false,
+                                                                /*writable=*/false,
                                                                 executable,
                                                                 low_4gb,
                                                                 dex_filenames,
@@ -1984,7 +1993,7 @@ OatFile* OatFile::Open(int zip_fd,
                                                                 oat_fd,
                                                                 vdex_location,
                                                                 oat_location,
-                                                                /*writable=*/ false,
+                                                                /*writable=*/false,
                                                                 executable,
                                                                 low_4gb,
                                                                 dex_filenames,
@@ -1996,17 +2005,19 @@ OatFile* OatFile::Open(int zip_fd,
 
 OatFile* OatFile::OpenFromVdex(const std::vector<const DexFile*>& dex_files,
                                std::unique_ptr<VdexFile>&& vdex_file,
-                               const std::string& location) {
+                               const std::string& location,
+                               ClassLoaderContext* context) {
   CheckLocation(location);
-  return OatFileBackedByVdex::Open(dex_files, std::move(vdex_file), location);
+  return OatFileBackedByVdex::Open(dex_files, std::move(vdex_file), location, context);
 }
 
 OatFile* OatFile::OpenFromVdex(int zip_fd,
                                std::unique_ptr<VdexFile>&& vdex_file,
                                const std::string& location,
+                               ClassLoaderContext* context,
                                std::string* error_msg) {
   CheckLocation(location);
-  return OatFileBackedByVdex::Open(zip_fd, std::move(vdex_file), location, error_msg);
+  return OatFileBackedByVdex::Open(zip_fd, std::move(vdex_file), location, context, error_msg);
 }
 
 OatFile::OatFile(const std::string& location, bool is_executable)
@@ -2463,7 +2474,8 @@ CompilerFilter::Filter OatFile::GetCompilerFilter() const {
 }
 
 std::string OatFile::GetClassLoaderContext() const {
-  return GetOatHeader().GetStoreValueByKey(OatHeader::kClassPathKey);
+  const char* value = GetOatHeader().GetStoreValueByKey(OatHeader::kClassPathKey);
+  return (value == nullptr) ? "" : value;
 }
 
 const char* OatFile::GetCompilationReason() const {
