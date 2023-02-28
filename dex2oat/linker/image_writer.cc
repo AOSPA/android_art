@@ -1141,7 +1141,8 @@ class ImageWriter::PruneClassesVisitor : public ClassVisitor {
       last_class_set.erase(it);
       DCHECK(std::none_of(class_table->classes_.begin(),
                           class_table->classes_.end(),
-                          [klass, hash](ClassTable::ClassSet& class_set) {
+                          [klass, hash](ClassTable::ClassSet& class_set)
+                              REQUIRES_SHARED(Locks::mutator_lock_) {
                             ClassTable::TableSlot slot(klass, hash);
                             return class_set.FindWithHash(slot, hash) != class_set.end();
                           }));
@@ -3443,25 +3444,7 @@ const uint8_t* ImageWriter::GetOatAddress(StubType type) const {
     const OatFile* oat_file = image_spaces[0]->GetOatFile();
     CHECK(oat_file != nullptr);
     const OatHeader& header = oat_file->GetOatHeader();
-    switch (type) {
-      // TODO: We could maybe clean this up if we stored them in an array in the oat header.
-      case StubType::kQuickGenericJNITrampoline:
-        return static_cast<const uint8_t*>(header.GetQuickGenericJniTrampoline());
-      case StubType::kJNIDlsymLookupTrampoline:
-        return static_cast<const uint8_t*>(header.GetJniDlsymLookupTrampoline());
-      case StubType::kJNIDlsymLookupCriticalTrampoline:
-        return static_cast<const uint8_t*>(header.GetJniDlsymLookupCriticalTrampoline());
-      case StubType::kQuickIMTConflictTrampoline:
-        return static_cast<const uint8_t*>(header.GetQuickImtConflictTrampoline());
-      case StubType::kQuickResolutionTrampoline:
-        return static_cast<const uint8_t*>(header.GetQuickResolutionTrampoline());
-      case StubType::kQuickToInterpreterBridge:
-        return static_cast<const uint8_t*>(header.GetQuickToInterpreterBridge());
-      case StubType::kNterpTrampoline:
-        return static_cast<const uint8_t*>(header.GetNterpTrampoline());
-      default:
-        UNREACHABLE();
-    }
+    return header.GetOatAddress(type);
   }
   const ImageInfo& primary_image_info = GetImageInfo(0);
   return GetOatAddressForOffset(primary_image_info.GetStubOffset(type), primary_image_info);
