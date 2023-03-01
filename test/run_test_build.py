@@ -167,7 +167,7 @@ class BuildTestContext:
     output = relpath(Path(args[args.index("--output") + 1]), self.rbe_exec_root)
     return self.rbe_wrap([
       "--output_files" if output.endswith(".jar") else "--output_directories", output,
-      "--toolchain_inputs=prebuilts/jdk/jdk11/linux-x86/bin/java",
+      "--toolchain_inputs=prebuilts/jdk/jdk17/linux-x86/bin/java",
       d8_path] + args, inputs)
 
   def rbe_smali(self, smali_path:Path, args):
@@ -175,7 +175,7 @@ class BuildTestContext:
     output = relpath(Path(args[args.index("--output") + 1]), self.rbe_exec_root)
     return self.rbe_wrap([
       "--output_files", output,
-      "--toolchain_inputs=prebuilts/jdk/jdk11/linux-x86/bin/java",
+      "--toolchain_inputs=prebuilts/jdk/jdk17/linux-x86/bin/java",
       smali_path] + args, inputs)
 
   def build(self) -> None:
@@ -455,6 +455,8 @@ class BuildTestContext:
 # We don't know which situation we are in, so as simple work-around, we use a lock
 # file to allow only one shard to use multiprocessing at the same time.
 def use_multiprocessing(mode: str) -> bool:
+  if "RBE_server_address" in os.environ:
+    return True
   global lock_file
   lock_path = Path(environ["TMPDIR"]) / ("art-test-run-test-build-py-" + mode)
   lock_file = open(lock_path, "w")

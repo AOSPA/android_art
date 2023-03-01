@@ -381,25 +381,16 @@ void DeoptManager::Shutdown() {
   deoptimization_status_lock_.ExclusiveLock(self);
   ScopedDeoptimizationContext sdc(self, this);
 
-  art::jit::Jit* jit = runtime->GetJit();
-  if (jit != nullptr && !runtime->IsShuttingDown(self)) {
-    jit->GetCodeCache()->InvalidateAllCompiledCode();
-    jit->GetCodeCache()->TransitionToDebuggable();
-    jit->GetJitCompiler()->SetDebuggableCompilerOption(false);
-  }
-
   art::RuntimeCallbacks* callbacks = runtime->GetRuntimeCallbacks();
   callbacks->RemoveMethodInspectionCallback(&inspection_callback_);
-  if (!runtime->IsJavaDebuggableAtInit()) {
-    runtime->SetRuntimeDebugState(art::Runtime::RuntimeDebugState::kNonJavaDebuggable);
+
+  if (runtime->IsShuttingDown(self)) {
+    return;
   }
-  // TODO(mythria): DeoptManager should use only one key. Merge
-  // kInstrumentationKey and kDeoptManagerInstrumentationKey.
-  if (!runtime->IsShuttingDown(self)) {
-    art::Runtime::Current()->GetInstrumentation()->DisableDeoptimization(kInstrumentationKey);
-    art::Runtime::Current()->GetInstrumentation()->DisableDeoptimization(
-        kDeoptManagerInstrumentationKey);
-  }
+
+  runtime->GetInstrumentation()->DisableDeoptimization(kInstrumentationKey);
+  runtime->GetInstrumentation()->DisableDeoptimization(kDeoptManagerInstrumentationKey);
+  runtime->GetInstrumentation()->MaybeSwitchRuntimeDebugState(self);
 }
 
 void DeoptManager::RemoveDeoptimizeAllMethodsLocked(art::Thread* self) {
@@ -496,6 +487,15 @@ void DeoptManager::AddDeoptimizationRequester() {
   art::ScopedThreadStateChange stsc(self, art::ThreadState::kSuspended);
   deoptimization_status_lock_.ExclusiveLock(self);
   deopter_count_++;
+  if (deopter_count_ == 1) {
+    // When we add a deoptimization requester, we should enable entry / exit hooks. We only call
+    // this in debuggable runtimes and hence it won't be necessary to update entrypoints but we
+    // still need to inform instrumentation that we need to actually run entry / exit hooks. Though
+    // entrypoints are capable of running entry / exit hooks they won't run them unless enabled.
+    ScopedDeoptimizationContext sdc(self, this);
+    art::Runtime::Current()->GetInstrumentation()->EnableEntryExitHooks(kInstrumentationKey);
+    return;
+  }
   deoptimization_status_lock_.ExclusiveUnlock(self);
 }
 

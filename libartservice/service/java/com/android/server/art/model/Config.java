@@ -16,8 +16,8 @@
 
 package com.android.server.art.model;
 
-import static com.android.server.art.ArtManagerLocal.OptimizePackageDoneCallback;
-import static com.android.server.art.ArtManagerLocal.OptimizePackagesCallback;
+import static com.android.server.art.ArtManagerLocal.BatchDexoptStartCallback;
+import static com.android.server.art.ArtManagerLocal.DexoptDoneCallback;
 import static com.android.server.art.ArtManagerLocal.ScheduleBackgroundDexoptJobCallback;
 
 import android.annotation.NonNull;
@@ -40,10 +40,10 @@ import java.util.concurrent.Executor;
  * @hide
  */
 public class Config {
-    /** @see ArtManagerLocal#setOptimizePackagesCallback(Executor, OptimizePackagesCallback) */
+    /** @see ArtManagerLocal#setBatchDexoptStartCallback(Executor, BatchDexoptStartCallback) */
     @GuardedBy("this")
     @Nullable
-    private Callback<OptimizePackagesCallback> mOptimizePackagesCallback = null;
+    private Callback<BatchDexoptStartCallback, Void> mBatchDexoptStartCallback = null;
 
     /**
      * @see ArtManagerLocal#setScheduleBackgroundDexoptJobCallback(Executor,
@@ -51,35 +51,34 @@ public class Config {
      */
     @GuardedBy("this")
     @Nullable
-    private Callback<ScheduleBackgroundDexoptJobCallback> mScheduleBackgroundDexoptJobCallback =
-            null;
+    private Callback<ScheduleBackgroundDexoptJobCallback, Void>
+            mScheduleBackgroundDexoptJobCallback = null;
 
     /**
-     * @see ArtManagerLocal#addOptimizePackageDoneCallback(Executor, OptimizePackageDoneCallback)
+     * @see ArtManagerLocal#addDexoptDoneCallback(Executor, DexoptDoneCallback)
      */
     @GuardedBy("this")
     @NonNull
-    private LinkedHashMap<OptimizePackageDoneCallback, Callback<OptimizePackageDoneCallback>>
-            mOptimizePackageDoneCallbacks = new LinkedHashMap<>();
+    private LinkedHashMap<DexoptDoneCallback, Callback<DexoptDoneCallback, Boolean>>
+            mDexoptDoneCallbacks = new LinkedHashMap<>();
 
-    public synchronized void setOptimizePackagesCallback(
-            @NonNull Executor executor, @NonNull OptimizePackagesCallback callback) {
-        mOptimizePackagesCallback = Callback.<OptimizePackagesCallback>create(callback, executor);
+    public synchronized void setBatchDexoptStartCallback(
+            @NonNull Executor executor, @NonNull BatchDexoptStartCallback callback) {
+        mBatchDexoptStartCallback = Callback.create(callback, executor);
     }
 
-    public synchronized void clearOptimizePackagesCallback() {
-        mOptimizePackagesCallback = null;
+    public synchronized void clearBatchDexoptStartCallback() {
+        mBatchDexoptStartCallback = null;
     }
 
     @Nullable
-    public synchronized Callback<OptimizePackagesCallback> getOptimizePackagesCallback() {
-        return mOptimizePackagesCallback;
+    public synchronized Callback<BatchDexoptStartCallback, Void> getBatchDexoptStartCallback() {
+        return mBatchDexoptStartCallback;
     }
 
     public synchronized void setScheduleBackgroundDexoptJobCallback(
             @NonNull Executor executor, @NonNull ScheduleBackgroundDexoptJobCallback callback) {
-        mScheduleBackgroundDexoptJobCallback =
-                Callback.<ScheduleBackgroundDexoptJobCallback>create(callback, executor);
+        mScheduleBackgroundDexoptJobCallback = Callback.create(callback, executor);
     }
 
     public synchronized void clearScheduleBackgroundDexoptJobCallback() {
@@ -87,37 +86,44 @@ public class Config {
     }
 
     @Nullable
-    public synchronized Callback<ScheduleBackgroundDexoptJobCallback>
+    public synchronized Callback<ScheduleBackgroundDexoptJobCallback, Void>
     getScheduleBackgroundDexoptJobCallback() {
         return mScheduleBackgroundDexoptJobCallback;
     }
 
-    public synchronized void addOptimizePackageDoneCallback(
-            @NonNull Executor executor, @NonNull OptimizePackageDoneCallback callback) {
-        if (mOptimizePackageDoneCallbacks.putIfAbsent(
-                    callback, Callback.<OptimizePackageDoneCallback>create(callback, executor))
+    public synchronized void addDexoptDoneCallback(boolean onlyIncludeUpdates,
+            @NonNull Executor executor, @NonNull DexoptDoneCallback callback) {
+        if (mDexoptDoneCallbacks.putIfAbsent(
+                    callback, Callback.create(callback, executor, onlyIncludeUpdates))
                 != null) {
             throw new IllegalStateException("callback already added");
         }
     }
 
-    public synchronized void removeOptimizePackageDoneCallback(
-            @NonNull OptimizePackageDoneCallback callback) {
-        mOptimizePackageDoneCallbacks.remove(callback);
+    public synchronized void removeDexoptDoneCallback(@NonNull DexoptDoneCallback callback) {
+        mDexoptDoneCallbacks.remove(callback);
     }
 
     @NonNull
-    public synchronized List<Callback<OptimizePackageDoneCallback>>
-    getOptimizePackageDoneCallbacks() {
-        return new ArrayList<>(mOptimizePackageDoneCallbacks.values());
+    public synchronized List<Callback<DexoptDoneCallback, Boolean>> getDexoptDoneCallbacks() {
+        return new ArrayList<>(mDexoptDoneCallbacks.values());
     }
 
     @AutoValue
-    public static abstract class Callback<T> {
-        public abstract @NonNull T get();
+    public static abstract class Callback<CallbackType, ExtraType> {
+        public abstract @NonNull CallbackType get();
         public abstract @NonNull Executor executor();
-        static <T> @NonNull Callback<T> create(@NonNull T callback, @NonNull Executor executor) {
-            return new AutoValue_Config_Callback<T>(callback, executor);
+        public abstract @Nullable ExtraType extra();
+        static <CallbackType, ExtraType> @NonNull Callback<CallbackType, ExtraType> create(
+                @NonNull CallbackType callback, @NonNull Executor executor,
+                @Nullable ExtraType extra) {
+            return new AutoValue_Config_Callback<CallbackType, ExtraType>(
+                    callback, executor, extra);
+        }
+        static <CallbackType> @NonNull Callback<CallbackType, Void> create(
+                @NonNull CallbackType callback, @NonNull Executor executor) {
+            return new AutoValue_Config_Callback<CallbackType, Void>(
+                    callback, executor, null /* extra */);
         }
     }
 }

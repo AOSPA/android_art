@@ -59,7 +59,10 @@ class QuickExceptionHandler {
   // Deoptimize the stack to the upcall/some code that's not deoptimizeable. For
   // every compiled frame, we create a "copy" shadow frame that will be executed
   // with the interpreter.
-  void DeoptimizeStack() REQUIRES_SHARED(Locks::mutator_lock_);
+  // skip_method_exit_callbacks specifies if we should skip method exit callbacks for the top frame.
+  // It is set if a deopt is needed after calling method exit callback for ex: if the callback
+  // throws or performs other actions that require a deopt.
+  void DeoptimizeStack(bool skip_method_exit_callbacks) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Deoptimize a single frame. It's directly triggered from compiled code. It
   // has the following properties:
@@ -72,13 +75,7 @@ class QuickExceptionHandler {
   //   on whether that single frame covers full or partial fragment.
   void DeoptimizeSingleFrame(DeoptimizationKind kind) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void DeoptimizePartialFragmentFixup(uintptr_t return_pc)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Update the instrumentation stack by removing all methods that will be unwound
-  // by the exception being thrown.
-  // Return the return pc of the last frame that's unwound.
-  uintptr_t UpdateInstrumentationStack() REQUIRES_SHARED(Locks::mutator_lock_);
+  void DeoptimizePartialFragmentFixup() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Set up environment before delivering an exception to optimized code.
   void SetCatchEnvironmentForOptimizedHandler(StackVisitor* stack_visitor)
@@ -154,8 +151,6 @@ class QuickExceptionHandler {
   Context* const context_;
   // Should we deoptimize the stack?
   const bool is_deoptimization_;
-  // Is method tracing active?
-  const bool method_tracing_active_;
   // Quick frame with found handler or last frame if no handler found.
   ArtMethod** handler_quick_frame_;
   // PC to branch to for the handler.

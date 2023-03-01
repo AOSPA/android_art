@@ -85,11 +85,11 @@ class Artd : public aidl::com::android::server::art::BnArtd {
       const aidl::com::android::server::art::ArtifactsPath& in_artifactsPath,
       int64_t* _aidl_return) override;
 
-  ndk::ScopedAStatus getOptimizationStatus(
+  ndk::ScopedAStatus getDexoptStatus(
       const std::string& in_dexFile,
       const std::string& in_instructionSet,
       const std::string& in_classLoaderContext,
-      aidl::com::android::server::art::GetOptimizationStatusResult* _aidl_return) override;
+      aidl::com::android::server::art::GetDexoptStatusResult* _aidl_return) override;
 
   ndk::ScopedAStatus isProfileUsable(const aidl::com::android::server::art::ProfilePath& in_profile,
                                      const std::string& in_dexFile,
@@ -152,7 +152,7 @@ class Artd : public aidl::com::android::server::art::BnArtd {
       const aidl::com::android::server::art::DexoptOptions& in_dexoptOptions,
       const std::shared_ptr<aidl::com::android::server::art::IArtdCancellationSignal>&
           in_cancellationSignal,
-      aidl::com::android::server::art::DexoptResult* _aidl_return) override;
+      aidl::com::android::server::art::ArtdDexoptResult* _aidl_return) override;
 
   ndk::ScopedAStatus createCancellationSignal(
       std::shared_ptr<aidl::com::android::server::art::IArtdCancellationSignal>* _aidl_return)
@@ -202,6 +202,7 @@ class Artd : public aidl::com::android::server::art::BnArtd {
                               /*out*/ art::tools::CmdlineBuilder& args);
 
   void AddPerfConfigFlags(aidl::com::android::server::art::PriorityClass priority_class,
+                          /*out*/ art::tools::CmdlineBuilder& art_exec_args,
                           /*out*/ art::tools::CmdlineBuilder& args);
 
   android::base::Result<struct stat> Fstat(const art::File& file) const;

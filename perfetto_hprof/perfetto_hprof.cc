@@ -893,11 +893,10 @@ enum class ResumeParentPolicy {
   DEFERRED
 };
 
-void ForkAndRun(
-    art::Thread* self,
-    ResumeParentPolicy resume_parent_policy,
-    std::function<void(pid_t child)> parent_runnable,
-    std::function<void(pid_t parent, uint64_t timestamp)> child_runnable) {
+void ForkAndRun(art::Thread* self,
+                ResumeParentPolicy resume_parent_policy,
+                const std::function<void(pid_t child)>& parent_runnable,
+                const std::function<void(pid_t parent, uint64_t timestamp)>& child_runnable) {
   pid_t parent_pid = getpid();
   LOG(INFO) << "preparing to dump heap for " << parent_pid;
   // Need to take a heap dump while GC isn't running. See the comment in
@@ -1034,7 +1033,7 @@ void DumpPerfetto(art::Thread* self) {
     });
 }
 
-void DumpPerfettoOutOfMemory() {
+void DumpPerfettoOutOfMemory() REQUIRES_SHARED(art::Locks::mutator_lock_) {
   art::Thread* self = art::Thread::Current();
   if (!self) {
     LOG(FATAL_WITHOUT_ABORT) << "no thread in DumpPerfettoOutOfMemory";
@@ -1049,6 +1048,8 @@ void DumpPerfettoOutOfMemory() {
     }
     g_oome_triggered = true;
   }
+
+  art::ScopedThreadSuspension sts(self, art::ThreadState::kSuspended);
   // If we fork & resume the original process execution it will most likely exit
   // ~immediately due to the OOME error thrown. When the system detects that
   // that, it will cleanup by killing all processes in the cgroup (including

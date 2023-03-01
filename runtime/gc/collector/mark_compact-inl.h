@@ -17,13 +17,53 @@
 #ifndef ART_RUNTIME_GC_COLLECTOR_MARK_COMPACT_INL_H_
 #define ART_RUNTIME_GC_COLLECTOR_MARK_COMPACT_INL_H_
 
+#include "gc/space/bump_pointer_space.h"
 #include "mark_compact.h"
-
 #include "mirror/object-inl.h"
 
 namespace art {
 namespace gc {
 namespace collector {
+
+inline void MarkCompact::UpdateClassAfterObjectMap(mirror::Object* obj) {
+  mirror::Class* klass = obj->GetClass<kVerifyNone, kWithoutReadBarrier>();
+  // Track a class if it needs walking super-classes for visiting references or
+  // if it's higher in address order than its objects and is in moving space.
+  if (UNLIKELY(
+          (std::less<mirror::Object*>{}(obj, klass) && bump_pointer_space_->HasAddress(klass)) ||
+          (klass->GetReferenceInstanceOffsets<kVerifyNone>() == mirror::Class::kClassWalkSuper &&
+           walk_super_class_cache_ != klass))) {
+    // Since this function gets invoked in the compaction pause as well, it is
+    // preferable to store such super class separately rather than updating key
+    // as the latter would require traversing the hierarchy for every object of 'klass'.
+    auto ret1 = class_after_obj_hash_map_.try_emplace(ObjReference::FromMirrorPtr(klass),
+                                                      ObjReference::FromMirrorPtr(obj));
+    if (ret1.second) {
+      if (klass->GetReferenceInstanceOffsets<kVerifyNone>() == mirror::Class::kClassWalkSuper) {
+        // In this case we require traversing through the super class hierarchy
+        // and find the super class at the highest address order.
+        mirror::Class* highest_klass = bump_pointer_space_->HasAddress(klass) ? klass : nullptr;
+        for (ObjPtr<mirror::Class> k = klass->GetSuperClass<kVerifyNone, kWithoutReadBarrier>();
+             k != nullptr;
+             k = k->GetSuperClass<kVerifyNone, kWithoutReadBarrier>()) {
+          // TODO: Can we break once we encounter a super class outside the moving space?
+          if (bump_pointer_space_->HasAddress(k.Ptr())) {
+            highest_klass = std::max(highest_klass, k.Ptr(), std::less<mirror::Class*>());
+          }
+        }
+        if (highest_klass != nullptr && highest_klass != klass) {
+          auto ret2 = super_class_after_class_hash_map_.try_emplace(
+              ObjReference::FromMirrorPtr(klass), ObjReference::FromMirrorPtr(highest_klass));
+          DCHECK(ret2.second);
+        } else {
+          walk_super_class_cache_ = klass;
+        }
+      }
+    } else if (std::less<mirror::Object*>{}(obj, ret1.first->second.AsMirrorPtr())) {
+      ret1.first->second = ObjReference::FromMirrorPtr(obj);
+    }
+  }
+}
 
 template <size_t kAlignment>
 inline uintptr_t MarkCompact::LiveWordsBitmap<kAlignment>::SetLiveWords(uintptr_t begin,

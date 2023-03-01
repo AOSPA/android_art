@@ -15,6 +15,20 @@
  */
 
 #include <fcntl.h>
+// Glibc v2.19 doesn't include these in fcntl.h so host builds will fail without.
+#if !defined(FALLOC_FL_PUNCH_HOLE) || !defined(FALLOC_FL_KEEP_SIZE)
+#include <linux/falloc.h>
+#endif
+#include <linux/userfaultfd.h>
+#include <poll.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <fstream>
+#include <numeric>
 
 #include "android-base/file.h"
 #include "android-base/properties.h"
@@ -35,19 +49,6 @@
 #include "scoped_thread_state_change-inl.h"
 #include "sigchain.h"
 #include "thread_list.h"
-// Glibc v2.19 doesn't include these in fcntl.h so host builds will fail without.
-#if !defined(FALLOC_FL_PUNCH_HOLE) || !defined(FALLOC_FL_KEEP_SIZE)
-#include <linux/falloc.h>
-#endif
-#include <linux/userfaultfd.h>
-#include <poll.h>
-#include <sys/ioctl.h>
-#include <sys/mman.h>
-#include <sys/resource.h>
-#include <unistd.h>
-
-#include <fstream>
-#include <numeric>
 
 #ifndef __BIONIC__
 #ifndef MREMAP_DONTUNMAP
@@ -96,6 +97,9 @@ static bool HaveMremapDontunmap() {
 static bool gHaveMremapDontunmap = IsKernelVersionAtLeast(5, 13) || HaveMremapDontunmap();
 // Bitmap of features supported by userfaultfd. This is obtained via uffd API ioctl.
 static uint64_t gUffdFeatures = 0;
+// Both, missing and minor faults on shmem are needed only for minor-fault mode.
+static constexpr uint64_t kUffdFeaturesForMinorFault =
+    UFFD_FEATURE_MISSING_SHMEM | UFFD_FEATURE_MINOR_SHMEM;
 
 static bool KernelSupportsUffd() {
 #ifdef __linux__
@@ -115,7 +119,7 @@ static bool KernelSupportsUffd() {
       gUffdFeatures = api.features;
       close(fd);
       // Allow this GC to be used only if minor-fault feature is available.
-      return api.features & UFFD_FEATURE_MINOR_SHMEM;
+      return (api.features & kUffdFeaturesForMinorFault) == kUffdFeaturesForMinorFault;
     }
   }
 #endif
@@ -175,12 +179,12 @@ static constexpr bool kVerifyRootsMarked = kIsDebugBuild;
 static constexpr size_t kMaxNumUffdWorkers = 2;
 // Minimum from-space chunk to be madvised (during concurrent compaction) in one go.
 static constexpr ssize_t kMinFromSpaceMadviseSize = 1 * MB;
-// Concurrent compaction termination logic works if the kernel has the fault-retry feature
-// (allowing repeated faults on the same page), which was introduced in 5.7.
-// Otherwise, kernel only retries pagefaults once, therefore having 2 or less
-// workers will also suffice as the termination logic requires (n-1) pagefault
-// retries.
-static const bool gKernelHasFaultRetry = kMaxNumUffdWorkers <= 2 || IsKernelVersionAtLeast(5, 7);
+// Concurrent compaction termination logic is different (and slightly more efficient) if the
+// kernel has the fault-retry feature (allowing repeated faults on the same page), which was
+// introduced in 5.7 (https://android-review.git.corp.google.com/c/kernel/common/+/1540088).
+// This allows a single page fault to be handled, in turn, by each worker thread, only waking
+// up the GC thread at the end.
+static const bool gKernelHasFaultRetry = IsKernelVersionAtLeast(5, 7);
 
 std::pair<bool, bool> MarkCompact::GetUffdAndMinorFault() {
   bool uffd_available;
@@ -195,42 +199,32 @@ std::pair<bool, bool> MarkCompact::GetUffdAndMinorFault() {
     // We can have any uffd features only if uffd exists.
     uffd_available = true;
   }
-  return std::pair<bool, bool>(uffd_available, gUffdFeatures & UFFD_FEATURE_MINOR_SHMEM);
+  bool minor_fault_available =
+      (gUffdFeatures & kUffdFeaturesForMinorFault) == kUffdFeaturesForMinorFault;
+  return std::pair<bool, bool>(uffd_available, minor_fault_available);
 }
 
 bool MarkCompact::CreateUserfaultfd(bool post_fork) {
   if (post_fork || uffd_ == kFdUnused) {
     // Don't use O_NONBLOCK as we rely on read waiting on uffd_ if there isn't
     // any read event available. We don't use poll.
-    if (gKernelHasFaultRetry) {
-      uffd_ = syscall(__NR_userfaultfd, O_CLOEXEC | UFFD_USER_MODE_ONLY);
-      // On non-android devices we may not have the kernel patches that restrict
-      // userfaultfd to user mode. But that is not a security concern as we are
-      // on host. Therefore, attempt one more time without UFFD_USER_MODE_ONLY.
-      if (!kIsTargetAndroid && UNLIKELY(uffd_ == -1 && errno == EINVAL)) {
-        uffd_ = syscall(__NR_userfaultfd, O_CLOEXEC);
-      }
-      if (UNLIKELY(uffd_ == -1)) {
-        uffd_ = kFallbackMode;
-        LOG(WARNING) << "Userfaultfd isn't supported (reason: " << strerror(errno)
-                     << ") and therefore falling back to stop-the-world compaction.";
-      } else {
-        DCHECK(IsValidFd(uffd_));
-        constexpr static uint64_t kRequestedUffdFeatures =
-            UFFD_FEATURE_MISSING_SHMEM | UFFD_FEATURE_MINOR_SHMEM;
-        // Initialize uffd with the features which are required and available.
-        struct uffdio_api api = {
-            .api = UFFD_API, .features = gUffdFeatures & kRequestedUffdFeatures, .ioctls = 0};
-        CHECK_EQ(ioctl(uffd_, UFFDIO_API, &api), 0)
-            << "ioctl_userfaultfd: API: " << strerror(errno);
-        // Missing userfaults on shmem should always be available.
-        CHECK_NE(api.features & UFFD_FEATURE_MISSING_SHMEM, 0u);
-        // TODO: Assert that minor-fault support isn't available only on 32-bit kernel.
-      }
-    } else {
-      // Without fault-retry feature in the kernel we can't terminate concurrent
-      // compaction. So fallback to stop-the-world compaction.
+    uffd_ = syscall(__NR_userfaultfd, O_CLOEXEC | UFFD_USER_MODE_ONLY);
+    // On non-android devices we may not have the kernel patches that restrict
+    // userfaultfd to user mode. But that is not a security concern as we are
+    // on host. Therefore, attempt one more time without UFFD_USER_MODE_ONLY.
+    if (!kIsTargetAndroid && UNLIKELY(uffd_ == -1 && errno == EINVAL)) {
+      uffd_ = syscall(__NR_userfaultfd, O_CLOEXEC);
+    }
+    if (UNLIKELY(uffd_ == -1)) {
       uffd_ = kFallbackMode;
+      LOG(WARNING) << "Userfaultfd isn't supported (reason: " << strerror(errno)
+                   << ") and therefore falling back to stop-the-world compaction.";
+    } else {
+      DCHECK(IsValidFd(uffd_));
+      // Initialize uffd with the features which are required and available.
+      struct uffdio_api api = {
+          .api = UFFD_API, .features = gUffdFeatures & kUffdFeaturesForMinorFault, .ioctls = 0};
+      CHECK_EQ(ioctl(uffd_, UFFDIO_API, &api), 0) << "ioctl_userfaultfd: API: " << strerror(errno);
     }
   }
   uffd_initialized_ = !post_fork || uffd_ == kFallbackMode;
@@ -249,6 +243,7 @@ MarkCompact::MarkCompact(Heap* heap)
       gc_barrier_(0),
       mark_stack_lock_("mark compact mark stack lock", kMarkSweepMarkStackLock),
       bump_pointer_space_(heap->GetBumpPointerSpace()),
+      moving_space_bitmap_(bump_pointer_space_->GetMarkBitmap()),
       moving_to_space_fd_(kFdUnused),
       moving_from_space_fd_(kFdUnused),
       uffd_(kFdUnused),
@@ -441,13 +436,8 @@ void MarkCompact::BindAndResetBitmaps() {
       // in these spaces. This card-table will eventually be used to track
       // mutations while concurrent marking is going on.
       card_table->ClearCardRange(space->Begin(), space->Limit());
-      if (space == bump_pointer_space_) {
-        // It is OK to clear the bitmap with mutators running since the only
-        // place it is read is VisitObjects which has exclusion with this GC.
-        moving_space_bitmap_ = bump_pointer_space_->GetMarkBitmap();
-        moving_space_bitmap_->Clear();
-      } else {
-        CHECK(space == heap_->GetNonMovingSpace());
+      if (space != bump_pointer_space_) {
+        CHECK_EQ(space, heap_->GetNonMovingSpace());
         non_moving_space_ = space;
         non_moving_space_bitmap_ = space->GetMarkBitmap();
       }
@@ -466,6 +456,7 @@ void MarkCompact::InitializePhase() {
   freed_objects_ = 0;
   from_space_slide_diff_ = from_space_begin_ - bump_pointer_space_->Begin();
   black_allocations_begin_ = bump_pointer_space_->Limit();
+  walk_super_class_cache_ = nullptr;
   compacting_ = false;
   // TODO: Would it suffice to read it once in the constructor, which is called
   // in zygote process?
@@ -1738,17 +1729,14 @@ void MarkCompact::DoPageCompactionWithStateChange(size_t page_idx,
   }
 }
 
-template <int kMode>
-void MarkCompact::FreeFromSpacePages(size_t cur_page_idx,
-                                     size_t* last_checked_page_idx,
-                                     uint8_t** last_freed_page) {
+void MarkCompact::FreeFromSpacePages(size_t cur_page_idx) {
   // Thanks to sliding compaction, bump-pointer allocations, and reverse
   // compaction (see CompactMovingSpace) the logic here is pretty simple: find
   // the to-space page up to which compaction has finished, all the from-space
   // pages corresponding to this onwards can be freed. There are some corner
   // cases to be taken care of, which are described below.
-  size_t idx = *last_checked_page_idx;
-  // Find the to-space page upto which the corresponding from-space pages can be
+  size_t idx = last_checked_reclaim_page_idx_;
+  // Find the to-space page up to which the corresponding from-space pages can be
   // freed.
   for (; idx > cur_page_idx; idx--) {
     PageState state = moving_pages_status_[idx - 1].load(std::memory_order_acquire);
@@ -1760,68 +1748,122 @@ void MarkCompact::FreeFromSpacePages(size_t cur_page_idx,
            (state == PageState::kUnprocessed && idx > moving_first_objs_count_));
   }
 
-  uint8_t* first;
-  // Calculate the first from-space page to be freed using idx. If the
-  // first-object of this to-space page started before the corresponding
+  uint8_t* reclaim_begin;
+  uint8_t* idx_addr;
+  // Calculate the first from-space page to be freed using 'idx'. If the
+  // first-object of the idx'th to-space page started before the corresponding
   // from-space page, which is almost always the case in the compaction portion
   // of the moving-space, then it indicates that the subsequent pages that are
-  // yet to be compacted will need the from-space. Therefore, find the page
+  // yet to be compacted will need the from-space pages. Therefore, find the page
   // (from the already compacted pages) whose first-object is different from
   // ours. All the from-space pages starting from that one are safe to be
   // removed. Please note that this iteration is not expected to be long in
   // normal cases as objects are smaller than page size.
   if (idx >= moving_first_objs_count_) {
     // black-allocated portion of the moving-space
-    first = black_allocations_begin_ + (idx - moving_first_objs_count_) * kPageSize;
+    idx_addr = black_allocations_begin_ + (idx - moving_first_objs_count_) * kPageSize;
+    reclaim_begin = idx_addr;
     mirror::Object* first_obj = first_objs_moving_space_[idx].AsMirrorPtr();
-    if (first_obj != nullptr && reinterpret_cast<uint8_t*>(first_obj) < first) {
+    if (first_obj != nullptr && reinterpret_cast<uint8_t*>(first_obj) < reclaim_begin) {
       size_t idx_len = moving_first_objs_count_ + black_page_count_;
       for (size_t i = idx + 1; i < idx_len; i++) {
         mirror::Object* obj = first_objs_moving_space_[i].AsMirrorPtr();
         // A null first-object indicates that the corresponding to-space page is
         // not used yet. So we can compute its from-space page and use that.
         if (obj != first_obj) {
-          first = obj != nullptr ?
-                      AlignUp(reinterpret_cast<uint8_t*>(obj), kPageSize) :
-                      (black_allocations_begin_ + (i - moving_first_objs_count_) * kPageSize);
+          reclaim_begin = obj != nullptr
+                          ? AlignUp(reinterpret_cast<uint8_t*>(obj), kPageSize)
+                          : (black_allocations_begin_ + (i - moving_first_objs_count_) * kPageSize);
           break;
         }
       }
     }
   } else {
     DCHECK_GE(pre_compact_offset_moving_space_[idx], 0u);
-    first = bump_pointer_space_->Begin() + pre_compact_offset_moving_space_[idx] * kAlignment;
-    DCHECK_LE(first, black_allocations_begin_);
+    idx_addr = bump_pointer_space_->Begin() + pre_compact_offset_moving_space_[idx] * kAlignment;
+    reclaim_begin = idx_addr;
+    DCHECK_LE(reclaim_begin, black_allocations_begin_);
     mirror::Object* first_obj = first_objs_moving_space_[idx].AsMirrorPtr();
-    if (reinterpret_cast<uint8_t*>(first_obj) < first) {
+    if (reinterpret_cast<uint8_t*>(first_obj) < reclaim_begin) {
       DCHECK_LT(idx, moving_first_objs_count_);
       mirror::Object* obj = first_obj;
       for (size_t i = idx + 1; i < moving_first_objs_count_; i++) {
         obj = first_objs_moving_space_[i].AsMirrorPtr();
         if (first_obj != obj) {
           DCHECK_LT(first_obj, obj);
-          DCHECK_LT(first, reinterpret_cast<uint8_t*>(obj));
-          first = reinterpret_cast<uint8_t*>(obj);
+          DCHECK_LT(reclaim_begin, reinterpret_cast<uint8_t*>(obj));
+          reclaim_begin = reinterpret_cast<uint8_t*>(obj);
           break;
         }
       }
       if (obj == first_obj) {
-        first = black_allocations_begin_;
+        reclaim_begin = black_allocations_begin_;
       }
     }
-    first = AlignUp(first, kPageSize);
+    reclaim_begin = AlignUp(reclaim_begin, kPageSize);
   }
-  DCHECK_NE(first, nullptr);
-  DCHECK_ALIGNED(first, kPageSize);
-  DCHECK_ALIGNED(*last_freed_page, kPageSize);
-  ssize_t size = *last_freed_page - first;
+
+  DCHECK_NE(reclaim_begin, nullptr);
+  DCHECK_ALIGNED(reclaim_begin, kPageSize);
+  DCHECK_ALIGNED(last_reclaimed_page_, kPageSize);
+  // Check if the 'class_after_obj_map_' map allows pages to be freed.
+  for (; class_after_obj_iter_ != class_after_obj_ordered_map_.rend(); class_after_obj_iter_++) {
+    mirror::Object* klass = class_after_obj_iter_->first.AsMirrorPtr();
+    mirror::Class* from_klass = static_cast<mirror::Class*>(GetFromSpaceAddr(klass));
+    // Check with class' end to ensure that, if required, the entire class survives.
+    uint8_t* klass_end = reinterpret_cast<uint8_t*>(klass) + from_klass->SizeOf<kVerifyNone>();
+    DCHECK_LE(klass_end, last_reclaimed_page_);
+    if (reinterpret_cast<uint8_t*>(klass_end) >= reclaim_begin) {
+      // Found a class which is in the reclaim range.
+      uint8_t* obj_addr = reinterpret_cast<uint8_t*>(class_after_obj_iter_->second.AsMirrorPtr());
+      // NOTE: Don't assert that obj is of 'klass' type as klass could instead
+      // be its super-class.
+      if (obj_addr < idx_addr) {
+        // Its lowest-address object is not compacted yet. Reclaim starting from
+        // the end of this class.
+        reclaim_begin = AlignUp(klass_end, kPageSize);
+      } else {
+        // Continue consuming pairs wherein the lowest address object has already
+        // been compacted.
+        continue;
+      }
+    }
+    // All the remaining class (and thereby corresponding object) addresses are
+    // lower than the reclaim range.
+    break;
+  }
+
+  ssize_t size = last_reclaimed_page_ - reclaim_begin;
   if (size >= kMinFromSpaceMadviseSize) {
-    int behavior = kMode == kMinorFaultMode ? MADV_REMOVE : MADV_DONTNEED;
-    CHECK_EQ(madvise(first + from_space_slide_diff_, size, behavior), 0)
+    int behavior = minor_fault_initialized_ ? MADV_REMOVE : MADV_DONTNEED;
+    CHECK_EQ(madvise(reclaim_begin + from_space_slide_diff_, size, behavior), 0)
         << "madvise of from-space failed: " << strerror(errno);
-    *last_freed_page = first;
+    last_reclaimed_page_ = reclaim_begin;
   }
-  *last_checked_page_idx = idx;
+  last_checked_reclaim_page_idx_ = idx;
+}
+
+void MarkCompact::UpdateClassAfterObjMap() {
+  CHECK(class_after_obj_ordered_map_.empty());
+  for (const auto& pair : class_after_obj_hash_map_) {
+    auto super_class_iter = super_class_after_class_hash_map_.find(pair.first);
+    ObjReference key = super_class_iter != super_class_after_class_hash_map_.end()
+                       ? super_class_iter->second
+                       : pair.first;
+    if (std::less<mirror::Object*>{}(pair.second.AsMirrorPtr(), key.AsMirrorPtr()) &&
+        bump_pointer_space_->HasAddress(key.AsMirrorPtr())) {
+      auto [ret_iter, success] = class_after_obj_ordered_map_.try_emplace(key, pair.second);
+      // It could fail only if the class 'key' has objects of its own, which are lower in
+      // address order, as well of some of its derived class. In this case
+      // choose the lowest address object.
+      if (!success &&
+          std::less<mirror::Object*>{}(pair.second.AsMirrorPtr(), ret_iter->second.AsMirrorPtr())) {
+        ret_iter->second = pair.second;
+      }
+    }
+  }
+  class_after_obj_hash_map_.clear();
+  super_class_after_class_hash_map_.clear();
 }
 
 template <int kMode>
@@ -1848,9 +1890,11 @@ void MarkCompact::CompactMovingSpace(uint8_t* page) {
 
   DCHECK(IsAligned<kPageSize>(pre_compact_page));
 
+  UpdateClassAfterObjMap();
   // These variables are maintained by FreeFromSpacePages().
-  uint8_t* last_freed_page = pre_compact_page;
-  size_t last_checked_page_idx = idx;
+  last_reclaimed_page_ = pre_compact_page;
+  last_checked_reclaim_page_idx_ = idx;
+  class_after_obj_iter_ = class_after_obj_ordered_map_.rbegin();
   // Allocated-black pages
   while (idx > moving_first_objs_count_) {
     idx--;
@@ -1875,7 +1919,7 @@ void MarkCompact::CompactMovingSpace(uint8_t* page) {
       // We are sliding here, so no point attempting to madvise for every
       // page. Wait for enough pages to be done.
       if (idx % (kMinFromSpaceMadviseSize / kPageSize) == 0) {
-        FreeFromSpacePages<kMode>(idx, &last_checked_page_idx, &last_freed_page);
+        FreeFromSpacePages(idx);
       }
     }
   }
@@ -1895,7 +1939,7 @@ void MarkCompact::CompactMovingSpace(uint8_t* page) {
         idx, page_status_arr_len, to_space_end, page, [&]() REQUIRES_SHARED(Locks::mutator_lock_) {
           CompactPage(first_obj, pre_compact_offset_moving_space_[idx], page, kMode == kCopyMode);
         });
-    FreeFromSpacePages<kMode>(idx, &last_checked_page_idx, &last_freed_page);
+    FreeFromSpacePages(idx);
   }
   DCHECK_EQ(to_space_end, bump_pointer_space_->Begin());
 }
@@ -2017,6 +2061,7 @@ void MarkCompact::UpdateMovingSpaceBlackAllocations() {
         if (set_mark_bit) {
           moving_space_bitmap_->Set(obj);
         }
+        UpdateClassAfterObjectMap(obj);
         size_t obj_size = RoundUp(obj->SizeOf(), kAlignment);
         // Handle objects which cross page boundary, including objects larger
         // than page size.
@@ -2366,6 +2411,11 @@ void MarkCompact::PreCompactionPhase() {
   }
 
   bool has_zygote_space = heap_->HasZygoteSpace();
+  // TODO: Find out why it's not sufficient to visit native roots of immune
+  // spaces, and why all the pre-zygote fork arenas have to be linearly updated.
+  // Is it possible that some native root starts getting pointed to by some object
+  // in moving space after fork? Or are we missing a write-barrier somewhere
+  // when a native root is updated?
   GcVisitedArenaPool* arena_pool =
       static_cast<GcVisitedArenaPool*>(runtime->GetLinearAllocArenaPool());
   if (uffd_ == kFallbackMode || (!has_zygote_space && runtime->IsZygote())) {
@@ -2388,6 +2438,9 @@ void MarkCompact::PreCompactionPhase() {
           if (!arena.IsPreZygoteForkArena()) {
             uint8_t* last_byte = arena.GetLastUsedByte();
             CHECK(linear_alloc_arenas_.insert({&arena, last_byte}).second);
+          } else {
+            LinearAllocPageUpdater updater(this);
+            arena.VisitRoots(updater);
           }
         });
   }
@@ -2419,7 +2472,7 @@ void MarkCompact::PreCompactionPhase() {
       // place and that the classes/dex-caches in immune-spaces may have allocations
       // (ArtMethod/ArtField arrays, dex-cache array, etc.) in the
       // non-userfaultfd visited private-anonymous mappings. Visit them here.
-      ImmuneSpaceUpdateObjVisitor visitor(this, /*visit_native_roots=*/has_zygote_space);
+      ImmuneSpaceUpdateObjVisitor visitor(this, /*visit_native_roots=*/false);
       if (table != nullptr) {
         table->ProcessCards();
         table->VisitObjects(ImmuneSpaceUpdateObjVisitor::Callback, &visitor);
@@ -2638,9 +2691,10 @@ void MarkCompact::ConcurrentCompaction(uint8_t* buf) {
       // page missing. Also, the value will be flushed to caches due to the ioctl
       // syscall below.
       uint8_t ret = thread_pool_counter_--;
-      // Only the last thread should map the zeropage so that the gc-thread can
-      // proceed.
-      if (ret == 1) {
+      // If 'gKernelHasFaultRetry == true' then only the last thread should map the
+      // zeropage so that the gc-thread can proceed. Otherwise, each thread does
+      // it and the gc-thread will repeat this fault until thread_pool_counter == 0.
+      if (!gKernelHasFaultRetry || ret == 1) {
         zeropage_ioctl(fault_addr, /*tolerate_eexist=*/false, /*tolerate_enoent=*/false);
       } else {
         struct uffdio_range uffd_range;
@@ -2995,9 +3049,6 @@ void MarkCompact::CompactionPhase() {
     CompactMovingSpace<kCopyMode>(compaction_buffers_map_.Begin());
   }
 
-  // madvise the page so that we can get userfaults on it.
-  ZeroAndReleasePages(conc_compaction_termination_page_, kPageSize);
-
   // TODO: add more sophisticated logic here wherein we sleep after attempting
   // yield a couple of times.
   while (compaction_in_progress_count_.load(std::memory_order_relaxed) > 0) {
@@ -3012,20 +3063,54 @@ void MarkCompact::CompactionPhase() {
 
   // Release all of the memory taken by moving-space's from-map
   if (minor_fault_initialized_) {
-    int ret = madvise(from_space_begin_, moving_space_size, MADV_REMOVE);
-    CHECK_EQ(ret, 0) << "madvise(MADV_REMOVE) failed for from-space map:" << strerror(errno);
+    if (IsValidFd(moving_from_space_fd_)) {
+      // A strange behavior is observed wherein between GC cycles the from-space'
+      // first page is accessed. But the memfd that is mapped on from-space, is
+      // used on to-space in next GC cycle, causing issues with userfaultfd as the
+      // page isn't missing. A possible reason for this could be prefetches. The
+      // mprotect ensures that such accesses don't succeed.
+      int ret = mprotect(from_space_begin_, moving_space_size, PROT_NONE);
+      CHECK_EQ(ret, 0) << "mprotect(PROT_NONE) for from-space failed: " << strerror(errno);
+      // madvise(MADV_REMOVE) needs PROT_WRITE. Use fallocate() instead, which
+      // does the same thing.
+      ret = fallocate(moving_from_space_fd_,
+                      FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                      /*offset=*/0,
+                      moving_space_size);
+      CHECK_EQ(ret, 0) << "fallocate for from-space failed: " << strerror(errno);
+    } else {
+      // We don't have a valid fd, so use madvise(MADV_REMOVE) instead. mprotect
+      // is not required in this case as we create fresh
+      // MAP_SHARED+MAP_ANONYMOUS mapping in each GC cycle.
+      int ret = madvise(from_space_begin_, moving_space_size, MADV_REMOVE);
+      CHECK_EQ(ret, 0) << "madvise(MADV_REMOVE) failed for from-space map:" << strerror(errno);
+    }
   } else {
     from_space_map_.MadviseDontNeedAndZero();
+  }
+  // mprotect(PROT_NONE) all maps except to-space in debug-mode to catch any unexpected accesses.
+  if (shadow_to_space_map_.IsValid()) {
+    DCHECK_EQ(mprotect(shadow_to_space_map_.Begin(), shadow_to_space_map_.Size(), PROT_NONE), 0)
+        << "mprotect(PROT_NONE) for shadow-map failed:" << strerror(errno);
+  }
+  if (!IsValidFd(moving_from_space_fd_)) {
+    // The other case is already mprotected above.
+    DCHECK_EQ(mprotect(from_space_begin_, moving_space_size, PROT_NONE), 0)
+        << "mprotect(PROT_NONE) for from-space failed: " << strerror(errno);
   }
 
   ProcessLinearAlloc();
 
-  // The following load triggers 'special' userfaults. When received by the
-  // thread-pool workers, they will exit out of the compaction task. This fault
-  // happens because we madvise info_map_ above and it is at least kPageSize in length.
   DCHECK(IsAligned<kPageSize>(conc_compaction_termination_page_));
-  CHECK_EQ(*reinterpret_cast<volatile uint8_t*>(conc_compaction_termination_page_), 0);
-  DCHECK_EQ(thread_pool_counter_, 0);
+  // We will only iterate once if gKernelHasFaultRetry is true.
+  do {
+    // madvise the page so that we can get userfaults on it.
+    ZeroAndReleasePages(conc_compaction_termination_page_, kPageSize);
+    // The following load triggers 'special' userfaults. When received by the
+    // thread-pool workers, they will exit out of the compaction task. This fault
+    // happens because we madvised the page.
+    ForceRead(conc_compaction_termination_page_);
+  } while (thread_pool_counter_ > 0);
 
   // Unregister linear-alloc spaces
   for (auto& data : linear_alloc_spaces_data_) {
@@ -3442,6 +3527,7 @@ size_t MarkCompact::LiveWordsBitmap<kAlignment>::LiveBytesInBitmapWord(size_t ch
 void MarkCompact::UpdateLivenessInfo(mirror::Object* obj) {
   DCHECK(obj != nullptr);
   uintptr_t obj_begin = reinterpret_cast<uintptr_t>(obj);
+  UpdateClassAfterObjectMap(obj);
   size_t size = RoundUp(obj->SizeOf<kDefaultVerifyFlags>(), kAlignment);
   uintptr_t bit_index = live_words_bitmap_->SetLiveWords(obj_begin, size);
   size_t chunk_idx = (obj_begin - live_words_bitmap_->Begin()) / kOffsetChunkSize;
@@ -3662,6 +3748,11 @@ void MarkCompact::FinishPhase() {
 
   info_map_.MadviseDontNeedAndZero();
   live_words_bitmap_->ClearBitmap();
+  // TODO: We can clear this bitmap right before compaction pause. But in that
+  // case we need to ensure that we don't assert on this bitmap afterwards.
+  // Also, we would still need to clear it here again as we may have to use the
+  // bitmap for black-allocations (see UpdateMovingSpaceBlackAllocations()).
+  moving_space_bitmap_->Clear();
 
   if (UNLIKELY(is_zygote && IsValidFd(uffd_))) {
     heap_->DeleteThreadPool();
@@ -3673,6 +3764,7 @@ void MarkCompact::FinishPhase() {
   CHECK(mark_stack_->IsEmpty());  // Ensure that the mark stack is empty.
   mark_stack_->Reset();
   updated_roots_.clear();
+  class_after_obj_ordered_map_.clear();
   delete[] moving_pages_status_;
   linear_alloc_arenas_.clear();
   {
@@ -3682,6 +3774,12 @@ void MarkCompact::FinishPhase() {
     heap_->ClearMarkedObjects();
   }
   std::swap(moving_to_space_fd_, moving_from_space_fd_);
+  if (IsValidFd(moving_to_space_fd_)) {
+    // Confirm that the memfd to be used on to-space in next GC cycle is empty.
+    struct stat buf;
+    DCHECK_EQ(fstat(moving_to_space_fd_, &buf), 0) << "fstat failed: " << strerror(errno);
+    DCHECK_EQ(buf.st_blocks, 0u);
+  }
 }
 
 }  // namespace collector

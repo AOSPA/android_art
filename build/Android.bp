@@ -42,9 +42,10 @@ art_clang_tidy_errors = [
     "performance-faster-string-find",
     "performance-for-range-copy",
     "performance-implicit-conversion-in-loop",
+    "performance-no-automatic-move",
+    "performance-noexcept-move-constructor",
     "performance-unnecessary-copy-initialization",
     "performance-unnecessary-value-param",
-    "performance-noexcept-move-constructor",
 ]
 
 art_clang_tidy_disabled = [

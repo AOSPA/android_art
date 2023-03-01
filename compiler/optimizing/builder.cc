@@ -96,62 +96,13 @@ bool HGraphBuilder::SkipCompilation(size_t number_of_branches) {
   return false;
 }
 
-static bool NeedsExtraGotoBlock(HBasicBlock* block) {
-  if (!block->IsSingleTryBoundary()) {
-    return false;
-  }
-
-  const HTryBoundary* boundary = block->GetLastInstruction()->AsTryBoundary();
-  DCHECK(boundary->GetNormalFlowSuccessor()->IsExitBlock());
-  DCHECK(!boundary->IsEntry());
-
-  const HInstruction* last_instruction = block->GetSinglePredecessor()->GetLastInstruction();
-  DCHECK(last_instruction->IsReturn() ||
-         last_instruction->IsReturnVoid() ||
-         last_instruction->IsThrow());
-
-  return !last_instruction->IsThrow();
-}
-
-void HGraphBuilder::MaybeAddExtraGotoBlocks() {
-  HBasicBlock* exit = graph_->GetExitBlock();
-  if (exit == nullptr) {
-    return;
-  }
-
-  for (size_t pred = 0, size = exit->GetPredecessors().size(); pred < size; ++pred) {
-    HBasicBlock* predecessor = exit->GetPredecessors()[pred];
-    if (NeedsExtraGotoBlock(predecessor)) {
-      HBasicBlock* new_goto = graph_->SplitEdgeAndUpdateRPO(predecessor, exit);
-      new_goto->AddInstruction(new (graph_->GetAllocator()) HGoto(predecessor->GetDexPc()));
-      if (predecessor->IsInLoop()) {
-        new_goto->SetLoopInformation(predecessor->GetLoopInformation());
-      }
-
-      // Update domination chain
-      if (!predecessor->GetDominatedBlocks().empty()) {
-        DCHECK_EQ(predecessor->GetDominatedBlocks().size(), 1u);
-        DCHECK_EQ(predecessor->GetDominatedBlocks()[0], exit);
-        new_goto->AddDominatedBlock(exit);
-        predecessor->RemoveDominatedBlock(exit);
-        exit->SetDominator(new_goto);
-      }
-
-      DCHECK(predecessor->GetDominatedBlocks().empty());
-      predecessor->AddDominatedBlock(new_goto);
-      new_goto->SetDominator(predecessor);
-    }
-  }
-}
-
-GraphAnalysisResult HGraphBuilder::BuildGraph(bool build_for_inline) {
+GraphAnalysisResult HGraphBuilder::BuildGraph() {
   DCHECK(code_item_accessor_.HasCodeItem());
   DCHECK(graph_->GetBlocks().empty());
 
   graph_->SetNumberOfVRegs(code_item_accessor_.RegistersSize());
   graph_->SetNumberOfInVRegs(code_item_accessor_.InsSize());
   graph_->SetMaximumNumberOfOutVRegs(code_item_accessor_.OutsSize());
-  graph_->SetHasTryCatch(code_item_accessor_.TriesSize() != 0);
 
   // Use ScopedArenaAllocator for all local allocations.
   ScopedArenaAllocator local_allocator(graph_->GetArenaStack());
@@ -195,13 +146,7 @@ GraphAnalysisResult HGraphBuilder::BuildGraph(bool build_for_inline) {
     return kAnalysisInvalidBytecode;
   }
 
-  // 5) When inlining, we want to add a Goto block if we have Return/ReturnVoid->TryBoundary->Exit
-  // since we will have Return/ReturnVoid->TryBoundary->`continue to normal execution` once inlined.
-  if (build_for_inline) {
-    MaybeAddExtraGotoBlocks();
-  }
-
-  // 6) Type the graph and eliminate dead/redundant phis.
+  // 5) Type the graph and eliminate dead/redundant phis.
   return ssa_builder.BuildSsa();
 }
 
@@ -222,7 +167,6 @@ void HGraphBuilder::BuildIntrinsicGraph(ArtMethod* method) {
   graph_->SetNumberOfVRegs(return_vregs + num_arg_vregs);
   graph_->SetNumberOfInVRegs(num_arg_vregs);
   graph_->SetMaximumNumberOfOutVRegs(num_arg_vregs);
-  graph_->SetHasTryCatch(false);
 
   // Use ScopedArenaAllocator for all local allocations.
   ScopedArenaAllocator local_allocator(graph_->GetArenaStack());

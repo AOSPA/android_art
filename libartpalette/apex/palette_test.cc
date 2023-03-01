@@ -21,7 +21,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-#include "common_runtime_test.h"
+#include "base/common_art_test.h"
 #include "gtest/gtest.h"
 
 namespace {
@@ -70,14 +70,35 @@ TEST_F(PaletteClientTest, Ashmem) {
 #endif
 }
 
-class PaletteClientJniTest : public art::CommonRuntimeTest {};
+class PaletteClientJniTest : public art::CommonArtTest {};
 
 TEST_F(PaletteClientJniTest, JniInvocation) {
   bool enabled;
   EXPECT_EQ(PALETTE_STATUS_OK, PaletteShouldReportJniInvocations(&enabled));
 
-  JNIEnv* env = art::Thread::Current()->GetJniEnv();
+  std::string boot_class_path_string =
+      GetClassPathOption("-Xbootclasspath:", GetLibCoreDexFileNames());
+  std::string boot_class_path_locations_string =
+      GetClassPathOption("-Xbootclasspath-locations:", GetLibCoreDexLocations());
+
+  JavaVMOption options[] = {
+      {.optionString = boot_class_path_string.c_str(), .extraInfo = nullptr},
+      {.optionString = boot_class_path_locations_string.c_str(), .extraInfo = nullptr},
+  };
+  JavaVMInitArgs vm_args = {
+      .version = JNI_VERSION_1_6,
+      .nOptions = std::size(options),
+      .options = options,
+      .ignoreUnrecognized = JNI_TRUE,
+  };
+
+  JavaVM* jvm = nullptr;
+  JNIEnv* env = nullptr;
+  EXPECT_EQ(JNI_OK, JNI_CreateJavaVM(&jvm, &env, &vm_args));
   ASSERT_NE(nullptr, env);
+
   PaletteNotifyBeginJniInvocation(env);
   PaletteNotifyEndJniInvocation(env);
+
+  EXPECT_EQ(JNI_OK, jvm->DestroyJavaVM());
 }

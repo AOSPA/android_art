@@ -39,62 +39,40 @@ public class ArtFlags {
     /** Whether the operation is applied for secondary dex'es. */
     public static final int FLAG_FOR_SECONDARY_DEX = 1 << 1;
 
-    // Flags specific to `optimizePackage`.
+    // Flags specific to `dexoptPackage`.
 
-    /** Whether to optimize dependency libraries as well. */
+    /** Whether to dexopt dependency libraries as well. */
     public static final int FLAG_SHOULD_INCLUDE_DEPENDENCIES = 1 << 2;
     /**
-     * Whether the intention is to downgrade the compiler filter. If true, the optimization will
+     * Whether the intention is to downgrade the compiler filter. If true, the dexopt will
      * be skipped if the target compiler filter is better than or equal to the compiler filter
-     * of the existing optimized artifacts, or optimized artifacts do not exist.
+     * of the existing dexopt artifacts, or dexopt artifacts do not exist.
      */
     public static final int FLAG_SHOULD_DOWNGRADE = 1 << 3;
     /**
-     * Whether to force optimization. If true, the optimization will be performed regardless of
-     * any existing optimized artifacts.
+     * Whether to force dexopt. If true, the dexopt will be performed regardless of
+     * any existing dexopt artifacts.
      */
     public static final int FLAG_FORCE = 1 << 4;
     /**
-     * If set, the optimization will be performed for a single split. Otherwise, the optimization
-     * will be performed for all splits. {@link OptimizeParams.Builder#setSplitName()} can be used
-     * to specify the split to optimize.
+     * If set, the dexopt will be performed for a single split. Otherwise, the dexopt
+     * will be performed for all splits. {@link DexoptParams.Builder#setSplitName()} can be used
+     * to specify the split to dexopt.
      *
      * When this flag is set, {@link #FLAG_FOR_PRIMARY_DEX} must be set, and {@link
      * #FLAG_FOR_SECONDARY_DEX} and {@link #FLAG_SHOULD_INCLUDE_DEPENDENCIES} must not be set.
      */
     public static final int FLAG_FOR_SINGLE_SPLIT = 1 << 5;
-
     /**
-     * Flags for
-     * {@link ArtManagerLocal#deleteOptimizedArtifacts(PackageManagerLocal.FilteredSnapshot, String,
-     * int)}.
-     *
-     * @hide
+     * If set, skips the dexopt if the remaining storage space is low. The threshold is
+     * controlled by the global settings {@code sys_storage_threshold_percentage} and {@code
+     * sys_storage_threshold_max_bytes}.
      */
-    // clang-format off
-    @IntDef(flag = true, prefix = "FLAG_", value = {
-        FLAG_FOR_PRIMARY_DEX,
-        FLAG_FOR_SECONDARY_DEX,
-    })
-    // clang-format on
-    @Retention(RetentionPolicy.SOURCE)
-    public @interface DeleteFlags {}
+    public static final int FLAG_SKIP_IF_STORAGE_LOW = 1 << 6;
 
     /**
-     * Default flags that are used when
-     * {@link ArtManagerLocal#deleteOptimizedArtifacts(PackageManagerLocal.FilteredSnapshot,
-     * String)}
-     * is called.
-     * Value: {@link #FLAG_FOR_PRIMARY_DEX}.
-     */
-    public static @DeleteFlags int defaultDeleteFlags() {
-        return FLAG_FOR_PRIMARY_DEX;
-    }
-
-    /**
-     * Flags for
-     * {@link ArtManagerLocal#getOptimizationStatus(PackageManagerLocal.FilteredSnapshot, String,
-     * int)}.
+     * Flags for {@link
+     * ArtManagerLocal#getDexoptStatus(PackageManagerLocal.FilteredSnapshot, String, int)}.
      *
      * @hide
      */
@@ -108,17 +86,17 @@ public class ArtFlags {
     public @interface GetStatusFlags {}
 
     /**
-     * Default flags that are used when
-     * {@link ArtManagerLocal#getOptimizationStatus(PackageManagerLocal.FilteredSnapshot, String)}
-     * is called.
-     * Value: {@link #FLAG_FOR_PRIMARY_DEX}.
+     * Default flags that are used when {@link
+     * ArtManagerLocal#getDexoptStatus(PackageManagerLocal.FilteredSnapshot, String)} is
+     * called.
+     * Value: {@link #FLAG_FOR_PRIMARY_DEX}, {@link #FLAG_FOR_SECONDARY_DEX}.
      */
     public static @GetStatusFlags int defaultGetStatusFlags() {
-        return FLAG_FOR_PRIMARY_DEX;
+        return FLAG_FOR_PRIMARY_DEX | FLAG_FOR_SECONDARY_DEX;
     }
 
     /**
-     * Flags for {@link OptimizeParams}.
+     * Flags for {@link DexoptParams}.
      *
      * @hide
      */
@@ -130,18 +108,19 @@ public class ArtFlags {
         FLAG_SHOULD_DOWNGRADE,
         FLAG_FORCE,
         FLAG_FOR_SINGLE_SPLIT,
+        FLAG_SKIP_IF_STORAGE_LOW,
     })
     // clang-format on
     @Retention(RetentionPolicy.SOURCE)
-    public @interface OptimizeFlags {}
+    public @interface DexoptFlags {}
 
     /**
      * Default flags that are used when
-     * {@link OptimizeParams.Builder#Builder(String)} is called.
+     * {@link DexoptParams.Builder#Builder(String)} is called.
      *
      * @hide
      */
-    public static @OptimizeFlags int defaultOptimizeFlags(@NonNull String reason) {
+    public static @DexoptFlags int defaultDexoptFlags(@NonNull String reason) {
         switch (reason) {
             case ReasonMapping.REASON_INSTALL:
             case ReasonMapping.REASON_INSTALL_FAST:
@@ -157,6 +136,8 @@ public class ArtFlags {
             case ReasonMapping.REASON_BOOT_AFTER_MAINLINE_UPDATE:
                 return FLAG_FOR_PRIMARY_DEX | FLAG_SHOULD_INCLUDE_DEPENDENCIES;
             case ReasonMapping.REASON_BG_DEXOPT:
+                return FLAG_FOR_PRIMARY_DEX | FLAG_FOR_SECONDARY_DEX
+                        | FLAG_SHOULD_INCLUDE_DEPENDENCIES | FLAG_SKIP_IF_STORAGE_LOW;
             case ReasonMapping.REASON_CMDLINE:
             default:
                 return FLAG_FOR_PRIMARY_DEX | FLAG_FOR_SECONDARY_DEX

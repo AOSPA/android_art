@@ -16,16 +16,16 @@
 
 package com.android.server.art;
 
+import static com.android.server.art.DexUseManagerLocal.SecondaryDexInfo;
 import static com.android.server.art.PrimaryDexUtils.DetailedPrimaryDexInfo;
 import static com.android.server.art.PrimaryDexUtils.PrimaryDexInfo;
-import static com.android.server.art.ReasonMapping.BatchOptimizeReason;
+import static com.android.server.art.ReasonMapping.BatchDexoptReason;
 import static com.android.server.art.ReasonMapping.BootReason;
 import static com.android.server.art.Utils.Abi;
-import static com.android.server.art.model.ArtFlags.DeleteFlags;
 import static com.android.server.art.model.ArtFlags.GetStatusFlags;
 import static com.android.server.art.model.ArtFlags.ScheduleStatus;
 import static com.android.server.art.model.Config.Callback;
-import static com.android.server.art.model.OptimizationStatus.DexContainerFileOptimizationStatus;
+import static com.android.server.art.model.DexoptStatus.DexContainerFileDexoptStatus;
 
 import android.R;
 import android.annotation.CallbackExecutor;
@@ -42,19 +42,23 @@ import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.ServiceSpecificException;
+import android.os.SystemProperties;
 import android.os.UserManager;
+import android.os.storage.StorageManager;
 import android.text.TextUtils;
+import android.util.Log;
+import android.util.Pair;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.server.LocalManagerRegistry;
 import com.android.server.art.model.ArtFlags;
-import com.android.server.art.model.BatchOptimizeParams;
+import com.android.server.art.model.BatchDexoptParams;
 import com.android.server.art.model.Config;
 import com.android.server.art.model.DeleteResult;
+import com.android.server.art.model.DexoptParams;
+import com.android.server.art.model.DexoptResult;
+import com.android.server.art.model.DexoptStatus;
 import com.android.server.art.model.OperationProgress;
-import com.android.server.art.model.OptimizationStatus;
-import com.android.server.art.model.OptimizeParams;
-import com.android.server.art.model.OptimizeResult;
 import com.android.server.pm.PackageManagerLocal;
 import com.android.server.pm.pkg.AndroidPackage;
 import com.android.server.pm.pkg.AndroidPackageSplit;
@@ -62,16 +66,23 @@ import com.android.server.pm.pkg.PackageState;
 
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * This class provides a system API for functionality provided by the ART module.
@@ -89,6 +100,7 @@ public final class ArtManagerLocal {
     private static final String TAG = "ArtService";
     private static final String[] CLASSPATHS_FOR_BOOT_IMAGE_PROFILE = {
             "BOOTCLASSPATH", "SYSTEMSERVERCLASSPATH", "STANDALONE_SYSTEMSERVER_JARS"};
+    private static final long DOWNGRADE_THRESHOLD_ABOVE_LOW_BYTES = 500_000_000;
 
     @NonNull private final Injector mInjector;
 
@@ -108,19 +120,17 @@ public final class ArtManagerLocal {
     }
 
     /**
-     * Handles `cmd package art` sub-command.
-     *
-     * For debugging purposes only. Intentionally enforces root access to limit the usage.
+     * Handles ART Service commands, which is a subset of `cmd package` commands.
      *
      * Note: This method is not an override of {@link Binder#handleShellCommand} because ART
-     * services does not publish a binder. Instead, it handles the `art` sub-command forwarded by
-     * the `package` service. The semantics of the parameters are the same as {@link
+     * services does not publish a binder. Instead, it handles the commands forwarded by the
+     * `package` service. The semantics of the parameters are the same as {@link
      * Binder#handleShellCommand}.
      *
      * @return zero on success, non-zero on internal error (e.g., I/O error)
      * @throws SecurityException if the caller is not root
      * @throws IllegalArgumentException if the arguments are illegal
-     * @see ArtShellCommand#onHelp()
+     * @see ArtShellCommand#printHelp(PrintWriter)
      */
     public int handleShellCommand(@NonNull Binder target, @NonNull ParcelFileDescriptor in,
             @NonNull ParcelFileDescriptor out, @NonNull ParcelFileDescriptor err,
@@ -131,69 +141,55 @@ public final class ArtManagerLocal {
                         err.getFileDescriptor(), args);
     }
 
+    /** Prints ART Service shell command help. */
+    public void printShellCommandHelp(@NonNull PrintWriter pw) {
+        ArtShellCommand.printHelp(pw);
+    }
+
     /**
-     * Deletes optimized artifacts of a package.
-     *
-     * Uses the default flags ({@link ArtFlags#defaultDeleteFlags()}).
+     * Deletes dexopt artifacts of a package, including the artifacts for primary dex files and the
+     * ones for secondary dex files. This includes VDEX, ODEX, and ART files.
      *
      * @throws IllegalArgumentException if the package is not found or the flags are illegal
      * @throws IllegalStateException if the operation encounters an error that should never happen
      *         (e.g., an internal logic error).
      */
     @NonNull
-    public DeleteResult deleteOptimizedArtifacts(
+    public DeleteResult deleteDexoptArtifacts(
             @NonNull PackageManagerLocal.FilteredSnapshot snapshot, @NonNull String packageName) {
-        return deleteOptimizedArtifacts(snapshot, packageName, ArtFlags.defaultDeleteFlags());
-    }
-
-    /**
-     * Same as above, but allows to specify flags.
-     *
-     * @see #deleteOptimizedArtifacts(PackageManagerLocal.FilteredSnapshot, String)
-     */
-    @NonNull
-    public DeleteResult deleteOptimizedArtifacts(
-            @NonNull PackageManagerLocal.FilteredSnapshot snapshot, @NonNull String packageName,
-            @DeleteFlags int flags) {
-        if ((flags & ArtFlags.FLAG_FOR_PRIMARY_DEX) == 0
-                && (flags & ArtFlags.FLAG_FOR_SECONDARY_DEX) == 0) {
-            throw new IllegalArgumentException("Nothing to delete");
-        }
-
         PackageState pkgState = Utils.getPackageStateOrThrow(snapshot, packageName);
         AndroidPackage pkg = Utils.getPackageOrThrow(pkgState);
 
         try {
             long freedBytes = 0;
 
-            if ((flags & ArtFlags.FLAG_FOR_PRIMARY_DEX) != 0) {
-                boolean isInDalvikCache = Utils.isInDalvikCache(pkgState);
-                for (PrimaryDexInfo dexInfo : PrimaryDexUtils.getDexInfo(pkg)) {
-                    if (!dexInfo.hasCode()) {
-                        continue;
-                    }
-                    for (Abi abi : Utils.getAllAbis(pkgState)) {
-                        freedBytes +=
-                                mInjector.getArtd().deleteArtifacts(AidlUtils.buildArtifactsPath(
-                                        dexInfo.dexPath(), abi.isa(), isInDalvikCache));
-                    }
+            boolean isInDalvikCache = Utils.isInDalvikCache(pkgState);
+            for (PrimaryDexInfo dexInfo : PrimaryDexUtils.getDexInfo(pkg)) {
+                if (!dexInfo.hasCode()) {
+                    continue;
+                }
+                for (Abi abi : Utils.getAllAbis(pkgState)) {
+                    freedBytes += mInjector.getArtd().deleteArtifacts(AidlUtils.buildArtifactsPath(
+                            dexInfo.dexPath(), abi.isa(), isInDalvikCache));
                 }
             }
 
-            if ((flags & ArtFlags.FLAG_FOR_SECONDARY_DEX) != 0) {
-                // TODO(jiakaiz): Implement this.
-                throw new UnsupportedOperationException(
-                        "Deleting artifacts of secondary dex'es is not implemented yet");
+            for (SecondaryDexInfo dexInfo :
+                    mInjector.getDexUseManager().getSecondaryDexInfo(packageName)) {
+                for (Abi abi : Utils.getAllAbisForNames(dexInfo.abiNames(), pkgState)) {
+                    freedBytes += mInjector.getArtd().deleteArtifacts(AidlUtils.buildArtifactsPath(
+                            dexInfo.dexPath(), abi.isa(), false /* isInDalvikCache */));
+                }
             }
 
-            return new DeleteResult(freedBytes);
+            return DeleteResult.create(freedBytes);
         } catch (RemoteException e) {
             throw new IllegalStateException("An error occurred when calling artd", e);
         }
     }
 
     /**
-     * Returns the optimization status of a package.
+     * Returns the dexopt status of a package.
      *
      * Uses the default flags ({@link ArtFlags#defaultGetStatusFlags()}).
      *
@@ -202,20 +198,19 @@ public final class ArtManagerLocal {
      *         (e.g., an internal logic error).
      */
     @NonNull
-    public OptimizationStatus getOptimizationStatus(
+    public DexoptStatus getDexoptStatus(
             @NonNull PackageManagerLocal.FilteredSnapshot snapshot, @NonNull String packageName) {
-        return getOptimizationStatus(snapshot, packageName, ArtFlags.defaultGetStatusFlags());
+        return getDexoptStatus(snapshot, packageName, ArtFlags.defaultGetStatusFlags());
     }
 
     /**
      * Same as above, but allows to specify flags.
      *
-     * @see #getOptimizationStatus(PackageManagerLocal.FilteredSnapshot, String)
+     * @see #getDexoptStatus(PackageManagerLocal.FilteredSnapshot, String)
      */
     @NonNull
-    public OptimizationStatus getOptimizationStatus(
-            @NonNull PackageManagerLocal.FilteredSnapshot snapshot, @NonNull String packageName,
-            @GetStatusFlags int flags) {
+    public DexoptStatus getDexoptStatus(@NonNull PackageManagerLocal.FilteredSnapshot snapshot,
+            @NonNull String packageName, @GetStatusFlags int flags) {
         if ((flags & ArtFlags.FLAG_FOR_PRIMARY_DEX) == 0
                 && (flags & ArtFlags.FLAG_FOR_SECONDARY_DEX) == 0) {
             throw new IllegalArgumentException("Nothing to check");
@@ -225,7 +220,7 @@ public final class ArtManagerLocal {
         AndroidPackage pkg = Utils.getPackageOrThrow(pkgState);
 
         try {
-            List<DexContainerFileOptimizationStatus> statuses = new ArrayList<>();
+            List<DexContainerFileDexoptStatus> statuses = new ArrayList<>();
 
             if ((flags & ArtFlags.FLAG_FOR_PRIMARY_DEX) != 0) {
                 for (DetailedPrimaryDexInfo dexInfo :
@@ -235,74 +230,164 @@ public final class ArtManagerLocal {
                     }
                     for (Abi abi : Utils.getAllAbis(pkgState)) {
                         try {
-                            GetOptimizationStatusResult result =
-                                    mInjector.getArtd().getOptimizationStatus(dexInfo.dexPath(),
-                                            abi.isa(), dexInfo.classLoaderContext());
-                            statuses.add(
-                                    DexContainerFileOptimizationStatus.create(dexInfo.dexPath(),
-                                            abi.isPrimaryAbi(), abi.name(), result.compilerFilter,
-                                            result.compilationReason, result.locationDebugString));
+                            GetDexoptStatusResult result = mInjector.getArtd().getDexoptStatus(
+                                    dexInfo.dexPath(), abi.isa(), dexInfo.classLoaderContext());
+                            statuses.add(DexContainerFileDexoptStatus.create(dexInfo.dexPath(),
+                                    true /* isPrimaryDex */, abi.isPrimaryAbi(), abi.name(),
+                                    result.compilerFilter, result.compilationReason,
+                                    result.locationDebugString));
                         } catch (ServiceSpecificException e) {
-                            statuses.add(DexContainerFileOptimizationStatus.create(
-                                    dexInfo.dexPath(), abi.isPrimaryAbi(), abi.name(), "error",
-                                    "error", e.getMessage()));
+                            statuses.add(DexContainerFileDexoptStatus.create(dexInfo.dexPath(),
+                                    true /* isPrimaryDex */, abi.isPrimaryAbi(), abi.name(),
+                                    "error", "error", e.getMessage()));
                         }
                     }
                 }
             }
 
             if ((flags & ArtFlags.FLAG_FOR_SECONDARY_DEX) != 0) {
-                // TODO(jiakaiz): Implement this.
-                throw new UnsupportedOperationException(
-                        "Getting optimization status of secondary dex'es is not implemented yet");
+                for (SecondaryDexInfo dexInfo :
+                        mInjector.getDexUseManager().getSecondaryDexInfo(packageName)) {
+                    for (Abi abi : Utils.getAllAbisForNames(dexInfo.abiNames(), pkgState)) {
+                        try {
+                            GetDexoptStatusResult result = mInjector.getArtd().getDexoptStatus(
+                                    dexInfo.dexPath(), abi.isa(), dexInfo.classLoaderContext());
+                            statuses.add(DexContainerFileDexoptStatus.create(dexInfo.dexPath(),
+                                    false /* isPrimaryDex */, abi.isPrimaryAbi(), abi.name(),
+                                    result.compilerFilter, result.compilationReason,
+                                    result.locationDebugString));
+                        } catch (ServiceSpecificException e) {
+                            statuses.add(DexContainerFileDexoptStatus.create(dexInfo.dexPath(),
+                                    false /* isPrimaryDex */, abi.isPrimaryAbi(), abi.name(),
+                                    "error", "error", e.getMessage()));
+                        }
+                    }
+                }
             }
 
-            return OptimizationStatus.create(statuses);
+            return DexoptStatus.create(statuses);
         } catch (RemoteException e) {
             throw new IllegalStateException("An error occurred when calling artd", e);
         }
     }
 
     /**
-     * Optimizes a package. The time this operation takes ranges from a few milliseconds to several
+     * Clears the profiles of the given app that are collected locally, including the profiles for
+     * primary dex files and the ones for secondary dex files. More specifically, it clears
+     * reference profiles and current profiles. External profiles (e.g., cloud profiles) will be
+     * kept.
+     *
+     * @throws IllegalArgumentException if the package is not found or the flags are illegal
+     * @throws IllegalStateException if the operation encounters an error that should never happen
+     *         (e.g., an internal logic error).
+     */
+    @NonNull
+    public void clearAppProfiles(
+            @NonNull PackageManagerLocal.FilteredSnapshot snapshot, @NonNull String packageName) {
+        PackageState pkgState = Utils.getPackageStateOrThrow(snapshot, packageName);
+        AndroidPackage pkg = Utils.getPackageOrThrow(pkgState);
+
+        try {
+            for (PrimaryDexInfo dexInfo : PrimaryDexUtils.getDexInfo(pkg)) {
+                if (!dexInfo.hasCode()) {
+                    continue;
+                }
+                mInjector.getArtd().deleteProfile(
+                        PrimaryDexUtils.buildRefProfilePath(pkgState, dexInfo));
+                for (ProfilePath profile : PrimaryDexUtils.getCurProfiles(
+                             mInjector.getUserManager(), pkgState, dexInfo)) {
+                    mInjector.getArtd().deleteProfile(profile);
+                }
+            }
+
+            // This only deletes the profiles of known secondary dex files. If there are unknown
+            // secondary dex files, their profiles will be deleted by `cleanup`.
+            for (SecondaryDexInfo dexInfo :
+                    mInjector.getDexUseManager().getSecondaryDexInfo(packageName)) {
+                mInjector.getArtd().deleteProfile(
+                        AidlUtils.buildProfilePathForSecondaryRef(dexInfo.dexPath()));
+                mInjector.getArtd().deleteProfile(
+                        AidlUtils.buildProfilePathForSecondaryCur(dexInfo.dexPath()));
+            }
+        } catch (RemoteException e) {
+            throw new IllegalStateException("An error occurred when calling artd", e);
+        }
+    }
+
+    /**
+     * Dexopts a package. The time this operation takes ranges from a few milliseconds to several
      * minutes, depending on the params and the code size of the package.
      *
      * When this operation ends (either completed or cancelled), callbacks added by {@link
-     * #addOptimizePackageDoneCallback(Executor, OptimizePackageDoneCallback)} are called.
+     * #addDexoptDoneCallback(Executor, DexoptDoneCallback)} are called.
      *
      * @throws IllegalArgumentException if the package is not found or the params are illegal
      * @throws IllegalStateException if the operation encounters an error that should never happen
      *         (e.g., an internal logic error).
      */
     @NonNull
-    public OptimizeResult optimizePackage(@NonNull PackageManagerLocal.FilteredSnapshot snapshot,
-            @NonNull String packageName, @NonNull OptimizeParams params) {
+    public DexoptResult dexoptPackage(@NonNull PackageManagerLocal.FilteredSnapshot snapshot,
+            @NonNull String packageName, @NonNull DexoptParams params) {
         var cancellationSignal = new CancellationSignal();
-        return optimizePackage(snapshot, packageName, params, cancellationSignal);
+        return dexoptPackage(snapshot, packageName, params, cancellationSignal);
     }
 
     /**
      * Same as above, but supports cancellation.
      *
-     * @see #optimizePackage(PackageManagerLocal.FilteredSnapshot, String, OptimizeParams)
+     * @see #dexoptPackage(PackageManagerLocal.FilteredSnapshot, String, DexoptParams)
      */
     @NonNull
-    public OptimizeResult optimizePackage(@NonNull PackageManagerLocal.FilteredSnapshot snapshot,
-            @NonNull String packageName, @NonNull OptimizeParams params,
+    public DexoptResult dexoptPackage(@NonNull PackageManagerLocal.FilteredSnapshot snapshot,
+            @NonNull String packageName, @NonNull DexoptParams params,
             @NonNull CancellationSignal cancellationSignal) {
-        return mInjector.getDexOptHelper().dexopt(
+        return mInjector.getDexoptHelper().dexopt(
                 snapshot, List.of(packageName), params, cancellationSignal, Runnable::run);
     }
 
     /**
-     * Runs batch optimization for the given reason.
+     * Resets the dexopt state of the package as if the package is newly installed.
+     *
+     * More specifically, it clears reference profiles, current profiles, and any code compiled from
+     * those local profiles. If there is an external profile (e.g., a cloud profile), the code
+     * compiled from that profile will be kept.
+     *
+     * For secondary dex files, it also clears all dexopt artifacts.
+     *
+     * @hide
+     */
+    @NonNull
+    public DexoptResult resetDexoptStatus(@NonNull PackageManagerLocal.FilteredSnapshot snapshot,
+            @NonNull String packageName, @NonNull CancellationSignal cancellationSignal) {
+        // We must delete the artifacts for primary dex files beforehand rather than relying on
+        // `dexoptPackage` to replace them because:
+        // - If dexopt is not needed after the deletion, then we shouldn't run dexopt at all. For
+        //   example, when we have a DM file that contains a VDEX file but doesn't contain a cloud
+        //   profile, this happens. Note that this is more about correctness rather than
+        //   performance.
+        // - We don't want the existing artifacts to affect dexopt. For example, the existing VDEX
+        //   file should not be an input VDEX.
+        //
+        // We delete the artifacts for secondary dex files and `dexoptPackage` won't re-generate
+        // them because `dexoptPackage` for `REASON_INSTALL` is for primary dex only. This is
+        // intentional because secondary dex files are supposed to be unknown at install time.
+        deleteDexoptArtifacts(snapshot, packageName);
+        clearAppProfiles(snapshot, packageName);
+
+        // Re-generate artifacts for primary dex files if needed.
+        return dexoptPackage(snapshot, packageName,
+                new DexoptParams.Builder(ReasonMapping.REASON_INSTALL).build(), cancellationSignal);
+    }
+
+    /**
+     * Runs batch dexopt for the given reason.
      *
      * This is called by ART Service automatically during boot / background dexopt.
      *
      * The list of packages and options are determined by {@code reason}, and can be overridden by
-     * {@link #setOptimizePackagesCallback(Executor, OptimizePackagesCallback)}.
+     * {@link #setBatchDexoptStartCallback(Executor, BatchDexoptStartCallback)}.
      *
-     * The optimization is done in a thread pool. The number of packages being optimized
+     * The dexopt is done in a thread pool. The number of packages being dexopted
      * simultaneously can be configured by system property {@code pm.dexopt.<reason>.concurrency}
      * (e.g., {@code pm.dexopt.bg-dexopt.concurrency=4}), and the number of threads for each {@code
      * dex2oat} invocation can be configured by system property {@code dalvik.vm.*dex2oat-threads}
@@ -312,7 +397,18 @@ public final class ArtManagerLocal {
      * threads.
      *
      * When this operation ends (either completed or cancelled), callbacks added by {@link
-     * #addOptimizePackageDoneCallback(Executor, OptimizePackageDoneCallback)} are called.
+     * #addDexoptDoneCallback(Executor, DexoptDoneCallback)} are called.
+     *
+     * If the storage is nearly low, and {@code reason} is {@link ReasonMapping#REASON_BG_DEXOPT},
+     * it may also downgrade some inactive packages to a less optimized compiler filter, specified
+     * by the system property {@code pm.dexopt.inactive} (typically "verify"), to free up some
+     * space. This feature is only enabled when the system property {@code
+     * pm.dexopt.downgrade_after_inactive_days} is set. The space threshold to trigger this feature
+     * is the Storage Manager's low space threshold plus {@link
+     * #DOWNGRADE_THRESHOLD_ABOVE_LOW_BYTES}. The concurrency can be configured by system property
+     * {@code pm.dexopt.inactive.concurrency}. The packages in the list provided by
+     * {@link BatchDexoptStartCallback} for {@link ReasonMapping#REASON_BG_DEXOPT} are never
+     * downgraded.
      *
      * @param snapshot the snapshot from {@link PackageManagerLocal} to operate on
      * @param reason determines the default list of packages and options
@@ -321,64 +417,70 @@ public final class ArtManagerLocal {
      * @param progressCallback called repeatedly whenever there is an update on the progress
      * @throws IllegalStateException if the operation encounters an error that should never happen
      *         (e.g., an internal logic error), or the callback set by {@link
-     *         #setOptimizePackagesCallback(Executor, OptimizePackagesCallback)} provides invalid
+     *         #setBatchDexoptStartCallback(Executor, BatchDexoptStartCallback)} provides invalid
      *         params.
      *
      * @hide
      */
     @NonNull
-    public OptimizeResult optimizePackages(@NonNull PackageManagerLocal.FilteredSnapshot snapshot,
-            @NonNull @BatchOptimizeReason String reason,
+    public DexoptResult dexoptPackages(@NonNull PackageManagerLocal.FilteredSnapshot snapshot,
+            @NonNull @BatchDexoptReason String reason,
             @NonNull CancellationSignal cancellationSignal,
-            @Nullable @CallbackExecutor Executor processCallbackExecutor,
+            @Nullable @CallbackExecutor Executor progressCallbackExecutor,
             @Nullable Consumer<OperationProgress> progressCallback) {
         List<String> defaultPackages =
                 Collections.unmodifiableList(getDefaultPackages(snapshot, reason));
-        OptimizeParams defaultOptimizeParams = new OptimizeParams.Builder(reason).build();
-        var builder = new BatchOptimizeParams.Builder(defaultPackages, defaultOptimizeParams);
-        Callback<OptimizePackagesCallback> callback =
-                mInjector.getConfig().getOptimizePackagesCallback();
+        DexoptParams defaultDexoptParams = new DexoptParams.Builder(reason).build();
+        var builder = new BatchDexoptParams.Builder(defaultPackages, defaultDexoptParams);
+        Callback<BatchDexoptStartCallback, Void> callback =
+                mInjector.getConfig().getBatchDexoptStartCallback();
         if (callback != null) {
             Utils.executeAndWait(callback.executor(), () -> {
-                callback.get().onOverrideBatchOptimizeParams(
-                        snapshot, reason, defaultPackages, builder);
+                callback.get().onBatchDexoptStart(
+                        snapshot, reason, defaultPackages, builder, cancellationSignal);
             });
         }
-        BatchOptimizeParams params = builder.build();
-        Utils.check(params.getOptimizeParams().getReason().equals(reason));
+        BatchDexoptParams params = builder.build();
+        Utils.check(params.getDexoptParams().getReason().equals(reason));
 
         ExecutorService dexoptExecutor =
                 Executors.newFixedThreadPool(ReasonMapping.getConcurrencyForReason(reason));
         try {
-            return mInjector.getDexOptHelper().dexopt(snapshot, params.getPackages(),
-                    params.getOptimizeParams(), cancellationSignal, dexoptExecutor,
-                    processCallbackExecutor, progressCallback);
+            if (reason.equals(ReasonMapping.REASON_BG_DEXOPT)) {
+                maybeDowngradePackages(snapshot,
+                        new HashSet<>(params.getPackages()) /* excludedPackages */,
+                        cancellationSignal, dexoptExecutor);
+            }
+            Log.i(TAG, "Dexopting packages");
+            return mInjector.getDexoptHelper().dexopt(snapshot, params.getPackages(),
+                    params.getDexoptParams(), cancellationSignal, dexoptExecutor,
+                    progressCallbackExecutor, progressCallback);
         } finally {
             dexoptExecutor.shutdown();
         }
     }
 
     /**
-     * Overrides the default params for {@link #optimizePackages}. This method is thread-safe.
+     * Overrides the default params for {@link #dexoptPackages}. This method is thread-safe.
      *
-     * This method gives users the opportunity to change the behavior of {@link #optimizePackages},
+     * This method gives users the opportunity to change the behavior of {@link #dexoptPackages},
      * which is called by ART Service automatically during boot / background dexopt.
      *
      * If this method is not called, the default list of packages and options determined by {@code
      * reason} will be used.
      */
-    public void setOptimizePackagesCallback(@NonNull @CallbackExecutor Executor executor,
-            @NonNull OptimizePackagesCallback callback) {
-        mInjector.getConfig().setOptimizePackagesCallback(executor, callback);
+    public void setBatchDexoptStartCallback(@NonNull @CallbackExecutor Executor executor,
+            @NonNull BatchDexoptStartCallback callback) {
+        mInjector.getConfig().setBatchDexoptStartCallback(executor, callback);
     }
 
     /**
      * Clears the callback set by {@link
-     * #setOptimizePackagesCallback(Executor, OptimizePackagesCallback)}. This method is
+     * #setBatchDexoptStartCallback(Executor, BatchDexoptStartCallback)}. This method is
      * thread-safe.
      */
-    public void clearOptimizePackagesCallback() {
-        mInjector.getConfig().clearOptimizePackagesCallback();
+    public void clearBatchDexoptStartCallback() {
+        mInjector.getConfig().clearBatchDexoptStartCallback();
     }
 
     /**
@@ -398,8 +500,6 @@ public final class ArtManagerLocal {
      *   <li>The device is charging. (see {@link JobInfo.Builder#setRequiresCharging(boolean)})
      *   <li>The battery level is not low.
      *     (see {@link JobInfo.Builder#setRequiresBatteryNotLow(boolean)})
-     *   <li>The free storage space is not low.
-     *     (see {@link JobInfo.Builder#setRequiresStorageNotLow(boolean)})
      * </ul>
      *
      * When the job is running, it may be cancelled by the job scheduler immediately whenever one of
@@ -408,14 +508,14 @@ public final class ArtManagerLocal {
      * window</i>. For information about <i>maintenance window</i>, see
      * https://developer.android.com/training/monitoring-device-state/doze-standby.
      *
-     * See {@link #optimizePackages} for how to customize the behavior of the job.
+     * See {@link #dexoptPackages} for how to customize the behavior of the job.
      *
      * When the job ends (either completed or cancelled), the result is sent to the callbacks added
-     * by {@link #addOptimizePackageDoneCallback(Executor, OptimizePackageDoneCallback)} with the
+     * by {@link #addDexoptDoneCallback(Executor, DexoptDoneCallback)} with the
      * reason {@link ReasonMapping#REASON_BG_DEXOPT}.
      */
     public @ScheduleStatus int scheduleBackgroundDexoptJob() {
-        return mInjector.getBackgroundDexOptJob().schedule();
+        return mInjector.getBackgroundDexoptJob().schedule();
     }
 
     /**
@@ -426,12 +526,12 @@ public final class ArtManagerLocal {
      *
      * If the job is already started by the job scheduler and is running, it will be cancelled
      * immediately, and the result sent to the callbacks added by {@link
-     * #addOptimizePackageDoneCallback(Executor, OptimizePackageDoneCallback)} will contain {@link
-     * OptimizeResult#OPTIMIZE_CANCELLED}. Note that a job started by {@link
+     * #addDexoptDoneCallback(Executor, DexoptDoneCallback)} will contain {@link
+     * DexoptResult#DEXOPT_CANCELLED}. Note that a job started by {@link
      * #startBackgroundDexoptJob()} will not be cancelled by this method.
      */
     public void unscheduleBackgroundDexoptJob() {
-        mInjector.getBackgroundDexOptJob().unschedule();
+        mInjector.getBackgroundDexoptJob().unschedule();
     }
 
     /**
@@ -459,14 +559,14 @@ public final class ArtManagerLocal {
      * constraints described in {@link #scheduleBackgroundDexoptJob()}, and hence will not be
      * cancelled when they aren't met.
      *
-     * See {@link #optimizePackages} for how to customize the behavior of the job.
+     * See {@link #dexoptPackages} for how to customize the behavior of the job.
      *
      * When the job ends (either completed or cancelled), the result is sent to the callbacks added
-     * by {@link #addOptimizePackageDoneCallback(Executor, OptimizePackageDoneCallback)} with the
+     * by {@link #addDexoptDoneCallback(Executor, DexoptDoneCallback)} with the
      * reason {@link ReasonMapping#REASON_BG_DEXOPT}.
      */
     public void startBackgroundDexoptJob() {
-        mInjector.getBackgroundDexOptJob().start();
+        mInjector.getBackgroundDexoptJob().start();
     }
 
     /**
@@ -475,33 +575,36 @@ public final class ArtManagerLocal {
      * blocking.
      *
      * The result sent to the callbacks added by {@link
-     * #addOptimizePackageDoneCallback(Executor, OptimizePackageDoneCallback)} will contain {@link
-     * OptimizeResult#OPTIMIZE_CANCELLED}.
+     * #addDexoptDoneCallback(Executor, DexoptDoneCallback)} will contain {@link
+     * DexoptResult#DEXOPT_CANCELLED}.
      */
     public void cancelBackgroundDexoptJob() {
-        mInjector.getBackgroundDexOptJob().cancel();
+        mInjector.getBackgroundDexoptJob().cancel();
     }
 
     /**
-     * Adds a global listener that listens to any result of optimizing package(s), no matter run
+     * Adds a global listener that listens to any result of dexopting package(s), no matter run
      * manually or automatically. Calling this method multiple times with different callbacks is
      * allowed. Callbacks are executed in the same order as the one in which they were added. This
      * method is thread-safe.
      *
+     * @param onlyIncludeUpdates if true, the results passed to the callback will only contain
+     *         packages that have any update, and the callback won't be called with results that
+     *         don't have any update.
      * @throws IllegalStateException if the same callback instance is already added
      */
-    public void addOptimizePackageDoneCallback(@NonNull @CallbackExecutor Executor executor,
-            @NonNull OptimizePackageDoneCallback callback) {
-        mInjector.getConfig().addOptimizePackageDoneCallback(executor, callback);
+    public void addDexoptDoneCallback(boolean onlyIncludeUpdates,
+            @NonNull @CallbackExecutor Executor executor, @NonNull DexoptDoneCallback callback) {
+        mInjector.getConfig().addDexoptDoneCallback(onlyIncludeUpdates, executor, callback);
     }
 
     /**
      * Removes the listener added by {@link
-     * #addOptimizePackageDoneCallback(Executor, OptimizePackageDoneCallback)}. Does nothing if the
+     * #addDexoptDoneCallback(Executor, DexoptDoneCallback)}. Does nothing if the
      * callback was not added. This method is thread-safe.
      */
-    public void removeOptimizePackageDoneCallback(@NonNull OptimizePackageDoneCallback callback) {
-        mInjector.getConfig().removeOptimizePackageDoneCallback(callback);
+    public void removeDexoptDoneCallback(@NonNull DexoptDoneCallback callback) {
+        mInjector.getConfig().removeDexoptDoneCallback(callback);
     }
 
     /**
@@ -523,6 +626,32 @@ public final class ArtManagerLocal {
     public ParcelFileDescriptor snapshotAppProfile(
             @NonNull PackageManagerLocal.FilteredSnapshot snapshot, @NonNull String packageName,
             @Nullable String splitName) throws SnapshotProfileException {
+        var options = new MergeProfileOptions();
+        options.forceMerge = true;
+        return snapshotOrDumpAppProfile(snapshot, packageName, splitName, options);
+    }
+
+    /**
+     * Same as above, but outputs in text format.
+     *
+     * @hide
+     */
+    @NonNull
+    public ParcelFileDescriptor dumpAppProfile(
+            @NonNull PackageManagerLocal.FilteredSnapshot snapshot, @NonNull String packageName,
+            @Nullable String splitName, boolean dumpClassesAndMethods)
+            throws SnapshotProfileException {
+        var options = new MergeProfileOptions();
+        options.dumpOnly = !dumpClassesAndMethods;
+        options.dumpClassesAndMethods = dumpClassesAndMethods;
+        return snapshotOrDumpAppProfile(snapshot, packageName, splitName, options);
+    }
+
+    @NonNull
+    private ParcelFileDescriptor snapshotOrDumpAppProfile(
+            @NonNull PackageManagerLocal.FilteredSnapshot snapshot, @NonNull String packageName,
+            @Nullable String splitName, @NonNull MergeProfileOptions options)
+            throws SnapshotProfileException {
         PackageState pkgState = Utils.getPackageStateOrThrow(snapshot, packageName);
         AndroidPackage pkg = Utils.getPackageOrThrow(pkgState);
         PrimaryDexInfo dexInfo = PrimaryDexUtils.getDexInfoBySplitName(pkg, splitName);
@@ -535,8 +664,7 @@ public final class ArtManagerLocal {
         OutputProfile output = PrimaryDexUtils.buildOutputProfile(
                 pkgState, dexInfo, Process.SYSTEM_UID, Process.SYSTEM_UID, false /* isPublic */);
 
-        return mergeProfilesAndGetFd(
-                profiles, output, List.of(dexInfo.dexPath()), false /* forBootImage */);
+        return mergeProfilesAndGetFd(profiles, output, List.of(dexInfo.dexPath()), options);
     }
 
     /**
@@ -571,7 +699,7 @@ public final class ArtManagerLocal {
         snapshot.getPackageStates().forEach((packageName, appPkgState) -> {
             // Hibernating apps can still provide useful profile contents, so skip the hibernation
             // check.
-            if (Utils.canOptimizePackage(appPkgState, null /* appHibernationManager */)) {
+            if (Utils.canDexoptPackage(appPkgState, null /* appHibernationManager */)) {
                 AndroidPackage appPkg = Utils.getPackageOrThrow(appPkgState);
                 for (PrimaryDexInfo appDexInfo : PrimaryDexUtils.getDexInfo(appPkg)) {
                     if (!appDexInfo.hasCode()) {
@@ -593,80 +721,172 @@ public final class ArtManagerLocal {
                                         .flatMap(classpath -> Arrays.stream(classpath.split(":")))
                                         .collect(Collectors.toList());
 
-        return mergeProfilesAndGetFd(profiles, output, dexPaths, true /* forBootImage */);
+        var options = new MergeProfileOptions();
+        options.forceMerge = true;
+        options.forBootImage = true;
+        return mergeProfilesAndGetFd(profiles, output, dexPaths, options);
     }
 
     /**
      * Notifies ART Service that this is a boot that falls into one of the categories listed in
      * {@link BootReason}. The current behavior is that ART Service goes through all recently used
-     * packages and optimizes those that are not optimized. This might change in the future.
+     * packages and dexopts those that are not dexopted. This might change in the future.
      *
      * This method is blocking. It takes about 30 seconds to a few minutes. During execution, {@code
      * progressCallback} is repeatedly called whenever there is an update on the progress.
      *
-     * See {@link #optimizePackages} for how to customize the behavior.
+     * See {@link #dexoptPackages} for how to customize the behavior.
      */
     public void onBoot(@NonNull @BootReason String bootReason,
             @Nullable @CallbackExecutor Executor progressCallbackExecutor,
             @Nullable Consumer<OperationProgress> progressCallback) {
         try (var snapshot = mInjector.getPackageManagerLocal().withFilteredSnapshot()) {
-            optimizePackages(snapshot, bootReason, new CancellationSignal(),
-                    progressCallbackExecutor, progressCallback);
+            dexoptPackages(snapshot, bootReason, new CancellationSignal(), progressCallbackExecutor,
+                    progressCallback);
         }
     }
 
     /**
-     * Should be used by {@link BackgroundDexOptJobService} ONLY.
+     * Dumps the dexopt state of all packages in text format for debugging purposes.
+     *
+     * There are no stability guarantees for the output format.
+     *
+     * @throws IllegalStateException if the operation encounters an error that should never happen
+     *         (e.g., an internal logic error).
+     */
+    public void dump(
+            @NonNull PrintWriter pw, @NonNull PackageManagerLocal.FilteredSnapshot snapshot) {
+        new DumpHelper(this).dump(pw, snapshot);
+    }
+
+    /**
+     * Dumps the dexopt state of the given package in text format for debugging purposes.
+     *
+     * There are no stability guarantees for the output format.
+     *
+     * @throws IllegalArgumentException if the package is not found
+     * @throws IllegalStateException if the operation encounters an error that should never happen
+     *         (e.g., an internal logic error).
+     */
+    public void dumpPackage(@NonNull PrintWriter pw,
+            @NonNull PackageManagerLocal.FilteredSnapshot snapshot, @NonNull String packageName) {
+        new DumpHelper(this).dumpPackage(
+                pw, snapshot, Utils.getPackageStateOrThrow(snapshot, packageName));
+    }
+
+    /**
+     * Should be used by {@link BackgroundDexoptJobService} ONLY.
      *
      * @hide
      */
     @NonNull
-    BackgroundDexOptJob getBackgroundDexOptJob() {
-        return mInjector.getBackgroundDexOptJob();
+    BackgroundDexoptJob getBackgroundDexoptJob() {
+        return mInjector.getBackgroundDexoptJob();
+    }
+
+    private void maybeDowngradePackages(@NonNull PackageManagerLocal.FilteredSnapshot snapshot,
+            @NonNull Set<String> excludedPackages, @NonNull CancellationSignal cancellationSignal,
+            @NonNull Executor executor) {
+        if (shouldDowngrade()) {
+            List<String> packages = getDefaultPackages(snapshot, ReasonMapping.REASON_INACTIVE)
+                                            .stream()
+                                            .filter(pkg -> !excludedPackages.contains(pkg))
+                                            .collect(Collectors.toList());
+            if (!packages.isEmpty()) {
+                Log.i(TAG, "Storage is low. Downgrading inactive packages");
+                mInjector.getDexoptHelper().dexopt(snapshot, packages,
+                        new DexoptParams.Builder(ReasonMapping.REASON_INACTIVE).build(),
+                        cancellationSignal, executor, null /* processCallbackExecutor */,
+                        null /* progressCallback */);
+            } else {
+                Log.i(TAG,
+                        "Storage is low, but downgrading is disabled or there's nothing to "
+                                + "downgrade");
+            }
+        }
+    }
+
+    private boolean shouldDowngrade() {
+        try {
+            return mInjector.getStorageManager().getAllocatableBytes(StorageManager.UUID_DEFAULT)
+                    < DOWNGRADE_THRESHOLD_ABOVE_LOW_BYTES;
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to check storage. Assuming storage not low", e);
+            return false;
+        }
+    }
+
+    /** Returns the list of packages to process for the given reason. */
+    @NonNull
+    private List<String> getDefaultPackages(
+            @NonNull PackageManagerLocal.FilteredSnapshot snapshot, @NonNull String reason) {
+        // We probably won't have an app hibernation manager in the boot time compilation, because
+        // ArtManagerLocal.onBoot needs to run early to ensure apps are compiled before the system
+        // server fires them up. This means the boot time compilation will ignore the hibernation
+        // states of the packages.
+        //
+        // TODO(b/265782156): When hibernated packages get compiled this way, the file GC will
+        // delete them again in the next background dexopt run. That means they are likely to get
+        // recreated again in the next boot dexopt (i.e. for OTA or Mainline update).
+        var appHibernationManager = mInjector.getAppHibernationManager();
+        if (reason != ReasonMapping.REASON_FIRST_BOOT
+                && reason != ReasonMapping.REASON_BOOT_AFTER_OTA
+                && reason != ReasonMapping.REASON_BOOT_AFTER_MAINLINE_UPDATE) {
+            // Check that it's present for other compilation reasons, to ensure we don't regress
+            // silently.
+            Objects.requireNonNull(appHibernationManager);
+        }
+
+        // Filter out hibernating packages even if the reason is REASON_INACTIVE. This is because
+        // artifacts for hibernating packages are already deleted.
+        Stream<PackageState> packages = snapshot.getPackageStates().values().stream().filter(
+                pkgState -> Utils.canDexoptPackage(pkgState, appHibernationManager));
+
+        switch (reason) {
+            case ReasonMapping.REASON_BOOT_AFTER_MAINLINE_UPDATE:
+                packages = packages.filter(
+                        pkgState -> mInjector.isSystemUiPackage(pkgState.getPackageName()));
+                break;
+            case ReasonMapping.REASON_INACTIVE:
+                packages = filterAndSortByLastActiveTime(
+                        packages, false /* keepRecent */, false /* descending */);
+                break;
+            default:
+                // Actually, the sorting is only needed for background dexopt, but we do it for all
+                // cases for simplicity.
+                packages = filterAndSortByLastActiveTime(
+                        packages, true /* keepRecent */, true /* descending */);
+        }
+
+        return packages.map(PackageState::getPackageName).collect(Collectors.toList());
     }
 
     @NonNull
-    private List<String> getDefaultPackages(@NonNull PackageManagerLocal.FilteredSnapshot snapshot,
-            @NonNull @BatchOptimizeReason String reason) {
-        final List<String> packages;
-        switch (reason) {
-            case ReasonMapping.REASON_BOOT_AFTER_MAINLINE_UPDATE:
-                packages =
-                        snapshot.getPackageStates()
-                                .values()
-                                .stream()
-                                .filter(pkgState
-                                        -> mInjector.isSystemUiPackage(pkgState.getPackageName()))
-                                .filter(pkgState
-                                        -> Utils.canOptimizePackage(
-                                                pkgState, mInjector.getAppHibernationManager()))
-                                .map(PackageState::getPackageName)
-                                .collect(Collectors.toList());
-                break;
-            default:
-                // TODO(b/258818709): Filter packages by last active time.
-                packages = snapshot.getPackageStates()
-                                   .values()
-                                   .stream()
-                                   .filter(pkgState
-                                           -> Utils.canOptimizePackage(
-                                                   pkgState, mInjector.getAppHibernationManager()))
-                                   .map(PackageState::getPackageName)
-                                   .collect(Collectors.toList());
-                break;
-        }
-        return packages;
+    private Stream<PackageState> filterAndSortByLastActiveTime(
+            @NonNull Stream<PackageState> packages, boolean keepRecent, boolean descending) {
+        // "pm.dexopt.downgrade_after_inactive_days" is repurposed to also determine whether to
+        // dexopt a package.
+        long inactiveMs = TimeUnit.DAYS.toMillis(SystemProperties.getInt(
+                "pm.dexopt.downgrade_after_inactive_days", Integer.MAX_VALUE /* def */));
+        long currentTimeMs = mInjector.getCurrentTimeMillis();
+        long thresholdTimeMs = currentTimeMs - inactiveMs;
+        return packages
+                .map(pkgState
+                        -> Pair.create(pkgState,
+                                Utils.getPackageLastActiveTime(pkgState,
+                                        mInjector.getDexUseManager(), mInjector.getUserManager())))
+                .filter(keepRecent ? (pair -> pair.second > thresholdTimeMs)
+                                   : (pair -> pair.second <= thresholdTimeMs))
+                .sorted(descending ? Comparator.comparingLong(pair -> - pair.second)
+                                   : Comparator.comparingLong(pair -> pair.second))
+                .map(pair -> pair.first);
     }
 
     @NonNull
     private ParcelFileDescriptor mergeProfilesAndGetFd(@NonNull List<ProfilePath> profiles,
-            @NonNull OutputProfile output, @NonNull List<String> dexPaths, boolean forBootImage)
-            throws SnapshotProfileException {
+            @NonNull OutputProfile output, @NonNull List<String> dexPaths,
+            @NonNull MergeProfileOptions options) throws SnapshotProfileException {
         try {
-            var options = new MergeProfileOptions();
-            options.forceMerge = true;
-            options.forBootImage = forBootImage;
-
             boolean hasContent = false;
             try {
                 hasContent = mInjector.getArtd().mergeProfiles(
@@ -696,31 +916,40 @@ public final class ArtManagerLocal {
         }
     }
 
-    public interface OptimizePackagesCallback {
+    /** @hide */
+    @SystemApi(client = SystemApi.Client.SYSTEM_SERVER)
+    public interface BatchDexoptStartCallback {
         /**
-         * Mutates {@code builder} to override the default params for {@link #optimizePackages}. It
+         * Mutates {@code builder} to override the default params for {@link #dexoptPackages}. It
          * must ignore unknown reasons because more reasons may be added in the future.
          *
-         * If {@code builder.setPackages} is not called, {@code defaultPackages} will be used as the
-         * list of packages to optimize.
+         * This is called before the start of any automatic package dexopt (i.e., not
+         * including package dexopt initiated by the {@link #dexoptPackage} API call).
          *
-         * If {@code builder.setOptimizeParams} is not called, the default params built from {@code
-         * new OptimizeParams.Builder(reason)} will to used as the params for optimizing each
+         * If {@code builder.setPackages} is not called, {@code defaultPackages} will be used as the
+         * list of packages to dexopt.
+         *
+         * If {@code builder.setDexoptParams} is not called, the default params built from {@code
+         * new DexoptParams.Builder(reason)} will to used as the params for dexopting each
          * package.
          *
-         * Additionally, if {@code reason} is {@link ReasonMapping#REASON_BG_DEXOPT}, {@link
-         * #cancelBackgroundDexoptJob()} can be called to skip this run. The job will be retried in
-         * the next <i>maintenance window</i>. For information about <i>maintenance window</i>, see
+         * Additionally, {@code cancellationSignal.cancel()} can be called to cancel this operation.
+         * If this operation is initiated by the job scheduler and the {@code reason} is {@link
+         * ReasonMapping#REASON_BG_DEXOPT}, the job will be retried in the next <i>maintenance
+         * window</i>. For information about <i>maintenance window</i>, see
          * https://developer.android.com/training/monitoring-device-state/doze-standby.
          *
          * Changing the reason is not allowed. Doing so will result in {@link IllegalStateException}
-         * when {@link #optimizePackages} is called.
+         * when {@link #dexoptPackages} is called.
          */
-        void onOverrideBatchOptimizeParams(@NonNull PackageManagerLocal.FilteredSnapshot snapshot,
-                @NonNull @BatchOptimizeReason String reason, @NonNull List<String> defaultPackages,
-                @NonNull BatchOptimizeParams.Builder builder);
+        void onBatchDexoptStart(@NonNull PackageManagerLocal.FilteredSnapshot snapshot,
+                @NonNull @BatchDexoptReason String reason, @NonNull List<String> defaultPackages,
+                @NonNull BatchDexoptParams.Builder builder,
+                @NonNull CancellationSignal cancellationSignal);
     }
 
+    /** @hide */
+    @SystemApi(client = SystemApi.Client.SYSTEM_SERVER)
     public interface ScheduleBackgroundDexoptJobCallback {
         /**
          * Mutates {@code builder} to override the configuration of the background dexopt job.
@@ -728,15 +957,30 @@ public final class ArtManagerLocal {
          * The default configuration described in {@link
          * ArtManagerLocal#scheduleBackgroundDexoptJob()} is passed to the callback as the {@code
          * builder} argument.
+         *
+         * Setting {@link JobInfo.Builder#setRequiresStorageNotLow(boolean)} is not allowed. Doing
+         * so will result in {@link IllegalStateException} when {@link
+         * #scheduleBackgroundDexoptJob()} is called. ART Service has its own storage check, which
+         * skips package dexopt when the storage is low. The storage check is enabled by
+         * default for background dexopt jobs. {@link
+         * #setBatchDexoptStartCallback(Executor, BatchDexoptStartCallback)} can be used to disable
+         * the storage check by clearing the {@link ArtFlags#FLAG_SKIP_IF_STORAGE_LOW} flag.
          */
         void onOverrideJobInfo(@NonNull JobInfo.Builder builder);
     }
 
-    public interface OptimizePackageDoneCallback {
-        void onOptimizePackageDone(@NonNull OptimizeResult result);
+    /** @hide */
+    @SystemApi(client = SystemApi.Client.SYSTEM_SERVER)
+    public interface DexoptDoneCallback {
+        void onDexoptDone(@NonNull DexoptResult result);
     }
 
-    /** Represents an error that happens when snapshotting profiles.  */
+    /**
+     * Represents an error that happens when snapshotting profiles.
+     *
+     * @hide
+     */
+    @SystemApi(client = SystemApi.Client.SYSTEM_SERVER)
     public static class SnapshotProfileException extends Exception {
         public SnapshotProfileException(@NonNull Throwable cause) {
             super(cause);
@@ -753,19 +997,28 @@ public final class ArtManagerLocal {
         @Nullable private final Context mContext;
         @Nullable private final PackageManagerLocal mPackageManagerLocal;
         @Nullable private final Config mConfig;
-        @Nullable private final BackgroundDexOptJob mBgDexOptJob;
+        @Nullable private final BackgroundDexoptJob mBgDexoptJob;
 
         Injector(@NonNull ArtManagerLocal artManagerLocal, @Nullable Context context) {
             mContext = context;
             if (context != null) {
                 // We only need them on Android U and above, where a context is passed.
-                mPackageManagerLocal = LocalManagerRegistry.getManager(PackageManagerLocal.class);
+                mPackageManagerLocal = Objects.requireNonNull(
+                        LocalManagerRegistry.getManager(PackageManagerLocal.class));
                 mConfig = new Config();
-                mBgDexOptJob = new BackgroundDexOptJob(context, artManagerLocal, mConfig);
+                mBgDexoptJob = new BackgroundDexoptJob(context, artManagerLocal, mConfig);
+
+                // Call the getters for the dependencies that aren't optional, to ensure correct
+                // initialization order.
+                getDexoptHelper();
+                getUserManager();
+                getDexUseManager();
+                getStorageManager();
+                ArtModuleServiceInitializer.getArtModuleServiceManager();
             } else {
                 mPackageManagerLocal = null;
                 mConfig = null;
-                mBgDexOptJob = null;
+                mBgDexoptJob = null;
             }
         }
 
@@ -785,8 +1038,8 @@ public final class ArtManagerLocal {
         }
 
         @NonNull
-        public DexOptHelper getDexOptHelper() {
-            return new DexOptHelper(getContext(), getConfig());
+        public DexoptHelper getDexoptHelper() {
+            return new DexoptHelper(getContext(), getConfig());
         }
 
         @NonNull
@@ -794,14 +1047,21 @@ public final class ArtManagerLocal {
             return mConfig;
         }
 
-        @NonNull
+        /**
+         * Returns the registered AppHibernationManager instance.
+         *
+         * It may be null because ArtManagerLocal needs to be available early to compile packages at
+         * boot with {@link onBoot}, before the hibernation manager has been initialized. It should
+         * not be null for other dexopt calls.
+         */
+        @Nullable
         public AppHibernationManager getAppHibernationManager() {
-            return Objects.requireNonNull(mContext.getSystemService(AppHibernationManager.class));
+            return mContext.getSystemService(AppHibernationManager.class);
         }
 
         @NonNull
-        public BackgroundDexOptJob getBackgroundDexOptJob() {
-            return Objects.requireNonNull(mBgDexOptJob);
+        public BackgroundDexoptJob getBackgroundDexoptJob() {
+            return Objects.requireNonNull(mBgDexoptJob);
         }
 
         @NonNull
@@ -818,6 +1078,15 @@ public final class ArtManagerLocal {
         @NonNull
         public boolean isSystemUiPackage(@NonNull String packageName) {
             return packageName.equals(mContext.getString(R.string.config_systemUi));
+        }
+
+        public long getCurrentTimeMillis() {
+            return System.currentTimeMillis();
+        }
+
+        @NonNull
+        public StorageManager getStorageManager() {
+            return Objects.requireNonNull(mContext.getSystemService(StorageManager.class));
         }
     }
 }

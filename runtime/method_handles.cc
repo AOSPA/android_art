@@ -290,6 +290,13 @@ bool ConvertJValueCommon(
       return false;
     }
 
+    ObjPtr<mirror::Class> from_obj_type = from_obj->GetClass();
+    Primitive::Type from_primitive_type;
+    if (!GetUnboxedPrimitiveType(from_obj_type, &from_primitive_type)) {
+      ThrowClassCastException(from, to);
+      return false;
+    }
+
     Primitive::Type unboxed_type;
     JValue unboxed_value;
     if (UNLIKELY(!GetUnboxedTypeAndValue(from_obj, &unboxed_type, &unboxed_value))) {
@@ -544,31 +551,30 @@ inline bool MethodHandleFieldPut(Thread* self,
                                  JValue& value) REQUIRES_SHARED(Locks::mutator_lock_) {
   DCHECK(!Runtime::Current()->IsActiveTransaction());
   static const bool kTransaction = false;         // Not in a transaction.
-  static const bool kAssignabilityCheck = false;  // No access check.
   switch (field_type) {
     case Primitive::kPrimBoolean:
       return
-          DoFieldPutCommon<Primitive::kPrimBoolean, kAssignabilityCheck, kTransaction>(
+          DoFieldPutCommon<Primitive::kPrimBoolean, kTransaction>(
               self, shadow_frame, obj, field, value);
     case Primitive::kPrimByte:
-      return DoFieldPutCommon<Primitive::kPrimByte, kAssignabilityCheck, kTransaction>(
+      return DoFieldPutCommon<Primitive::kPrimByte, kTransaction>(
           self, shadow_frame, obj, field, value);
     case Primitive::kPrimChar:
-      return DoFieldPutCommon<Primitive::kPrimChar, kAssignabilityCheck, kTransaction>(
+      return DoFieldPutCommon<Primitive::kPrimChar, kTransaction>(
           self, shadow_frame, obj, field, value);
     case Primitive::kPrimShort:
-      return DoFieldPutCommon<Primitive::kPrimShort, kAssignabilityCheck, kTransaction>(
+      return DoFieldPutCommon<Primitive::kPrimShort, kTransaction>(
           self, shadow_frame, obj, field, value);
     case Primitive::kPrimInt:
     case Primitive::kPrimFloat:
-      return DoFieldPutCommon<Primitive::kPrimInt, kAssignabilityCheck, kTransaction>(
+      return DoFieldPutCommon<Primitive::kPrimInt, kTransaction>(
           self, shadow_frame, obj, field, value);
     case Primitive::kPrimLong:
     case Primitive::kPrimDouble:
-      return DoFieldPutCommon<Primitive::kPrimLong, kAssignabilityCheck, kTransaction>(
+      return DoFieldPutCommon<Primitive::kPrimLong, kTransaction>(
           self, shadow_frame, obj, field, value);
     case Primitive::kPrimNot:
-      return DoFieldPutCommon<Primitive::kPrimNot, kAssignabilityCheck, kTransaction>(
+      return DoFieldPutCommon<Primitive::kPrimNot, kTransaction>(
           self, shadow_frame, obj, field, value);
     case Primitive::kPrimVoid:
       LOG(FATAL) << "Unreachable: " << field_type;

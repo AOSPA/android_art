@@ -19,6 +19,7 @@
 
 #include <map>
 #include <memory>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "barrier.h"
@@ -158,7 +159,7 @@ class MarkCompact final : public GarbageCollector {
   };
 
  private:
-  using ObjReference = mirror::ObjectReference</*kPoisonReferences*/ false, mirror::Object>;
+  using ObjReference = mirror::CompressedReference<mirror::Object>;
   // Number of bits (live-words) covered by a single chunk-info (below)
   // entry/word.
   // TODO: Since popcount is performed usomg SIMD instructions, we should
@@ -484,10 +485,7 @@ class MarkCompact final : public GarbageCollector {
   // feature.
   bool CanCompactMovingSpaceWithMinorFault();
 
-  template <int kMode>
-  void FreeFromSpacePages(size_t cur_page_idx,
-                          size_t* last_checked_page_idx,
-                          uint8_t** last_freed_pag) REQUIRES_SHARED(Locks::mutator_lock_);
+  void FreeFromSpacePages(size_t cur_page_idx) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Maps processed pages (from moving space and linear-alloc) for uffd's
   // minor-fault feature. We try to 'claim' all processed (and unmapped) pages
@@ -501,6 +499,16 @@ class MarkCompact final : public GarbageCollector {
                          size_t arr_len) REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool IsValidFd(int fd) const { return fd >= 0; }
+  // Add/update <class, obj> pair if class > obj and obj is the lowest address
+  // object of class.
+  ALWAYS_INLINE void UpdateClassAfterObjectMap(mirror::Object* obj)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Updates 'class_after_obj_map_' map by updating the keys (class) with its
+  // highest-address super-class (obtained from 'super_class_after_class_map_'),
+  // if there is any. This is to ensure we don't free from-space pages before
+  // the lowest-address obj is compacted.
+  void UpdateClassAfterObjMap();
 
   // Buffers, one per worker thread + gc-thread, to be used when
   // kObjPtrPoisoning == true as in that case we can't have the buffer on the
@@ -567,13 +575,64 @@ class MarkCompact final : public GarbageCollector {
     // Indicates if the linear-alloc is already MAP_SHARED.
     bool already_shared_;
   };
+
   std::vector<LinearAllocSpaceData> linear_alloc_spaces_data_;
 
-  // The main space bitmap
-  accounting::ContinuousSpaceBitmap* moving_space_bitmap_;
-  accounting::ContinuousSpaceBitmap* non_moving_space_bitmap_;
+  class ObjReferenceHash {
+   public:
+    uint32_t operator()(const ObjReference& ref) const {
+      return ref.AsVRegValue() >> kObjectAlignmentShift;
+    }
+  };
+
+  class ObjReferenceEqualFn {
+   public:
+    bool operator()(const ObjReference& a, const ObjReference& b) const {
+      return a.AsMirrorPtr() == b.AsMirrorPtr();
+    }
+  };
+
+  class LessByObjReference {
+   public:
+    bool operator()(const ObjReference& a, const ObjReference& b) const {
+      return std::less<mirror::Object*>{}(a.AsMirrorPtr(), b.AsMirrorPtr());
+    }
+  };
+
+  // Data structures used to track objects whose layout information is stored in later
+  // allocated classes (at higher addresses). We must be careful not to free the
+  // corresponding from-space pages prematurely.
+  using ObjObjOrderedMap = std::map<ObjReference, ObjReference, LessByObjReference>;
+  using ObjObjUnorderedMap =
+      std::unordered_map<ObjReference, ObjReference, ObjReferenceHash, ObjReferenceEqualFn>;
+  // Unordered map of <K, S> such that the class K (in moving space) has kClassWalkSuper
+  // in reference bitmap and S is its highest address super class.
+  ObjObjUnorderedMap super_class_after_class_hash_map_;
+  // Unordered map of <K, V> such that the class K (in moving space) is after its objects
+  // or would require iterating super-class hierarchy when visiting references. And V is
+  // its lowest address object (in moving space).
+  ObjObjUnorderedMap class_after_obj_hash_map_;
+  // Ordered map constructed before starting compaction using the above two maps. Key is a
+  // class (or super-class) which is higher in address order than some of its object(s) and
+  // value is the corresponding object with lowest address.
+  ObjObjOrderedMap class_after_obj_ordered_map_;
+  // Since the compaction is done in reverse, we use a reverse iterator. It is maintained
+  // either at the pair whose class is lower than the first page to be freed, or at the
+  // pair whose object is not yet compacted.
+  ObjObjOrderedMap::const_reverse_iterator class_after_obj_iter_;
+  // Cached reference to the last class which has kClassWalkSuper in reference
+  // bitmap but has all its super classes lower address order than itself.
+  mirror::Class* walk_super_class_cache_;
+  // Used by FreeFromSpacePages() for maintaining markers in the moving space for
+  // how far the pages have been reclaimed/checked.
+  size_t last_checked_reclaim_page_idx_;
+  uint8_t* last_reclaimed_page_;
+
   space::ContinuousSpace* non_moving_space_;
   space::BumpPointerSpace* const bump_pointer_space_;
+  // The main space bitmap
+  accounting::ContinuousSpaceBitmap* const moving_space_bitmap_;
+  accounting::ContinuousSpaceBitmap* non_moving_space_bitmap_;
   Thread* thread_running_gc_;
   // Array of pages' compaction status.
   Atomic<PageState>* moving_pages_status_;
@@ -632,6 +691,7 @@ class MarkCompact final : public GarbageCollector {
   void* stack_low_addr_;
 
   uint8_t* conc_compaction_termination_page_;
+
   PointerSize pointer_size_;
   // Number of objects freed during this GC in moving space. It is decremented
   // every time an object is discovered. And total-object count is added to it

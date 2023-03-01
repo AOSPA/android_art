@@ -866,6 +866,11 @@ ObjPtr<mirror::Object> JavaVMExt::DecodeWeakGlobalLocked(Thread* self, IndirectR
   return weak_globals_.Get(ref);
 }
 
+ObjPtr<mirror::Object> JavaVMExt::DecodeWeakGlobalAsStrong(IndirectRef ref) {
+  // The target is known to be alive. Simple `Get()` with read barrier is enough.
+  return weak_globals_.Get(ref);
+}
+
 ObjPtr<mirror::Object> JavaVMExt::DecodeWeakGlobalDuringShutdown(Thread* self, IndirectRef ref) {
   DCHECK_EQ(IndirectReferenceTable::GetIndirectRefKind(ref), kWeakGlobal);
   DCHECK(Runtime::Current()->IsShuttingDown(self));
@@ -1157,7 +1162,7 @@ void* JavaVMExt::FindCodeForNativeMethod(ArtMethod* m, std::string* error_msg, b
   CHECK(m->IsNative());
   ObjPtr<mirror::Class> c = m->GetDeclaringClass();
   // If this is a static method, it could be called before the class has been initialized.
-  CHECK(c->IsInitializing() || !NeedsClinitCheckBeforeCall(m))
+  CHECK(c->IsInitializing() || !m->NeedsClinitCheckBeforeCall())
       << c->GetStatus() << " " << m->PrettyMethod();
   Thread* const self = Thread::Current();
   void* native_method = libraries_->FindNativeMethod(self, m, error_msg, can_suspend);

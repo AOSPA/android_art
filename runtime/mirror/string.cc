@@ -255,7 +255,7 @@ ObjPtr<String> String::AllocFromModifiedUtf8(Thread* self,
   return Alloc(self, length_with_flag, allocator_type, visitor);
 }
 
-bool String::Equals(ObjPtr<String> that) {
+bool String::Equals(mirror::String* that) {
   if (this == that) {
     // Quick reference equality test
     return true;
@@ -313,7 +313,7 @@ std::string String::ToModifiedUtf8() {
   if (IsCompressed()) {
     return std::string(reinterpret_cast<const char*>(GetValueCompressed()), GetLength());
   } else {
-    size_t byte_count = GetUtfLength();
+    size_t byte_count = GetModifiedUtf8Length();
     std::string result(byte_count, static_cast<char>(0));
     ConvertUtf16ToModifiedUtf8(&result[0], byte_count, GetValue(), GetLength());
     return result;

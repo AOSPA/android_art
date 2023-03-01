@@ -3259,7 +3259,7 @@ void IntrinsicCodeGeneratorX86::VisitSystemArrayCopy(HInvoke* invoke) {
   }
 
   // We only need one card marking on the destination array.
-  codegen_->MarkGCCard(temp1, temp2, dest, Register(kNoRegister), /* value_can_be_null= */ false);
+  codegen_->MarkGCCard(temp1, temp2, dest, Register(kNoRegister), /* emit_null_check= */ false);
 
   __ Bind(intrinsic_slow_path->GetExitLabel());
 }
@@ -4041,13 +4041,16 @@ static void GenerateVarHandleSet(HInvoke* invoke, CodeGeneratorX86* codegen) {
   InstructionCodeGeneratorX86* instr_codegen =
         down_cast<InstructionCodeGeneratorX86*>(codegen->GetInstructionVisitor());
   // Store the value to the field
-  instr_codegen->HandleFieldSet(invoke,
-                                value_index,
-                                value_type,
-                                Address(reference, offset, TIMES_1, 0),
-                                reference,
-                                is_volatile,
-                                /* value_can_be_null */ true);
+  instr_codegen->HandleFieldSet(
+      invoke,
+      value_index,
+      value_type,
+      Address(reference, offset, TIMES_1, 0),
+      reference,
+      is_volatile,
+      /* value_can_be_null */ true,
+      // Value can be null, and this write barrier is not being relied on for other sets.
+      WriteBarrierKind::kEmitWithNullCheck);
 
   __ Bind(slow_path->GetExitLabel());
 }
@@ -4208,7 +4211,7 @@ static void GenerateVarHandleGetAndSet(HInvoke* invoke, CodeGeneratorX86* codege
             &temp2);
       }
       codegen->MarkGCCard(
-          temp, temp2, reference, value.AsRegister<Register>(), /* value_can_be_null= */ false);
+          temp, temp2, reference, value.AsRegister<Register>(), /* emit_null_check= */ false);
       if (kPoisonHeapReferences) {
         __ movl(temp, value.AsRegister<Register>());
         __ PoisonHeapReference(temp);

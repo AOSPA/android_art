@@ -98,9 +98,8 @@ class EntrypointsOrderTest : public CommonArtTest {
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, monitor_enter_object, top_handle_scope, sizeof(void*));
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, top_handle_scope, class_loader_override, sizeof(void*));
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, class_loader_override, long_jump_context, sizeof(void*));
-    EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, long_jump_context, instrumentation_stack, sizeof(void*));
-    EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, instrumentation_stack, stacked_shadow_frame_record,
-                        sizeof(void*));
+    EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, long_jump_context,
+                        stacked_shadow_frame_record, sizeof(void*));
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, stacked_shadow_frame_record,
                         deoptimization_context_stack, sizeof(void*));
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, deoptimization_context_stack,
@@ -109,9 +108,7 @@ class EntrypointsOrderTest : public CommonArtTest {
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, name, pthread_self, sizeof(void*));
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, pthread_self, last_no_thread_suspension_cause,
                         sizeof(void*));
-    EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, last_no_thread_suspension_cause, checkpoint_function,
-                        sizeof(void*));
-    EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, checkpoint_function, active_suspend_barriers,
+    EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, last_no_thread_suspension_cause, active_suspend_barriers,
                         sizeof(void*));
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, active_suspend_barriers, thread_local_start,
                         sizeof(Thread::tls_ptr_sized_values::active_suspend_barriers));
@@ -119,7 +116,9 @@ class EntrypointsOrderTest : public CommonArtTest {
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, thread_local_pos, thread_local_end, sizeof(void*));
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, thread_local_end, thread_local_limit, sizeof(void*));
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, thread_local_limit, thread_local_objects, sizeof(void*));
-    EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, thread_local_objects, jni_entrypoints, sizeof(size_t));
+    EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, thread_local_objects, checkpoint_function, sizeof(size_t));
+    EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, checkpoint_function, jni_entrypoints,
+                        sizeof(void*));
 
     // Skip across the entrypoints structures.
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, rosalloc_runs, thread_local_alloc_stack_top,
@@ -135,10 +134,14 @@ class EntrypointsOrderTest : public CommonArtTest {
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, thread_local_mark_stack, async_exception, sizeof(void*));
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, async_exception, top_reflective_handle_scope,
                         sizeof(void*));
+    EXPECT_OFFSET_DIFFP(
+        Thread, tlsPtr_, top_reflective_handle_scope, method_trace_buffer, sizeof(void*));
+    EXPECT_OFFSET_DIFFP(
+        Thread, tlsPtr_, method_trace_buffer, method_trace_buffer_index, sizeof(void*));
     // The first field after tlsPtr_ is forced to a 16 byte alignment so it might have some space.
     auto offset_tlsptr_end = OFFSETOF_MEMBER(Thread, tlsPtr_) +
         sizeof(decltype(reinterpret_cast<Thread*>(16)->tlsPtr_));
-    CHECKED(offset_tlsptr_end - OFFSETOF_MEMBER(Thread, tlsPtr_.top_reflective_handle_scope) ==
+    CHECKED(offset_tlsptr_end - OFFSETOF_MEMBER(Thread, tlsPtr_.method_trace_buffer_index) ==
                 sizeof(void*),
             "async_exception last field");
   }

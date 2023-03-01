@@ -73,15 +73,15 @@ namespace artd {
 
 namespace {
 
+using ::aidl::com::android::server::art::ArtdDexoptResult;
 using ::aidl::com::android::server::art::ArtifactsPath;
 using ::aidl::com::android::server::art::DexMetadataPath;
 using ::aidl::com::android::server::art::DexoptOptions;
-using ::aidl::com::android::server::art::DexoptResult;
 using ::aidl::com::android::server::art::DexoptTrigger;
 using ::aidl::com::android::server::art::FileVisibility;
 using ::aidl::com::android::server::art::FsPermission;
 using ::aidl::com::android::server::art::GetDexoptNeededResult;
-using ::aidl::com::android::server::art::GetOptimizationStatusResult;
+using ::aidl::com::android::server::art::GetDexoptStatusResult;
 using ::aidl::com::android::server::art::IArtdCancellationSignal;
 using ::aidl::com::android::server::art::MergeProfileOptions;
 using ::aidl::com::android::server::art::OutputArtifacts;
@@ -212,11 +212,7 @@ ArtifactsLocation ArtifactsLocationToAidl(OatFileAssistant::Location location) {
   LOG(FATAL) << "Unexpected Location " << location;
 }
 
-Result<void> PrepareArtifactsDir(
-    const std::string& path,
-    const FsPermission& fs_permission,
-    const std::optional<OutputArtifacts::PermissionSettings::SeContext>& se_context =
-        std::nullopt) {
+Result<void> PrepareArtifactsDir(const std::string& path, const FsPermission& fs_permission) {
   std::error_code ec;
   bool created = std::filesystem::create_directory(path, ec);
   if (ec) {
@@ -234,26 +230,12 @@ Result<void> PrepareArtifactsDir(
   }
   OR_RETURN(Chown(path, fs_permission));
 
-  if (kIsTargetAndroid) {
-    int res = 0;
-    if (se_context.has_value()) {
-      res = selinux_android_restorecon_pkgdir(path.c_str(),
-                                              se_context->seInfo.c_str(),
-                                              se_context->uid,
-                                              SELINUX_ANDROID_RESTORECON_RECURSE);
-    } else {
-      res = selinux_android_restorecon(path.c_str(), SELINUX_ANDROID_RESTORECON_RECURSE);
-    }
-    if (res != 0) {
-      return ErrnoErrorf("Failed to restorecon directory '{}'", path);
-    }
-  }
-
   cleanup.Disable();
   return {};
 }
 
-Result<void> PrepareArtifactsDirs(const OutputArtifacts& output_artifacts) {
+Result<void> PrepareArtifactsDirs(const OutputArtifacts& output_artifacts,
+                                  /*out*/ std::string* oat_dir_path) {
   if (output_artifacts.artifactsPath.isInDalvikCache) {
     return {};
   }
@@ -263,10 +245,31 @@ Result<void> PrepareArtifactsDirs(const OutputArtifacts& output_artifacts) {
   std::filesystem::path oat_dir = isa_dir.parent_path();
   DCHECK_EQ(oat_dir.filename(), "oat");
 
-  OR_RETURN(PrepareArtifactsDir(oat_dir,
-                                output_artifacts.permissionSettings.dirFsPermission,
-                                output_artifacts.permissionSettings.seContext));
+  OR_RETURN(PrepareArtifactsDir(oat_dir, output_artifacts.permissionSettings.dirFsPermission));
   OR_RETURN(PrepareArtifactsDir(isa_dir, output_artifacts.permissionSettings.dirFsPermission));
+  *oat_dir_path = oat_dir;
+  return {};
+}
+
+Result<void> Restorecon(
+    const std::string& path,
+    const std::optional<OutputArtifacts::PermissionSettings::SeContext>& se_context) {
+  if (!kIsTargetAndroid) {
+    return {};
+  }
+
+  int res = 0;
+  if (se_context.has_value()) {
+    res = selinux_android_restorecon_pkgdir(path.c_str(),
+                                            se_context->seInfo.c_str(),
+                                            se_context->uid,
+                                            SELINUX_ANDROID_RESTORECON_RECURSE);
+  } else {
+    res = selinux_android_restorecon(path.c_str(), SELINUX_ANDROID_RESTORECON_RECURSE);
+  }
+  if (res != 0) {
+    return ErrnoErrorf("Failed to restorecon directory '{}'", path);
+  }
   return {};
 }
 
@@ -324,6 +327,14 @@ class FdLogger {
   void Add(const NewFile& file) { fd_mapping_.emplace_back(file.Fd(), file.TempPath()); }
   void Add(const File& file) { fd_mapping_.emplace_back(file.Fd(), file.GetPath()); }
 
+  std::string GetFds() {
+    std::vector<int> fds;
+    for (const auto& [fd, path] : fd_mapping_) {
+      fds.push_back(fd);
+    }
+    return Join(fds, ':');
+  }
+
  private:
   std::vector<std::pair<int, std::string>> fd_mapping_;
 
@@ -367,10 +378,10 @@ ScopedAStatus Artd::deleteArtifacts(const ArtifactsPath& in_artifactsPath, int64
   return ScopedAStatus::ok();
 }
 
-ScopedAStatus Artd::getOptimizationStatus(const std::string& in_dexFile,
-                                          const std::string& in_instructionSet,
-                                          const std::string& in_classLoaderContext,
-                                          GetOptimizationStatusResult* _aidl_return) {
+ScopedAStatus Artd::getDexoptStatus(const std::string& in_dexFile,
+                                    const std::string& in_instructionSet,
+                                    const std::string& in_classLoaderContext,
+                                    GetDexoptStatusResult* _aidl_return) {
   Result<OatFileAssistantContext*> ofa_context = GetOatFileAssistantContext();
   if (!ofa_context.ok()) {
     return NonFatal("Failed to get runtime options: " + ofa_context.error().message());
@@ -412,12 +423,13 @@ ndk::ScopedAStatus Artd::isProfileUsable(const ProfilePath& in_profile,
   std::string profile_path = OR_RETURN_FATAL(BuildProfileOrDmPath(in_profile));
   OR_RETURN_FATAL(ValidateDexPath(in_dexFile));
 
-  CmdlineBuilder args;
   FdLogger fd_logger;
-  args.Add(OR_RETURN_FATAL(GetArtExec()))
-      .Add("--drop-capabilities")
-      .Add("--")
-      .Add(OR_RETURN_FATAL(GetProfman()));
+
+  CmdlineBuilder art_exec_args;
+  art_exec_args.Add(OR_RETURN_FATAL(GetArtExec())).Add("--drop-capabilities");
+
+  CmdlineBuilder args;
+  args.Add(OR_RETURN_FATAL(GetProfman()));
 
   Result<std::unique_ptr<File>> profile = OpenFileForReading(profile_path);
   if (!profile.ok()) {
@@ -435,10 +447,12 @@ ndk::ScopedAStatus Artd::isProfileUsable(const ProfilePath& in_profile,
   args.Add("--apk-fd=%d", dex_file->Fd());
   fd_logger.Add(*dex_file);
 
-  LOG(INFO) << "Running profman: " << Join(args.Get(), /*separator=*/" ")
+  art_exec_args.Add("--keep-fds=%s", fd_logger.GetFds()).Add("--").Concat(std::move(args));
+
+  LOG(INFO) << "Running profman: " << Join(art_exec_args.Get(), /*separator=*/" ")
             << "\nOpened FDs: " << fd_logger;
 
-  Result<int> result = ExecAndReturnCode(args.Get(), kShortTimeoutSec);
+  Result<int> result = ExecAndReturnCode(art_exec_args.Get(), kShortTimeoutSec);
   if (!result.ok()) {
     return NonFatal("Failed to run profman: " + result.error().message());
   }
@@ -462,13 +476,13 @@ ndk::ScopedAStatus Artd::copyAndRewriteProfile(const ProfilePath& in_src,
   std::string dst_path = OR_RETURN_FATAL(BuildFinalProfilePath(in_dst->profilePath));
   OR_RETURN_FATAL(ValidateDexPath(in_dexFile));
 
-  CmdlineBuilder args;
   FdLogger fd_logger;
-  args.Add(OR_RETURN_FATAL(GetArtExec()))
-      .Add("--drop-capabilities")
-      .Add("--")
-      .Add(OR_RETURN_FATAL(GetProfman()))
-      .Add("--copy-and-update-profile-key");
+
+  CmdlineBuilder art_exec_args;
+  art_exec_args.Add(OR_RETURN_FATAL(GetArtExec())).Add("--drop-capabilities");
+
+  CmdlineBuilder args;
+  args.Add(OR_RETURN_FATAL(GetProfman())).Add("--copy-and-update-profile-key");
 
   Result<std::unique_ptr<File>> src = OpenFileForReading(src_path);
   if (!src.ok()) {
@@ -490,10 +504,12 @@ ndk::ScopedAStatus Artd::copyAndRewriteProfile(const ProfilePath& in_src,
   args.Add("--reference-profile-file-fd=%d", dst->Fd());
   fd_logger.Add(*dst);
 
-  LOG(INFO) << "Running profman: " << Join(args.Get(), /*separator=*/" ")
+  art_exec_args.Add("--keep-fds=%s", fd_logger.GetFds()).Add("--").Concat(std::move(args));
+
+  LOG(INFO) << "Running profman: " << Join(art_exec_args.Get(), /*separator=*/" ")
             << "\nOpened FDs: " << fd_logger;
 
-  Result<int> result = ExecAndReturnCode(args.Get(), kShortTimeoutSec);
+  Result<int> result = ExecAndReturnCode(art_exec_args.Get(), kShortTimeoutSec);
   if (!result.ok()) {
     return NonFatal("Failed to run profman: " + result.error().message());
   }
@@ -588,13 +604,17 @@ ndk::ScopedAStatus Artd::mergeProfiles(const std::vector<ProfilePath>& in_profil
   for (const std::string& dex_file : in_dexFiles) {
     OR_RETURN_FATAL(ValidateDexPath(dex_file));
   }
+  if (in_options.forceMerge + in_options.dumpOnly + in_options.dumpClassesAndMethods > 1) {
+    return Fatal("Only one of 'forceMerge', 'dumpOnly', and 'dumpClassesAndMethods' can be set");
+  }
+
+  FdLogger fd_logger;
+
+  CmdlineBuilder art_exec_args;
+  art_exec_args.Add(OR_RETURN_FATAL(GetArtExec())).Add("--drop-capabilities");
 
   CmdlineBuilder args;
-  FdLogger fd_logger;
-  args.Add(OR_RETURN_FATAL(GetArtExec()))
-      .Add("--drop-capabilities")
-      .Add("--")
-      .Add(OR_RETURN_FATAL(GetProfman()));
+  args.Add(OR_RETURN_FATAL(GetProfman()));
 
   std::vector<std::unique_ptr<File>> profile_files;
   for (const std::string& profile_path : profile_paths) {
@@ -622,6 +642,11 @@ ndk::ScopedAStatus Artd::mergeProfiles(const std::vector<ProfilePath>& in_profil
       OR_RETURN_NON_FATAL(NewFile::Create(output_profile_path, in_outputProfile->fsPermission));
 
   if (in_referenceProfile.has_value()) {
+    if (in_options.forceMerge || in_options.dumpOnly || in_options.dumpClassesAndMethods) {
+      return Fatal(
+          "Reference profile must not be set when 'forceMerge', 'dumpOnly', or "
+          "'dumpClassesAndMethods' is set");
+    }
     std::string reference_profile_path =
         OR_RETURN_FATAL(BuildProfileOrDmPath(*in_referenceProfile));
     if (in_referenceProfile->getTag() == ProfilePath::dexMetadataPath) {
@@ -630,8 +655,12 @@ ndk::ScopedAStatus Artd::mergeProfiles(const std::vector<ProfilePath>& in_profil
     OR_RETURN_NON_FATAL(CopyFile(reference_profile_path, *output_profile_file));
   }
 
-  // profman is ok with this being an empty file when in_referenceProfile isn't set.
-  args.Add("--reference-profile-file-fd=%d", output_profile_file->Fd());
+  if (in_options.dumpOnly || in_options.dumpClassesAndMethods) {
+    args.Add("--dump-output-to-fd=%d", output_profile_file->Fd());
+  } else {
+    // profman is ok with this being an empty file when in_referenceProfile isn't set.
+    args.Add("--reference-profile-file-fd=%d", output_profile_file->Fd());
+  }
   fd_logger.Add(*output_profile_file);
 
   std::vector<std::unique_ptr<File>> dex_files;
@@ -642,17 +671,23 @@ ndk::ScopedAStatus Artd::mergeProfiles(const std::vector<ProfilePath>& in_profil
     dex_files.push_back(std::move(dex_file));
   }
 
-  args.AddIfNonEmpty("--min-new-classes-percent-change=%s",
-                     props_->GetOrEmpty("dalvik.vm.bgdexopt.new-classes-percent"))
-      .AddIfNonEmpty("--min-new-methods-percent-change=%s",
-                     props_->GetOrEmpty("dalvik.vm.bgdexopt.new-methods-percent"))
-      .AddIf(in_options.forceMerge, "--force-merge")
-      .AddIf(in_options.forBootImage, "--boot-image-merge");
+  if (in_options.dumpOnly || in_options.dumpClassesAndMethods) {
+    args.Add(in_options.dumpOnly ? "--dump-only" : "--dump-classes-and-methods");
+  } else {
+    args.AddIfNonEmpty("--min-new-classes-percent-change=%s",
+                       props_->GetOrEmpty("dalvik.vm.bgdexopt.new-classes-percent"))
+        .AddIfNonEmpty("--min-new-methods-percent-change=%s",
+                       props_->GetOrEmpty("dalvik.vm.bgdexopt.new-methods-percent"))
+        .AddIf(in_options.forceMerge, "--force-merge")
+        .AddIf(in_options.forBootImage, "--boot-image-merge");
+  }
 
-  LOG(INFO) << "Running profman: " << Join(args.Get(), /*separator=*/" ")
+  art_exec_args.Add("--keep-fds=%s", fd_logger.GetFds()).Add("--").Concat(std::move(args));
+
+  LOG(INFO) << "Running profman: " << Join(art_exec_args.Get(), /*separator=*/" ")
             << "\nOpened FDs: " << fd_logger;
 
-  Result<int> result = ExecAndReturnCode(args.Get(), kShortTimeoutSec);
+  Result<int> result = ExecAndReturnCode(art_exec_args.Get(), kShortTimeoutSec);
   if (!result.ok()) {
     return NonFatal("Failed to run profman: " + result.error().message());
   }
@@ -666,7 +701,9 @@ ndk::ScopedAStatus Artd::mergeProfiles(const std::vector<ProfilePath>& in_profil
   }
 
   ProfmanResult::ProcessingResult expected_result =
-      in_options.forceMerge ? ProfmanResult::kSuccess : ProfmanResult::kCompile;
+      (in_options.forceMerge || in_options.dumpOnly || in_options.dumpClassesAndMethods) ?
+          ProfmanResult::kSuccess :
+          ProfmanResult::kCompile;
   if (result.value() != expected_result) {
     return NonFatal("profman returned an unexpected code: {}"_format(result.value()));
   }
@@ -726,7 +763,7 @@ ndk::ScopedAStatus Artd::dexopt(
     PriorityClass in_priorityClass,
     const DexoptOptions& in_dexoptOptions,
     const std::shared_ptr<IArtdCancellationSignal>& in_cancellationSignal,
-    DexoptResult* _aidl_return) {
+    ArtdDexoptResult* _aidl_return) {
   _aidl_return->cancelled = false;
 
   std::string oat_path = OR_RETURN_FATAL(BuildOatPath(in_outputArtifacts.artifactsPath));
@@ -748,17 +785,23 @@ ndk::ScopedAStatus Artd::dexopt(
     }
   }
 
-  OR_RETURN_NON_FATAL(PrepareArtifactsDirs(in_outputArtifacts));
+  std::string oat_dir_path;  // For restorecon, can be empty if the artifacts are in dalvik-cache.
+  OR_RETURN_NON_FATAL(PrepareArtifactsDirs(in_outputArtifacts, &oat_dir_path));
 
-  CmdlineBuilder args;
-  args.Add(OR_RETURN_FATAL(GetArtExec())).Add("--drop-capabilities");
-
-  if (in_priorityClass < PriorityClass::BOOT) {
-    args.Add("--set-task-profile=Dex2OatBootComplete").Add("--set-priority=background");
+  // First-round restorecon. artd doesn't have the permission to create files with the
+  // `apk_data_file` label, so we need to restorecon the "oat" directory first so that files will
+  // inherit `dalvikcache_data_file` rather than `apk_data_file`.
+  if (!in_outputArtifacts.artifactsPath.isInDalvikCache) {
+    OR_RETURN_NON_FATAL(Restorecon(oat_dir_path, in_outputArtifacts.permissionSettings.seContext));
   }
 
-  args.Add("--").Add(OR_RETURN_FATAL(GetDex2Oat()));
   FdLogger fd_logger;
+
+  CmdlineBuilder art_exec_args;
+  art_exec_args.Add(OR_RETURN_FATAL(GetArtExec())).Add("--drop-capabilities");
+
+  CmdlineBuilder args;
+  args.Add(OR_RETURN_FATAL(GetDex2Oat()));
 
   const FsPermission& fs_permission = in_outputArtifacts.permissionSettings.fileFsPermission;
 
@@ -868,12 +911,24 @@ ndk::ScopedAStatus Artd::dexopt(
     // TODO(b/260228411): Check uid and gid.
   }
 
+  // Second-round restorecon. Restorecon recursively after the output files are created, so that the
+  // SELinux context is applied to all of them. The SELinux context of a file is mostly inherited
+  // from the parent directory upon creation, but the MLS label is not inherited, so we need to
+  // restorecon every file so that they have the right MLS label. If the files are in dalvik-cache,
+  // there's no need to restorecon because they inherits the SELinux context of the dalvik-cache
+  // directory and they don't need to have MLS labels.
+  if (!in_outputArtifacts.artifactsPath.isInDalvikCache) {
+    OR_RETURN_NON_FATAL(Restorecon(oat_dir_path, in_outputArtifacts.permissionSettings.seContext));
+  }
+
   AddBootImageFlags(args);
   AddCompilerConfigFlags(
       in_instructionSet, in_compilerFilter, in_priorityClass, in_dexoptOptions, args);
-  AddPerfConfigFlags(in_priorityClass, args);
+  AddPerfConfigFlags(in_priorityClass, art_exec_args, args);
 
-  LOG(INFO) << "Running dex2oat: " << Join(args.Get(), /*separator=*/" ")
+  art_exec_args.Add("--keep-fds=%s", fd_logger.GetFds()).Add("--").Concat(std::move(args));
+
+  LOG(INFO) << "Running dex2oat: " << Join(art_exec_args.Get(), /*separator=*/" ")
             << "\nOpened FDs: " << fd_logger;
 
   ExecCallbacks callbacks{
@@ -896,7 +951,7 @@ ndk::ScopedAStatus Artd::dexopt(
   };
 
   ProcessStat stat;
-  Result<int> result = ExecAndReturnCode(args.Get(), kLongTimeoutSec, callbacks, &stat);
+  Result<int> result = ExecAndReturnCode(art_exec_args.Get(), kLongTimeoutSec, callbacks, &stat);
   _aidl_return->wallTimeMs = stat.wall_time_ms;
   _aidl_return->cpuTimeMs = stat.cpu_time_ms;
   if (!result.ok()) {
@@ -1132,7 +1187,9 @@ void Artd::AddCompilerConfigFlags(const std::string& instruction_set,
       .AddRuntimeIf(dexopt_options.hiddenApiPolicyEnabled, "-Xhidden-api-policy:enabled");
 }
 
-void Artd::AddPerfConfigFlags(PriorityClass priority_class, /*out*/ CmdlineBuilder& args) {
+void Artd::AddPerfConfigFlags(PriorityClass priority_class,
+                              /*out*/ CmdlineBuilder& art_exec_args,
+                              /*out*/ CmdlineBuilder& dex2oat_args) {
   // CPU set and number of threads.
   std::string default_cpu_set_prop = "dalvik.vm.dex2oat-cpu-set";
   std::string default_threads_prop = "dalvik.vm.dex2oat-threads";
@@ -1151,15 +1208,22 @@ void Artd::AddPerfConfigFlags(PriorityClass priority_class, /*out*/ CmdlineBuild
     cpu_set = props_->GetOrEmpty(default_cpu_set_prop);
     threads = props_->GetOrEmpty(default_threads_prop);
   }
-  args.AddIfNonEmpty("--cpu-set=%s", cpu_set).AddIfNonEmpty("-j%s", threads);
+  dex2oat_args.AddIfNonEmpty("--cpu-set=%s", cpu_set).AddIfNonEmpty("-j%s", threads);
 
-  args.AddRuntimeIfNonEmpty("-Xms%s", props_->GetOrEmpty("dalvik.vm.dex2oat-Xms"))
+  if (priority_class < PriorityClass::BOOT) {
+    art_exec_args
+        .Add(priority_class <= PriorityClass::BACKGROUND ? "--set-task-profile=Dex2OatBackground" :
+                                                           "--set-task-profile=Dex2OatBootComplete")
+        .Add("--set-priority=background");
+  }
+
+  dex2oat_args.AddRuntimeIfNonEmpty("-Xms%s", props_->GetOrEmpty("dalvik.vm.dex2oat-Xms"))
       .AddRuntimeIfNonEmpty("-Xmx%s", props_->GetOrEmpty("dalvik.vm.dex2oat-Xmx"));
 
   // Enable compiling dex files in isolation on low ram devices.
   // It takes longer but reduces the memory footprint.
-  args.AddIf(props_->GetBool("ro.config.low_ram", /*default_value=*/false),
-             "--compile-individually");
+  dex2oat_args.AddIf(props_->GetBool("ro.config.low_ram", /*default_value=*/false),
+                     "--compile-individually");
 }
 
 Result<int> Artd::ExecAndReturnCode(const std::vector<std::string>& args,

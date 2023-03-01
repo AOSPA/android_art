@@ -53,8 +53,6 @@ QuickExceptionHandler::QuickExceptionHandler(Thread* self, bool is_deoptimizatio
     : self_(self),
       context_(self->GetLongJumpContext()),
       is_deoptimization_(is_deoptimization),
-      method_tracing_active_(is_deoptimization ||
-                             Runtime::Current()->GetInstrumentation()->AreExitStubsInstalled()),
       handler_quick_frame_(nullptr),
       handler_quick_frame_pc_(0),
       handler_method_header_(nullptr),
@@ -253,8 +251,6 @@ void QuickExceptionHandler::FindCatch(ObjPtr<mirror::Throwable> exception,
                                                         exception_ref);
   } while (!popped_to_top);
 
-  // Pop off frames on instrumentation stack to keep it in sync with what is on the stack.
-  instr->PopInstrumentationStackUntil(self_, reinterpret_cast<uintptr_t>(handler_quick_frame_));
   if (!clear_exception_) {
     // Put exception back in root set with clear throw location.
     self_->SetException(exception_ref.Get());
@@ -384,8 +380,8 @@ class DeoptimizeStackVisitor final : public StackVisitor {
   DeoptimizeStackVisitor(Thread* self,
                          Context* context,
                          QuickExceptionHandler* exception_handler,
-                         bool single_frame)
-      REQUIRES_SHARED(Locks::mutator_lock_)
+                         bool single_frame,
+                         bool skip_method_exit_callbacks) REQUIRES_SHARED(Locks::mutator_lock_)
       : StackVisitor(self, context, StackVisitor::StackWalkKind::kIncludeInlinedFrames),
         exception_handler_(exception_handler),
         prev_shadow_frame_(nullptr),
@@ -394,8 +390,8 @@ class DeoptimizeStackVisitor final : public StackVisitor {
         single_frame_done_(false),
         single_frame_deopt_method_(nullptr),
         single_frame_deopt_quick_method_header_(nullptr),
-        callee_method_(nullptr) {
-  }
+        callee_method_(nullptr),
+        skip_method_exit_callbacks_(skip_method_exit_callbacks) {}
 
   ArtMethod* GetSingleFrameDeoptMethod() const {
     return single_frame_deopt_method_;
@@ -475,6 +471,25 @@ class DeoptimizeStackVisitor final : public StackVisitor {
         HandleNterpDeoptimization(method, new_frame, updated_vregs);
       } else {
         HandleOptimizingDeoptimization(method, new_frame, updated_vregs);
+      }
+      // Update if method exit event needs to be reported. We should report exit event only if we
+      // have reported an entry event. So tell interpreter if/ an entry event was reported.
+      bool supports_exit_events =
+          Runtime::Current()->GetInstrumentation()->MethodSupportsExitEvents(
+              method, GetCurrentOatQuickMethodHeader());
+      new_frame->SetSkipMethodExitEvents(!supports_exit_events);
+      // If we are deoptimizing after method exit callback we shouldn't call the method exit
+      // callbacks again for the top frame. We may have to deopt after the callback if the callback
+      // either throws or performs other actions that require a deopt.
+      // We only need to skip for the top frame and the rest of the frames should still run the
+      // callbacks. So only do this check for the top frame.
+      if (GetFrameDepth() == 0U && skip_method_exit_callbacks_) {
+        new_frame->SetSkipMethodExitEvents(true);
+        // This exception was raised by method exit callbacks and we shouldn't report it to
+        // listeners for these exceptions.
+        if (GetThread()->IsExceptionPending()) {
+          new_frame->SetSkipNextExceptionEvent(true);
+        }
       }
       if (updated_vregs != nullptr) {
         // Calling Thread::RemoveDebuggerShadowFrameMapping will also delete the updated_vregs
@@ -632,6 +647,10 @@ class DeoptimizeStackVisitor final : public StackVisitor {
   ArtMethod* single_frame_deopt_method_;
   const OatQuickMethodHeader* single_frame_deopt_quick_method_header_;
   ArtMethod* callee_method_;
+  // This specifies if method exit callbacks should be skipped for the top frame. We may request
+  // a deopt after running method exit callbacks if the callback throws or requests events that
+  // need a deopt.
+  bool skip_method_exit_callbacks_;
 
   DISALLOW_COPY_AND_ASSIGN(DeoptimizeStackVisitor);
 };
@@ -651,13 +670,13 @@ void QuickExceptionHandler::PrepareForLongJumpToInvokeStubOrInterpreterBridge() 
   }
 }
 
-void QuickExceptionHandler::DeoptimizeStack() {
+void QuickExceptionHandler::DeoptimizeStack(bool skip_method_exit_callbacks) {
   DCHECK(is_deoptimization_);
   if (kDebugExceptionDelivery) {
     self_->DumpStack(LOG_STREAM(INFO) << "Deoptimizing: ");
   }
 
-  DeoptimizeStackVisitor visitor(self_, context_, this, false);
+  DeoptimizeStackVisitor visitor(self_, context_, this, false, skip_method_exit_callbacks);
   visitor.WalkStack(true);
   PrepareForLongJumpToInvokeStubOrInterpreterBridge();
 }
@@ -665,7 +684,10 @@ void QuickExceptionHandler::DeoptimizeStack() {
 void QuickExceptionHandler::DeoptimizeSingleFrame(DeoptimizationKind kind) {
   DCHECK(is_deoptimization_);
 
-  DeoptimizeStackVisitor visitor(self_, context_, this, true);
+  // This deopt is requested while still executing the method. We haven't run method exit callbacks
+  // yet, so don't skip them.
+  DeoptimizeStackVisitor visitor(
+      self_, context_, this, true, /* skip_method_exit_callbacks= */ false);
   visitor.WalkStack(true);
 
   // Compiled code made an explicit deoptimization.
@@ -696,21 +718,8 @@ void QuickExceptionHandler::DeoptimizeSingleFrame(DeoptimizationKind kind) {
   PrepareForLongJumpToInvokeStubOrInterpreterBridge();
 }
 
-void QuickExceptionHandler::DeoptimizePartialFragmentFixup(uintptr_t return_pc) {
-  // At this point, the instrumentation stack has been updated. We need to install
-  // the real return pc on stack, in case instrumentation stub is stored there,
-  // so that the interpreter bridge code can return to the right place. JITed
-  // frames in Java debuggable runtimes may not have an instrumentation stub, so
-  // update the PC only when required.
-  uintptr_t* pc_addr = reinterpret_cast<uintptr_t*>(handler_quick_frame_);
-  CHECK(pc_addr != nullptr);
-  pc_addr--;
-  if (return_pc != 0 &&
-      (*reinterpret_cast<uintptr_t*>(pc_addr)) ==
-          reinterpret_cast<uintptr_t>(GetQuickInstrumentationExitPc())) {
-    *reinterpret_cast<uintptr_t*>(pc_addr) = return_pc;
-  }
-
+void QuickExceptionHandler::DeoptimizePartialFragmentFixup() {
+  CHECK(handler_quick_frame_ != nullptr);
   // Architecture-dependent work. This is to get the LR right for x86 and x86-64.
   if (kRuntimeISA == InstructionSet::kX86 || kRuntimeISA == InstructionSet::kX86_64) {
     // On x86, the return address is on the stack, so just reuse it. Otherwise we would have to
@@ -718,17 +727,6 @@ void QuickExceptionHandler::DeoptimizePartialFragmentFixup(uintptr_t return_pc) 
     handler_quick_frame_ = reinterpret_cast<ArtMethod**>(
         reinterpret_cast<uintptr_t>(handler_quick_frame_) - sizeof(void*));
   }
-}
-
-uintptr_t QuickExceptionHandler::UpdateInstrumentationStack() {
-  DCHECK(is_deoptimization_) << "Non-deoptimization handlers should use FindCatch";
-  uintptr_t return_pc = 0;
-  if (method_tracing_active_) {
-    instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
-    return_pc = instrumentation->PopInstrumentationStackUntil(
-        self_, reinterpret_cast<uintptr_t>(handler_quick_frame_));
-  }
-  return return_pc;
 }
 
 void QuickExceptionHandler::DoLongJump(bool smash_caller_saves) {
