@@ -45,12 +45,6 @@ void DexCache::Initialize(const DexFile* dex_file, ObjPtr<ClassLoader> class_loa
   DCHECK(GetResolvedMethodTypes() == nullptr);
   DCHECK(GetResolvedCallSites() == nullptr);
 
-  DCHECK(GetStringsArray() == nullptr);
-  DCHECK(GetResolvedTypesArray() == nullptr);
-  DCHECK(GetResolvedMethodsArray() == nullptr);
-  DCHECK(GetResolvedFieldsArray() == nullptr);
-  DCHECK(GetResolvedMethodTypesArray() == nullptr);
-
   ScopedAssertNoThreadSuspension sants(__FUNCTION__);
 
   SetDexFile(dex_file);
@@ -190,13 +184,6 @@ bool DexCache::ShouldAllocateFullArrayAtStartup() {
       CompilerFilter::IsAotCompilationEnabled(oat_dex_file->GetOatFile()->GetCompilerFilter())) {
     // We only allocate full arrays for dex files where we do not have
     // compilation.
-    return false;
-  }
-
-  if (!ProfileSaver::IsStarted()) {
-    // Only allocate full arrays if the profile saver is running: if the app
-    // does not call `reportFullyDrawn`, then only the profile saver will notify
-    // that the app has eventually started.
     return false;
   }
 
