@@ -91,6 +91,7 @@ static art::ConditionVariable& GetStateCV() {
 static int requested_tracing_session_id = 0;
 static State g_state = State::kUninitialized;
 static bool g_oome_triggered = false;
+static uint32_t g_oome_sessions_pending = 0;
 
 // Pipe to signal from the signal handler into a worker thread that handles the
 // dump requests.
@@ -164,16 +165,35 @@ uint64_t GetCurrentBootClockNs() {
   return ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
+bool IsDebugBuild() {
+  std::string build_type = android::base::GetProperty("ro.build.type", "");
+  return !build_type.empty() && build_type != "user";
+}
+
+// Verifies the manifest restrictions are respected.
+// For regular heap dumps this is already handled by heapprofd.
+bool IsOomeHeapDumpAllowed(const perfetto::DataSourceConfig& ds_config) {
+  if (art::Runtime::Current()->IsJavaDebuggable() || IsDebugBuild()) {
+    return true;
+  }
+
+  if (ds_config.session_initiator() ==
+      perfetto::DataSourceConfig::SESSION_INITIATOR_TRUSTED_SYSTEM) {
+    return art::Runtime::Current()->IsProfileable() || art::Runtime::Current()->IsSystemServer();
+  } else {
+    return art::Runtime::Current()->IsProfileableFromShell();
+  }
+}
+
 class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
  public:
   constexpr static perfetto::BufferExhaustedPolicy kBufferExhaustedPolicy =
     perfetto::BufferExhaustedPolicy::kStall;
 
-  explicit JavaHprofDataSource(bool dispatched_from_heapprofd)
-      : dispatched_from_heapprofd_(dispatched_from_heapprofd) {}
+  explicit JavaHprofDataSource(bool is_oome_heap) : is_oome_heap_(is_oome_heap) {}
 
   void OnSetup(const SetupArgs& args) override {
-    if (dispatched_from_heapprofd_) {
+    if (!is_oome_heap_) {
       uint64_t normalized_tracing_session_id =
         args.config->tracing_session_id() % std::numeric_limits<int32_t>::max();
       if (requested_tracing_session_id < 0) {
@@ -197,21 +217,31 @@ class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
     }
     // This tracing session ID matches the requesting tracing session ID, so we know heapprofd
     // has verified it targets this process.
-    enabled_ = dispatched_from_heapprofd_ || IsDumpEnabled(*cfg.get());
+    enabled_ =
+        !is_oome_heap_ || (IsOomeHeapDumpAllowed(*args.config) && IsOomeDumpEnabled(*cfg.get()));
   }
 
   bool dump_smaps() { return dump_smaps_; }
 
-  // Per-DS enable bit. Invoked by the ::Trace method.
+  // Per-DataSource enable bit. Invoked by the ::Trace method.
   bool enabled() { return enabled_; }
 
   void OnStart(const StartArgs&) override {
     art::MutexLock lk(art_thread(), GetStateMutex());
+    // In case there are multiple tracing sessions waiting for an OOME error,
+    // there will be a data source instance for each of them. Before the
+    // transition to kStart and signaling the dumping thread, we need to make
+    // sure all the data sources are ready.
+    if (is_oome_heap_ && g_oome_sessions_pending > 0) {
+      --g_oome_sessions_pending;
+    }
     if (g_state == State::kWaitForStart) {
-      // WriteHeapPackets is responsible for checking whether the DS is actually
-      // enabled.
-      g_state = State::kStart;
-      GetStateCV().Broadcast(art_thread());
+      // WriteHeapPackets is responsible for checking whether the DataSource is\
+      // actually enabled.
+      if (!is_oome_heap_ || g_oome_sessions_pending == 0) {
+        g_state = State::kStart;
+        GetStateCV().Broadcast(art_thread());
+      }
     }
   }
 
@@ -252,7 +282,7 @@ class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
   }
 
  private:
-  static bool IsDumpEnabled(const perfetto::protos::pbzero::JavaHprofConfig::Decoder& cfg) {
+  static bool IsOomeDumpEnabled(const perfetto::protos::pbzero::JavaHprofConfig::Decoder& cfg) {
     std::string cmdline;
     if (!android::base::ReadFileToString("/proc/self/cmdline", &cmdline)) {
       return false;
@@ -268,7 +298,7 @@ class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
     return false;
   }
 
-  bool dispatched_from_heapprofd_ = false;
+  bool is_oome_heap_ = false;
   bool enabled_ = false;
   bool dump_smaps_ = false;
   std::vector<std::string> ignored_types_;
@@ -279,7 +309,7 @@ class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
   std::function<void()> async_stop_;
 };
 
-void SetupDataSource(const std::string& ds_name, bool dispatched_from_heapprofd) {
+void SetupDataSource(const std::string& ds_name, bool is_oome_heap) {
   perfetto::TracingInitArgs args;
   args.backends = perfetto::BackendType::kSystemBackend;
   perfetto::Tracing::Initialize(args);
@@ -287,7 +317,7 @@ void SetupDataSource(const std::string& ds_name, bool dispatched_from_heapprofd)
   perfetto::DataSourceDescriptor dsd;
   dsd.set_name(ds_name);
   dsd.set_will_notify_on_stop(true);
-  JavaHprofDataSource::Register(dsd, dispatched_from_heapprofd);
+  JavaHprofDataSource::Register(dsd, is_oome_heap);
   LOG(INFO) << "registered data source " << ds_name;
 }
 
@@ -1046,7 +1076,7 @@ void DumpPerfetto(art::Thread* self) {
       // Make sure that this is the first thing we do after forking, so if anything
       // below hangs, the fork will go away from the watchdog.
       ArmWatchdogOrDie();
-      SetupDataSource("android.java_hprof", true);
+      SetupDataSource("android.java_hprof", false);
       WaitForDataSource(self);
       WriteHeapPackets(dumped_pid, timestamp);
       LOG(INFO) << "finished dumping heap for " << dumped_pid;
@@ -1059,6 +1089,13 @@ void DumpPerfettoOutOfMemory() REQUIRES_SHARED(art::Locks::mutator_lock_) {
     LOG(FATAL_WITHOUT_ABORT) << "no thread in DumpPerfettoOutOfMemory";
     return;
   }
+
+  // Ensure that there is an active, armed tracing session
+  uint32_t session_cnt =
+      android::base::GetUintProperty<uint32_t>("traced.oome_heap_session.count", 0);
+  if (session_cnt == 0) {
+    return;
+  }
   {
     // OutOfMemoryErrors are reentrant, make sure we do not fork and process
     // more than once.
@@ -1067,6 +1104,7 @@ void DumpPerfettoOutOfMemory() REQUIRES_SHARED(art::Locks::mutator_lock_) {
       return;
     }
     g_oome_triggered = true;
+    g_oome_sessions_pending = session_cnt;
   }
 
   art::ScopedThreadSuspension sts(self, art::ThreadState::kSuspended);
@@ -1095,23 +1133,18 @@ void DumpPerfettoOutOfMemory() REQUIRES_SHARED(art::Locks::mutator_lock_) {
     [self](pid_t dumped_pid, uint64_t timestamp) {
       ArmWatchdogOrDie();
       art::ScopedTrace trace("perfetto_hprof oome");
-      SetupDataSource("android.java_hprof.oom", false);
+      SetupDataSource("android.java_hprof.oom", true);
       perfetto::Tracing::ActivateTriggers({"com.android.telemetry.art-outofmemory"}, 500);
 
       // A pre-armed tracing session might not exist, so we should wait for a
       // limited amount of time before we decide to let the execution continue.
-      if (!TimedWaitForDataSource(self, 500)) {
+      if (!TimedWaitForDataSource(self, 1000)) {
         LOG(INFO) << "OOME hprof timeout (state " << g_state << ")";
         return;
       }
       WriteHeapPackets(dumped_pid, timestamp);
       LOG(INFO) << "OOME hprof complete for " << dumped_pid;
     });
-}
-
-bool CanProfile() {
-  std::string build_type = android::base::GetProperty("ro.build.type", "");
-  return !build_type.empty() && build_type != "user";
 }
 
 // The plugin initialization function.
@@ -1202,17 +1235,13 @@ extern "C" bool ArtPlugin_Initialize() {
   th.detach();
 
   // Register the OOM error handler.
-  if (CanProfile()) {
-    art::Runtime::Current()->SetOutOfMemoryErrorHook(perfetto_hprof::DumpPerfettoOutOfMemory);
-  }
+  art::Runtime::Current()->SetOutOfMemoryErrorHook(perfetto_hprof::DumpPerfettoOutOfMemory);
 
   return true;
 }
 
 extern "C" bool ArtPlugin_Deinitialize() {
-  if (CanProfile()) {
-    art::Runtime::Current()->SetOutOfMemoryErrorHook(nullptr);
-  }
+  art::Runtime::Current()->SetOutOfMemoryErrorHook(nullptr);
 
   if (sigaction(kJavaHeapprofdSignal, &g_orig_act, nullptr) != 0) {
     PLOG(ERROR) << "failed to reset signal handler";

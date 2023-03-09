@@ -761,6 +761,7 @@ TEST_F(ArtdTest, dexoptDexoptOptions) {
       .debuggable = false,
       .generateAppImage = false,
       .hiddenApiPolicyEnabled = false,
+      .comments = "my-comments",
   };
 
   EXPECT_CALL(
@@ -771,7 +772,8 @@ TEST_F(ArtdTest, dexoptDexoptOptions) {
                                             Contains(Flag("-Xtarget-sdk-version:", "123")),
                                             Not(Contains("--debuggable")),
                                             Not(Contains(Flag("--app-image-fd=", _))),
-                                            Not(Contains(Flag("-Xhidden-api-policy:", _))))),
+                                            Not(Contains(Flag("-Xhidden-api-policy:", _))),
+                                            Contains(Flag("--comments=", "my-comments")))),
                           _,
                           _))
       .WillOnce(Return(0));
@@ -1432,7 +1434,9 @@ TEST_F(ArtdTest, deleteProfile) {
 }
 
 TEST_F(ArtdTest, deleteProfileDoesNotExist) {
-  std::string profile_file = OR_FATAL(BuildProfileOrDmPath(profile_path_.value()));
+  auto scoped_set_logger = ScopedSetLogger(mock_logger_.AsStdFunction());
+  EXPECT_CALL(mock_logger_, Call).Times(0);
+
   EXPECT_TRUE(artd_->deleteProfile(profile_path_.value()).isOk());
 }
 
@@ -1441,6 +1445,10 @@ TEST_F(ArtdTest, deleteProfileFailed) {
   EXPECT_CALL(
       mock_logger_,
       Call(_, _, _, _, _, ContainsRegex(R"re(Failed to remove .*primary\.prof\.12345\.tmp)re")));
+
+  std::string profile_file = OR_FATAL(BuildProfileOrDmPath(profile_path_.value()));
+  auto scoped_inaccessible = ScopedInaccessible(std::filesystem::path(profile_file).parent_path());
+  auto scoped_unroot = ScopedUnroot();
 
   EXPECT_TRUE(artd_->deleteProfile(profile_path_.value()).isOk());
 }
