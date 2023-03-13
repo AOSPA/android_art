@@ -89,10 +89,10 @@ public class SecondaryDexopterTest {
             AidlUtils.buildOutputProfileForSecondary(DEX_1, UID, UID, false /* isOtherReadable */);
 
     private final int mDefaultDexoptTrigger = DexoptTrigger.COMPILER_FILTER_IS_BETTER
-            | DexoptTrigger.PRIMARY_BOOT_IMAGE_BECOMES_USABLE;
+            | DexoptTrigger.PRIMARY_BOOT_IMAGE_BECOMES_USABLE | DexoptTrigger.NEED_EXTRACTION;
     private final int mBetterOrSameDexoptTrigger = DexoptTrigger.COMPILER_FILTER_IS_BETTER
             | DexoptTrigger.COMPILER_FILTER_IS_SAME
-            | DexoptTrigger.PRIMARY_BOOT_IMAGE_BECOMES_USABLE;
+            | DexoptTrigger.PRIMARY_BOOT_IMAGE_BECOMES_USABLE | DexoptTrigger.NEED_EXTRACTION;
 
     private final MergeProfileOptions mMergeProfileOptions = new MergeProfileOptions();
 
@@ -231,7 +231,7 @@ public class SecondaryDexopterTest {
         lenient().when(pkg.isDebuggable()).thenReturn(false);
         lenient().when(pkg.getTargetSdkVersion()).thenReturn(123);
         lenient().when(pkg.isSignedWithPlatformKey()).thenReturn(false);
-        lenient().when(pkg.isUsesNonSdkApi()).thenReturn(false);
+        lenient().when(pkg.isNonSdkApiRequested()).thenReturn(false);
         return pkg;
     }
 

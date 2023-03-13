@@ -37,7 +37,6 @@ import com.android.server.art.model.Config;
 import com.android.server.art.model.DexoptParams;
 import com.android.server.art.model.DexoptResult;
 import com.android.server.art.model.OperationProgress;
-import com.android.server.art.wrapper.PackageStateWrapper;
 import com.android.server.pm.PackageManagerLocal;
 import com.android.server.pm.pkg.AndroidPackage;
 import com.android.server.pm.pkg.PackageState;
@@ -77,8 +76,16 @@ public class DexoptHelper {
 
     @NonNull private final Injector mInjector;
 
-    public DexoptHelper(@NonNull Context context, @NonNull Config config) {
-        this(new Injector(context, config));
+    /**
+     * Constructs a new instance.
+     *
+     * The {@link AppHibernationManager} reference may be null for boot time compilation runs, when
+     * the app hibernation manager hasn't yet been initialized. It should not be null otherwise. See
+     * comment in {@link ArtManagerLocal.dexoptPackages} for more details.
+     */
+    public DexoptHelper(@NonNull Context context, @NonNull Config config,
+            @Nullable AppHibernationManager appHibernationManager) {
+        this(new Injector(context, config, appHibernationManager));
     }
 
     @VisibleForTesting
@@ -271,8 +278,7 @@ public class DexoptHelper {
             Utils.getPackageOrThrow(pkgState);
             pkgStates.put(packageName, pkgState);
             if (includeDependencies && canDexoptPackage(pkgState)) {
-                for (SharedLibrary library :
-                        PackageStateWrapper.getSharedLibraryDependencies(pkgState)) {
+                for (SharedLibrary library : pkgState.getSharedLibraryDependencies()) {
                     maybeEnqueue.accept(library);
                 }
             }
@@ -309,10 +315,13 @@ public class DexoptHelper {
     public static class Injector {
         @NonNull private final Context mContext;
         @NonNull private final Config mConfig;
+        @Nullable private final AppHibernationManager mAppHibernationManager;
 
-        Injector(@NonNull Context context, @NonNull Config config) {
+        Injector(@NonNull Context context, @NonNull Config config,
+                @Nullable AppHibernationManager appHibernationManager) {
             mContext = context;
             mConfig = config;
+            mAppHibernationManager = appHibernationManager;
 
             // Call the getters for the dependencies that aren't optional, to ensure correct
             // initialization order.
@@ -333,16 +342,9 @@ public class DexoptHelper {
             return new SecondaryDexopter(mContext, pkgState, pkg, params, cancellationSignal);
         }
 
-        /**
-         * Returns the registered AppHibernationManager instance.
-         *
-         * It may be null because ArtManagerLocal needs to be available early to compile packages at
-         * boot with {@link onBoot}, before the hibernation manager has been initialized. It should
-         * not be null for other dexopt calls.
-         */
         @Nullable
         public AppHibernationManager getAppHibernationManager() {
-            return mContext.getSystemService(AppHibernationManager.class);
+            return mAppHibernationManager;
         }
 
         @NonNull

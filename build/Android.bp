@@ -29,6 +29,7 @@ bootstrap_go_package {
 
 art_clang_tidy_errors = [
     "android-cloexec-dup",
+    "android-cloexec-fopen",
     "android-cloexec-open",
     "bugprone-argument-comment",
     "bugprone-lambda-function-name",
@@ -42,6 +43,7 @@ art_clang_tidy_errors = [
     "performance-faster-string-find",
     "performance-for-range-copy",
     "performance-implicit-conversion-in-loop",
+    "performance-inefficient-vector-operation",
     "performance-no-automatic-move",
     "performance-noexcept-move-constructor",
     "performance-unnecessary-copy-initialization",
@@ -184,6 +186,10 @@ art_module_art_global_defaults {
                 // Apple, it's a pain.
                 "-Wmissing-noreturn",
             ],
+            // Don't export symbols of statically linked libziparchive.
+            // Workaround to fix ODR violations (b/264235288) in gtests.
+            // `--exclude-libs` flag is not supported on windows/darwin.
+            ldflags: ["-Wl,--exclude-libs=libziparchive.a"],
         },
         linux_bionic: {
             strip: {

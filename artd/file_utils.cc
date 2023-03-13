@@ -81,6 +81,9 @@ Result<void> NewFile::CommitOrAbandon() {
   std::error_code ec;
   std::filesystem::rename(temp_path_, final_path_, ec);
   if (ec) {
+    // If this fails because the temp file doesn't exist, it could be that the file is deleted by
+    // `Artd::cleanup` if that method is run simultaneously. At the time of writing, this should
+    // never happen because `Artd::cleanup` is only called at the end of the backgrond dexopt job.
     return Errorf(
         "Failed to move new file '{}' to path '{}': {}", temp_path_, final_path_, ec.message());
   }
@@ -149,6 +152,7 @@ Result<void> NewFile::CommitAllOrAbandon(const std::vector<NewFile*>& files_to_c
 
   // Move old files to temporary locations.
   std::vector<std::string_view> all_files_to_remove;
+  all_files_to_remove.reserve(files_to_commit.size() + files_to_remove.size());
   for (NewFile* file : files_to_commit) {
     all_files_to_remove.push_back(file->FinalPath());
   }

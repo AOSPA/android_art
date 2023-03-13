@@ -212,6 +212,7 @@ struct TraceConfig {
   Trace::TraceOutputMode trace_output_mode;
   std::string trace_file;
   size_t trace_file_size;
+  TraceClockSource clock_source;
 };
 
 namespace {
@@ -1060,9 +1061,20 @@ bool Runtime::Start() {
 
   if (trace_config_.get() != nullptr && trace_config_->trace_file != "") {
     ScopedThreadStateChange tsc(self, ThreadState::kWaitingForMethodTracingStart);
+    int flags = 0;
+    if (trace_config_->clock_source == TraceClockSource::kDual) {
+      flags = Trace::TraceFlag::kTraceClockSourceWallClock |
+              Trace::TraceFlag::kTraceClockSourceThreadCpu;
+    } else if (trace_config_->clock_source == TraceClockSource::kWall) {
+      flags = Trace::TraceFlag::kTraceClockSourceWallClock;
+    } else if (TraceClockSource::kThreadCpu == trace_config_->clock_source) {
+      flags = Trace::TraceFlag::kTraceClockSourceThreadCpu;
+    } else {
+      LOG(ERROR) << "Unexpected clock source";
+    }
     Trace::Start(trace_config_->trace_file.c_str(),
                  static_cast<int>(trace_config_->trace_file_size),
-                 0,
+                 flags,
                  trace_config_->trace_output_mode,
                  trace_config_->trace_mode,
                  0);
@@ -1751,9 +1763,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // Change the implicit checks flags based on runtime architecture.
   switch (kRuntimeISA) {
     case InstructionSet::kArm64:
-      // TODO: Implicit suspend checks are currently disabled to facilitate search
-      // for unrelated memory use regressions. Bug: 213757852.
-      implicit_suspend_checks_ = false;
+      implicit_suspend_checks_ = true;
       FALLTHROUGH_INTENDED;
     case InstructionSet::kArm:
     case InstructionSet::kThumb2:
@@ -1930,9 +1940,10 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     trace_config_->trace_output_mode = runtime_options.Exists(Opt::MethodTraceStreaming) ?
         Trace::TraceOutputMode::kStreaming :
         Trace::TraceOutputMode::kFile;
+    trace_config_->clock_source = runtime_options.GetOrDefault(Opt::MethodTraceClock);
   }
 
-  // TODO: move this to just be an Trace::Start argument
+  // TODO: Remove this in a follow up CL. This isn't used anywhere.
   Trace::SetDefaultClockSource(runtime_options.GetOrDefault(Opt::ProfileClock));
 
   if (GetHeap()->HasBootImageSpace()) {
@@ -2763,11 +2774,6 @@ void Runtime::RegisterAppInfo(const std::string& package_name,
     LOG(WARNING) << "JIT profile information will not be recorded: profile filename is empty.";
     return;
   }
-  if (!OS::FileExists(profile_output_filename.c_str(), /*check_file_type=*/ false)) {
-    LOG(WARNING) << "JIT profile information will not be recorded: profile file does not exist: "
-                 << profile_output_filename;
-    return;
-  }
   if (code_paths.empty()) {
     LOG(WARNING) << "JIT profile information will not be recorded: code paths is empty.";
     return;
@@ -3449,11 +3455,13 @@ class Runtime::NotifyStartupCompletedTask : public gc::HeapTask {
       runtime->DeleteThreadPool();
     }
 
-    {
+    if (startup_linear_alloc != nullptr) {
       // We know that after the checkpoint, there is no thread that can hold
       // the startup linear alloc, so it's safe to delete it now.
       ScopedTrace trace2("Delete startup linear alloc");
+      ArenaPool* arena_pool = startup_linear_alloc->GetArenaPool();
       startup_linear_alloc.reset();
+      arena_pool->TrimMaps();
     }
   }
 };

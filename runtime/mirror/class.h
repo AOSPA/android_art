@@ -65,6 +65,7 @@ template<typename T> class StrideIterator;
 template<size_t kNumReferences> class PACKED(4) StackHandleScope;
 class Thread;
 class DexCacheVisitor;
+class RuntimeImageHelper;
 
 namespace mirror {
 
@@ -866,6 +867,8 @@ class MANAGED Class final : public Object {
 
   void SetImt(ImTable* imt, PointerSize pointer_size) REQUIRES_SHARED(Locks::mutator_lock_);
 
+  ImTable* FindSuperImt(PointerSize pointer_size) REQUIRES_SHARED(Locks::mutator_lock_);
+
   ArtMethod* GetEmbeddedVTableEntry(uint32_t i, PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -1356,6 +1359,13 @@ class MANAGED Class final : public Object {
   size_t GetMethodIdOffset(ArtMethod* method, PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Returns whether the class should be visible to an app.
+  // Notorious example is java.lang.ClassValue, which was added in Android U and proguarding tools
+  // used that as justification to remove computeValue method implementation. Such an app running
+  // on U+ will fail with AbstractMethodError as computeValue is not implemented.
+  // See b/259501764.
+  bool CheckIsVisibleWithTargetSdk(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_);
+
  private:
   template <typename T, VerifyObjectFlags kVerifyFlags, typename Visitor>
   void FixupNativePointer(
@@ -1572,6 +1582,7 @@ class MANAGED Class final : public Object {
   friend struct art::ClassOffsets;  // for verifying offset information
   friend class Object;  // For VisitReferences
   friend class linker::ImageWriter;  // For SetStatusInternal
+  friend class art::RuntimeImageHelper;  // For SetStatusInternal
   DISALLOW_IMPLICIT_CONSTRUCTORS(Class);
 };
 
