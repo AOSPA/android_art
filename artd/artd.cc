@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -68,6 +69,10 @@
 #include "selinux/android.h"
 #include "tools/cmdline_builder.h"
 #include "tools/tools.h"
+
+#ifdef __BIONIC__
+#include <linux/incrementalfs.h>
+#endif
 
 namespace art {
 namespace artd {
@@ -555,7 +560,8 @@ ndk::ScopedAStatus Artd::deleteProfile(const ProfilePath& in_profile) {
   std::string profile_path = OR_RETURN_FATAL(BuildProfileOrDmPath(in_profile));
 
   std::error_code ec;
-  if (!std::filesystem::remove(profile_path, ec) && ec.value() != ENOENT) {
+  std::filesystem::remove(profile_path, ec);
+  if (ec) {
     LOG(ERROR) << "Failed to remove '{}': {}"_format(profile_path, ec.message());
   }
 
@@ -931,6 +937,9 @@ ndk::ScopedAStatus Artd::dexopt(
       in_instructionSet, in_compilerFilter, in_priorityClass, in_dexoptOptions, args);
   AddPerfConfigFlags(in_priorityClass, art_exec_args, args);
 
+  // For being surfaced in crash reports on crashes.
+  args.Add("--comments=%s", in_dexoptOptions.comments);
+
   art_exec_args.Add("--keep-fds=%s", fd_logger.GetFds()).Add("--").Concat(std::move(args));
 
   LOG(INFO) << "Running dex2oat: " << Join(art_exec_args.Get(), /*separator=*/" ")
@@ -1038,6 +1047,24 @@ ScopedAStatus Artd::cleanup(const std::vector<ProfilePath>& in_profilesToKeep,
     }
   }
   return ScopedAStatus::ok();
+}
+
+ScopedAStatus Artd::isIncrementalFsPath(const std::string& in_dexFile [[maybe_unused]],
+                                        bool* _aidl_return) {
+#ifdef __BIONIC__
+  OR_RETURN_FATAL(ValidateDexPath(in_dexFile));
+  struct statfs st;
+  if (statfs(in_dexFile.c_str(), &st) != 0) {
+    PLOG(ERROR) << "Failed to statfs '{}'"_format(in_dexFile);
+    *_aidl_return = false;
+    return ScopedAStatus::ok();
+  }
+  *_aidl_return = st.f_type == INCFS_MAGIC_NUMBER;
+  return ScopedAStatus::ok();
+#else
+  *_aidl_return = false;
+  return ScopedAStatus::ok();
+#endif
 }
 
 Result<void> Artd::Start() {

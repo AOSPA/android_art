@@ -2377,7 +2377,10 @@ class HInstruction : public ArenaObject<kArenaAllocInstruction> {
     return GetType() == DataType::Type::kReference;
   }
 
+  // Sets the ReferenceTypeInfo. The RTI must be valid.
   void SetReferenceTypeInfo(ReferenceTypeInfo rti);
+  // Same as above, but we only set it if it's valid. Otherwise, we don't change the current RTI.
+  void SetReferenceTypeInfoIfValid(ReferenceTypeInfo rti);
 
   ReferenceTypeInfo GetReferenceTypeInfo() const {
     DCHECK_EQ(GetType(), DataType::Type::kReference);
@@ -3764,7 +3767,7 @@ class HClassTableGet final : public HExpression<1> {
   static constexpr size_t kNumberOfClassTableGetPackedBits = kFieldTableKind + kFieldTableKindSize;
   static_assert(kNumberOfClassTableGetPackedBits <= kMaxNumberOfPackedBits,
                 "Too many packed fields.");
-  using TableKindField = BitField<TableKind, kFieldTableKind, kFieldTableKind>;
+  using TableKindField = BitField<TableKind, kFieldTableKind, kFieldTableKindSize>;
 
   // The index of the ArtMethod in the table.
   const size_t index_;
@@ -5355,7 +5358,7 @@ class HNewArray final : public HExpression<2> {
       kFieldComponentSizeShift + kFieldComponentSizeShiftSize;
   static_assert(kNumberOfNewArrayPackedBits <= kMaxNumberOfPackedBits, "Too many packed fields.");
   using ComponentSizeShiftField =
-      BitField<size_t, kFieldComponentSizeShift, kFieldComponentSizeShift>;
+      BitField<size_t, kFieldComponentSizeShift, kFieldComponentSizeShiftSize>;
 };
 
 class HAdd final : public HBinaryOperation {

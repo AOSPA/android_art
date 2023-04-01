@@ -18,6 +18,7 @@ import dalvik.system.DexFile;
 import dalvik.system.VMRuntime;
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.Array;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.util.concurrent.CyclicBarrier;
@@ -167,9 +168,9 @@ public class Main implements Itf {
       return;
     }
 
+    String instructionSet = VMRuntime.getCurrentInstructionSet();
     // Wait for the file to be generated.
-    File image = new File(
-        DEX_LOCATION + "/845-data-image.art" + (runtime.is64Bit() ? "64" : "32"));
+    File image = new File(DEX_LOCATION + "/" + instructionSet + "/845-data-image.art");
     while (!image.exists()) {
       Thread.yield();
     }
@@ -213,6 +214,18 @@ public class Main implements Itf {
     Itf foo = (Itf) MyProxy.newInstance(new Main());
     assertEquals(3, foo.someMethod());
     assertEquals(42, foo.someDefaultMethod());
+
+    // Test with array classes.
+    assertEquals("[LMain;", Main[].class.getName());
+    assertEquals("[[LMain;", Main[][].class.getName());
+
+    assertEquals("[LMain;", new Main[4].getClass().getName());
+    assertEquals("[[LMain;", new Main[1][2].getClass().getName());
+
+    Main array[] = new Main[] { new Main() };
+    assertEquals("[LMain;", array.getClass().getName());
+
+    assertEquals(Object[][][][].class, Array.newInstance(Object.class, 0, 0, 0, 0).getClass());
 
     // Call all interface methods to trigger the creation of a imt conflict method.
     itf2.defaultMethod1();
@@ -274,7 +287,7 @@ public class Main implements Itf {
     }
   }
 
-  private static void assertEquals(String expected, String actual) {
+  private static void assertEquals(Object expected, Object actual) {
     if (!expected.equals(actual)) {
       throw new Error("Expected \"" + expected + "\", got \"" + actual + "\"");
     }

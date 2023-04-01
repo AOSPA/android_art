@@ -1327,7 +1327,7 @@ bool HInliner::TryDevirtualize(HInvoke* invoke_instruction,
   invoke_instruction->GetBlock()->InsertInstructionBefore(new_invoke, invoke_instruction);
   new_invoke->CopyEnvironmentFrom(invoke_instruction->GetEnvironment());
   if (invoke_instruction->GetType() == DataType::Type::kReference) {
-    new_invoke->SetReferenceTypeInfo(invoke_instruction->GetReferenceTypeInfo());
+    new_invoke->SetReferenceTypeInfoIfValid(invoke_instruction->GetReferenceTypeInfo());
   }
   *replacement = new_invoke;
 
@@ -1529,7 +1529,7 @@ bool HInliner::TryBuildAndInline(HInvoke* invoke_instruction,
     invoke_instruction->GetBlock()->InsertInstructionBefore(new_invoke, invoke_instruction);
     new_invoke->CopyEnvironmentFrom(invoke_instruction->GetEnvironment());
     if (invoke_instruction->GetType() == DataType::Type::kReference) {
-      new_invoke->SetReferenceTypeInfo(invoke_instruction->GetReferenceTypeInfo());
+      new_invoke->SetReferenceTypeInfoIfValid(invoke_instruction->GetReferenceTypeInfo());
     }
     *return_replacement = new_invoke;
     return true;
@@ -1855,7 +1855,7 @@ void HInliner::SubstituteArguments(HGraph* callee_graph,
           run_rtp = true;
           current->SetReferenceTypeInfo(receiver_type);
         } else {
-          current->SetReferenceTypeInfo(argument->GetReferenceTypeInfo());
+          current->SetReferenceTypeInfoIfValid(argument->GetReferenceTypeInfo());
         }
         current->AsParameterValue()->SetCanBeNull(argument->CanBeNull());
       }
@@ -2251,6 +2251,10 @@ static bool IsReferenceTypeRefinement(ObjPtr<mirror::Class> declared_class,
   }
 
   ReferenceTypeInfo actual_rti = actual_obj->GetReferenceTypeInfo();
+  if (!actual_rti.IsValid()) {
+    return false;
+  }
+
   ObjPtr<mirror::Class> actual_class = actual_rti.GetTypeHandle().Get();
   return (actual_rti.IsExact() && !declared_is_exact) ||
          (declared_class != actual_class && declared_class->IsAssignableFrom(actual_class));

@@ -15,8 +15,13 @@
  */
 
 public class Main {
+  static class ValueHolder {
+    int getValue() {
+      return 1;
+    }
+  }
 
-  public static void main(String[] args) {
+  public static void main(String[] args) throws Exception {
     testSimpleUse();
     testTwoUses();
     testFieldStores(doThrow);
@@ -28,6 +33,13 @@ public class Main {
     testVolatileStore();
     testCatchBlock();
     $noinline$testTwoThrowingPathsAndStringBuilderAppend();
+    try {
+      $noinline$testSinkNewInstanceWithClinitCheck();
+      throw new Exception("Unreachable");
+    } catch (Error e) {
+      // expected
+    }
+    $noinline$testMethodEndsWithTryBoundary();
     doThrow = true;
     try {
       testInstanceSideEffects();
@@ -287,6 +299,66 @@ public class Main {
     m.volatileField = 42;
     if (doThrow) {
       throw new Error(m.toString());
+    }
+  }
+
+  private static void $noinline$testMethodEndsWithTryBoundary() throws Exception {
+    assertEquals(0, $noinline$testDontSinkToReturnBranch(0, 0, false, new Object()));
+    assertEquals(1, $noinline$testSinkToThrowBranch(0, 0, true, new Object()));
+    try {
+      $noinline$testSinkToThrowBranch(0, 0, false, new Object());
+      throw new Exception("Unreachable");
+    } catch (Error expected) {
+    }
+  }
+
+  // Consistency check: only one add
+  /// CHECK-START: int Main.$noinline$testDontSinkToReturnBranch(int, int, boolean, java.lang.Object) code_sinking (before)
+  /// CHECK:     Add
+  /// CHECK-NOT: Add
+
+  /// CHECK-START: int Main.$noinline$testDontSinkToReturnBranch(int, int, boolean, java.lang.Object) code_sinking (before)
+  /// CHECK:      Add
+  /// CHECK-NEXT: If
+
+  /// CHECK-START: int Main.$noinline$testDontSinkToReturnBranch(int, int, boolean, java.lang.Object) code_sinking (after)
+  /// CHECK:      Add
+  /// CHECK-NEXT: If
+  private static int $noinline$testDontSinkToReturnBranch(int a, int b, boolean flag, Object obj) {
+    int c = a + b;
+    if (flag) {
+      return 1;
+    }
+
+    synchronized (obj) {
+      return $noinline$returnSameValue(c);
+    }
+  }
+
+  private static int $noinline$returnSameValue(int value) {
+    return value;
+  }
+
+  // Consistency check: only one add
+  /// CHECK-START: int Main.$noinline$testSinkToThrowBranch(int, int, boolean, java.lang.Object) code_sinking (before)
+  /// CHECK:     Add
+  /// CHECK-NOT: Add
+
+  /// CHECK-START: int Main.$noinline$testSinkToThrowBranch(int, int, boolean, java.lang.Object) code_sinking (before)
+  /// CHECK:      Add
+  /// CHECK:      If
+
+  /// CHECK-START: int Main.$noinline$testSinkToThrowBranch(int, int, boolean, java.lang.Object) code_sinking (after)
+  /// CHECK:      If
+  /// CHECK:      Add
+  private static int $noinline$testSinkToThrowBranch(int a, int b, boolean flag, Object obj) {
+    int c = a + b;
+    if (flag) {
+      return 1;
+    }
+
+    synchronized (obj) {
+      throw new Error(Integer.toString(c));
     }
   }
 
@@ -564,6 +636,51 @@ public class Main {
     }
   }
 
+  // Consistency check: only one ClinitCheck
+  /// CHECK-START: void Main.$noinline$testSinkNewInstanceWithClinitCheck() code_sinking (before)
+  /// CHECK:                ClinitCheck
+  /// CHECK-NOT:            ClinitCheck
+
+  /// CHECK-START: void Main.$noinline$testSinkNewInstanceWithClinitCheck() code_sinking (before)
+  /// CHECK: <<Check:l\d+>> ClinitCheck
+  /// CHECK:                NewInstance [<<Check>>]
+  /// CHECK:                NewInstance
+  /// CHECK:                If
+
+  /// CHECK-START: void Main.$noinline$testSinkNewInstanceWithClinitCheck() code_sinking (after)
+  /// CHECK: <<Check:l\d+>> ClinitCheck
+  /// CHECK:                If
+  /// CHECK:                NewInstance
+  /// CHECK:                NewInstance [<<Check>>]
+
+  /// CHECK-START: void Main.$noinline$testSinkNewInstanceWithClinitCheck() prepare_for_register_allocation (before)
+  /// CHECK-NOT:            If
+
+  // We have an instruction that can throw between the ClinitCheck and its NewInstance.
+
+  /// CHECK-START: void Main.$noinline$testSinkNewInstanceWithClinitCheck() prepare_for_register_allocation (before)
+  /// CHECK: <<Check:l\d+>> ClinitCheck
+  /// CHECK:                NewInstance
+  /// CHECK:                NewInstance [<<Check>>]
+
+  // We can remove the ClinitCheck by merging it with the LoadClass right before.
+
+  /// CHECK-START: void Main.$noinline$testSinkNewInstanceWithClinitCheck() prepare_for_register_allocation (after)
+  /// CHECK-NOT: ClinitCheck
+  private static void $noinline$testSinkNewInstanceWithClinitCheck() {
+    ValueHolder vh = new ValueHolder();
+    Object o = new Object();
+
+    // The if will always be true but we don't know this after LSE. Code sinking will sink code
+    // since this is an uncommon branch, but then we will have everything in one block before
+    // prepare_for_register_allocation for the crash to appear.
+    staticIntField = 1;
+    int value = staticIntField;
+    if (value == 1) {
+      throw new Error(Integer.toString(vh.getValue()) + o.toString());
+    }
+  }
+
   // We currently do not inline the `StringBuilder` constructor.
   // When we did, the `StringBuilderAppend` pattern recognition was looking for
   // the inlined `NewArray` (and its associated `LoadClass`) and checked in
@@ -628,6 +745,7 @@ public class Main {
   static boolean doLoop;
   static boolean doEarlyReturn;
   static boolean doOtherEarlyReturn;
+  static int staticIntField;
   static Main mainField = new Main();
   static Object obj = new Object();
 }

@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "android-base/file.h"
+#include "android-base/properties.h"
 #include "android-base/scopeguard.h"
 #include "android-base/unique_fd.h"
 #include "base/arena_allocator.h"
@@ -818,7 +819,12 @@ bool ProfileCompilationInfo::Save(const std::string& filename, uint64_t* bytes_w
   return SaveFallback(filename, bytes_written);
 #else
   // Prior to U, SELinux policy doesn't allow apps to create profile files.
-  if (!android::modules::sdklevel::IsAtLeastU()) {
+  // Additionally, when installd is being used for dexopt, it acquires a flock when working on a
+  // profile. It's unclear to us whether the flock means that the file at the fd shouldn't change or
+  // that the file at the path shouldn't change, especially when the installd code is modified by
+  // partners. Therefore, we fall back to using a flock as well just to be safe.
+  if (!android::modules::sdklevel::IsAtLeastU() ||
+      !android::base::GetBoolProperty("dalvik.vm.useartservice", /*default_value=*/false)) {
     return SaveFallback(filename, bytes_written);
   }
 
@@ -2178,6 +2184,16 @@ bool ProfileCompilationInfo::GetClassesAndMethods(
     class_set->insert(type_index);
   }
   return true;
+}
+
+const ArenaSet<dex::TypeIndex>* ProfileCompilationInfo::GetClasses(
+    const DexFile& dex_file,
+    const ProfileSampleAnnotation& annotation) const {
+  const DexFileData* dex_data = FindDexDataUsingAnnotations(&dex_file, annotation);
+  if (dex_data == nullptr) {
+    return nullptr;
+  }
+  return &dex_data->class_set;
 }
 
 bool ProfileCompilationInfo::SameVersion(const ProfileCompilationInfo& other) const {
