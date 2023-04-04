@@ -65,6 +65,7 @@ Arm64FeaturesUniquePtr Arm64InstructionSetFeatures::FromVariant(
   };
 
   static const char* arm64_variants_with_crc[] = {
+      // clang-format off
       "default",
       "generic",
       "cortex-a35",
@@ -75,6 +76,7 @@ Arm64FeaturesUniquePtr Arm64InstructionSetFeatures::FromVariant(
       "cortex-a72",
       "cortex-a73",
       "cortex-a55",
+      "cortex-a510",
       "cortex-a75",
       "cortex-a76",
       "exynos-m1",
@@ -83,10 +85,12 @@ Arm64FeaturesUniquePtr Arm64InstructionSetFeatures::FromVariant(
       "kryo",
       "kryo385",
       "kryo785",
+      // clang-format on
   };
 
   static const char* arm64_variants_with_lse[] = {
       "cortex-a55",
+      "cortex-a510",
       "cortex-a75",
       "cortex-a76",
       "kryo385",
@@ -95,6 +99,7 @@ Arm64FeaturesUniquePtr Arm64InstructionSetFeatures::FromVariant(
 
   static const char* arm64_variants_with_fp16[] = {
       "cortex-a55",
+      "cortex-a510",
       "cortex-a75",
       "cortex-a76",
       "kryo385",
@@ -103,6 +108,7 @@ Arm64FeaturesUniquePtr Arm64InstructionSetFeatures::FromVariant(
 
   static const char* arm64_variants_with_dotprod[] = {
       "cortex-a55",
+      "cortex-a510",
       "cortex-a75",
       "cortex-a76",
   };
@@ -138,6 +144,7 @@ Arm64FeaturesUniquePtr Arm64InstructionSetFeatures::FromVariant(
     static const char* other_arm64_known_variants[] = {
         "cortex-a35",
         "cortex-a55",
+        "cortex-a510",
         "cortex-a75",
         "cortex-a76",
         "exynos-m1",
