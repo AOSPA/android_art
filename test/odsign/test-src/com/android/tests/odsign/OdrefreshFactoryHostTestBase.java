@@ -87,7 +87,7 @@ abstract public class OdrefreshFactoryHostTestBase extends BaseHostJUnit4Test {
         mTestUtils.runOdrefresh();
 
         // It should delete all compilation artifacts and update the cache info.
-        // TODO(b/272245228): The cache info should be updated.
+        mTestUtils.assertModifiedAfter(Set.of(OdsignTestUtils.CACHE_INFO_FILE), timeMs);
         mTestUtils.assertFilesNotExist(mTestUtils.getZygotesExpectedArtifacts());
         mTestUtils.assertFilesNotExist(mTestUtils.getSystemServerExpectedArtifacts());
     }
@@ -107,17 +107,18 @@ abstract public class OdrefreshFactoryHostTestBase extends BaseHostJUnit4Test {
         mTestUtils.runOdrefresh();
 
         // It should delete all compilation artifacts and update the cache info.
-        // TODO(b/272245228): The cache info should be updated.
+        mTestUtils.assertModifiedAfter(Set.of(OdsignTestUtils.CACHE_INFO_FILE), timeMs);
         mTestUtils.assertFilesNotExist(mTestUtils.getZygotesExpectedArtifacts());
         mTestUtils.assertFilesNotExist(mTestUtils.getSystemServerExpectedArtifacts());
     }
 
     @Test
-    @Ignore("This test cannot pass. The fix for b/272245228 will also fix this.")
     public void verifyMissingArtifactTriggersCompilation() throws Exception {
         // Simulate that an artifact is missing from /system.
-        mDeviceState.backupAndDeleteFile("/system/framework/oat/x86_64/services.odex");
+        mDeviceState.backupAndDeleteFile(
+                "/system/framework/oat/" + mTestUtils.getSystemServerIsa() + "/services.odex");
 
+        mTestUtils.removeCompilationLogToAvoidBackoff();
         long timeMs = mTestUtils.getCurrentTimeMs();
         mTestUtils.runOdrefresh();
 
@@ -179,7 +180,7 @@ abstract public class OdrefreshFactoryHostTestBase extends BaseHostJUnit4Test {
         mTestUtils.runOdrefresh();
 
         // It should delete all compilation artifacts and update the cache info.
-        // TODO(b/272245228): The cache info should be updated.
+        mTestUtils.assertModifiedAfter(Set.of(OdsignTestUtils.CACHE_INFO_FILE), timeMs);
         mTestUtils.assertFilesNotExist(mTestUtils.getZygotesExpectedArtifacts());
         mTestUtils.assertFilesNotExist(mTestUtils.getSystemServerExpectedArtifacts());
     }

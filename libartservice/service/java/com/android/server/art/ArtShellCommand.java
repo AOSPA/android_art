@@ -79,7 +79,7 @@ import java.util.stream.Collectors;
  * @hide
  */
 public final class ArtShellCommand extends BasicShellCommandHandler {
-    private static final String TAG = "ArtShellCommand";
+    private static final String TAG = ArtManagerLocal.TAG;
 
     /** The default location for profile dumps. */
     private final static String PROFILE_DEBUG_LOCATION = "/data/misc/profman";
@@ -626,7 +626,7 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
         pw.println("       'verify' being used instead. If not specified, this defaults to the");
         pw.println("       value given by -r, or the system property 'pm.dexopt.cmdline'.");
         pw.println("       Available options (in descending order): 'speed', 'speed-profile',");
-        pw.println("       'verify', 'extract'.");
+        pw.println("       'verify'.");
         pw.println("    -p Set the priority of the operation, which determines the resource usage");
         pw.println("       and the process priority. If not specified, this defaults to");
         pw.println("       the value given by -r, or 'PRIORITY_INTERACTIVE'.");
