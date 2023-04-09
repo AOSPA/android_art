@@ -587,6 +587,7 @@ void MarkCompact::InitializePhase() {
   moving_first_objs_count_ = 0;
   non_moving_first_objs_count_ = 0;
   black_page_count_ = 0;
+  bytes_scanned_ = 0;
   freed_objects_ = 0;
   // The first buffer is used by gc-thread.
   compaction_buffer_counter_ = 1;
@@ -1433,6 +1434,7 @@ void MarkCompact::CompactPage(mirror::Object* obj,
                               uint32_t offset,
                               uint8_t* addr,
                               bool needs_memset_zero) {
+  mirror::Object* first_obj = obj;
   DCHECK(moving_space_bitmap_->Test(obj)
          && live_words_bitmap_->Test(obj));
   DCHECK(live_words_bitmap_->Test(offset)) << "obj=" << obj
@@ -1524,7 +1526,25 @@ void MarkCompact::CompactPage(mirror::Object* obj,
                                                                      + kPageSize));
     }
     obj_size = RoundUp(obj_size, kAlignment);
-    DCHECK_GT(obj_size, offset_within_obj);
+    CHECK_GT(obj_size, offset_within_obj)
+        << "obj:" << obj
+        << " class:"
+        << obj->GetClass<kDefaultVerifyFlags, kWithFromSpaceBarrier>()
+        << " to_addr:" << to_ref
+        << " first-obj:" << first_obj
+        << " black-allocation-begin:" << reinterpret_cast<void*>(black_allocations_begin_)
+        << " post-compact-end:" << reinterpret_cast<void*>(post_compact_end_)
+        << " offset:" << offset * kAlignment
+        << " class-after-obj-iter:"
+        << (class_after_obj_iter_ != class_after_obj_ordered_map_.rend() ?
+            class_after_obj_iter_->first.AsMirrorPtr() : nullptr)
+        << " last-reclaimed-page:" << reinterpret_cast<void*>(last_reclaimed_page_)
+        << " last-checked-reclaim-page-idx:" << last_checked_reclaim_page_idx_
+        << " offset-of-last-idx:"
+        << pre_compact_offset_moving_space_[last_checked_reclaim_page_idx_] * kAlignment
+        << " first-obj-of-last-idx:"
+        << first_objs_moving_space_[last_checked_reclaim_page_idx_].AsMirrorPtr();
+
     obj_size -= offset_within_obj;
     // If there is only one stride, then adjust last_stride_begin to the
     // end of the first object.
@@ -1570,6 +1590,26 @@ void MarkCompact::CompactPage(mirror::Object* obj,
                                            MemberOffset(0),
                                            MemberOffset(end_addr - (addr + bytes_done)));
     obj_size = RoundUp(obj_size, kAlignment);
+    CHECK_GT(obj_size, 0u)
+        << "from_addr:" << obj
+        << " from-space-class:"
+        << obj->GetClass<kDefaultVerifyFlags, kWithFromSpaceBarrier>()
+        << " to_addr:" << ref
+        << " first-obj:" << first_obj
+        << " black-allocation-begin:" << reinterpret_cast<void*>(black_allocations_begin_)
+        << " post-compact-end:" << reinterpret_cast<void*>(post_compact_end_)
+        << " offset:" << offset * kAlignment
+        << " bytes_done:" << bytes_done
+        << " class-after-obj-iter:"
+        << (class_after_obj_iter_ != class_after_obj_ordered_map_.rend() ?
+            class_after_obj_iter_->first.AsMirrorPtr() : nullptr)
+        << " last-reclaimed-page:" << reinterpret_cast<void*>(last_reclaimed_page_)
+        << " last-checked-reclaim-page-idx:" << last_checked_reclaim_page_idx_
+        << " offset-of-last-idx:"
+        << pre_compact_offset_moving_space_[last_checked_reclaim_page_idx_] * kAlignment
+        << " first-obj-of-last-idx:"
+        << first_objs_moving_space_[last_checked_reclaim_page_idx_].AsMirrorPtr();
+
     from_addr += obj_size;
     bytes_done += obj_size;
   }
@@ -1958,6 +1998,13 @@ void MarkCompact::FreeFromSpacePages(size_t cur_page_idx, int mode) {
            (state == PageState::kUnprocessed &&
             (mode == kFallbackMode || idx > moving_first_objs_count_)));
   }
+  DCHECK_LE(idx, last_checked_reclaim_page_idx_);
+  if (idx == last_checked_reclaim_page_idx_) {
+    // Nothing to do. Also, this possibly avoids freeing from-space pages too
+    // soon. TODO: Update the comment if returning here indeed fixed NPE like
+    // in b/272272332.
+    return;
+  }
 
   uint8_t* reclaim_begin;
   uint8_t* idx_addr;
@@ -2266,7 +2313,9 @@ void MarkCompact::UpdateMovingSpaceBlackAllocations() {
              && obj->GetClass<kDefaultVerifyFlags, kWithoutReadBarrier>() != nullptr) {
         // Try to keep instructions which access class instance together to
         // avoid reloading the pointer from object.
-        size_t obj_size = RoundUp(obj->SizeOf(), kAlignment);
+        size_t obj_size = obj->SizeOf();
+        bytes_scanned_ += obj_size;
+        obj_size = RoundUp(obj_size, kAlignment);
         UpdateClassAfterObjectMap(obj);
         if (first_obj == nullptr) {
           first_obj = obj;
@@ -3921,11 +3970,12 @@ size_t MarkCompact::LiveWordsBitmap<kAlignment>::LiveBytesInBitmapWord(size_t ch
   return words * kAlignment;
 }
 
-void MarkCompact::UpdateLivenessInfo(mirror::Object* obj) {
+void MarkCompact::UpdateLivenessInfo(mirror::Object* obj, size_t obj_size) {
   DCHECK(obj != nullptr);
+  DCHECK_EQ(obj_size, obj->SizeOf<kDefaultVerifyFlags>());
   uintptr_t obj_begin = reinterpret_cast<uintptr_t>(obj);
   UpdateClassAfterObjectMap(obj);
-  size_t size = RoundUp(obj->SizeOf<kDefaultVerifyFlags>(), kAlignment);
+  size_t size = RoundUp(obj_size, kAlignment);
   uintptr_t bit_index = live_words_bitmap_->SetLiveWords(obj_begin, size);
   size_t chunk_idx = (obj_begin - live_words_bitmap_->Begin()) / kOffsetChunkSize;
   // Compute the bit-index within the chunk-info vector word.
@@ -3944,10 +3994,16 @@ void MarkCompact::UpdateLivenessInfo(mirror::Object* obj) {
 
 template <bool kUpdateLiveWords>
 void MarkCompact::ScanObject(mirror::Object* obj) {
+  // The size of `obj` is used both here (to update `bytes_scanned_`) and in
+  // `UpdateLivenessInfo`. As fetching this value can be expensive, do it once
+  // here and pass that information to `UpdateLivenessInfo`.
+  size_t obj_size = obj->SizeOf<kDefaultVerifyFlags>();
+  bytes_scanned_ += obj_size;
+
   RefFieldsVisitor visitor(this);
   DCHECK(IsMarked(obj)) << "Scanning marked object " << obj << "\n" << heap_->DumpSpaces();
   if (kUpdateLiveWords && moving_space_bitmap_->HasAddress(obj)) {
-    UpdateLivenessInfo(obj);
+    UpdateLivenessInfo(obj, obj_size);
   }
   obj->VisitReferences(visitor, visitor);
 }
@@ -4132,6 +4188,7 @@ void MarkCompact::DelayReferenceReferent(ObjPtr<mirror::Class> klass,
 }
 
 void MarkCompact::FinishPhase() {
+  GetCurrentIteration()->SetScannedBytes(bytes_scanned_);
   bool is_zygote = Runtime::Current()->IsZygote();
   compacting_ = false;
   minor_fault_initialized_ = !is_zygote && uffd_minor_fault_supported_;
