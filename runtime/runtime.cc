@@ -811,7 +811,9 @@ void Runtime::SweepSystemWeaks(IsMarkedVisitor* visitor) {
   GetMonitorList()->SweepMonitorList(visitor);
   GetJavaVM()->SweepJniWeakGlobals(visitor);
   GetHeap()->SweepAllocationRecords(visitor);
-  if (GetJit() != nullptr) {
+  // Sweep JIT tables only if the GC is moving as in other cases the entries are
+  // not updated.
+  if (GetJit() != nullptr && GetHeap()->IsMovingGc()) {
     // Visit JIT literal tables. Objects in these tables are classes and strings
     // and only classes can be affected by class unloading. The strings always
     // stay alive as they are strongly interned.
@@ -1775,9 +1777,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
       break;
   }
 
+  fault_manager.Init(!no_sig_chain_);
   if (!no_sig_chain_) {
-    fault_manager.Init();
-
     if (HandlesSignalsInCompiledCode()) {
       // These need to be in a specific order.  The null point check handler must be
       // after the suspend check and stack overflow check handlers.
@@ -2577,17 +2578,20 @@ void Runtime::VisitReflectiveTargets(ReflectiveValueVisitor *visitor) {
 }
 
 void Runtime::VisitImageRoots(RootVisitor* visitor) {
-  for (auto* space : GetHeap()->GetContinuousSpaces()) {
-    if (space->IsImageSpace()) {
-      auto* image_space = space->AsImageSpace();
-      const auto& image_header = image_space->GetImageHeader();
-      for (int32_t i = 0, size = image_header.GetImageRoots()->GetLength(); i != size; ++i) {
-        mirror::Object* obj =
-            image_header.GetImageRoot(static_cast<ImageHeader::ImageRoot>(i)).Ptr();
-        if (obj != nullptr) {
-          mirror::Object* after_obj = obj;
-          visitor->VisitRoot(&after_obj, RootInfo(kRootStickyClass));
-          CHECK_EQ(after_obj, obj);
+  // We only confirm that image roots are unchanged.
+  if (kIsDebugBuild) {
+    for (auto* space : GetHeap()->GetContinuousSpaces()) {
+      if (space->IsImageSpace()) {
+        auto* image_space = space->AsImageSpace();
+        const auto& image_header = image_space->GetImageHeader();
+        for (int32_t i = 0, size = image_header.GetImageRoots()->GetLength(); i != size; ++i) {
+          mirror::Object* obj =
+              image_header.GetImageRoot(static_cast<ImageHeader::ImageRoot>(i)).Ptr();
+          if (obj != nullptr) {
+            mirror::Object* after_obj = obj;
+            visitor->VisitRoot(&after_obj, RootInfo(kRootStickyClass));
+            CHECK_EQ(after_obj, obj);
+          }
         }
       }
     }
@@ -3400,31 +3404,6 @@ bool Runtime::IsSystemServerProfiled() const {
 
 bool Runtime::GetOatFilesExecutable() const {
   return !IsAotCompiler() && !IsSystemServerProfiled();
-}
-
-void Runtime::ProcessWeakClass(GcRoot<mirror::Class>* root_ptr,
-                               IsMarkedVisitor* visitor,
-                               mirror::Class* update) {
-    // This does not need a read barrier because this is called by GC.
-  mirror::Class* cls = root_ptr->Read<kWithoutReadBarrier>();
-  if (cls != nullptr && cls != GetWeakClassSentinel()) {
-    DCHECK((cls->IsClass<kDefaultVerifyFlags>()));
-    // Look at the classloader of the class to know if it has been unloaded.
-    // This does not need a read barrier because this is called by GC.
-    ObjPtr<mirror::Object> class_loader =
-        cls->GetClassLoader<kDefaultVerifyFlags, kWithoutReadBarrier>();
-    if (class_loader == nullptr || visitor->IsMarked(class_loader.Ptr()) != nullptr) {
-      // The class loader is live, update the entry if the class has moved.
-      mirror::Class* new_cls = down_cast<mirror::Class*>(visitor->IsMarked(cls));
-      // Note that new_object can be null for CMS and newly allocated objects.
-      if (new_cls != nullptr && new_cls != cls) {
-        *root_ptr = GcRoot<mirror::Class>(new_cls);
-      }
-    } else {
-      // The class loader is not live, clear the entry.
-      *root_ptr = GcRoot<mirror::Class>(update);
-    }
-  }
 }
 
 void Runtime::MadviseFileForRange(size_t madvise_size_limit_bytes,

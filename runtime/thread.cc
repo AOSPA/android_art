@@ -1499,7 +1499,7 @@ bool Thread::ModifySuspendCountInternal(Thread* self,
     return false;
   }
 
-  if (gUseReadBarrier && delta > 0 && this != self && tlsPtr_.flip_function != nullptr) {
+  if (delta > 0 && this != self && tlsPtr_.flip_function != nullptr) {
     // Force retry of a suspend request if it's in the middle of a thread flip to avoid a
     // deadlock. b/31683379.
     return false;
@@ -1972,9 +1972,11 @@ void Thread::DumpState(std::ostream& os, const Thread* thread, pid_t tid) {
         WellKnownClasses::java_lang_Thread_group->GetObject(thread->tlsPtr_.opeer);
 
     if (thread_group != nullptr) {
-      ObjPtr<mirror::String> group_name_string =
-          WellKnownClasses::java_lang_ThreadGroup_name->GetObject(thread_group)->AsString();
-      group_name = (group_name_string != nullptr) ? group_name_string->ToModifiedUtf8() : "<null>";
+      ObjPtr<mirror::Object> group_name_object =
+          WellKnownClasses::java_lang_ThreadGroup_name->GetObject(thread_group);
+      group_name = (group_name_object != nullptr)
+          ? group_name_object->AsString()->ToModifiedUtf8()
+          : "<null>";
     }
   } else if (thread != nullptr) {
     priority = thread->GetNativePriority();
@@ -4018,14 +4020,11 @@ class ReferenceMapVisitor : public StackVisitor {
  public:
   ReferenceMapVisitor(Thread* thread, Context* context, RootVisitor& visitor)
       REQUIRES_SHARED(Locks::mutator_lock_)
-        // We are visiting the references in compiled frames, so we do not need
-        // to know the inlined frames.
+      // We are visiting the references in compiled frames, so we do not need
+      // to know the inlined frames.
       : StackVisitor(thread, context, StackVisitor::StackWalkKind::kSkipInlinedFrames),
-        visitor_(visitor) {
-    gc::Heap* const heap = Runtime::Current()->GetHeap();
-    visit_declaring_class_ = heap->CurrentCollectorType() != gc::CollectorType::kCollectorTypeCMC
-                             || !heap->MarkCompactCollector()->IsCompacting(Thread::Current());
-  }
+        visitor_(visitor),
+        visit_declaring_class_(!Runtime::Current()->GetHeap()->IsPerformingUffdCompaction()) {}
 
   bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
     if (false) {
@@ -4468,15 +4467,16 @@ static void SweepCacheEntry(IsMarkedVisitor* visitor, const Instruction* inst, s
     case Opcode::INSTANCE_OF:
     case Opcode::NEW_ARRAY:
     case Opcode::CONST_CLASS: {
-      mirror::Class* cls = reinterpret_cast<mirror::Class*>(*value);
-      if (cls == nullptr || cls == Runtime::GetWeakClassSentinel()) {
-        // Entry got deleted in a previous sweep.
+      mirror::Class* klass = reinterpret_cast<mirror::Class*>(*value);
+      if (klass == nullptr || klass == Runtime::GetWeakClassSentinel()) {
         return;
       }
-      Runtime::ProcessWeakClass(
-          reinterpret_cast<GcRoot<mirror::Class>*>(value),
-          visitor,
-          Runtime::GetWeakClassSentinel());
+      mirror::Class* new_klass = down_cast<mirror::Class*>(visitor->IsMarked(klass));
+      if (new_klass == nullptr) {
+        *value = reinterpret_cast<size_t>(Runtime::GetWeakClassSentinel());
+      } else if (new_klass != klass) {
+        *value = reinterpret_cast<size_t>(new_klass);
+      }
       return;
     }
     case Opcode::CONST_STRING:
@@ -4488,10 +4488,8 @@ static void SweepCacheEntry(IsMarkedVisitor* visitor, const Instruction* inst, s
       mirror::Object* new_object = visitor->IsMarked(object);
       // We know the string is marked because it's a strongly-interned string that
       // is always alive (see b/117621117 for trying to make those strings weak).
-      // The IsMarked implementation of the CMS collector returns
-      // null for newly allocated objects, but we know those haven't moved. Therefore,
-      // only update the entry if we get a different non-null string.
-      if (new_object != nullptr && new_object != object) {
+      DCHECK_NE(new_object, nullptr);
+      if (new_object != object) {
         *value = reinterpret_cast<size_t>(new_object);
       }
       return;
