@@ -78,6 +78,7 @@ import java.util.stream.Collectors;
  *
  * @hide
  */
+@RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
 public final class ArtShellCommand extends BasicShellCommandHandler {
     private static final String TAG = ArtManagerLocal.TAG;
 
@@ -97,7 +98,6 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
         mPackageManagerLocal = packageManagerLocal;
     }
 
-    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     @Override
     public int onCommand(String cmd) {
         // Apps shouldn't call ART Service shell commands, not even for dexopting themselves.
@@ -138,7 +138,6 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
         }
     }
 
-    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     private int handleArtCommand(
             @NonNull PrintWriter pw, @NonNull PackageManagerLocal.FilteredSnapshot snapshot) {
         String subcmd = getNextArgRequired();
@@ -644,10 +643,16 @@ public final class ArtShellCommand extends BasicShellCommandHandler {
         pw.println("       When this flag is set, all the other flags are ignored.");
         pw.println("    -v Verbose mode. This mode prints detailed results.");
         pw.println("  Scope options:");
-        pw.println("    --primary-dex Dexopt primary dex files only.");
-        pw.println("    --secondary-dex Dexopt secondary dex files only.");
-        pw.println("    --include-dependencies Include dependency packages. This option can only");
-        pw.println("      be used together with '--primary-dex' or '--secondary-dex'.");
+        pw.println("    --primary-dex Dexopt primary dex files only (all APKs that are installed");
+        pw.println("      as part of the package, including the base APK and all other split");
+        pw.println("      APKs).");
+        pw.println("    --secondary-dex Dexopt secondary dex files only (APKs/JARs that the app");
+        pw.println("      puts in its own data directory at runtime and loads with custom");
+        pw.println("      classloaders).");
+        pw.println("    --include-dependencies Include dependency packages (dependencies that are");
+        pw.println("      declared by the app with <uses-library> tags and transitive");
+        pw.println("      dependencies). This option can only be used together with");
+        pw.println("      '--primary-dex' or '--secondary-dex'.");
         pw.println("    --full Dexopt all above. (Recommended)");
         pw.println("    --split SPLIT_NAME Only dexopt the given split. If SPLIT_NAME is an empty");
         pw.println("      string, only dexopt the base APK.");
