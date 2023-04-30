@@ -114,12 +114,10 @@ class CompilerOptions final {
     return compiler_filter_ == CompilerFilter::kAssumeVerified;
   }
 
-  bool VerifyAtRuntime() const {
-    return compiler_filter_ == CompilerFilter::kExtract;
-  }
-
   bool IsAnyCompilationEnabled() const {
-    return CompilerFilter::IsAnyCompilationEnabled(compiler_filter_);
+    return CompilerFilter::IsAnyCompilationEnabled(compiler_filter_) &&
+           // TODO(riscv64): remove this when we have compiler support for RISC-V
+           GetInstructionSet() != InstructionSet::kRiscv64;
   }
 
   size_t GetHugeMethodThreshold() const {

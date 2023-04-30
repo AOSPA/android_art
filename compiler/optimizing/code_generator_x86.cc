@@ -1106,6 +1106,33 @@ void CodeGeneratorX86::GenerateInvokeRuntime(int32_t entry_point_offset) {
   __ fs()->call(Address::Absolute(entry_point_offset));
 }
 
+namespace detail {
+// Mark which intrinsics we don't have handcrafted code for.
+template <Intrinsics T>
+struct IsUnimplemented {
+  bool is_unimplemented = false;
+};
+
+#define TRUE_OVERRIDE(Name)                     \
+  template <>                                   \
+  struct IsUnimplemented<Intrinsics::k##Name> { \
+    bool is_unimplemented = true;               \
+  };
+UNIMPLEMENTED_INTRINSIC_LIST_X86(TRUE_OVERRIDE)
+#undef TRUE_OVERRIDE
+
+#include "intrinsics_list.h"
+static constexpr bool kIsIntrinsicUnimplemented[] = {
+  false,  // kNone
+#define IS_UNIMPLEMENTED(Intrinsic, ...) \
+  IsUnimplemented<Intrinsics::k##Intrinsic>().is_unimplemented,
+  INTRINSICS_LIST(IS_UNIMPLEMENTED)
+#undef IS_UNIMPLEMENTED
+};
+#undef INTRINSICS_LIST
+
+}  // namespace detail
+
 CodeGeneratorX86::CodeGeneratorX86(HGraph* graph,
                                    const CompilerOptions& compiler_options,
                                    OptimizingCompilerStats* stats)
@@ -1118,7 +1145,8 @@ CodeGeneratorX86::CodeGeneratorX86(HGraph* graph,
                         | (1 << kFakeReturnRegister),
                     0,
                     compiler_options,
-                    stats),
+                    stats,
+                    ArrayRef<const bool>(detail::kIsIntrinsicUnimplemented)),
       block_labels_(nullptr),
       location_builder_(graph, this),
       instruction_visitor_(graph, this),
@@ -2966,7 +2994,7 @@ void LocationsBuilderX86::VisitTypeConversion(HTypeConversion* conversion) {
         case DataType::Type::kInt64: {
           HInstruction* input = conversion->InputAt(0);
           Location input_location = input->IsConstant()
-              ? Location::ConstantLocation(input->AsConstant())
+              ? Location::ConstantLocation(input)
               : Location::RegisterPairLocation(EAX, EDX);
           locations->SetInAt(0, input_location);
           // Make the output overlap to please the register allocator. This greatly simplifies
@@ -7538,9 +7566,9 @@ void LocationsBuilderX86::VisitInstanceOf(HInstanceOf* instruction) {
   }
   locations->SetInAt(0, Location::RequiresRegister());
   if (type_check_kind == TypeCheckKind::kBitstringCheck) {
-    locations->SetInAt(1, Location::ConstantLocation(instruction->InputAt(1)->AsConstant()));
-    locations->SetInAt(2, Location::ConstantLocation(instruction->InputAt(2)->AsConstant()));
-    locations->SetInAt(3, Location::ConstantLocation(instruction->InputAt(3)->AsConstant()));
+    locations->SetInAt(1, Location::ConstantLocation(instruction->InputAt(1)));
+    locations->SetInAt(2, Location::ConstantLocation(instruction->InputAt(2)));
+    locations->SetInAt(3, Location::ConstantLocation(instruction->InputAt(3)));
   } else {
     locations->SetInAt(1, Location::Any());
   }
@@ -7806,9 +7834,9 @@ void LocationsBuilderX86::VisitCheckCast(HCheckCast* instruction) {
     // a memory address.
     locations->SetInAt(1, Location::RequiresRegister());
   } else if (type_check_kind == TypeCheckKind::kBitstringCheck) {
-    locations->SetInAt(1, Location::ConstantLocation(instruction->InputAt(1)->AsConstant()));
-    locations->SetInAt(2, Location::ConstantLocation(instruction->InputAt(2)->AsConstant()));
-    locations->SetInAt(3, Location::ConstantLocation(instruction->InputAt(3)->AsConstant()));
+    locations->SetInAt(1, Location::ConstantLocation(instruction->InputAt(1)));
+    locations->SetInAt(2, Location::ConstantLocation(instruction->InputAt(2)));
+    locations->SetInAt(3, Location::ConstantLocation(instruction->InputAt(3)));
   } else {
     locations->SetInAt(1, Location::Any());
   }

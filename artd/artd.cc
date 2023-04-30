@@ -58,7 +58,9 @@
 #include "base/compiler_filter.h"
 #include "base/file_utils.h"
 #include "base/globals.h"
+#include "base/logging.h"
 #include "base/os.h"
+#include "cmdline_types.h"
 #include "exec_utils.h"
 #include "file_utils.h"
 #include "fmt/format.h"
@@ -331,6 +333,22 @@ Result<void> CopyFile(const std::string& src_path, const NewFile& dst_file) {
   return {};
 }
 
+Result<void> SetLogVerbosity() {
+  std::string options = android::base::GetProperty("dalvik.vm.artd-verbose", /*default_value=*/"");
+  if (options.empty()) {
+    return {};
+  }
+
+  CmdlineType<LogVerbosity> parser;
+  CmdlineParseResult<LogVerbosity> result = parser.Parse(options);
+  if (!result.IsSuccess()) {
+    return Error() << result.GetMessage();
+  }
+
+  gLogVerbosity = result.ReleaseValue();
+  return {};
+}
+
 class FdLogger {
  public:
   void Add(const NewFile& file) { fd_mapping_.emplace_back(file.Fd(), file.TempPath()); }
@@ -390,7 +408,7 @@ ScopedAStatus Artd::deleteArtifacts(const ArtifactsPath& in_artifactsPath, int64
 
 ScopedAStatus Artd::getDexoptStatus(const std::string& in_dexFile,
                                     const std::string& in_instructionSet,
-                                    const std::string& in_classLoaderContext,
+                                    const std::optional<std::string>& in_classLoaderContext,
                                     GetDexoptStatusResult* _aidl_return) {
   Result<OatFileAssistantContext*> ofa_context = GetOatFileAssistantContext();
   if (!ofa_context.ok()) {
@@ -399,9 +417,9 @@ ScopedAStatus Artd::getDexoptStatus(const std::string& in_dexFile,
 
   std::unique_ptr<ClassLoaderContext> context;
   std::string error_msg;
-  auto oat_file_assistant = OatFileAssistant::Create(in_dexFile.c_str(),
-                                                     in_instructionSet.c_str(),
-                                                     in_classLoaderContext.c_str(),
+  auto oat_file_assistant = OatFileAssistant::Create(in_dexFile,
+                                                     in_instructionSet,
+                                                     in_classLoaderContext,
                                                      /*load_executable=*/false,
                                                      /*only_load_trusted_executable=*/true,
                                                      ofa_context.value(),
@@ -1068,6 +1086,8 @@ ScopedAStatus Artd::isIncrementalFsPath(const std::string& in_dexFile [[maybe_un
 }
 
 Result<void> Artd::Start() {
+  OR_RETURN(SetLogVerbosity());
+
   ScopedAStatus status = ScopedAStatus::fromStatus(
       AServiceManager_registerLazyService(this->asBinder().get(), kServiceName));
   if (!status.isOk()) {

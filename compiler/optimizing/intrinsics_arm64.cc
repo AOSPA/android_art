@@ -55,7 +55,6 @@ using helpers::DRegisterFrom;
 using helpers::HeapOperand;
 using helpers::LocationFrom;
 using helpers::InputCPURegisterOrZeroRegAt;
-using helpers::IsConstantZeroBitPattern;
 using helpers::OperandFrom;
 using helpers::RegisterFrom;
 using helpers::SRegisterFrom;
@@ -4757,8 +4756,8 @@ static LocationSummary* CreateVarHandleCommonLocations(HInvoke* invoke) {
   uint32_t number_of_arguments = invoke->GetNumberOfArguments();
   for (size_t arg_index = arguments_start; arg_index != number_of_arguments; ++arg_index) {
     HInstruction* arg = invoke->InputAt(arg_index);
-    if (IsConstantZeroBitPattern(arg)) {
-      locations->SetInAt(arg_index, Location::ConstantLocation(arg->AsConstant()));
+    if (IsZeroBitPattern(arg)) {
+      locations->SetInAt(arg_index, Location::ConstantLocation(arg));
     } else if (DataType::IsFloatingPointType(arg->GetType())) {
       locations->SetInAt(arg_index, Location::RequiresFpuRegister());
     } else {
@@ -5069,16 +5068,16 @@ static void CreateVarHandleCompareAndSetOrExchangeLocations(HInvoke* invoke, boo
       // Add a temporary for old value and exclusive store result if floating point
       // `expected` and/or `new_value` take scratch registers.
       size_t available_scratch_registers =
-          (IsConstantZeroBitPattern(invoke->InputAt(number_of_arguments - 1u)) ? 1u : 0u) +
-          (IsConstantZeroBitPattern(invoke->InputAt(number_of_arguments - 2u)) ? 1u : 0u);
+          (IsZeroBitPattern(invoke->InputAt(number_of_arguments - 1u)) ? 1u : 0u) +
+          (IsZeroBitPattern(invoke->InputAt(number_of_arguments - 2u)) ? 1u : 0u);
       size_t temps_needed = /* pointer, old value, store result */ 3u - available_scratch_registers;
       // We can reuse the declaring class (if present) and offset temporary.
       if (temps_needed > old_temp_count) {
         locations->AddRegisterTemps(temps_needed - old_temp_count);
       }
     } else if ((value_type != DataType::Type::kReference && DataType::Size(value_type) != 1u) &&
-               !IsConstantZeroBitPattern(invoke->InputAt(number_of_arguments - 2u)) &&
-               !IsConstantZeroBitPattern(invoke->InputAt(number_of_arguments - 1u)) &&
+               !IsZeroBitPattern(invoke->InputAt(number_of_arguments - 2u)) &&
+               !IsZeroBitPattern(invoke->InputAt(number_of_arguments - 1u)) &&
                GetExpectedVarHandleCoordinatesCount(invoke) == 2u) {
       // Allocate a normal temporary for store result in the non-native byte order path
       // because scratch registers are used by the byte-swapped `expected` and `new_value`.
@@ -5400,7 +5399,7 @@ static void CreateVarHandleGetAndUpdateLocations(HInvoke* invoke,
       DCHECK(get_and_update_op == GetAndUpdateOp::kSet);
       // We can reuse the declaring class temporary if present.
       if (old_temp_count == 1u &&
-          !IsConstantZeroBitPattern(invoke->InputAt(invoke->GetNumberOfArguments() - 1u))) {
+          !IsZeroBitPattern(invoke->InputAt(invoke->GetNumberOfArguments() - 1u))) {
         // Add a temporary for `old_value` if floating point `new_value` takes a scratch register.
         locations->AddTemp(Location::RequiresRegister());
       }
@@ -5411,7 +5410,7 @@ static void CreateVarHandleGetAndUpdateLocations(HInvoke* invoke,
   if (old_temp_count == 1u &&
       (get_and_update_op != GetAndUpdateOp::kSet && get_and_update_op != GetAndUpdateOp::kAdd) &&
       GetExpectedVarHandleCoordinatesCount(invoke) == 2u &&
-      !IsConstantZeroBitPattern(invoke->InputAt(invoke->GetNumberOfArguments() - 1u))) {
+      !IsZeroBitPattern(invoke->InputAt(invoke->GetNumberOfArguments() - 1u))) {
     DataType::Type value_type =
         GetVarHandleExpectedValueType(invoke, /*expected_coordinates_count=*/ 2u);
     if (value_type != DataType::Type::kReference && DataType::Size(value_type) != 1u) {
@@ -5731,7 +5730,7 @@ void VarHandleSlowPathARM64::EmitByteArrayViewCode(CodeGenerator* codegen_in) {
 
     // Byte order check. For native byte order return to the main path.
     if (access_mode_template == mirror::VarHandle::AccessModeTemplate::kSet &&
-        IsConstantZeroBitPattern(invoke->InputAt(invoke->GetNumberOfArguments() - 1u))) {
+        IsZeroBitPattern(invoke->InputAt(invoke->GetNumberOfArguments() - 1u))) {
       // There is no reason to differentiate between native byte order and byte-swap
       // for setting a zero bit pattern. Just return to the main path.
       __ B(GetNativeByteOrderLabel());
@@ -5761,42 +5760,9 @@ void VarHandleSlowPathARM64::EmitByteArrayViewCode(CodeGenerator* codegen_in) {
   __ B(GetExitLabel());
 }
 
-UNIMPLEMENTED_INTRINSIC(ARM64, StringStringIndexOf);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringStringIndexOfAfter);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBufferAppend);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBufferLength);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBufferToString);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendObject);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendString);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendCharSequence);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendCharArray);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendBoolean);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendChar);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendInt);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendLong);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendFloat);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendDouble);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderLength);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderToString);
-UNIMPLEMENTED_INTRINSIC(ARM64, SystemArrayCopyByte);
-UNIMPLEMENTED_INTRINSIC(ARM64, SystemArrayCopyInt);
-
-// 1.8.
-UNIMPLEMENTED_INTRINSIC(ARM64, UnsafeGetAndAddInt)
-UNIMPLEMENTED_INTRINSIC(ARM64, UnsafeGetAndAddLong)
-UNIMPLEMENTED_INTRINSIC(ARM64, UnsafeGetAndSetInt)
-UNIMPLEMENTED_INTRINSIC(ARM64, UnsafeGetAndSetLong)
-UNIMPLEMENTED_INTRINSIC(ARM64, UnsafeGetAndSetObject)
-
-UNIMPLEMENTED_INTRINSIC(ARM64, MethodHandleInvokeExact)
-UNIMPLEMENTED_INTRINSIC(ARM64, MethodHandleInvoke)
-
-// OpenJDK 11
-UNIMPLEMENTED_INTRINSIC(ARM64, JdkUnsafeGetAndAddInt)
-UNIMPLEMENTED_INTRINSIC(ARM64, JdkUnsafeGetAndAddLong)
-UNIMPLEMENTED_INTRINSIC(ARM64, JdkUnsafeGetAndSetInt)
-UNIMPLEMENTED_INTRINSIC(ARM64, JdkUnsafeGetAndSetLong)
-UNIMPLEMENTED_INTRINSIC(ARM64, JdkUnsafeGetAndSetObject)
+#define MARK_UNIMPLEMENTED(Name) UNIMPLEMENTED_INTRINSIC(ARM64, Name)
+UNIMPLEMENTED_INTRINSIC_LIST_ARM64(MARK_UNIMPLEMENTED);
+#undef MARK_UNIMPLEMENTED
 
 UNREACHABLE_INTRINSICS(ARM64)
 

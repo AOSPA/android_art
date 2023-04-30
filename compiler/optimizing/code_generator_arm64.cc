@@ -77,7 +77,6 @@ using helpers::InputFPRegisterAt;
 using helpers::InputOperandAt;
 using helpers::InputRegisterAt;
 using helpers::Int64FromLocation;
-using helpers::IsConstantZeroBitPattern;
 using helpers::LocationFrom;
 using helpers::OperandFromMemOperand;
 using helpers::OutputCPURegister;
@@ -936,6 +935,33 @@ Location CriticalNativeCallingConventionVisitorARM64::GetMethodLocation() const 
   return Location::RegisterLocation(x15.GetCode());
 }
 
+namespace detail {
+// Mark which intrinsics we don't have handcrafted code for.
+template <Intrinsics T>
+struct IsUnimplemented {
+  bool is_unimplemented = false;
+};
+
+#define TRUE_OVERRIDE(Name)                     \
+  template <>                                   \
+  struct IsUnimplemented<Intrinsics::k##Name> { \
+    bool is_unimplemented = true;               \
+  };
+UNIMPLEMENTED_INTRINSIC_LIST_ARM64(TRUE_OVERRIDE)
+#undef TRUE_OVERRIDE
+
+#include "intrinsics_list.h"
+static constexpr bool kIsIntrinsicUnimplemented[] = {
+  false,  // kNone
+#define IS_UNIMPLEMENTED(Intrinsic, ...) \
+  IsUnimplemented<Intrinsics::k##Intrinsic>().is_unimplemented,
+  INTRINSICS_LIST(IS_UNIMPLEMENTED)
+#undef IS_UNIMPLEMENTED
+};
+#undef INTRINSICS_LIST
+
+}  // namespace detail
+
 CodeGeneratorARM64::CodeGeneratorARM64(HGraph* graph,
                                        const CompilerOptions& compiler_options,
                                        OptimizingCompilerStats* stats)
@@ -946,7 +972,8 @@ CodeGeneratorARM64::CodeGeneratorARM64(HGraph* graph,
                     callee_saved_core_registers.GetList(),
                     callee_saved_fp_registers.GetList(),
                     compiler_options,
-                    stats),
+                    stats,
+                    ArrayRef<const bool>(detail::kIsIntrinsicUnimplemented)),
       block_labels_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       jump_tables_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       location_builder_neon_(graph, this),
@@ -2219,9 +2246,10 @@ void LocationsBuilderARM64::HandleFieldSet(HInstruction* instruction) {
   LocationSummary* locations =
       new (GetGraph()->GetAllocator()) LocationSummary(instruction, LocationSummary::kNoCall);
   locations->SetInAt(0, Location::RequiresRegister());
-  if (IsConstantZeroBitPattern(instruction->InputAt(1))) {
-    locations->SetInAt(1, Location::ConstantLocation(instruction->InputAt(1)->AsConstant()));
-  } else if (DataType::IsFloatingPointType(instruction->InputAt(1)->GetType())) {
+  HInstruction* value = instruction->InputAt(1);
+  if (IsZeroBitPattern(value)) {
+    locations->SetInAt(1, Location::ConstantLocation(value));
+  } else if (DataType::IsFloatingPointType(value->GetType())) {
     locations->SetInAt(1, Location::RequiresFpuRegister());
   } else {
     locations->SetInAt(1, Location::RequiresRegister());
@@ -2452,7 +2480,7 @@ void LocationsBuilderARM64::VisitDataProcWithShifterOp(
   LocationSummary* locations =
       new (GetGraph()->GetAllocator()) LocationSummary(instruction, LocationSummary::kNoCall);
   if (instruction->GetInstrKind() == HInstruction::kNeg) {
-    locations->SetInAt(0, Location::ConstantLocation(instruction->InputAt(0)->AsConstant()));
+    locations->SetInAt(0, Location::ConstantLocation(instruction->InputAt(0)));
   } else {
     locations->SetInAt(0, Location::RequiresRegister());
   }
@@ -2545,7 +2573,7 @@ void LocationsBuilderARM64::VisitIntermediateAddressIndex(HIntermediateAddressIn
   // data offset constant generation out of the loop and reduce the critical path length in the
   // loop.
   locations->SetInAt(1, shift->GetValue() == 0
-                        ? Location::ConstantLocation(instruction->GetOffset()->AsIntConstant())
+                        ? Location::ConstantLocation(instruction->GetOffset())
                         : Location::RequiresRegister());
   locations->SetInAt(2, Location::ConstantLocation(shift));
   locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
@@ -2820,9 +2848,10 @@ void LocationsBuilderARM64::VisitArraySet(HArraySet* instruction) {
       instruction,
       needs_type_check ? LocationSummary::kCallOnSlowPath : LocationSummary::kNoCall);
   locations->SetInAt(0, Location::RequiresRegister());
-  locations->SetInAt(1, Location::RegisterOrConstant(instruction->InputAt(1)));
-  if (IsConstantZeroBitPattern(instruction->InputAt(2))) {
-    locations->SetInAt(2, Location::ConstantLocation(instruction->InputAt(2)->AsConstant()));
+  locations->SetInAt(1, Location::RegisterOrConstant(instruction->GetIndex()));
+  HInstruction* value = instruction->GetValue();
+  if (IsZeroBitPattern(value)) {
+    locations->SetInAt(2, Location::ConstantLocation(value));
   } else if (DataType::IsFloatingPointType(value_type)) {
     locations->SetInAt(2, Location::RequiresFpuRegister());
   } else {
@@ -3003,10 +3032,10 @@ void LocationsBuilderARM64::VisitBoundsCheck(HBoundsCheck* instruction) {
   HInstruction* length = instruction->InputAt(1);
   bool both_const = index->IsConstant() && length->IsConstant();
   locations->SetInAt(0, both_const
-      ? Location::ConstantLocation(index->AsConstant())
+      ? Location::ConstantLocation(index)
       : ARM64EncodableConstantOrRegister(index, instruction));
   locations->SetInAt(1, both_const
-      ? Location::ConstantLocation(length->AsConstant())
+      ? Location::ConstantLocation(length)
       : ARM64EncodableConstantOrRegister(length, instruction));
 }
 
@@ -3104,6 +3133,7 @@ void LocationsBuilderARM64::VisitCompare(HCompare* compare) {
   LocationSummary* locations =
       new (GetGraph()->GetAllocator()) LocationSummary(compare, LocationSummary::kNoCall);
   DataType::Type in_type = compare->InputAt(0)->GetType();
+  HInstruction* rhs = compare->InputAt(1);
   switch (in_type) {
     case DataType::Type::kBool:
     case DataType::Type::kUint8:
@@ -3113,7 +3143,7 @@ void LocationsBuilderARM64::VisitCompare(HCompare* compare) {
     case DataType::Type::kInt32:
     case DataType::Type::kInt64: {
       locations->SetInAt(0, Location::RequiresRegister());
-      locations->SetInAt(1, ARM64EncodableConstantOrRegister(compare->InputAt(1), compare));
+      locations->SetInAt(1, ARM64EncodableConstantOrRegister(rhs, compare));
       locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
       break;
     }
@@ -3121,8 +3151,8 @@ void LocationsBuilderARM64::VisitCompare(HCompare* compare) {
     case DataType::Type::kFloat64: {
       locations->SetInAt(0, Location::RequiresFpuRegister());
       locations->SetInAt(1,
-                         IsFloatingPointZeroConstant(compare->InputAt(1))
-                             ? Location::ConstantLocation(compare->InputAt(1)->AsConstant())
+                         IsFloatingPointZeroConstant(rhs)
+                             ? Location::ConstantLocation(rhs)
                              : Location::RequiresFpuRegister());
       locations->SetOut(Location::RequiresRegister());
       break;
@@ -3170,16 +3200,17 @@ void InstructionCodeGeneratorARM64::VisitCompare(HCompare* compare) {
 void LocationsBuilderARM64::HandleCondition(HCondition* instruction) {
   LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(instruction);
 
+  HInstruction* rhs = instruction->InputAt(1);
   if (DataType::IsFloatingPointType(instruction->InputAt(0)->GetType())) {
     locations->SetInAt(0, Location::RequiresFpuRegister());
     locations->SetInAt(1,
-                       IsFloatingPointZeroConstant(instruction->InputAt(1))
-                           ? Location::ConstantLocation(instruction->InputAt(1)->AsConstant())
+                       IsFloatingPointZeroConstant(rhs)
+                           ? Location::ConstantLocation(rhs)
                            : Location::RequiresFpuRegister());
   } else {
     // Integer cases.
     locations->SetInAt(0, Location::RequiresRegister());
-    locations->SetInAt(1, ARM64EncodableConstantOrRegister(instruction->InputAt(1), instruction));
+    locations->SetInAt(1, ARM64EncodableConstantOrRegister(rhs, instruction));
   }
 
   if (!instruction->IsEmittedAtUseSite()) {
@@ -4025,9 +4056,9 @@ void LocationsBuilderARM64::VisitInstanceOf(HInstanceOf* instruction) {
   }
   locations->SetInAt(0, Location::RequiresRegister());
   if (type_check_kind == TypeCheckKind::kBitstringCheck) {
-    locations->SetInAt(1, Location::ConstantLocation(instruction->InputAt(1)->AsConstant()));
-    locations->SetInAt(2, Location::ConstantLocation(instruction->InputAt(2)->AsConstant()));
-    locations->SetInAt(3, Location::ConstantLocation(instruction->InputAt(3)->AsConstant()));
+    locations->SetInAt(1, Location::ConstantLocation(instruction->InputAt(1)));
+    locations->SetInAt(2, Location::ConstantLocation(instruction->InputAt(2)));
+    locations->SetInAt(3, Location::ConstantLocation(instruction->InputAt(3)));
   } else {
     locations->SetInAt(1, Location::RequiresRegister());
   }
@@ -4271,9 +4302,9 @@ void LocationsBuilderARM64::VisitCheckCast(HCheckCast* instruction) {
       new (GetGraph()->GetAllocator()) LocationSummary(instruction, call_kind);
   locations->SetInAt(0, Location::RequiresRegister());
   if (type_check_kind == TypeCheckKind::kBitstringCheck) {
-    locations->SetInAt(1, Location::ConstantLocation(instruction->InputAt(1)->AsConstant()));
-    locations->SetInAt(2, Location::ConstantLocation(instruction->InputAt(2)->AsConstant()));
-    locations->SetInAt(3, Location::ConstantLocation(instruction->InputAt(3)->AsConstant()));
+    locations->SetInAt(1, Location::ConstantLocation(instruction->InputAt(1)));
+    locations->SetInAt(2, Location::ConstantLocation(instruction->InputAt(2)));
+    locations->SetInAt(3, Location::ConstantLocation(instruction->InputAt(3)));
   } else {
     locations->SetInAt(1, Location::RequiresRegister());
   }

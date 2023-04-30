@@ -382,6 +382,12 @@ class ClassLinker {
 
   ArtField* LookupResolvedField(uint32_t field_idx, ArtMethod* referrer, bool is_static)
       REQUIRES_SHARED(Locks::mutator_lock_);
+  // Find a field by its field index.
+  ArtField* LookupResolvedField(uint32_t field_idx,
+                                ObjPtr<mirror::DexCache> dex_cache,
+                                ObjPtr<mirror::ClassLoader> class_loader,
+                                bool is_static)
+      REQUIRES_SHARED(Locks::mutator_lock_);
   ArtField* ResolveField(uint32_t field_idx, ArtMethod* referrer, bool is_static)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_, !Roles::uninterruptible_);
@@ -1113,13 +1119,6 @@ class ClassLinker {
       REQUIRES(!Locks::classlinker_classes_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Find a field by its field index.
-  ArtField* LookupResolvedField(uint32_t field_idx,
-                                ObjPtr<mirror::DexCache> dex_cache,
-                                ObjPtr<mirror::ClassLoader> class_loader,
-                                bool is_static)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
   void RegisterDexFileLocked(const DexFile& dex_file,
                              ObjPtr<mirror::DexCache> dex_cache,
                              ObjPtr<mirror::ClassLoader> class_loader)
@@ -1185,6 +1184,8 @@ class ClassLinker {
   bool LinkStaticFields(Thread* self, Handle<mirror::Class> klass, size_t* class_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
   bool LinkInstanceFields(Thread* self, Handle<mirror::Class> klass)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  void SetRecordClassFlagIfNeeded(Handle<mirror::Class> klass)
       REQUIRES_SHARED(Locks::mutator_lock_);
   void CreateReferenceInstanceOffsets(Handle<mirror::Class> klass)
       REQUIRES_SHARED(Locks::mutator_lock_);

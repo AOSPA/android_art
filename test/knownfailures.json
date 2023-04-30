@@ -183,9 +183,10 @@
                   "138-duplicate-classes-check",
                   "018-stack-overflow",
                   "961-default-iface-resolution-gen",
-                  "964-default-iface-init-gen"],
+                  "964-default-iface-init-gen",
+                  "2047-checker-const-string-length"],
         "variant": "no-image",
-        "description": ["This test fails without an image. 018, 961, 964 often",
+        "description": ["137, 138, 2047 fail without an image. 018, 961, 964 often ",
                         "time out."],
         "bug": "http://b/34369284"
     },
@@ -1219,7 +1220,8 @@
                   "2238-checker-polymorphic-recursive-inlining",
                   "2240-tracing-non-invokable-method",
                   "2246-trace-stream",
-                  "2254-class-value-before-and-after-u"],
+                  "2254-class-value-before-and-after-u",
+                  "2261-badcleaner-in-systemcleaner"],
         "variant": "jvm",
         "description": ["Doesn't run on RI."]
     },

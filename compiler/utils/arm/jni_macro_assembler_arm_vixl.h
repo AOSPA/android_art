@@ -23,7 +23,6 @@
 #include "base/macros.h"
 #include "constants_arm.h"
 #include "offsets.h"
-#include "utils/arm/assembler_arm_shared.h"
 #include "utils/arm/assembler_arm_vixl.h"
 #include "utils/arm/managed_register_arm.h"
 #include "utils/assembler.h"
@@ -91,6 +90,11 @@ class ArmVIXLJNIMacroAssembler final
   // Exploit fast access in managed code to Thread::Current().
   void GetCurrentThread(ManagedRegister dest) override;
   void GetCurrentThread(FrameOffset dest_offset) override;
+
+  // Decode JNI transition or local `jobject`. For (weak) global `jobject`, jump to slow path.
+  void DecodeJNITransitionOrLocalJObject(ManagedRegister reg,
+                                         JNIMacroLabel* slow_path,
+                                         JNIMacroLabel* resume) override;
 
   // Heap::VerifyObject on src. In some cases (such as a reference to this) we
   // know that src may not be null.

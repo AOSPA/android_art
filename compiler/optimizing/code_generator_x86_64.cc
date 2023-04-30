@@ -1494,6 +1494,33 @@ void CodeGeneratorX86_64::GenerateInvokeRuntime(int32_t entry_point_offset) {
   __ gs()->call(Address::Absolute(entry_point_offset, /* no_rip= */ true));
 }
 
+namespace detail {
+// Mark which intrinsics we don't have handcrafted code for.
+template <Intrinsics T>
+struct IsUnimplemented {
+  bool is_unimplemented = false;
+};
+
+#define TRUE_OVERRIDE(Name)                     \
+  template <>                                   \
+  struct IsUnimplemented<Intrinsics::k##Name> { \
+    bool is_unimplemented = true;               \
+  };
+UNIMPLEMENTED_INTRINSIC_LIST_X86_64(TRUE_OVERRIDE)
+#undef TRUE_OVERRIDE
+
+#include "intrinsics_list.h"
+static constexpr bool kIsIntrinsicUnimplemented[] = {
+  false,  // kNone
+#define IS_UNIMPLEMENTED(Intrinsic, ...) \
+  IsUnimplemented<Intrinsics::k##Intrinsic>().is_unimplemented,
+  INTRINSICS_LIST(IS_UNIMPLEMENTED)
+#undef IS_UNIMPLEMENTED
+};
+#undef INTRINSICS_LIST
+
+}  // namespace detail
+
 static constexpr int kNumberOfCpuRegisterPairs = 0;
 // Use a fake return address register to mimic Quick.
 static constexpr Register kFakeReturnRegister = Register(kLastCpuRegister + 1);
@@ -1510,7 +1537,8 @@ CodeGeneratorX86_64::CodeGeneratorX86_64(HGraph* graph,
                     ComputeRegisterMask(reinterpret_cast<const int*>(kFpuCalleeSaves),
                                         arraysize(kFpuCalleeSaves)),
                     compiler_options,
-                    stats),
+                    stats,
+                    ArrayRef<const bool>(detail::kIsIntrinsicUnimplemented)),
       block_labels_(nullptr),
       location_builder_(graph, this),
       instruction_visitor_(graph, this),
@@ -6800,9 +6828,9 @@ void LocationsBuilderX86_64::VisitInstanceOf(HInstanceOf* instruction) {
   }
   locations->SetInAt(0, Location::RequiresRegister());
   if (type_check_kind == TypeCheckKind::kBitstringCheck) {
-    locations->SetInAt(1, Location::ConstantLocation(instruction->InputAt(1)->AsConstant()));
-    locations->SetInAt(2, Location::ConstantLocation(instruction->InputAt(2)->AsConstant()));
-    locations->SetInAt(3, Location::ConstantLocation(instruction->InputAt(3)->AsConstant()));
+    locations->SetInAt(1, Location::ConstantLocation(instruction->InputAt(1)));
+    locations->SetInAt(2, Location::ConstantLocation(instruction->InputAt(2)));
+    locations->SetInAt(3, Location::ConstantLocation(instruction->InputAt(3)));
   } else {
     locations->SetInAt(1, Location::Any());
   }
@@ -7078,9 +7106,9 @@ void LocationsBuilderX86_64::VisitCheckCast(HCheckCast* instruction) {
     // a memory address.
     locations->SetInAt(1, Location::RequiresRegister());
   } else if (type_check_kind == TypeCheckKind::kBitstringCheck) {
-    locations->SetInAt(1, Location::ConstantLocation(instruction->InputAt(1)->AsConstant()));
-    locations->SetInAt(2, Location::ConstantLocation(instruction->InputAt(2)->AsConstant()));
-    locations->SetInAt(3, Location::ConstantLocation(instruction->InputAt(3)->AsConstant()));
+    locations->SetInAt(1, Location::ConstantLocation(instruction->InputAt(1)));
+    locations->SetInAt(2, Location::ConstantLocation(instruction->InputAt(2)));
+    locations->SetInAt(3, Location::ConstantLocation(instruction->InputAt(3)));
   } else {
     locations->SetInAt(1, Location::Any());
   }

@@ -587,6 +587,7 @@ void MarkCompact::InitializePhase() {
   moving_first_objs_count_ = 0;
   non_moving_first_objs_count_ = 0;
   black_page_count_ = 0;
+  bytes_scanned_ = 0;
   freed_objects_ = 0;
   // The first buffer is used by gc-thread.
   compaction_buffer_counter_ = 1;
@@ -1433,6 +1434,7 @@ void MarkCompact::CompactPage(mirror::Object* obj,
                               uint32_t offset,
                               uint8_t* addr,
                               bool needs_memset_zero) {
+  mirror::Object* first_obj = obj;
   DCHECK(moving_space_bitmap_->Test(obj)
          && live_words_bitmap_->Test(obj));
   DCHECK(live_words_bitmap_->Test(offset)) << "obj=" << obj
@@ -1524,7 +1526,25 @@ void MarkCompact::CompactPage(mirror::Object* obj,
                                                                      + kPageSize));
     }
     obj_size = RoundUp(obj_size, kAlignment);
-    DCHECK_GT(obj_size, offset_within_obj);
+    CHECK_GT(obj_size, offset_within_obj)
+        << "obj:" << obj
+        << " class:"
+        << obj->GetClass<kDefaultVerifyFlags, kWithFromSpaceBarrier>()
+        << " to_addr:" << to_ref
+        << " first-obj:" << first_obj
+        << " black-allocation-begin:" << reinterpret_cast<void*>(black_allocations_begin_)
+        << " post-compact-end:" << reinterpret_cast<void*>(post_compact_end_)
+        << " offset:" << offset * kAlignment
+        << " class-after-obj-iter:"
+        << (class_after_obj_iter_ != class_after_obj_ordered_map_.rend() ?
+            class_after_obj_iter_->first.AsMirrorPtr() : nullptr)
+        << " last-reclaimed-page:" << reinterpret_cast<void*>(last_reclaimed_page_)
+        << " last-checked-reclaim-page-idx:" << last_checked_reclaim_page_idx_
+        << " offset-of-last-idx:"
+        << pre_compact_offset_moving_space_[last_checked_reclaim_page_idx_] * kAlignment
+        << " first-obj-of-last-idx:"
+        << first_objs_moving_space_[last_checked_reclaim_page_idx_].AsMirrorPtr();
+
     obj_size -= offset_within_obj;
     // If there is only one stride, then adjust last_stride_begin to the
     // end of the first object.
@@ -1570,6 +1590,26 @@ void MarkCompact::CompactPage(mirror::Object* obj,
                                            MemberOffset(0),
                                            MemberOffset(end_addr - (addr + bytes_done)));
     obj_size = RoundUp(obj_size, kAlignment);
+    CHECK_GT(obj_size, 0u)
+        << "from_addr:" << obj
+        << " from-space-class:"
+        << obj->GetClass<kDefaultVerifyFlags, kWithFromSpaceBarrier>()
+        << " to_addr:" << ref
+        << " first-obj:" << first_obj
+        << " black-allocation-begin:" << reinterpret_cast<void*>(black_allocations_begin_)
+        << " post-compact-end:" << reinterpret_cast<void*>(post_compact_end_)
+        << " offset:" << offset * kAlignment
+        << " bytes_done:" << bytes_done
+        << " class-after-obj-iter:"
+        << (class_after_obj_iter_ != class_after_obj_ordered_map_.rend() ?
+            class_after_obj_iter_->first.AsMirrorPtr() : nullptr)
+        << " last-reclaimed-page:" << reinterpret_cast<void*>(last_reclaimed_page_)
+        << " last-checked-reclaim-page-idx:" << last_checked_reclaim_page_idx_
+        << " offset-of-last-idx:"
+        << pre_compact_offset_moving_space_[last_checked_reclaim_page_idx_] * kAlignment
+        << " first-obj-of-last-idx:"
+        << first_objs_moving_space_[last_checked_reclaim_page_idx_].AsMirrorPtr();
+
     from_addr += obj_size;
     bytes_done += obj_size;
   }
@@ -1939,7 +1979,7 @@ void MarkCompact::DoPageCompactionWithStateChange(size_t page_idx,
   }
 }
 
-void MarkCompact::FreeFromSpacePages(size_t cur_page_idx) {
+void MarkCompact::FreeFromSpacePages(size_t cur_page_idx, int mode) {
   // Thanks to sliding compaction, bump-pointer allocations, and reverse
   // compaction (see CompactMovingSpace) the logic here is pretty simple: find
   // the to-space page up to which compaction has finished, all the from-space
@@ -1955,7 +1995,15 @@ void MarkCompact::FreeFromSpacePages(size_t cur_page_idx) {
       break;
     }
     DCHECK(state >= PageState::kProcessed ||
-           (state == PageState::kUnprocessed && idx > moving_first_objs_count_));
+           (state == PageState::kUnprocessed &&
+            (mode == kFallbackMode || idx > moving_first_objs_count_)));
+  }
+  DCHECK_LE(idx, last_checked_reclaim_page_idx_);
+  if (idx == last_checked_reclaim_page_idx_) {
+    // Nothing to do. Also, this possibly avoids freeing from-space pages too
+    // soon. TODO: Update the comment if returning here indeed fixed NPE like
+    // in b/272272332.
+    return;
   }
 
   uint8_t* reclaim_begin;
@@ -2129,7 +2177,7 @@ void MarkCompact::CompactMovingSpace(uint8_t* page) {
       // We are sliding here, so no point attempting to madvise for every
       // page. Wait for enough pages to be done.
       if (idx % (kMinFromSpaceMadviseSize / kPageSize) == 0) {
-        FreeFromSpacePages(idx);
+        FreeFromSpacePages(idx, kMode);
       }
     }
   }
@@ -2149,7 +2197,7 @@ void MarkCompact::CompactMovingSpace(uint8_t* page) {
         idx, page_status_arr_len, to_space_end, page, [&]() REQUIRES_SHARED(Locks::mutator_lock_) {
           CompactPage(first_obj, pre_compact_offset_moving_space_[idx], page, kMode == kCopyMode);
         });
-    FreeFromSpacePages(idx);
+    FreeFromSpacePages(idx, kMode);
   }
   DCHECK_EQ(to_space_end, bump_pointer_space_->Begin());
 }
@@ -2265,7 +2313,9 @@ void MarkCompact::UpdateMovingSpaceBlackAllocations() {
              && obj->GetClass<kDefaultVerifyFlags, kWithoutReadBarrier>() != nullptr) {
         // Try to keep instructions which access class instance together to
         // avoid reloading the pointer from object.
-        size_t obj_size = RoundUp(obj->SizeOf(), kAlignment);
+        size_t obj_size = obj->SizeOf();
+        bytes_scanned_ += obj_size;
+        obj_size = RoundUp(obj_size, kAlignment);
         UpdateClassAfterObjectMap(obj);
         if (first_obj == nullptr) {
           first_obj = obj;
@@ -2331,13 +2381,15 @@ void MarkCompact::UpdateMovingSpaceBlackAllocations() {
         black_allocs = block_end;
       }
     }
-    // Store the leftover first-chunk, if any, and update page index.
-    if (black_alloc_pages_first_chunk_size_[black_page_idx] > 0) {
-      black_page_idx++;
-    } else if (first_chunk_size > 0) {
-      black_alloc_pages_first_chunk_size_[black_page_idx] = first_chunk_size;
-      first_objs_moving_space_[black_page_idx].Assign(first_obj);
-      black_page_idx++;
+    if (black_page_idx < bump_pointer_space_->Size() / kPageSize) {
+      // Store the leftover first-chunk, if any, and update page index.
+      if (black_alloc_pages_first_chunk_size_[black_page_idx] > 0) {
+        black_page_idx++;
+      } else if (first_chunk_size > 0) {
+        black_alloc_pages_first_chunk_size_[black_page_idx] = first_chunk_size;
+        first_objs_moving_space_[black_page_idx].Assign(first_obj);
+        black_page_idx++;
+      }
     }
     black_page_count_ = black_page_idx - moving_first_objs_count_;
     delete block_sizes;
@@ -2641,6 +2693,9 @@ void MarkCompact::CompactionPause() {
     LinearAllocPageUpdater updater(this);
     arena_pool->VisitRoots(updater);
   } else {
+    // Clear the flag as we care about this only if arenas are freed during
+    // concurrent compaction.
+    arena_pool->ClearArenasFreed();
     arena_pool->ForEachAllocatedArena(
         [this](const TrackedArena& arena) REQUIRES_SHARED(Locks::mutator_lock_) {
           // The pre-zygote fork arenas are not visited concurrently in the
@@ -3286,68 +3341,86 @@ void MarkCompact::ConcurrentlyProcessLinearAllocPage(uint8_t* fault_page, bool i
 }
 
 void MarkCompact::ProcessLinearAlloc() {
+  GcVisitedArenaPool* arena_pool =
+      static_cast<GcVisitedArenaPool*>(Runtime::Current()->GetLinearAllocArenaPool());
   for (auto& pair : linear_alloc_arenas_) {
     const TrackedArena* arena = pair.first;
-    uint8_t* last_byte = pair.second;
-    DCHECK_ALIGNED(last_byte, kPageSize);
-    bool others_processing = false;
-    // Find the linear-alloc space containing the arena
-    LinearAllocSpaceData* space_data = nullptr;
-    for (auto& data : linear_alloc_spaces_data_) {
-      if (data.begin_ <= arena->Begin() && arena->Begin() < data.end_) {
-        space_data = &data;
-        break;
+    size_t arena_size;
+    uint8_t* arena_begin;
+    ptrdiff_t diff;
+    bool others_processing;
+    {
+      // Acquire arena-pool's lock so that the arena being worked cannot be
+      // deallocated at the same time.
+      std::lock_guard<std::mutex> lock(arena_pool->GetLock());
+      // If any arenas were freed since compaction pause then skip them from
+      // visiting.
+      if (arena_pool->AreArenasFreed() && !arena_pool->FindAllocatedArena(arena)) {
+        continue;
       }
-    }
-    DCHECK_NE(space_data, nullptr);
-    ptrdiff_t diff = space_data->shadow_.Begin() - space_data->begin_;
-    auto visitor = [space_data, last_byte, diff, this, &others_processing](
-                       uint8_t* page_begin,
-                       uint8_t* first_obj) REQUIRES_SHARED(Locks::mutator_lock_) {
-      // No need to process pages past last_byte as they already have updated
-      // gc-roots, if any.
-      if (page_begin >= last_byte) {
-        return;
-      }
-      LinearAllocPageUpdater updater(this);
-      size_t page_idx = (page_begin - space_data->begin_) / kPageSize;
-      DCHECK_LT(page_idx, space_data->page_status_map_.Size());
-      Atomic<PageState>* state_arr =
-          reinterpret_cast<Atomic<PageState>*>(space_data->page_status_map_.Begin());
-      PageState expected_state = PageState::kUnprocessed;
-      PageState desired_state =
-          minor_fault_initialized_ ? PageState::kProcessing : PageState::kProcessingAndMapping;
-      // Acquire order to ensure that we don't start accessing the shadow page,
-      // which is shared with other threads, prior to CAS. Also, for same
-      // reason, we used 'release' order for changing the state to 'processed'.
-      if (state_arr[page_idx].compare_exchange_strong(
-              expected_state, desired_state, std::memory_order_acquire)) {
-        updater(page_begin + diff, first_obj + diff);
-        expected_state = PageState::kProcessing;
-        if (!minor_fault_initialized_) {
-          MapUpdatedLinearAllocPage(
-              page_begin, page_begin + diff, state_arr[page_idx], updater.WasLastPageTouched());
-        } else if (!state_arr[page_idx].compare_exchange_strong(
-                       expected_state, PageState::kProcessed, std::memory_order_release)) {
-          DCHECK_EQ(expected_state, PageState::kProcessingAndMapping);
-          // Force read in case the page was missing and updater didn't touch it
-          // as there was nothing to do. This will ensure that a zeropage is
-          // faulted on the shadow map.
-          ForceRead(page_begin + diff);
-          MapProcessedPages</*kFirstPageMapping=*/true>(
-              page_begin, state_arr, page_idx, space_data->page_status_map_.Size());
+      uint8_t* last_byte = pair.second;
+      DCHECK_ALIGNED(last_byte, kPageSize);
+      others_processing = false;
+      arena_begin = arena->Begin();
+      arena_size = arena->Size();
+      // Find the linear-alloc space containing the arena
+      LinearAllocSpaceData* space_data = nullptr;
+      for (auto& data : linear_alloc_spaces_data_) {
+        if (data.begin_ <= arena_begin && arena_begin < data.end_) {
+          space_data = &data;
+          break;
         }
-      } else {
-        others_processing = true;
       }
-    };
+      DCHECK_NE(space_data, nullptr);
+      diff = space_data->shadow_.Begin() - space_data->begin_;
+      auto visitor = [space_data, last_byte, diff, this, &others_processing](
+                         uint8_t* page_begin,
+                         uint8_t* first_obj) REQUIRES_SHARED(Locks::mutator_lock_) {
+        // No need to process pages past last_byte as they already have updated
+        // gc-roots, if any.
+        if (page_begin >= last_byte) {
+          return;
+        }
+        LinearAllocPageUpdater updater(this);
+        size_t page_idx = (page_begin - space_data->begin_) / kPageSize;
+        DCHECK_LT(page_idx, space_data->page_status_map_.Size());
+        Atomic<PageState>* state_arr =
+            reinterpret_cast<Atomic<PageState>*>(space_data->page_status_map_.Begin());
+        PageState expected_state = PageState::kUnprocessed;
+        PageState desired_state =
+            minor_fault_initialized_ ? PageState::kProcessing : PageState::kProcessingAndMapping;
+        // Acquire order to ensure that we don't start accessing the shadow page,
+        // which is shared with other threads, prior to CAS. Also, for same
+        // reason, we used 'release' order for changing the state to 'processed'.
+        if (state_arr[page_idx].compare_exchange_strong(
+                expected_state, desired_state, std::memory_order_acquire)) {
+          updater(page_begin + diff, first_obj + diff);
+          expected_state = PageState::kProcessing;
+          if (!minor_fault_initialized_) {
+            MapUpdatedLinearAllocPage(
+                page_begin, page_begin + diff, state_arr[page_idx], updater.WasLastPageTouched());
+          } else if (!state_arr[page_idx].compare_exchange_strong(
+                         expected_state, PageState::kProcessed, std::memory_order_release)) {
+            DCHECK_EQ(expected_state, PageState::kProcessingAndMapping);
+            // Force read in case the page was missing and updater didn't touch it
+            // as there was nothing to do. This will ensure that a zeropage is
+            // faulted on the shadow map.
+            ForceRead(page_begin + diff);
+            MapProcessedPages</*kFirstPageMapping=*/true>(
+                page_begin, state_arr, page_idx, space_data->page_status_map_.Size());
+          }
+        } else {
+          others_processing = true;
+        }
+      };
 
-    arena->VisitRoots(visitor);
+      arena->VisitRoots(visitor);
+    }
     // If we are not in minor-fault mode and if no other thread was found to be
     // processing any pages in this arena, then we can madvise the shadow size.
     // Otherwise, we will double the memory use for linear-alloc.
     if (!minor_fault_initialized_ && !others_processing) {
-      ZeroAndReleasePages(arena->Begin() + diff, arena->Size());
+      ZeroAndReleasePages(arena_begin + diff, arena_size);
     }
   }
 }
@@ -3897,11 +3970,12 @@ size_t MarkCompact::LiveWordsBitmap<kAlignment>::LiveBytesInBitmapWord(size_t ch
   return words * kAlignment;
 }
 
-void MarkCompact::UpdateLivenessInfo(mirror::Object* obj) {
+void MarkCompact::UpdateLivenessInfo(mirror::Object* obj, size_t obj_size) {
   DCHECK(obj != nullptr);
+  DCHECK_EQ(obj_size, obj->SizeOf<kDefaultVerifyFlags>());
   uintptr_t obj_begin = reinterpret_cast<uintptr_t>(obj);
   UpdateClassAfterObjectMap(obj);
-  size_t size = RoundUp(obj->SizeOf<kDefaultVerifyFlags>(), kAlignment);
+  size_t size = RoundUp(obj_size, kAlignment);
   uintptr_t bit_index = live_words_bitmap_->SetLiveWords(obj_begin, size);
   size_t chunk_idx = (obj_begin - live_words_bitmap_->Begin()) / kOffsetChunkSize;
   // Compute the bit-index within the chunk-info vector word.
@@ -3920,10 +3994,16 @@ void MarkCompact::UpdateLivenessInfo(mirror::Object* obj) {
 
 template <bool kUpdateLiveWords>
 void MarkCompact::ScanObject(mirror::Object* obj) {
+  // The size of `obj` is used both here (to update `bytes_scanned_`) and in
+  // `UpdateLivenessInfo`. As fetching this value can be expensive, do it once
+  // here and pass that information to `UpdateLivenessInfo`.
+  size_t obj_size = obj->SizeOf<kDefaultVerifyFlags>();
+  bytes_scanned_ += obj_size;
+
   RefFieldsVisitor visitor(this);
   DCHECK(IsMarked(obj)) << "Scanning marked object " << obj << "\n" << heap_->DumpSpaces();
   if (kUpdateLiveWords && moving_space_bitmap_->HasAddress(obj)) {
-    UpdateLivenessInfo(obj);
+    UpdateLivenessInfo(obj, obj_size);
   }
   obj->VisitReferences(visitor, visitor);
 }
@@ -4108,6 +4188,7 @@ void MarkCompact::DelayReferenceReferent(ObjPtr<mirror::Class> klass,
 }
 
 void MarkCompact::FinishPhase() {
+  GetCurrentIteration()->SetScannedBytes(bytes_scanned_);
   bool is_zygote = Runtime::Current()->IsZygote();
   compacting_ = false;
   minor_fault_initialized_ = !is_zygote && uffd_minor_fault_supported_;
