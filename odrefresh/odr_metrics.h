@@ -34,7 +34,8 @@ class OdrMetrics final {
  public:
   // Enumeration used to track the latest stage reached running odrefresh.
   //
-  // These values mirror those in OdrefreshReported::Stage in frameworks/proto_logging/atoms.proto.
+  // These values mirror those in OdrefreshReported::Stage in
+  // frameworks/proto_logging/atoms/art/odrefresh_extension_atoms.proto.
   // NB There are gaps between the values in case an additional stages are introduced.
   enum class Stage : uint8_t {
     kUnknown = 0,
@@ -48,7 +49,8 @@ class OdrMetrics final {
 
   // Enumeration describing the overall status, processing stops on the first error discovered.
   //
-  // These values mirror those in OdrefreshReported::Status in frameworks/proto_logging/atoms.proto.
+  // These values mirror those in OdrefreshReported::Status in
+  // frameworks/proto_logging/atoms/art/odrefresh_extension_atoms.proto.
   enum class Status : uint8_t {
     kUnknown = 0,
     kOK = 1,
@@ -66,12 +68,24 @@ class OdrMetrics final {
   // Enumeration describing the cause of compilation (if any) in odrefresh.
   //
   // These values mirror those in OdrefreshReported::Trigger in
-  // frameworks/proto_logging/atoms.proto.
+  // frameworks/proto_logging/atoms/art/odrefresh_extension_atoms.proto.
   enum class Trigger : uint8_t {
     kUnknown = 0,
     kApexVersionMismatch = 1,
     kDexFilesChanged = 2,
     kMissingArtifacts = 3,
+  };
+
+  // Enumeration describing the type of boot classpath compilation in odrefresh.
+  //
+  // These values mirror those in OdrefreshReported::BcpCompilationType in
+  // frameworks/proto_logging/atoms/art/odrefresh_extension_atoms.proto.
+  enum class BcpCompilationType : uint8_t {
+    kUnknown = 0,
+    // Compiles for both the primary boot image and the mainline extension.
+    kPrimaryAndMainline = 1,
+    // Only compiles for the mainline extension.
+    kMainline = 2,
   };
 
   explicit OdrMetrics(const std::string& cache_directory,
@@ -111,7 +125,12 @@ class OdrMetrics final {
   void SetStage(Stage stage) { stage_ = stage; }
 
   // Sets the result of the current dex2oat invocation.
-  void SetDex2OatResult(const ExecResult& dex2oat_result);
+  void SetDex2OatResult(Stage stage,
+                        int64_t compilation_time,
+                        const std::optional<ExecResult>& dex2oat_result);
+
+  // Sets the BCP compilation type.
+  void SetBcpCompilationType(Stage stage, BcpCompilationType type);
 
   // Captures the current free space as the end free space.
   void CaptureSpaceFreeEnd();
@@ -126,7 +145,6 @@ class OdrMetrics final {
   static int32_t GetFreeSpaceMiB(const std::string& path);
   static void WriteToFile(const std::string& path, const OdrMetrics* metrics);
 
-  void SetCompilationTime(int32_t millis);
   static OdrMetricsRecord::Dex2OatExecResult
   ConvertExecResult(const std::optional<ExecResult>& result);
 
@@ -151,6 +169,8 @@ class OdrMetrics final {
   // not invoked.
   std::optional<ExecResult> primary_bcp_dex2oat_result_;
 
+  BcpCompilationType primary_bcp_compilation_type_ = BcpCompilationType::kUnknown;
+
   // The total time spent on compiling secondary BCP.
   int32_t secondary_bcp_compilation_millis_ = 0;
 
@@ -158,34 +178,14 @@ class OdrMetrics final {
   // is not invoked.
   std::optional<ExecResult> secondary_bcp_dex2oat_result_;
 
+  BcpCompilationType secondary_bcp_compilation_type_ = BcpCompilationType::kUnknown;
+
   // The total time spent on compiling system server.
   int32_t system_server_compilation_millis_ = 0;
 
   // The result of the last dex2oat invocation for compiling system server, or `std::nullopt` if
   // dex2oat is not invoked.
   std::optional<ExecResult> system_server_dex2oat_result_;
-
-  friend class ScopedOdrCompilationTimer;
-};
-
-// Timer used to measure compilation time (in seconds). Automatically associates the time recorded
-// with the current stage of the metrics used.
-class ScopedOdrCompilationTimer final {
- public:
-  explicit ScopedOdrCompilationTimer(OdrMetrics& metrics) :
-    metrics_(metrics), start_(std::chrono::steady_clock::now()) {}
-
-  ~ScopedOdrCompilationTimer() {
-    auto elapsed_time = std::chrono::steady_clock::now() - start_;
-    auto elapsed_millis = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed_time);
-    metrics_.SetCompilationTime(static_cast<int32_t>(elapsed_millis.count()));
-  }
-
- private:
-  OdrMetrics& metrics_;
-  std::chrono::time_point<std::chrono::steady_clock> start_;
-
-  DISALLOW_ALLOCATION();
 };
 
 // Generated ostream operators.
