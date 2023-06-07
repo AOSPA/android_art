@@ -1541,7 +1541,10 @@ void Heap::DoPendingCollectorTransition() {
   if (collector_type_ == kCollectorTypeCC || collector_type_ == kCollectorTypeCMC) {
     // App's allocations (since last GC) more than the threshold then do TransitionGC
     // when the app was in background. If not then don't do TransitionGC.
-    size_t num_bytes_allocated_since_gc = GetBytesAllocated() - num_bytes_alive_after_gc_;
+    // num_bytes_allocated_since_gc should always be positive even if initially
+    // num_bytes_alive_after_gc_ is coming from Zygote. This gives positive or zero value.
+    size_t num_bytes_allocated_since_gc =
+        UnsignedDifference(GetBytesAllocated(), num_bytes_alive_after_gc_);
     if (num_bytes_allocated_since_gc <
         (UnsignedDifference(target_footprint_.load(std::memory_order_relaxed),
                             num_bytes_alive_after_gc_)/4)
@@ -3627,6 +3630,15 @@ collector::GcType Heap::WaitForGcToCompleteLocked(GcCause cause, Thread* self) {
 void Heap::DumpForSigQuit(std::ostream& os) {
   os << "Heap: " << GetPercentFree() << "% free, " << PrettySize(GetBytesAllocated()) << "/"
      << PrettySize(GetTotalMemory()) << "; " << GetObjectsAllocated() << " objects\n";
+  {
+    os << "Image spaces:\n";
+    ScopedObjectAccess soa(Thread::Current());
+    for (const auto& space : continuous_spaces_) {
+      if (space->IsImageSpace()) {
+        os << space->GetName() << "\n";
+      }
+    }
+  }
   DumpGcPerformanceInfo(os);
 }
 

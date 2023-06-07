@@ -31,7 +31,7 @@ namespace odrefresh {
 constexpr const char* kOdrefreshMetricsFile = "/data/misc/odrefresh/odrefresh-metrics.xml";
 
 // Initial OdrefreshMetrics version
-static constexpr int32_t kOdrefreshMetricsVersion = 3;
+static constexpr int32_t kOdrefreshMetricsVersion = 4;
 
 // Constant value used in ExecResult when the process was not run at all.
 // Mirrors EXEC_RESULT_STATUS_NOT_RUN contained in frameworks/proto_logging/atoms.proto.
@@ -72,6 +72,8 @@ struct OdrMetricsRecord {
   Dex2OatExecResult primary_bcp_dex2oat_result;
   Dex2OatExecResult secondary_bcp_dex2oat_result;
   Dex2OatExecResult system_server_dex2oat_result;
+  int32_t primary_bcp_compilation_type;
+  int32_t secondary_bcp_compilation_type;
 
   // Reads a `MetricsRecord` from an XML file.
   // Returns an error if the XML document was not found or parsed correctly.
