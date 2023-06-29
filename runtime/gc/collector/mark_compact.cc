@@ -29,10 +29,15 @@
 
 #include <fstream>
 #include <numeric>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include "android-base/file.h"
 #include "android-base/parsebool.h"
+#include "android-base/parseint.h"
 #include "android-base/properties.h"
+#include "android-base/strings.h"
 #include "base/file_utils.h"
 #include "base/memfd.h"
 #include "base/quasi_atomic.h"
@@ -162,18 +167,64 @@ static gc::CollectorType FetchCmdlineGcType() {
 }
 
 #ifdef ART_TARGET_ANDROID
+static int GetOverrideCacheInfoFd() {
+  std::string args_str;
+  if (!android::base::ReadFileToString("/proc/self/cmdline", &args_str)) {
+    LOG(WARNING) << "Failed to load /proc/self/cmdline";
+    return -1;
+  }
+  std::vector<std::string_view> args;
+  Split(std::string_view(args_str), /*separator=*/'\0', &args);
+  for (std::string_view arg : args) {
+    if (android::base::ConsumePrefix(&arg, "--cache-info-fd=")) {  // This is a dex2oat flag.
+      int fd;
+      if (!android::base::ParseInt(std::string(arg), &fd)) {
+        LOG(ERROR) << "Failed to parse --cache-info-fd (value: '" << arg << "')";
+        return -1;
+      }
+      return fd;
+    }
+  }
+  return -1;
+}
+
 static bool GetCachedBoolProperty(const std::string& key, bool default_value) {
-  std::string path = GetApexDataDalvikCacheDirectory(InstructionSet::kNone) + "/cache-info.xml";
-  std::optional<com::android::art::CacheInfo> cache_info = com::android::art::read(path.c_str());
+  // For simplicity, we don't handle multiple calls because otherwise we would have to reset the fd.
+  static bool called = false;
+  CHECK(!called) << "GetCachedBoolProperty can be called only once";
+  called = true;
+
+  std::string cache_info_contents;
+  int fd = GetOverrideCacheInfoFd();
+  if (fd >= 0) {
+    if (!android::base::ReadFdToString(fd, &cache_info_contents)) {
+      PLOG(ERROR) << "Failed to read cache-info from fd " << fd;
+      return default_value;
+    }
+  } else {
+    std::string path = GetApexDataDalvikCacheDirectory(InstructionSet::kNone) + "/cache-info.xml";
+    if (!android::base::ReadFileToString(path, &cache_info_contents)) {
+      // If the file is not found, then we are in chroot or in a standalone runtime process (e.g.,
+      // IncidentHelper), or odsign/odrefresh failed to generate and sign the cache info. There's
+      // nothing we can do.
+      if (errno != ENOENT) {
+        PLOG(ERROR) << "Failed to read cache-info from the default path";
+      }
+      return default_value;
+    }
+  }
+
+  std::optional<com::android::art::CacheInfo> cache_info =
+      com::android::art::parse(cache_info_contents.c_str());
   if (!cache_info.has_value()) {
-    // We are in chroot or in a standalone runtime process (e.g., IncidentHelper), or
-    // odsign/odrefresh failed to generate and sign the cache info. There's nothing we can do.
+    // This should never happen.
+    LOG(ERROR) << "Failed to parse cache-info";
     return default_value;
   }
   const com::android::art::KeyValuePairList* list = cache_info->getFirstSystemProperties();
   if (list == nullptr) {
     // This should never happen.
-    LOG(ERROR) << "Missing system properties from cache-info.";
+    LOG(ERROR) << "Missing system properties from cache-info";
     return default_value;
   }
   const std::vector<com::android::art::KeyValuePair>& properties = list->getItem();
@@ -590,7 +641,7 @@ void MarkCompact::InitializePhase() {
   bytes_scanned_ = 0;
   freed_objects_ = 0;
   // The first buffer is used by gc-thread.
-  compaction_buffer_counter_ = 1;
+  compaction_buffer_counter_.store(1, std::memory_order_relaxed);
   from_space_slide_diff_ = from_space_begin_ - bump_pointer_space_->Begin();
   black_allocations_begin_ = bump_pointer_space_->Limit();
   walk_super_class_cache_ = nullptr;
@@ -2764,6 +2815,7 @@ void MarkCompact::CompactionPause() {
     RecordFree(ObjectBytePair(freed_objects_, freed_bytes));
   } else {
     DCHECK_EQ(compaction_in_progress_count_.load(std::memory_order_relaxed), 0u);
+    DCHECK_EQ(compaction_buffer_counter_.load(std::memory_order_relaxed), 1);
     if (!use_uffd_sigbus_) {
       // We must start worker threads before resuming mutators to avoid deadlocks.
       heap_->GetThreadPool()->StartWorkers(thread_running_gc_);
@@ -3009,16 +3061,8 @@ bool MarkCompact::SigbusHandler(siginfo_t* info) {
         ConcurrentlyProcessMovingPage<kMinorFaultMode>(
             fault_page, nullptr, nr_moving_space_used_pages);
       } else {
-        uint8_t* buf = self->GetThreadLocalGcBuffer();
-        if (buf == nullptr) {
-          uint16_t idx = compaction_buffer_counter_.fetch_add(1, std::memory_order_relaxed);
-          // The buffer-map is one page bigger as the first buffer is used by GC-thread.
-          CHECK_LE(idx, kMutatorCompactionBufferCount);
-          buf = compaction_buffers_map_.Begin() + idx * kPageSize;
-          DCHECK(compaction_buffers_map_.HasAddress(buf));
-          self->SetThreadLocalGcBuffer(buf);
-        }
-        ConcurrentlyProcessMovingPage<kCopyMode>(fault_page, buf, nr_moving_space_used_pages);
+        ConcurrentlyProcessMovingPage<kCopyMode>(
+            fault_page, self->GetThreadLocalGcBuffer(), nr_moving_space_used_pages);
       }
       return true;
     } else {
@@ -3127,6 +3171,14 @@ void MarkCompact::ConcurrentlyProcessMovingPage(uint8_t* fault_page,
           if (kMode == kMinorFaultMode) {
             DCHECK_EQ(buf, nullptr);
             buf = shadow_to_space_map_.Begin() + page_idx * kPageSize;
+          } else if (UNLIKELY(buf == nullptr)) {
+            DCHECK_EQ(kMode, kCopyMode);
+            uint16_t idx = compaction_buffer_counter_.fetch_add(1, std::memory_order_relaxed);
+            // The buffer-map is one page bigger as the first buffer is used by GC-thread.
+            CHECK_LE(idx, kMutatorCompactionBufferCount);
+            buf = compaction_buffers_map_.Begin() + idx * kPageSize;
+            DCHECK(compaction_buffers_map_.HasAddress(buf));
+            Thread::Current()->SetThreadLocalGcBuffer(buf);
           }
 
           if (fault_page < post_compact_end_) {
