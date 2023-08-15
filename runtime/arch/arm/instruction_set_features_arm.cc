@@ -60,6 +60,7 @@ ArmFeaturesUniquePtr ArmInstructionSetFeatures::FromVariant(
       "cortex-a53.a72",
       "cortex-a55",
       "cortex-a57",
+      "cortex-a710",
       "cortex-a72",
       "cortex-a73",
       "cortex-a75",
