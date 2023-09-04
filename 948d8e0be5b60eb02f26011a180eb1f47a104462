@@ -33,6 +33,23 @@
       "message": "has been fixed on latest mainline kernel",
       "revId": "948d8e0be5b60eb02f26011a180eb1f47a104462",
       "serverId": "3162e3d8-d894-470e-abd9-724f7b0effad"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "c27ec9a9_a1ad9667",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 1
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 1000760
+      },
+      "writtenOn": "2023-09-04T23:43:34Z",
+      "side": 1,
+      "message": "or upgrade to anything above 6.2",
+      "revId": "948d8e0be5b60eb02f26011a180eb1f47a104462",
+      "serverId": "3162e3d8-d894-470e-abd9-724f7b0effad"
     }
   ]
 }
