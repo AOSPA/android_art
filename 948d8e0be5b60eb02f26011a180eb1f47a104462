@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "d78f6f71_ee434f4a",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 1
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 1000012
+      },
+      "writtenOn": "2023-09-04T01:16:19Z",
+      "side": 1,
+      "message": "downgrade your host kernel to 5.15.",
+      "revId": "948d8e0be5b60eb02f26011a180eb1f47a104462",
+      "serverId": "3162e3d8-d894-470e-abd9-724f7b0effad"
+    }
+  ]
+}
